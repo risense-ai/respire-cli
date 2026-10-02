@@ -39,8 +39,14 @@ jobs:
       - id: source
         env:
           BUILD_VERSION: ${{ inputs.version }}
+          BUILD_REF: ${{ inputs.ref }}
         run: |
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Manual branch candidates need a fresh dev identity; a stale checked-in
+          # prerelease would correctly fail the live registry version diagnostic.
+          if [ -z "$BUILD_VERSION" ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [[ ! "$BUILD_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BUILD_VERSION="$(node -p 'require("./npm/artifact-manifest.json").cliVersion.split("-")[0]')-dev.${GITHUB_RUN_ID}"
+          fi
           if [ -n "$BUILD_VERSION" ]; then node npm/scripts/set-build-version.mjs "$BUILD_VERSION"; fi
           node -e 'const fs=require("fs"); const m=require("./npm/artifact-manifest.json"); fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${m.cliVersion}\n`)'
 
