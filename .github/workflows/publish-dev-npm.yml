@@ -1,0 +1,174 @@
+name: Publish dev npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to package from
+        required: true
+        default: main
+        type: string
+      tag:
+        description: Existing GitHub Release tag (must be vX.Y.Z-dev.N)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: vars.RESPIRE_ENABLE_PUBLIC_RELEASES == 'true'
+    name: Publish ${{ inputs.tag }} to npm dev
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate dev release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-dev\.[0-9]+$ ]]; then
+            echo "::error::tag must match vX.Y.Z-dev.N; got $TAG"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify checked out version matches release tag
+        env:
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(awk -F'"' '/^version/{print $2; exit}' cli/Cargo.toml)"
+          expected="${TAG#v}"
+          if [[ "$version" != "$expected" ]]; then
+            echo "::error::checked out cli/Cargo.toml is $version, but release tag is $TAG"
+            exit 1
+          fi
+
+      - name: Wait for all release assets
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')"
+          expected_assets=(
+            "rsrs-x86_64-unknown-linux-gnu"
+            "rsrs-aarch64-unknown-linux-gnu"
+            "rsrs-x86_64-unknown-linux-musl"
+            "rsrs-aarch64-unknown-linux-musl"
+            "rsrs-aarch64-apple-darwin"
+            "rsrs-x86_64-pc-windows-msvc.exe"
+            "rsrs-aarch64-pc-windows-msvc.exe"
+            "rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz"
+            "rsrs-aarch64-unknown-linux-gnu-runtime.tar.gz"
+            "rsrs-x86_64-unknown-linux-musl-runtime.tar.gz"
+            "rsrs-aarch64-unknown-linux-musl-runtime.tar.gz"
+            "rsrs-aarch64-apple-darwin-runtime.tar.gz"
+            "rsrs-x86_64-pc-windows-msvc-runtime.tar.gz"
+            "rsrs-aarch64-pc-windows-msvc-runtime.tar.gz"
+          )
+          found=0
+          for attempt in $(seq 1 60); do
+            assets="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --jq '.[].name' 2>/dev/null || true)"
+            missing=()
+            for asset in "${expected_assets[@]}"; do
+              if ! grep -Fxq "$asset" <<<"$assets"; then
+                missing+=("$asset")
+              fi
+            done
+            if (( ${#missing[@]} == 0 )); then
+              echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+              found=1
+              break
+            fi
+            echo "waiting for release assets (${attempt}/60): ${missing[*]}"
+            sleep 10
+          done
+          if (( found == 0 )); then
+            echo "::error::release $TAG did not expose all binaries and Core runtime assets within 10 minutes"
+            exit 1
+          fi
+
+      - name: Download release assets into target/ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A dirs=(
+            [rsrs-x86_64-unknown-linux-gnu]=x86_64-unknown-linux-gnu
+            [rsrs-aarch64-unknown-linux-gnu]=aarch64-unknown-linux-gnu
+            [rsrs-x86_64-unknown-linux-musl]=x86_64-unknown-linux-musl
+            [rsrs-aarch64-unknown-linux-musl]=aarch64-unknown-linux-musl
+            [rsrs-aarch64-apple-darwin]=aarch64-apple-darwin
+            [rsrs-x86_64-pc-windows-msvc.exe]=x86_64-pc-windows-msvc
+            [rsrs-aarch64-pc-windows-msvc.exe]=aarch64-pc-windows-msvc
+          )
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')"
+          for asset in "${!dirs[@]}"; do
+            triple="${dirs[$asset]}"
+            dir="target/ci/$triple/release"
+            mkdir -p "$dir"
+            asset_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
+              --jq ".[] | select(.name == \"${asset}\") | .id")"
+            asset_id="${asset_id%%$'\n'*}"
+            if [[ -z "$asset_id" || "$asset_id" == "null" ]]; then
+              echo "::error::release asset not found: $asset"
+              exit 1
+            fi
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+              -H "Accept: application/octet-stream" > "$dir/$asset"
+            bytes="$(wc -c < "$dir/$asset")"
+            if (( bytes < 1000000 )); then
+              echo "::error::release asset $asset is only ${bytes} bytes"
+              exit 1
+            fi
+            if [[ "$asset" == *.exe ]]; then
+              mv "$dir/$asset" "$dir/rsrs.exe"
+            else
+              mv "$dir/$asset" "$dir/rsrs"
+              chmod +x "$dir/rsrs"
+            fi
+            runtime="rsrs-${triple}-runtime.tar.gz"
+            runtime_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
+              --jq ".[] | select(.name == \"${runtime}\") | .id")"
+            runtime_id="${runtime_id%%$'\n'*}"
+            if [[ -z "$runtime_id" || "$runtime_id" == "null" ]]; then
+              echo "::error::release asset not found: $runtime"
+              exit 1
+            fi
+            mkdir -p runtime-downloads
+            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${runtime_id}" \
+              -H "Accept: application/octet-stream" > "runtime-downloads/$runtime"
+            tar -xzf "runtime-downloads/$runtime" -C "$dir"
+          done
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Publish npm packages with dev tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          if npm view "@rsrsai/cli@${version}" version >/dev/null 2>&1; then
+            echo "npm @rsrsai/cli@${version} already published"
+            exit 0
+          fi
+          node npm/scripts/pack.mjs --root target/ci --publish --tag dev

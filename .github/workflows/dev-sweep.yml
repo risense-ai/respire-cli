@@ -1,0 +1,88 @@
+# Sweep an approved development server after explicitly configuring its address.
+# Windows, macOS, and Linux run the same isolated script.
+name: Dev server sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: npm version or the dev dist-tag (1.0.4-dev.3, 1.0.4, or dev)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        description: Release tag or version (v1.0.4-dev.3 or 1.0.4-dev.3)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  sweep:
+    if: vars.RESPIRE_ENABLE_PUBLIC_RELEASES == 'true' && vars.RESPIRE_DEV_SERVER_ADDR != ''
+    name: sweep (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install PowerShell
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v pwsh >/dev/null 2>&1; then
+            exit 0
+          fi
+          if [ "$(uname -s)" = Linux ]; then
+            . /etc/os-release
+            curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
+            sudo dpkg -i /tmp/packages-microsoft-prod.deb
+            sudo apt-get update
+            sudo apt-get install -y powershell
+          else
+            brew install powershell
+          fi
+      - name: Unlock a headless keychain
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chain="$RUNNER_TEMP/sweep.keychain-db"
+          security create-keychain -p "" "$chain"
+          security default-keychain -s "$chain"
+          security unlock-keychain -p "" "$chain"
+          security set-keychain-settings -t 3600 -u "$chain"
+      - name: Sweep the published package
+        shell: pwsh
+        env:
+          ONEMEMORY_LANG: en
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = '${{ inputs.version }}'.Trim()
+          if ($ver.StartsWith('v')) { $ver = $ver.Substring(1) }
+          if ($ver -notmatch '^(dev|\d+\.\d+\.\d+(-dev\.\d+)?)$') {
+            throw "拒绝版本 $ver"
+          }
+          $pkg = "@rsrsai/cli@$ver"
+          $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
+          ./scripts/dev-release-sweep.ps1 -Package $pkg -Root $root
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-report-${{ matrix.os }}
+          path: ${{ runner.temp }}/om-sweep/report.md
+          if-no-files-found: warn

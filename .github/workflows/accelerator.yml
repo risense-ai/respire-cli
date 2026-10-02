@@ -1,0 +1,82 @@
+name: Accelerator validation
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Self-hosted hardware label (e.g. intel-npu, amd-npu, qualcomm-npu, apple-silicon)'
+        required: true
+        type: string
+      engine:
+        description: 'Strict engine selection; missing hardware is a failure'
+        type: choice
+        options: [npu, gpu, cpu]
+        default: npu
+      install_providers:
+        description: 'Authorize Windows ML provider installation on this runner'
+        type: boolean
+        default: false
+      model:
+        description: 'Embedding model to validate on the requested hardware'
+        type: choice
+        options: [legacy, m3]
+        default: m3
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: [self-hosted, '${{ inputs.runner }}']
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - run: cargo build --release --locked -p respire --bin rsrs --target-dir target/hardware
+      - name: Install model and validate actual inference
+        shell: pwsh
+        env:
+          ONEMEMORY_ENGINE: ${{ inputs.engine }}
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/model
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
+          PROBE_MODEL: ${{ inputs.model }}
+          ONEMEMORY_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}
+          ONEMEMORY_ORT_DEBUG: '1'
+          INSTALL_PROVIDERS: ${{ inputs.install_providers }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+          $exe = Join-Path 'target/hardware/release' $name
+          $install = if ($env:PROBE_MODEL -eq 'm3') { 'install-m3' } else { 'install-bge' }
+          & $exe --direct model $install --json
+          if ($LASTEXITCODE -ne 0) { throw 'Model installation failed' }
+          if ($IsWindows -and $env:INSTALL_PROVIDERS -eq 'true') {
+            & $exe --direct model install-engines --json
+            if ($LASTEXITCODE -ne 0) { throw 'Provider installation failed' }
+          }
+          $raw = & $exe --direct model probe --model $env:PROBE_MODEL --json
+          if ($LASTEXITCODE -ne 0) { throw 'Hardware inference or CPU comparison failed' }
+          $raw
+          $probe = ($raw | ConvertFrom-Json).summary
+          $pattern = switch ($env:ONEMEMORY_ENGINE) {
+            'npu' { '^(Npu:|CoreML CPUAndNeuralEngine)' }
+            'gpu' { '^(Gpu:|CoreML CPUAndGPU)' }
+            'cpu' { '^CPU$' }
+          }
+          if ($probe.selected -notmatch $pattern -or $probe.fallbacks.Count -ne 0) {
+            throw "Requested accelerator was not used: $($probe.selected)"
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: accelerator-${{ inputs.runner }}-${{ inputs.engine }}
+          path: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}*.json

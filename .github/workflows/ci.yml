@@ -1,0 +1,115 @@
+name: CLI CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  platform-build:
+    name: Compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare pinned binary Core SDK
+        if: ${{ !contains(matrix.target, '-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - name: Build without local vendor SDKs or accelerator hardware
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: cargo build --workspace --locked --target ${{ matrix.target }} --target-dir target/ci
+      - uses: actions/cache@v4
+        if: contains(matrix.target, '-musl')
+        id: musl-cache
+        with:
+          path: target/musl-cache
+          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
+      - name: Build static Linux binary and verify libc independence
+        if: contains(matrix.target, '-musl')
+        run: bash scripts/build-linux-musl.sh "${{ matrix.target }}"
+      - name: Preserve native build cache even if Rust linking fails
+        if: always() && contains(matrix.target, '-musl') && steps.musl-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: target/musl-cache
+          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
+      - name: Verify musl CPU inference
+        if: contains(matrix.target, '-musl')
+        env:
+          ONEMEMORY_ENGINE: cpu
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/musl-probe
+        run: target/ci/${{ matrix.target }}/release/rsrs --direct model probe --json
+      - name: Verify glibc CPU inference
+        if: contains(matrix.target, '-gnu')
+        env:
+          ONEMEMORY_ENGINE: cpu
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/glibc-probe
+        run: target/ci/${{ matrix.target }}/debug/rsrs --direct model probe --json
+  check:
+    runs-on: ubuntu-latest
+    env:
+      ONEMEMORY_ENGINE: cpu
+      # Several existing tests change process-global data-dir/language variables.
+      # Their own parallel-request checks still create concurrent client threads.
+      RESPIRE_CORE_TEST_MODE: '1'
+      RUST_TEST_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: llvm-tools-preview
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo check --workspace --locked
+      - run: cargo test --workspace --locked
+      - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
+        run: |
+          cargo llvm-cov --locked -p respire --fail-under-lines 90 \
+            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error)\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify\.rs|recall_select\.rs)'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check npm/scripts/pack.mjs
+      - run: node npm/scripts/check-manifest.mjs
