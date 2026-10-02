@@ -144,12 +144,12 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
-          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep')
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
       - uses: actions/setup-python@v5
         if: runner.os == 'Linux'
         with:
           python-version: '3.12'
-      - name: Verify background synchronization under network faults
+      - name: Verify all supplementary CLI contracts
         if: runner.os == 'Linux'
         shell: bash
         env:
@@ -158,9 +158,10 @@ jobs:
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
           set -euo pipefail
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/dev-outbox-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-outbox" --model-dir "$RUNNER_TEMP/release-outbox/models"
+          python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-supplements" --cli-report "$RUNNER_TEMP/release-sweep/coverage.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -168,7 +169,12 @@ jobs:
           path: |
             ${{ runner.temp }}/release-sweep/report.md
             ${{ runner.temp }}/release-sweep/coverage.json
-            ${{ runner.temp }}/release-outbox/outbox-coverage.json
+            ${{ runner.temp }}/release-supplements/suite-results.json
+            ${{ runner.temp }}/release-supplements/combined-coverage.json
+            ${{ runner.temp }}/release-supplements/outbox/outbox-coverage.json
+            ${{ runner.temp }}/release-supplements/ai-inject/ai-inject-coverage.json
+            ${{ runner.temp }}/release-supplements/local-api-coverage.json
+            ${{ runner.temp }}/release-supplements/legacy-vault/legacy-vault-coverage.json
           if-no-files-found: error
 
   api-smoke:

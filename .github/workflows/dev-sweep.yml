@@ -144,21 +144,22 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
-          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
       - uses: actions/setup-python@v5
         if: runner.os == 'Linux'
         with:
           python-version: '3.12'
-      - name: Verify background synchronization under network faults
+      - name: Verify all supplementary CLI contracts
         if: runner.os == 'Linux'
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
         run: |
           set -euo pipefail
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/dev-outbox-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-outbox" --model-dir "$RUNNER_TEMP/dev-outbox/models"
+          python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -167,7 +168,12 @@ jobs:
           path: |
             ${{ runner.temp }}/om-sweep/report.md
             ${{ runner.temp }}/om-sweep/coverage.json
-            ${{ runner.temp }}/dev-outbox/outbox-coverage.json
+            ${{ runner.temp }}/dev-supplements/suite-results.json
+            ${{ runner.temp }}/dev-supplements/combined-coverage.json
+            ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json
+            ${{ runner.temp }}/dev-supplements/ai-inject/ai-inject-coverage.json
+            ${{ runner.temp }}/dev-supplements/local-api-coverage.json
+            ${{ runner.temp }}/dev-supplements/legacy-vault/legacy-vault-coverage.json
           if-no-files-found: error
 
   api-smoke:
