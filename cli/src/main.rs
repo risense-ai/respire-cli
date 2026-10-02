@@ -8282,7 +8282,8 @@ mod sync_retry_tests {
             dir.path().join("session.json"),
             format!(r#"{{"addr":"http://127.0.0.1:{port}","token":"hang"}}"#),
         )?;
-        let store = super::build_local()?;
+        // This scheduling fixture owns its temporary store, not the in-process runtime's boot profile.
+        let store = respire::transport::local::LocalStore::open(&dir.path().join("onememory.db"))?;
         let keys = respire::SessionKeys::from_urk([9u8; 32])?;
         crate::rpc::set_worker_active(true);
         let started = std::time::Instant::now();

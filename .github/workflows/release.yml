@@ -158,6 +158,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
       id-token: write
     steps:
       - uses: actions/checkout@v5
@@ -168,6 +169,33 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
+      - name: Require successful CLI CI for this exact source
+        timeout-minutes: 21
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireCi(){
+            const sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
+            if(!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid release source SHA');
+            const deadline=Date.now()+20*60*1000;
+            while(Date.now()<deadline){
+              const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
+              const run=result.workflow_runs.filter(run=>run.head_sha===sha).sort((a,b)=>b.id-a.id)[0];
+              if(run?.status==='completed'){
+                if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
+                console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
+                return;
+              }
+              console.log(`Waiting for latest CLI CI for ${sha}: ${run?`${run.id} ${run.status}`:'not yet available'}`);
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            throw new Error(`No successful latest CLI CI for ${sha} within 20 minutes; publication refused`);
+          }
+          requireCi().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
       - run: npm install --global npm@11.5.1
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}

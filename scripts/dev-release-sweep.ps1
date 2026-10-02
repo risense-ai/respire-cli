@@ -27,7 +27,7 @@ if (-not $pkgMatch.Success) {
 }
 $requested = $pkgMatch.Groups[1].Value
 
-$stamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$stamp = "$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
 if (-not $Root) {
     if ($env:RUNNER_TEMP) {
         $Root = Join-Path $env:RUNNER_TEMP "om-dev-sweep-$stamp"
@@ -699,7 +699,7 @@ Invoke-Om -Name 'sync-resolve-bogus' -ArgList @(
 ) -DataDir $DirA -AllowStatus @('fail') -Note '无冲突时必须失败' | Out-Null
 
 Invoke-Om -Name 'config-addr-b' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirB | Out-Null
-$loginB = Invoke-Om -Name 'login-b' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
+$loginB = Invoke-Om -Name 'login-b' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -HostProfile -TimeoutSec 180
 if (-not $loginB.Ok) { throw 'B 登录失败。super 必须用 register 响应里的 summary.super。已中止，避免后续命令走默认正式服。' }
 $stB = Invoke-Om -Name 'status-b' -ArgList @('--json', 'status') -DataDir $DirB
 $addrB = ''
@@ -713,7 +713,7 @@ if ($recB.Stdout -notlike "*$marker*") { throw "B recall 没有召回 A 写入�
 Invoke-Om -Name 'show-b' -ArgList @('--json', 'show', $short) -DataDir $DirB | Out-Null
 $bad = Join-Path $Root 'bad'
 Invoke-Om -Name 'config-addr-bad' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $bad | Out-Null
-Invoke-Om -Name 'login-wrong-pass' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', 'wrong-pass-000') -DataDir $bad -AllowStatus @('fail') -Secret -Note '错误口令应失败' | Out-Null
+Invoke-Om -Name 'login-wrong-pass' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', 'wrong-pass-000') -DataDir $bad -AllowStatus @('fail') -Secret -HostProfile -Note '错误口令应失败' | Out-Null
 
 # The second device uses fivekeys. Read material from device A without printing it.
 $sessionPath = Join-Path $DirA 'session.json'
