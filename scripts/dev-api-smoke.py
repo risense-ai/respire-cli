@@ -201,9 +201,12 @@ class Smoke:
                 continue
             path = route['path'].replace('{user}', self.namespace + '-missing').replace('{id}', 'missing')
             unauth = route['group'] == 'auth'
+            # Serde accepts [] for TotpIn: all three fields have defaults.
+            # That is an empty ticket/code authentication attempt, not bad JSON.
+            empty_totp = path in ('/login/totp', '/admin/login/totp')
             self.check(route['method'], path, [] if unauth else None,
-                       status=400 if unauth else 401, predicate=lambda r: 'error' in r,
-                       kind='negative', label='bad-json' if unauth else 'missing-authorization')
+                       status=401 if empty_totp or not unauth else 400, predicate=lambda r: 'error' in r,
+                       kind='negative', label='empty-default-totp-ticket' if empty_totp else 'bad-json' if unauth else 'missing-authorization')
 
     def user_and_sync(self, a, b):
         token = a['token']

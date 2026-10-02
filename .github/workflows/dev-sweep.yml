@@ -5,6 +5,10 @@ name: Dev server sweep
 on:
   workflow_dispatch:
     inputs:
+      api_only:
+        description: Run cloud API diagnostics only; does not validate all CLI features or publish
+        type: boolean
+        default: false
       cli_run_id:
         description: Validated Release run whose exact artifacts will be tested without rebuilding
         required: true
@@ -15,6 +19,9 @@ on:
         type: string
   workflow_call:
     inputs:
+      api_only:
+        type: boolean
+        default: false
       cli_run_id:
         required: true
         type: string
@@ -28,6 +35,7 @@ permissions:
 
 jobs:
   sweep:
+    if: ${{ !inputs.api_only }}
     name: sweep (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
