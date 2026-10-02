@@ -62,6 +62,11 @@ jobs:
           node-version: '22'
       - name: Require all approved binary SDK targets before creating a release
         run: node scripts/check-sdk-release.mjs
+      - name: Require an explicitly configured development server
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure the approved development server before publishing"); const url=new URL(value); if(!["http:","https:"].includes(url.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs"].includes(url.hostname)) throw new Error("Release sweep must not use a production service")'
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -253,19 +258,21 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion "${{ needs.release.outputs.tag }}" -Root $root
       - name: Verify selected CPU engine
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
-        shell: pwsh
+        shell: bash
         timeout-minutes: 5
         env:
           ONEMEMORY_ENGINE: cpu
           ONEMEMORY_ORT_DEBUG: '1'
+          ONEMEMORY_NO_AUTOSYNC: '1'
+          ONEMEMORY_UPDATE_CHECK: '0'
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-engine-probe
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/om-engine-probe/models/bge-base-zh-v1.5
         run: |
-          $ErrorActionPreference = 'Stop'
-          $env:ONEMEMORY_DATA_DIR = Join-Path $env:RUNNER_TEMP 'om-engine-probe'
-          $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
-          $exe = Join-Path "target/ci/${{ matrix.target }}/release" $name
-          & $exe --direct model probe --json
-          if ($LASTEXITCODE -ne 0) { throw 'CPU inference or comparison failed' }
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --direct model install-bge --json
+          "$exe" --direct model probe --json
       - name: Verify BGE-M3 CPU inference
         if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
         shell: pwsh

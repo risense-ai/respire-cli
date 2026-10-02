@@ -60,6 +60,7 @@ for (const [triple, t] of Object.entries(TARGETS)) {
   }
   const dir = path.join(outDir, t.pkg);
   mkdirSync(path.join(dir, 'bin'), { recursive: true });
+  copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(dir, 'LICENSE'));
   const binFile = path.basename(src);
   copyFileSync(src, path.join(dir, 'bin', binFile));
   const runtime = JSON.parse(readFileSync(path.join(path.dirname(src), 'core-runtime.json'), 'utf8'));
@@ -67,7 +68,12 @@ for (const [triple, t] of Object.entries(TARGETS)) {
   if (!runtime.files.some(file => file.path === 'core-notices/native/CORE-SDK-NOTICE.txt')) {
     throw new Error(`Core SDK license notice missing: ${triple}`);
   }
-  if (doPublish && runtime.redistribution !== 'approved') throw new Error('Core SDK redistribution has not been approved');
+  if (!runtime.files.some(file => file.path === 'core-notices/CORE-SDK-LICENSE.txt')) {
+    throw new Error(`Core SDK redistribution license missing: ${triple}`);
+  }
+  if (doPublish && runtime.redistribution !== 'permitted-under-included-license') {
+    throw new Error('Core SDK redistribution is not permitted under the included license');
+  }
   for (const file of runtime.files) {
     if (file.path.includes('\\') || file.path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe runtime path');
     const bytes = readFileSync(path.join(path.dirname(src), file.path));
@@ -81,7 +87,8 @@ for (const [triple, t] of Object.entries(TARGETS)) {
   writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name: t.pkg, version,
     description: 'rsrs CLI platform binary',
-    license: 'SEE LICENSE IN bin/core-notices/CORE-SDK-LICENSE.txt', os: t.os, cpu: t.cpu, ...(t.libc ? {libc: t.libc} : {}), files: ['bin'],
+    repository: { type: 'git', url: 'git+https://github.com/risense-ai/respire-cli.git' },
+    license: 'SEE LICENSE IN bin/core-notices/CORE-SDK-LICENSE.txt', os: t.os, cpu: t.cpu, ...(t.libc ? {libc: t.libc} : {}), files: ['bin', 'LICENSE'],
     exports: { [`./bin/${binFile}`]: `./bin/${binFile}` },
   }, null, 2) + '\n');
   built.push({ name: t.pkg, dir });
@@ -105,6 +112,7 @@ mkdirSync(path.join(mainDir, 'bin'), { recursive: true });
 copyFileSync(path.join(repoRoot, 'npm', 'bin', 'cli.js'), path.join(mainDir, 'bin', 'cli.js'));
 chmodSync(path.join(mainDir, 'bin', 'cli.js'), 0o755);
 cpSync(path.join(repoRoot, 'npm', 'README.md'), path.join(mainDir, 'README.md'));
+copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(mainDir, 'LICENSE'));
 const webDist = path.join(repoRoot, 'npm', 'web-dist');
 if (!existsSync(path.join(webDist, 'index.html'))) {
   console.error('npm/web-dist/index.html is missing; cargo embeds it into the CLI at build time');
@@ -117,7 +125,7 @@ writeFileSync(path.join(mainDir, 'package.json'), JSON.stringify({
   license: 'MIT',
   repository: { type: 'git', url: 'git+https://github.com/risense-ai/respire-cli.git' },
   bin: { 'rsrs': './bin/cli.js' },
-  files: ['bin', 'README.md'],
+  files: ['bin', 'README.md', 'LICENSE'],
   engines: { node: '>=16' },
   optionalDependencies,
 }, null, 2) + '\n');

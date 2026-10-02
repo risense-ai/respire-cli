@@ -1,0 +1,99 @@
+name: Verify and publish interface crates
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: Interface crate selection
+        type: choice
+        default: all
+        options: [all, protocol, sdk]
+      publish:
+        description: Publish verified new crate versions to crates.io
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: interface-crates
+  cancel-in-progress: false
+
+jobs:
+  protocol:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify protocol package
+        run: node scripts/verify-interface-crate.mjs protocol "$RUNNER_TEMP/protocol-package"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: protocol-package-verification
+          path: |
+            ${{ runner.temp }}/protocol-package/PACKAGE.json
+            ${{ runner.temp }}/protocol-package/target/package/*.crate
+          if-no-files-found: error
+      - name: Publish protocol only when explicitly selected
+        if: inputs.publish && inputs.package != 'sdk'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/protocol-package/target
+        run: node scripts/publish-interface-crate.mjs protocol
+  sdk:
+    needs: protocol
+    if: inputs.package != 'protocol'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Use GNU tar on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: '"C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH'
+      - name: Require all approved SDK pins
+        run: node scripts/check-sdk-release.mjs
+      - name: Verify SDK package and public-download consumer
+        shell: bash
+        run: node scripts/verify-interface-crate.mjs sdk "$RUNNER_TEMP/sdk-package"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdk-package-verification-${{ runner.os }}
+          path: |
+            ${{ runner.temp }}/sdk-package/PACKAGE.json
+            ${{ runner.temp }}/sdk-package/target/package/*.crate
+          if-no-files-found: error
+  publish-sdk:
+    needs: sdk
+    if: inputs.publish && inputs.package != 'protocol'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Prepare the approved public SDK
+        run: node scripts/fetch-core-sdk.mjs x86_64-unknown-linux-gnu
+      - name: Publish binding only after both consumers pass
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_TARGET_DIR: ${{ runner.temp }}/sdk-publish-target
+        run: node scripts/publish-interface-crate.mjs sdk
