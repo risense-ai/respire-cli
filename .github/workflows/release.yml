@@ -75,7 +75,6 @@ jobs:
 
   cloud-sweep:
     needs: [plan, validate]
-    if: needs.plan.outputs.publish == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -99,7 +98,7 @@ jobs:
         env:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
         run: |
-          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR with the approved development server before publishing"); const u=new URL(value); if(!["http:","https:"].includes(u.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs","1memory.ai"].includes(u.hostname)) throw new Error("Release sweep must not use a production service")'
+          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://dev.rsrs.rs")'
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
       - uses: actions/download-artifact@v4
@@ -138,6 +137,7 @@ jobs:
         shell: pwsh
         env:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
           ONEMEMORY_ENGINE: cpu
           ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/sweep-model/bge-base-zh-v1.5
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
@@ -145,15 +145,60 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep')
+      - uses: actions/setup-python@v5
+        if: runner.os == 'Linux'
+        with:
+          python-version: '3.12'
+      - name: Verify background synchronization under network faults
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          binary="$(realpath cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/dev-outbox-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-outbox" --model-dir "$RUNNER_TEMP/release-outbox/models"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: release-sweep-${{ matrix.target }}
-          path: ${{ runner.temp }}/release-sweep/report.md
-          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/release-sweep/report.md
+            ${{ runner.temp }}/release-sweep/coverage.json
+            ${{ runner.temp }}/release-outbox/outbox-coverage.json
+          if-no-files-found: error
+
+  api-smoke:
+    needs: [plan, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check all development API contracts
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
+          RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: dev-api-coverage
+          path: ${{ runner.temp }}/dev-api-coverage.json
+          if-no-files-found: error
 
   publish:
-    needs: [plan, validate, cloud-sweep]
+    needs: [plan, validate, cloud-sweep, api-smoke]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

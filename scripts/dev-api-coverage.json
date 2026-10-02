@@ -1,0 +1,313 @@
+{
+  "schema": 1,
+  "authority": "Cloud serve route implementations; reviewed 2026-10-03",
+  "expected_route_count": 61,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/health",
+      "group": "public"
+    },
+    {
+      "method": "GET",
+      "path": "/ready",
+      "group": "public"
+    },
+    {
+      "method": "POST",
+      "path": "/register",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/login",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/login/totp",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/forgot",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/reset",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/login",
+      "group": "auth"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/login/totp",
+      "group": "auth"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/sessions",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/sessions/{id}/revoke",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/rotate",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/sessions",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/password",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/vault",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/vault",
+      "group": "self"
+    },
+    {
+      "method": "GET",
+      "path": "/api/self/keys",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/email",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/email/confirm",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/begin",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/confirm",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/totp/disable",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/api/self/purge",
+      "group": "self"
+    },
+    {
+      "method": "POST",
+      "path": "/push",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/push/batch",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/sync/capabilities",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/push/batch",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/v2/conflicts/resolve",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/pull",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/snapshot",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v2/conflicts/resolutions",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/pull",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/max",
+      "group": "sync"
+    },
+    {
+      "method": "POST",
+      "path": "/forget",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/count",
+      "group": "sync"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/me",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/password",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/users",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/audit",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/outbox",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/admins",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/begin",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/confirm",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/totp/disable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins/{user}/update",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/admins/{user}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "GET",
+      "path": "/admin/users/{user}/sessions",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/sessions",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/sessions/{id}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/update",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/disable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/enable",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/kick",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/delete",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/restore",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/rotate",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/revoke",
+      "group": "admin"
+    },
+    {
+      "method": "POST",
+      "path": "/admin/users/{user}/purge",
+      "group": "admin"
+    }
+  ],
+  "server_source_sha": "30938493073ff4f611d7c34f773003a7fb02a405"
+}
