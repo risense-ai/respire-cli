@@ -271,7 +271,8 @@ class Suite:
         self.invoke('cure_config_set', {'on': False}, lambda v: has(v, 'cure_auto', False))
         self.invoke('config_get', {}, lambda v: Path(v['data_dir']).resolve() == self.library and v['addr'] == 'https://dev.rsrs.rs')
         self.invoke('data_dir_set', {'dir': str(self.library)}, lambda v: Path(v['data_dir']).resolve() == self.library)
-        self.invoke('diary_mode_set', {'mode': 'verbose'}, lambda v: has(v, 'diary_mode', 'verbose'))
+        self.invoke('diary_mode_set', {'mode': 'verbose'}, lambda v: v.get('action') == 'updated'
+                    and v.get('key') == 'diary_mode' and v.get('value') == 'verbose')
         self.invoke('diary_mode_get', {}, lambda v: v.get('diary_mode') == 'verbose')
         self.invoke('workspace_mode_set', {'mode': 'normal'}, lambda v: v.get('ok') is True and v.get('mode') == 'normal')
         self.invoke('workspace_mode_get', {}, lambda v: v.get('mode') == 'normal')

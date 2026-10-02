@@ -226,7 +226,7 @@ pub fn rerank_target_dir() -> PathBuf {
             return expand_home(trimmed);
         }
     }
-    let bge = default_user_model_dir();
+    let bge = install_target_dir(None);
     match bge.parent() {
         Some(models_dir) => models_dir.join("bge-reranker-base"),
         None => bge.with_file_name("bge-reranker-base"),
@@ -264,14 +264,7 @@ pub fn install_rerank(
     let _operation = model_progress::Operation::begin("verify")?;
     let dest = match dir {
         Some(d) if !d.trim().is_empty() => expand_home(d.trim()),
-        _ => {
-            // Next to BGE: under the **parent** of the user model dir (.../models/bge-base-zh-v1.5)
-            let bge = default_user_model_dir();
-            match bge.parent() {
-                Some(models_dir) => models_dir.join("bge-reranker-base"),
-                None => bge.with_file_name("bge-reranker-base"),
-            }
-        }
+        _ => rerank_target_dir(),
     };
     std::fs::create_dir_all(dest.join("onnx"))
         .map_err(|e| anyhow!("failed to create reranker dir ({}): {e}", dest.display()))?;
