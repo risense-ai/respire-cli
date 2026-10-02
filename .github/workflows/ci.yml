@@ -68,13 +68,23 @@ jobs:
         env:
           ONEMEMORY_ENGINE: cpu
           ONEMEMORY_DATA_DIR: ${{ runner.temp }}/musl-probe
-        run: target/ci/${{ matrix.target }}/release/rsrs --direct model probe --json
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/musl-probe/model
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          "$exe" --direct model install-bge --json
+          "$exe" --direct model probe --json
       - name: Verify glibc CPU inference
         if: contains(matrix.target, '-gnu')
         env:
           ONEMEMORY_ENGINE: cpu
           ONEMEMORY_DATA_DIR: ${{ runner.temp }}/glibc-probe
-        run: target/ci/${{ matrix.target }}/debug/rsrs --direct model probe --json
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/glibc-probe/model
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/debug/rsrs
+          "$exe" --direct model install-bge --json
+          "$exe" --direct model probe --json
   check:
     runs-on: ubuntu-latest
     env:

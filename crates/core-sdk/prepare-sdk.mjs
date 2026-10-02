@@ -111,7 +111,8 @@ export async function prepareSdk(target, destination, lockPath = join(root, 'cor
         inspectArchive(archive);
         const archivePath = join(temporary, 'sdk.tar.gz');
         writeFileSync(archivePath, archive);
-        const extraction = spawnSync('tar', ['-xzf', archivePath, '-C', staged], { encoding: 'utf8' });
+        // A Windows drive colon in -f can be mistaken for a remote host by GNU tar.
+        const extraction = spawnSync('tar', ['-xzf', 'sdk.tar.gz', '-C', 'sdk'], { cwd: temporary, encoding: 'utf8' });
         if (extraction.error) throw extraction.error;
         if (extraction.status !== 0) throw new Error(`SDK extraction failed: ${extraction.stderr}`);
         if (!readFileSync(join(staged, 'manifest.json')).equals(bytes)) throw new Error('Archive manifest differs from pinned standalone manifest');
