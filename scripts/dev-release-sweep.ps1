@@ -1439,10 +1439,18 @@ $m3Probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe
 Assert-Smoke 'model-m3-probe-success' ($m3Probe.Ok -and [string]$m3Probe.Envelope.status -eq 'ok')
 $activateM3 = Invoke-Om -Name 'model-activate-m3' -ArgList @('--json', 'model', 'activate', 'm3') -DataDir $DirA -TimeoutSec 900
 $m3Recall = Invoke-Om -Name 'model-m3-recall-existing-content' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'model-m3-index-and-recall' ($activateM3.Ok -and [string]$activateM3.Envelope.summary.model -eq 'm3' -and [int]$activateM3.Envelope.summary.indexed -gt 0 -and $m3Recall.Ok -and $m3Recall.Stdout -like "*$marker*")
+$m3MarkerHits = @($m3Recall.Envelope.details | Where-Object { [string]$_.entry.content -like "*$marker*" })
+Assert-Smoke 'model-m3-index-and-recall' ($activateM3.Ok -and [string]$activateM3.Envelope.summary.model -eq 'm3' -and [int]$activateM3.Envelope.summary.indexed -gt 0 -and $m3Recall.Ok -and [string]$m3Recall.Envelope.summary.embedding_model -eq 'm3' -and $m3MarkerHits.Count -gt 0)
 $activateLegacy = Invoke-Om -Name 'model-activate-legacy' -ArgList @('--json', 'model', 'activate', 'legacy') -DataDir $DirA -TimeoutSec 600
 $legacyRecall = Invoke-Om -Name 'model-legacy-recall-after-switch' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'model-legacy-switch-back-preserves-content' ($activateLegacy.Ok -and [string]$activateLegacy.Envelope.summary.model -eq 'legacy' -and [int]$activateLegacy.Envelope.summary.indexed -gt 0 -and $legacyRecall.Ok -and $legacyRecall.Stdout -like "*$marker*")
+# Existing source-checked generation artifacts are reused; indexed counts only
+# newly prepared rows, so a successful switch can legitimately report zero.
+$legacyIndexed = $activateLegacy.Envelope.summary.indexed
+$legacyIndexedNumber = $legacyIndexed -is [int] -or $legacyIndexed -is [long]
+$legacyMarkerHits = @($legacyRecall.Envelope.details | Where-Object { [string]$_.entry.content -like "*$marker*" })
+# Recall reports the persisted active model; lightweight JSON status does not.
+$legacyContent = Invoke-Om -Name 'model-legacy-show-preserved-content' -ArgList @('--json', 'show', $httpId) -DataDir $DirA
+Assert-Smoke 'model-legacy-switch-back-preserves-content' ($activateLegacy.Ok -and [string]$activateLegacy.Envelope.summary.model -eq 'legacy' -and $legacyIndexedNumber -and $legacyIndexed -ge 0 -and $legacyRecall.Ok -and [string]$legacyRecall.Envelope.summary.embedding_model -eq 'legacy' -and $legacyMarkerHits.Count -gt 0 -and $legacyContent.Ok -and [string]$legacyContent.Envelope.details.entry.id -eq $httpId -and [string]$legacyContent.Envelope.details.entry.content -ceq $httpMarker)
 $revealed = Invoke-Om -Name 'secret-reveal-isolated' -ArgList @('--json', 'secret', '--reveal') -DataDir $DirA -Secret -AllowStatus @('warn')
 Assert-Smoke 'secret-reveal-current-recovery-code' ($revealed.Ok -and [string]$revealed.Envelope.details.secret -eq $newSuper)
 Invoke-Om -Name 'model-reset-cpu' -ArgList @('--json', 'model', 'reset-cpu') -DataDir $DirA -HostProfile | Out-Null

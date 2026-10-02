@@ -311,7 +311,13 @@ class Suite:
         self.invoke('backup_db', {'path': str(backup)}, lambda v: v.get('backed_up') == str(backup) and backup.is_file())
         self.invoke('scope_material', {'root': root_id}, lambda v: isinstance(v.get('material'), str) and 'Local HTTP root' in v['material'])
         self.invoke('book_material', {'root': root_id}, lambda v: isinstance(v.get('chapters'), list) and v.get('root', {}).get('id') == root_id)
-        self.invoke('portrait_material', {'limit': 20}, lambda v: isinstance(v.get('entries'), list))
+        portrait_count = self.invoke('status', {}, lambda v: v.get('local_alive', 0) >= 3,
+                    label='portrait-source-count')['local_alive']
+        # service::App::portrait_material returns grouped arrays, not entries.
+        self.invoke('portrait_material', {'limit': 20}, lambda v: v.get('total_entries') == portrait_count
+                    and all(isinstance(v.get(field), list) for field in ('preferences', 'decisions', 'emotions', 'skills', 'top_themes', 'timeline'))
+                    and any(theme == ['Local HTTP root', 1] for theme in v['top_themes'])
+                    and sum(count for _, count in v['timeline']) == portrait_count)
         share = self.root / 'files' / 'share.txt'
         self.invoke('share_subtree', {'root': root_id, 'out': str(share)}, lambda v: v.get('path') == str(share) and share.is_file())
         self.invoke('share_import', {'path': str(share)}, lambda v: isinstance(v.get('candidates'), list))
