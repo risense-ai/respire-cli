@@ -77,9 +77,38 @@ function Stop-OurRuntimes {
         }
     }
 }
-trap { Stop-OurRuntimes; throw $_ }
+trap { Write-SweepReport; Stop-OurRuntimes; throw $_ }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
+
+function Write-SweepReport {
+    $lines = @('# CLI development sweep', '', "- Server: $Server", "- Version: $ExpectVersion", '', '| Step | Command | Exit | Status | Result | Note |', '| --- | --- | --- | --- | --- | --- |')
+    foreach ($row in $Rows) {
+        $mark = if ($row.Ok) { 'PASS' } else { 'FAIL' }
+        $note = (($row.Note + ' ' + $row.Leak).Trim()) -replace '\|', '/'
+        $lines += "| $($row.Step) | $($row.Name) | $($row.Exit) | $($row.Status) | $mark | $note |"
+    }
+    [IO.File]::WriteAllText($ReportPath, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
+}
+
+function Get-SafeFailureReason($Envelope) {
+    # Report fixed classifications only, never raw authentication responses.
+    $message = @($Envelope.errors) -join ' '
+    if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
+    foreach ($entry in @(
+        @('already registered', 'account_exists'),
+        @('none in the local keyring|super password required', 'recovery_key_missing'),
+        @('keyring|keychain', 'keyring'),
+        @('session not unlocked|vault.*locked', 'vault_locked'),
+        @('TLS|certificate', 'tls'),
+        @('DNS|resolve', 'dns'),
+        @('connect|timeout|transport', 'transport'),
+        @('runtime.*token|runtime.*auth', 'runtime_auth')
+    )) {
+        if ($message -match $entry[0]) { return $entry[1] }
+    }
+    return 'unclassified'
+}
 
 function Assert-DevEnvelope($Envelope, [string]$Where) {
     if (-not $Envelope -or -not $Envelope.summary) { return }
@@ -271,6 +300,7 @@ function Invoke-Om {
     } while ($readyFail -and $readyTries -lt 2)
     if ($readyTries -gt 1) { $Note = ("runtime 重试 $readyTries 次 " + $Note).Trim() }
     $ok = $exitOk -and $statusOk -and ($leaks.Count -eq 0) -and (-not $timedOut)
+    if (-not $ok -and $Secret) { $Note = ("failure_reason=$(Get-SafeFailureReason $envlp) $Note").Trim() }
     $row = [pscustomobject]@{
         Step   = $script:Step
         Name   = $Name
@@ -281,6 +311,7 @@ function Invoke-Om {
         Note   = $(if ($timedOut) { "timeout ${TimeoutSec}s; $Note" } else { $Note })
     }
     $Rows.Add($row) | Out-Null
+    Write-SweepReport
     $flag = if ($ok) { 'PASS' } else { 'FAIL' }
     Write-Host "$flag $Name exit=$exit status=$status leak=$($row.Leak)"
     if (-not $ok) {

@@ -9,34 +9,97 @@ on:
         description: npm version or the dev dist-tag (1.0.4-dev.3, 1.0.4, or dev)
         required: true
         type: string
+        default: dev
+      cli_run_id:
+        description: Optional validated Release run whose artifacts should be tested without rebuilding
+        default: ''
+        type: string
+      cli_sha:
+        description: Exact 40-character CLI source SHA for cli_run_id
+        default: ''
+        type: string
   workflow_call:
     inputs:
       version:
         description: Release tag or version (v1.0.4-dev.3 or 1.0.4-dev.3)
         required: true
         type: string
+      cli_run_id:
+        default: ''
+        type: string
+      cli_sha:
+        default: ''
+        type: string
 
 permissions:
   contents: read
-  actions: write
+  actions: read
 
 jobs:
   sweep:
-    if: vars.RESPIRE_ENABLE_PUBLIC_RELEASES == 'true' && vars.RESPIRE_DEV_SERVER_ADDR != ''
     name: sweep (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '24'
+      - name: Require the approved development server
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before sweeping"); const u=new URL(value); if(!["http:","https:"].includes(u.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs","1memory.ai"].includes(u.hostname)) throw new Error("Sweep must not use a production service")'
+      - name: Verify the original release build
+        if: inputs.cli_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process'),m=require('./npm/artifact-manifest.json');
+          const id=process.env.CLI_RUN_ID,sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
+          if(!/^\d+$/.test(id)||!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Pass an exact validated run ID and full CLI SHA');
+          const api=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
+          const run=api(`actions/runs/${id}`);
+          if(run.head_sha!==sha||!['.github/workflows/release.yml','.github/workflows/release-validation.yml'].includes(run.path)) throw new Error('Unexpected release source or workflow');
+          const jobs=api(`actions/runs/${id}/jobs?per_page=100`).jobs;
+          const required=[...m.targets.map(t=>`Release (${t.triple})`),'npm-dry-run'];
+          for(const name of required) if(!jobs.some(j=>(j.name===name||j.name.endsWith(` / ${name}`))&&j.conclusion==='success')) throw new Error(`Original release validation did not pass: ${name}`);
+          NODE
+      - uses: actions/download-artifact@v4
+        if: inputs.cli_run_id != ''
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: original-artifact
+          run-id: ${{ inputs.cli_run_id }}
+          github-token: ${{ github.token }}
+      - name: Verify and extract the original binary
+        if: inputs.cli_run_id != ''
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ inputs.cli_sha }}
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const metadata=JSON.parse(fs.readFileSync(`original-artifact/cli-build-${process.env.CLI_TARGET}.json`,'utf8'));
+          cp.execFileSync(process.execPath,['npm/scripts/set-build-version.mjs',metadata.version],{stdio:'inherit'});
+          cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
+          fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\n`);
+          NODE
       - name: Install PowerShell
         if: runner.os != 'Windows'
         shell: bash
@@ -69,6 +132,10 @@ jobs:
         env:
           ONEMEMORY_LANG: en
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          ONEMEMORY_ENGINE: cpu
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/sweep-model/bge-base-zh-v1.5
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
           $ver = '${{ inputs.version }}'.Trim()
@@ -78,7 +145,12 @@ jobs:
           }
           $pkg = "@rsrsai/cli@$ver"
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
-          ./scripts/dev-release-sweep.ps1 -Package $pkg -Root $root
+          if ($env:CLI_RUN_ID) {
+            $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+            ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root
+          } else {
+            ./scripts/dev-release-sweep.ps1 -Package $pkg -Root $root
+          }
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
