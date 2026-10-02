@@ -136,6 +136,15 @@ jobs:
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+      - name: Upload base smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-sweep-report-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/om-sweep/report.md
+            ${{ runner.temp }}/om-sweep/coverage.json
+          if-no-files-found: warn
       - uses: actions/setup-python@v5
         id: supplement_python
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}

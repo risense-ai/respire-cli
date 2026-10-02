@@ -102,10 +102,12 @@ class Suite:
                         XDG_CONFIG_HOME=str(self.root / 'config'), XDG_DATA_HOME=str(self.root / 'data'),
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         TMPDIR=str(self.root / 'tmp'), ONEMEMORY_BIN_DIR=str(self.root / 'bin'),
+                        ONEMEMORY_DATA_DIR=str(self.root),
                         ONEMEMORY_MODEL_DIR=str(self.root / 'models' / 'bge-base-zh-v1.5'),
                         ONEMEMORY_RERANKER_DIR=str(self.root / 'models' / 'bge-reranker-base'),
                         ONEMEMORY_ENGINE='cpu', ONEMEMORY_NO_AUTOSYNC='1')
-        require('RESPIRE_CORE_TEST_MODE' not in self.env and 'ONEMEMORY_DATA_DIR' not in self.env, 'fixture-environment-not-isolated')
+        require('RESPIRE_CORE_TEST_MODE' not in self.env
+                and Path(self.env['ONEMEMORY_DATA_DIR']).resolve() == self.root, 'fixture-environment-not-isolated')
         version = subprocess.run([str(self.args.binary), '--version'], env=self.env, capture_output=True, text=True, timeout=20)
         require(version.returncode == 0 and version.stdout.strip().split()[-1] == self.args.version, 'exact-cli-version-mismatch')
         self.direct(['config', '--data-dir', str(self.library), '--addr', 'https://dev.rsrs.rs', '--autosync', 'false'])
@@ -142,7 +144,9 @@ class Suite:
         self.runtime = subprocess.Popen([str(self.args.binary), 'web', '--internal', '--no-open', '--port', str(self.port)],
                                         env=env, cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 40
-        token_file = self.current_profile / 'runtime' / 'token'
+        # The runtime belongs to the isolated profile root, while health reports
+        # the currently selected descendant library or space profile.
+        token_file = self.root / 'runtime' / 'token'
         while time.monotonic() < deadline:
             require(self.runtime.poll() is None, 'owned-runtime-exited-before-ready')
             if token_file.is_file():

@@ -168,6 +168,7 @@ function Get-SafeFailureReason($Envelope) {
     foreach ($entry in @(
         @('already registered', 'account_exists'),
         @('runtime owns its boot profile', 'profile_change_requires_host'),
+        @('read.only', 'readonly_local_guard'),
         @('none in the local keyring|super password required', 'recovery_key_missing'),
         @('keyring write did not round-trip', 'keyring_readback_failed'),
         @('local keyring write failed|keyring write failed', 'keyring_write_failed'),
@@ -404,7 +405,7 @@ function Invoke-Om {
             break
         }
     }
-    if (-not $ok -and $Secret) { $Note = ("failure_reason=$(Get-SafeFailureReason $envlp) $Note").Trim() }
+    if (-not $ok) { $Note = ("failure_reason=$(Get-SafeFailureReason $envlp) $Note").Trim() }
     $row = [pscustomobject]@{
         Step   = $script:Step
         Name   = $Name
@@ -1127,6 +1128,14 @@ $revokedSync = Invoke-Om -Name 'session-revoked-cloud-sync-denied' -ArgList @('-
 Assert-Smoke 'session-revoked-access-denied' ($revokedSync.Ok -and $revokedSync.Exit -eq 1 -and ($revokedSync.Envelope.errors -join ' ') -match 'unauthorized|token rejected|401')
 $revokedLocal = Invoke-Om -Name 'session-revoked-local-read-preserved' -ArgList @('--json', 'show', $id) -DataDir $DirB
 Assert-Smoke 'session-revocation-preserves-local-decryption' ($revokedLocal.Ok -and [string]$revokedLocal.Envelope.details.entry.content -eq "merged $marker")
+# A revoked owner session is marked personal read-only by the remote transport.
+# Recover through the existing CLI setting, while team members remain unable to self-unlock.
+$revokedConfig = Invoke-Om -Name 'session-revoked-agent-config' -ArgList @('--json', 'agent-config') -DataDir $DirB
+Assert-Smoke 'session-revoked-personal-readonly-marked' ($revokedConfig.Ok -and $revokedConfig.Envelope.summary.readonly -eq $true -and $revokedConfig.Envelope.summary.readonly_team -ne $true)
+$ownerClear = Invoke-Om -Name 'session-owner-clear-personal-readonly' -ArgList @('--json', 'agent-config', '--set', 'readonly=false') -DataDir $DirB
+Assert-Smoke 'session-owner-personal-readonly-cleared' ($ownerClear.Ok -and [string]$ownerClear.Envelope.summary.key -eq 'readonly' -and $ownerClear.Envelope.summary.value -eq $false)
+$ownerConfig = Invoke-Om -Name 'session-owner-agent-config-readback' -ArgList @('--json', 'agent-config') -DataDir $DirB
+Assert-Smoke 'session-owner-personal-readonly-readback' ($ownerConfig.Ok -and $ownerConfig.Envelope.summary.readonly -eq $false -and $ownerConfig.Envelope.summary.readonly_team -ne $true)
 Invoke-Om -Name 'logout' -ArgList @('--json', 'logout') -DataDir $DirB | Out-Null
 $loginAgain = Invoke-Om -Name 'login-b-again' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
 if (-not $loginAgain.Ok) { throw '重新登录失败' }

@@ -137,6 +137,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
+      - name: Upload base smoke diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: base-release-sweep-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/release-sweep/report.md
+            ${{ runner.temp }}/release-sweep/coverage.json
+          if-no-files-found: warn
       - uses: actions/setup-python@v5
         id: supplement_python
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}

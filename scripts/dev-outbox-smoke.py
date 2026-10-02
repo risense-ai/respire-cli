@@ -299,6 +299,7 @@ class Fixture:
         with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
             return {
                 "pending": db.execute("SELECT seq,id FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),
+                "envelopes": db.execute("SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),
                 "dirty": {row[0] for row in db.execute("SELECT id FROM memories WHERE dirty=1")},
                 "epoch": db.execute("SELECT value FROM meta WHERE key='sync_v2_epoch'").fetchone(),
             }
@@ -463,15 +464,21 @@ def run(args, report):
         require(before["epoch"] is not None and memory_id in before["dirty"], "reset_initial_epoch_or_pending_missing")
         reset = fixture.rpc(["sync-reset"])
         require(reset.get("ok") and reset.get("exit") == 0, "local_snapshot_reset_failed")
+        reset_snapshot = fixture.snapshot()
+        # Reset deliberately requeues fresh identities; compare preserved envelopes, not old seq values.
+        require(reset_snapshot["epoch"] is None and reset_snapshot["envelopes"] == before["envelopes"]
+                and memory_id in reset_snapshot["dirty"], "reset_did_not_preserve_pending_envelopes")
         old_release.set()
         # A subsequent held pass proves the old pass completed, without allowing new epoch application.
         require(new_entered.wait(45), "reset_new_generation_pass_not_entered")
         after = fixture.snapshot()
-        require(after["epoch"] is None and after["pending"] == before["pending"] and memory_id in after["dirty"], "old_response_mutated_reset_snapshot")
+        require(after == reset_snapshot, "old_response_mutated_reset_snapshot")
         require(memory_id not in fixture.gate.acknowledged, "old_generation_uploaded_pending_marker")
         new_release.set()
         fixture.prove({memory_id: content})
-        report["cases"]["reset_old_response_rejection"] = {"passed": True, "old_response_could_not_restore_epoch": True, "pending_preserved": True, "new_pass_real_ack_and_independent_pull": True}
+        report["cases"]["reset_old_response_rejection"] = {"passed": True, "old_response_released": True,
+            "subsequent_pass_observed": True, "old_response_could_not_restore_epoch": True,
+            "pending_envelopes_preserved": True, "new_pass_real_ack_and_independent_pull": True}
     finally:
         fixture.diagnose(report, "reset")
         fixture.close()
