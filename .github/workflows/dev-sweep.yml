@@ -64,6 +64,7 @@ jobs:
           node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before sweeping"); const u=new URL(value); if(!["http:","https:"].includes(u.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs","1memory.ai"].includes(u.hostname)) throw new Error("Sweep must not use a production service")'
       - name: Verify the original release build
         if: inputs.cli_run_id != ''
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
@@ -89,6 +90,7 @@ jobs:
           github-token: ${{ github.token }}
       - name: Verify and extract the original binary
         if: inputs.cli_run_id != ''
+        shell: bash
         env:
           CLI_TARGET: ${{ matrix.target }}
           CLI_SHA: ${{ inputs.cli_sha }}
