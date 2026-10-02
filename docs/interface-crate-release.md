@@ -3,15 +3,21 @@
 Run **Verify and publish interface crates** on the reviewed commit. The default
 `publish=false` performs packaging and consumer verification only.
 
+A stable `vX.Y.Z` tag matching the CLI source version automatically runs verification
+and publishes any new interface crate versions. A push to `main` does not publish
+these immutable crate versions. An already published protocol or binding version
+is explicitly skipped; no new source version means no repeat publication. Bump
+the appropriate source crate version when its packaged contents change.
+
 | Selection | Verification | Explicit publication |
 | --- | --- | --- |
 | `protocol` | `cargo package --locked` and package inventory | Publish the protocol version if absent |
 | `sdk` | Protocol package; Windows GNU tar and GNU Linux public-SDK consumers | Publish a new binding version |
 | `all` | Both packages and consumers | Protocol first, then binding after registry availability and consumer success |
 
-Publication requires the `CARGO_REGISTRY_TOKEN` repository secret. It is read only
-by explicitly selected publish steps. Existing binding versions are rejected;
-an existing protocol version is reused. A new protocol version must reach crates.io
+Publication of a new version requires the `CARGO_REGISTRY_TOKEN` repository secret.
+It is read only by stable-tag or explicitly selected manual publish steps.
+Existing crate versions are reused without republishing. A new protocol version must reach crates.io
 before the binding's registry dependency can be verified. A validation-only run
 will report that dependency gate rather than substitute a local protocol.
 

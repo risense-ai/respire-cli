@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {existsSync, readFileSync, writeFileSync} from 'node:fs';
+import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {execFileSync, spawnSync} from 'node:child_process';
 
@@ -24,6 +24,10 @@ if (process.argv.includes('--assets-only')) {
 }
 
 const names = [...manifest.targets.map(target => target.pkg), manifest.npmScope];
+const packIndex = process.argv.indexOf('--pack');
+const packDirectory = packIndex >= 0 ? resolve(process.argv[packIndex + 1] || 'npm/release-packages') : null;
+if (packDirectory) mkdirSync(packDirectory, {recursive:true});
+const packages = [];
 for (const name of names) {
   const directory = join(root, 'npm/dist', name);
   const pkg = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
@@ -43,10 +47,11 @@ for (const name of names) {
       throw new Error(`npm redistribution license mismatch: ${name}`);
     }
   }
-  const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['pack', '--dry-run', '--json'], {
+  const args = ['pack', '--json', ...(packDirectory ? ['--pack-destination', packDirectory] : ['--dry-run'])];
+  const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', args, {
     cwd:directory, encoding:'utf8', shell:process.platform === 'win32',
   });
-  if (result.status !== 0) throw new Error(`npm pack dry-run failed: ${name}\n${result.stderr}`);
+  if (result.status !== 0) throw new Error(`npm pack failed: ${name}\n${result.stderr}`);
   const report = JSON.parse(result.stdout);
   if (report.length !== 1 || report[0].name !== name || report[0].version !== manifest.cliVersion) {
     throw new Error(`npm pack report mismatch: ${name}`);
@@ -56,6 +61,11 @@ for (const name of names) {
     throw new Error(`npm package is missing its source or binary SDK license: ${name}`);
   }
   writeFileSync(join(directory, 'release.pack.json'), JSON.stringify(report, null, 2)+'\n');
+  if (packDirectory) packages.push({name, version:manifest.cliVersion, file:report[0].filename, sha256:hash(join(packDirectory, report[0].filename))});
   console.log(`Validated npm pack: ${name}@${manifest.cliVersion}`);
+}
+if (packDirectory) {
+  writeFileSync(join(packDirectory, 'SHA256SUMS'), packages.map(pkg => `${pkg.sha256}  ${pkg.file}`).join('\n')+'\n');
+  writeFileSync(join(packDirectory, 'source-version.json'), JSON.stringify({schema_version:1, git_sha:sha, version:manifest.cliVersion, packages}, null, 2)+'\n');
 }
 console.log(`Validated all ${names.length} packages without publishing`);

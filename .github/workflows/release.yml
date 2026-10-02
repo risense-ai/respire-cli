@@ -1,495 +1,240 @@
-# Public distribution stays disabled until explicitly enabled after SDK validation.
 name: Release
 
 on:
+  push:
+    branches: [main]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       ref:
-        description: git ref to publish
+        description: CLI branch, commit or stable vX.Y.Z tag
         default: main
+        required: true
         type: string
-      reuse_assets:
-        description: Skip rebuild and package the assets already on this release
+      publish:
+        description: Publish after all binary, package and development-server checks
         default: false
         type: boolean
-  push:
-    tags:
-      - "v*"
+      mirror:
+        description: Also mirror the completed release to respire-releases
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
-  release:
-    if: vars.RESPIRE_ENABLE_PUBLIC_RELEASES == 'true'
+  plan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     outputs:
-      tag: ${{ steps.meta.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      channel: ${{ steps.plan.outputs.channel }}
+      publish: ${{ steps.plan.outputs.publish }}
     steps:
-      - id: meta
-        run: |
-          TAG="${{ github.event.inputs.ref || github.ref_name }}"
-          TAG="${TAG#refs/tags/}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
-          ref: ${{ steps.meta.outputs.tag }}
-      - name: tag must be on main
+          fetch-depth: 0
+      - id: plan
         env:
-          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ inputs.ref || github.ref }}
+          RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
-          set -euo pipefail
-          git fetch "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main:refs/remotes/origin/main
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::v* must be an ancestor of origin/main"
-            exit 1
-          fi
-      - name: tag matches cli/Cargo.toml
-        run: |
-          VER="$(awk -F'"' '/^version/{print $2; exit}' cli/Cargo.toml)"
-          TAG="${{ steps.meta.outputs.tag }}"
-          case "$TAG" in
-            "v$VER") ;;
-            v*) echo "::error::tag $TAG != cli/Cargo.toml $VER (want v$VER)"; exit 1 ;;
-            *) echo "::error::pass a v* tag (v$VER)"; exit 1 ;;
-          esac
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Require all approved binary SDK targets before creating a release
-        run: node scripts/check-sdk-release.mjs
-      - name: Require an explicitly configured development server
-        env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-        run: |
-          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure the approved development server before publishing"); const url=new URL(value); if(!["http:","https:"].includes(url.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs"].includes(url.hostname)) throw new Error("Release sweep must not use a production service")'
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ steps.meta.outputs.tag }}"
-          NOTES_FILE="docs/releases/${TAG#v}.md"
-          NOTES_ARGS=(--generate-notes)
-          if [ -f "$NOTES_FILE" ]; then NOTES_ARGS=(--notes-file "$NOTES_FILE"); fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $TAG already exists"
-          elif [[ "$TAG" == *-dev.* ]]; then
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --prerelease "${NOTES_ARGS[@]}"
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" "${NOTES_ARGS[@]}"
-          fi
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const cargo=fs.readFileSync('cli/Cargo.toml','utf8').match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const manifest=require('./npm/artifact-manifest.json');
+          if(!cargo||manifest.cliVersion!==cargo) throw new Error('CLI Cargo/npm versions differ');
+          const ref=process.env.RELEASE_REF.replace(/^refs\/tags\//,'');
+          const tagEvent=process.env.RELEASE_REF.startsWith('refs/tags/')||/^v\d+\./.test(ref);
+          let channel,version;
+          if(tagEvent){
+            if(!/^v\d+\.\d+\.\d+$/.test(ref)) throw new Error('Stable publication accepts only vX.Y.Z tags, never dev tags');
+            version=ref.slice(1);channel='latest';
+            if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
+            cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
+          }else{
+            const base=cargo.match(/^(\d+\.\d+\.\d+)(?:-|$)/)?.[1];
+            if(!base) throw new Error('Invalid CLI stable version base');
+            channel='dev';version=`${base}-dev.${process.env.RELEASE_RUN_ID}`;
+          }
+          const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
+          NODE
 
-  binaries:
-    name: build (${{ matrix.target }})
-    needs: release
-    if: github.event_name != 'workflow_dispatch' || inputs.reuse_assets == false
+  validate:
+    needs: plan
+    uses: ./.github/workflows/release-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+
+  cloud-sweep:
+    needs: [plan, validate]
+    if: needs.plan.outputs.publish == 'true'
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            rustflags: "-C target-feature=-crt-static"
-          - os: windows-11-arm
-            target: aarch64-pc-windows-msvc
-            rustflags: "-C target-feature=-crt-static"
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-          ref: ${{ github.event.inputs.ref || github.ref }}
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: ${{ matrix.target }}
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - name: Prepare pinned binary Core SDK
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          node scripts/fetch-core-sdk.mjs "$target"
-      - name: Build
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
+          node-version: '24'
+      - name: Require the approved development server
         env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-      - uses: actions/cache@v4
-        if: contains(matrix.target, '-musl')
-        id: musl-cache
-        with:
-          path: target/musl-cache
-          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
-      - name: Build static Linux binary and verify libc independence
-        if: contains(matrix.target, '-musl')
-        run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
-      - name: Preserve native build cache even if Rust linking fails
-        if: always() && contains(matrix.target, '-musl') && steps.musl-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/musl-cache
-          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
-      - name: Stage Core runtime and notices
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
-        run: node scripts/stage-core-runtime.mjs "target/ci/${{ matrix.target }}/release"
-      - name: Stage asset
-        shell: bash
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
         run: |
-          mkdir -p dist
-          NAME="rsrs-${{ matrix.target }}"
-          SRC="target/ci/${{ matrix.target }}/release/rsrs"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            NAME="$NAME.exe"
-            SRC="$SRC.exe"
-          else
-            chmod +x "$SRC"
-          fi
-          cp "$SRC" "dist/$NAME"
-          RUNTIME="rsrs-${{ matrix.target }}-runtime.tar.gz"
-          DIR="target/ci/${{ matrix.target }}/release"
-          DLLS=()
-          while IFS= read -r file; do
-            DLLS+=("$file")
-          done < <(node -e 'const m=require(process.argv[1]); for(const f of m.files) if(!f.path.includes("/")) console.log(f.path)' "./$DIR/core-runtime.json")
-          tar -czf "dist/$RUNTIME" -C "$DIR" core-runtime.json core-notices "${DLLS[@]}"
-          echo "asset=$NAME" >> "$GITHUB_ENV"
-          echo "runtime_asset=$RUNTIME" >> "$GITHUB_ENV"
-      - name: Upload release asset
+          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR with the approved development server before publishing"); const u=new URL(value); if(!["http:","https:"].includes(u.protocol)||["rsrs.rs","api.rsrs.rs","dash.rsrs.rs","admin.rsrs.rs","1memory.ai"].includes(u.hostname)) throw new Error("Release sweep must not use a production service")'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - name: Verify and extract this platform's artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.release.outputs.tag }}"
-          upload_asset() {
-            local ASSET="$1"
-            release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')"
-            # A rerun can leave an asset with the same name in the release. Remove
-            # it through the API before uploading so --clobber does not race the
-            # release asset index and return ReleaseAsset.name already exists.
-            for attempt in 1 2 3; do
-              asset_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
-                --jq ".[] | select(.name == \"${ASSET}\") | .id" 2>/dev/null | head -n 1 || true)"
-              if [[ -n "$asset_id" ]]; then
-                # Another rerun may delete it between lookup and DELETE. Retry
-                # the whole lookup/delete/upload sequence in that case.
-                if ! gh api --method DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"; then
-                  sleep $((attempt * 2))
-                  continue
-                fi
-              fi
-              upload_status=0
-              upload_output="$(gh release upload "$TAG" "dist/$ASSET" \
-                --repo "$GITHUB_REPOSITORY" --clobber 2>&1)" || upload_status=$?
-              if (( upload_status == 0 )); then
-                printf '%s\n' "$upload_output"
-                return 0
-              fi
-              printf '%s\n' "$upload_output" >&2
-              if grep -Fq 'ReleaseAsset.name already exists' <<<"$upload_output"; then
-                echo "release asset $ASSET already exists; treating upload as complete"
-                return 0
-              fi
-              sleep $((attempt * 2))
-            done
-            echo "::error::failed to upload $ASSET to $TAG after retries"
-            return 1
-          }
-          upload_asset "${{ env.asset }}"
-          upload_asset "${{ env.runtime_asset }}"
+          CLI_TARGET: ${{ matrix.target }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/extract-artifact.mjs validated-cli cli
       - name: Install PowerShell
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          if command -v pwsh >/dev/null 2>&1; then
-            exit 0
-          fi
-          if [ "$(uname -s)" = Linux ]; then
+          if command -v pwsh >/dev/null 2>&1; then exit 0; fi
+          if [ "$RUNNER_OS" = macOS ]; then brew install powershell; else
             . /etc/os-release
             curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
             sudo dpkg -i /tmp/packages-microsoft-prod.deb
             sudo apt-get update
             sudo apt-get install -y powershell
-          else
-            brew install powershell
           fi
-      - name: Unlock a headless keychain
-        if: matrix.target == 'aarch64-apple-darwin'
+      - name: Unlock a disposable macOS keychain
+        if: runner.os == 'macOS'
         shell: bash
         run: |
-          set -euo pipefail
           chain="$RUNNER_TEMP/sweep.keychain-db"
           security create-keychain -p "" "$chain"
           security default-keychain -s "$chain"
           security unlock-keychain -p "" "$chain"
           security set-keychain-settings -t 3600 -u "$chain"
-      - name: Sweep dev server before npm publish
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
+      - name: Sweep the approved development server
         shell: pwsh
         env:
-          ONEMEMORY_LANG: en
-          ONEMEMORY_ENGINE: cpu
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
-          $exe = Join-Path "target/ci/${{ matrix.target }}/release" $name
-          $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
-          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion "${{ needs.release.outputs.tag }}" -Root $root
-      - name: Verify selected CPU engine
-        shell: bash
-        timeout-minutes: 5
-        env:
           ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_ORT_DEBUG: '1'
-          ONEMEMORY_NO_AUTOSYNC: '1'
-          ONEMEMORY_UPDATE_CHECK: '0'
-          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-engine-probe
-          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/om-engine-probe/models/bge-base-zh-v1.5
-        run: |
-          set -euo pipefail
-          exe=target/ci/${{ matrix.target }}/release/rsrs
-          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          "$exe" --direct model install-bge --json
-          "$exe" --direct model probe --json
-      - name: Verify BGE-M3 CPU inference
-        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
-        shell: pwsh
-        timeout-minutes: 15
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/sweep-model/bge-base-zh-v1.5
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
-          $env:ONEMEMORY_DATA_DIR = Join-Path $env:RUNNER_TEMP 'om-m3-probe'
-          $env:ONEMEMORY_M3_DIR = Join-Path $env:RUNNER_TEMP 'om-m3-model'
-          $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
-          $exe = Join-Path "target/ci/${{ matrix.target }}/release" $name
-          & $exe --direct model install-m3 --json
-          if ($LASTEXITCODE -ne 0) { throw 'M3 download or integrity verification failed' }
-          $env:ONEMEMORY_ENGINE = 'cpu'
-          & $exe --direct model probe --model m3 --json
-          if ($LASTEXITCODE -ne 0) { throw 'M3 CPU inference or comparison failed' }
-      - name: Upload sweep report
-        if: always() && (matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc')
-        uses: actions/upload-artifact@v4
+          $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep')
+      - uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: sweep-${{ matrix.target }}
-          path: ${{ runner.temp }}/om-sweep/report.md
-          if-no-files-found: ignore
+          name: release-sweep-${{ matrix.target }}
+          path: ${{ runner.temp }}/release-sweep/report.md
+          if-no-files-found: warn
 
-  npm:
-    needs: [release, binaries]
-    if: always() && needs.release.result == 'success' && (needs.binaries.result == 'success' || needs.binaries.result == 'skipped')
+  publish:
+    needs: [plan, validate, cloud-sweep]
+    if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
-          ref: ${{ github.event.inputs.ref || github.ref }}
-      - name: Download CLI binaries from this release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          TAG="${{ needs.release.outputs.tag }}"
-          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" --jq '.id')"
-          expected_assets=(
-            "rsrs-x86_64-unknown-linux-gnu"
-            "rsrs-aarch64-unknown-linux-gnu"
-            "rsrs-x86_64-unknown-linux-musl"
-            "rsrs-aarch64-unknown-linux-musl"
-            "rsrs-aarch64-apple-darwin"
-            "rsrs-x86_64-pc-windows-msvc.exe"
-            "rsrs-aarch64-pc-windows-msvc.exe"
-            "rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz"
-            "rsrs-aarch64-unknown-linux-gnu-runtime.tar.gz"
-            "rsrs-x86_64-unknown-linux-musl-runtime.tar.gz"
-            "rsrs-aarch64-unknown-linux-musl-runtime.tar.gz"
-            "rsrs-aarch64-apple-darwin-runtime.tar.gz"
-            "rsrs-x86_64-pc-windows-msvc-runtime.tar.gz"
-            "rsrs-aarch64-pc-windows-msvc-runtime.tar.gz"
-          )
-          assets_ready=0
-          for attempt in $(seq 1 60); do
-            assets="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
-              --jq '.[].name' 2>/dev/null || true)"
-            missing=0
-            for asset in "${expected_assets[@]}"; do
-              if ! grep -Fxq "$asset" <<<"$assets"; then
-                missing=1
-                break
-              fi
-            done
-            if (( missing == 0 )); then
-              assets_ready=1
-              break
-            fi
-            sleep 2
-          done
-          if (( assets_ready == 0 )); then
-            echo "::error::release $TAG did not expose all binaries and Core runtime assets before npm packaging"
-            exit 1
-          fi
-          mkdir -p \
-            target/ci/x86_64-unknown-linux-gnu/release \
-            target/ci/aarch64-unknown-linux-gnu/release \
-            target/ci/x86_64-unknown-linux-musl/release \
-            target/ci/aarch64-unknown-linux-musl/release \
-            target/ci/aarch64-apple-darwin/release \
-            target/ci/x86_64-pc-windows-msvc/release \
-            target/ci/aarch64-pc-windows-msvc/release
-          # gh release download reads /releases/tags/:tag. That payload can keep
-          # assets empty after upload, while /releases/:id/assets already lists them.
-          download() {
-            local name="$1"
-            local dest_dir="$2"
-            local asset_id bytes
-            asset_id="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" \
-              --jq ".[] | select(.name == \"${name}\") | .id")"
-            asset_id="${asset_id%%$'\n'*}"
-            if [[ -z "$asset_id" || "$asset_id" == "null" ]]; then
-              echo "::error::release asset not found: $name"
-              exit 1
-            fi
-            mkdir -p "$dest_dir"
-            gh api "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
-              -H "Accept: application/octet-stream" > "$dest_dir/$name"
-            bytes="$(wc -c < "$dest_dir/$name")"
-            if (( bytes == 0 )); then
-              echo "::error::release asset $name is only ${bytes} bytes"
-              exit 1
-            fi
-          }
-          download "rsrs-x86_64-unknown-linux-gnu" target/ci/x86_64-unknown-linux-gnu/release
-          download "rsrs-aarch64-unknown-linux-gnu" target/ci/aarch64-unknown-linux-gnu/release
-          download "rsrs-x86_64-unknown-linux-musl" target/ci/x86_64-unknown-linux-musl/release
-          download "rsrs-aarch64-unknown-linux-musl" target/ci/aarch64-unknown-linux-musl/release
-          download "rsrs-aarch64-apple-darwin" target/ci/aarch64-apple-darwin/release
-          download "rsrs-x86_64-pc-windows-msvc.exe" target/ci/x86_64-pc-windows-msvc/release
-          download "rsrs-aarch64-pc-windows-msvc.exe" target/ci/aarch64-pc-windows-msvc/release
-          for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-pc-windows-msvc aarch64-pc-windows-msvc; do
-            download "rsrs-${triple}-runtime.tar.gz" runtime-downloads
-            tar -xzf "runtime-downloads/rsrs-${triple}-runtime.tar.gz" -C "target/ci/${triple}/release"
-          done
-          shopt -s nullglob
-          for f in target/ci/*/release/rsrs-*; do
-            dir="$(dirname "$f")"
-            case "$f" in
-              *.exe) mv "$f" "$dir/rsrs.exe" ;;
-              *) mv "$f" "$dir/rsrs"; chmod +x "$dir/rsrs" ;;
-            esac
-          done
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: '24'
           registry-url: https://registry.npmjs.org
-      - name: Publish npm (@rsrsai/cli)
+      - run: npm install --global npm@11.5.1
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Verify release artifacts and prepare all eight npm packages
+        run: |
+          node npm/scripts/verify-packages.mjs release-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          node npm/scripts/verify-packages.mjs release-assets
+      - name: Create a draft and upload every verified artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
           set -euo pipefail
-          TAG="${{ needs.release.outputs.tag }}"
-          VER="${TAG#v}"
-          if npm view "@rsrsai/cli@${VER}" version >/dev/null 2>&1; then
-            echo "npm @rsrsai/cli@${VER} already published"
-            exit 0
-          fi
-          if [[ "$TAG" == *-dev.* ]]; then
-            node npm/scripts/pack.mjs --root target/ci --publish --tag dev
+          if gh release view "$CLI_TAG" --json isDraft >/dev/null 2>&1; then
+            test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = true || { echo 'Release is already public; use a new version'; exit 1; }
+          elif [ "$CLI_CHANNEL" = dev ]; then
+            gh release create "$CLI_TAG" --draft --prerelease --target "$CLI_SHA" --title "$CLI_TAG" --notes "Validated CLI source: $CLI_SHA"
           else
-            node npm/scripts/pack.mjs --root target/ci --publish --tag latest
+            gh release create "$CLI_TAG" --draft --target "$CLI_SHA" --title "$CLI_TAG" --notes "Validated CLI source: $CLI_SHA"
           fi
+          gh release upload "$CLI_TAG" release-assets/* --clobber
+          gh release view "$CLI_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
+          node - <<'NODE'
+          const fs=require('fs'),path=require('path');
+          const expected=fs.readdirSync('release-assets').sort();
+          const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
+          if(expected.length!==21||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 21 verified binary/runtime/metadata assets');
+          NODE
+      - name: Publish npm using Trusted Publishing
+        env:
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/pack.mjs --root target/ci --publish --tag "$CLI_CHANNEL"
+      - name: Make the complete release public
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+        run: gh release edit "$CLI_TAG" --draft=false
 
-  mirror-public:
-    name: mirror to respire-releases
-    needs: [release, binaries]
-    if: always() && needs.release.result == 'success' && (needs.binaries.result == 'success' || needs.binaries.result == 'skipped')
+  mirror:
+    needs: [plan, publish]
+    if: github.event_name == 'workflow_dispatch' && inputs.mirror && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Mirror CLI binaries to risense-ai/respire-releases
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Mirror only when explicitly requested
         env:
-          SRC_TOKEN: ${{ github.token }}
-          DST_TOKEN: ${{ secrets.RELEASES_GITHUB_TOKEN }}
-          TAG: ${{ needs.release.outputs.tag }}
-          SRC_REPO: ${{ github.repository }}
-          DST_REPO: risense-ai/respire-releases
+          GH_TOKEN: ${{ secrets.RELEASES_GITHUB_TOKEN }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: |
           set -euo pipefail
-          if [ -z "${DST_TOKEN:-}" ]; then
-            echo "::warning::no secrets.RELEASES_GITHUB_TOKEN; skip public mirror"
-            exit 0
+          test -n "$GH_TOKEN" || { echo 'Requested mirror requires RELEASES_GITHUB_TOKEN'; exit 1; }
+          if ! gh release view "$CLI_TAG" --repo risense-ai/respire-releases >/dev/null 2>&1; then
+            extra=(); if [ "$CLI_CHANNEL" = dev ]; then extra+=(--prerelease); fi
+            gh release create "$CLI_TAG" --repo risense-ai/respire-releases --title "$CLI_TAG" --notes "Validated CLI distribution" "${extra[@]}"
           fi
-          mkdir -p assets
-          release_id="$(GH_TOKEN="$SRC_TOKEN" gh api "repos/${SRC_REPO}/releases/tags/${TAG}" --jq '.id')"
-          while IFS=$'\t' read -r asset_id asset_name; do
-            [[ -n "$asset_id" && "$asset_id" != "null" && -n "$asset_name" ]] || continue
-            GH_TOKEN="$SRC_TOKEN" gh api "repos/${SRC_REPO}/releases/assets/${asset_id}" \
-              -H "Accept: application/octet-stream" > "assets/${asset_name}"
-          done < <(GH_TOKEN="$SRC_TOKEN" gh api --paginate "repos/${SRC_REPO}/releases/${release_id}/assets" --jq '.[] | [.id, .name] | @tsv')
-          test -n "$(ls -A assets)" || { echo "::error::$SRC_REPO $TAG has no assets"; exit 1; }
-          GH_TOKEN="$SRC_TOKEN" gh api "repos/${SRC_REPO}/releases/tags/${TAG}" --jq '.body' > release-notes.md
-          test -s release-notes.md || { echo "::error::source release notes are empty"; exit 1; }
-          if GH_TOKEN="$DST_TOKEN" gh release view "$TAG" --repo "$DST_REPO" >/dev/null 2>&1; then
-            GH_TOKEN="$DST_TOKEN" gh release edit "$TAG" --repo "$DST_REPO" --notes-file release-notes.md
-          elif [[ "$TAG" == *-dev.* ]]; then
-            GH_TOKEN="$DST_TOKEN" gh release create "$TAG" --repo "$DST_REPO" --title "$TAG" --notes-file release-notes.md --prerelease
-          else
-            GH_TOKEN="$DST_TOKEN" gh release create "$TAG" --repo "$DST_REPO" --title "$TAG" --notes-file release-notes.md
-          fi
-          # --clobber still returns ReleaseAsset.name already exists when the public
-          # release already has this tag's binaries. Replace by asset id, same as
-          # the source upload job.
-          dst_id="$(GH_TOKEN="$DST_TOKEN" gh api "repos/${DST_REPO}/releases/tags/${TAG}" --jq '.id')"
-          for asset_path in assets/*; do
-            name="$(basename "$asset_path")"
-            uploaded=0
-            for attempt in 1 2 3; do
-              asset_id="$(GH_TOKEN="$DST_TOKEN" gh api --paginate "repos/${DST_REPO}/releases/${dst_id}/assets" \
-                --jq ".[] | select(.name == \"${name}\") | .id" || true)"
-              asset_id="${asset_id%%$'\n'*}"
-              if [[ -n "$asset_id" && "$asset_id" != "null" ]]; then
-                if ! GH_TOKEN="$DST_TOKEN" gh api --method DELETE "repos/${DST_REPO}/releases/assets/${asset_id}"; then
-                  sleep $((attempt * 2))
-                  continue
-                fi
-              fi
-              upload_status=0
-              upload_output="$(GH_TOKEN="$DST_TOKEN" gh release upload "$TAG" "$asset_path" --repo "$DST_REPO" --clobber 2>&1)" || upload_status=$?
-              if (( upload_status == 0 )); then
-                uploaded=1
-                break
-              fi
-              printf '%s\n' "$upload_output" >&2
-              if grep -Fq 'ReleaseAsset.name already exists' <<<"$upload_output"; then
-                echo "public asset $name already exists; treating upload as complete"
-                uploaded=1
-                break
-              fi
-              sleep $((attempt * 2))
-            done
-            if (( uploaded == 0 )); then
-              echo "::error::failed to mirror $name"
-              exit 1
-            fi
-          done
-          echo "https://github.com/${DST_REPO}/releases/tag/${TAG}"
+          gh release upload "$CLI_TAG" release-assets/* --repo risense-ai/respire-releases --clobber

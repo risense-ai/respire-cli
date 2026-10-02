@@ -136,6 +136,11 @@ for (const b of built) console.log(`  ${b.name}${doPublish ? '' : ' (dry run)'}`
 
 if (doPublish) {
   for (const b of built) {
+    const existing = spawnSync('npm', ['view', `${b.name}@${version}`, 'version'], { encoding:'utf8' });
+    if (existing.status === 0 && existing.stdout.trim() === version) {
+      console.log(`npm ${b.name}@${version} already published; keep the immutable version`);
+      continue;
+    }
     console.log(`\nnpm publish ${b.dir} --access public`);
     const r = spawnSync('npm', ['publish', b.dir, '--access', 'public', '--tag', npmTag], { stdio: 'inherit' });
     if (r.status !== 0) {

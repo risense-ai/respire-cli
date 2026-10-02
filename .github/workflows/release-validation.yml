@@ -1,6 +1,19 @@
 name: Release validation
 
 on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        default: ''
+        type: string
+    outputs:
+      sha:
+        value: ${{ jobs.resolve.outputs.sha }}
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
   workflow_dispatch:
     inputs:
       ref:
@@ -17,13 +30,19 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
           persist-credentials: false
       - id: source
-        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+        env:
+          BUILD_VERSION: ${{ inputs.version }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -n "$BUILD_VERSION" ]; then node npm/scripts/set-build-version.mjs "$BUILD_VERSION"; fi
+          node -e 'const fs=require("fs"); const m=require("./npm/artifact-manifest.json"); fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${m.cliVersion}\n`)'
 
   binaries:
     needs: resolve
@@ -60,6 +79,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
       - name: Validate release manifests
         run: |
           node npm/scripts/check-manifest.mjs
@@ -128,6 +149,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
       - uses: actions/download-artifact@v4
         with:
           pattern: cli-release-*
@@ -137,21 +160,17 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          while IFS= read -r triple; do
-            dir="target/ci/$triple/release"
-            mkdir -p "$dir"
-            name="rsrs-$triple"
-            binary=rsrs
-            if [[ "$triple" == *windows* ]]; then name="$name.exe"; binary=rsrs.exe; fi
-            cp "release-assets/$name" "$dir/$binary"
-            chmod +x "$dir/$binary"
-            tar -xzf "release-assets/rsrs-$triple-runtime.tar.gz" -C "$dir"
-          done < <(node -e 'for(const t of require("./npm/artifact-manifest.json").targets) console.log(t.triple)')
           node npm/scripts/verify-packages.mjs release-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci
-          node npm/scripts/verify-packages.mjs release-assets
+          node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
       - uses: actions/upload-artifact@v4
         with:
           name: npm-release-validation
           path: npm/dist/**/*.pack.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-packages
+          path: npm/release-packages/*
           if-no-files-found: error
