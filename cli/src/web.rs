@@ -577,7 +577,12 @@ fn dispatch(cmd: &str, a: &Value) -> Result<Value, String> {
         "attach" => cli(&["attach", a["id"].as_str().ok_or("attach missing id")?, "--parent", a["parent"].as_str().ok_or("attach missing parent")?]),
         "restore" => cli(&["restore", a["id"].as_str().ok_or("restore missing id")?]),
         "promote" => cli(&["promote", a["id"].as_str().ok_or("promote missing id")?]),
-        "demote" => cli(&["demote", a["id"].as_str().ok_or("demote missing id")?]),
+        "demote" => cli(&[
+            "demote",
+            a["id"].as_str().ok_or("demote missing id")?,
+            "--parent",
+            a["parent"].as_str().ok_or("demote missing parent")?,
+        ]),
         "sync" => cli(&["sync"]),
         "register" => {
             let mut args: Vec<String> = vec!["register".into(), "--user".into(), a["user"].as_str().ok_or("register missing user")?.to_owned(), "--pass".into(), a["pass"].as_str().ok_or("register missing pass")?.to_owned()];

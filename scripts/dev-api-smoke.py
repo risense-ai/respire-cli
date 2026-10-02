@@ -192,7 +192,7 @@ class Smoke:
     def blob(self, ident, cipher='aa'):
         self.tick += 1
         stamp = (self.start + datetime.timedelta(milliseconds=self.tick)).isoformat(timespec='milliseconds').replace('+00:00', 'Z')
-        return {'id': ident, 'ciphertext': cipher, 'nonce': '11', 'embedding_enc': '',
+        return {'id': ident, 'user': '', 'ciphertext': cipher, 'nonce': '11', 'embedding_enc': '',
                 'updated_at': stamp, 'deleted': False}
 
     def negatives(self):

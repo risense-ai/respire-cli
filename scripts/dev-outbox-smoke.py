@@ -57,6 +57,8 @@ class Gate:
         self.acknowledged = set()
         self.fault_requests = 0
         self.capability_requests = 0
+        self.sync_read_requests = 0
+        self.request_counts = {"capability": 0, "pull": 0, "snapshot": 0, "push": 0}
         self.held_calls = {}
         self.lock = threading.Lock()
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
@@ -75,13 +77,21 @@ class Gate:
             def forward(self):
                 try:
                     require(self.path.startswith("/") and not self.path.startswith("//"), "invalid_proxy_path")
-                    is_capability = self.path.split("?")[0].endswith("/sync/capabilities")
+                    path = self.path.split("?")[0]
+                    kind = next((name for suffix, name in (("/sync/capabilities", "capability"),
+                        ("/v2/pull", "pull"), ("/v2/snapshot", "snapshot"), ("/v2/push/batch", "push"))
+                        if path.endswith(suffix)), None)
+                    is_sync_read = self.command == "GET" and kind in ("capability", "pull", "snapshot")
                     hold_call = None
-                    if is_capability:
-                        with gate.lock:
+                    with gate.lock:
+                        if kind:
+                            gate.request_counts[kind] += 1
+                        if kind == "capability":
                             gate.capability_requests += 1
-                            hold_call = gate.held_calls.get(gate.capability_requests)
-                    if is_capability and gate.fail:
+                        if is_sync_read:
+                            gate.sync_read_requests += 1
+                            hold_call = gate.held_calls.get(gate.sync_read_requests)
+                    if is_sync_read and gate.fail:
                         with gate.lock:
                             gate.fault_requests += 1
                         self.connection.shutdown(socket.SHUT_RDWR)
@@ -111,12 +121,12 @@ class Gate:
                                     memory_id = ids.get(result.get("op_id"))
                                     if memory_id:
                                         gate.acknowledged.add(memory_id)
-                    if is_capability and gate.hold:
+                    if is_sync_read and gate.hold:
                         gate.entered.set()
-                        require(gate.release.wait(90), "capability_gate_timeout")
+                        require(gate.release.wait(90), "sync_read_gate_timeout")
                     if hold_call is not None:
                         hold_call[0].set()
-                        require(hold_call[1].wait(90), "numbered_capability_gate_timeout")
+                        require(hold_call[1].wait(90), "numbered_sync_read_gate_timeout")
                     self.send_response(status)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Content-Length", str(len(raw)))
@@ -146,19 +156,23 @@ class Gate:
     def hold_call(self, ordinal):
         events = (threading.Event(), threading.Event())
         with self.lock:
-            require(ordinal > self.capability_requests, "capability_gate_armed_too_late")
+            require(ordinal > self.sync_read_requests, "sync_read_gate_armed_too_late")
             self.held_calls[ordinal] = events
         return events
 
 
 class Fixture:
-    def __init__(self, args, root):
+    def __init__(self, args, root, cleanup):
         self.args = args
         self.root = root
         self.child = None
         self.gate = Gate()
         self.user = "ci-outbox-" + secrets.token_hex(12)
         self.password = secrets.token_urlsafe(32)
+        self.cleanup_report = cleanup
+        self.registration_attempted = False
+        self.created = False
+        self.account_token = None
         self.a = self.environment("a")
         self.b = self.environment("b")
 
@@ -191,12 +205,23 @@ class Fixture:
         return data
 
     def prepare(self):
+        self.registration_attempted = True
+        self.cleanup_report["unconfirmed_users"].append(self.user)
         registration = self.direct(self.a, ["register", "--addr", UPSTREAM, "--user", self.user, "--pass", self.password])
+        require(registration.get("summary", {}).get("user") == self.user
+                and registration.get("summary", {}).get("ok") is True, "registered_user_identity_mismatch")
+        self.created = True
+        self.cleanup_report["unconfirmed_users"].remove(self.user)
+        self.cleanup_report["remaining_users"].append(self.user)
+        session_path = Path(self.a["ONEMEMORY_DATA_DIR"]) / "session.json"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        require(session.get("user") == self.user and session.get("addr") == UPSTREAM
+                and isinstance(session.get("token"), str) and bool(session["token"]), "created_user_session_mismatch")
+        self.account_token = session["token"]
         super_key = registration.get("summary", {}).get("super")
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
         self.direct(self.b, ["login", "--addr", UPSTREAM, "--user", self.user, "--pass", self.password, "--super", super_key])
-        session_path = Path(self.a["ONEMEMORY_DATA_DIR"]) / "session.json"
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address
@@ -228,13 +253,36 @@ class Fixture:
         except Exception:
             raise RuntimeError("local_rpc_failed") from None
 
-    def remember(self, title, content):
-        result = self.rpc(["remember", content, "--title", title, "--importance", "important", "--force"])
-        require(result.get("ok") and result.get("exit") == 0, "foreground_save_failed")
+    def remember(self, title, content, direct=False):
+        command = ["remember", content, "--title", title, "--importance", "important", "--force"]
+        if direct:
+            self.direct(self.a, command)
+        else:
+            result = self.rpc(command)
+            require(result.get("ok") and result.get("exit") == 0, "foreground_save_failed")
         with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
             row = db.execute("SELECT id FROM memories WHERE title=? AND deleted=0", (title,)).fetchone()
         require(row is not None, "saved_memory_missing")
         return row[0]
+
+    def diagnose(self, report, phase):
+        # Only finite state and counts, never session fields or provider error strings.
+        result = {"phase": phase, "runtime_alive": self.child is not None and self.child.poll() is None}
+        with self.gate.lock:
+            result.update(request_counts=dict(self.gate.request_counts), sync_read_requests=self.gate.sync_read_requests,
+                          injected_disconnects=self.gate.fault_requests, real_acknowledgments=len(self.gate.acknowledged))
+        try:
+            result["pending"] = self.pending()
+            if result["runtime_alive"] and hasattr(self, "runtime_token"):
+                summary = self.rpc(["status"]).get("envelope", {}).get("summary", {})
+                scheduler = summary.get("sync_scheduler", {})
+                result["scheduler"] = {key: scheduler.get(key) for key in ("state", "next_run_ms", "manual_waiters")}
+                result["autosync"] = summary.get("autosync")
+                result["remote_configured"] = summary.get("remote_configured")
+                result["sync_phase"] = summary.get("sync_live", {}).get("phase")
+        except Exception:
+            result["diagnostic_code"] = "local_diagnostics_unavailable"
+        report.setdefault("diagnostics", []).append(result)
 
     def pending(self):
         with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
@@ -256,15 +304,54 @@ class Fixture:
             require(any(node.get("id") == memory_id and node.get("content") == content for node in objects(shown)), "independent_pull_decrypt_mismatch")
 
     def close(self):
-        self.gate.release.set()
-        if self.child is not None:
-            self.child.terminate()
+        stopped = False
+        try:
+            self.gate.release.set()
+            if self.child is not None:
+                self.child.terminate()
+                try:
+                    self.child.wait(10)
+                except subprocess.TimeoutExpired:
+                    self.child.kill()
+                    self.child.wait(10)
+            self.gate.close()
+            stopped = True
+        except Exception:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_runtime_shutdown_failed"})
+        if stopped:
+            self.cleanup_account()
+
+    def cleanup_account(self):
+        if not self.created:
+            self.cleanup_report["events"].append({"user": self.user, "passed": not self.registration_attempted,
+                "code": "registration_outcome_unconfirmed" if self.registration_attempted else "no_account_created"})
+            return
+        if not self.account_token:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_account_token_missing"})
+            return
+        def request(method, path, body=None):
+            encoded = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(UPSTREAM + path, encoded,
+                {"Authorization": "Bearer " + self.account_token, "Content-Type": "application/json"}, method=method)
             try:
-                self.child.wait(10)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait(10)
-        self.gate.close()
+                response = self.gate.opener.open(req, timeout=45)
+            except urllib.error.HTTPError as error:
+                response = error
+            with response:
+                status = response.code
+                raw = response.read(1024 * 1024 + 1)
+                require(len(raw) <= 1024 * 1024, "cleanup_response_too_large")
+                return status, json.loads(raw)
+        try:
+            # The authenticated server binds purge to this confirmed-created user, never an admin target.
+            status, result = request("POST", "/api/self/purge", {"confirm": self.user})
+            require(status == 200 and result.get("purged") is True and result.get("user") == self.user, "cleanup_self_purge_failed")
+            status, _ = request("GET", "/api/self")
+            require(status == 401, "cleanup_token_still_accepted")
+            self.cleanup_report["remaining_users"].remove(self.user)
+            self.cleanup_report["events"].append({"user": self.user, "passed": True, "self_purge_confirmed": True, "old_token_rejected": True})
+        except Exception:
+            self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_self_purge_or_verification_failed"})
 
 
 def run(args, report):
@@ -279,7 +366,7 @@ def run(args, report):
     require(args.model_dir == args.root / "models", "model_dir_must_be_owned_root_models")
     args.root.mkdir(parents=True, exist_ok=False, mode=0o700)
     report.update(source_sha=args.source_sha, version=args.version, binary_sha256=args.binary_sha256.lower(), upstream=UPSTREAM)
-    fixture = Fixture(args, args.root / "foreground")
+    fixture = Fixture(args, args.root / "foreground", report["cleanup"])
     try:
         version = fixture.direct(fixture.a, ["v"])
         require(any(value == args.version for node in objects(version) for value in node.values() if isinstance(value, str)), "binary_version_mismatch")
@@ -290,9 +377,12 @@ def run(args, report):
                     (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model.onnx")),
                 "installed_model_files_missing")
         fixture.prepare()
+        seed_content = "Development queued foreground seed " + secrets.token_hex(16)
+        seed_id = fixture.remember("CI foreground seed", seed_content, direct=True)
+        require(fixture.pending() > 0, "foreground_seed_not_pending")
         fixture.gate.hold = True
         fixture.start()
-        require(fixture.gate.entered.wait(30), "real_capability_hold_not_entered")
+        require(fixture.gate.entered.wait(30), "real_sync_read_hold_not_entered")
         content = "Development outbox foreground marker " + secrets.token_hex(16)
         started = time.monotonic()
         memory_id = fixture.remember("CI outbox foreground", content)
@@ -301,13 +391,14 @@ def run(args, report):
         require(fixture.rpc(["status"]).get("ok"), "status_during_network_wait_failed")
         fixture.gate.hold = False
         fixture.gate.release.set()
-        fixture.prove({memory_id: content})
+        fixture.prove({seed_id: seed_content, memory_id: content})
         report["cases"]["foreground_save_during_network_wait"] = {"passed": True, "completed_before_release": True, "elapsed_ms": elapsed}
-        report["cases"]["independent_pull_decrypt"] = {"passed": True, "real_acknowledgments": 1, "content_equal": True}
+        report["cases"]["independent_pull_decrypt"] = {"passed": True, "real_acknowledgments": 2, "content_equal": True}
     finally:
+        fixture.diagnose(report, "foreground")
         fixture.close()
 
-    fixture = Fixture(args, args.root / "finite-manual")
+    fixture = Fixture(args, args.root / "finite-manual", report["cleanup"])
     manual_thread = None
     try:
         fixture.prepare()
@@ -324,7 +415,7 @@ def run(args, report):
                 manual["failed"] = True
         manual_thread = threading.Thread(target=synchronize, daemon=True)
         manual_thread.start()
-        require(entered.wait(30), "manual_capability_gate_not_entered")
+        require(entered.wait(30), "manual_sync_read_gate_not_entered")
         later_content = "Development finite boundary later marker " + secrets.token_hex(16)
         later_id = fixture.remember("CI finite later", later_content)
         require(any(seq > captured_boundary and identity == later_id for seq, identity in fixture.snapshot()["pending"]), "later_operation_not_beyond_boundary")
@@ -341,19 +432,21 @@ def run(args, report):
         fixture.prove({first_id: first_content, later_id: later_content})
         report["cases"]["finite_manual_boundary"] = {"passed": True, "later_write_retained": True, "first_pass_real_ack_only": True, "second_pass_and_independent_pull": True}
     finally:
+        fixture.diagnose(report, "finite_manual")
         fixture.close()
         if manual_thread is not None:
             manual_thread.join(5)
 
-    fixture = Fixture(args, args.root / "reset")
+    fixture = Fixture(args, args.root / "reset", report["cleanup"])
     try:
         fixture.prepare()
+        content = "Development reset pending marker " + secrets.token_hex(16)
+        memory_id = fixture.remember("CI reset pending", content, direct=True)
+        require(fixture.pending() > 0, "reset_seed_not_pending")
         old_entered, old_release = fixture.gate.hold_call(1)
         new_entered, new_release = fixture.gate.hold_call(2)
         fixture.start()
-        require(old_entered.wait(30), "reset_old_capability_gate_not_entered")
-        content = "Development reset pending marker " + secrets.token_hex(16)
-        memory_id = fixture.remember("CI reset pending", content)
+        require(old_entered.wait(30), "reset_old_sync_read_gate_not_entered")
         before = fixture.snapshot()
         require(before["epoch"] is not None and memory_id in before["dirty"], "reset_initial_epoch_or_pending_missing")
         reset = fixture.rpc(["sync-reset"])
@@ -368,8 +461,9 @@ def run(args, report):
         fixture.prove({memory_id: content})
         report["cases"]["reset_old_response_rejection"] = {"passed": True, "old_response_could_not_restore_epoch": True, "pending_preserved": True, "new_pass_real_ack_and_independent_pull": True}
     finally:
+        fixture.diagnose(report, "reset")
         fixture.close()
-    fixture = Fixture(args, args.root / "backoff")
+    fixture = Fixture(args, args.root / "backoff", report["cleanup"])
     try:
         fixture.prepare()
         fixture.gate.fail = True
@@ -383,11 +477,13 @@ def run(args, report):
         require(0 < state.get("next_run_ms", 0) <= 31000 and fixture.pending() > 0, "backoff_did_not_preserve_pending")
         with fixture.gate.lock:
             failed_requests = fixture.gate.fault_requests
+        require(failed_requests > 0, "transport_fault_not_injected")
         fixture.gate.fail = False
         # No sync command or mutation after this point: only the scheduled pass can upload.
         fixture.prove({memory_id: content})
         report["cases"]["scheduled_transport_retry"] = {"passed": True, "injected_disconnects": failed_requests, "backoff_observed": True, "scheduled_real_ack": True, "independent_content_equal": True}
     finally:
+        fixture.diagnose(report, "backoff")
         fixture.close()
 
 
@@ -401,20 +497,25 @@ def main():
     parser.add_argument("--model-dir", type=Path, required=True)
     args = parser.parse_args()
     required = ["foreground_save_during_network_wait", "independent_pull_decrypt", "scheduled_transport_retry", "finite_manual_boundary", "reset_old_response_rejection"]
-    report = {"passed": False, "cases": {}, "required": required}
+    report = {"passed": False, "cases": {}, "required": required,
+              "cleanup": {"passed": False, "remaining_users": [], "unconfirmed_users": [], "events": []}}
     try:
         run(args, report)
         require(all(report["cases"].get(name, {}).get("passed") is True for name in required), "required_case_missing")
+        require(not report["cleanup"]["remaining_users"] and not report["cleanup"]["unconfirmed_users"]
+                and all(event["passed"] for event in report["cleanup"]["events"]), "fixture_cleanup_failed")
         report["passed"] = True
     except Exception as error:
         # Only harness-owned error codes are safe for public diagnostics.
         report["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
     report["remaining"] = [name for name in required if report["cases"].get(name, {}).get("passed") is not True]
+    cleanup = report["cleanup"]
+    cleanup["passed"] = not cleanup["remaining_users"] and not cleanup["unconfirmed_users"] and all(event["passed"] for event in cleanup["events"])
     runner_temp = os.environ.get("RUNNER_TEMP")
     safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
     if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():
         (args.root / "outbox-coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "remaining": report["remaining"]}))
+    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "remaining": report["remaining"], "cleanup": cleanup}))
     return 0 if report["passed"] else 1
 
 
