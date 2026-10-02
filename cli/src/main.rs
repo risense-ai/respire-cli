@@ -1504,13 +1504,11 @@ fn build_transport() -> Result<Arc<dyn MemoryTransport>> {
             token,
         })));
     }
-    let db: PathBuf = respire::service::data_dir().join("onememory.db");
-    Ok(Arc::new(LocalStore::open(&db)?))
+    Ok(Arc::new(respire::service::open_store()?))
 }
 
 fn build_local() -> Result<LocalStore> {
-    let db: PathBuf = respire::service::data_dir().join("onememory.db");
-    LocalStore::open(&db)
+    respire::service::open_store()
 }
 
 /// Remote config: session.json first (addr/token written by client login), then env vars.
@@ -4248,11 +4246,9 @@ fn run_passport() -> Result<()> {
     let si = respire::service::session_info();
     let st = respire::service::status_light().ok();
     let alive = st.as_ref().map(|s| s.local_alive).unwrap_or(0);
-    let devices = respire::transport::local::LocalStore::open(
-        &respire::service::data_dir().join("onememory.db"),
-    )
-    .and_then(|s| s.devices_count())
-    .unwrap_or(0);
+    let devices = respire::service::open_store()
+        .and_then(|s| s.devices_count())
+        .unwrap_or(0);
     let agents = respire::inject::targets()
         .map(|ts| {
             ts.iter()
@@ -6643,6 +6639,7 @@ fn run_local(args: Cli) -> Result<()> {
             trace,
             titles,
         } => {
+            let recall_generation = rpc::sync_generation();
             let session = build_session()?;
             let store = build_local()?;
             if trace {
@@ -6678,13 +6675,17 @@ fn run_local(args: Cli) -> Result<()> {
             {
                 let candidates: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
                 let scores: Vec<f32> = ranked.iter().map(|r| r.score).collect();
-                let _ = store.log_query(
-                    &query,
-                    project.as_deref().unwrap_or(""),
-                    "",
-                    &candidates,
-                    &scores,
-                );
+                let stats = rpc::RecallStats {
+                    query: query.clone(),
+                    project: project.clone().unwrap_or_default(),
+                    candidates,
+                    scores,
+                };
+                if rpc::worker_active() {
+                    rpc::queue_recall_stats(stats, recall_generation);
+                } else if let Err(error) = stats.persist(&store) {
+                    eprintln!("recall statistics writeback failed: {error:#}");
+                }
                 // Hit-heat writeback: top hits recall_count+1 - source of the heat-axis hit_score (used to be read-only, always 0; this round fills it)
                 // Plugin hook post-recall: query and hit summary (post-training / external telemetry)
                 {
@@ -6753,10 +6754,6 @@ fn run_local(args: Cli) -> Result<()> {
                     .collect::<Vec<_>>())
             };
             emit_result(result)?;
-            for r in &ranked {
-                // Hit heat: increment as soon as recall returns (heat-axis source, local only, not synced)
-                let _ = store.bump_recall_count(&r.entry.id);
-            }
         }
         Command::Attach { id, parent } => {
             let session = build_session()?;
@@ -7725,6 +7722,7 @@ fn run_local(args: Cli) -> Result<()> {
                 v["workspace"] = serde_json::json!(respire::service::workspace_mode());
                 let live = sync_live();
                 v["sync_scheduler"] = rpc::sync_scheduler_status();
+                v["recall_statistics"] = rpc::recall_stats_status();
                 v["sync_live"] = serde_json::json!({
                     "phase": if live.phase.is_empty() { "idle" } else { live.phase.as_str() },
                     "pulled": live.pulled,

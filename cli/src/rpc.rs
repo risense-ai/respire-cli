@@ -34,6 +34,13 @@ static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: AtomicUsize = AtomicUsize::new(1);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+static WRITE_TX: Mutex<Option<mpsc::SyncSender<WriteJob>>> = Mutex::new(None);
+static STATS_PENDING: AtomicUsize = AtomicUsize::new(0);
+static STATS_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
+static STATS_PERSISTED: AtomicUsize = AtomicUsize::new(0);
+static STATS_REJECTED: AtomicUsize = AtomicUsize::new(0);
+static STATS_FAILED: AtomicUsize = AtomicUsize::new(0);
+const MAX_PENDING_STATS: usize = 16;
 static EXCLUSIVE: OnceLock<Arc<WriteGate>> = OnceLock::new();
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
 static WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -122,6 +129,81 @@ pub(crate) fn set_worker_active(on: bool) {
 
 fn mark_worker() {
     WORKER.with(|flag| flag.set(true));
+}
+
+enum WriteJob {
+    Command(Job),
+    RecallStats(RecallStats, usize),
+}
+
+pub(crate) struct RecallStats {
+    pub query: String,
+    pub project: String,
+    pub candidates: Vec<String>,
+    pub scores: Vec<f32>,
+}
+
+impl RecallStats {
+    pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
+        store.write_transaction(|| {
+            store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
+            store.bump_recall(&self.candidates)
+        })
+    }
+}
+
+pub(crate) fn recall_stats_status() -> Value {
+    json!({
+        "pending": STATS_PENDING.load(Ordering::Acquire),
+        "enqueued": STATS_ENQUEUED.load(Ordering::Acquire),
+        "persisted": STATS_PERSISTED.load(Ordering::Acquire),
+        "rejected": STATS_REJECTED.load(Ordering::Acquire),
+        "failed": STATS_FAILED.load(Ordering::Acquire),
+    })
+}
+
+/// Statistics are best effort; never wait for queue capacity on the recall reply path.
+pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
+    if STATS_PENDING
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
+            (pending < MAX_PENDING_STATS).then_some(pending + 1)
+        })
+        .is_err()
+    {
+        STATS_REJECTED.fetch_add(1, Ordering::AcqRel);
+        eprintln!("recall statistics rejected: pending statistics limit reached");
+        return;
+    }
+    let queued = (|| -> Result<()> {
+        check_sync_context(generation)?;
+        let tx = WRITE_TX
+            .lock()
+            .map_err(|_| anyhow::anyhow!("write queue lock poisoned"))?
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("write worker is not running"))?;
+        let gate = shared_exclusive();
+        gate.reserve();
+        match tx.try_send(WriteJob::RecallStats(stats, generation)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                gate.cancel_reservation();
+                match error {
+                    mpsc::TrySendError::Full(_) => bail!("write request queue is full"),
+                    mpsc::TrySendError::Disconnected(_) => bail!("write worker is gone"),
+                }
+            }
+        }
+    })();
+    match queued {
+        Ok(()) => {
+            STATS_ENQUEUED.fetch_add(1, Ordering::AcqRel);
+        }
+        Err(error) => {
+            STATS_PENDING.fetch_sub(1, Ordering::AcqRel);
+            STATS_REJECTED.fetch_add(1, Ordering::AcqRel);
+            eprintln!("recall statistics rejected: {error:#}");
+        }
+    }
 }
 
 fn shared_exclusive() -> Arc<WriteGate> {
@@ -918,6 +1000,7 @@ pub(crate) fn health_body() -> Value {
         "url": current_url(),
         "exe": exe,
         "data_dir": respire::service::data_dir().display().to_string(),
+        "recall_statistics": recall_stats_status(),
     })
 }
 
@@ -1087,13 +1170,49 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     if classifier.is_err() {
         stop_process(1);
     }
-    let (write_tx, write_rx) = mpsc::sync_channel::<Job>(256);
+    let (write_tx, write_rx) = mpsc::sync_channel::<WriteJob>(256);
+    if let Ok(mut installed) = WRITE_TX.lock() {
+        *installed = Some(write_tx.clone());
+    } else {
+        eprintln!("runtime failed to install the write queue");
+        stop_process(1);
+    }
     let writer = std::thread::Builder::new()
         .name("respire-write".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(move || {
             mark_worker();
-            while let Ok(job) = write_rx.recv() {
+            while let Ok(work) = write_rx.recv() {
+                let job = match work {
+                    WriteJob::Command(job) => job,
+                    WriteJob::RecallStats(stats, generation) => {
+                        let result = if STOPPING.load(Ordering::Acquire) {
+                            shared_exclusive().cancel_reservation();
+                            Err(anyhow::anyhow!("runtime is stopping"))
+                        } else {
+                            WRITE_RUNNING.store(true, Ordering::Release);
+                            let gate = shared_exclusive();
+                            let _held = gate.acquire_reserved();
+                            let result = check_sync_context(generation)
+                                .and_then(|_| respire::service::open_store())
+                                .and_then(|store| stats.persist(&store));
+                            drop(_held);
+                            WRITE_RUNNING.store(false, Ordering::Release);
+                            result
+                        };
+                        STATS_PENDING.fetch_sub(1, Ordering::AcqRel);
+                        match result {
+                            Ok(()) => {
+                                STATS_PERSISTED.fetch_add(1, Ordering::AcqRel);
+                            }
+                            Err(error) => {
+                                STATS_FAILED.fetch_add(1, Ordering::AcqRel);
+                                eprintln!("recall statistics writeback failed: {error:#}");
+                            }
+                        }
+                        continue;
+                    }
+                };
                 if STOPPING.load(Ordering::Acquire) {
                     shared_exclusive().cancel_reservation();
                     let _ = job.reply.send(Err("runtime is stopping".into()));
@@ -1168,16 +1287,17 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     }
                 } else if is_exclusive(&job.args) {
                     shared_exclusive().reserve();
-                    match write_tx.try_send(job) {
+                    match write_tx.try_send(WriteJob::Command(job)) {
                         Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(job)) => {
+                        Err(mpsc::TrySendError::Full(WriteJob::Command(job))) => {
                             shared_exclusive().cancel_reservation();
                             let _ = job.reply.send(Err("write request queue is full".into()));
                         }
-                        Err(mpsc::TrySendError::Disconnected(job)) => {
+                        Err(mpsc::TrySendError::Disconnected(WriteJob::Command(job))) => {
                             shared_exclusive().cancel_reservation();
                             let _ = job.reply.send(Err("write worker is gone".into()));
                         }
+                        Err(_) => unreachable!("only a command was submitted"),
                     }
                 } else if pending.len() < 256 {
                     pending.push_back(job);
@@ -1229,6 +1349,9 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     }
     STOPPING.store(true, Ordering::Release);
     SYNC_CV.notify_all();
+    if let Ok(mut installed) = WRITE_TX.lock() {
+        installed.take();
+    }
     drop(write_tx);
     drop(classify_tx);
     for job in pending {

@@ -2540,9 +2540,14 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
 
 pub fn open_store() -> Result<LocalStore> {
     let root = data_dir();
+    check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
     let db = root.join("onememory.db");
-    LocalStore::open(&db)
+    if RUNTIME_PROFILE.get().is_some() {
+        LocalStore::open_existing(&db)
+    } else {
+        LocalStore::open(&db)
+    }
 }
 
 pub fn home_dir() -> Result<PathBuf> {

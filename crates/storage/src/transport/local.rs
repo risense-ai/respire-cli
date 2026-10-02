@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
@@ -84,6 +84,25 @@ impl LocalStore {
         )?;
         migrate(&connection)?;
         connection.execute_batch(include_str!("local/sync_schema.sql"))?;
+        Ok(Self { connection })
+    }
+
+    /// Connect to a library already initialized by its runtime owner, without recovery writes.
+    pub fn open_existing(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            respire_core_sdk::set_index_root(&std::fs::canonicalize(parent)?)?;
+        }
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| {
+            format!("failed to open initialized local memory db: {}", path.display())
+        })?;
+        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
+        connection
+            .prepare("SELECT seq, op_id, state FROM sync_outbox LIMIT 0")
+            .context("runtime library schema is not initialized")?;
         Ok(Self { connection })
     }
 
