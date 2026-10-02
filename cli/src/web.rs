@@ -126,13 +126,22 @@ fn last_nonempty_line(s: &str) -> &str {
 /// Parse the CLI JSON contract and expose the command payload to the web API.
 /// Every child invocation must return a complete ResultEnvelope; legacy bare
 /// JSON is rejected so a command migration cannot be hidden by the bridge.
-fn parse_cli_envelope(line: &str) -> Result<Value, String> {
+fn parse_cli_envelope(line: &str, code: Option<i32>) -> Result<Value, String> {
     let value: Value = serde_json::from_str(line).map_err(|e| {
         format!(
             "CLI output failed to parse ({e}): {}",
             line.chars().take(200).collect::<String>()
         )
     })?;
+    let expected = match value.get("status").and_then(Value::as_str) {
+        Some("ok" | "skip") => Some(0),
+        Some("warn" | "pending") => Some(2),
+        Some("fail") => Some(1),
+        _ => return Err("CLI ResultEnvelope has invalid status".to_owned()),
+    };
+    if code != expected {
+        return Err("CLI exit code does not match ResultEnvelope status".to_owned());
+    }
     cli_payload(value)
 }
 
@@ -157,7 +166,8 @@ fn cli_payload(value: Value) -> Result<Value, String> {
     {
         return Err("CLI ResultEnvelope items/actions/errors must be arrays".to_owned());
     }
-    if !matches!(status, "ok" | "skip") {
+    // Warnings and pending previews carry valid review data; only failure is an error.
+    if status == "fail" {
         let errors = object["errors"]
             .as_array()
             .into_iter()
@@ -221,7 +231,7 @@ fn resolve_cli_exe() -> Result<std::path::PathBuf, String> {
     )
 }
 
-fn cli_output(args: &[&str]) -> Result<(bool, String, String), String> {
+fn cli_output(args: &[&str]) -> Result<(Option<i32>, String, String), String> {
     let exe = resolve_cli_exe()?;
     let out = Command::new(&exe)
         .args(args)
@@ -229,7 +239,7 @@ fn cli_output(args: &[&str]) -> Result<(bool, String, String), String> {
         .output()
         .map_err(|e| format!("failed to start rsrs CLI child ({}): {e}", exe.display()))?;
     Ok((
-        out.status.success(),
+        out.status.code(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
@@ -241,8 +251,8 @@ fn cli(args: &[&str]) -> Result<Value, String> {
         return result;
     }
     let _gate = CLI_GATE.lock().unwrap_or_else(|e| e.into_inner());
-    let (ok, stdout, stderr) = cli_output(args)?;
-    if !ok {
+    let (code, stdout, stderr) = cli_output(args)?;
+    if !matches!(code, Some(0 | 2)) {
         let msg = last_nonempty_line(&stderr);
         return Err(if msg.is_empty() {
             "command failed".to_owned()
@@ -250,7 +260,7 @@ fn cli(args: &[&str]) -> Result<Value, String> {
             msg.to_owned()
         });
     }
-    parse_cli_envelope(last_nonempty_line(&stdout))
+    parse_cli_envelope(last_nonempty_line(&stdout), code)
 }
 
 /// Stream a CLI run: read stderr (progress) and stdout (last-line JSON) line by line, callback each.
@@ -313,16 +323,22 @@ fn cli_streaming(
         }
     });
 
-    let out = std::io::read_to_string(stdout).unwrap_or_default();
-    let _ = child.wait();
+    let out = std::io::read_to_string(stdout);
+    let status = child.wait();
     let _ = h_err.join();
+
+    let out = out.map_err(|e| format!("failed to read CLI child output: {e}"))?;
+    let status = status.map_err(|e| format!("failed to wait for CLI child: {e}"))?;
+    if !matches!(status.code(), Some(0 | 2)) {
+        return Err(format!("CLI child failed with exit status: {status}"));
+    }
 
     let last = out
         .lines()
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    parse_cli_envelope(last)
+    parse_cli_envelope(last, status.code())
 }
 
 /// Async long job: return task_id immediately, run on a background thread; the UI polls /api/task?id=.

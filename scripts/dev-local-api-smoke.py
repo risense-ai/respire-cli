@@ -249,26 +249,26 @@ class Suite:
         args = {'title': title, 'content': content, 'kind': 'context', 'importance': 'important', 'force': True}
         if parent:
             args['parent'] = parent
-        value = self.invoke('create', args, lambda v: has(v, 'id') and has(v, 'action', 'created'))
-        return next(o['id'] for o in objects(value) if 'id' in o)
+        value = self.invoke('create', args, lambda v: bool(v.get('id')) and v.get('action') == 'created')
+        return value['id']
 
     def run_actions(self):
         self.negatives()
         self.rpc_proofs()
-        key = self.invoke('keygen', {}, lambda v: has(v, 'super') and has(v, 'path'))
-        self.super = next(o['super'] for o in objects(key) if 'super' in o)
+        key = self.invoke('keygen', {}, lambda v: bool(v.get('super')) and bool(v.get('path')))
+        self.super = key['super']
         self.register_attempted = True
         registered = self.invoke('register', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs'},
-                                 lambda v: has(v, 'user', self.user) and has(v, 'super'))
+                                 lambda v: v.get('ok') is True and v.get('user') == self.user and bool(v.get('super')))
         self.created_user = self.user
-        self.super = next(o['super'] for o in objects(registered) if 'super' in o)
+        self.super = registered['super']
         self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs', 'super_pass': self.super},
-                    lambda v: has(v, 'ok', True) and has(v, 'user', self.user))
-        self.invoke('resume_session', {}, lambda v: has(v, 'resumed', True) and has(v, 'user', self.user))
-        self.invoke('server_addr_set', {'addr': 'https://dev.rsrs.rs'}, lambda v: has(v, 'addr', 'https://dev.rsrs.rs'))
+                    lambda v: v.get('ok') is True and v.get('user') == self.user)
+        self.invoke('resume_session', {}, lambda v: v.get('resumed') is True and v.get('user') == self.user)
+        self.invoke('server_addr_set', {'addr': 'https://dev.rsrs.rs'}, lambda v: v.get('addr') == 'https://dev.rsrs.rs')
         self.invoke('server_addr_get', {}, lambda v: v.get('addr') == 'https://dev.rsrs.rs')
-        self.invoke('sync_config_set', {'autosync': False}, lambda v: has(v, 'autosync', False))
-        self.invoke('cure_config_set', {'on': False}, lambda v: has(v, 'cure_auto', False))
+        self.invoke('sync_config_set', {'autosync': False}, lambda v: v.get('autosync') is False)
+        self.invoke('cure_config_set', {'on': False}, lambda v: v.get('cure_auto') is False)
         self.invoke('config_get', {}, lambda v: Path(v['data_dir']).resolve() == self.library and v['addr'] == 'https://dev.rsrs.rs')
         self.invoke('data_dir_set', {'dir': str(self.library)}, lambda v: Path(v['data_dir']).resolve() == self.library)
         self.invoke('diary_mode_set', {'mode': 'verbose'}, lambda v: v.get('action') == 'updated'
@@ -285,31 +285,40 @@ class Suite:
         self.invoke('search', {'q': 'local HTTP adapter', 'limit': 20}, lambda v: isinstance(v, list) and has(v, 'id', root_id))
         self.invoke('show', {'id': child_id}, lambda v: v.get('entry', {}).get('id') == child_id)
         self.invoke('tree', {'from': root_id, 'depth': 5}, lambda v: isinstance(v, list) and has(v, 'id', child_id))
-        self.invoke('candidates', {'content': 'Durable local HTTP adapter validation candidate'}, lambda v: has(v, 'merge') and has(v, 'parent'))
-        self.invoke('update', {'id': child_id, 'title': 'Local HTTP updated'}, lambda v: has(v, 'id', child_id))
+        self.invoke('candidates', {'content': 'Durable local HTTP adapter validation candidate'}, lambda v: 'merge' in v and 'parent' in v)
+        self.invoke('update', {'id': child_id, 'title': 'Local HTTP updated'}, lambda v: v.get('id') == child_id)
         self.invoke('show', {'id': child_id}, lambda v: v.get('entry', {}).get('title') == 'Local HTTP updated', label='update-readback')
         self.invoke('promote', {'id': child_id}, lambda v: v.get('id') == child_id and 'new_parent' in v)
         self.invoke('attach', {'id': child_id, 'parent': root_id}, lambda v: v.get('child') == child_id and v.get('parent') == root_id)
         self.invoke('demote', {'id': child_id, 'parent': root_id}, lambda v: v.get('id') == child_id and v.get('parent') == root_id)
-        self.invoke('delete', {'id': child_id}, lambda v: has(v, 'deleted', True))
-        self.invoke('restore', {'id': child_id}, lambda v: has(v, 'restored', True))
+        self.invoke('delete', {'id': child_id}, lambda v: v.get('deleted') is True)
+        self.invoke('restore', {'id': child_id}, lambda v: v.get('restored') is True)
         exported = self.root / 'files' / 'export.json'
         self.invoke('export_memories', {'path': str(exported)}, lambda v: v.get('exported', 0) >= 2 and exported.is_file())
         self.invoke('purge', {'id': child_id}, lambda v: v.get('purged') is True)
-        self.invoke('import_memories', {'path': str(exported)}, lambda v: v.get('imported', 0) >= 1)
-        self.invoke('show', {'id': child_id}, lambda v: v.get('entry', {}).get('title') == 'Local HTTP updated', label='import-restoration-readback')
+        self.invoke('import_memories', {'path': str(exported)}, lambda v: v.get('imported') == 2
+                    and v.get('reattached') == 1 and v.get('orphaned') == 0)
+        imported = self.invoke('list', {'limit': 50}, lambda v: isinstance(v, list), label='import-copy-inventory')
+        copied = [entry for entry in objects(imported) if entry.get('title') == 'Local HTTP updated' and 'id' in entry]
+        require(len(copied) == 1 and copied[0]['id'] != child_id, 'import-did-not-mint-copy-id')
+        copied_child = self.invoke('show', {'id': copied[0]['id']}, lambda v: v.get('entry', {}).get('title') == 'Local HTTP updated'
+                    and v['entry'].get('content') == 'Fixture child: a separate record to validate editing, causal attachment and archive restore.',
+                    label='import-copy-content-readback')['entry']
+        require(bool(copied_child.get('parent_id')) and copied_child['parent_id'] != root_id, 'import-copy-parent-not-remapped')
+        self.invoke('show', {'id': copied_child['parent_id']}, lambda v: v.get('entry', {}).get('title') == 'Local HTTP root',
+                    label='import-copy-parent-readback')
         backup = self.root / 'files' / 'backup.db'
-        self.invoke('backup_db', {'path': str(backup)}, lambda v: has(v, 'backed_up') and backup.is_file())
+        self.invoke('backup_db', {'path': str(backup)}, lambda v: v.get('backed_up') == str(backup) and backup.is_file())
         self.invoke('scope_material', {'root': root_id}, lambda v: isinstance(v.get('material'), str) and 'Local HTTP root' in v['material'])
-        self.invoke('book_material', {'root': root_id}, lambda v: has(v, 'chapters') and has(v, 'root'))
-        self.invoke('portrait_material', {'limit': 20}, lambda v: has(v, 'entries'))
+        self.invoke('book_material', {'root': root_id}, lambda v: isinstance(v.get('chapters'), list) and v.get('root', {}).get('id') == root_id)
+        self.invoke('portrait_material', {'limit': 20}, lambda v: isinstance(v.get('entries'), list))
         share = self.root / 'files' / 'share.txt'
-        self.invoke('share_subtree', {'root': root_id, 'out': str(share)}, lambda v: has(v, 'path', str(share)) and share.is_file())
-        self.invoke('share_import', {'path': str(share)}, lambda v: has(v, 'candidates'))
-        self.invoke('tree_cure', {'top': 10}, lambda v: has(v, 'suggests') or has(v, 'suggestions'))
+        self.invoke('share_subtree', {'root': root_id, 'out': str(share)}, lambda v: v.get('path') == str(share) and share.is_file())
+        self.invoke('share_import', {'path': str(share)}, lambda v: isinstance(v.get('candidates'), list))
+        self.invoke('tree_cure', {'top': 10}, lambda v: isinstance(v.get('suggests'), list) and isinstance(v.get('roots'), list))
         self.invoke('defrag', {'min': 0.8, 'top': 10}, lambda v: v.get('total', 0) >= 2 and isinstance(v.get('roots'), int) and isinstance(v.get('clusters'), list))
         self.invoke('reembed', {}, lambda v: v.get('reembedded', 0) >= 2 and v.get('dims', 0) > 0)
-        self.invoke('sync', {}, lambda v: has(v, 'protocol', 2) and has(v, 'pending', 0), timeout=180)
+        self.invoke('sync', {}, lambda v: v.get('protocol') == 2 and v.get('pending') == 0, timeout=180)
         self.inject_actions()
         require('<!-- respire:begin -->' in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
                 'doctor-fixture-injection-not-installed')
@@ -317,8 +326,11 @@ class Suite:
         self.invoke('inject_remove', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and v.get('changed') is True)
         require('<!-- respire:begin -->' not in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
                 'injection-removal-readback-failed')
-        self.invoke('rerank_model_install', {}, lambda v: has(v, 'installed', True) or has(v, 'dir') or has(v, 'model'), timeout=1200)
-        self.invoke('rerank_model_status', {}, lambda v: v.get('installed') is True and v.get('size_mb', 0) > 0)
+        reranker = self.root / 'models' / 'bge-reranker-base'
+        self.invoke('rerank_model_install', {}, lambda v: v.get('model') == 'bge-reranker-base'
+                    and Path(v.get('dir', '')).resolve() == reranker and (reranker / 'onnx' / 'model_quantized.onnx').is_file(), timeout=1200)
+        self.invoke('rerank_model_status', {}, lambda v: v.get('installed') is True and v.get('size_mb', 0) > 0
+                    and Path(v.get('dir', '')).resolve() == reranker)
         self.invoke('classify_backend_set', {'backend': 'ds'}, lambda v: v.get('backend') == 'ds')
         self.invoke('classify_backend_get', {}, lambda v: v.get('backend') == 'ds')
         self.invoke('ds_key_save', {'key': 'ci-disposable-unused-key', 'base': 'http://127.0.0.1:9/v1', 'model': 'ci-no-provider'},
@@ -330,7 +342,10 @@ class Suite:
         while time.monotonic() < deadline:
             result = self.invoke('task_status', {'id': task['task_id']}, lambda v: v.get('id') == task['task_id'], label='task-poll')
             if result.get('status') == 'done':
-                require(isinstance(result.get('result'), dict), 'dry-run-task-result-invalid')
+                finished = result.get('result')
+                require(isinstance(finished, dict) and finished.get('mode') == 'auto'
+                        and finished.get('dry_run') is True and finished.get('applied') == 0
+                        and isinstance(finished.get('ops'), list), 'dry-run-task-result-invalid')
                 break
             require(result.get('status') != 'failed', 'dry-run-task-failed')
             time.sleep(0.3)
@@ -344,8 +359,8 @@ class Suite:
         self.space_actions()
         reset = self.invoke('super_reset', {'super_pass': self.super}, lambda v: v.get('ok') is True and bool(v.get('super')))
         self.super = reset['super']
-        self.invoke('logout', {}, lambda v: has(v, 'credentials_cleared', True))
-        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs', 'super_pass': self.super}, lambda v: has(v, 'ok', True), label='post-logout-relogin')
+        self.invoke('logout', {}, lambda v: v.get('credentials_cleared') is True)
+        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs', 'super_pass': self.super}, lambda v: v.get('ok') is True and v.get('user') == self.user, label='post-logout-relogin')
         actual, version = self.request('POST', '/api/invoke', {'cmd': 'update_check', 'args': {}})
         require(actual == 200 and isinstance(version, dict) and version.get('current') == self.args.version, 'update-check-adapter-contract-failed')
         if isinstance(version.get('latest'), str):
@@ -355,7 +370,7 @@ class Suite:
 
     def inject_actions(self):
         self.invoke('inject_targets', {}, lambda v: isinstance(v, list) and has(v, 'id', 'codex'))
-        preview = self.invoke('inject_preview', {}, lambda v: has(v, 'revision') and has(v, 'path'))
+        preview = self.invoke('inject_preview', {}, lambda v: bool(v.get('revision')) and bool(v.get('path')))
         require(self.owned(preview['path']) == self.home / '.codex' / 'AGENTS.md', 'inject-preview-outside-fake-home')
         self.invoke('inject_apply', {'revision': preview['revision']}, lambda v: v.get('target') == 'codex' and isinstance(v.get('changed'), bool))
         self.invoke('inject', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and isinstance(v.get('changed'), bool))
@@ -375,7 +390,7 @@ class Suite:
 
     def space_actions(self):
         self.invoke('space_list', {}, lambda v: isinstance(v.get('spaces'), list) and Path(v.get('current_dir', '')).resolve() == self.library)
-        invited = self.invoke('space_invite', {'note': 'local-api-member'}, lambda v: has(v, 'session_id') and has(v, 'code'))
+        invited = self.invoke('space_invite', {'note': 'local-api-member'}, lambda v: bool(v.get('session_id')) and bool(v.get('code')))
         self.invoke('space_members', {}, lambda v: has(v, 'session_id', invited['session_id']))
         name = self.user + '-space'
         created = self.guarded('space_create', {'name': name}, ['space', 'create', name],
