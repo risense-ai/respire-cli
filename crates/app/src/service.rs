@@ -2212,7 +2212,6 @@ pub struct CureSuggest {
     pub orphan: NodeRef,
     pub target: NodeRef,
     pub target_tree: NodeRef,
-    pub sim: f32,
 }
 
 #[derive(Debug, Serialize, serde::Deserialize)]

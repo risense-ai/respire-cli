@@ -22,5 +22,6 @@ if (metadata.schema_version !== 1 || metadata.git_sha !== sha || metadata.versio
 mkdirSync(destination, {recursive:true});
 copyFileSync(join(source, binary), join(destination, manifest.binaryName+extension));
 if (!extension) chmodSync(join(destination, manifest.binaryName), 0o755);
-execFileSync('tar', ['-xzf', resolve(source, runtime), '-C', resolve(destination)]);
+const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
+execFileSync(tar, ['-xzf', resolve(source, runtime), '-C', resolve(destination)]);
 console.log(`Extracted verified ${target}@${version} from ${sha}`);

@@ -97,6 +97,7 @@ function Get-SafeFailureReason($Envelope) {
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
     foreach ($entry in @(
         @('already registered', 'account_exists'),
+        @('runtime owns its boot profile', 'profile_change_requires_host'),
         @('none in the local keyring|super password required', 'recovery_key_missing'),
         @('keyring|keychain', 'keyring'),
         @('session not unlocked|vault.*locked', 'vault_locked'),
@@ -198,6 +199,7 @@ function Invoke-Om {
         [string[]]$AllowStatus = @('ok', 'warn', 'skip'),
         [switch]$Secret,
         [switch]$Raw,
+        [switch]$HostProfile,
         [int]$TimeoutSec = 180,
         [string]$StdinText = '',
         [string]$Note = '',
@@ -211,6 +213,14 @@ function Invoke-Om {
             -DataDir $script:ActiveDataDir -Raw | Out-Null
     }
     $script:ActiveDataDir = $DataDir
+    if ($HostProfile) {
+        # Only stop this disposable sweep runtime. The following normal command
+        # autostarts its replacement after the host has switched the profile.
+        Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('web', '--stop') `
+            -DataDir $DataDir -Raw -ExpectExit @(0, 2) | Out-Null
+        Stop-OurRuntimes
+        if ($ArgList -notcontains '--direct') { $ArgList = @('--direct') + $ArgList }
+    }
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     $script:Step++
     $safe = ($Name -replace '[^\w\-]+', '_')
@@ -626,12 +636,12 @@ Invoke-Om -Name 'keys-export' -ArgList @('--json', 'keys-export', '--out', (Join
 Invoke-Om -Name 'account-list' -ArgList @('--json', 'account', 'list') -DataDir $DirA | Out-Null
 $otherUser = "oth$stamp"
 $otherPass = New-Pass
-$otherReg = Invoke-Om -Name 'register-second-user' -ArgList @('--json', 'register', '--addr', $Server, '--user', $otherUser, '--pass', $otherPass) -DataDir $DirA -Secret
+$otherReg = Invoke-Om -Name 'register-second-user' -ArgList @('--json', 'register', '--addr', $Server, '--user', $otherUser, '--pass', $otherPass) -DataDir $DirA -Secret -HostProfile
 if (-not $otherReg.Ok) { throw '已有主账号时 register 第二个用户失败，不能报 none in the local keyring。' }
 if (-not $otherReg.Envelope.summary.super) { throw '第二个用户 register 没有发出新的 super' }
-Invoke-Om -Name 'account-back-after-second-register' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA | Out-Null
+Invoke-Om -Name 'account-back-after-second-register' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA -HostProfile | Out-Null
 Invoke-Om -Name 'space-list' -ArgList @('--json', 'space', 'list') -DataDir $DirA | Out-Null
-Invoke-Om -Name 'space-create' -ArgList @('--json', 'space', 'create', 'sweepspace') -DataDir $DirA | Out-Null
+Invoke-Om -Name 'space-create' -ArgList @('--json', 'space', 'create', 'sweepspace') -DataDir $DirA -HostProfile | Out-Null
 $spaceUser = "sps$stamp"
 $spacePass = New-Pass
 $spaceReg = Invoke-Om -Name 'space-register' -ArgList @('--json', 'register', '--addr', $Server, '--user', $spaceUser, '--pass', $spacePass) -DataDir $DirA -Secret
@@ -646,8 +656,8 @@ if ($inv.Envelope.details.session_id) { $memberSid = [string]$inv.Envelope.detai
 $DirC = Join-Path $Root 'c'
 if ($inviteCode) {
     Invoke-Om -Name 'config-addr-c' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirC | Out-Null
-    Invoke-Om -Name 'space-join' -ArgList @('--json', 'space', 'join', $inviteCode) -DataDir $DirC -Secret | Out-Null
-    Invoke-Om -Name 'space-use-c' -ArgList @('--json', 'space', 'use', 'sweepspace') -DataDir $DirC | Out-Null
+    Invoke-Om -Name 'space-join' -ArgList @('--json', 'space', 'join', $inviteCode) -DataDir $DirC -Secret -HostProfile | Out-Null
+    Invoke-Om -Name 'space-use-c' -ArgList @('--json', 'space', 'use', 'sweepspace') -DataDir $DirC -HostProfile | Out-Null
     $stC = Invoke-Om -Name 'status-c' -ArgList @('--json', 'status') -DataDir $DirC
     $addrC = ''
     if ($stC.Envelope.summary.server_addr) { $addrC = [string]$stC.Envelope.summary.server_addr }
