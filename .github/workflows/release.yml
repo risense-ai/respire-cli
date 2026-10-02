@@ -106,6 +106,7 @@ jobs:
           name: cli-release-${{ matrix.target }}
           path: validated-cli
       - name: Verify and extract this platform's artifacts
+        id: verified_artifact
         env:
           CLI_TARGET: ${{ matrix.target }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
@@ -124,15 +125,6 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y powershell
           fi
-      - name: Unlock a disposable macOS keychain
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          chain="$RUNNER_TEMP/sweep.keychain-db"
-          security create-keychain -p "" "$chain"
-          security default-keychain -s "$chain"
-          security unlock-keychain -p "" "$chain"
-          security set-keychain-settings -t 3600 -u "$chain"
       - name: Sweep the approved development server
         shell: pwsh
         env:
@@ -146,11 +138,12 @@ jobs:
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
       - uses: actions/setup-python@v5
-        if: runner.os == 'Linux'
+        id: supplement_python
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
         with:
           python-version: '3.12'
       - name: Verify all supplementary CLI contracts
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}

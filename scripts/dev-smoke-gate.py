@@ -61,6 +61,8 @@ def verify(args, result):
     observed = {row.get("case") for row in base.get("cases", [])
                 if row.get("result") == "passed" and row.get("status") == "ok"}
     require(set(required).issubset(observed), "cli_required_observations_missing")
+    require(base.get("cloud_cleanup", {}).get("passed") is True
+            and not base.get("cloud_cleanup", {}).get("remaining_users"), "cli_cleanup_failed")
     result["components"]["cli"] = {"passed": True, "required_observed": len(required)}
 
     outbox = read(args.outbox)

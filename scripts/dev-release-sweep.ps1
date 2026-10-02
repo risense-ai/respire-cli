@@ -60,6 +60,26 @@ $ReportPath = Join-Path $Root 'report.md'
 $CoveragePath = Join-Path $Root 'coverage.json'
 $SmokeHome = Join-Path $Root 'home'
 New-Item -ItemType Directory -Force -Path $SmokeHome | Out-Null
+if ($IsMacOS) {
+    # The native keyring reads user-domain preferences under the CLI's isolated HOME.
+    # Configure only this disposable home; never replace the runner's default keychain.
+    $preferences = Join-Path $SmokeHome 'Library/Preferences'
+    $keychains = Join-Path $SmokeHome 'Library/Keychains'
+    New-Item -ItemType Directory -Force -Path $preferences, $keychains | Out-Null
+    $keychain = Join-Path $keychains 'rsrs-smoke.keychain-db'
+    function Invoke-SmokeSecurity([string[]]$SecurityArgs) {
+        $output = & /usr/bin/env "HOME=$SmokeHome" /usr/bin/security @SecurityArgs 2>&1
+        if ($LASTEXITCODE -ne 0) { throw "Isolated keychain setup failed: $($SecurityArgs[0])" }
+        return ($output -join "`n")
+    }
+    Invoke-SmokeSecurity @('create-keychain', '-p', '', $keychain) | Out-Null
+    Invoke-SmokeSecurity @('list-keychains', '-d', 'user', '-s', $keychain) | Out-Null
+    Invoke-SmokeSecurity @('default-keychain', '-d', 'user', '-s', $keychain) | Out-Null
+    Invoke-SmokeSecurity @('unlock-keychain', '-p', '', $keychain) | Out-Null
+    Invoke-SmokeSecurity @('set-keychain-settings', '-t', '3600', '-u', $keychain) | Out-Null
+    $selectedKeychain = (Invoke-SmokeSecurity @('default-keychain', '-d', 'user')).Trim().Trim('"')
+    if ($selectedKeychain -cne $keychain) { throw 'Isolated keychain default readback does not match the fixture.' }
+}
 $script:Catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'dev-smoke-cli-coverage.json') -Raw -Encoding utf8 | ConvertFrom-Json
 if ($DeferSupplemental) {
     $approved = @('local_api', 'ai_inject', 'outbox', 'legacy_vault')
@@ -95,7 +115,11 @@ function Stop-OurRuntimes {
         }
     }
 }
-trap { Write-SweepReport; Stop-OurRuntimes; throw $_ }
+$script:CloudAccounts = New-Object System.Collections.Generic.List[object]
+$script:CloudCleanup = @{ passed = $false; events = @(); remaining_users = @() }
+$script:CloudCleanupCompleted = $false
+$script:CloudCleanupRunning = $false
+trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
 
@@ -115,6 +139,7 @@ function Write-SweepReport {
         schema_version = 1; server = $Server; source_sha = $env:CLI_SHA; workflow_sha = $env:GITHUB_SHA
         expected_version = $ExpectVersion; observed_version = $script:ObservedVersion
         observed_version_display = $script:ObservedVersionDisplay
+        cloud_cleanup = $script:CloudCleanup
         binary_sha256 = $script:BinarySha256; catalog = $script:Catalog
         cases = $observed; passed = @($Rows | Where-Object { $_.Ok -and $_.Status -notin @('skip', 'fail') }).Count
         expected_errors = @($Rows | Where-Object { $_.Ok -and $_.Status -eq 'fail' }).Count
@@ -144,6 +169,8 @@ function Get-SafeFailureReason($Envelope) {
         @('already registered', 'account_exists'),
         @('runtime owns its boot profile', 'profile_change_requires_host'),
         @('none in the local keyring|super password required', 'recovery_key_missing'),
+        @('keyring write did not round-trip', 'keyring_readback_failed'),
+        @('local keyring write failed|keyring write failed', 'keyring_write_failed'),
         @('keyring|keychain', 'keyring'),
         @('session not unlocked|vault.*locked', 'vault_locked'),
         @('TLS|certificate', 'tls'),
@@ -423,6 +450,62 @@ function Get-SmokeSession([string]$DataRoot, [string]$ExpectedUser) {
     return $sessions[0]
 }
 
+function Add-CloudRegistration([string]$User, [string]$Password) {
+    # Record before the request: a failed response does not prove no account was created.
+    if ($User -notmatch "^(sweep|oth|sps)$stamp$") { throw 'Registration is outside this sweep namespace.' }
+    $account = [pscustomobject]@{ User = $User; Password = $Password; Super = ''; Confirmed = $false; Purged = $false }
+    $script:CloudAccounts.Add($account)
+    return $account
+}
+
+function Confirm-CloudRegistration($Account, $Registration) {
+    if ($Registration.Ok -and $Registration.Envelope.summary.ok -eq $true -and
+        [string]$Registration.Envelope.summary.user -ceq $Account.User -and
+        [string]$Registration.Envelope.summary.addr -ceq $Server -and
+        [bool]$Registration.Envelope.summary.super) {
+        $Account.Super = [string]$Registration.Envelope.summary.super
+        $Account.Confirmed = $true
+    }
+}
+
+function Invoke-CloudCleanup {
+    if ($script:CloudCleanupCompleted -or $script:CloudCleanupRunning) { return }
+    $script:CloudCleanupRunning = $true
+    $events = New-Object System.Collections.Generic.List[object]
+    foreach ($account in $script:CloudAccounts) {
+        $event = @{ user = $account.User; passed = $false; old_token_rejected = $false }
+        try {
+            if (-not $account.Confirmed) { throw 'registration_outcome_unconfirmed' }
+            if ($account.User -notmatch "^(sweep|oth|sps)$stamp$") { throw 'cleanup_scope_mismatch' }
+            $dataDir = Join-Path $Root "cleanup/$($account.User)"
+            $login = Invoke-Om -Name 'cleanup-owned-account-login' -ArgList @('--json', 'login', '--addr', $Server, '--user', $account.User, '--pass', $account.Password, '--super', $account.Super) -DataDir $dataDir -Secret -HostProfile -TimeoutSec 120
+            if (-not $login.Ok -or [string]$login.Envelope.summary.user -cne $account.User) { throw 'cleanup_login_failed' }
+            $session = Get-SmokeSession $dataDir $account.User
+            if ([string]$session.Value.addr -cne $Server) { throw 'cleanup_session_server_mismatch' }
+            $headers = @{ Authorization = "Bearer $($session.Value.token)" }
+            $response = Invoke-WebRequest -Uri "$Server/api/self/purge" -Method Post -Headers $headers -ContentType 'application/json' -Body (@{ confirm = $account.User } | ConvertTo-Json -Compress) -MaximumRedirection 0 -SkipHttpErrorCheck -TimeoutSec 45
+            if ([int]$response.StatusCode -ne 200) { throw 'cleanup_purge_not_confirmed' }
+            $result = $response.Content | ConvertFrom-Json
+            if ($result.purged -ne $true -or [string]$result.user -cne $account.User) { throw 'cleanup_purge_not_confirmed' }
+            $rejected = Invoke-WebRequest -Uri "$Server/api/self" -Method Get -Headers $headers -MaximumRedirection 0 -SkipHttpErrorCheck -TimeoutSec 45
+            if ([int]$rejected.StatusCode -ne 401) { throw 'cleanup_old_token_still_accepted' }
+            $account.Purged = $true
+            $event.passed = $true
+            $event.old_token_rejected = $true
+        } catch {
+            # Use a fixed classification; exception text can include authenticated request details.
+            $known = @('registration_outcome_unconfirmed', 'cleanup_scope_mismatch', 'cleanup_login_failed', 'cleanup_session_server_mismatch', 'cleanup_purge_not_confirmed', 'cleanup_old_token_still_accepted')
+            $reason = [string]$_.Exception.Message
+            $event.reason = if ($reason -cin $known) { $reason } else { 'cleanup_request_failed' }
+        }
+        $events.Add($event)
+    }
+    $remaining = @($script:CloudAccounts | Where-Object { -not $_.Purged } | ForEach-Object { $_.User })
+    $script:CloudCleanup = @{ passed = $remaining.Count -eq 0; events = @($events.ToArray()); remaining_users = $remaining }
+    $script:CloudCleanupCompleted = $true
+    $script:CloudCleanupRunning = $false
+}
+
 $script:UseExe = [bool]$Exe
 $script:ExePath = $Exe
 if ($script:UseExe) {
@@ -551,8 +634,10 @@ Assert-Smoke 'full-logout-session-file-removed' ($offlineLogout.Ok -and -not (Te
 
 $user = "sweep$stamp"
 $pass = New-Pass
+$mainCloudAccount = Add-CloudRegistration $user $pass
 [System.IO.File]::WriteAllText((Join-Path $Secrets 'account.txt'), "user=$user`n", [Text.UTF8Encoding]::new($false))
 $reg = Invoke-Om -Name 'register' -ArgList @('--json', 'register', '--addr', $Server, '--user', $user, '--pass', $pass) -DataDir $DirA -Secret -TimeoutSec 120
+Confirm-CloudRegistration $mainCloudAccount $reg
 if (-not $reg.Ok) { throw 'register 失败，中止。密钥见 secrets，勿外传。' }
 $super = ''
 if ($reg.Envelope.summary.super) { $super = [string]$reg.Envelope.summary.super }
@@ -627,7 +712,7 @@ $child = Invoke-Om -Name 'remember-parent' -ArgList @(
 ) -DataDir $DirA -TimeoutSec 300
 $childId = [string]$child.Envelope.summary.id
 $disp = Invoke-Om -Name 'remember-disposable' -ArgList @(
-    '--json', 'remember', "disposable $marker", '--title', "丢弃$stamp", '--force', '--importance', 'trivial'
+    '--json', 'remember', "disposable $marker", '--title', "丢弃$stamp", '--force', '--importance', 'important'
 ) -DataDir $DirA -TimeoutSec 300
 $dispId = [string]$disp.Envelope.summary.id
 
@@ -791,7 +876,9 @@ Invoke-Om -Name 'keys-export' -ArgList @('--json', 'keys-export', '--out', (Join
 Invoke-Om -Name 'account-list' -ArgList @('--json', 'account', 'list') -DataDir $DirA | Out-Null
 $otherUser = "oth$stamp"
 $otherPass = New-Pass
+$otherCloudAccount = Add-CloudRegistration $otherUser $otherPass
 $otherReg = Invoke-Om -Name 'register-second-user' -ArgList @('--json', 'register', '--addr', $Server, '--user', $otherUser, '--pass', $otherPass) -DataDir $DirA -Secret -HostProfile
+Confirm-CloudRegistration $otherCloudAccount $otherReg
 if (-not $otherReg.Ok) { throw '已有主账号时 register 第二个用户失败，不能报 none in the local keyring。' }
 if (-not $otherReg.Envelope.summary.super) { throw '第二个用户 register 没有发出新的 super' }
 Invoke-Om -Name 'account-back-after-second-register' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA -HostProfile | Out-Null
@@ -802,7 +889,9 @@ Invoke-Om -Name 'space-list' -ArgList @('--json', 'space', 'list') -DataDir $Dir
 Invoke-Om -Name 'space-create' -ArgList @('--json', 'space', 'create', 'sweepspace') -DataDir $DirA -HostProfile | Out-Null
 $spaceUser = "sps$stamp"
 $spacePass = New-Pass
+$spaceCloudAccount = Add-CloudRegistration $spaceUser $spacePass
 $spaceReg = Invoke-Om -Name 'space-register' -ArgList @('--json', 'register', '--addr', $Server, '--user', $spaceUser, '--pass', $spacePass) -DataDir $DirA -Secret
+Confirm-CloudRegistration $spaceCloudAccount $spaceReg
 if (-not $spaceReg.Ok) { throw 'space 档案上 register 失败。空档案应发新的 super，不能报 none in the local keyring。' }
 if (-not $spaceReg.Envelope.summary.super) { throw 'space register 没有发出新的 super' }
 $spaceMarker = "space-marker-$stamp"
@@ -1047,6 +1136,7 @@ $syncAgain = Invoke-Om -Name 'sync-after-relogin' -ArgList @('--json', 'sync') -
 if (-not $syncAgain.Ok) { throw '重新登录后同步失败' }
 $superReset = Invoke-Om -Name 'super-reset' -ArgList @('--json', 'super-reset', '--super', $super) -DataDir $DirA -Secret -TimeoutSec 180
 $newSuper = [string]$superReset.Envelope.summary.super
+if ($superReset.Ok -and $newSuper) { $mainCloudAccount.Super = $newSuper }
 $afterReset = Invoke-Om -Name 'super-reset-memory-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
 Assert-Smoke 'super-reset-preserves-memory' ($superReset.Ok -and [bool]$newSuper -and $newSuper -ne $super -and $afterReset.Ok -and [string]$afterReset.Envelope.details.entry.content -eq "merged $marker")
 $oldRecoveryDir = Join-Path $Root 'old-recovery'
@@ -1360,6 +1450,7 @@ foreach ($required in $script:Catalog.required_assertions) {
         Add-SweepRow "missing-required-$required" $false 'required positive assertion was not observed'
     }
 }
+Invoke-CloudCleanup
 Write-SweepReport
 
 $failed = @($Rows | Where-Object { -not $_.Ok })
@@ -1386,6 +1477,10 @@ foreach ($row in $Rows) {
 Write-Host "REPORT $ReportPath"
 Write-Host "PASS $($passed.Count) FAIL $($failed.Count)"
 Stop-OurRuntimes
+if (-not $script:CloudCleanup.passed) {
+    Write-Host 'FAILED: disposable cloud account cleanup was not confirmed; see coverage.json.'
+    exit 1
+}
 if ($failed.Count -gt 0) { exit 1 }
 if (@($script:Catalog.required_remaining).Count -gt 0) {
     Write-Host 'INCOMPLETE: required functional coverage remains; see coverage.json.'

@@ -90,6 +90,7 @@ jobs:
           run-id: ${{ inputs.cli_run_id }}
           github-token: ${{ github.token }}
       - name: Verify and extract the original binary
+        id: verified_artifact
         if: inputs.cli_run_id != ''
         shell: bash
         env:
@@ -120,16 +121,6 @@ jobs:
           else
             brew install powershell
           fi
-      - name: Unlock a headless keychain
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          chain="$RUNNER_TEMP/sweep.keychain-db"
-          security create-keychain -p "" "$chain"
-          security default-keychain -s "$chain"
-          security unlock-keychain -p "" "$chain"
-          security set-keychain-settings -t 3600 -u "$chain"
       - name: Sweep the exact CI binary
         shell: pwsh
         env:
@@ -146,11 +137,12 @@ jobs:
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
       - uses: actions/setup-python@v5
-        if: runner.os == 'Linux'
+        id: supplement_python
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
         with:
           python-version: '3.12'
       - name: Verify all supplementary CLI contracts
-        if: runner.os == 'Linux'
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
