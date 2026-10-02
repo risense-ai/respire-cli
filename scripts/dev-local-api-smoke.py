@@ -300,7 +300,13 @@ class Suite:
         self.invoke('defrag', {'min': 0.8, 'top': 10}, lambda v: v.get('total', 0) >= 2 and isinstance(v.get('roots'), int) and isinstance(v.get('clusters'), list))
         self.invoke('reembed', {}, lambda v: v.get('reembedded', 0) >= 2 and v.get('dims', 0) > 0)
         self.invoke('sync', {}, lambda v: has(v, 'protocol', 2) and has(v, 'pending', 0), timeout=180)
+        self.inject_actions()
+        require('<!-- respire:begin -->' in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
+                'doctor-fixture-injection-not-installed')
         self.invoke('doctor', {}, lambda v: v.get('version') == self.args.version and v.get('fail') == 0 and v.get('pass', 0) > 0)
+        self.invoke('inject_remove', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and v.get('changed') is True)
+        require('<!-- respire:begin -->' not in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
+                'injection-removal-readback-failed')
         self.invoke('rerank_model_install', {}, lambda v: has(v, 'installed', True) or has(v, 'dir') or has(v, 'model'), timeout=1200)
         self.invoke('rerank_model_status', {}, lambda v: v.get('installed') is True and v.get('size_mb', 0) > 0)
         self.invoke('classify_backend_set', {'backend': 'ds'}, lambda v: v.get('backend') == 'ds')
@@ -320,7 +326,6 @@ class Suite:
             time.sleep(0.3)
         else:
             raise Failure('dry-run-task-timeout')
-        self.inject_actions()
         self.invoke('pick_save_file', {'defaultName': 'ci-export.json'}, lambda v: isinstance(v, str) and self.owned(v) is not None)
         for action in ('pick_open_file', 'pick_directory'):
             self.invoke(action, {}, lambda v: 'browser mode cannot open' in v.get('error', ''), status=500, label='designed-browser-picker-unsupported')
@@ -344,7 +349,6 @@ class Suite:
         require(self.owned(preview['path']) == self.home / '.codex' / 'AGENTS.md', 'inject-preview-outside-fake-home')
         self.invoke('inject_apply', {'revision': preview['revision']}, lambda v: v.get('target') == 'codex' and isinstance(v.get('changed'), bool))
         self.invoke('inject', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and isinstance(v.get('changed'), bool))
-        self.invoke('inject_remove', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and isinstance(v.get('changed'), bool))
 
     def rpc_proofs(self):
         request_id = 'ci-runtime-status'

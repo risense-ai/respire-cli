@@ -5259,6 +5259,12 @@ fn main_body() -> i32 {
             crate::app_version::emit(json)
         }
         Preparsed::Web(flags) => rpc::web_entry(flags),
+        Preparsed::WebHelp => {
+            println!(
+                "Start or manage the local runtime.\n\nUsage: rsrs web [OPTIONS]\n\nOptions:\n  --port <PORT>  Set the local runtime port\n  --host <HOST>  Bind address [default: 127.0.0.1]\n  --no-open      Do not open a browser\n  --status       Show runtime status\n  --stop         Stop the local runtime\n  -h, --help     Print help"
+            );
+            Ok(())
+        }
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
             run(Cli::parse_from(
@@ -5296,6 +5302,7 @@ enum Preparsed {
         json: bool,
     },
     Web(rpc::WebFlags),
+    WebHelp,
     Cli {
         direct: bool,
         args: Vec<std::ffi::OsString>,
@@ -5327,6 +5334,13 @@ fn preprocess_args() -> Preparsed {
         return Preparsed::Version { json };
     }
     if args.first().map(String::as_str) == Some("web") {
+        if args
+            .iter()
+            .skip(1)
+            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
+        {
+            return Preparsed::WebHelp;
+        }
         let mut flags = rpc::WebFlags {
             port: None,
             no_open: false,

@@ -114,6 +114,7 @@ function Write-SweepReport {
     $coverage = @{
         schema_version = 1; server = $Server; source_sha = $env:CLI_SHA; workflow_sha = $env:GITHUB_SHA
         expected_version = $ExpectVersion; observed_version = $script:ObservedVersion
+        observed_version_display = $script:ObservedVersionDisplay
         binary_sha256 = $script:BinarySha256; catalog = $script:Catalog
         cases = $observed; passed = @($Rows | Where-Object { $_.Ok -and $_.Status -notin @('skip', 'fail') }).Count
         expected_errors = @($Rows | Where-Object { $_.Ok -and $_.Status -eq 'fail' }).Count
@@ -482,8 +483,9 @@ if (-not ($verJson.Stdout -like '*"command":"version"*')) {
     Add-SweepRow 'version-json-command' $false $verJson.Stdout
 }
 if ($wantVersion -and $ver.Stdout -notmatch [regex]::Escape($wantVersion)) { throw "version 输出与 $wantVersion 不符" }
-$script:ObservedVersion = $ver.Stdout.Trim()
-Assert-Smoke 'exact-artifact-version' ($ver.Ok -and $ver.Stdout.Trim() -eq "rsrs $wantVersion")
+$script:ObservedVersion = [string]$verJson.Envelope.summary.version
+$script:ObservedVersionDisplay = $ver.Stdout.Trim()
+Assert-Smoke 'exact-artifact-version' ($ver.Ok -and $verJson.Ok -and $script:ObservedVersion -ceq $wantVersion -and $script:ObservedVersionDisplay -ceq "rsrs $wantVersion")
 
 Invoke-Om -Name 'help' -ArgList @('--help') -DataDir $DirA -Raw | Out-Null
 foreach ($path in $script:Catalog.command_paths) {
