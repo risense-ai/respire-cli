@@ -154,6 +154,7 @@ jobs:
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
         run: |
           set -euo pipefail
           python3 -m pip install --only-binary=:all: cryptography==46.0.3
