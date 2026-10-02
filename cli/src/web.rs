@@ -56,7 +56,15 @@ pub(crate) fn install_executor(f: fn(Vec<String>) -> Result<Value, String>) {
 fn in_process(args: &[&str]) -> Option<Result<Value, String>> {
     IN_PROCESS
         .get()
-        .map(|exec| exec(args.iter().map(|arg| (*arg).to_owned()).collect()))
+        .map(|exec| execute_web(*exec, args.iter().map(|arg| (*arg).to_owned()).collect()))
+}
+
+fn execute_web(
+    exec: fn(Vec<String>) -> Result<Value, String>,
+    mut args: Vec<String>,
+) -> Result<Value, String> {
+    args.insert(0, "--json".to_owned());
+    cli_payload(exec(args)?)
 }
 
 /// Long-task progress table (async jobs): task_id -> progress snapshot.
@@ -125,6 +133,10 @@ fn parse_cli_envelope(line: &str) -> Result<Value, String> {
             line.chars().take(200).collect::<String>()
         )
     })?;
+    cli_payload(value)
+}
+
+fn cli_payload(value: Value) -> Result<Value, String> {
     let object = value
         .as_object()
         .ok_or_else(|| "CLI output is not a ResultEnvelope object".to_owned())?;
@@ -144,6 +156,20 @@ fn parse_cli_envelope(line: &str) -> Result<Value, String> {
     if !object["items"].is_array() || !object["actions"].is_array() || !object["errors"].is_array()
     {
         return Err("CLI ResultEnvelope items/actions/errors must be arrays".to_owned());
+    }
+    if !matches!(status, "ok" | "skip") {
+        let errors = object["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(if errors.is_empty() {
+            format!("CLI command returned {status}")
+        } else {
+            errors
+        });
     }
     match object.get("details") {
         Some(details) if !details.is_null() => Ok(details.clone()),
@@ -236,7 +262,7 @@ fn cli_streaming(
 ) -> Result<Value, String> {
     if let Some(exec) = IN_PROCESS.get() {
         tasks_log(task_id, "running");
-        return exec(args.to_vec());
+        return execute_web(*exec, args.to_vec());
     }
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;

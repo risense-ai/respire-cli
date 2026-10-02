@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 
@@ -167,8 +168,12 @@ class Suite:
                 'runtime-protocol-version-mismatch')
         require(health.get('pid') == self.runtime.pid and Path(health.get('exe', '')).resolve() == self.args.binary.resolve(),
                 'runtime-process-binary-mismatch')
-        require(Path(health.get('data_dir', '')).resolve() == self.current_profile and health.get('url', '').rstrip('/') == self.url,
-                'runtime-profile-address-mismatch')
+        require(Path(health.get('data_dir', '')).resolve() == self.current_profile, 'runtime-profile-mismatch')
+        address = urllib.parse.urlsplit(health.get('url', ''))
+        require(address.scheme == 'http' and address.netloc == '127.0.0.1:' + str(self.port)
+                and address.path == '/' and not address.fragment
+                and urllib.parse.parse_qsl(address.query, keep_blank_values=True) == [('token', self.token)],
+                'runtime-owned-token-address-mismatch')
 
     def stop(self):
         if self.runtime is None:
