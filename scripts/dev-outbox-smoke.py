@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import socket
@@ -174,11 +175,13 @@ class Fixture:
         self.child = None
         self.gate = Gate()
         self.user = "ci-outbox-" + secrets.token_hex(12)
-        self.password = secrets.token_urlsafe(32)
+        # Exercise leading-option characters without reducing the random password entropy.
+        self.password = "-" + secrets.token_urlsafe(32)
         self.cleanup_report = cleanup
         self.registration_attempted = False
         self.created = False
         self.account_token = None
+        self.direct_failures = []
         self.a = self.environment("a")
         self.b = self.environment("b")
 
@@ -200,9 +203,22 @@ class Fixture:
         return env
 
     def direct(self, env, command, allow_pending=False, timeout=150):
-        result = subprocess.run([str(self.args.binary), "--direct", "--json", *command],
-                                env=env, capture_output=True, timeout=timeout)
-        require(result.returncode in ((0, 2) if allow_pending else (0,)), "direct_" + command[0] + "_failed")
+        try:
+            result = subprocess.run([str(self.args.binary), "--direct", "--json", *command],
+                                    env=env, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.direct_failures.append({"phase": command[0], "exit_code": None, "timeout": True})
+            raise RuntimeError("direct_" + command[0] + "_timeout") from None
+        if result.returncode not in ((0, 2) if allow_pending else (0,)):
+            text = (result.stdout + result.stderr).decode("utf-8", errors="replace")
+            patterns = {"argument_parse": r"unexpected argument|unrecognized (?:argument|option)|invalid value|required arguments",
+                        "timeout": r"timed? out|timeout", "profile": r"runtime owns its boot profile|profile change",
+                        "keyring": r"keyring|secret service", "invalid": r"invalid", "rate_limit": r"too many requests|rate.limit"}
+            statuses = [int(value) for value in re.findall(r"(?:HTTP(?:/\S+)?\s+|status(?:\s+code)?[\s:=]+)([45]\d\d)\b", text, re.I)]
+            self.direct_failures.append({"phase": command[0], "exit_code": result.returncode,
+                "http_statuses": sorted({value for value in statuses if value in (400, 401, 403, 404, 409, 429, 500, 502, 503, 504)}),
+                "recognized": {key: bool(re.search(pattern, text, re.I)) for key, pattern in patterns.items()}})
+            raise RuntimeError("direct_" + command[0] + "_failed")
         try:
             data = json.loads(result.stdout)
         except ValueError:
@@ -213,7 +229,7 @@ class Fixture:
     def prepare(self):
         self.registration_attempted = True
         self.cleanup_report["unconfirmed_users"].append(self.user)
-        registration = self.direct(self.a, ["register", "--addr", UPSTREAM, "--user", self.user, "--pass", self.password])
+        registration = self.direct(self.a, ["register", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password])
         require(registration.get("summary", {}).get("user") == self.user
                 and registration.get("summary", {}).get("ok") is True, "registered_user_identity_mismatch")
         self.created = True
@@ -227,7 +243,7 @@ class Fixture:
         super_key = registration.get("summary", {}).get("super")
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
-        self.direct(self.b, ["login", "--addr", UPSTREAM, "--user", self.user, "--pass", self.password, "--super", super_key])
+        self.direct(self.b, ["login", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address
@@ -273,7 +289,8 @@ class Fixture:
 
     def diagnose(self, report, phase):
         # Only finite state and counts, never session fields or provider error strings.
-        result = {"phase": phase, "runtime_alive": self.child is not None and self.child.poll() is None}
+        result = {"phase": phase, "runtime_alive": self.child is not None and self.child.poll() is None,
+                  "direct_failures": list(self.direct_failures)}
         with self.gate.lock:
             result.update(request_counts=dict(self.gate.request_counts), sync_read_requests=self.gate.sync_read_requests,
                           injected_disconnects=self.gate.fault_requests, real_acknowledgments=len(self.gate.acknowledged),

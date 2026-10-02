@@ -627,7 +627,7 @@ fn dispatch(cmd: &str, a: &Value) -> Result<Value, String> {
         ]),
         "sync" => cli(&["sync"]),
         "register" => {
-            let mut args: Vec<String> = vec!["register".into(), "--user".into(), a["user"].as_str().ok_or("register missing user")?.to_owned(), "--pass".into(), a["pass"].as_str().ok_or("register missing pass")?.to_owned()];
+            let mut args: Vec<String> = vec!["register".into(), "--user".into(), a["user"].as_str().ok_or("register missing user")?.to_owned(), format!("--pass={}", a["pass"].as_str().ok_or("register missing pass")?)];
             if let Some(addr) = opt_str(a, "addr") {
                 args.extend(["--addr".to_owned(), addr.to_owned()]);
             }
@@ -635,17 +635,15 @@ fn dispatch(cmd: &str, a: &Value) -> Result<Value, String> {
             cli(&refs)
         }
         "login" => {
-            let mut args = vec!["login".to_owned(), "--user".into(), a["user"].as_str().ok_or("login missing user")?.to_owned(), "--pass".into(), a["pass"].as_str().ok_or("login missing pass")?.to_owned()];
+            let mut args = vec!["login".to_owned(), "--user".into(), a["user"].as_str().ok_or("login missing user")?.to_owned(), format!("--pass={}", a["pass"].as_str().ok_or("login missing pass")?)];
             if let Some(s) = opt_str(a, "addr") {
                 args.extend(["--addr".to_owned(), s.to_owned()]);
             }
             if let Some(s) = opt_str(a, "super_pass").or_else(|| opt_str(a, "superPass")) {
-                args.push("--super".into());
-                args.push(s.to_owned());
+                args.push(format!("--super={s}"));
             }
             if let Some(s) = opt_str(a, "secret_key") {
-                args.push("--secret-key".into());
-                args.push(s.to_owned());
+                args.push(format!("--secret-key={s}"));
             }
             if a.get("reset_vault").and_then(|v| v.as_bool()).unwrap_or(false) {
                 args.push("--reset-vault".into());
@@ -669,12 +667,12 @@ fn dispatch(cmd: &str, a: &Value) -> Result<Value, String> {
             }
         }
         "super_reset" => {
-            let mut args: Vec<&str> = vec!["super-reset"];
+            let mut args = vec!["super-reset".to_owned()];
             if let Some(s) = opt_str(a, "super_pass") {
-                args.push("--super");
-                args.push(s);
+                args.push(format!("--super={s}"));
             }
-            cli(&args)
+            let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            cli(&refs)
         }
         "keys_export" => {
             let owned = opt_str(a, "out").map(ToOwned::to_owned);

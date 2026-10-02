@@ -281,7 +281,7 @@ class Smoke:
         self.registration_attempted = True
         self.save()
         registered = self.cli("register", "--addr", "https://dev.rsrs.rs", "--user", username,
-            "--pass", secrets.token_urlsafe(32), timeout=120)
+            "--pass=-" + secrets.token_urlsafe(32), timeout=120)
         require(registered["summary"].get("user") == username and registered["summary"].get("ok") is True,
             "registered_user_identity_mismatch")
         session = json.loads((self.root / "library/session.json").read_text())

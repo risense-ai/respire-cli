@@ -150,12 +150,12 @@ class Smoke:
     def run_version(self, version):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         env = self.env(f"v{version}-original")
-        user, password = "ci-vault-" + secrets.token_hex(8), secrets.token_urlsafe(32)
+        user, password = "ci-vault-" + secrets.token_hex(8), "-" + secrets.token_urlsafe(32)
         account = {"user": user, "token": None, "confirmed": False}
         self.accounts.append(account)
         self.report["cloud_cleanup"]["remaining_users"].append(user)
         self.save()
-        registered = self.cli(env, "register", "--addr", UPSTREAM, "--user", user, "--pass", password)
+        registered = self.cli(env, "register", "--addr", UPSTREAM, "--user", user, "--pass=" + password)
         session = self.session(env)
         require(registered["summary"].get("ok") is True and registered["summary"].get("user") == user
             and session.get("user") == user and session.get("addr") == UPSTREAM
@@ -197,11 +197,11 @@ class Smoke:
             upgraded_env = env
         else:
             upgraded_env = self.env(f"v{version}-legacy-recovery", user)
-        command = ["login", "--addr", UPSTREAM, "--user", user, "--pass", password]
+        command = ["login", "--addr", UPSTREAM, "--user", user, "--pass=" + password]
         if version != 1:
-            command += ["--super", legacy_pass]
+            command += ["--super=" + legacy_pass]
         if version == 3:
-            command += ["--secret-key", secret]
+            command += ["--secret-key=" + secret]
         result = self.cli(upgraded_env, *command)
         new_code = secret if version == 3 else result["summary"].get("super_issued")
         require(isinstance(new_code, str) and bool(new_code), "upgraded_recovery_code_missing")
@@ -221,7 +221,7 @@ class Smoke:
         require(original == (ciphertext, item_nonce), "upgrade_changed_original_ciphertext")
         final_env = self.env(f"v{version}-new-device", user)
         final_env["ONEMEMORY_SUPER"] = new_code
-        self.cli(final_env, "login", "--addr", UPSTREAM, "--user", user, "--pass", password, "--super", new_code)
+        self.cli(final_env, "login", "--addr", UPSTREAM, "--user", user, "--pass=" + password, "--super=" + new_code)
         final_session = self.session(final_env)
         require(final_session.get("user") == user and final_session.get("addr") == UPSTREAM
             and isinstance(final_session.get("token"), str) and bool(final_session["token"]),

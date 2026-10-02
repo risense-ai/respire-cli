@@ -70,7 +70,7 @@ class Suite:
         self.cleanup_ok = True
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.user = 'ci-local-' + os.environ.get('GITHUB_RUN_ID', '') + '-' + secrets.token_hex(4)
-        self.password = secrets.token_urlsafe(32)
+        self.password = "-" + secrets.token_urlsafe(32)
         self.super = None
 
     def owned(self, path):
@@ -116,6 +116,7 @@ class Suite:
         probe = self.direct(['model', 'probe', '--model', 'legacy'], timeout=180)
         require(probe.get('status') == 'ok' and probe.get('summary', {}).get('ready') is True
                 and probe['summary'].get('dimensions', 0) > 0, 'real-cpu-model-probe-failed')
+        self.model_dimensions = probe['summary']['dimensions']
         self.start()
 
     def direct(self, command, timeout=90):
@@ -323,7 +324,14 @@ class Suite:
         self.invoke('share_import', {'path': str(share)}, lambda v: isinstance(v.get('candidates'), list))
         self.invoke('tree_cure', {'top': 10}, lambda v: isinstance(v.get('suggests'), list) and isinstance(v.get('roots'), list))
         self.invoke('defrag', {'min': 0.8, 'top': 10}, lambda v: v.get('total', 0) >= 2 and isinstance(v.get('roots'), int) and isinstance(v.get('clusters'), list))
-        self.invoke('reembed', {}, lambda v: v.get('reembedded', 0) >= 2 and v.get('dims', 0) > 0)
+        # The count is newly prepared rows: current cached artifacts legitimately
+        # return zero (LocalStore::rebuild_index_with_progress), not store size.
+        self.invoke('reembed', {}, lambda v: type(v.get('reembedded')) is int
+                    and 0 <= v['reembedded'] <= portrait_count and v.get('dims') == self.model_dimensions)
+        self.invoke('show', {'id': copied_child['id']}, lambda v: v.get('entry', {}).get('id') == copied_child['id']
+                    and v['entry'].get('content') == copied_child['content'], label='post-reembed-copy-readback')
+        self.invoke('search', {'q': copied_child['content'], 'limit': 50}, lambda v: isinstance(v, list)
+                    and has(v, 'id', copied_child['id']), label='post-reembed-index-recall')
         self.invoke('sync', {}, lambda v: v.get('protocol') == 2 and v.get('pending') == 0, timeout=180)
         self.inject_actions()
         require('<!-- respire:begin -->' in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
