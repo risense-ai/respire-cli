@@ -55,6 +55,7 @@ class Suite:
         self.catalog = json.loads(Path(__file__).with_name('dev-local-api-coverage.json').read_text(encoding='utf-8'))
         self.coverage = {a['action']: dict(a, positive=[], negative=[], failures=[]) for a in self.catalog['actions']}
         self.events = []
+        self.diagnostics = []
         self.conditional = []
         self.runtime = None
         self.dbus = None
@@ -217,9 +218,39 @@ class Suite:
         self.events.append(event)
         if not ok:
             self.coverage[action]['failures'].append(event)
+            if action == 'doctor':
+                self.doctor_diagnostics()
             raise Failure('local-action-semantic-assertion-failed')
         self.coverage[action][kind].append(label)
         return value
+
+    def doctor_diagnostics(self):
+        # Raw RPC preserves a failed diagnostic envelope. Only allowlisted
+        # names/statuses and numeric counts leave memory; never item values.
+        names = {'store', 'data dir', 'mcp bin', 'mcp http', 'session', 'embedder',
+                 'reranker', 'lock', 'remote', 'inject', 'memory status', 'tidy counter', 'CLI version'}
+        statuses = {'ok', 'warn', 'fail', 'skip', 'pending'}
+        try:
+            status, response = self.request('POST', '/api/rpc',
+                {'v': 1, 'id': 'ci-doctor-diagnostic-' + secrets.token_hex(4),
+                 'method': 'cli.exec', 'args': ['--json', 'doctor']})
+            envelope = response.get('envelope', {})
+            require(status == 200 and isinstance(envelope, dict) and envelope.get('command') == 'doctor',
+                    'doctor-diagnostic-envelope-unavailable')
+            items = envelope.get('items', [])
+            require(isinstance(items, list), 'doctor-diagnostic-items-unavailable')
+            summary = envelope.get('summary', {})
+            require(isinstance(summary, dict), 'doctor-diagnostic-summary-unavailable')
+            self.diagnostics.append({'action': 'doctor', 'available': True,
+                'items': [{'name': item['name'], 'status': item['status']} for item in items
+                          if isinstance(item, dict) and item.get('name') in names and item.get('status') in statuses],
+                'summary': {field: summary[field] for field in ('pass', 'warn', 'fail', 'skip', 'total')
+                            if type(summary.get(field)) is int and 0 <= summary[field] <= 100},
+                'version': self.args.version if summary.get('version') == self.args.version else 'unexpected-version'})
+        except Failure as failure:
+            self.diagnostics.append({'action': 'doctor', 'available': False, 'failure_code': str(failure)})
+        except Exception:
+            self.diagnostics.append({'action': 'doctor', 'available': False, 'failure_code': 'doctor-diagnostics-unavailable'})
 
     def guarded(self, action, args, direct_args, proof):
         self.invoke(action, args, lambda v: isinstance(v, dict) and 'runtime owns its boot profile' in v.get('error', ''),
@@ -460,6 +491,7 @@ class Suite:
                   'counts': {'actions': 72, 'positive_observed': 72 - len(missing), 'negative_observed': 72 - len(negatives)},
                   'uncovered': missing, 'negative_uncovered': negatives, 'conditional': self.conditional,
                   'actions': list(self.coverage.values()), 'assertions': self.events,
+                  'diagnostics': self.diagnostics,
                   'cloud_cleanup': self.cleanup_ok,
                   'remaining_users': [] if self.cleanup_ok else [self.user] if self.register_attempted else [],
                   'cleanup': {'passed': self.cleanup_ok, 'remaining_cloud_user': self.created_user},

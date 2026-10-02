@@ -9,6 +9,10 @@ on:
         description: Run cloud API diagnostics only; does not validate all CLI features or publish
         type: boolean
         default: false
+      local_api_only:
+        description: Diagnose local API actions only; never validates the complete release gate
+        type: boolean
+        default: false
       cli_run_id:
         description: Validated Release run whose exact artifacts will be tested without rebuilding
         required: true
@@ -20,6 +24,9 @@ on:
   workflow_call:
     inputs:
       api_only:
+        type: boolean
+        default: false
+      local_api_only:
         type: boolean
         default: false
       cli_run_id:
@@ -35,20 +42,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ !inputs.api_only }}
-    name: sweep (${{ matrix.os }})
+    if: ${{ !inputs.api_only || inputs.local_api_only }}
+    name: ${{ inputs.local_api_only && 'Local API diagnostics' || format('sweep ({0})', matrix.os) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: macos-latest
-            target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+        include: ${{ fromJSON(inputs.local_api_only && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -61,7 +62,10 @@ jobs:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
           CLI_SHA: ${{ inputs.cli_sha }}
+          API_ONLY: ${{ inputs.api_only }}
+          LOCAL_API_ONLY: ${{ inputs.local_api_only }}
         run: |
+          node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
           node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("CLI smoke requires https://dev.rsrs.rs"); if(!process.env.CLI_RUN_ID||!process.env.CLI_SHA) throw new Error("Pass the exact CI run ID and source SHA; mutable npm tags are not smoke artifacts")'
       - name: Verify the original release build
         if: inputs.cli_run_id != ''
@@ -105,7 +109,7 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\n`);
           NODE
       - name: Install PowerShell
-        if: runner.os != 'Windows'
+        if: ${{ !inputs.local_api_only && runner.os != 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -122,6 +126,7 @@ jobs:
             brew install powershell
           fi
       - name: Sweep the exact CI binary
+        if: ${{ !inputs.local_api_only }}
         shell: pwsh
         env:
           ONEMEMORY_LANG: en
@@ -137,7 +142,7 @@ jobs:
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
       - name: Upload base smoke diagnostics
-        if: always()
+        if: ${{ always() && !inputs.local_api_only }}
         uses: actions/upload-artifact@v4
         with:
           name: base-sweep-report-${{ matrix.os }}
@@ -151,7 +156,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Verify all supplementary CLI contracts
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.local_api_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -162,6 +167,17 @@ jobs:
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
+      - name: Diagnose local API contracts without a full release claim
+        if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+        run: |
+          set -euo pipefail
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          python3 scripts/dev-local-api-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --cli-source-sha "$CLI_SHA" --root "$RUNNER_TEMP/local-api-diagnostics" --report "$RUNNER_TEMP/dev-supplements/local-api-coverage.json"
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
