@@ -252,6 +252,10 @@ jobs:
           python-version: '3.12'
       - name: Check all development API contracts
         env:
+          RESPIRE_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
+          RESPIRE_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
+          RESPIRE_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
+          RESPIRE_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
           RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
