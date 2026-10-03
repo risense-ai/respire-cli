@@ -250,10 +250,13 @@ int main(int argc, char **argv) {
     int result = 1;
     OSStatus status = 0;
     const char *stage = "arguments";
+    const char *tag_class = "none";
+    CFIndex matching_count = 0, max_tag_count = 0;
     char password[256] = {0}, keychain_path[PATH_MAX] = {0};
     SecKeychainRef keychain = NULL, item_keychain = NULL;
     SecAccessRef access = NULL;
     SecTrustedApplicationRef reader = NULL;
+    SecACLRef reader_acl = NULL;
     CFMutableDictionaryRef query = NULL;
     CFStringRef service = NULL, account = NULL, description = NULL;
     CFDataRef reader_data = NULL;
@@ -302,45 +305,83 @@ int main(int argc, char **argv) {
     status = SecKeychainItemCopyAccess(item, &access);
     if (status) goto done;
     acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt);
-    if (!acls || CFArrayGetCount(acls) != 1) { stage = "decrypt_acl"; goto done; }
-    SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, 0);
-    tags = SecACLCopyAuthorizations(acl);
-    if (!tags || CFArrayGetCount(tags) != 1
-        || !CFEqual(CFArrayGetValueAtIndex(tags, 0), kSecACLAuthorizationDecrypt)) {
-        stage = "decrypt_only"; goto done;
-    }
-    SecKeychainPromptSelector prompt = 0;
-    stage = "copy_contents";
-    status = SecACLCopyContents(acl, &apps, &description, &prompt);
-    if (status) goto done;
-    /* NULL already permits every app. Preserve that policy without changing it. */
-    if (!apps) { result = 0; goto done; }
+    if (!acls) { stage = "decrypt_acl"; goto done; }
+    matching_count = CFArrayGetCount(acls);
     stage = "reader";
     status = SecTrustedApplicationCreateFromPath("/usr/bin/security", &reader);
     if (status) goto done;
     status = SecTrustedApplicationCopyData(reader, &reader_data);
     if (status) goto done;
-    for (CFIndex i = 0; i < CFArrayGetCount(apps); ++i) {
-        CFDataRef existing_data = NULL;
-        status = SecTrustedApplicationCopyData(
-            (SecTrustedApplicationRef)CFArrayGetValueAtIndex(apps, i), &existing_data);
+    for (CFIndex i = 0; i < matching_count; ++i) {
+        SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, i);
+        tags = SecACLCopyAuthorizations(acl);
+        if (!tags) { stage = "copy_tags"; goto done; }
+        CFIndex count = CFArrayGetCount(tags);
+        if (count > max_tag_count) max_tag_count = count;
+        Boolean known = true, any = false;
+        const CFStringRef allowed[] = {kSecACLAuthorizationDecrypt, kSecACLAuthorizationSign,
+            kSecACLAuthorizationMAC, kSecACLAuthorizationDerive, kSecACLAuthorizationExportClear,
+            kSecACLAuthorizationExportWrapped, kSecACLAuthorizationAny};
+        for (CFIndex j = 0; j < count; ++j) {
+            CFTypeRef tag = CFArrayGetValueAtIndex(tags, j);
+            Boolean found = false;
+            for (size_t k = 0; k < sizeof(allowed) / sizeof(allowed[0]); ++k)
+                if (CFEqual(tag, allowed[k])) found = true;
+            if (!found) known = false;
+            if (CFEqual(tag, kSecACLAuthorizationAny)) any = true;
+        }
+        tag_class = !known ? "other" : any ? "any"
+            : count == 1 && CFEqual(CFArrayGetValueAtIndex(tags, 0), kSecACLAuthorizationDecrypt)
+            ? "decrypt" : "combined_known";
+        CFRelease(tags); tags = NULL;
+        SecKeychainPromptSelector prompt = 0;
+        stage = "copy_contents";
+        status = SecACLCopyContents(acl, &apps, &description, &prompt);
         if (status) goto done;
-        Boolean equal = CFEqual(existing_data, reader_data);
-        CFRelease(existing_data);
-        if (equal) { result = 0; goto done; }
+        /* All-app or existing reader access needs no ACL change. */
+        if (!apps) { result = 0; goto done; }
+        for (CFIndex j = 0; j < CFArrayGetCount(apps); ++j) {
+            CFDataRef existing_data = NULL;
+            status = SecTrustedApplicationCopyData(
+                (SecTrustedApplicationRef)CFArrayGetValueAtIndex(apps, j), &existing_data);
+            if (status) goto done;
+            Boolean equal = CFEqual(existing_data, reader_data);
+            CFRelease(existing_data);
+            if (equal) { result = 0; goto done; }
+        }
+        CFRelease(apps); apps = NULL;
+        if (description) CFRelease(description);
+        description = NULL;
     }
-    updated = CFArrayCreateMutableCopy(NULL, 0, apps);
+    updated = CFArrayCreateMutable(NULL, 0, &kCFTypeArrayCallBacks);
     if (!updated) { stage = "allocation"; goto done; }
     CFArrayAppendValue(updated, reader);
-    stage = "set_contents";
-    status = SecACLSetContents(acl, updated, description, prompt);
+    /* Leave every original combined/partition/owner ACL untouched. */
+    stage = "create_reader_acl";
+    status = SecACLCreateWithSimpleContents(access, updated,
+        CFSTR("Respire isolated CI credential reader"), 0, &reader_acl);
     if (status) goto done;
+    CFTypeRef decrypt = kSecACLAuthorizationDecrypt;
+    tags = CFArrayCreate(NULL, &decrypt, 1, &kCFTypeArrayCallBacks);
+    if (!tags) { stage = "allocation"; goto done; }
+    stage = "reader_authorizations";
+    status = SecACLUpdateAuthorizations(reader_acl, tags);
+    if (status) goto done;
+    CFRelease(tags);
+    tags = SecACLCopyAuthorizations(reader_acl);
+    if (!tags || CFArrayGetCount(tags) != 1
+        || !CFEqual(CFArrayGetValueAtIndex(tags, 0), kSecACLAuthorizationDecrypt)) {
+        stage = "reader_decrypt_only"; goto done;
+    }
     stage = "authorize";
     status = set_access(item, access, (UInt32)strlen(password), password);
     if (!status) result = 0;
 done:
     memset(password, 0, sizeof(password));
-    if (result == 1) fprintf(stderr, "fixture_native_acl_%s_status_%d\n", stage, (int)status);
+    if (result == 1) fprintf(stderr,
+        "fixture_native_acl_%s_matching_%ld_tags_%ld_class_%s_status_%d\n",
+        stage, (long)matching_count, (long)max_tag_count, tag_class, (int)status);
+    if (reader_acl) CFRelease(reader_acl);
     if (updated) CFRelease(updated);
     if (tags) CFRelease(tags);
     if (apps) CFRelease(apps);
@@ -474,7 +515,8 @@ class MacKeys(TrackedKeys):
             raise RuntimeError("fixture_native_acl_authorize_timeout") from None
         if result.returncode not in (0, 3):
             code = result.stderr.decode("ascii", errors="replace").strip()
-            require(re.fullmatch(r"fixture_native_acl_[a-z_]+_status_-?[0-9]+", code),
+            require(re.fullmatch(r"fixture_native_acl_[a-z_]+_matching_[0-9]+_tags_[0-9]+"
+                                r"_class_(?:none|other|any|decrypt|combined_known)_status_-?[0-9]+", code),
                     "fixture_native_acl_authorize_failed")
             raise RuntimeError(code)
         if result.returncode == 0:
