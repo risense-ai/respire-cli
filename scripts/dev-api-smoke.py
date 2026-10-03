@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import secrets
 import struct
+import subprocess
 import sys
 import time
 import urllib.error
@@ -307,31 +308,49 @@ class Smoke:
                    predicate=lambda r: r.get('updated') is True, label='fixture-password-update')
         self.login(a)
 
-    def mail_code(self, email, subject, admin_token):
+    def mail_code(self, email, subject, admin_token, requested_at, purpose):
         for page in range(1, 21):
             result = self.check('GET', '/admin/outbox?page=' + str(page), token=admin_token,
                                 predicate=lambda r: isinstance(r.get('items'), list), label='mail-outbox-read')
             # Never log or serialize global rows; only inspect this run's exact address/subject.
             for item in result['items']:
                 if item.get('to') == email and item.get('subject') == subject:
-                    match = re.fullmatch(r'code=(\d{6})', item.get('body', '').strip())
-                    if match:
-                        return match.group(1)
+                    if 'body' in item:
+                        raise SmokeFailure('admin-outbox-exposes-verification-code')
+                    for _ in range(30):
+                        try:
+                            reply = subprocess.run([sys.executable, str(Path(__file__).with_name('read-dev-mail.py')),
+                                json.dumps({'recipient': email, 'requestedAt': requested_at, 'purpose': purpose})],
+                                capture_output=True, text=True, timeout=20, check=True)
+                            code = json.loads(reply.stdout).get('code')
+                        except (subprocess.SubprocessError, ValueError):
+                            raise SmokeFailure('development-mailbox-reader-failed') from None
+                        if isinstance(code, str) and re.fullmatch(r'\d{6}', code):
+                            return code
+                        time.sleep(2)
+                    raise SmokeFailure('verification-email-not-received')
             if not result['items']:
                 break
         raise SmokeFailure('fixture-email-code-not-found')
 
     def email_and_totp(self, a, owner):
         self.owned(a['user'])
-        email = a['user'] + '@example.invalid'
-        self.check('POST', '/api/self/email', {'email': email}, a['token'], predicate=lambda r: r.get('sent') is True, label='fixture-email-code-issued')
-        code = self.mail_code(email, 'respire verify email', owner['token'])
+        email = os.environ.get('RESPIRE_DEV_MAIL_ADDRESS', '')
+        if not email:
+            raise SmokeFailure('development-test-mailbox-not-configured')
+        requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        self.check('POST', '/api/self/email', {'email': email}, a['token'], predicate=lambda r: r.get('queued') is True, label='fixture-email-code-issued')
+        code = self.mail_code(email, 'Respire email verification', owner['token'], requested_at, 'verify_email')
         self.check('POST', '/api/self/email/confirm', {'code': code}, a['token'], predicate=lambda r: r.get('updated') is True, label='fixture-email-verified')
+        requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.check('POST', '/forgot', {'user': a['user']}, predicate=lambda r: r.get('ok') is True, label='fixture-password-reset-request')
-        code = self.mail_code(email, 'respire password reset', owner['token'])
+        code = self.mail_code(email, 'Respire password reset', owner['token'], requested_at, 'reset_password')
+        previous_token = a['token']
         a['pass_hash'] = secrets.token_hex(32)
         self.check('POST', '/reset', {'user': a['user'], 'code': code, 'pass_hash': a['pass_hash'], 'salt': a['salt']},
                    predicate=lambda r: r.get('updated') is True, label='fixture-password-reset-complete')
+        self.check('GET', '/count', token=previous_token, status=401, predicate=lambda r: 'error' in r, kind='negative', label='reset-revokes-old-session')
+        self.check('POST', '/reset', {'user': a['user'], 'code': code, 'pass_hash': a['pass_hash'], 'salt': a['salt']}, status=401, predicate=lambda r: 'error' in r, kind='negative', label='reset-code-cannot-be-replayed')
         self.login(a)
         setup = self.check('POST', '/api/self/totp/begin', {}, a['token'], predicate=lambda r: bool(r.get('secret')), label='fixture-totp-setup')
         self.check('POST', '/api/self/totp/confirm', {'code': totp(setup['secret'])}, a['token'], predicate=lambda r: r.get('totp') is True, label='fixture-totp-enabled')
