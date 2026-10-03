@@ -259,6 +259,13 @@ class Smoke(support.Smoke):
         if sys.platform == "darwin":
             self.verify_mac_native_credentials(env, {"account": account, "code": code, "password": password,
                 "id": memory_id, "text": text, "cipher": row})
+        if service == "rsrs":
+            # This is the genuine current target, not a legacy namespace fixture.
+            # Keep the CLI-created credentials and endpoint exactly as registered.
+            self.report["fixture_operation"] = "retained_current_credentials"
+            self.save()
+            return {"account": account, "password": password, "code": code, "service": service,
+                "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": None}
         self.report["fixture_operation"] = "seed_legacy_native_credentials"
         self.save()
         self.keys.put(service, "super:" + user, code)
@@ -349,13 +356,8 @@ class Smoke(support.Smoke):
         if target:
             current = self.seed(env, home / ".rsrs", "rsrs", name + "-existing-rsrs")
             # A current profile must keep its existing credentials and URL untouched.
-            self.keys.put("rsrs", "super:" + current["account"]["user"], current["code"])
-            self.keys.put("rsrs", "pass:" + current["account"]["user"], current["password"])
             current_env = dict(env, ONEMEMORY_DATA_DIR=str(current["source"]))
-            session = self.session(current_env)
-            session["addr"] = support.UPSTREAM
-            self.write_session(current_env, session)
-            self.cli(current_env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
+            current_session = self.session(current_env)
         default = self.default_env(env)
         if interrupt:
             padding = fixtures[0]["source"] / "migration-copy-fixture.bin"
@@ -393,6 +395,16 @@ class Smoke(support.Smoke):
             with sqlite3.connect(current["source"] / "onememory.db") as db:
                 require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (current["id"],)).fetchone() == current["cipher"],
                     "existing_target_data_overwritten")
+            require(self.session(current_env) == current_session, "existing_target_session_overwritten")
+            self.report["fixture_operation"] = "retained_current_credentials"
+            self.save()
+            if sys.platform == "darwin":
+                self.verify_mac_native_credentials(current_env, current)
+            else:
+                user = current["account"]["user"]
+                require(self.keys.read("rsrs", "super:" + user) == current["code"]
+                    and self.keys.read("rsrs", "pass:" + user) == current["password"],
+                    "existing_target_native_credentials_overwritten")
             self.read_entry(current_env, current["id"], current["text"])
             self.passed("existing_rsrs_preserved_and_legacy_imported", imported=len(fixtures))
         before = {str(p.relative_to(home)): digest(p) for p in (home / ".rsrs").rglob(".rsrs-migration.json")}
