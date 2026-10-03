@@ -3,6 +3,7 @@ import importlib.util
 from importlib.metadata import version
 import os
 from pathlib import Path
+import re
 import secrets
 import subprocess
 import sys
@@ -25,6 +26,9 @@ class SecretServiceKeys(_base.TrackedKeys):
         self.daemon = None
         self.connection = None
         self.attribute_snapshots = {}
+        self.current_target_entries = set()
+        self.generic_schema_observed = set()
+        self.normalized_current_entries = set()
         self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
         require(sys.platform.startswith("linux")
                 and os.environ.get("RESPIRE_SS_FIXTURE_BUS") == "private"
@@ -107,6 +111,16 @@ class SecretServiceKeys(_base.TrackedKeys):
         return {"target": "default", "service": service, "username": slot,
                 "application": "rust-keyring"}
 
+    def register_current_target(self, user):
+        require(not self.current_target_entries and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user),
+                "fixture_current_target_registration_invalid")
+        entries = {("rsrs", prefix + user) for prefix in ("super:", "pass:")}
+        for entry in entries:
+            require(entry in self.entries and entry not in self.attribute_snapshots
+                    and self._find(*entry, check_snapshot=False) is None,
+                    "fixture_current_target_not_fresh_owned_entry")
+        self.current_target_entries.update(entries)
+
     def _find(self, service, slot, check_snapshot=True):
         expected = self.attributes(service, slot)
         lookup = {key: expected[key] for key in ("target", "service", "username")}
@@ -122,7 +136,26 @@ class SecretServiceKeys(_base.TrackedKeys):
                     "fixture_secret_service_attributes_mismatch")
             if check_snapshot:
                 snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
-                if actual != snapshot:
+                compared_actual, compared_snapshot = actual, snapshot
+                entry = (service, slot)
+                if entry in self.current_target_entries:
+                    # GNOME maps both an omitted schema and exact Generic to
+                    # persisted type 0. Preserve the first raw snapshot; only
+                    # these two newly registered target entries use this baseline.
+                    generic = "org.freedesktop.Secret.Generic"
+                    require(("xdg:schema" not in snapshot or snapshot["xdg:schema"] == generic)
+                            and ("xdg:schema" not in actual or actual["xdg:schema"] == generic),
+                            "fixture_current_target_schema_not_generic")
+                    present = "xdg:schema" in actual
+                    require(present or entry not in self.generic_schema_observed,
+                            "fixture_current_target_schema_reverted")
+                    if present:
+                        self.generic_schema_observed.add(entry)
+                        if "xdg:schema" not in snapshot:
+                            self.normalized_current_entries.add(entry)
+                    compared_actual = dict(actual, **{"xdg:schema": generic})
+                    compared_snapshot = dict(snapshot, **{"xdg:schema": generic})
+                if compared_actual != compared_snapshot:
                     changed = {key for key in actual.keys() | snapshot.keys()
                                if actual.get(key) != snapshot.get(key)}
                     known = {"target", "service", "username", "application", "xdg:schema"}
@@ -181,6 +214,14 @@ class SecretServiceKeys(_base.TrackedKeys):
                 events.append(event)
                 remaining.append(event)
         report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
+        report["provider_schema_baseline"] = {
+            "scope": "two_new_owned_current_target_credentials_only",
+            "registered_entries": len(self.current_target_entries),
+            "observed_normalizations": len(self.normalized_current_entries),
+            "other_attributes_and_values": "strict",
+            "initial_raw_snapshots_overwritten": False,
+            "old_namespaces_and_migrated_aliases": "full_raw_attribute_snapshots",
+        }
         if hasattr(self, "collection"):
             try:
                 require(not list(self.collection.get_all_items()), "fixture_collection_not_empty")

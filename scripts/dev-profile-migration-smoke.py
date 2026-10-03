@@ -216,6 +216,8 @@ class Smoke(support.Smoke):
         env = dict(env, ONEMEMORY_DATA_DIR=str(path))
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
+        if service == "rsrs" and self.keys.name == "linux-secret-service":
+            self.keys.register_current_target(user)
         auth_salt = support.hkdf(user.encode(), None, b"onememory:auth-salt:v1", length=16)
         account = {"user": user, "token": None, "confirmed": False,
             "pass_hash": hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()}
