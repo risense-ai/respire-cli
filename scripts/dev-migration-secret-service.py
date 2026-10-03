@@ -128,7 +128,10 @@ class SecretServiceKeys(_base.TrackedKeys):
                     known = {"target", "service", "username", "application", "xdg:schema"}
                     names = "_".join(sorted(changed & known)) or "none"
                     raise RuntimeError("fixture_secret_service_attributes_changed_keys_" + names
-                                       + "_unknown_count_" + str(len(changed - known)))
+                                       + "_unknown_count_" + str(len(changed - known))
+                                       + "_schema_was_absent_" + str(int("xdg:schema" not in snapshot))
+                                       + "_schema_is_generic_" + str(int(actual.get("xdg:schema")
+                                           == "org.freedesktop.Secret.Generic")))
             require(not item.is_locked(), "fixture_secret_service_entry_locked")
         return item
 
@@ -142,7 +145,9 @@ class SecretServiceKeys(_base.TrackedKeys):
 
     def _put(self, service, slot, value):
         require((service, slot) in self.entries, "credential_not_owned_by_fixture")
-        self.collection.create_item("Synthetic migration fixture", self.attributes(service, slot),
+        attributes = dict(self.attributes(service, slot),
+                          **{"xdg:schema": "org.freedesktop.Secret.Generic"})
+        self.collection.create_item("Synthetic migration fixture", attributes,
                                     value.encode("utf-8"), replace=True)
         self._find(service, slot)
 

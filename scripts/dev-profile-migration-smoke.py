@@ -236,9 +236,17 @@ class Smoke(support.Smoke):
             alias = value.get("keyring_account")
             require(isinstance(alias, str) and alias.startswith("legacy-"), "migration_key_alias_missing")
             require(alias == fixture["alias"], "migration_native_alias_identity_mismatch")
+            self.report["fixture_operation"] = "new_alias_super"
+            self.save()
             require(self.keys.read("rsrs", "super:" + alias) == fixture["code"], "migration_key_changed")
+            self.report["fixture_operation"] = "new_alias_pass"
+            self.save()
             require(self.keys.read("rsrs", "pass:" + alias) == fixture["password"], "migration_login_password_changed")
+            self.report["fixture_operation"] = "legacy_source_super"
+            self.save()
             require(self.keys.read(fixture["service"], "super:" + user) == fixture["code"], "legacy_key_source_changed")
+            self.report["fixture_operation"] = "legacy_source_pass"
+            self.save()
             require(self.keys.read(fixture["service"], "pass:" + user) == fixture["password"], "legacy_password_source_changed")
             with sqlite3.connect((fixture["source"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as source_db:
                 require(source_db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
