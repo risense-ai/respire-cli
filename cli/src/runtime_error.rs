@@ -14,7 +14,7 @@ pub enum RuntimeError {
 impl fmt::Display for RuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unavailable => write!(f, "runtime_unavailable: host HTTP runtime is not running at {}; start `rsrs web --no-open` in the host terminal", crate::net_rpc::rpc_base_url()),
+            Self::Unavailable => write!(f, "runtime_unavailable: host HTTP runtime is not running at {}; start `rsrs --runtime-internal` in the host terminal", crate::net_rpc::rpc_base_url()),
             Self::TokenMissing => write!(f, "runtime_token_missing: no RPC token; configure the host token through ONEMEMORY_RPC_TOKEN or read access to its runtime/token file"),
             Self::TokenUnreadable(detail) => write!(f, "runtime_token_unreadable: {detail}; have the host provide RPC authentication"),
             Self::Unauthorized => write!(f, "runtime_unauthorized: HTTP runtime rejected the token; verify host/client authentication without restarting the service"),

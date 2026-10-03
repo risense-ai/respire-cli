@@ -4,7 +4,8 @@
 //! (kind/tags/title/project/computer + plaintext embedding BLOB),
 //! those plaintext columns serve local search only and are **never uploaded** (StoredMemory serde skip).
 //!
-//! Old schema (v1: id INTEGER + tag_hashes) is detected and rebuilt.
+//! Supported TEXT-ID schemas retain their rows during upgrades. Historical
+//! INTEGER-ID demos use a different ciphertext format and require explicit export.
 
 use std::path::Path;
 
@@ -672,7 +673,6 @@ impl LocalStore {
         Ok(n > 0)
     }
 
-
     pub fn chunked_ids(&self) -> Result<std::collections::HashSet<String>> {
         let mut stmt = self
             .connection
@@ -682,25 +682,71 @@ impl LocalStore {
     }
 }
 
+/// Validate and upgrade an existing migration staging database before publication.
+/// This does not create a database or configure the private Core index root.
+pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("failed to open existing migration staging database")?;
+    connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
+    migrate(&connection)?;
+    connection
+        .execute_batch(include_str!("local/sync_schema.sql"))
+        .context("migration staging sync schema is incompatible")?;
+    Ok(())
+}
 
-/// v1 → v2 → v3 migrate: rebuild old tables (tag_hashes / no embedding_enc); add missing dirty column; create meta.
+/// Commit schema upgrades together; any unsupported format or SQL failure leaves
+/// the original tables and rows intact.
 fn migrate(connection: &Connection) -> Result<()> {
+    let transaction = connection.unchecked_transaction()?;
+    migrate_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_schema(connection: &Connection) -> Result<()> {
     let has_old = connection
         .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='memories'")?
         .exists([])?;
     if has_old {
-        let cols: Vec<String> = connection
+        let columns: Vec<(String, String, i64)> = connection
             .prepare("PRAGMA table_info(memories)")?
-            .query_map([], |row| row.get::<_, String>(1))?
+            .query_map([], |row| Ok((row.get(1)?, row.get(2)?, row.get(5)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let is_v1 =
-            cols.iter().any(|c| c == "tag_hashes") || !cols.iter().any(|c| c == "embedding_enc");
-        if is_v1 {
-            connection.execute_batch(
-                "
-                DROP TABLE memories;
-                ",
-            )?;
+        anyhow::ensure!(
+            !columns.iter().any(|(name, _, _)| name == "tag_hashes")
+                && columns.iter().filter(|(_, _, primary)| *primary > 0).count() == 1
+                && columns.iter().any(|(name, kind, primary)| {
+                    name == "id" && kind.trim().eq_ignore_ascii_case("TEXT") && *primary == 1
+                }),
+            "unsupported legacy memory schema: historical INTEGER-ID/tag_hashes demos use a different key derivation and plaintext format; no rows were removed. Keep the original database and export with its original version before importing into rsrs"
+        );
+        for required in ["user", "ciphertext", "nonce", "created_at", "updated_at"] {
+            anyhow::ensure!(
+                columns.iter().any(|(name, _, _)| name == required),
+                "unsupported memory schema: missing {required}; encrypted fields cannot be reconstructed. No rows were removed"
+            );
+        }
+        // These are derived indexes or local state, not invented key material.
+        // The original ciphertext, nonce, identity and timestamps stay untouched.
+        for (name, declaration) in [
+            ("embedding_enc", "TEXT NOT NULL DEFAULT ''"),
+            ("deleted", "INTEGER NOT NULL DEFAULT 0"),
+            ("kind", "TEXT NOT NULL DEFAULT 'context'"),
+            ("tags", "TEXT NOT NULL DEFAULT ''"),
+            ("title", "TEXT NOT NULL DEFAULT ''"),
+            ("project", "TEXT NOT NULL DEFAULT ''"),
+            ("computer", "TEXT NOT NULL DEFAULT ''"),
+            ("embedding", "BLOB"),
+        ] {
+            if !columns.iter().any(|(existing, _, _)| existing == name) {
+                connection.execute_batch(&format!(
+                    "ALTER TABLE memories ADD COLUMN {name} {declaration}"
+                ))?;
+            }
         }
     }
     connection.execute_batch(
@@ -924,7 +970,8 @@ impl LocalStore {
         let id = id.trim_start_matches('#');
         let stamp = chrono::Utc::now().to_rfc3339();
         self.forget(id)?;
-        self.connection.execute("DELETE FROM core_artifacts WHERE memory_id=?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM core_artifacts WHERE memory_id=?1", params![id])?;
         let n = self.connection.execute(
             "UPDATE memories SET ciphertext='', nonce='', embedding_enc='', embedding=NULL, title='', content_head='', tags='', project='', computer='', kind='', recall_count=0, dirty=1, updated_at=?2 WHERE id=?1",
             params![id, stamp],
@@ -934,7 +981,8 @@ impl LocalStore {
 
     /// Clear local content fields (called on an empty tombstone — remote already purged, local syncs the clear).
     pub fn purge_content(&self, id: &str) -> Result<()> {
-        self.connection.execute("DELETE FROM core_artifacts WHERE memory_id=?1", params![id])?;
+        self.connection
+            .execute("DELETE FROM core_artifacts WHERE memory_id=?1", params![id])?;
         self.connection.execute(
             "UPDATE memories SET ciphertext='', nonce='', embedding_enc='', embedding=NULL, title='', content_head='', tags='', project='', computer='' WHERE id=?1",
             params![id],
@@ -1058,7 +1106,12 @@ mod tests {
             local_title: "标题".to_owned(),
             local_project: "respire".to_owned(),
             local_computer: "pc1".to_owned(),
-            local_embedding: Some([0.1f32, 0.2, 0.3].iter().flat_map(|v| v.to_le_bytes()).collect()),
+            local_embedding: Some(
+                [0.1f32, 0.2, 0.3]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            ),
             local_parent_id: String::new(),
             local_created_at: "2026-09-02T00:00:00.000Z".to_owned(),
             local_content_head: "旧备份库关系边 演示内容".to_owned(),
@@ -1127,10 +1180,10 @@ mod tests {
     }
 
     #[test]
-    fn v1_schema_migrates() -> anyhow::Result<()> {
+    fn v1_schema_is_preserved_and_requires_legacy_export() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("old.db");
-        // build a v1 table
+        // The historical demo has a different KDF and encrypts content directly.
         let conn = Connection::open(&path)?;
         conn.execute_batch(
             "CREATE TABLE memories (
@@ -1143,15 +1196,126 @@ mod tests {
                 tag_hashes TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );",
+            );
+            INSERT INTO memories(ciphertext,nonce,kind,tags,title,created_at,updated_at)
+            VALUES ('original-ciphertext','original-nonce','context','legacy','original-title','created','updated');",
         )?;
         drop(conn);
-        // open triggers migrate
-        let store = LocalStore::open(&path)?;
-        assert_eq!(MemoryTransport::count(&store)?, 0);
-        // new schema is usable
-        MemoryTransport::put(&store, &sample("mig-1"))?;
-        assert_eq!(MemoryTransport::count(&store)?, 1);
+        let error = LocalStore::open(&path)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("legacy demo was unexpectedly opened"))?;
+        assert!(error
+            .to_string()
+            .contains("unsupported legacy memory schema"));
+        let preserved = Connection::open(&path)?;
+        let original: (i64, String, String, String) = preserved.query_row(
+            "SELECT id,ciphertext,nonce,title FROM memories",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        assert_eq!(
+            original,
+            (
+                1,
+                "original-ciphertext".to_owned(),
+                "original-nonce".to_owned(),
+                "original-title".to_owned()
+            )
+        );
+        assert_eq!(
+            preserved.query_row("SELECT COUNT(*) FROM memories", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        assert!(preserved
+            .prepare("SELECT tag_hashes FROM memories")?
+            .exists([])?);
+        Ok(())
+    }
+
+    #[test]
+    fn text_schema_adds_missing_indexes_without_changing_encrypted_rows() -> anyhow::Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY, user TEXT NOT NULL, ciphertext TEXT NOT NULL,
+                nonce TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                title TEXT NOT NULL
+            );
+            INSERT INTO memories VALUES ('kept-id','kept-user','original-ciphertext','original-nonce','created','updated','kept-title');",
+        )?;
+        migrate(&connection)?;
+        migrate(&connection)?;
+        let kept: (String, String, String, String, String, String, String) = connection.query_row(
+            "SELECT id,user,ciphertext,nonce,created_at,updated_at,title FROM memories",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )?;
+        assert_eq!(
+            kept,
+            (
+                "kept-id".to_owned(),
+                "kept-user".to_owned(),
+                "original-ciphertext".to_owned(),
+                "original-nonce".to_owned(),
+                "created".to_owned(),
+                "updated".to_owned(),
+                "kept-title".to_owned()
+            )
+        );
+        let derived: (String, Option<Vec<u8>>, i64) = connection.query_row(
+            "SELECT embedding_enc,embedding,dirty FROM memories",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(derived, (String::new(), None, 1));
+        assert_eq!(
+            connection.query_row("SELECT COUNT(*) FROM memories", [], |row| row
+                .get::<_, i64>(0))?,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn schema_upgrade_rolls_back_if_existing_query_log_is_unsupported() -> anyhow::Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE memories (
+                id TEXT PRIMARY KEY, user TEXT NOT NULL, ciphertext TEXT NOT NULL,
+                nonce TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            INSERT INTO memories VALUES ('kept-id','kept-user','original-ciphertext','original-nonce','created','updated');
+            CREATE TABLE query_log (id INTEGER PRIMARY KEY, ts_unix INTEGER, hit_ids TEXT);",
+        )?;
+        assert!(migrate(&connection).is_err());
+        let columns: Vec<String> = connection
+            .prepare("PRAGMA table_info(memories)")?
+            .query_map([], |row| row.get(1))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(!columns.iter().any(|column| column == "embedding_enc"));
+        let original: (String, String) =
+            connection.query_row("SELECT ciphertext,nonce FROM memories", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+        assert_eq!(
+            original,
+            (
+                "original-ciphertext".to_owned(),
+                "original-nonce".to_owned()
+            )
+        );
+        assert!(connection.prepare("SELECT hit_ids FROM query_log").is_ok());
         Ok(())
     }
 

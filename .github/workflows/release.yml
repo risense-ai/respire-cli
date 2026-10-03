@@ -79,6 +79,7 @@ jobs:
   cloud-sweep:
     needs: [plan, validate]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -151,7 +152,7 @@ jobs:
           if-no-files-found: warn
       - uses: actions/setup-python@v5
         id: supplement_python
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' }}
         with:
           python-version: '3.12'
       - name: Verify all supplementary CLI contracts
@@ -159,6 +160,7 @@ jobs:
         shell: bash
         env:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
@@ -167,6 +169,31 @@ jobs:
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-supplements" --cli-report "$RUNNER_TEMP/release-sweep/coverage.json"
+      - name: Verify native Windows and macOS account migration
+        if: ${{ !cancelled() && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: pwsh
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = (Resolve-Path (Join-Path cli $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }))).Path
+          $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          $root = Join-Path $env:RUNNER_TEMP 'native-profile-migration'
+          python scripts/dev-profile-migration-smoke.py --binary $binary --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA --root $root
+          $suiteExit = $LASTEXITCODE
+          python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'release-sweep/coverage.json') --profile-migration (Join-Path $root 'migration-coverage.json') --report (Join-Path $root 'migration-platform-gate.json') --source-sha $env:CLI_SHA --version $env:CLI_VERSION --binary-sha256 $checksum
+          if ($suiteExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native credential migration or its release gate failed' }
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && runner.os != 'Linux' }}
+        with:
+          name: native-profile-migration-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/native-profile-migration/migration-coverage.json
+            ${{ runner.temp }}/native-profile-migration/migration-platform-gate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -178,8 +205,9 @@ jobs:
             ${{ runner.temp }}/release-supplements/combined-coverage.json
             ${{ runner.temp }}/release-supplements/outbox/outbox-coverage.json
             ${{ runner.temp }}/release-supplements/ai-inject/ai-inject-coverage.json
-            ${{ runner.temp }}/release-supplements/local-api-coverage.json
+            ${{ runner.temp }}/release-supplements/runtime-coverage.json
             ${{ runner.temp }}/release-supplements/legacy-vault/legacy-vault-coverage.json
+            ${{ runner.temp }}/release-supplements/profile-migration/migration-coverage.json
           if-no-files-found: error
 
   api-smoke:
@@ -208,8 +236,64 @@ jobs:
           path: ${{ runner.temp }}/dev-api-coverage.json
           if-no-files-found: error
 
+  web-smoke:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Require pinned frontend revisions
+        env:
+          CONSOLE_SHA: ${{ vars.RESPIRE_DEV_CONSOLE_SHA }}
+          SITE_SHA: ${{ vars.RESPIRE_DEV_SITE_SHA }}
+        run: |
+          node -e 'for (const value of [process.env.CONSOLE_SHA,process.env.SITE_SHA]) if (!/^[0-9a-f]{40}$/.test(value || "")) throw new Error("Configure exact tested development frontend revisions")'
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-server
+          ref: ${{ vars.RESPIRE_DEV_CONSOLE_SHA }}
+          persist-credentials: false
+      - name: Require successful frontend source CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CONSOLE_SHA: ${{ vars.RESPIRE_DEV_CONSOLE_SHA }}
+          SITE_SHA: ${{ vars.RESPIRE_DEV_SITE_SHA }}
+        run: |
+          set -euo pipefail
+          gh run list --repo risense-ai/respire-server --workflow ci.yml --commit "$CONSOLE_SHA" --branch main --event push --limit 20 --json status,conclusion | jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' > /dev/null
+          gh run list --repo risense-ai/respire-site --workflow ci.yml --commit "$SITE_SHA" --branch main --event push --limit 20 --json status,conclusion | jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' > /dev/null
+      - name: Prepare isolated browser test dependencies
+        working-directory: admin-ui
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+      - name: Verify real development website and account consoles
+        working-directory: admin-ui
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
+          RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RESPIRE_DEV_CONSOLE_SHA: ${{ vars.RESPIRE_DEV_CONSOLE_SHA }}
+          RESPIRE_DEV_SITE_SHA: ${{ vars.RESPIRE_DEV_SITE_SHA }}
+          RESPIRE_WEB_SMOKE_OUTPUT: ${{ runner.temp }}/web-smoke
+        run: npm run test:dev
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: development-web-smoke
+          path: |
+            ${{ runner.temp }}/web-smoke/*.json
+            ${{ runner.temp }}/web-smoke/*.png
+          if-no-files-found: error
+
   publish:
-    needs: [plan, validate, cloud-sweep, api-smoke]
+    needs: [plan, validate, cloud-sweep, api-smoke, web-smoke]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:

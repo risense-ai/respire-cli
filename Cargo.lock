@@ -826,25 +826,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "include_dir"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "923d117408f1e49d914f1a379a309cffe4f18c05cf4e3d12e613a15fc81bd0dd"
-dependencies = [
- "include_dir_macros",
-]
-
-[[package]]
-name = "include_dir_macros"
-version = "0.7.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cab85a7ed0bd5f0e76d93846e0147172bed2e2d3f859bcc33a8d9699cad1a75"
-dependencies = [
- "proc-macro2",
- "quote",
-]
-
-[[package]]
 name = "indoc"
 version = "2.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1018,131 +999,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "respire"
-version = "1.0.8-dev.1"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "clap",
- "crossterm",
- "dirs",
- "flate2",
- "hex",
- "hmac",
- "include_dir",
- "interprocess",
- "respire_app",
- "respire_spawn",
- "rand",
- "ratatui",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "signal-hook",
- "tempfile",
- "tiny_http",
- "unicode-width 0.2.0",
- "ureq",
- "uuid",
-]
-
-[[package]]
-name = "respire_app"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "crossterm",
- "dirs",
- "flate2",
- "hex",
- "keyring",
- "respire_core_sdk",
- "respire_crypto",
- "respire_protocol",
- "respire_storage",
- "rpassword",
- "rusqlite",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tempfile",
- "ureq",
- "uuid",
- "whoami",
-]
-
-[[package]]
-name = "respire_core_sdk"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "base64",
- "dirs",
- "hex",
- "respire_protocol",
- "serde",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "respire_crypto"
-version = "1.0.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "argon2",
- "hex",
- "hkdf",
- "respire_core_sdk",
- "respire_protocol",
- "pbkdf2",
- "rand",
- "serde_json",
- "sha2",
-]
-
-[[package]]
-name = "respire_protocol"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "respire_spawn"
-version = "1.0.8-dev.1"
-dependencies = [
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "respire_storage"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "hex",
- "respire_core_sdk",
- "respire_crypto",
- "respire_protocol",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "uuid",
-]
 
 [[package]]
 name = "miniz_oxide"
@@ -1413,6 +1269,130 @@ checksum = "60dc65c0ff1a7ae1294b0c67b9f14baf70b644404010370171787bfac1038fc0"
 dependencies = [
  "libredox",
  "thiserror",
+]
+
+[[package]]
+name = "respire"
+version = "1.0.8-dev.2"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "clap",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "hex",
+ "hmac",
+ "interprocess",
+ "rand",
+ "ratatui",
+ "respire_app",
+ "respire_spawn",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "signal-hook",
+ "tempfile",
+ "tiny_http",
+ "unicode-width 0.2.0",
+ "ureq",
+ "uuid",
+]
+
+[[package]]
+name = "respire_app"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "crossterm",
+ "dirs",
+ "flate2",
+ "hex",
+ "keyring",
+ "respire_core_sdk",
+ "respire_crypto",
+ "respire_protocol",
+ "respire_storage",
+ "rpassword",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "uuid",
+ "whoami",
+]
+
+[[package]]
+name = "respire_core_sdk"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "dirs",
+ "hex",
+ "respire_protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "respire_crypto"
+version = "1.0.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "argon2",
+ "hex",
+ "hkdf",
+ "pbkdf2",
+ "rand",
+ "respire_core_sdk",
+ "respire_protocol",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "respire_protocol"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "respire_spawn"
+version = "1.0.8-dev.2"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "respire_storage"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hex",
+ "respire_core_sdk",
+ "respire_crypto",
+ "respire_protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]

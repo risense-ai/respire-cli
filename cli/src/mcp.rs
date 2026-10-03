@@ -1,4 +1,4 @@
-//! MCP server: stdio JSON-RPC and HTTP/SSE helpers used by `rsrs web`.
+//! MCP server: stdio JSON-RPC and HTTP/SSE helpers used by the authenticated runtime.
 //!
 //! Tool calls go through the resident runtime (`rpc::query_json`). This process
 //! never `spawn`s another `rsrs` to re-invoke the CLI. `current_exe` is only

@@ -6,12 +6,82 @@
 
 use anyhow::{anyhow, Result};
 
-const SERVICE: &str = "respire";
+const SERVICE: &str = "rsrs";
+const VAULT_SERVICE: &str = "rsrs";
+
+fn credential_account(user: &str) -> String {
+    let account = if user.trim().is_empty() { "local" } else { user.trim() };
+    if let Ok(session) = crate::auth::read_session_json() {
+        let session_user = session["user"].as_str().unwrap_or("");
+        let session_user = if session_user.trim().is_empty() { "local" } else { session_user.trim() };
+        if session_user == account {
+            if let Some(alias) = session["keyring_account"].as_str().filter(|alias| {
+                alias.starts_with("legacy-") && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            }) { return alias.to_owned(); }
+        }
+    }
+    account.to_owned()
+}
+
+/// Import into a separate namespace. Existing credentials are never overwritten.
+pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Result<()> {
+    let entry = keyring::Entry::new(VAULT_SERVICE, &format!("{slot}:{account}"))
+        .map_err(|_| anyhow!("migration keyring initialization failed"))?;
+    match entry.get_password() {
+        Ok(existing) if existing != value => return Err(anyhow!("migration keyring destination contains a different credential")),
+        Ok(_) => {}
+        Err(keyring::Error::NoEntry) => entry.set_password(value).map_err(|_| anyhow!("migration keyring write failed"))?,
+        Err(_) => return Err(anyhow!("migration keyring destination could not be read")),
+    }
+    let readback = keyring::Entry::new(VAULT_SERVICE, &format!("{slot}:{account}"))
+        .map_err(|_| anyhow!("migration keyring readback initialization failed"))?;
+    if readback.get_password().map_err(|_| anyhow!("migration keyring readback failed"))? != value {
+        return Err(anyhow!("migration keyring readback mismatch"));
+    }
+    Ok(())
+}
+
+/// Classification settings are global per endpoint, unlike per-library vaults.
+/// Preserve an existing new setting; import known legacy slots into new entries.
+pub(crate) fn import_classification(services: &[&str]) -> Result<()> {
+    let mut slots = vec!["typesafe".to_owned(), "ds".to_owned(), "last-backend".to_owned(), "ds-last-base".to_owned()];
+    for service in services {
+        if let Ok(entry) = keyring::Entry::new(service, "classify:ds-last-base") {
+            if let Ok(base) = entry.get_password() {
+                let host = host_of(&base);
+                if !host.is_empty() {
+                    slots.push(format!("ds@{host}"));
+                    slots.push(format!("ds-model@{host}"));
+                }
+            }
+        }
+    }
+    slots.sort(); slots.dedup();
+    for slot in slots {
+        let target = keyring::Entry::new(SERVICE, &format!("classify:{slot}"))
+            .map_err(|_| anyhow!("classification migration keyring initialization failed"))?;
+        match target.get_password() {
+            Ok(_) => continue,
+            Err(keyring::Error::NoEntry) => {}
+            Err(_) => return Err(anyhow!("classification migration keyring destination could not be read")),
+        }
+        for service in services {
+            let original = keyring::Entry::new(service, &format!("classify:{slot}"))
+                .map_err(|_| anyhow!("classification migration keyring initialization failed"))?;
+            match original.get_password() {
+                Ok(value) => { import_credential(&slot, "classify", &value)?; break; }
+                Err(keyring::Error::NoEntry) => {}
+                Err(_) => return Err(anyhow!("classification migration original credential could not be read")),
+            }
+        }
+    }
+    Ok(())
+}
 
 fn entry(user: &str) -> Result<keyring::Entry> {
     // Pure local keygen has no account name — use the "local" slot
-    let acct = if user.trim().is_empty() { "local" } else { user.trim() };
-    keyring::Entry::new(SERVICE, &format!("super:{acct}"))
+    let acct = credential_account(user);
+    keyring::Entry::new(VAULT_SERVICE, &format!("super:{acct}"))
         .map_err(|e| anyhow!("keyring init failed: {e}"))
 }
 
@@ -24,8 +94,8 @@ pub fn save_super(user: &str, super_pass: &str) -> Result<()> {
 }
 
 fn login_entry(user: &str) -> Result<keyring::Entry> {
-    let acct = if user.trim().is_empty() { "local" } else { user.trim() };
-    keyring::Entry::new(SERVICE, &format!("pass:{acct}"))
+    let acct = credential_account(user);
+    keyring::Entry::new(VAULT_SERVICE, &format!("pass:{acct}"))
         .map_err(|e| anyhow!("keyring init failed: {e}"))
 }
 

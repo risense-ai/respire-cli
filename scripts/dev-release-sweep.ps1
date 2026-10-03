@@ -82,14 +82,14 @@ if ($IsMacOS) {
 }
 $script:Catalog = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'dev-smoke-cli-coverage.json') -Raw -Encoding utf8 | ConvertFrom-Json
 if ($DeferSupplemental) {
-    $approved = @('local_api', 'ai_inject', 'outbox', 'legacy_vault')
+    $approved = @('runtime', 'ai_inject', 'outbox', 'legacy_vault', 'profile_migration')
     $actual = @($script:Catalog.supplemental_required | Sort-Object -Unique)
     if (@($script:Catalog.required_remaining).Count -gt 0 -or @($actual | Where-Object { $_ -notin $approved }).Count -gt 0 -or $actual.Count -ne $approved.Count -or @($script:Catalog.supplemental_required).Count -ne $approved.Count) {
-        throw 'Only the four explicitly assigned supplemental suites may be deferred; unknown required functionality must fail closed.'
+        throw 'Only the five explicitly assigned supplemental suites may be deferred; unknown required functionality must fail closed.'
     }
 }
 function Stop-OurRuntimes {
-    # Runtime command lines contain web --internal; the data directory is in the environment.
+    # Runtime command lines contain --runtime-internal; the data directory is in the environment.
     # With -Exe, the binary is outside the npm prefix; locate the isolated runtime correctly.
     $self = $PID
     $targets = New-Object System.Collections.Generic.List[int]
@@ -288,14 +288,14 @@ function Invoke-Om {
     # These are separate simulated devices sharing one CI host/port. The host
     # must stop the old device with its own credentials before switching roots.
     if ($script:ActiveDataDir -and $script:ActiveDataDir -ne $DataDir) {
-        Invoke-Om -Name 'host-stop-before-device-switch' -ArgList @('web', '--stop') `
+        Invoke-Om -Name 'host-stop-before-device-switch' -ArgList @('--runtime-internal', '--stop') `
             -DataDir $script:ActiveDataDir -Raw | Out-Null
     }
     $script:ActiveDataDir = $DataDir
     if ($HostProfile) {
         # Only stop this disposable sweep runtime. The following normal command
         # autostarts its replacement after the host has switched the profile.
-        Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('web', '--stop') `
+        Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
             -DataDir $DataDir -Raw -ExpectExit @(0, 2) | Out-Null
         Stop-OurRuntimes
         if ($ArgList -notcontains '--direct') { $ArgList = @('--direct') + $ArgList }
@@ -944,7 +944,7 @@ $kickAll = Invoke-Om -Name 'space-kick-all' -ArgList @('--json', 'space', 'kick'
 Assert-Smoke 'space-kick-all-member-sessions' ($kickAll.Ok -and [int]$kickAll.Envelope.summary.revoked -ge 1 -and [int]$kickAll.Envelope.summary.failed -eq 0 -and [int]$kickAll.Envelope.summary.remaining -eq 0)
 $readonlyKicked = Invoke-Om -Name 'space-kicked-readonly-cloud-denied' -ArgList @('--json', 'sync') -DataDir $readonlyDir -AllowStatus @('fail')
 Assert-Smoke 'space-kicked-readonly-session-denied' ($readonlyKicked.Ok -and $readonlyKicked.Exit -eq 1 -and ($readonlyKicked.Envelope.errors -join ' ') -match 'unauthorized|token rejected|401')
-Invoke-Om -Name 'web-stop-before-space-remove' -ArgList @('web', '--stop') -DataDir $DirA -Raw -ExpectExit @(0, 2) | Out-Null
+Invoke-Om -Name 'runtime-stop-before-space-remove' -ArgList @('--runtime-internal', '--stop') -DataDir $DirA -Raw -ExpectExit @(0, 2) | Out-Null
 Stop-OurRuntimes
 Start-Sleep -Seconds 1
 Invoke-Om -Name 'account-use-main' -ArgList @('--direct', '--json', 'account', 'use', 'main') -DataDir $DirA -Note 'web --stop 可能在进程仍存活时返回，先结束本轮 runtime 再用 --direct' | Out-Null
@@ -1185,8 +1185,20 @@ $resetRecall = Invoke-Om -Name 'reset-vault-recall-readable' -ArgList @('--json'
 Assert-Smoke 'reset-vault-no-undecryptable-old-library' ($resetSync.Ok -and $resetCloudRead.Ok -and $resetList.Ok -and $resetRecall.Ok -and [string]$resetCloudRead.Envelope.details.entry.content -eq "merged $marker" -and ($resetList.Envelope.errors -join ' ') -notmatch 'decrypt|decode' -and ($resetRecall.Envelope.errors -join ' ') -notmatch 'decrypt|decode')
 Invoke-Om -Name 'sync-reset' -ArgList @('--json', 'sync-reset') -DataDir $DirA -TimeoutSec 180 -Note '一次性账号上的快照重建' | Out-Null
 
-# Inspect the autostarted runtime, stop it, then start it without opening a browser.
-$webStatus = Invoke-Om -Name 'web-status' -ArgList @('--json', 'web', '--status') -DataDir $DirA -ExpectExit @(0, 2) -Raw -Note '未运行时允许非 0'
+# Web opens the hosted dashboard; runtime lifecycle is a separate hidden command.
+$dashboardDir = Join-Path $Root 'dashboard-launch'
+$dashboard = Invoke-Om -Name 'web-dashboard-report' -ArgList @('--json', 'web', '--no-open') -DataDir $dashboardDir
+Assert-Smoke 'web-dashboard-fixed-url' ($dashboard.Ok -and [string]$dashboard.Envelope.summary.url -ceq 'https://dash.rsrs.rs' -and $dashboard.Envelope.summary.opened -eq $false)
+Assert-Smoke 'web-dashboard-no-runtime' (-not (Test-Path -LiteralPath (Join-Path $dashboardDir 'runtime/endpoint.json')))
+$legacyWebRejected = $true
+foreach ($flags in @(@('--internal'), @('--status'), @('--stop'), @('--port', '15169'), @('--host', '127.0.0.1'))) {
+    $rejected = Invoke-Om -Name "web-reject-legacy-$($flags[0].TrimStart('-'))" -ArgList (@('web') + $flags) -DataDir $dashboardDir -ExpectExit @(1, 2) -Raw
+    $legacyWebRejected = $legacyWebRejected -and $rejected.Ok
+}
+Assert-Smoke 'web-legacy-lifecycle-flags-rejected' ($legacyWebRejected -and -not (Test-Path -LiteralPath (Join-Path $dashboardDir 'runtime/endpoint.json')))
+# A normal CLI call starts only the API runtime for the original fixture.
+Invoke-Om -Name 'runtime-start-by-cli-status' -ArgList @('--json', 'status') -DataDir $DirA | Out-Null
+$webStatus = Invoke-Om -Name 'runtime-status' -ArgList @('--json', '--runtime-internal', '--status') -DataDir $DirA -ExpectExit @(0, 2) -Raw
 $url = ''
 $endpointFile = Join-Path $DirA 'runtime\endpoint.json'
 if (Test-Path $endpointFile) {
@@ -1194,20 +1206,6 @@ if (Test-Path $endpointFile) {
     $url = [string]$ep.url
     $runtimeUri = [Uri]$url
     if ($runtimeUri.Host -notin @('127.0.0.1', 'localhost', '::1')) { throw "Runtime endpoint is not loopback: $url" }
-    try {
-        $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
-        $body = [string]$resp.Content
-        $pageOk = ($resp.StatusCode -eq 200) -and ($body -match '(?i)<!doctype html>')
-        $Rows.Add([pscustomobject]@{
-            Step = 0; Name = 'web-http'; Exit = $(if ($pageOk) { 0 } else { 1 }); Status = "$($resp.StatusCode)"; Ok = $pageOk; Leak = ''; Note = $url
-        }) | Out-Null
-        Write-Host "$(if ($pageOk) {'PASS'} else {'FAIL'}) web-http $url"
-    } catch {
-        $Rows.Add([pscustomobject]@{
-            Step = 0; Name = 'web-http'; Exit = 1; Status = 'fail'; Ok = $false; Leak = ''; Note = $_.Exception.Message
-        }) | Out-Null
-        Write-Host "FAIL web-http $($_.Exception.Message)"
-    }
 }
 $rpcToken = ''
 $tokenFile = Join-Path $DirA 'runtime\token'
@@ -1234,37 +1232,43 @@ function Invoke-LocalSmoke {
 }
 $health = Invoke-LocalSmoke -Name 'runtime-http-health' -Path '/api/health' -Method GET
 Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -eq $ExpectVersion)
-Invoke-LocalSmoke -Name 'runtime-http-wrong-token' -Path '/api/invoke' -Payload @{ cmd = 'status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' } -ExpectedStatus 401 | Out-Null
-Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/invoke' -Payload @{ cmd = 'status' } -Headers @{ Authorization = "Bearer $rpcToken"; Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
-Invoke-LocalSmoke -Name 'runtime-http-malformed-json' -Path '/api/invoke' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
-Invoke-LocalSmoke -Name 'runtime-http-missing-command' -Path '/api/invoke' -Payload @{} -ExpectedStatus 400 | Out-Null
-foreach ($action in @('status', 'config_get', 'server_addr_get', 'db_stamp', 'list', 'tree', 'diary_mode_get', 'workspace_mode_get', 'inject_targets', 'rerank_model_status', 'classify_backend_get')) {
-    $value = Invoke-LocalSmoke -Name "web-invoke-$action" -Path '/api/invoke' -Payload @{ cmd = $action; args = @{} }
-    Assert-Smoke "web-invoke-$action-response" ($null -ne $value)
-    switch ($action) {
-        'status' { Assert-Smoke 'web-status-approved-server' ([string]$value.server_addr -eq $Server -and $value.unlocked -eq $true) }
-        'config_get' { Assert-Smoke 'web-config-approved-server' ([string]$value.addr -eq $Server -and $value.autosync -eq $false) }
-        'server_addr_get' { Assert-Smoke 'web-server-addr-approved-server' ([string]$value.addr -eq $Server) }
-        'db_stamp' { Assert-Smoke 'web-db-stamp-positive' ([long]$value -gt 0) }
-        'diary_mode_get' { Assert-Smoke 'web-diary-mode-contract' ([string]$value.diary_mode -in @('concise', 'verbose')) }
-        'workspace_mode_get' { Assert-Smoke 'web-workspace-mode-normal' ([string]$value.mode -eq 'normal') }
-        'rerank_model_status' { Assert-Smoke 'web-rerank-installed' ($value.installed -eq $true) }
-    }
+Invoke-LocalSmoke -Name 'runtime-http-wrong-token' -Path '/api/rpc' -Payload @{ v = 1; id = 'wrong-token'; method = 'runtime.status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' } -ExpectedStatus 401 | Out-Null
+Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/rpc' -Payload @{ v = 1; id = 'foreign-origin'; method = 'runtime.status' } -Headers @{ Authorization = "Bearer $rpcToken"; Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
+Invoke-LocalSmoke -Name 'runtime-http-malformed-json' -Path '/api/rpc' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
+Invoke-LocalSmoke -Name 'runtime-http-missing-command' -Path '/api/rpc' -Payload @{} -ExpectedStatus 400 | Out-Null
+foreach ($removed in @(@('/', 'GET'), @('/index.html', 'GET'), @('/favicon.ico', 'GET'), @('/api/invoke', 'POST'), @('/api/task/start', 'POST'))) {
+    Invoke-LocalSmoke -Name "runtime-removed-ui-$($removed[0] -replace '[^a-zA-Z0-9]', '-')" -Path $removed[0] -Method $removed[1] -Payload @{} -ExpectedStatus 404 | Out-Null
 }
-$webCreated = Invoke-LocalSmoke -Name 'web-invoke-create' -Path '/api/invoke' -Payload @{ cmd = 'create'; args = @{ content = "web-invoke-$stamp"; title = "web-$stamp"; importance = 'important'; force = $true; parent = $id } }
-$webId = [string]$webCreated.id
-Assert-Smoke 'web-invoke-created-id' ([bool]$webId)
-Invoke-LocalSmoke -Name 'web-invoke-update' -Path '/api/invoke' -Payload @{ cmd = 'update'; args = @{ id = $webId; content = "web-updated-$stamp"; title = "web-updated-$stamp" } } | Out-Null
-$webRead = Invoke-LocalSmoke -Name 'web-invoke-show' -Path '/api/invoke' -Payload @{ cmd = 'show'; args = @{ id = $webId } }
-Assert-Smoke 'web-invoke-update-persisted' ([string]$webRead.entry.content -eq "web-updated-$stamp")
-Invoke-LocalSmoke -Name 'web-invoke-attach' -Path '/api/invoke' -Payload @{ cmd = 'attach'; args = @{ id = $webId; parent = $splitId } } | Out-Null
-$webParent = Invoke-LocalSmoke -Name 'web-invoke-parent-readback' -Path '/api/invoke' -Payload @{ cmd = 'show'; args = @{ id = $webId } }
-Assert-Smoke 'web-invoke-parent-persisted' ([string]$webParent.entry.parent_id -eq $splitId)
-Invoke-LocalSmoke -Name 'web-invoke-delete' -Path '/api/invoke' -Payload @{ cmd = 'delete'; args = @{ id = $webId } } | Out-Null
-Invoke-LocalSmoke -Name 'web-invoke-restore' -Path '/api/invoke' -Payload @{ cmd = 'restore'; args = @{ id = $webId } } | Out-Null
-$webRestored = Invoke-LocalSmoke -Name 'web-invoke-restore-readback' -Path '/api/invoke' -Payload @{ cmd = 'show'; args = @{ id = $webId } }
-Assert-Smoke 'web-invoke-restore-preserved-content' ([string]$webRestored.entry.content -eq "web-updated-$stamp")
-Invoke-LocalSmoke -Name 'web-invoke-purge' -Path '/api/invoke' -Payload @{ cmd = 'purge'; args = @{ id = $webId } } | Out-Null
+function Invoke-RuntimeCli([string]$Name, [string[]]$Arguments) {
+    $response = Invoke-LocalSmoke -Name $Name -Path '/api/rpc' -Payload @{ v = 1; id = $Name; method = 'cli.exec'; args = @('--json') + $Arguments }
+    Assert-Smoke "$Name-response" ($response.ok -eq $true -and [string]$response.id -ceq $Name -and [string]$response.bin -ceq $ExpectVersion -and $null -ne $response.envelope)
+    return $response.envelope
+}
+$runtimeStatus = Invoke-RuntimeCli 'runtime-cli-status' @('status')
+Assert-Smoke 'runtime-cli-status-approved-server' ([string]$runtimeStatus.summary.server_addr -ceq $Server -and $runtimeStatus.summary.unlocked -eq $true)
+Assert-Smoke 'runtime-cli-workspace-mode-normal' ([string]$runtimeStatus.summary.workspace -ceq 'normal')
+$runtimeConfig = Invoke-RuntimeCli 'runtime-cli-config' @('config')
+Assert-Smoke 'runtime-cli-config-approved-server' ([string]$runtimeConfig.summary.addr -ceq $Server -and $runtimeConfig.summary.autosync -eq $false)
+$runtimeAgent = Invoke-RuntimeCli 'runtime-cli-agent-config' @('agent-config')
+Assert-Smoke 'runtime-cli-diary-mode-contract' ([string]$runtimeAgent.summary.diary_mode -in @('concise', 'verbose'))
+Invoke-RuntimeCli 'runtime-cli-list' @('list', '--limit', '5') | Out-Null
+Invoke-RuntimeCli 'runtime-cli-tree' @('tree', '--depth', '3') | Out-Null
+Invoke-RuntimeCli 'runtime-cli-inject-targets' @('inject', '--targets') | Out-Null
+Assert-Smoke 'runtime-cli-rerank-installed' (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base/onnx/model_quantized.onnx'))
+$runtimeCreated = Invoke-RuntimeCli 'runtime-cli-create' @('remember', "runtime-rpc-$stamp", '--title', "runtime-$stamp", '--importance', 'important', '--force', '--parent', $id)
+$runtimeId = [string]$runtimeCreated.summary.id
+Assert-Smoke 'runtime-cli-created-id' ([bool]$runtimeId)
+Invoke-RuntimeCli 'runtime-cli-update' @('update', $runtimeId, '--content', "runtime-updated-$stamp", '--title', "runtime-updated-$stamp") | Out-Null
+$runtimeRead = Invoke-RuntimeCli 'runtime-cli-show' @('show', $runtimeId)
+Assert-Smoke 'runtime-cli-update-persisted' ([string]$runtimeRead.details.entry.content -ceq "runtime-updated-$stamp")
+Invoke-RuntimeCli 'runtime-cli-attach' @('attach', $runtimeId, '--parent', $splitId) | Out-Null
+$runtimeParent = Invoke-RuntimeCli 'runtime-cli-parent-readback' @('show', $runtimeId)
+Assert-Smoke 'runtime-cli-parent-persisted' ([string]$runtimeParent.details.entry.parent_id -ceq $splitId)
+Invoke-RuntimeCli 'runtime-cli-delete' @('forget', $runtimeId) | Out-Null
+Invoke-RuntimeCli 'runtime-cli-restore' @('restore', $runtimeId) | Out-Null
+$runtimeRestored = Invoke-RuntimeCli 'runtime-cli-restore-readback' @('show', $runtimeId)
+Assert-Smoke 'runtime-cli-restore-preserved-content' ([string]$runtimeRestored.details.entry.content -ceq "runtime-updated-$stamp")
+Invoke-RuntimeCli 'runtime-cli-purge' @('purge', $runtimeId, '--yes') | Out-Null
 $wantTools = @(
     'memory_status','memory_remember','memory_recall','memory_list','memory_show','memory_update',
     'memory_attach','memory_tree','memory_history','memory_diary','memory_chain','memory_query_log_mark',
@@ -1456,7 +1460,7 @@ Assert-Smoke 'secret-reveal-current-recovery-code' ($revealed.Ok -and [string]$r
 Invoke-Om -Name 'model-reset-cpu' -ArgList @('--json', 'model', 'reset-cpu') -DataDir $DirA -HostProfile | Out-Null
 $resetEngine = Invoke-Om -Name 'model-reset-cpu-readback' -ArgList @('--json', 'model', 'engine') -DataDir $DirA
 Assert-Smoke 'model-reset-cpu-engine' ($resetEngine.Ok -and [string]$resetEngine.Envelope.summary.engine -eq 'cpu')
-Invoke-Om -Name 'web-stop' -ArgList @('--json', 'web', '--stop') -DataDir $DirA -ExpectExit @(0, 2) -Raw | Out-Null
+Invoke-Om -Name 'runtime-stop' -ArgList @('--json', '--runtime-internal', '--stop') -DataDir $DirA -ExpectExit @(0, 2) -Raw | Out-Null
 Stop-OurRuntimes
 $uninstallRerank = Invoke-Om -Name 'model-uninstall-rerank' -ArgList @('--direct', '--json', 'model', 'uninstall-rerank') -DataDir $DirA
 Assert-Smoke 'model-rerank-removed' ($uninstallRerank.Ok -and $uninstallRerank.Envelope.summary.removed -eq $true -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base')))

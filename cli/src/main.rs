@@ -21,12 +21,14 @@ use uuid::Uuid;
 mod app_version;
 mod bench;
 mod classify;
+mod classify_config;
 mod i18n;
 mod mcp;
 mod net_rpc;
 mod output;
 mod rpc;
 mod runtime_error;
+mod runtime_http;
 mod runtime_policy;
 mod shell;
 mod web;
@@ -919,17 +921,26 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start the local Web client: the browser is the GUI (hosts tree-ui; invoke becomes a CLI child; business truth stays in the CLI)
+    /// Open the hosted user dashboard without starting the local runtime
     Web {
-        /// Listen port (default 15169; if taken, take over a rsrs runtime or fail)
-        #[arg(long)]
-        port: Option<u16>,
-        /// Do not open a browser after start
+        /// Report https://dash.rsrs.rs without opening a browser
         #[arg(long)]
         no_open: bool,
-        /// Bind address (default 127.0.0.1, this machine only; 0.0.0.0 opens the LAN - use with care)
-        #[arg(long, default_value = "127.0.0.1")]
-        host: String,
+    },
+    /// Inspect or configure classification without running a model
+    ClassifyConfig {
+        #[arg(long, value_parser = ["jev", "ds"])]
+        backend: Option<String>,
+        #[arg(long)]
+        api_base: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        /// Persist the selected backend and optional endpoint/model
+        #[arg(long)]
+        set: bool,
+        /// Read one API key from redirected stdin and store it in the OS keyring
+        #[arg(long)]
+        key_stdin: bool,
     },
     /// Model management: install or uninstall BGE and the optional rerank model
     Model {
@@ -938,7 +949,7 @@ enum Command {
     },
     /// View/set local config (client.json: data dir / server address / auto-sync / auto-cure)
     Config {
-        /// Set the data directory (absolute path; empty string clears back to default ~/.respire)
+        /// Set the data directory (absolute path; empty string clears back to default ~/.rsrs)
         #[arg(long)]
         data_dir: Option<String>,
         /// Set the server address
@@ -950,7 +961,7 @@ enum Command {
         /// Set periodic auto-cure
         #[arg(long)]
         cure_auto: Option<bool>,
-        /// Max concurrent read jobs in the resident runtime. 0 clears the setting and follows the CPU count, never above 4. Writes always queue. Applies after `rsrs web --stop`.
+        /// Max concurrent runtime read jobs. 0 follows CPU count (at most 4). Writes queue. Applies after `rsrs --runtime-internal --stop`.
         #[arg(long)]
         rpc_parallelism: Option<u32>,
     },
@@ -970,7 +981,7 @@ enum Command {
         #[command(subcommand)]
         command: PluginCommand,
     },
-    /// MCP server over stdio JSON-RPC. HTTP/SSE is served by `rsrs web` at `/mcp` and `/sse`.
+    /// MCP server over stdio JSON-RPC. The internal runtime serves HTTP/SSE at `/mcp` and `/sse`.
     Mcp,
     /// Check npm for a newer CLI (24h throttle; --force skips it; --clear drops the cache)
     UpdateCheck {
@@ -2709,10 +2720,17 @@ fn build_classify_backend(
     use classify::Backend;
     // -- backend pick --
     // --backend (jev|ds) and --ds collapse: jev plus --ds is a conflict;
-    // GUI dropdown or CLI `--ds` / `--backend ds` both reach DS.
+    // An explicit flag takes precedence over the stored default selection.
     let be = backend
         .map(|s| s.trim().to_ascii_lowercase())
-        .filter(|s| !s.is_empty());
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            if ds.is_none() {
+                respire::keystore::load_classify_backend()
+            } else {
+                None
+            }
+        });
     let ds_sel: Option<String> = match (&be, ds) {
         (Some(b), _) if b == "jev" || b == "typesafe" => {
             if ds.is_some() {
@@ -3955,7 +3973,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         "mcp http",
         true,
         format!(
-            "rsrs web serves POST /mcp and GET /sse (default {}/mcp)",
+            "The internal runtime serves POST /mcp and GET /sse (default {}/mcp)",
             crate::net_rpc::rpc_base_url()
         ),
     );
@@ -4538,7 +4556,7 @@ fn run_config(
     let workers = rpc::worker_limit();
     let mut worker_text = workers.to_string();
     if rpc_parallelism.is_some() {
-        worker_text.push_str(" (after web --stop)");
+        worker_text.push_str(" (after --runtime-internal --stop)");
     }
     let info = serde_json::json!({
         "data_dir": respire::service::data_dir().to_string_lossy(),
@@ -5161,7 +5179,7 @@ fn is_off_allowed(c: &Command) -> bool {
         // Status and doctor
         | Command::Status | Command::Doctor { .. } | Command::UpdateCheck { .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::Model { .. }
+        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::Model { .. } | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }
         // Sync (infrastructure - off blocks memory r/w, not the cloud)
         | Command::Sync { .. } | Command::SyncConflicts { .. } | Command::SyncHistory { .. }
@@ -5224,6 +5242,12 @@ fn main_body() -> i32 {
     if std::env::args_os().any(|arg| arg == "--client-only") {
         std::env::set_var("ONEMEMORY_CLIENT_ONLY", "1");
     }
+    if !runtime_policy::client_only() {
+        if let Err(error) = respire::migration::ensure_default_home() {
+            eprintln!("default profile migration failed: {error:#}");
+            return 1;
+        }
+    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--internal-inference-worker")
@@ -5251,20 +5275,18 @@ fn main_body() -> i32 {
         }
     }
     // Parse args, then run the command, so a Windows debug stack does not hold both at once.
-    // `web` and `--direct` are peeled off before clap: the command enum is large enough that
+    // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.
     let result = match preprocess_args() {
         Preparsed::Version { json } => {
             set_json_mode(json);
             crate::app_version::emit(json)
         }
-        Preparsed::Web(flags) => rpc::web_entry(flags),
-        Preparsed::WebHelp => {
-            println!(
-                "Start or manage the local runtime.\n\nUsage: rsrs web [OPTIONS]\n\nOptions:\n  --port <PORT>  Set the local runtime port\n  --host <HOST>  Bind address [default: 127.0.0.1]\n  --no-open      Do not open a browser\n  --status       Show runtime status\n  --stop         Stop the local runtime\n  -h, --help     Print help"
-            );
-            Ok(())
+        Preparsed::Runtime { flags, json } => {
+            set_json_mode(json);
+            rpc::runtime_entry(flags)
         }
+        Preparsed::Invalid(error) => Err(anyhow!(error)),
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
             run(Cli::parse_from(
@@ -5301,8 +5323,11 @@ enum Preparsed {
     Version {
         json: bool,
     },
-    Web(rpc::WebFlags),
-    WebHelp,
+    Runtime {
+        flags: rpc::RuntimeFlags,
+        json: bool,
+    },
+    Invalid(String),
     Cli {
         direct: bool,
         args: Vec<std::ffi::OsString>,
@@ -5333,52 +5358,95 @@ fn preprocess_args() -> Preparsed {
     if let Some(json) = is_short_v_version(&args) {
         return Preparsed::Version { json };
     }
-    if args.first().map(String::as_str) == Some("web") {
-        if args
-            .iter()
-            .skip(1)
-            .any(|arg| matches!(arg.as_str(), "-h" | "--help"))
-        {
-            return Preparsed::WebHelp;
-        }
-        let mut flags = rpc::WebFlags {
+    if args
+        .iter()
+        .find(|arg| arg.as_str() != "--json")
+        .is_some_and(|arg| arg == "--runtime-internal")
+    {
+        let mut flags = rpc::RuntimeFlags {
             port: None,
-            no_open: false,
             host: "127.0.0.1".to_owned(),
-            internal: false,
             status: false,
             stop: false,
         };
-        let mut index = 1;
+        let mut json = false;
+        let mut index = 0;
         while index < args.len() {
             match args[index].as_str() {
-                "--internal" => flags.internal = true,
+                "--runtime-internal" | "--no-open" => {}
+                "--json" => json = true,
                 "--status" => flags.status = true,
                 "--stop" => flags.stop = true,
-                "--no-open" => flags.no_open = true,
                 "--port" => {
                     index += 1;
-                    flags.port = args.get(index).and_then(|value| value.parse().ok());
+                    match args
+                        .get(index)
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .filter(|port| *port > 0)
+                    {
+                        Some(port) => flags.port = Some(port),
+                        None => {
+                            return Preparsed::Invalid(
+                                "internal runtime requires a valid --port".to_owned(),
+                            )
+                        }
+                    }
                 }
                 "--host" => {
                     index += 1;
-                    if let Some(host) = args.get(index) {
-                        flags.host = host.clone();
+                    match args.get(index).filter(|host| !host.is_empty()) {
+                        Some(host) => flags.host = host.clone(),
+                        None => {
+                            return Preparsed::Invalid(
+                                "internal runtime requires --host".to_owned(),
+                            )
+                        }
                     }
                 }
                 other => {
-                    eprintln!("unknown web flag: {other}");
-                    std::process::exit(2);
+                    return Preparsed::Invalid(format!("unknown internal runtime flag: {other}"))
                 }
             }
             index += 1;
         }
-        return Preparsed::Web(flags);
+        if flags.status && flags.stop {
+            return Preparsed::Invalid(
+                "internal runtime cannot combine --status and --stop".to_owned(),
+            );
+        }
+        return Preparsed::Runtime { flags, json };
     }
     Preparsed::Cli {
         direct,
         args: args.into_iter().map(std::ffi::OsString::from).collect(),
     }
+}
+
+fn run_classify_config(
+    backend: Option<&str>,
+    api_base: Option<&str>,
+    model: Option<&str>,
+    set: bool,
+    key_stdin: bool,
+) -> Result<()> {
+    let value = if set {
+        let selected = backend
+            .map(str::to_owned)
+            .or_else(respire::keystore::load_classify_backend)
+            .unwrap_or_else(|| "jev".to_owned());
+        classify_config::configure(&selected, api_base, model, key_stdin)?
+    } else {
+        if key_stdin || model.is_some() {
+            anyhow::bail!("--key-stdin and --model require classify-config --set");
+        }
+        classify_config::status(backend, api_base)?
+    };
+    emit_result(ResultEnvelope::new(
+        "classify-config",
+        OutputStatus::Ok,
+        value,
+        Vec::new(),
+    ))
 }
 
 fn run(args: Cli) -> Result<()> {
@@ -5388,6 +5456,26 @@ fn run(args: Cli) -> Result<()> {
     );
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
+    }
+    if let Some(Command::ClassifyConfig {
+        backend,
+        api_base,
+        model,
+        set,
+        key_stdin,
+    }) = args.command.as_ref()
+    {
+        runtime_policy::require_host("classification configuration")?;
+        if rpc::worker_active() && *key_stdin {
+            anyhow::bail!("--key-stdin must run in the host CLI, not through runtime RPC");
+        }
+        return run_classify_config(
+            backend.as_deref(),
+            api_base.as_deref(),
+            model.as_deref(),
+            *set,
+            *key_stdin,
+        );
     }
     if rpc::worker_active() {
         return run_local(args);
@@ -5409,20 +5497,16 @@ fn run(args: Cli) -> Result<()> {
             vec![],
         ));
     }
-    if let Some(Command::Web {
-        port,
-        no_open,
-        host,
-    }) = args.command.as_ref()
-    {
-        return rpc::web_entry(rpc::WebFlags {
-            port: *port,
-            no_open: *no_open,
-            host: host.clone(),
-            internal: false,
-            status: false,
-            stop: false,
-        });
+    if let Some(Command::Web { no_open }) = args.command.as_ref() {
+        if !no_open {
+            crate::web::open_browser(crate::web::DASHBOARD_URL)?;
+        }
+        return emit_result(ResultEnvelope::new(
+            "web",
+            OutputStatus::Ok,
+            serde_json::json!({"url":crate::web::DASHBOARD_URL,"opened":!no_open}),
+            Vec::new(),
+        ));
     }
     if matches!(args.command, Some(Command::Mcp)) {
         if DIRECT_MODE.load(Ordering::Relaxed) {
@@ -5434,7 +5518,7 @@ fn run(args: Cli) -> Result<()> {
         runtime_policy::require_host("direct local execution")?;
         if rpc::runtime_is_up() {
             anyhow::bail!(
-                "the local runtime is running; stop it with `rsrs web --stop` before --direct"
+                "the local runtime is running; stop it with `rsrs --runtime-internal --stop` before --direct"
             );
         }
         eprintln!("{}", i18n::text("direct"));
@@ -5464,7 +5548,7 @@ fn run_local(args: Cli) -> Result<()> {
         return crate::app_version::emit(json_mode());
     }
     if matches!(args.command, Some(Command::Web { .. })) {
-        anyhow::bail!("the web runtime does not run inside a command worker");
+        anyhow::bail!("the dashboard launcher does not run inside a command worker");
     }
     // The runtime worker already holds lock.db for the process lifetime.
     let _library_lock = if rpc::worker_active() {
@@ -8100,7 +8184,8 @@ fn run_local(args: Cli) -> Result<()> {
         | Command::QueryLog { .. }
         | Command::Bench { .. }
         | Command::Classify { .. }
-        | Command::Web { .. } => unreachable!(
+        | Command::Web { .. }
+        | Command::ClassifyConfig { .. } => unreachable!(
             "commands that do not need the embedder already returned at the top of main"
         ),
     }

@@ -62,7 +62,7 @@ if (!bin) {
   process.exit(1);
 }
 
-// UI assets are embedded at compile time; no runtime web-dist lookup is needed.
+// The CLI opens the hosted dashboard; no UI assets are bundled.
 const r = spawnSync(bin, process.argv.slice(2), { stdio: 'inherit', env: process.env });
 if (r.error) {
   console.error(`rsrs: ${r.error.message}`);

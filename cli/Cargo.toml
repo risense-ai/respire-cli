@@ -1,6 +1,6 @@
 [package]
 name = "respire"
-version = "1.0.8-dev.1"
+version = "1.0.8-dev.2"
 edition = "2021"
 rust-version = "1.88"
 description = "respire CLI — encrypted cross-device AI memory"
@@ -31,9 +31,8 @@ uuid = { version = "1.0", features = ["v4", "v5"] }
 # Interactive terminal selector for inject --tui
 ratatui = "0.29"
 crossterm = "0.28"
-# Local web client: serves the embedded UI and local RPC in one process
+# Authenticated local HTTP RPC/MCP transport
 tiny_http = "0.12"
-include_dir = "0.7"
 interprocess = "2.4.2"
 # Shared subtree payloads: gzip compression and base64 for text transport
 flate2 = "1.1"

@@ -1,4 +1,4 @@
-//! Start `rsrs web --internal` without keeping the caller's stdout pipe open.
+//! Start `rsrs --runtime-internal` without keeping the caller's stdout pipe open.
 //!
 //! On Windows, `CreateProcess` with `bInheritHandles = TRUE` copies every
 //! inheritable handle, not only the stdio slots. A piped parent then never
@@ -14,8 +14,7 @@ pub use confinement::is_restricted;
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
     command
-        .arg("web")
-        .arg("--internal")
+        .arg("--runtime-internal")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -28,10 +28,17 @@ On PowerShell, set `$env:RESPIRE_CORE_SDK_DIR`. Include the staged runtime libra
 ```sh
 rsrs doctor
 rsrs help
+rsrs web
 rsrs recall "query" --titles --json
 ```
 
-The default profile is `~/.respire`, the local runtime port is `15169`, and the default sync API is `https://api.rsrs.rs`.
+`rsrs web` opens https://dash.rsrs.rs without starting a local Web server. No dashboard assets are embedded in the CLI.
+
+The default profile is `~/.rsrs`, the local runtime port is `15169`, and the default sync API is `https://api.rsrs.rs`.
+
+Startup imports supported accounts from `~/.onememory` and `~/.respire`, preserving their encrypted data, settings and available credentials. Original directories remain intact. Missing decryption credentials require the original recovery material; an explicit `ONEMEMORY_DATA_DIR` bypasses default-directory migration.
+
+`rsrs classify-config` reports classification configuration without invoking a model. Select a backend with `rsrs classify-config --set --backend jev` or `--backend ds --api-base <URL> --model <MODEL>`. Add `--key-stdin` to read a key from redirected input into the OS keyring; keys are never printed or stored in ordinary config files.
 
 | Guide | Topic |
 | --- | --- |

@@ -258,7 +258,7 @@ class Fixture:
         if automatic:
             env.pop("ONEMEMORY_NO_AUTOSYNC", None)
         env["ONEMEMORY_RPC_PORT"] = str(self.port)
-        self.child = subprocess.Popen([str(self.args.binary), "web", "--internal", "--no-open", "--port", str(self.port)],
+        self.child = subprocess.Popen([str(self.args.binary), "--runtime-internal", "--no-open", "--port", str(self.port)],
                                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         token_path = Path(env["ONEMEMORY_DATA_DIR"]) / "runtime" / "token"
         wait_for(lambda: token_path.is_file() if self.child.poll() is None else False, 30, "runtime_start_timeout")

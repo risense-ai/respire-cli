@@ -374,11 +374,9 @@
     },
     {
       "command": "web",
-      "source": "cli/src/main.rs:923",
+      "source": "cli/src/web.rs",
       "options": [
-        "--port",
-        "--no-open",
-        "--host"
+        "--no-open"
       ]
     },
     {
@@ -758,368 +756,17 @@
         "--all",
         "--yes"
       ]
-    }
-  ],
-  "local_web_actions": [
-    {
-      "name": "status",
-      "line": 500,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "update_check",
-      "line": 501,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "db_stamp",
-      "line": 502,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "list",
-      "line": 503,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "search",
-      "line": 507,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "show",
-      "line": 518,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "tree",
-      "line": 519,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "candidates",
-      "line": 529,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "create",
-      "line": 530,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "update",
-      "line": 565,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "delete",
-      "line": 575,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "purge",
-      "line": 576,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "attach",
-      "line": 577,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "restore",
-      "line": 578,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "promote",
-      "line": 579,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "demote",
-      "line": 580,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "sync",
-      "line": 581,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "register",
-      "line": 582,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "login",
-      "line": 590,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "logout",
-      "line": 609,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "keygen",
-      "line": 617,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "super_reset",
-      "line": 624,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "keys_export",
-      "line": 632,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "config_get",
-      "line": 641,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "server_addr_get",
-      "line": 642,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "resume_session",
-      "line": 656,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "server_addr_set",
-      "line": 657,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "sync_config_set",
-      "line": 658,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "cure_config_set",
-      "line": 659,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "diary_mode_get",
-      "line": 660,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "diary_mode_set",
-      "line": 664,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "workspace_mode_get",
-      "line": 666,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "workspace_mode_set",
-      "line": 672,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "data_dir_set",
-      "line": 696,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "list_system_fonts",
-      "line": 697,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "scope_material",
-      "line": 699,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_list",
-      "line": 701,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_create",
-      "line": 702,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_use",
-      "line": 703,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_invite",
-      "line": 704,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_join",
-      "line": 715,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_members",
-      "line": 716,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_kick",
-      "line": 720,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "space_remove",
-      "line": 727,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "doctor",
-      "line": 733,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "rerank_model_status",
-      "line": 734,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "rerank_model_install",
-      "line": 735,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "inject_targets",
-      "line": 736,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "inject",
-      "line": 737,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "inject_remove",
-      "line": 741,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "inject_preview",
-      "line": 742,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "inject_apply",
-      "line": 749,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "pick_save_file",
-      "line": 760,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "pick_open_file",
-      "line": 772,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "pick_directory",
-      "line": 773,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "export_memories",
-      "line": 774,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "import_memories",
-      "line": 775,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "backup_db",
-      "line": 776,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "book_material",
-      "line": 777,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "share_subtree",
-      "line": 779,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "share_import",
-      "line": 793,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "portrait_material",
-      "line": 815,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "tree_cure",
-      "line": 819,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "causal_reorder",
-      "line": 825,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "causal_plan",
-      "line": 853,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "ds_key_status",
-      "line": 863,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "ds_key_save",
-      "line": 894,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "classify_backend_get",
-      "line": 919,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "classify_backend_set",
-      "line": 922,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "task_status",
-      "line": 932,
-      "coverage": "not directly invoked through /api/invoke"
-    },
-    {
-      "name": "defrag",
-      "line": 936,
-      "coverage": "not directly invoked through /api/invoke"
     },
     {
-      "name": "reembed",
-      "line": 941,
-      "coverage": "not directly invoked through /api/invoke"
+      "command": "classify-config",
+      "source": "cli/src/classify_config.rs",
+      "options": [
+        "--backend",
+        "--api-base",
+        "--model",
+        "--set",
+        "--key-stdin"
+      ]
     }
   ],
   "mcp_tools": [
@@ -1392,6 +1039,15 @@
     "resolve-take-incoming-history-kept",
     "resort-parent-persisted",
     "restore-preserves-content",
+    "runtime-cli-config-approved-server",
+    "runtime-cli-created-id",
+    "runtime-cli-diary-mode-contract",
+    "runtime-cli-parent-persisted",
+    "runtime-cli-rerank-installed",
+    "runtime-cli-restore-preserved-content",
+    "runtime-cli-status-approved-server",
+    "runtime-cli-update-persisted",
+    "runtime-cli-workspace-mode-normal",
     "runtime-endpoint-and-token-present",
     "runtime-health-protocol-version",
     "runtime-http-foreign-origin",
@@ -1400,12 +1056,12 @@
     "runtime-http-missing-command",
     "runtime-http-wrong-token",
     "secret-reveal-current-recovery-code",
-    "session-revocation-preserves-local-decryption",
-    "session-revoked-personal-readonly-marked",
     "session-owner-personal-readonly-cleared",
     "session-owner-personal-readonly-readback",
+    "session-revocation-preserves-local-decryption",
     "session-revoke-secondary-confirmed",
     "session-revoked-access-denied",
+    "session-revoked-personal-readonly-marked",
     "session-secondary-id-present",
     "session-secondary-listed",
     "space-invite-code-session-present",
@@ -1433,37 +1089,10 @@
     "tree-cure-parent-persisted",
     "tree-mutations-no-orphans",
     "update-title-content-persisted",
-    "web-config-approved-server",
-    "web-db-stamp-positive",
-    "web-diary-mode-contract",
-    "web-invoke-attach",
-    "web-invoke-classify_backend_get-response",
-    "web-invoke-config_get-response",
-    "web-invoke-create",
-    "web-invoke-created-id",
-    "web-invoke-db_stamp-response",
-    "web-invoke-delete",
-    "web-invoke-diary_mode_get-response",
-    "web-invoke-inject_targets-response",
-    "web-invoke-list-response",
-    "web-invoke-parent-persisted",
-    "web-invoke-parent-readback",
-    "web-invoke-purge",
-    "web-invoke-rerank_model_status-response",
-    "web-invoke-restore",
-    "web-invoke-restore-preserved-content",
-    "web-invoke-restore-readback",
-    "web-invoke-server_addr_get-response",
-    "web-invoke-show",
-    "web-invoke-status-response",
-    "web-invoke-tree-response",
-    "web-invoke-update",
-    "web-invoke-update-persisted",
-    "web-invoke-workspace_mode_get-response",
-    "web-rerank-installed",
-    "web-server-addr-approved-server",
-    "web-status-approved-server",
-    "web-workspace-mode-normal"
+    "web-dashboard-fixed-url",
+    "web-dashboard-no-runtime",
+    "web-legacy-lifecycle-flags-rejected",
+    "help-classify-config-contract"
   ],
   "required_remaining": [],
   "conditional_unverified": [
@@ -1472,8 +1101,8 @@
       "reason": "GitHub hosted CPU runners do not provide supported GPU/NPU hardware. Saving GPU/NPU engine selection is explicitly asserted by the base suite; actual accelerated inference remains unverified."
     },
     {
-      "feature": "Interactive TUI, native file pickers, browser rendering and actual third-party agent integration",
-      "reason": "Requires an interactive desktop or externally installed host; not asserted by a headless CLI smoke."
+      "feature": "Interactive TUI and actual third-party agent integration",
+      "reason": "Requires an interactive desktop or an external agent installation. Browser dashboard behavior is checked separately by real development web end-to-end tests."
     },
     {
       "feature": "External paid/provider credentials and provider-specific LLM quality",
@@ -1490,7 +1119,7 @@
       "reason": "This operation requires a supported Windows WinML catalog/provider and accelerator hardware. Headless hosted CPU evidence cannot assert acceleration or optional provider download support. Saving GPU/NPU engine selection is explicitly asserted by the base suite; actual accelerated inference remains unverified."
     }
   ],
-  "gate": "Default fails until every required positive assertion and supplemental suite is verified. In GitHub Actions only, -DeferSupplemental permits exactly the four named delegated suites (five catalog feature groups), never unknown requirements; base_complete is reported separately and coverage_full stays false until a combined release gate verifies all supplemental reports.",
+  "gate": "Default fails until all required base observations and five named supplemental suites pass for the exact CI artifact. Retained dashboard business functions require observed CLI/RPC equivalents; six UI-only functions are explicitly retired by requirement.",
   "excluded_not_implemented": [
     {
       "feature": "Grant token consumption through CLI/Web/MCP/RPC",
@@ -1505,10 +1134,11 @@
   ],
   "coverage_scope": "Existing callable operations and semantic effects; not an infinite Cartesian product of flags. Historical vault input formats require controlled legacy fixtures before claiming compatibility coverage.",
   "supplemental_required": [
-    "local_api",
+    "runtime",
     "ai_inject",
     "outbox",
-    "legacy_vault"
+    "legacy_vault",
+    "profile_migration"
   ],
   "supplemental_features": [
     {
@@ -1527,10 +1157,10 @@
       "reason": "Requires sufficiently large deterministic tree fixtures and a declared local or dev-hosted AI provider; existing preview calls do not cover writes."
     },
     {
-      "suite": "local_api",
-      "feature": "Remaining local /api/invoke actions and runtime /api/rpc/model.control",
-      "source": "cli/src/web.rs:498",
-      "reason": "Catalog below records all 72 dispatch actions. Current added HTTP CRUD/read/auth cases are a subset; profile/auth/config/task/stream operations need explicit contracts and assertions."
+      "suite": "runtime",
+      "feature": "Authenticated runtime RPC/MCP, dashboard launch and persistent settings",
+      "source": "cli/src/runtime_http.rs",
+      "reason": "Retained business actions require actual CLI/RPC evidence. Removed UI endpoints must return authenticated 404 and the dashboard command must not start a runtime."
     },
     {
       "suite": "outbox",
@@ -1555,6 +1185,14 @@
       "feature": "Login/vault v1/v2/v3 to v4 upgrades and secret-key two-factor recovery",
       "source": "crates/app/src/auth.rs:541",
       "reason": "Current disposable users are v4. Must provision controlled genuine legacy wrap material through approved development API; passing --secret-key on v4 does not prove historical upgrades."
+    },
+    {
+      "suite": "profile_migration",
+      "feature": "Encrypted legacy home/profile migration, WAL/outbox retention and restart recovery",
+      "source": "crates/app/src/migration.rs",
+      "reason": "Genuine disposable accounts and original keyring credentials must remain readable without a SUPER environment override; original roots must be preserved."
     }
-  ]
+  ],
+  "business_equivalence_catalog": "scripts/dev-runtime-business-coverage.json",
+  "historical_dashboard_action_count": 72
 }

@@ -29,9 +29,9 @@ def main():
     commands = [
         ("outbox", "dev-outbox-smoke.py", common + ["--root", str(root / "outbox"), "--model-dir", str(root / "outbox/models")]),
         ("ai_inject", "dev-ai-inject-smoke.py", common + ["--root", str(root / "ai-inject")]),
-        ("local_api", "dev-local-api-smoke.py", ["--binary", str(args.binary), "--binary-sha256", args.binary_sha256,
-         "--version", args.version, "--cli-source-sha", args.source_sha, "--root", str(root / "local-api"), "--report", str(root / "local-api-coverage.json")]),
+        ("runtime", "dev-runtime-smoke.py", common + ["--root", str(root / "runtime"), "--report", str(root / "runtime-coverage.json")]),
         ("legacy_vault", "dev-legacy-vault-smoke.py", common + ["--root", str(root / "legacy-vault")]),
+        ("profile_migration", "dev-profile-migration-smoke.py", common + ["--root", str(root / "profile-migration")]),
     ]
     outcomes = []
     for name, script, flags in commands:
@@ -53,7 +53,8 @@ def main():
     (root / "suite-results.json").write_text(json.dumps(outcomes, indent=2) + "\n", encoding="utf-8")
     gate = [sys.executable, str(scripts / "dev-smoke-gate.py"), "--cli-report", str(args.cli_report),
             "--outbox", str(root / "outbox/outbox-coverage.json"), "--ai-inject", str(root / "ai-inject/ai-inject-coverage.json"),
-            "--local-api", str(root / "local-api-coverage.json"), "--legacy-vault", str(root / "legacy-vault/legacy-vault-coverage.json"),
+            "--runtime", str(root / "runtime-coverage.json"), "--legacy-vault", str(root / "legacy-vault/legacy-vault-coverage.json"),
+            "--profile-migration", str(root / "profile-migration/migration-coverage.json"),
             "--report", str(root / "combined-coverage.json"), "--source-sha", args.source_sha,
             "--version", args.version, "--binary-sha256", args.binary_sha256]
     result = subprocess.run(gate, timeout=30)

@@ -1,5 +1,5 @@
-//! Local runtime transport. `rsrs web` binds this pipe and the HTTP UI
-//! in one process. Other commands connect here and auto-start `web --internal`.
+//! Local authenticated runtime transport. Commands connect to its RPC pipe/HTTP
+//! endpoints and auto-start the hidden `--runtime-internal` host entry.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -446,11 +446,9 @@ fn flight_loop() {
 }
 
 #[derive(Clone, Debug)]
-pub struct WebFlags {
+pub struct RuntimeFlags {
     pub port: Option<u16>,
-    pub no_open: bool,
     pub host: String,
-    pub internal: bool,
     pub status: bool,
     pub stop: bool,
 }
@@ -546,15 +544,18 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
-pub fn web_entry(flags: WebFlags) -> Result<()> {
-    if flags.internal {
-        crate::runtime_policy::require_host("runtime startup")?;
-        std::env::set_var("ONEMEMORY_RUNTIME", "1");
-        return serve(flags, true);
-    }
+pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
     if flags.status {
         return match call_method("runtime.status", Vec::new(), false) {
             Ok(response) => {
+                if crate::json_mode() {
+                    return crate::emit_result(ResultEnvelope::new(
+                        "runtime",
+                        OutputStatus::Ok,
+                        json!({"state":"up","pid":response.pid,"url":response.web_url,"data_dir":response.data_dir}),
+                        Vec::new(),
+                    ));
+                }
                 println!(
                     "runtime=up pid={} url={} data_dir={}",
                     response.pid.unwrap_or(0),
@@ -564,6 +565,16 @@ pub fn web_entry(flags: WebFlags) -> Result<()> {
                 Ok(())
             }
             Err(error) => {
+                if crate::json_mode() {
+                    let mut envelope = ResultEnvelope::new(
+                        "runtime",
+                        OutputStatus::Warn,
+                        json!({"state":"down"}),
+                        Vec::new(),
+                    );
+                    envelope.errors.push(format!("{error:#}"));
+                    return crate::emit_result(envelope);
+                }
                 eprintln!("{error:#}");
                 crate::set_exit_code(2);
                 Ok(())
@@ -572,22 +583,20 @@ pub fn web_entry(flags: WebFlags) -> Result<()> {
     }
     if flags.stop {
         stop_if_running()?;
+        if crate::json_mode() {
+            return crate::emit_result(ResultEnvelope::new(
+                "runtime",
+                OutputStatus::Ok,
+                json!({"state":"stopped"}),
+                Vec::new(),
+            ));
+        }
         println!("runtime=stopped");
         return Ok(());
     }
-    ensure_daemon()?;
-    match call_method("runtime.status", Vec::new(), false) {
-        Ok(response) => {
-            if let Some(url) = response.web_url.as_deref() {
-                println!("rsrs local client attached: {url}");
-                if !flags.no_open && !crate::runtime_policy::client_only() {
-                    crate::web::open_browser(url);
-                }
-            }
-            Ok(())
-        }
-        Err(error) => Err(error),
-    }
+    crate::runtime_policy::require_host("runtime startup")?;
+    std::env::set_var("ONEMEMORY_RUNTIME", "1");
+    serve(flags, true)
 }
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
@@ -691,7 +700,7 @@ fn try_exchange(request: &RpcRequest) -> Result<RpcResponse> {
     Ok(response)
 }
 
-fn serve(flags: WebFlags, detached: bool) -> Result<()> {
+fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
     crate::runtime_policy::require_host("runtime startup")?;
     // Ignore SIGHUP off this thread. signal_hook's handler install must not sit
     // in front of bind: under llvm-cov that call can stall the thread that has
@@ -732,7 +741,7 @@ fn serve(flags: WebFlags, detached: bool) -> Result<()> {
         }
         Err(error) => return Err(error).context("failed to bind the runtime pipe"),
     };
-    let Some(bound) = bind_http(&flags, detached)? else {
+    let Some(bound) = bind_http(&flags, _detached)? else {
         return Ok(());
     };
     {
@@ -741,12 +750,6 @@ fn serve(flags: WebFlags, detached: bool) -> Result<()> {
     }
     write_endpoint(&bound.url)?;
     drop(boot);
-    crate::web::install_executor(execute_json);
-    if !flags.no_open && !detached {
-        println!("rsrs local client started: {}", bound.url);
-        println!("frontend artifact: embedded");
-        crate::web::open_browser(&bound.url);
-    }
     let (tx, rx) = mpsc::channel();
     let _ = JOB_TX.set(Mutex::new(tx.clone()));
     // Sandboxed clients cannot restart an idle-exited host runtime.
@@ -759,16 +762,19 @@ fn serve(flags: WebFlags, detached: bool) -> Result<()> {
         .spawn(move || dispatch_loop(rx, limit, idle))
         .context("failed to start the runtime dispatcher")?;
     std::thread::spawn(move || {
-        if let Err(error) = crate::web::serve_loop(bound.server) {
-            eprintln!("web server stopped: {error:#}");
+        if let Err(error) = crate::runtime_http::serve_loop(bound.server) {
+            eprintln!("runtime HTTP server stopped: {error:#}");
         }
     });
     accept_loop(listener, tx);
     Ok(())
 }
 
-fn bind_http(flags: &WebFlags, _detached: bool) -> Result<Option<crate::web::BoundWeb>> {
-    crate::web::bind_web(flags.port, &flags.host).map(Some)
+fn bind_http(
+    flags: &RuntimeFlags,
+    _detached: bool,
+) -> Result<Option<crate::runtime_http::BoundRuntime>> {
+    crate::runtime_http::bind_runtime(flags.port, &flags.host).map(Some)
 }
 
 fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Job>) {
@@ -1505,7 +1511,7 @@ fn socket_path() -> PathBuf {
 
 /// Unix keeps the socket inside the data dir so a dead runtime can be cleared.
 /// A namespaced name under `/tmp` or `$TMPDIR` stays behind after a crash and the
-/// next `web --internal` never becomes ready.
+/// next `--runtime-internal` never becomes ready.
 #[cfg(unix)]
 fn unix_socket_name() -> Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
@@ -1884,17 +1890,15 @@ mod tests {
         STOPPING.store(false, Ordering::Release);
         assert!(!runtime_is_up());
         assert!(call_method("runtime.status", Vec::new(), false).is_err());
-        let down = WebFlags {
+        let down = RuntimeFlags {
             port: None,
-            no_open: true,
             host: "127.0.0.1".into(),
-            internal: false,
             status: true,
             stop: false,
         };
-        web_entry(down.clone())?;
+        runtime_entry(down.clone())?;
         assert_eq!(crate::exit_code(), 2);
-        web_entry(WebFlags {
+        runtime_entry(RuntimeFlags {
             status: false,
             stop: true,
             ..down
@@ -1921,11 +1925,9 @@ mod tests {
         let serve_error_slot = Arc::clone(&serve_error);
         let server = std::thread::spawn(move || {
             let started = serve(
-                WebFlags {
+                RuntimeFlags {
                     port: Some(18761),
-                    no_open: true,
                     host: "127.0.0.1".into(),
-                    internal: false,
                     status: false,
                     stop: false,
                 },

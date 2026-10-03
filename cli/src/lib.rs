@@ -15,6 +15,7 @@ pub use respire_app::inject;
 pub mod inject_tui;
 pub use respire_app::keystore;
 pub use respire_app::lock;
+pub use respire_app::migration;
 pub mod memory;
 pub mod model_install;
 pub mod model_progress;

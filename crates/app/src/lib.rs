@@ -10,6 +10,7 @@ mod test_lock;
 pub mod auth;
 pub mod inject;
 pub mod lock;
+pub mod migration;
 pub mod service;
 pub mod sync;
 pub mod taxonomy;

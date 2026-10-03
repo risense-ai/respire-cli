@@ -98,7 +98,9 @@ pub fn logout(full: bool) -> Result<()> {
 pub fn load_local_session() -> Result<SessionKeys> {
     let data = read_session_json()?;
     let user = data["user"].as_str().unwrap_or("").to_owned();
-    unlock_session_keys(&data, data["pass"].as_str().unwrap_or(""), None, &user)
+    let pass = data["pass"].as_str().map(ToOwned::to_owned)
+        .or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default();
+    unlock_session_keys(&data, &pass, None, &user)
 }
 
 /// Try to unlock the local session; no session → Ok(None) (unregistered; web can guide register).
@@ -225,7 +227,7 @@ pub fn keygen() -> Result<(PathBuf, String)> {
     Ok((path, super_pass))
 }
 
-fn unlock_session_keys(
+pub(crate) fn unlock_session_keys(
     data: &serde_json::Value,
     login_pass: &str,
     super_arg: Option<&str>,
@@ -252,8 +254,12 @@ fn unlock_session_keys(
         }
         // v3: super password (passphrase) + Secret Key two-factor (read-compat; login auto-upgrades to v4)
         Some(3) => {
+            let stored_super = if super_arg.is_none() && data["super"].as_str().is_none() {
+                crate::keystore::load_super(user)
+            } else { None };
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
+                .or(stored_super.as_deref())
                 .ok_or_else(|| anyhow!("super password required"))?;
             let secret_key = data["secret_key"]
                 .as_str()
@@ -263,8 +269,12 @@ fn unlock_session_keys(
         }
         // v2: super password (passphrase) only
         Some(2) => {
+            let stored_super = if super_arg.is_none() && data["super"].as_str().is_none() {
+                crate::keystore::load_super(user)
+            } else { None };
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
+                .or(stored_super.as_deref())
                 .ok_or_else(|| anyhow!("super password required"))?;
             crate::memory::SessionKeys::unlock_super(super_pass, salt, wrapped, nonce)
         }
@@ -675,7 +685,7 @@ pub fn fivekeys_login(
 ) -> Result<()> {
     crate::service::check_runtime_user(user)?;
     // A different account must not overwrite the profile that is already open.
-    session_for_other_user(user)?;
+    let previous = session_for_other_user(user)?;
     let mut data = if !super_pass.is_empty() {
         let trimmed_addr = addr.trim().trim_end_matches('/').to_owned();
         // Current accounts wrap with v4 (derive_kek_v4). unlock_super is the older
@@ -686,6 +696,9 @@ pub fn fivekeys_login(
                     "user": user,
                     "addr": trimmed_addr,
                 });
+                if let Some(alias) = previous.get("keyring_account") {
+                    data["keyring_account"] = alias.clone();
+                }
                 apply_vault_v4(
                     &mut data,
                     user,
@@ -725,6 +738,9 @@ pub fn fivekeys_login(
             "addr": addr.trim().trim_end_matches('/'),
         })
     };
+    if let Some(alias) = previous.get("keyring_account") {
+        data["keyring_account"] = alias.clone();
+    }
     if !addr.trim().is_empty() {
         authenticate_session(&mut data, addr, user, pass)?;
     }

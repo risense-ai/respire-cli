@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
       local_api_only:
-        description: Diagnose local API actions only; never validates the complete release gate
+        description: Diagnose authenticated runtime contracts only; never validates the complete release gate
         type: boolean
         default: false
       cli_run_id:
@@ -43,9 +43,9 @@ permissions:
 jobs:
   sweep:
     if: ${{ !inputs.api_only || inputs.local_api_only }}
-    name: ${{ inputs.local_api_only && 'Local API diagnostics' || format('sweep ({0})', matrix.os) }}
+    name: ${{ inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.os) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
@@ -152,7 +152,7 @@ jobs:
           if-no-files-found: warn
       - uses: actions/setup-python@v5
         id: supplement_python
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' }}
         with:
           python-version: '3.12'
       - name: Verify all supplementary CLI contracts
@@ -161,23 +161,42 @@ jobs:
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
           python3 -m pip install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
-      - name: Diagnose local API contracts without a full release claim
+      - name: Verify native encrypted profile migration
+        if: ${{ !cancelled() && !inputs.local_api_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: pwsh
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $binary = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
+          $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'dev-supplements') | Out-Null
+          $migrationRoot = Join-Path $env:RUNNER_TEMP 'dev-supplements/profile-migration'
+          python scripts/dev-profile-migration-smoke.py --binary $binary --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA --root $migrationRoot
+          $migrationExit = $LASTEXITCODE
+          python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'om-sweep/coverage.json') --profile-migration (Join-Path $migrationRoot 'migration-coverage.json') --report (Join-Path $env:RUNNER_TEMP 'dev-supplements/migration-platform-gate.json') --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA
+          if ($migrationExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native migration or artifact gate failed.' }
+      - name: Diagnose runtime contracts without a full release claim
         if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/dev-local-api-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --cli-source-sha "$CLI_SHA" --root "$RUNNER_TEMP/local-api-diagnostics" --report "$RUNNER_TEMP/dev-supplements/local-api-coverage.json"
+          python3 scripts/dev-runtime-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/runtime-diagnostics" --report "$RUNNER_TEMP/dev-supplements/runtime-coverage.json"
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -190,8 +209,10 @@ jobs:
             ${{ runner.temp }}/dev-supplements/combined-coverage.json
             ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json
             ${{ runner.temp }}/dev-supplements/ai-inject/ai-inject-coverage.json
-            ${{ runner.temp }}/dev-supplements/local-api-coverage.json
+            ${{ runner.temp }}/dev-supplements/runtime-coverage.json
             ${{ runner.temp }}/dev-supplements/legacy-vault/legacy-vault-coverage.json
+            ${{ runner.temp }}/dev-supplements/profile-migration/migration-coverage.json
+            ${{ runner.temp }}/dev-supplements/migration-platform-gate.json
           if-no-files-found: error
 
   api-smoke:

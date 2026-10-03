@@ -113,12 +113,6 @@ copyFileSync(path.join(repoRoot, 'npm', 'bin', 'cli.js'), path.join(mainDir, 'bi
 chmodSync(path.join(mainDir, 'bin', 'cli.js'), 0o755);
 cpSync(path.join(repoRoot, 'npm', 'README.md'), path.join(mainDir, 'README.md'));
 copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(mainDir, 'LICENSE'));
-const webDist = path.join(repoRoot, 'npm', 'web-dist');
-if (!existsSync(path.join(webDist, 'index.html'))) {
-  console.error('npm/web-dist/index.html is missing; cargo embeds it into the CLI at build time');
-  process.exit(1);
-}
-
 writeFileSync(path.join(mainDir, 'package.json'), JSON.stringify({
   name: SCOPE, version,
   description: 'rsrs CLI — encrypted cross-device AI memory',

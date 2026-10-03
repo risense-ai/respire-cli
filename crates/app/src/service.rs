@@ -31,7 +31,7 @@ pub fn install_runtime_profile(profile: PathBuf) {
 }
 pub fn require_profile_change_host() -> Result<()> {
     if RUNTIME_PROFILE.get().is_some() {
-        anyhow::bail!("runtime owns its boot profile; stop it on the host with `rsrs web --stop`, run the profile command with `rsrs --direct`, then restart `rsrs web --no-open`");
+        anyhow::bail!("runtime owns its boot profile; stop it on the host with `rsrs --runtime-internal --stop`, run the profile command with `rsrs --direct`, then restart `rsrs --runtime-internal`");
     }
     Ok(())
 }
@@ -741,7 +741,7 @@ pub fn keygen() -> Result<(PathBuf, String)> {
     auth::keygen()
 }
 
-/// Default server address (client can change it; stored in ~/.respire/client.json, separate from session.json auth).
+/// Default server address (client can change it; stored in ~/.rsrs/client.json, separate from session.json auth).
 pub const DEFAULT_SERVER_ADDR: &str = "https://api.rsrs.rs";
 
 /// Expand `~` (`~/` and Windows `~\` both count) — **the only impl**; do not rewrite elsewhere.
@@ -751,7 +751,7 @@ pub const DEFAULT_SERVER_ADDR: &str = "https://api.rsrs.rs";
 /// `~\...` paths did not expand. Now collected here; every caller uses this.
 pub fn expand_tilde(v: &str) -> PathBuf {
     if let Some(rest) = v.strip_prefix("~/").or_else(|| v.strip_prefix("~\\")) {
-        if let Some(h) = dirs::home_dir() {
+        if let Ok(h) = home_dir() {
             return h.join(rest);
         }
     }
@@ -765,6 +765,9 @@ pub fn env_root_dir() -> Option<PathBuf> {
     let v = std::env::var("ONEMEMORY_DATA_DIR").ok()?;
     let v = v.trim();
     if v.is_empty() {
+        return None;
+    }
+    if crate::migration::internally_configured_root(v) {
         return None;
     }
     Some(expand_tilde(v))
@@ -785,7 +788,7 @@ fn client_config_path() -> PathBuf {
     }
     home_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".respire")
+        .join(".rsrs")
         .join("client.json")
 }
 
@@ -805,17 +808,17 @@ fn write_client_config(data: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-// ── data dir (client.json data_dir → ONEMEMORY_DATA_DIR → ~/.respire) ──
+// ── data dir (client.json data_dir → ONEMEMORY_DATA_DIR → ~/.rsrs) ──
 // For tests and multi-lib maintenance: changing data_dir switches the whole library (db/session/lock follow).
-// Order: env var wins (one-shot override for CI/tests) → client.json data_dir → default ~/.respire.
+// Order: env var wins (one-shot override for CI/tests) → client.json data_dir → default ~/.rsrs.
 
 pub fn default_data_dir() -> PathBuf {
     home_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".respire")
+        .join(".rsrs")
 }
 
-/// Main-profile dir: `ONEMEMORY_DATA_DIR` when isolated, else default `~/.respire`.
+/// Main-profile dir: `ONEMEMORY_DATA_DIR` when isolated, else default `~/.rsrs`.
 /// **Every "back to main" path must use this**, not a hard `default_data_dir()` — otherwise an isolated instance
 /// switching back to main would land in the real user dir (hit 2026-09-20).
 pub fn main_data_dir() -> PathBuf {
@@ -880,17 +883,11 @@ pub fn set_data_dir(dir: &str) -> Result<()> {
 // accounts_root would become <profile>/accounts and other profiles would vanish).
 // But **when ONEMEMORY_DATA_DIR is set it must follow** (fixed 2026-09-20): that var is the only isolation entry
 // for tests/multi-lib; if the profile root still landed in real HOME, isolated space profiles polluted the user dir (hit:
-// a web isolation instance created work/sales under ~/.respire/accounts).
+// a web isolation instance created work/sales under ~/.rsrs/accounts).
 // Scene: several accounts on one machine (work/personal/test); login no longer needs logout --full to wipe key material.
 
 pub fn accounts_root() -> PathBuf {
-    if let Ok(v) = std::env::var("ONEMEMORY_DATA_DIR") {
-        let v = v.trim();
-        if !v.is_empty() {
-            return PathBuf::from(v).join("accounts");
-        }
-    }
-    default_data_dir().join("accounts")
+    env_root_dir().unwrap_or_else(default_data_dir).join("accounts")
 }
 
 /// Account profile dir (name check: letters/digits/-/_; no path traversal).
@@ -1390,7 +1387,7 @@ pub fn autosync_enabled() -> bool {
 /// Actual write-path sync gate: always off inside tests.
 ///
 /// Why (proven 2026-09-16): tests build fixtures with a fixed URK (`[7u8; 32]`); if the write path triggered
-/// auto-sync, and that check read the **real** ~/.respire/session.json, a logged-in test machine
+/// auto-sync, and that check read the **real** ~/.rsrs/session.json, a logged-in test machine
 /// would push fake rows to the real cloud — ciphertext the local key cannot open (14 rows).
 /// split_exec / deepen_apply each missed this and got one-off patches; this is the single gate:
 /// every write-path auto-sync goes through this fn; new write paths do not need a private check.
@@ -3007,7 +3004,7 @@ mod tests {
     fn data_dir_config_roundtrip() -> anyhow::Result<()> {
         let real_client = dirs::home_dir()
             .ok_or_else(|| anyhow!("home dir missing"))?
-            .join(".respire")
+            .join(".rsrs")
             .join("client.json");
         let before = std::fs::read(&real_client).ok();
         let iso = crate::test_lock::Isolate::new()?;
@@ -3108,7 +3105,7 @@ mod tests {
 
     /// Split contract: attach children to the outline, reseal it, and preserve the body when no summary is supplied.
     /// Isolation: split_exec used to auto-sync at the end via remote_configured(), which reads the **real**
-    /// ~/.respire/session.json — if the test machine is logged in, cloud data is pulled into the temp library,
+    /// ~/.rsrs/session.json — if the test machine is logged in, cloud data is pulled into the temp library,
     /// and the "two children" assert is polluted (2026-09-16: got 7 not 2). This test forces auto-sync off.
     #[test]
     fn split_exec_lands_children_and_summary() -> anyhow::Result<()> {

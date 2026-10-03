@@ -374,14 +374,14 @@ fn read_lang_file() -> Option<Lang> {
     parse_lang(data.get("lang")?.as_str()?)
 }
 
-/// Same path rule as app-core: `ONEMEMORY_DATA_DIR/client.json`, else `~/.respire/client.json`.
+/// Same path rule as app-core: `ONEMEMORY_DATA_DIR/client.json`, else `~/.rsrs/client.json`.
 pub fn client_config_path() -> PathBuf {
     if let Some(root) = respire::service::env_root_dir() {
         return root.join("client.json");
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".respire")
+    respire::service::home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".rsrs")
         .join("client.json")
 }
 

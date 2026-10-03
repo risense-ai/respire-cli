@@ -1,4 +1,4 @@
-//! HTTP RPC against `rsrs web --internal` (the daemon).
+//! HTTP RPC against the hidden `rsrs --runtime-internal` host entry.
 //! Isolated DATA_DIR + ephemeral port. Safe for GitHub Actions.
 //! Do not bind the developer machine's default 15169.
 
@@ -54,8 +54,7 @@ fn start_internal_runtime() -> Result<Runtime, String> {
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
     let mut child = Command::new(bin())
         .args([
-            "web",
-            "--internal",
+            "--runtime-internal",
             "--no-open",
             "--port",
             &port.to_string(),

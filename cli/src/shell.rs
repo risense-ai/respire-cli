@@ -1748,12 +1748,11 @@ fn web_key(app: &mut App, code: KeyCode) -> bool {
         KeyCode::Down => app.cursor = 1,
         KeyCode::Enter if app.cursor == 1 => app.page = Page::Home,
         KeyCode::Enter => {
-            let url = if app.live.url.is_empty() {
-                crate::net_rpc::rpc_base_url()
-            } else {
-                app.live.url.clone()
-            };
-            crate::web::open_browser(&url);
+            let url = crate::web::DASHBOARD_URL;
+            if let Err(error) = crate::web::open_browser(url) {
+                app.set_notice(error.to_string());
+                return false;
+            }
             app.set_notice(t(&format!("已打开 {url}"), &format!("Opened {url}")));
         }
         _ => {}
@@ -1762,13 +1761,9 @@ fn web_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 fn web_body(app: &App) -> Vec<Line<'static>> {
-    let url = if app.live.url.is_empty() {
-        crate::net_rpc::rpc_base_url()
-    } else {
-        app.live.url.clone()
-    };
+    let url = crate::web::DASHBOARD_URL;
     vec![
-        line(format!("{}: {url}", t("本机页面", "Local page"))),
+        line(format!("{}: {url}", t("用户后台", "User dashboard"))),
         line(t(
             "回车用系统浏览器打开。",
             "Enter opens it in the system browser.",

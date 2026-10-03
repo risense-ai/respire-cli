@@ -15,9 +15,11 @@ flowchart LR
 | Other sandboxes | Integration explicitly selects client-only mode |
 
 ```sh
-# Host
-rsrs web --no-open
-rsrs web --stop
+# Hosted dashboard (does not start the local runtime)
+rsrs web
+# Host lifecycle diagnostics
+rsrs --runtime-internal
+rsrs --runtime-internal --stop
 # Sandbox
 rsrs --client-only recall "query" --titles --json
 ```
@@ -54,7 +56,12 @@ host loopback addresses.
 | Administration | `https://admin.rsrs.rs` |
 | Default API | `https://api.rsrs.rs` |
 
-The default API can be changed through the server settings. Respire uses its own `~/.respire` profile and port `15169`; it
-does not automatically read the old product's config or session. Explicit
+The default API can be changed through the server settings. Respire uses `~/.rsrs` and port `15169`; supported old default profiles are copied safely on startup while the original directories remain. Explicit
 `ONEMEMORY_*` overrides remain supported, and the database filename and wire format
 remain compatible.
+
+## Hosted dashboard and local transport
+
+`rsrs web` opens `https://dash.rsrs.rs`. `rsrs web --no-open --json` reports that URL without opening a browser. It does not start, stop, or bind the runtime. Former `web --host`, `--port`, `--status`, `--stop`, and `--internal` flags are no longer supported.
+
+The hidden `--runtime-internal` entry is reserved for host lifecycle and automated diagnostics. CLI commands automatically start the authenticated runtime when allowed; restricted clients only connect. Local `/api/health`, `/api/rpc`, `/api/runtime/stop`, `/mcp`, and `/sse` remain authenticated. Browser pages, static assets, `/api/invoke`, and `/api/task` are removed. Authentication tokens are accepted in headers, never dashboard URLs.

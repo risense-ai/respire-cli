@@ -7,7 +7,7 @@ from pathlib import Path
 import re
 import sys
 
-SUPPLEMENTS = {"local_api", "ai_inject", "outbox", "legacy_vault"}
+SUPPLEMENTS = {"runtime", "ai_inject", "outbox", "legacy_vault", "profile_migration"}
 OUTBOX = {"foreground_save_during_network_wait", "independent_pull_decrypt",
           "scheduled_transport_retry", "finite_manual_boundary", "reset_old_response_rejection"}
 AI = {"model_cpu_real", "inject_preview_install_remove", "inject_stale_revision_rejected",
@@ -17,6 +17,11 @@ AI = {"model_cpu_real", "inject_preview_install_remove", "inject_stale_revision_
       "tree_deepen_auto_applied", "tree_cure_auto_applied"}
 LEGACY = {"model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade",
           "cloud_v3_secret_key_recovery_upgrade"}
+MIGRATION = {"model_cpu_real", "onememory_multiaccount_wal_migrated", "respire_compatibility_migrated",
+             "legacy_keys_migrated_without_super_override", "legacy_api_defaults_rewritten",
+             "migration_repeated_start_idempotent", "migration_interrupted_restart_recovered",
+             "existing_rsrs_preserved_and_legacy_imported", "migrated_outbox_sync_and_independent_decrypt",
+             "migration_incompatible_primary_keys_rejected", "migration_symlink_root_rejected", "migration_client_only_does_not_write"}
 
 
 def require(value, code):
@@ -39,6 +44,25 @@ def identity(report, args, source="source_sha", version="version"):
 def cases(report, required, code):
     observed = report.get("cases", {})
     require(all(observed.get(name, {}).get("passed") is True for name in required), code)
+
+
+def verify_migration(args, result):
+    migration = read(args.profile_migration)
+    identity(migration, args)
+    require(set(migration.get("required_cases", [])) == MIGRATION, "migration_case_contract_mismatch")
+    require(migration.get("passed") is True and not migration.get("missing_cases"), "migration_incomplete")
+    cases(migration, MIGRATION, "migration_required_cases_missing")
+    require(migration.get("cloud_cleanup", {}).get("passed") is True
+            and not migration.get("cloud_cleanup", {}).get("remaining_users"), "migration_cleanup_failed")
+    require(migration.get("keyring_cleanup", {}).get("passed") is True
+            and not migration.get("keyring_cleanup", {}).get("remaining_entries"), "migration_keyring_cleanup_failed")
+    native_backends = {"linux": "linux-keyutils", "darwin": "macos-keychain-synthetic-acl",
+                       "win32": "windows-credential-manager"}
+    require(migration.get("platform") == sys.platform
+            and migration.get("keyring_backend") == native_backends.get(sys.platform),
+            "migration_native_platform_mismatch")
+    result["components"]["profile_migration"] = {"passed": True, "required_observed": len(MIGRATION),
+        "platform": migration["platform"], "keyring_backend": migration["keyring_backend"]}
 
 
 def verify(args, result):
@@ -64,6 +88,12 @@ def verify(args, result):
     require(base.get("cloud_cleanup", {}).get("passed") is True
             and not base.get("cloud_cleanup", {}).get("remaining_users"), "cli_cleanup_failed")
     result["components"]["cli"] = {"passed": True, "required_observed": len(required)}
+    if args.migration_only:
+        verify_migration(args, result)
+        result["complete"] = True
+        return
+    require(all(getattr(args, name) is not None for name in ("outbox", "ai_inject", "runtime", "legacy_vault")),
+            "full_gate_supplement_paths_required")
 
     outbox = read(args.outbox)
     identity(outbox, args)
@@ -86,17 +116,43 @@ def verify(args, result):
     require(legacy.get("cloud_cleanup", {}).get("passed") is True, "legacy_vault_cleanup_failed")
     result["components"]["legacy_vault"] = {"passed": True, "required_observed": len(LEGACY)}
 
-    local = read(args.local_api)
-    identity(local, args, source="cli_source_sha")
-    require(local.get("complete") is True and not local.get("uncovered")
-            and not local.get("negative_uncovered") and not local.get("conditional"), "local_api_incomplete")
-    actions = local.get("actions", [])
-    expected_actions = json.loads(Path(__file__).with_name("dev-local-api-coverage.json").read_text(encoding="utf-8"))["actions"]
-    require(len(actions) == 72 and {action.get("action") for action in actions}
-            == {action["action"] for action in expected_actions} and all(action.get("passed") is True
-            and action.get("observed_assertions", 0) >= 2 for action in actions), "local_api_observations_missing")
-    require(local.get("cloud_cleanup") is True and not local.get("remaining_users"), "local_api_cleanup_failed")
-    result["components"]["local_api"] = {"passed": True, "required_observed": len(actions)}
+    runtime = read(args.runtime)
+    identity(runtime, args)
+    runtime_catalog = read(Path(__file__).with_name("dev-runtime-required.json"))
+    runtime_required = set(runtime_catalog["required_cases"])
+    require(runtime_required and len(runtime_required) == len(runtime_catalog["required_cases"])
+            and set(runtime.get("required_cases", [])) == runtime_required, "runtime_case_contract_mismatch")
+    require(runtime.get("passed") is True and not runtime.get("missing_cases"), "runtime_incomplete")
+    cases(runtime, runtime_required, "runtime_required_cases_missing")
+    require(runtime.get("cloud_cleanup", {}).get("passed") is True
+            and not runtime.get("cloud_cleanup", {}).get("remaining_users"), "runtime_cleanup_failed")
+    result["components"]["runtime"] = {"passed": True, "required_observed": len(runtime_required)}
+
+    verify_migration(args, result)
+
+    mapping = read(Path(__file__).with_name("dev-runtime-business-coverage.json"))
+    original = read(Path(__file__).with_name("dev-local-api-coverage.json"))["actions"]
+    actions = mapping["actions"]
+    require(len(actions) == 72 and {row["action"] for row in actions} == {row["action"] for row in original},
+            "business_mapping_incomplete")
+    base_observed = {row.get("case") for row in base.get("cases", []) if row.get("result") == "passed"
+                     and row.get("status") not in ("fail", "skip")}
+    suites = {"cli": base_observed, "runtime": {name for name, row in runtime.get("cases", {}).items() if row.get("passed") is True},
+              "ai_inject": {name for name, row in ai.get("cases", {}).items() if row.get("passed") is True},
+              "legacy_vault": {name for name, row in legacy.get("cases", {}).items() if row.get("passed") is True}}
+    retired = {"list_system_fonts", "pick_save_file", "pick_open_file", "pick_directory", "task_status", "db_stamp"}
+    observations = []
+    for action in actions:
+        if action["action"] in retired:
+            require(action.get("removed_by_requirement") is True and bool(action.get("reason")), "invalid_retired_action")
+            observations.append({"action": action["action"], "removed_by_requirement": True})
+            continue
+        evidence = action.get("evidence", [])
+        require(evidence and all(item.get("suite") in suites and item.get("case") in suites[item["suite"]]
+                                 for item in evidence), "business_observation_missing:" + action["action"])
+        observations.append({"action": action["action"], "passed": True, "evidence": evidence})
+    result["business_actions"] = observations
+    result["components"]["business_equivalence"] = {"passed": True, "observed": 66, "removed_by_requirement": 6}
     result["complete"] = True
     result["conditional_unverified"] = catalog.get("conditional_unverified", [])
     result["excluded_not_implemented"] = catalog.get("excluded_not_implemented", [])
@@ -104,13 +160,18 @@ def verify(args, result):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ("cli-report", "outbox", "ai-inject", "local-api", "legacy-vault", "report"):
+    for name in ("cli-report", "profile-migration", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
+    for name in ("outbox", "ai-inject", "runtime", "legacy-vault"):
+        parser.add_argument("--" + name, type=Path)
+    parser.add_argument("--migration-only", action="store_true",
+                        help="Verify this native platform's base and migration only; not the full supplemental gate.")
     for name in ("source-sha", "version", "binary-sha256"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
     result = {"complete": False, "source_sha": args.source_sha, "version": args.version,
-              "binary_sha256": args.binary_sha256, "components": {}}
+              "binary_sha256": args.binary_sha256, "components": {},
+              "scope": "native_profile_migration" if args.migration_only else "full_cli_supplements"}
     try:
         verify(args, result)
     except Exception as error:
