@@ -29,7 +29,7 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("status envelope command was {}", value["command"]).into());
     }
 
-    let again = run(dir.path(), &["web", "--status"])?;
+    let again = run(dir.path(), &["--runtime-internal", "--status"])?;
     let text = String::from_utf8(again.stdout)?;
     if !text.contains("runtime=up") {
         return Err(format!(
@@ -39,12 +39,12 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let stopped = run(dir.path(), &["web", "--stop"])?;
+    let stopped = run(dir.path(), &["--runtime-internal", "--stop"])?;
     if !stopped.status.success() {
         return Err(format!("stop failed: {}", String::from_utf8(stopped.stderr)?).into());
     }
     std::thread::sleep(Duration::from_millis(300));
-    let down = run(dir.path(), &["web", "--status"])?;
+    let down = run(dir.path(), &["--runtime-internal", "--status"])?;
     let down_text = String::from_utf8(down.stdout)?;
     if down.status.code() != Some(2)
         && !down_text.contains("没有在运行")
