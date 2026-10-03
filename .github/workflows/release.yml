@@ -179,6 +179,10 @@ jobs:
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($IsMacOS) {
+            python -m pip install --only-binary=:all: cryptography==46.0.3
+            if ($LASTEXITCODE -ne 0) { throw 'macOS migration fixture dependencies failed' }
+          }
           $binary = (Resolve-Path (Join-Path cli $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }))).Path
           $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           $root = Join-Path $env:RUNNER_TEMP 'native-profile-migration'
