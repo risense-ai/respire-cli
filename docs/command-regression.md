@@ -37,6 +37,11 @@ the original successful build run and its exact source SHA; it never selects a
 floating npm version. Reports contain no session files, credentials or raw payloads.
 
 Main pushes publish a development version and stable tags publish a formal version
-only after build, API and CLI gates pass. Interactive UI, real GPU/NPU hardware and
+only after build, API and CLI gates pass. Development versions use consecutive
+numbers, such as `1.0.8-dev.1`, `1.0.8-dev.2`, and `1.0.8-dev.3`, rather than Actions
+run IDs. Publishing is serialized; existing tags, draft releases and all eight npm
+packages reserve numbers. A partially published version is never reused. The next
+unreleased base starts at `dev.1`; existing published versions remain unchanged.
+Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.

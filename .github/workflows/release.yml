@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: cli-release-publication
+  cancel-in-progress: false
+
 jobs:
   plan:
     runs-on: ubuntu-latest
@@ -42,7 +46,7 @@ jobs:
         env:
           RELEASE_REF: ${{ inputs.ref || github.ref }}
           RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
-          RELEASE_RUN_ID: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
           const fs=require('fs'),cp=require('child_process');
@@ -58,9 +62,8 @@ jobs:
             if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
             cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
           }else{
-            const base=cargo.match(/^(\d+\.\d+\.\d+)(?:-|$)/)?.[1];
-            if(!base) throw new Error('Invalid CLI stable version base');
-            channel='dev';version=`${base}-dev.${process.env.RELEASE_RUN_ID}`;
+            channel='dev';
+            version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
           }
           const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
           fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);

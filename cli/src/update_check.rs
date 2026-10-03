@@ -84,7 +84,15 @@ pub fn is_newer(a: &str, b: &str) -> bool {
     match (apre.is_empty(), bpre.is_empty()) {
         (true, false) => true,
         (false, true) => false,
-        _ => apre > bpre,
+        _ => match (
+            apre.strip_prefix("dev.")
+                .and_then(|n| n.parse::<u64>().ok()),
+            bpre.strip_prefix("dev.")
+                .and_then(|n| n.parse::<u64>().ok()),
+        ) {
+            (Some(a), Some(b)) => a > b,
+            _ => apre > bpre,
+        },
     }
 }
 
