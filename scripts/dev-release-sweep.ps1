@@ -1268,7 +1268,7 @@ Invoke-RuntimeCli 'runtime-cli-delete' @('forget', $runtimeId) | Out-Null
 Invoke-RuntimeCli 'runtime-cli-restore' @('restore', $runtimeId) | Out-Null
 $runtimeRestored = Invoke-RuntimeCli 'runtime-cli-restore-readback' @('show', $runtimeId)
 Assert-Smoke 'runtime-cli-restore-preserved-content' ([string]$runtimeRestored.details.entry.content -ceq "runtime-updated-$stamp")
-Invoke-RuntimeCli 'runtime-cli-purge' @('purge', $runtimeId, '--yes') | Out-Null
+Invoke-RuntimeCli 'runtime-cli-purge' @('purge', $runtimeId) | Out-Null
 $wantTools = @(
     'memory_status','memory_remember','memory_recall','memory_list','memory_show','memory_update',
     'memory_attach','memory_tree','memory_history','memory_diary','memory_chain','memory_query_log_mark',
