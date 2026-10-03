@@ -229,6 +229,35 @@ class Smoke:
         return entry
 
     def inject(self):
+        def verify_policy(text, edition):
+            require(isinstance(text, str) and bool(text), "inject_policy_missing_" + edition)
+            require("scan_mode" not in text and not re.search(r"--importance\s+\d", text),
+                "inject_unsupported_policy_claim_" + edition)
+            if edition == "readonly":
+                require(all(value in text for value in (
+                    "rsrs --client-only", "127.0.0.1:15169", "--direct", "Do not store",
+                    "Do not start, stop, copy or upgrade", "read-only restrictions")),
+                    "inject_readonly_contract_missing")
+            else:
+                require(all(value in text for value in (
+                    "Credential references", "Task conditions", "【触发】", "confirmed",
+                    "prerequisite", "time zone", "private keys", "important", "trivial")),
+                    "inject_agent_rules_missing_" + edition)
+                require("not an automatic CLI scanner" in text
+                    or "does not provide automatic scanning" in text,
+                    "inject_scanner_limit_missing_" + edition)
+                require("not automatic validation or a background reminder" in text
+                    or "not CLI validation or a background reminder" in text
+                    or "no automatic validation or background reminder" in text,
+                    "inject_reminder_limit_missing_" + edition)
+                if edition != "workbuddy":
+                    require("rsrs --client-only" in text and "127.0.0.1:15169" in text,
+                        "inject_sandbox_contract_missing_" + edition)
+            return hashlib.sha256(text.encode()).hexdigest()
+
+        # Full policy is exposed by prompt; normal installations use the lite edition.
+        full = self.cli("prompt")["summary"].get("instructions")
+        policies = {"full_prompt": verify_policy(full, "full")}
         target = self.root / "home/.codex/AGENTS.md"
         target.parent.mkdir()
         original = "# Disposable fixture\nKeep this text.\n"
@@ -238,12 +267,42 @@ class Smoke:
         self.cli("inject", "--id", "codex", "--expected", preview["revision"])
         require(target.read_text() == preview["after"], "inject_install_readback")
         installed = target.read_text()
+        policies["lite"] = verify_policy(installed, "lite")
         self.cli("inject", "--id", "codex")
         require(target.read_text() == installed, "inject_not_idempotent")
         remove = self.cli("inject", "--id", "codex", "--remove", "--preview")["details"]
         self.cli("inject", "--id", "codex", "--remove", "--expected", remove["revision"])
         require(target.read_text() == remove["after"] and "Keep this text." in target.read_text(), "inject_remove_readback")
-        self.passed("inject_preview_install_remove", install_sha256=hashlib.sha256(installed.encode()).hexdigest())
+        self.cli("agent-config", "--set", "readonly=true")
+        try:
+            readonly = self.cli("inject", "--id", "codex", "--preview")["details"]
+            self.cli("inject", "--id", "codex", "--expected", readonly["revision"])
+            require(target.read_text() == readonly["after"], "inject_readonly_install_readback")
+            policies["readonly"] = verify_policy(target.read_text(), "readonly")
+            self.cli("inject", "--id", "codex", "--remove")
+            require(target.read_text().rstrip("\r\n") == original.rstrip("\r\n"),
+                "inject_readonly_remove_changed_user_content")
+        finally:
+            self.cli("agent-config", "--set", "readonly=false")
+        workbuddy = self.root / "home/.workbuddy/MEMORY.md"
+        workbuddy.parent.mkdir()
+        workbuddy.write_text(original, encoding="utf-8")
+        self.cli("inject", "--id", "workbuddy")
+        reference = workbuddy.read_text()
+        require(reference.startswith(original), "inject_workbuddy_changed_user_content")
+        policies["workbuddy"] = verify_policy(reference, "workbuddy")
+        entity = re.search(r"Read the complete policy before each round: `([^`]+)`", reference)
+        require(entity is not None, "inject_workbuddy_entity_reference_missing")
+        entity_path = Path(entity.group(1)).resolve(strict=True)
+        require(entity_path.is_relative_to(self.root), "inject_entity_outside_fixture")
+        verify_policy(entity_path.read_text(), "lite")
+        self.cli("inject", "--id", "workbuddy")
+        require(workbuddy.read_text() == reference, "inject_workbuddy_not_idempotent")
+        self.cli("inject", "--id", "workbuddy", "--remove")
+        require(workbuddy.read_text().rstrip("\r\n") == original.rstrip("\r\n"),
+            "inject_workbuddy_remove_changed_user_content")
+        self.passed("inject_preview_install_remove", install_sha256=hashlib.sha256(installed.encode()).hexdigest(),
+            policy_editions=policies, readonly_restored=True, workbuddy_roundtrip=True)
         preview = self.cli("inject", "--id", "codex", "--preview")["details"]
         target.write_text(original + "New revision.\n", encoding="utf-8")
         before = target.read_bytes()

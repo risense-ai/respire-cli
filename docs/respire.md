@@ -6,7 +6,29 @@ Recall before responding or acting, read selected records in JSON, prefer updati
 | --- | --- |
 | Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
-| Complete policy | Original Chinese rules below remain authoritative; this overview does not change them |
+| Complete policy | Apply the English rules here together with the existing Chinese workflow below |
+
+## Credential references
+
+Before storing, updating, importing or sharing memory content, inspect its body,
+title and tags. Do not include plaintext passwords, API tokens or private keys.
+Record only a safe reference to their purpose and storage location, such as
+"The deployment credential is held in the system credential store." Keep the
+secret itself out of recall queries and shared text as well. This is an agent
+instruction; the CLI does not provide automatic scanning, blocking or redaction.
+
+## Task conditions
+
+For a task-plan record, include a `【触发】` line with a confirmed `YYYY-MM-DD`
+date or a verifiable prerequisite. Include a time zone when a time matters.
+Ask when the date or prerequisite is missing or ambiguous; do not infer an
+absolute date from relative wording without a confirmed reference date.
+When recalling the task, check the current date and evidence that its
+prerequisite is satisfied. Mention an overdue or approaching deadline, or a
+verified satisfied prerequisite, before the main answer. This is a check by
+the agent during the conversation, not CLI validation or a background reminder.
+Keep the existing `【前因】`, `【行为】` and `【后果】` body markers and use
+`--importance important` or `--importance trivial`, not a numeric score.
 
 ## 中文完整规则
 

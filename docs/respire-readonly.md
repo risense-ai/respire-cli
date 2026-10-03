@@ -4,9 +4,14 @@ Read memories only. Do not store, update, delete, merge, import or modify the tr
 
 | Contract | Requirement |
 | --- | --- |
-| Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
+| Sandbox | Use `rsrs --client-only <command>` to connect to the authenticated host HTTP runtime at `127.0.0.1:15169` by default; do not use `--direct` or change the runtime lifecycle. |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
 | Complete policy | Original Chinese rules below remain authoritative; this overview does not change them |
+
+If connection or authentication fails, report the failure for the host operator
+to resolve. Do not start, stop, copy or upgrade the host service. Client-only
+access does not grant write permission: the read-only restrictions below still
+apply.
 
 ## 中文完整规则
 

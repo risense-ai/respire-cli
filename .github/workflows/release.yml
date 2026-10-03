@@ -15,10 +15,6 @@ on:
         description: Publish after all binary, package and development-server checks
         default: false
         type: boolean
-      mirror:
-        description: Also mirror the completed release to respire-releases
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -415,27 +411,3 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
         run: gh release edit "$CLI_TAG" --draft=false
-
-  mirror:
-    needs: [plan, publish]
-    if: github.event_name == 'workflow_dispatch' && inputs.mirror && needs.publish.result == 'success'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: cli-release-*
-          path: release-assets
-          merge-multiple: true
-      - name: Mirror only when explicitly requested
-        env:
-          GH_TOKEN: ${{ secrets.RELEASES_GITHUB_TOKEN }}
-          CLI_TAG: ${{ needs.plan.outputs.tag }}
-          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
-        run: |
-          set -euo pipefail
-          test -n "$GH_TOKEN" || { echo 'Requested mirror requires RELEASES_GITHUB_TOKEN'; exit 1; }
-          if ! gh release view "$CLI_TAG" --repo risense-ai/respire-releases >/dev/null 2>&1; then
-            extra=(); if [ "$CLI_CHANNEL" = dev ]; then extra+=(--prerelease); fi
-            gh release create "$CLI_TAG" --repo risense-ai/respire-releases --title "$CLI_TAG" --notes "Validated CLI distribution" "${extra[@]}"
-          fi
-          gh release upload "$CLI_TAG" release-assets/* --repo risense-ai/respire-releases --clobber

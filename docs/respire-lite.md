@@ -6,7 +6,10 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 | --- | --- |
 | Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
-| Complete policy | Original Chinese rules below remain authoritative; this overview does not change them |
+| Complete policy | Apply the English rules here together with the existing Chinese workflow below |
+| Credential references | Inspect content before writing or sharing; omit plaintext passwords, API tokens and private keys, and store only a safe purpose/location reference. Keep secrets out of recall queries. This is an agent rule, not an automatic CLI scanner. |
+| Task conditions | Include a `【触发】` line with a confirmed date (and time zone if needed) or verifiable prerequisite. Ask if unclear; check dates and prerequisite evidence when recalling the task, then mention due conditions. There is no automatic validation or background reminder. |
+| Importance | Use `--importance important` for reusable findings or `--importance trivial` for diary entries; do not use numeric scores. |
 
 ## 中文完整规则
 

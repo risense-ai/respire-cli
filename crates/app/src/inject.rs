@@ -119,13 +119,13 @@ fn expand(p: &str) -> std::path::PathBuf {
 /// so we do not embed the full text (7408 chars); only core rules + the full-text path, so it reads respire.md each turn.
 fn wb_ref_md(entity: &str) -> String {
     format!(
-        r#"## Respire 记忆铁律
+        r#"## Respire memory workflow
 
-全文（每轮开工前用 Read 读一次）：`{entity}`
+Read the complete policy before each round: `{entity}`.
 
 **三行铁锚**（上下文愈长、工具输出愈多，愈须回读）：**答前必查 ｜ 收尾必存 ｜ 遇障先翻忆**。
 
-核心五条，逐条照办：
+Core rules (follow each item):
 
 1. **言必检**：开口前先 `rsrs recall "<项目名+关键词>" --limit 3`；命中则融入回答，未命中换词再查一次（禁敷衍式一查：查了不用等于没查）。
 2. **遇障先翻忆**：报错/异常/行为不符，先 `rsrs recall "<项目名+组件+症状>"` 2–3 组关键词，再动手；同一坑不踩第二次。
@@ -136,6 +136,8 @@ fn wb_ref_md(entity: &str) -> String {
 7. **读忆首看设备**：recall/show/diary 每条皆标 `🖥记录于=<主机/平台>`、`✎改于=<最后改的设备>`。他机之忆只取结论，**命令与路径不得照搬**；标「未知设备（旧数据，勿跨机照搬）」者更须当场核实。存忆时若内容特定于本机（路径/端口/硬件），正文须明写设备名。
 8. **禁偷懒**：以上各条皆下限非上限——禁以「条文没写」为由省事、禁取字面最省力之解、禁以「做完了」充作「做到位」；**干活宁慢勿快**——有依赖者必串行（如多图上传有序，逐件传毕验毕再传次件），无关联者方可并行；干活三纲（认真·勤勉·周全 ①–⑫＋反偷懒总则）见全文。
 9. **回合双闸（发出回复前逐字自答）**：**查闸**——本回合动手前 recall 过否？查询词含项目名否？换过 2–3 组词否？**存闸**——发出前落库否？每条只讲一件事否？新条皆挂同题条下否？**设备闸**——所引之忆看清是哪台机器了否？三问有一「否」即补，补完再答。**漏一闸即为失职**，非「疏忽」可辩。
+10. **Credential references**: inspect content before writing or sharing. Omit plaintext passwords, API tokens and private keys; record only a safe purpose/location reference. Keep secrets out of recall queries. This is an agent rule, not an automatic CLI scanner.
+11. **Task conditions**: include a `【触发】` line with a confirmed date (and time zone if needed) or verifiable prerequisite. Ask if unclear; verify dates and prerequisite evidence when recalling the task, then mention due conditions. This is a conversational check, not automatic validation or a background reminder. Keep `important`/`trivial` importance inputs.
 "#
     )
 }
