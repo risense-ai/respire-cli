@@ -345,9 +345,12 @@ class Smoke:
         requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         self.check('POST', '/forgot', {'user': a['user']}, predicate=lambda r: r.get('ok') is True, label='fixture-password-reset-request')
         code = self.mail_code(email, 'Respire password reset', owner['token'], requested_at, 'reset_password')
+        previous_token = a['token']
         a['pass_hash'] = secrets.token_hex(32)
         self.check('POST', '/reset', {'user': a['user'], 'code': code, 'pass_hash': a['pass_hash'], 'salt': a['salt']},
                    predicate=lambda r: r.get('updated') is True, label='fixture-password-reset-complete')
+        self.check('GET', '/count', token=previous_token, status=401, predicate=lambda r: 'error' in r, kind='negative', label='reset-revokes-old-session')
+        self.check('POST', '/reset', {'user': a['user'], 'code': code, 'pass_hash': a['pass_hash'], 'salt': a['salt']}, status=401, predicate=lambda r: 'error' in r, kind='negative', label='reset-code-cannot-be-replayed')
         self.login(a)
         setup = self.check('POST', '/api/self/totp/begin', {}, a['token'], predicate=lambda r: bool(r.get('secret')), label='fixture-totp-setup')
         self.check('POST', '/api/self/totp/confirm', {'code': totp(setup['secret'])}, a['token'], predicate=lambda r: r.get('totp') is True, label='fixture-totp-enabled')
