@@ -13,6 +13,7 @@ _spec = importlib.util.spec_from_file_location(
 _base = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_base)
 require = _base.require
+owned_path = _base.owned_path
 canonical_identity = _base.canonical_identity
 
 
