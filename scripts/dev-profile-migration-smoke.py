@@ -90,6 +90,67 @@ class Smoke(support.Smoke):
             self.keys.reserve("rsrs", slot + alias)
         return alias
 
+    def verify_mac_native_credentials(self, env, fixture):
+        """Consume owned native credentials through the unchanged CLI creator.
+
+        This proves the original values through export and authenticated unwrap;
+        it does not test automatic server reauthentication or change item ACLs.
+        """
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        clean_env = dict(env)
+        for key in ("ONEMEMORY_SUPER", "ONEMEMORY_PASS", "ONEMEMORY_SECRET",
+                    "ONEMEMORY_KDF_SALT", "ONEMEMORY_WRAPPED_URK", "ONEMEMORY_URK_NONCE"):
+            clean_env.pop(key, None)
+        profile = Path(clean_env["ONEMEMORY_DATA_DIR"])
+        keyring_backend.owned_path(profile)
+        session_path = profile / "session.json"
+        require(session_path.is_file() and not session_path.is_symlink(), "native_consumer_session_missing")
+        original = session_path.read_bytes()
+        session = json.loads(original)
+        require(session.get("user") == fixture["account"]["user"]
+            and session.get("vault_version") == 4
+            and all(not session.get(key) for key in ("pass", "super", "secret_key")),
+            "native_consumer_session_has_override")
+        note = self.root / ("native-recovery-" + secrets.token_hex(8) + ".txt")
+        require(not note.exists(), "native_consumer_export_not_fresh")
+        try:
+            self.report["fixture_operation"] = "native_consumer_super_export"
+            self.save()
+            self.cli(clean_env, "keys-export", "--out", str(note))
+            require(note.is_file() and not note.is_symlink(), "native_consumer_export_missing")
+            exported = re.findall(r"^super password: (.+)$", note.read_text(encoding="utf-8"), re.MULTILINE)
+            require(exported == [fixture["code"]], "native_consumer_super_changed")
+            urk = AESGCM(support.v4_kek(fixture["code"], session["kdf_salt"])).decrypt(
+                bytes.fromhex(session["urk_nonce"]), bytes.fromhex(session["wrapped_urk"]), None)
+            require(len(urk) == 32, "native_consumer_urk_invalid")
+            salt, nonce, secret = secrets.token_bytes(16).hex(), secrets.token_bytes(12), secrets.token_hex(32)
+            wrapped = AESGCM(support.legacy_kek(1, fixture["password"], secret, salt)).encrypt(nonce, urk, None)
+            probe = dict(session, vault_version=1, kdf_salt=salt, wrapped_urk=wrapped.hex(),
+                         urk_nonce=nonce.hex(), secret=secret)
+            for key in ("pass", "super", "secret_key"):
+                probe.pop(key, None)
+            self.report["fixture_operation"] = "native_consumer_password_unwrap"
+            self.save()
+            self.write_session(clean_env, probe)
+            shown = self.cli(clean_env, "show", fixture["id"])
+            require(shown.get("details", {}).get("entry", {}).get("content") == fixture["text"],
+                    "native_consumer_original_ciphertext_not_decrypted")
+        finally:
+            try:
+                session_path.write_bytes(original)
+            finally:
+                note.unlink(missing_ok=True)
+            require(session_path.read_bytes() == original, "native_consumer_session_restore_failed")
+        with sqlite3.connect((profile / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
+            require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
+                    == fixture["cipher"], "native_consumer_ciphertext_changed")
+        proof = self.report.setdefault("native_credential_consumer", {
+            "platform": "darwin", "super": "cli_keys_export", "password": "cli_v1_kdf_aead_show",
+            "consumer_changes_product_acl": False, "automatic_server_reauthentication_tested": False,
+            "verified_profiles": 0})
+        proof["verified_profiles"] += 1
+        self.save()
+
     @contextmanager
     def selected_profile(self, default, fixture):
         profile = fixture["destination"]
@@ -172,9 +233,10 @@ class Smoke(support.Smoke):
         require(isinstance(code, str) and bool(code), "migration_super_missing")
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
-        require(self.keys.read("rsrs", "super:" + user) == code
-            and self.keys.read("rsrs", "pass:" + user) == password,
-            "registered_native_credentials_not_in_owned_store")
+        if sys.platform != "darwin":
+            require(self.keys.read("rsrs", "super:" + user) == code
+                and self.keys.read("rsrs", "pass:" + user) == password,
+                "registered_native_credentials_not_in_owned_store")
         env["ONEMEMORY_SUPER"] = code
         self.report["fixture_operation"] = "seed_local_content"
         self.save()
@@ -194,6 +256,9 @@ class Smoke(support.Smoke):
         require(row and connection.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0,
             "migration_outbox_fixture_not_pending")
         self.wal_connections.append(connection)
+        if sys.platform == "darwin":
+            self.verify_mac_native_credentials(env, {"account": account, "code": code, "password": password,
+                "id": memory_id, "text": text, "cipher": row})
         self.report["fixture_operation"] = "seed_legacy_native_credentials"
         self.save()
         self.keys.put(service, "super:" + user, code)
@@ -236,12 +301,13 @@ class Smoke(support.Smoke):
             alias = value.get("keyring_account")
             require(isinstance(alias, str) and alias.startswith("legacy-"), "migration_key_alias_missing")
             require(alias == fixture["alias"], "migration_native_alias_identity_mismatch")
-            self.report["fixture_operation"] = "new_alias_super"
-            self.save()
-            require(self.keys.read("rsrs", "super:" + alias) == fixture["code"], "migration_key_changed")
-            self.report["fixture_operation"] = "new_alias_pass"
-            self.save()
-            require(self.keys.read("rsrs", "pass:" + alias) == fixture["password"], "migration_login_password_changed")
+            if sys.platform != "darwin":
+                self.report["fixture_operation"] = "new_alias_super"
+                self.save()
+                require(self.keys.read("rsrs", "super:" + alias) == fixture["code"], "migration_key_changed")
+                self.report["fixture_operation"] = "new_alias_pass"
+                self.save()
+                require(self.keys.read("rsrs", "pass:" + alias) == fixture["password"], "migration_login_password_changed")
             self.report["fixture_operation"] = "legacy_source_super"
             self.save()
             require(self.keys.read(fixture["service"], "super:" + user) == fixture["code"], "legacy_key_source_changed")
@@ -320,6 +386,8 @@ class Smoke(support.Smoke):
         for fixture in fixtures:
             with self.selected_profile(default, fixture) as user_env:
                 require("ONEMEMORY_SUPER" not in user_env, "migration_super_override_present")
+                if sys.platform == "darwin":
+                    self.verify_mac_native_credentials(user_env, fixture)
                 self.read_entry(user_env, fixture["id"], fixture["text"])
         if target:
             with sqlite3.connect(current["source"] / "onememory.db") as db:
