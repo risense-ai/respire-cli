@@ -798,7 +798,10 @@ mod tests {
             .join("accounts/legacy-onememory-work/session.json")
             .is_file());
         let config: Value = serde_json::from_slice(&std::fs::read(target.join("client.json"))?)?;
-        assert_eq!(config["data_dir"], json!(target.join("accounts/work")));
+        let active_profile = config["data_dir"]
+            .as_str()
+            .ok_or_else(|| anyhow!("migrated active profile path is missing"))?;
+        assert_eq!(Path::new(active_profile), target.join("accounts/work"));
         assert_eq!(config["addr"], "https://dev.rsrs.rs");
         let session_before = std::fs::read(target.join("session.json"))?;
         migrate_home(home.path())?;
