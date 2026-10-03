@@ -31,3 +31,28 @@ jobs:
           name: native-migration-keyring-${{ runner.os }}
           path: ${{ runner.temp }}/native-migration-keyring/keyring-selftest.json
           if-no-files-found: error
+
+  secret-service-fixture:
+    name: Isolated Secret Service credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated credential fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+      - name: Verify private Secret Service credential roundtrips
+        run: dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/secret-service-keyring"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: isolated-secret-service-keyring-Linux
+          path: ${{ runner.temp }}/secret-service-keyring/keyring-selftest.json
+          if-no-files-found: error

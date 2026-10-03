@@ -1,6 +1,7 @@
 //! keystore — super-password (v4 single-factor key) storage.
 //!
-//! Priority: OS keyring (gnome-keyring/Keychain/Credential Manager) > env ONEMEMORY_SUPER
+//! Priority: persistent Secret Service on Linux, then its volatile kernel store;
+//! Keychain/Credential Manager elsewhere; finally env ONEMEMORY_SUPER.
 //! > none. Plaintext is never written to session.json from v4 on — a disk copy cannot decrypt.
 //! Headless servers (no keyring) use ONEMEMORY_SUPER or pass --super each time.
 
@@ -9,94 +10,219 @@ use anyhow::{anyhow, Result};
 const SERVICE: &str = "rsrs";
 const VAULT_SERVICE: &str = "rsrs";
 
+#[derive(Clone, Copy)]
+enum Backend {
+    #[cfg(any(not(target_os = "linux"), test))]
+    Native,
+    #[cfg(all(target_os = "linux", not(test)))]
+    SecretService,
+    #[cfg(all(target_os = "linux", not(test)))]
+    Kernel,
+}
+
+impl Backend {
+    fn name(self) -> &'static str {
+        match self {
+            #[cfg(any(not(target_os = "linux"), test))]
+            Self::Native => "native",
+            #[cfg(all(target_os = "linux", not(test)))]
+            Self::SecretService => "secret_service",
+            #[cfg(all(target_os = "linux", not(test)))]
+            Self::Kernel => "kernel",
+        }
+    }
+}
+
+fn backends() -> &'static [Backend] {
+    #[cfg(all(target_os = "linux", not(test)))]
+    {
+        &[Backend::SecretService, Backend::Kernel]
+    }
+    #[cfg(any(not(target_os = "linux"), test))]
+    {
+        &[Backend::Native]
+    }
+}
+
+fn credential_entry(service: &str, label: &str, backend: Backend) -> Result<keyring::Entry> {
+    match backend {
+        #[cfg(any(not(target_os = "linux"), test))]
+        Backend::Native => keyring::Entry::new(service, label)
+            .map_err(|_| anyhow!("keyring initialization failed")),
+        #[cfg(all(target_os = "linux", not(test)))]
+        Backend::SecretService => keyring::secret_service::default_credential_builder()
+            .build(None, service, label)
+            .map(keyring::Entry::new_with_credential)
+            .map_err(|_| anyhow!("Secret Service initialization failed")),
+        #[cfg(all(target_os = "linux", not(test)))]
+        Backend::Kernel => keyring::keyutils::default_credential_builder()
+            .build(None, service, label)
+            .map(keyring::Entry::new_with_credential)
+            .map_err(|_| anyhow!("kernel keyring initialization failed")),
+    }
+}
+
+/// Read every applicable legacy backend without writing or self-healing it.
+pub(crate) fn read_credentials(service: &str, label: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    for backend in backends() {
+        if let Ok(entry) = credential_entry(service, label, *backend) {
+            if let Ok(value) = entry.get_password() {
+                if !value.is_empty() && !values.contains(&value) {
+                    values.push(value);
+                }
+            }
+        }
+    }
+    values
+}
+
+fn save_label(label: &str, value: &str) -> Result<()> {
+    for backend in backends() {
+        let entry = credential_entry(SERVICE, label, *backend)?;
+        if entry.set_password(value).is_ok() {
+            if backend.name() == "kernel" {
+                eprintln!("warning: Linux credentials are in the volatile kernel keyring; enabling Secret Service alone does not preserve existing keys across reboot; restore or re-import them into the persistent store");
+            }
+            return Ok(());
+        }
+    }
+    Err(anyhow!(
+        "keyring write failed; no available credential backend"
+    ))
+}
+
+fn delete_label(label: &str) {
+    for backend in backends() {
+        let result = credential_entry(SERVICE, label, *backend).and_then(|entry| {
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(_) => Err(anyhow!("keyring deletion failed")),
+            }
+        });
+        if result.is_err() {
+            eprintln!(
+                "warning: {} credential could not be deleted; clear the rsrs entry in that store",
+                backend.name()
+            );
+        }
+    }
+}
+
 fn credential_account(user: &str) -> String {
-    let account = if user.trim().is_empty() { "local" } else { user.trim() };
+    let account = if user.trim().is_empty() {
+        "local"
+    } else {
+        user.trim()
+    };
     if let Ok(session) = crate::auth::read_session_json() {
         let session_user = session["user"].as_str().unwrap_or("");
-        let session_user = if session_user.trim().is_empty() { "local" } else { session_user.trim() };
+        let session_user = if session_user.trim().is_empty() {
+            "local"
+        } else {
+            session_user.trim()
+        };
         if session_user == account {
             if let Some(alias) = session["keyring_account"].as_str().filter(|alias| {
-                alias.starts_with("legacy-") && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
-            }) { return alias.to_owned(); }
+                alias.starts_with("legacy-")
+                    && alias
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+            }) {
+                return alias.to_owned();
+            }
         }
     }
     account.to_owned()
 }
 
 /// Import into a separate namespace. Existing credentials are never overwritten.
-pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Result<()> {
-    let entry = keyring::Entry::new(VAULT_SERVICE, &format!("{slot}:{account}"))
-        .map_err(|_| anyhow!("migration keyring initialization failed"))?;
-    match entry.get_password() {
-        Ok(existing) if existing != value => return Err(anyhow!("migration keyring destination contains a different credential")),
-        Ok(_) => {}
-        Err(keyring::Error::NoEntry) => entry.set_password(value).map_err(|_| anyhow!("migration keyring write failed"))?,
-        Err(_) => return Err(anyhow!("migration keyring destination could not be read")),
+pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Result<&'static str> {
+    let label = format!("{slot}:{account}");
+    if read_credentials(VAULT_SERVICE, &label)
+        .iter()
+        .any(|existing| existing != value)
+    {
+        return Err(anyhow!(
+            "migration keyring destination contains a different credential"
+        ));
     }
-    let readback = keyring::Entry::new(VAULT_SERVICE, &format!("{slot}:{account}"))
-        .map_err(|_| anyhow!("migration keyring readback initialization failed"))?;
-    if readback.get_password().map_err(|_| anyhow!("migration keyring readback failed"))? != value {
-        return Err(anyhow!("migration keyring readback mismatch"));
+    for backend in backends() {
+        let entry = credential_entry(VAULT_SERVICE, &label, *backend)?;
+        match entry.get_password() {
+            Ok(existing) if existing != value => {
+                return Err(anyhow!(
+                    "migration keyring destination contains a different credential"
+                ))
+            }
+            Ok(_) => {}
+            Err(keyring::Error::NoEntry) => {
+                if entry.set_password(value).is_err() {
+                    continue;
+                }
+            }
+            Err(keyring::Error::Ambiguous(_))
+            | Err(keyring::Error::BadEncoding(_))
+            | Err(keyring::Error::Invalid(_, _)) => {
+                return Err(anyhow!("migration keyring destination is ambiguous or invalid; original credentials were preserved"));
+            }
+            Err(_) => continue,
+        }
+        let readback = credential_entry(VAULT_SERVICE, &label, *backend)?;
+        match readback.get_password() {
+            Ok(found) if found == value => {
+                if backend.name() == "kernel" {
+                    eprintln!("warning: migrated credentials use the volatile Linux kernel keyring; original keys were preserved; restore or re-import them into an available Secret Service store for reboot-safe storage");
+                }
+                return Ok(backend.name());
+            }
+            Ok(_) => return Err(anyhow!("migration keyring readback mismatch")),
+            Err(_) => continue,
+        }
     }
-    Ok(())
+    Err(anyhow!(
+        "migration keyring write/readback failed; no snapshot was published"
+    ))
 }
 
 /// Classification settings are global per endpoint, unlike per-library vaults.
 /// Preserve an existing new setting; import known legacy slots into new entries.
 pub(crate) fn import_classification(services: &[&str]) -> Result<()> {
-    let mut slots = vec!["typesafe".to_owned(), "ds".to_owned(), "last-backend".to_owned(), "ds-last-base".to_owned()];
+    let mut slots = vec![
+        "typesafe".to_owned(),
+        "ds".to_owned(),
+        "last-backend".to_owned(),
+        "ds-last-base".to_owned(),
+    ];
     for service in services {
-        if let Ok(entry) = keyring::Entry::new(service, "classify:ds-last-base") {
-            if let Ok(base) = entry.get_password() {
-                let host = host_of(&base);
-                if !host.is_empty() {
-                    slots.push(format!("ds@{host}"));
-                    slots.push(format!("ds-model@{host}"));
-                }
+        for base in read_credentials(service, "classify:ds-last-base") {
+            let host = host_of(&base);
+            if !host.is_empty() {
+                slots.push(format!("ds@{host}"));
+                slots.push(format!("ds-model@{host}"));
             }
         }
     }
-    slots.sort(); slots.dedup();
+    slots.sort();
+    slots.dedup();
     for slot in slots {
-        let target = keyring::Entry::new(SERVICE, &format!("classify:{slot}"))
-            .map_err(|_| anyhow!("classification migration keyring initialization failed"))?;
-        match target.get_password() {
-            Ok(_) => continue,
-            Err(keyring::Error::NoEntry) => {}
-            Err(_) => return Err(anyhow!("classification migration keyring destination could not be read")),
+        if !read_credentials(SERVICE, &format!("classify:{slot}")).is_empty() {
+            continue;
         }
         for service in services {
-            let original = keyring::Entry::new(service, &format!("classify:{slot}"))
-                .map_err(|_| anyhow!("classification migration keyring initialization failed"))?;
-            match original.get_password() {
-                Ok(value) => { import_credential(&slot, "classify", &value)?; break; }
-                Err(keyring::Error::NoEntry) => {}
-                Err(_) => return Err(anyhow!("classification migration original credential could not be read")),
+            if let Some(value) = read_credentials(service, &format!("classify:{slot}")).first() {
+                import_credential(&slot, "classify", value)?;
+                break;
             }
         }
     }
     Ok(())
 }
 
-fn entry(user: &str) -> Result<keyring::Entry> {
-    // Pure local keygen has no account name — use the "local" slot
-    let acct = credential_account(user);
-    keyring::Entry::new(VAULT_SERVICE, &format!("super:{acct}"))
-        .map_err(|e| anyhow!("keyring init failed: {e}"))
-}
-
 /// Save the super password into the OS keyring. Headless with no keyring returns Err
 /// (caller warns and falls back to the env var).
 pub fn save_super(user: &str, super_pass: &str) -> Result<()> {
-    entry(user)?
-        .set_password(super_pass)
-        .map_err(|e| anyhow!("keyring write failed ({e}) — on a headless server set ONEMEMORY_SUPER"))
-}
-
-fn login_entry(user: &str) -> Result<keyring::Entry> {
-    let acct = credential_account(user);
-    keyring::Entry::new(VAULT_SERVICE, &format!("pass:{acct}"))
-        .map_err(|e| anyhow!("keyring init failed: {e}"))
+    save_label(&format!("super:{}", credential_account(user)), super_pass)
 }
 
 /// Save the server login password next to the super password.
@@ -106,38 +232,27 @@ pub fn save_login_pass(user: &str, pass: &str) -> Result<()> {
     if pass.is_empty() {
         return Ok(());
     }
-    login_entry(user)?
-        .set_password(pass)
-        .map_err(|e| anyhow!("keyring write failed ({e}) — the login password was not stored"))
+    save_label(&format!("pass:{}", credential_account(user)), pass)
 }
 
 /// Load the server login password from the OS keyring. None if the slot is missing.
 pub fn load_login_pass(user: &str) -> Option<String> {
-    login_entry(user)
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|v| !v.is_empty())
+    read_credentials(SERVICE, &format!("pass:{}", credential_account(user)))
+        .into_iter()
+        .next()
 }
 
 /// Delete the stored login password (logout --full).
 pub fn delete_login_pass(user: &str) {
-    match login_entry(user) {
-        Ok(e) => {
-            if let Err(err) = e.delete_credential() {
-                eprintln!("warning: failed to delete login password from keyring ({err})");
-            }
-        }
-        Err(err) => eprintln!("warning: keyring unavailable, could not delete login password ({err})"),
-    }
+    delete_label(&format!("pass:{}", credential_account(user)));
 }
 
 /// Load super password: OS keyring → env ONEMEMORY_SUPER → None.
 /// Any failure of entry()/get_password() (headless, no keyring) must fall through to the env var.
 pub fn load_super(user: &str) -> Option<String> {
-    let from_ring = entry(user)
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|v| !v.is_empty());
+    let from_ring = read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
+        .into_iter()
+        .next();
     from_ring.or_else(|| {
         std::env::var("ONEMEMORY_SUPER")
             .ok()
@@ -150,14 +265,7 @@ pub fn load_super(user: &str) -> Option<String> {
 /// Failures must be reported (L8, 2026-09-20 audit): a silent failure makes the user
 /// think the key is gone while the keyring still holds a code that unlocks all memories.
 pub fn delete_super(user: &str) {
-    match entry(user) {
-        Ok(e) => {
-            if let Err(err) = e.delete_credential() {
-                eprintln!("warning: failed to delete super password from keyring ({err}) — on a shared machine clear it from Credential Manager");
-            }
-        }
-        Err(err) => eprintln!("warning: keyring unavailable, could not delete super password ({err})"),
-    }
+    delete_label(&format!("super:{}", credential_account(user)));
 }
 
 // ───────────────────── classify (classification backend) API key ─────────────────────
@@ -165,16 +273,14 @@ pub fn delete_super(user: &str) {
 /// classify backend slot (separate account under the same OS keyring service).
 /// DS backends are keyed by **endpoint host** — official deepseek.com and b.ai relay keys
 /// are not interchangeable; sharing one slot overwrites the other (hit 2026-09-20).
-fn classify_entry(backend: &str) -> Result<keyring::Entry> {
-    keyring::Entry::new(SERVICE, &format!("classify:{backend}"))
-        .map_err(|e| anyhow!("keyring init failed: {e}"))
-}
-
 /// Host from an endpoint URL, used as the DS key-slot suffix (e.g. api.deepseek.com / api.b.ai).
 pub fn host_of(base: &str) -> String {
     let b = base.trim();
     let rest = b.split_once("://").map(|(_, r)| r).unwrap_or(b);
-    rest.split(['/', '?', '#']).next().unwrap_or(rest).to_owned()
+    rest.split(['/', '?', '#'])
+        .next()
+        .unwrap_or(rest)
+        .to_owned()
 }
 
 #[cfg(test)]
@@ -204,19 +310,20 @@ mod host_tests {
 
 /// Save a classify backend key (backend ∈ "ds" | "typesafe").
 pub fn save_classify_key(backend: &str, key: &str) -> Result<()> {
-    classify_entry(backend)?
-        .set_password(key)
-        .map_err(|e| anyhow!("keyring write failed ({e}) — without a keyring set TYPESAFE_API_KEY / DS_API_KEY"))
+    save_label(&format!("classify:{backend}"), key)
 }
 
 /// Load a classify backend key: OS keyring → env (DS_API_KEY / TYPESAFE_API_KEY) → None.
 pub fn load_classify_key(backend: &str) -> Option<String> {
-    let from_ring = classify_entry(backend)
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|v| !v.is_empty());
+    let from_ring = read_credentials(SERVICE, &format!("classify:{backend}"))
+        .into_iter()
+        .next();
     from_ring.or_else(|| {
-        let var = if backend.starts_with("ds") { "DS_API_KEY" } else { "TYPESAFE_API_KEY" };
+        let var = if backend.starts_with("ds") {
+            "DS_API_KEY"
+        } else {
+            "TYPESAFE_API_KEY"
+        };
         std::env::var(var).ok().filter(|s| !s.is_empty())
     })
 }
@@ -224,52 +331,48 @@ pub fn load_classify_key(backend: &str) -> Option<String> {
 /// Remember the last DS endpoint used (including path, e.g. https://api.b.ai/v1)
 /// so a stored key is not paired with a host that dropped the path.
 pub fn save_ds_last_base(base: &str) {
-    if let Ok(e) = keyring::Entry::new(SERVICE, "classify:ds-last-base") {
-        let _ = e.set_password(base);
+    if save_label("classify:ds-last-base", base).is_err() {
+        eprintln!("warning: classification endpoint could not be saved");
     }
 }
 
 /// Load the last DS endpoint used (full base).
 pub fn load_ds_last_base() -> Option<String> {
-    keyring::Entry::new(SERVICE, "classify:ds-last-base")
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|v| !v.is_empty())
+    read_credentials(SERVICE, "classify:ds-last-base")
+        .into_iter()
+        .next()
 }
 
 /// Remember the last model used for an endpoint (relay names differ: official deepseek-chat, b.ai deepseek-v4.1-flash).
 pub fn save_ds_model(host: &str, model: &str) {
-    if let Ok(e) = keyring::Entry::new(SERVICE, &format!("classify:ds-model@{host}")) {
-        let _ = e.set_password(model);
+    if save_label(&format!("classify:ds-model@{host}"), model).is_err() {
+        eprintln!("warning: classification model could not be saved");
     }
 }
 
 /// Load the last model used for an endpoint.
 pub fn load_ds_model(host: &str) -> Option<String> {
-    keyring::Entry::new(SERVICE, &format!("classify:ds-model@{host}"))
-        .ok()
-        .and_then(|e| e.get_password().ok())
-        .filter(|v| !v.is_empty())
+    read_credentials(SERVICE, &format!("classify:ds-model@{host}"))
+        .into_iter()
+        .next()
 }
 
 /// Remember the classify backend choice (GUI "AI backend" dropdown; "jev" | "ds").
 pub fn save_classify_backend(backend: &str) {
-    if let Ok(e) = keyring::Entry::new(SERVICE, "classify:last-backend") {
-        let _ = e.set_password(backend);
+    if save_label("classify:last-backend", backend).is_err() {
+        eprintln!("warning: classification backend could not be saved");
     }
 }
 
 /// Load the last classify backend (None if unset; caller picks the default).
 pub fn load_classify_backend() -> Option<String> {
-    keyring::Entry::new(SERVICE, "classify:last-backend")
-        .ok()
-        .and_then(|e| e.get_password().ok())
+    read_credentials(SERVICE, "classify:last-backend")
+        .into_iter()
+        .next()
         .filter(|v| v == "jev" || v == "ds")
 }
 
 /// Delete a classify key from the keyring (key rotation / revoke).
 pub fn delete_classify_key(backend: &str) {
-    if let Ok(e) = classify_entry(backend) {
-        let _ = e.delete_credential();
-    }
+    delete_label(&format!("classify:{backend}"));
 }

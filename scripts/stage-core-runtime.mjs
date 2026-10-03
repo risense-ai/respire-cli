@@ -32,6 +32,15 @@ for (const entry of readdirSync(modelNotices, {withFileTypes:true})) {
   writeFileSync(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
+const dependencyNotices = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'dependency-notices');
+for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
+  if (!entry.isFile()) continue;
+  const bytes = readFileSync(join(dependencyNotices, entry.name));
+  const path = `core-notices/consumer/${entry.name}`;
+  mkdirSync(dirname(join(output,path)), {recursive:true});
+  writeFileSync(join(output,path), bytes);
+  files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+}
 writeFileSync(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');
 console.log(`Staged ${files.length} runtime/notice files next to the CLI`);

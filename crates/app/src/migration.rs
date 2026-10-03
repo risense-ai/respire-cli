@@ -354,10 +354,12 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile]) -> Re
         private_file(&database)?;
     }
     let mut checked = 0;
+    let mut keyring_backend = None;
     if let Some(bytes) = original_session.as_ref() {
         let mut session: Value = serde_json::from_slice(bytes)
             .context("legacy session is invalid; source was preserved")?;
         checked = migrate_credentials(profile, stage, &mut session)?;
+        keyring_backend = session.get("keyring_backend").cloned();
         rewrite_address(&mut session);
         write_json(&stage.join("session.json"), &session)?;
     } else if encrypted_count(&stage.join("onememory.db"))? > 0 {
@@ -402,7 +404,8 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile]) -> Re
         &stage.join(RECEIPT),
         &json!({"schema":1,"complete":true,"source_identity":profile.identity,
         "source":profile.source,"destination":profile.destination,"verified_ciphertexts":checked,
-        "api_default":crate::service::DEFAULT_SERVER_ADDR,"original_preserved":true,
+            "api_default":crate::service::DEFAULT_SERVER_ADDR,"original_preserved":true,
+            "keyring_backend":keyring_backend,
         "snapshot_at":chrono::Utc::now().to_rfc3339(),"legacy_runtime_active":legacy_active,
         "snapshot_only":true}),
     )?;
@@ -540,13 +543,10 @@ fn candidate_values(
         user.trim()
     };
     for service in profile.services {
-        if let Ok(entry) = keyring::Entry::new(service, &format!("{slot}:{account}")) {
-            if let Ok(value) = entry.get_password() {
-                if !value.is_empty() {
-                    values.push(value);
-                }
-            }
-        }
+        values.extend(crate::keystore::read_credentials(
+            service,
+            &format!("{slot}:{account}"),
+        ));
     }
     if slot == "super" {
         if let Ok(value) = std::env::var("ONEMEMORY_SUPER") {
@@ -617,10 +617,14 @@ fn migrate_credentials(profile: &Profile, stage: &Path, session: &mut Value) -> 
     }
     let alias = format!("legacy-{}", &profile.identity[..16]);
     if let Some(value) = super_pass {
-        crate::keystore::import_credential(&alias, "super", &value)?;
+        let backend = crate::keystore::import_credential(&alias, "super", &value)?;
+        session["keyring_backend"] = json!(backend);
     }
     if let Some(value) = legacy_pass.as_ref().or_else(|| passes.first()) {
-        crate::keystore::import_credential(&alias, "pass", value)?;
+        let backend = crate::keystore::import_credential(&alias, "pass", value)?;
+        if legacy_pass.is_some() {
+            session["keyring_backend"] = json!(backend);
+        }
     }
     session["keyring_account"] = json!(alias);
     Ok(checked)

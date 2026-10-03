@@ -168,6 +168,25 @@ jobs:
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
+      - name: Verify historical Secret Service profile migration
+        if: ${{ !cancelled() && !inputs.local_api_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          binary="$(realpath validated-cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          root="$RUNNER_TEMP/secret-service-profile-migration"
+          fixture_status=0
+          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
+          python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
+          test "$fixture_status" -eq 0
       - name: Verify native encrypted profile migration
         if: ${{ !cancelled() && !inputs.local_api_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: pwsh
@@ -213,6 +232,8 @@ jobs:
             ${{ runner.temp }}/dev-supplements/legacy-vault/legacy-vault-coverage.json
             ${{ runner.temp }}/dev-supplements/profile-migration/migration-coverage.json
             ${{ runner.temp }}/dev-supplements/migration-platform-gate.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
           if-no-files-found: error
 
   api-smoke:

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Hosted CI only: real encrypted profiles, keyring aliases, WAL and restart migration."""
 import argparse
+from contextlib import contextmanager
+import hashlib
 import importlib.util
 import json
 import os
@@ -47,14 +49,94 @@ class Smoke(support.Smoke):
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
 
+    def cli(self, env, *args, timeout=180):
+        output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
+            cwd=self.root, env=env, capture_output=True, timeout=timeout)
+        value = None
+        try:
+            value = json.loads(output.stdout)
+        except (ValueError, UnicodeError):
+            pass
+        failed = output.returncode != 0 or not isinstance(value, dict) \
+            or value.get("errors") or value.get("status") in ("error", "failed")
+        if failed:
+            text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
+            categories = (
+                ("argument_contract", ("unexpected argument", "required arguments were not provided", "a value is required")),
+                ("rate_limited", ("too many requests", "rate limit", "http 429", "status: 429")),
+                ("native_credentials", ("keyring", "keychain", "credential manager", "osstatus")),
+                ("vault_unlock", ("failed to decrypt", "vault could not be unlocked", "super password required", "secret key required")),
+                ("entry_not_found", ("not found #", "memory not found")),
+                ("http_transport", ("connection refused", "connection timed out", "network is unreachable", "tls")),
+            )
+            category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
+            self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
+                "error_class": category, "json_envelope": isinstance(value, dict)}
+            self.save()
+            reason = "cli_failed_" if output.returncode != 0 else \
+                "invalid_cli_json_" if not isinstance(value, dict) else "cli_error_"
+            raise RuntimeError(reason + args[0])
+        return value
+
     def reserve_alias(self, source):
         alias = "legacy-" + keyring_backend.canonical_identity(source)[:16]
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + alias)
         return alias
 
+    @contextmanager
+    def selected_profile(self, default, fixture):
+        profile = fixture["destination"]
+        config_path = profile / "client.json"
+        original = config_path.read_bytes() if config_path.exists() else None
+        config = json.loads(original) if original is not None else {}
+        # An environment root intentionally preserves its selected child account.
+        # Select this owned fixture explicitly, then restore the original selection.
+        config["data_dir"] = str(profile)
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        config_path.chmod(0o600)
+        try:
+            yield dict(default, ONEMEMORY_DATA_DIR=str(profile))
+        finally:
+            if original is None:
+                config_path.unlink()
+            else:
+                config_path.write_bytes(original)
+            require((config_path.read_bytes() if config_path.exists() else None) == original,
+                "fixture_profile_selection_restore_failed")
+
     def save(self):
         (self.root / "migration-coverage.json").write_text(json.dumps(self.report, indent=2) + "\n", encoding="utf-8")
+
+    def cleanup(self):
+        recoveries = []
+        for account in self.accounts:
+            if account["confirmed"]:
+                continue
+            event = {"user": account["user"], "confirmed": False}
+            try:
+                # Authenticate with this fixture's generated credential; never
+                # delete an account by prefix or an unconfirmed username.
+                request = support.urllib.request.Request(support.UPSTREAM + "/login",
+                    json.dumps({"user": account["user"], "pass_hash": account["pass_hash"],
+                        "device_name": "migration-cleanup"}).encode(),
+                    {"Content-Type": "application/json"}, method="POST")
+                with self.opener.open(request, timeout=45) as response:
+                    require(response.status == 200, "cleanup_login_not_confirmed")
+                    raw = response.read(1024 * 1024 + 1)
+                    require(len(raw) <= 1024 * 1024, "cleanup_login_response_too_large")
+                    token = json.loads(raw).get("token")
+                require(isinstance(token, str) and bool(token), "cleanup_login_token_missing")
+                candidate = dict(account, confirmed=True, token=token)
+                identity = self.api(candidate, "GET", "/api/self")
+                require(identity.get("user") == account["user"], "cleanup_login_identity_mismatch")
+                account.update(confirmed=True, token=token)
+                event["confirmed"] = True
+            except Exception as error:
+                event["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+            recoveries.append(event)
+        self.report["cloud_cleanup"]["recovered_session_checks"] = recoveries
+        super().cleanup()
 
     def default_env(self, env):
         result = dict(env)
@@ -65,9 +147,11 @@ class Smoke(support.Smoke):
     def seed(self, env, path, service, label):
         path.mkdir(parents=True, exist_ok=True)
         env = dict(env, ONEMEMORY_DATA_DIR=str(path))
-        user, password = "ci-migrate-" + secrets.token_hex(8), secrets.token_urlsafe(32)
+        user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
-        account = {"user": user, "token": None, "confirmed": False}
+        auth_salt = support.hkdf(user.encode(), None, b"onememory:auth-salt:v1", length=16)
+        account = {"user": user, "token": None, "confirmed": False,
+            "pass_hash": hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()}
         self.accounts.append(account)
         self.report["cloud_cleanup"]["remaining_users"].append(user)
         self.save()
@@ -152,6 +236,7 @@ class Smoke(support.Smoke):
         return sessions
 
     def case(self, name, sources, target=False, interrupt=False):
+        self.report["stage"] = name
         env = self.env(name)
         home = Path(env["HOME"])
         fixtures = []
@@ -204,10 +289,13 @@ class Smoke(support.Smoke):
             require(not (home / ".rsrs").exists(), "interruption_fixture_missed_prepublication_window")
         self.cli(default, "status")
         self.migrated(home, fixtures)
+        if name == "multiaccount":
+            selected = self.cli(default, "config")["summary"]["data_dir"]
+            require(Path(selected).resolve() == fixtures[-1]["destination"].resolve(), "migration_active_account_not_preserved")
         for fixture in fixtures:
-            user_env = dict(default, ONEMEMORY_DATA_DIR=str(fixture["destination"]))
-            require("ONEMEMORY_SUPER" not in user_env, "migration_super_override_present")
-            self.read_entry(user_env, fixture["id"], fixture["text"])
+            with self.selected_profile(default, fixture) as user_env:
+                require("ONEMEMORY_SUPER" not in user_env, "migration_super_override_present")
+                self.read_entry(user_env, fixture["id"], fixture["text"])
         if target:
             with sqlite3.connect(current["source"] / "onememory.db") as db:
                 require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (current["id"],)).fetchone() == current["cipher"],
@@ -231,13 +319,13 @@ class Smoke(support.Smoke):
             self.passed("legacy_api_defaults_rewritten", verified="old defaults to api.rsrs.rs; dev redirect only after verification")
             self.passed("migration_repeated_start_idempotent", profiles=len(fixtures))
             for fixture in fixtures:
-                profile_env = dict(default, ONEMEMORY_DATA_DIR=str(fixture["destination"]))
-                session = self.session(profile_env)
-                session["addr"] = support.UPSTREAM
-                self.write_session(profile_env, session)
-                self.cli(profile_env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
-                self.cli(profile_env, "remember", "New-directory migration write", "--title", "post-migration", "--force")
-                self.cli(profile_env, "sync")
+                with self.selected_profile(default, fixture) as profile_env:
+                    session = self.session(profile_env)
+                    session["addr"] = support.UPSTREAM
+                    self.write_session(profile_env, session)
+                    self.cli(profile_env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
+                    self.cli(profile_env, "remember", "New-directory migration write", "--title", "post-migration", "--force")
+                    self.cli(profile_env, "sync")
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
                 remote["ONEMEMORY_SUPER"] = fixture["code"]

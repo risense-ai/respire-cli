@@ -117,7 +117,7 @@ jobs:
       - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
         run: |
           cargo llvm-cov --locked -p respire --fail-under-lines 90 \
-            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error)\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify\.rs|recall_select\.rs)'
+            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
       - uses: actions/setup-node@v4
         with:
           node-version: 22

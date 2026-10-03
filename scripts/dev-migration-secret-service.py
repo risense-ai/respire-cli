@@ -1,0 +1,180 @@
+"""Real Secret Service fixtures on a private hosted D-Bus session only."""
+import importlib.util
+from importlib.metadata import version
+import os
+from pathlib import Path
+import secrets
+import subprocess
+import sys
+import time
+
+_spec = importlib.util.spec_from_file_location(
+    "migration_native_fixture_keys", Path(__file__).with_name("dev-migration-keyring.py"))
+_base = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_base)
+require = _base.require
+canonical_identity = _base.canonical_identity
+
+
+class SecretServiceKeys(_base.TrackedKeys):
+    name = "linux-secret-service"
+
+    def __init__(self, root):
+        super().__init__(root)
+        self.daemon = None
+        self.connection = None
+        self.attribute_snapshots = {}
+        self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        require(sys.platform.startswith("linux")
+                and os.environ.get("RESPIRE_SS_FIXTURE_BUS") == "private"
+                and self.bus.startswith("unix:"), "private_fixture_session_bus_required")
+        require(version("SecretStorage") == "3.3.3" and version("jeepney") == "0.9.0",
+                "secret_service_fixture_dependencies_not_pinned")
+        import secretstorage
+        from jeepney import DBusAddress, new_method_call
+        self.secretstorage = secretstorage
+        try:
+            self.connection = secretstorage.dbus_init()
+            address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                  "org.freedesktop.DBus")
+            reply = self.connection.send_and_get_reply(new_method_call(
+                address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+            require(reply.body == (False,), "fixture_bus_already_has_secret_service")
+            control = root / "control"
+            control.mkdir(mode=0o700)
+            env = dict(os.environ, HOME=str(root), USERPROFILE=str(root),
+                       XDG_DATA_HOME=str(root / "data"), XDG_CONFIG_HOME=str(root / "config"),
+                       XDG_CACHE_HOME=str(root / "cache"), XDG_RUNTIME_DIR=str(control),
+                       DBUS_SESSION_BUS_ADDRESS=self.bus)
+            env.pop("GNOME_KEYRING_CONTROL", None)
+            for key in ("SSH_AUTH_SOCK", "GNOME_KEYRING_PID"):
+                env.pop(key, None)
+            self.daemon = subprocess.Popen([
+                "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
+                "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.daemon.stdin.write(secrets.token_urlsafe(32).encode("utf-8"))
+            self.daemon.stdin.close()
+            deadline = time.monotonic() + 10
+            while True:
+                require(self.daemon.poll() is None, "fixture_secret_service_daemon_exited")
+                owner = self.connection.send_and_get_reply(new_method_call(
+                    address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+                if owner.body != (True,):
+                    require(time.monotonic() < deadline, "fixture_secret_service_owner_not_ready")
+                    time.sleep(0.05)
+                    continue
+                owner_pid = self.connection.send_and_get_reply(new_method_call(
+                    address, "GetConnectionUnixProcessID", "s", ("org.freedesktop.secrets",)))
+                require(owner_pid.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
+                # Do not address Secret Service until our foreground process owns
+                # its bus name: an earlier call could autoactivate a runner daemon.
+                try:
+                    self.collection = secretstorage.get_collection_by_alias(self.connection, "default")
+                    require(not self.collection.is_locked(), "fixture_default_collection_locked")
+                    break
+                except (secretstorage.exceptions.ItemNotFoundException,
+                        secretstorage.exceptions.SecretServiceNotAvailableException):
+                    require(time.monotonic() < deadline, "fixture_default_collection_not_ready")
+                    time.sleep(0.05)
+        except Exception as error:
+            fixed_codes = {
+                "fixture_bus_already_has_secret_service", "fixture_secret_service_daemon_exited",
+                "fixture_secret_service_owner_not_ready", "fixture_secret_service_owner_mismatch",
+                "fixture_default_collection_locked", "fixture_default_collection_not_ready",
+            }
+            code = str(error) if isinstance(error, RuntimeError) and str(error) in fixed_codes \
+                else "fixture_secret_service_initialization_failed"
+            try:
+                cleanup_passed = self.cleanup()["passed"]
+            except Exception:
+                cleanup_passed = False
+            if not cleanup_passed:
+                code += "_cleanup_failed"
+            raise RuntimeError(code) from None
+
+    def configure_env(self, env):
+        super().configure_env(env)
+        env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
+        env["RESPIRE_SS_FIXTURE_BUS"] = "private"
+        return env
+
+    @staticmethod
+    def attributes(service, slot):
+        return {"target": "default", "service": service, "username": slot,
+                "application": "rust-keyring"}
+
+    def _find(self, service, slot):
+        expected = self.attributes(service, slot)
+        lookup = {key: expected[key] for key in ("target", "service", "username")}
+        items = list(self.collection.search_items(lookup))
+        require(len(items) <= 1, "fixture_secret_service_entry_ambiguous")
+        if not items:
+            return None
+        item = items[0]
+        # Unreserved collisions only establish existence, never read their secret.
+        if (service, slot) in self.entries:
+            actual = item.get_attributes()
+            require(all(actual.get(key) == value for key, value in expected.items()),
+                    "fixture_secret_service_attributes_mismatch")
+            snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
+            require(actual == snapshot, "fixture_secret_service_attributes_changed")
+            require(not item.is_locked(), "fixture_secret_service_entry_locked")
+        return item
+
+    def _read(self, service, slot):
+        item = self._find(service, slot)
+        if item is None:
+            return None
+        if (service, slot) not in self.entries:
+            return ""
+        return item.get_secret().decode("utf-8")
+
+    def _put(self, service, slot, value):
+        require((service, slot) in self.entries, "credential_not_owned_by_fixture")
+        self.collection.create_item("Synthetic migration fixture", self.attributes(service, slot),
+                                    value.encode("utf-8"), replace=True)
+        self._find(service, slot)
+
+    def _remove(self, service, slot):
+        item = self._find(service, slot)
+        if item is not None:
+            item.delete()
+
+    def cleanup(self):
+        report = super().cleanup()
+        if hasattr(self, "collection"):
+            try:
+                require(not list(self.collection.get_all_items()), "fixture_collection_not_empty")
+            except Exception:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_collection_cleanup_failed"})
+        if self.connection is not None:
+            try:
+                self.connection.close()
+                self.connection = None
+            except Exception:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_bus_connection_close_failed"})
+        if self.daemon is not None:
+            try:
+                if self.daemon.poll() is None:
+                    self.daemon.terminate()
+                    try:
+                        self.daemon.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.daemon.kill()
+                        self.daemon.wait(timeout=5)
+                require(self.daemon.poll() is not None, "fixture_daemon_still_running")
+                self.daemon = None
+            except Exception:
+                report["passed"] = False
+                report["remaining_entries"].append({"code": "fixture_daemon_cleanup_failed"})
+        return report
+
+
+def create(root):
+    root = _base.owned_path(root)
+    require(not root.exists(), "fixture_keyring_home_not_fresh")
+    root.mkdir(parents=True, mode=0o700)
+    return SecretServiceKeys(root)

@@ -194,6 +194,35 @@ jobs:
             ${{ runner.temp }}/native-profile-migration/migration-coverage.json
             ${{ runner.temp }}/native-profile-migration/migration-platform-gate.json
           if-no-files-found: error
+      - name: Verify legacy Secret Service account migration
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          binary="$(realpath cli/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          root="$RUNNER_TEMP/secret-service-profile-migration"
+          suite_exit=0
+          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
+          gate_exit=0
+          python3 scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --source-sha "$CLI_SHA" --version "$CLI_VERSION" --binary-sha256 "$checksum" || gate_exit=$?
+          test "$suite_exit" -eq 0 && test "$gate_exit" -eq 0
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && runner.os == 'Linux' }}
+        with:
+          name: secret-service-profile-migration-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
+            ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
