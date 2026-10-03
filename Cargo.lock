@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "respire"
-version = "1.0.8-dev.3"
+version = "1.0.8"
 dependencies = [
  "anyhow",
  "base64",
@@ -1467,7 +1467,7 @@ dependencies = [
 
 [[package]]
 name = "respire_spawn"
-version = "1.0.8-dev.3"
+version = "1.0.8"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
