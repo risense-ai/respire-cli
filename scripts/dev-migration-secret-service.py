@@ -145,10 +145,14 @@ class SecretServiceKeys(_base.TrackedKeys):
 
     def _put(self, service, slot, value):
         require((service, slot) in self.entries, "credential_not_owned_by_fixture")
-        attributes = dict(self.attributes(service, slot),
-                          **{"xdg:schema": "org.freedesktop.Secret.Generic"})
-        self.collection.create_item("Synthetic migration fixture", attributes,
-                                    value.encode("utf-8"), replace=True)
+        item = self._find(service, slot)
+        if item is not None:
+            item.set_secret(value.encode("utf-8"))
+        else:
+            attributes = dict(self.attributes(service, slot),
+                              **{"xdg:schema": "org.freedesktop.Secret.Generic"})
+            self.collection.create_item("Synthetic migration fixture", attributes,
+                                        value.encode("utf-8"), replace=False)
         self._find(service, slot)
 
     def _remove(self, service, slot):
