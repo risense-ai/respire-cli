@@ -397,7 +397,15 @@
       "evidence": [
         {
           "suite": "cli",
-          "case": "doctor-json"
+          "case": "doctor-mcp-bin-item"
+        },
+        {
+          "suite": "cli",
+          "case": "doctor-mcp-http-item"
+        },
+        {
+          "suite": "runtime",
+          "case": "rerank_status_real"
         }
       ]
     },

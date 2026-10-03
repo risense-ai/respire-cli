@@ -147,7 +147,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         self._find(service, slot)
 
     def _remove(self, service, slot):
-        item = self._find(service, slot)
+        item = self._find(service, slot, check_snapshot=False)
         if item is not None:
             item.delete()
         require(self._find(service, slot, check_snapshot=False) is None,

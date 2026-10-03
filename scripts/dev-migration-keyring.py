@@ -233,6 +233,133 @@ class WindowsKeys(TrackedKeys):
             require(ctypes.get_last_error() == 1168, "fixture_credential_delete_failed")
 
 
+MAC_FIXTURE_ACL_SOURCE = r"""
+/* Isolated CI only: authorize a reader without fetching or modifying secret data. */
+#include <CoreFoundation/CoreFoundation.h>
+#include <Security/Security.h>
+#include <dlfcn.h>
+#include <limits.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <string.h>
+
+typedef OSStatus (*SetAccessWithPassword)(SecKeychainItemRef, SecAccessRef,
+                                         UInt32, const void *);
+
+int main(int argc, char **argv) {
+    int result = 1;
+    OSStatus status = 0;
+    const char *stage = "arguments";
+    char password[256] = {0}, keychain_path[PATH_MAX] = {0};
+    SecKeychainRef keychain = NULL, item_keychain = NULL;
+    SecAccessRef access = NULL;
+    SecTrustedApplicationRef reader = NULL;
+    CFMutableDictionaryRef query = NULL;
+    CFStringRef service = NULL, account = NULL, description = NULL;
+    CFDataRef reader_data = NULL;
+    CFArrayRef search = NULL, matches = NULL, acls = NULL, apps = NULL, tags = NULL;
+    CFMutableArrayRef updated = NULL;
+    SetAccessWithPassword set_access = (SetAccessWithPassword)
+        dlsym(RTLD_DEFAULT, "SecKeychainItemSetAccessWithPassword");
+    if (!set_access) { stage = "api_unavailable"; goto done; }
+    if (argc != 3 || !fgets(password, sizeof(password), stdin)) goto done;
+    password[strcspn(password, "\n")] = 0;
+    if (!password[0]) goto done;
+    stage = "interaction";
+    status = SecKeychainSetUserInteractionAllowed(false);
+    if (status) goto done;
+    stage = "open";
+    status = SecKeychainOpen(argv[1], &keychain);
+    if (status) goto done;
+    service = CFSTR("rsrs");
+    account = CFStringCreateWithCString(NULL, argv[2], kCFStringEncodingUTF8);
+    search = CFArrayCreate(NULL, (const void **)&keychain, 1, &kCFTypeArrayCallBacks);
+    query = CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks,
+                                     &kCFTypeDictionaryValueCallBacks);
+    if (!account || !search || !query) { stage = "allocation"; goto done; }
+    CFDictionarySetValue(query, kSecClass, kSecClassGenericPassword);
+    CFDictionarySetValue(query, kSecAttrService, service);
+    CFDictionarySetValue(query, kSecAttrAccount, account);
+    CFDictionarySetValue(query, kSecMatchSearchList, search);
+    CFDictionarySetValue(query, kSecMatchLimit, kSecMatchLimitAll);
+    CFDictionarySetValue(query, kSecReturnRef, kCFBooleanTrue);
+    stage = "lookup";
+    status = SecItemCopyMatching(query, (CFTypeRef *)&matches);
+    if (status == errSecItemNotFound) { result = 3; goto done; }
+    if (status) goto done;
+    if (!matches || CFGetTypeID(matches) != CFArrayGetTypeID()
+        || CFArrayGetCount(matches) != 1) { stage = "unique"; goto done; }
+    SecKeychainItemRef item = (SecKeychainItemRef)CFArrayGetValueAtIndex(matches, 0);
+    stage = "owner";
+    status = SecKeychainItemCopyKeychain(item, &item_keychain);
+    if (status) goto done;
+    UInt32 length = sizeof(keychain_path);
+    status = SecKeychainGetPath(item_keychain, &length, keychain_path);
+    if (status || length >= sizeof(keychain_path)) goto done;
+    keychain_path[length] = 0;
+    if (strcmp(keychain_path, argv[1])) goto done;
+    stage = "copy_access";
+    status = SecKeychainItemCopyAccess(item, &access);
+    if (status) goto done;
+    acls = SecAccessCopyMatchingACLList(access, kSecACLAuthorizationDecrypt);
+    if (!acls || CFArrayGetCount(acls) != 1) { stage = "decrypt_acl"; goto done; }
+    SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(acls, 0);
+    tags = SecACLCopyAuthorizations(acl);
+    if (!tags || CFArrayGetCount(tags) != 1
+        || !CFEqual(CFArrayGetValueAtIndex(tags, 0), kSecACLAuthorizationDecrypt)) {
+        stage = "decrypt_only"; goto done;
+    }
+    SecKeychainPromptSelector prompt = 0;
+    stage = "copy_contents";
+    status = SecACLCopyContents(acl, &apps, &description, &prompt);
+    if (status) goto done;
+    /* NULL already permits every app. Preserve that policy without changing it. */
+    if (!apps) { result = 0; goto done; }
+    stage = "reader";
+    status = SecTrustedApplicationCreateFromPath("/usr/bin/security", &reader);
+    if (status) goto done;
+    status = SecTrustedApplicationCopyData(reader, &reader_data);
+    if (status) goto done;
+    for (CFIndex i = 0; i < CFArrayGetCount(apps); ++i) {
+        CFDataRef existing_data = NULL;
+        status = SecTrustedApplicationCopyData(
+            (SecTrustedApplicationRef)CFArrayGetValueAtIndex(apps, i), &existing_data);
+        if (status) goto done;
+        Boolean equal = CFEqual(existing_data, reader_data);
+        CFRelease(existing_data);
+        if (equal) { result = 0; goto done; }
+    }
+    updated = CFArrayCreateMutableCopy(NULL, 0, apps);
+    if (!updated) { stage = "allocation"; goto done; }
+    CFArrayAppendValue(updated, reader);
+    stage = "set_contents";
+    status = SecACLSetContents(acl, updated, description, prompt);
+    if (status) goto done;
+    stage = "authorize";
+    status = set_access(item, access, (UInt32)strlen(password), password);
+    if (!status) result = 0;
+done:
+    memset(password, 0, sizeof(password));
+    if (result == 1) fprintf(stderr, "fixture_native_acl_%s_status_%d\n", stage, (int)status);
+    if (updated) CFRelease(updated);
+    if (tags) CFRelease(tags);
+    if (apps) CFRelease(apps);
+    if (description) CFRelease(description);
+    if (reader_data) CFRelease(reader_data);
+    if (reader) CFRelease(reader);
+    if (acls) CFRelease(acls);
+    if (access) CFRelease(access);
+    if (matches) CFRelease(matches);
+    if (query) CFRelease(query);
+    if (search) CFRelease(search);
+    if (account) CFRelease(account);
+    if (item_keychain) CFRelease(item_keychain);
+    if (keychain) CFRelease(keychain);
+    return result;
+}
+"""
+
+
 class MacKeys(TrackedKeys):
     name = "macos-keychain-synthetic-acl"
 
@@ -243,6 +370,8 @@ class MacKeys(TrackedKeys):
         self.keychain = root / "fixture.keychain-db"
         self.password = secrets.token_urlsafe(32)
         self.created = False
+        self.acl_helper = None
+        self.acl_authorized_reads = 0
         try:
             self._capture_home(root)
             result = self._security(root, ["create-keychain", "-p", self.password, str(self.keychain)])
@@ -306,6 +435,8 @@ class MacKeys(TrackedKeys):
         return env
 
     def _read(self, service, slot):
+        if service == "rsrs" and (service, slot) in self.entries:
+            self._authorize_reader(slot)
         metadata = self._security(self.root, ["find-generic-password", "-s", service,
                                              "-a", slot, str(self.keychain)])
         if metadata.returncode == 44:
@@ -320,6 +451,35 @@ class MacKeys(TrackedKeys):
         require(result.returncode == 0, "fixture_credential_read_failed")
         return result.stdout.decode("utf-8").removesuffix("\n")
 
+    def _authorize_reader(self, slot):
+        require(("rsrs", slot) in self.entries, "credential_not_owned_by_fixture")
+        owned_path(self.keychain)
+        if self.acl_helper is None:
+            source = self.root / "fixture-acl.c"
+            helper = self.root / "fixture-acl"
+            require(not source.exists() and not helper.exists(), "fixture_acl_helper_not_fresh")
+            source.write_text(MAC_FIXTURE_ACL_SOURCE, encoding="utf-8")
+            try:
+                compiled = subprocess.run(["/usr/bin/clang", "-Wno-deprecated-declarations",
+                    str(source), "-framework", "Security", "-framework", "CoreFoundation",
+                    "-o", str(helper)], capture_output=True, timeout=60)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError("fixture_native_acl_compile_timeout") from None
+            require(compiled.returncode == 0, "fixture_native_acl_compile_failed")
+            self.acl_helper = helper
+        try:
+            result = subprocess.run([str(self.acl_helper), str(self.keychain), slot],
+                input=(self.password + "\n").encode("utf-8"), capture_output=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("fixture_native_acl_authorize_timeout") from None
+        if result.returncode not in (0, 3):
+            code = result.stderr.decode("ascii", errors="replace").strip()
+            require(re.fullmatch(r"fixture_native_acl_[a-z_]+_status_-?[0-9]+", code),
+                    "fixture_native_acl_authorize_failed")
+            raise RuntimeError(code)
+        if result.returncode == 0:
+            self.acl_authorized_reads += 1
+
     def _put(self, service, slot, value):
         # -A is deliberate only for synthetic CI secrets, not a product ACL change.
         result = self._security(self.root, ["add-generic-password", "-U", "-s", service,
@@ -333,6 +493,8 @@ class MacKeys(TrackedKeys):
 
     def cleanup(self):
         report = super().cleanup()
+        report["reader_acl"] = {"scope": "owned_rsrs_ci_decrypt_reader_only",
+                                "authorized_reads": self.acl_authorized_reads}
         if self.created:
             try:
                 require(self._security(self.root, ["delete-keychain", str(self.keychain)]).returncode == 0
