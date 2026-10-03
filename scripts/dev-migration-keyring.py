@@ -113,17 +113,20 @@ class TrackedKeys:
 
 class LinuxKeys(TrackedKeys):
     name = "linux-keyutils"
+    no_entry_errors = (getattr(errno, "ENOKEY", 126), errno.EACCES,
+                       getattr(errno, "EKEYREVOKED", 128), getattr(errno, "EKEYEXPIRED", 127))
 
     def __init__(self, root):
         super().__init__(root)
         self.lib = ctypes.CDLL("libkeyutils.so.1", use_errno=True)
         signatures = {
-            "keyctl_get_persistent": ([ctypes.c_uint, ctypes.c_long], ctypes.c_long),
+            "keyctl_get_persistent": ([ctypes.c_uint, ctypes.c_int32], ctypes.c_long),
             "add_key": ([ctypes.c_char_p, ctypes.c_char_p, ctypes.c_void_p,
-                         ctypes.c_size_t, ctypes.c_long], ctypes.c_long),
-            "keyctl_search": ([ctypes.c_long, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_long], ctypes.c_long),
-            "keyctl_read": ([ctypes.c_long, ctypes.c_void_p, ctypes.c_size_t], ctypes.c_long),
-            "keyctl_invalidate": ([ctypes.c_long], ctypes.c_long),
+                         ctypes.c_size_t, ctypes.c_int32], ctypes.c_int32),
+            "keyctl_search": ([ctypes.c_int32, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int32], ctypes.c_long),
+            "keyctl_read": ([ctypes.c_int32, ctypes.c_void_p, ctypes.c_size_t], ctypes.c_long),
+            "keyctl_unlink": ([ctypes.c_int32, ctypes.c_int32], ctypes.c_long),
+            "keyctl_invalidate": ([ctypes.c_int32], ctypes.c_long),
         }
         for name, (args, result) in signatures.items():
             function = getattr(self.lib, name)
@@ -135,7 +138,10 @@ class LinuxKeys(TrackedKeys):
         description = f"keyring-rs:{slot}@{service}".encode()
         key = self.lib.keyctl_search(self.ring, b"user", description, 0)
         if key < 0:
-            require(ctypes.get_errno() == getattr(errno, "ENOKEY", 126), "fixture_keyring_search_failed")
+            error = ctypes.get_errno()
+            # Match keyring 3.6.3's NoEntry mapping for exact allowlisted fixture
+            # descriptions. Reads after a positive lookup remain strict.
+            require(error in self.no_entry_errors, f"fixture_keyring_search_failed_errno_{error}")
             return None
         return key
 
@@ -161,7 +167,15 @@ class LinuxKeys(TrackedKeys):
     def _remove(self, service, slot):
         key = self._find(service, slot)
         if key is not None:
-            require(self.lib.keyctl_invalidate(key) == 0, "fixture_credential_delete_failed")
+            result = self.lib.keyctl_unlink(key, self.ring)
+            error = ctypes.get_errno()
+            require(result == 0, f"fixture_credential_unlink_failed_errno_{error}")
+            # Unlink first so the persistent ring cannot retain an invalidated
+            # reference. Last-reference collection may already remove the key.
+            result = self.lib.keyctl_invalidate(key)
+            error = ctypes.get_errno()
+            require(result == 0 or error in self.no_entry_errors,
+                    f"fixture_credential_invalidate_failed_errno_{error}")
 
 
 class WindowsKeys(TrackedKeys):
