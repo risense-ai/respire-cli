@@ -73,6 +73,7 @@ class SecretServiceKeys(_base.TrackedKeys):
                 try:
                     self.collection = secretstorage.get_collection_by_alias(self.connection, "default")
                     require(not self.collection.is_locked(), "fixture_default_collection_locked")
+                    require(not list(self.collection.get_all_items()), "fixture_default_collection_not_empty")
                     break
                 except (secretstorage.exceptions.ItemNotFoundException,
                         secretstorage.exceptions.SecretServiceNotAvailableException):
@@ -83,6 +84,7 @@ class SecretServiceKeys(_base.TrackedKeys):
                 "fixture_bus_already_has_secret_service", "fixture_secret_service_daemon_exited",
                 "fixture_secret_service_owner_not_ready", "fixture_secret_service_owner_mismatch",
                 "fixture_default_collection_locked", "fixture_default_collection_not_ready",
+                "fixture_default_collection_not_empty",
             }
             code = str(error) if isinstance(error, RuntimeError) and str(error) in fixed_codes \
                 else "fixture_secret_service_initialization_failed"
@@ -105,7 +107,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         return {"target": "default", "service": service, "username": slot,
                 "application": "rust-keyring"}
 
-    def _find(self, service, slot):
+    def _find(self, service, slot, check_snapshot=True):
         expected = self.attributes(service, slot)
         lookup = {key: expected[key] for key in ("target", "service", "username")}
         items = list(self.collection.search_items(lookup))
@@ -118,8 +120,15 @@ class SecretServiceKeys(_base.TrackedKeys):
             actual = item.get_attributes()
             require(all(actual.get(key) == value for key, value in expected.items()),
                     "fixture_secret_service_attributes_mismatch")
-            snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
-            require(actual == snapshot, "fixture_secret_service_attributes_changed")
+            if check_snapshot:
+                snapshot = self.attribute_snapshots.setdefault((service, slot), dict(actual))
+                if actual != snapshot:
+                    changed = {key for key in actual.keys() | snapshot.keys()
+                               if actual.get(key) != snapshot.get(key)}
+                    known = {"target", "service", "username", "application", "xdg:schema"}
+                    names = "_".join(sorted(changed & known)) or "none"
+                    raise RuntimeError("fixture_secret_service_attributes_changed_keys_" + names
+                                       + "_unknown_count_" + str(len(changed - known)))
             require(not item.is_locked(), "fixture_secret_service_entry_locked")
         return item
 
@@ -141,9 +150,28 @@ class SecretServiceKeys(_base.TrackedKeys):
         item = self._find(service, slot)
         if item is not None:
             item.delete()
+        require(self._find(service, slot, check_snapshot=False) is None,
+                "fixture_credential_delete_readback_failed")
+        self.attribute_snapshots.pop((service, slot), None)
 
     def cleanup(self):
-        report = super().cleanup()
+        # The private collection started empty and every slot was reserved absent.
+        # Attribute preservation failures must not prevent exact owned cleanup.
+        events, remaining = [], []
+        for index, (service, slot) in enumerate(sorted(self.entries)):
+            try:
+                item = self._find(service, slot, check_snapshot=False)
+                if item is not None:
+                    item.delete()
+                require(self._find(service, slot, check_snapshot=False) is None,
+                        "fixture_credential_delete_readback_failed")
+                self.attribute_snapshots.pop((service, slot), None)
+                events.append({"entry": index, "passed": True, "code": "credential_removed"})
+            except Exception:
+                event = {"entry": index, "passed": False, "code": "credential_cleanup_failed"}
+                events.append(event)
+                remaining.append(event)
+        report = {"passed": not remaining, "remaining_entries": remaining, "events": events}
         if hasattr(self, "collection"):
             try:
                 require(not list(self.collection.get_all_items()), "fixture_collection_not_empty")

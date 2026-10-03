@@ -50,8 +50,14 @@ class Smoke(support.Smoke):
             self.keys.reserve("rsrs", slot + user)
 
     def cli(self, env, *args, timeout=180):
-        output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
-            cwd=self.root, env=env, capture_output=True, timeout=timeout)
+        try:
+            output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
+                cwd=self.root, env=env, capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.report["cli_failure"] = {"command": args[0], "timeout_seconds": timeout,
+                "error_class": "timeout"}
+            self.save()
+            raise
         value = None
         try:
             value = json.loads(output.stdout)
@@ -154,6 +160,7 @@ class Smoke(support.Smoke):
             "pass_hash": hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()}
         self.accounts.append(account)
         self.report["cloud_cleanup"]["remaining_users"].append(user)
+        self.report["fixture_operation"] = "register"
         self.save()
         value = self.cli(env, "register", "--addr", support.UPSTREAM, "--user", user, "--pass", password)
         session = self.session(env)
@@ -163,10 +170,14 @@ class Smoke(support.Smoke):
         account.update(token=session["token"], confirmed=True)
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")
+        self.report["fixture_operation"] = "verify_registered_native_credentials"
+        self.save()
         require(self.keys.read("rsrs", "super:" + user) == code
             and self.keys.read("rsrs", "pass:" + user) == password,
             "registered_native_credentials_not_in_owned_store")
         env["ONEMEMORY_SUPER"] = code
+        self.report["fixture_operation"] = "seed_local_content"
+        self.save()
         self.cli(env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
         text = "Synthetic unsynchronized migration content " + label
         created = self.cli(env, "remember", text, "--title", label, "--force", "--importance", "important")
@@ -183,12 +194,18 @@ class Smoke(support.Smoke):
         require(row and connection.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0,
             "migration_outbox_fixture_not_pending")
         self.wal_connections.append(connection)
+        self.report["fixture_operation"] = "seed_legacy_native_credentials"
+        self.save()
         self.keys.put(service, "super:" + user, code)
         self.keys.put(service, "pass:" + user, password)
         # The old service is the only credential source, not an environment override.
+        self.report["fixture_operation"] = "remove_current_native_credentials"
+        self.save()
         self.keys.remove("rsrs", "super:" + user)
         self.keys.remove("rsrs", "pass:" + user)
         env.pop("ONEMEMORY_SUPER", None)
+        self.report["fixture_operation"] = "rewrite_legacy_endpoint"
+        self.save()
         session["addr"] = {"1memory": "https://api.1memory.ai", "memocap": "https://api.memocap.ai"}.get(service,
             "https://api.respire.ai")
         self.write_session(env, session)
@@ -324,7 +341,9 @@ class Smoke(support.Smoke):
                     session["addr"] = support.UPSTREAM
                     self.write_session(profile_env, session)
                     self.cli(profile_env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
-                    self.cli(profile_env, "remember", "New-directory migration write", "--title", "post-migration", "--force")
+                    created = self.cli(profile_env, "remember", "New-directory migration write",
+                        "--title", "post-migration", "--force", "--importance", "important")
+                    new_id = created["summary"]["id"]
                     self.cli(profile_env, "sync")
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
@@ -333,6 +352,7 @@ class Smoke(support.Smoke):
                 fixture["account"]["token"] = self.session(remote)["token"]
                 self.cli(remote, "sync")
                 self.read_entry(remote, fixture["id"], fixture["text"])
+                self.read_entry(remote, new_id, "New-directory migration write")
                 rows = self.cli(remote, "list", "--limit", "100")
                 require("post-migration" in json.dumps(rows), "new_directory_write_not_synced")
             self.passed("migrated_outbox_sync_and_independent_decrypt", profiles=len(fixtures))

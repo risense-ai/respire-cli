@@ -261,7 +261,14 @@ class MacKeys(TrackedKeys):
     def _security(self, home, args):
         home = owned_path(home)
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
-        return subprocess.run(["/usr/bin/security", *args], env=env, capture_output=True, timeout=20)
+        try:
+            return subprocess.run(["/usr/bin/security", *args], env=env, capture_output=True, timeout=20)
+        except subprocess.TimeoutExpired:
+            operations = {"create-keychain", "unlock-keychain", "set-keychain-settings",
+                          "list-keychains", "default-keychain", "find-generic-password",
+                          "add-generic-password", "delete-generic-password", "delete-keychain"}
+            operation = args[0] if args and args[0] in operations else "unknown-operation"
+            raise RuntimeError("fixture_native_security_timeout_" + operation) from None
 
     def _capture_home(self, home):
         if home in self.homes:
