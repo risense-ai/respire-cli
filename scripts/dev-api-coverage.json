@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "authority": "Cloud serve route implementations; reviewed 2026-10-03",
+  "authority": "Cloud serve route implementations; reviewed 2026-10-04",
   "expected_route_count": 61,
   "routes": [
     {
@@ -309,5 +309,5 @@
       "group": "admin"
     }
   ],
-  "server_source_sha": "30938493073ff4f611d7c34f773003a7fb02a405"
+  "server_source_sha": "b8e1870e6dc1ba9442083ccc8bec6089908a07fe"
 }
