@@ -35,12 +35,46 @@ struct Progress {
 
 pub struct Operation;
 
+#[derive(Debug)]
+pub enum OperationStopped {
+    Cancelled,
+    TimedOut,
+}
+
+impl std::fmt::Display for OperationStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Cancelled => "model operation cancelled",
+            Self::TimedOut => "model operation timed out after 30 minutes",
+        })
+    }
+}
+
+impl std::error::Error for OperationStopped {}
+
+fn check_progress(progress: &Progress) -> Result<()> {
+    if progress.cancelled {
+        return Err(OperationStopped::Cancelled.into());
+    }
+    if progress.started.elapsed().as_secs() >= 1800 {
+        return Err(OperationStopped::TimedOut.into());
+    }
+    Ok(())
+}
+
 impl Operation {
     pub fn begin(phase: &str) -> Result<Self> {
+        Self::try_begin(phase)?.ok_or_else(|| anyhow!("another model operation is running"))
+    }
+
+    /// Background indexing waits for the existing model operation instead of racing it.
+    pub fn try_begin(phase: &str) -> Result<Option<Self>> {
         let mut slot = CURRENT
             .lock()
             .map_err(|_| anyhow!("model progress lock poisoned"))?;
-        anyhow::ensure!(slot.is_none(), "another model operation is running");
+        if slot.is_some() {
+            return Ok(None);
+        }
         *slot = Some(Progress {
             id: TASK_ID
                 .with_borrow(|id| id.clone())
@@ -54,8 +88,21 @@ impl Operation {
             cancelled: false,
         });
         TRACKED.set(true);
-        Ok(Self)
+        Ok(Some(Self))
     }
+}
+
+pub fn status() -> Result<Value> {
+    let slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
+    Ok(match slot.as_ref() {
+        Some(progress) => json!({
+            "active": true, "id": progress.id, "phase": progress.phase,
+            "item": progress.item, "done": progress.done, "total": progress.total,
+            "elapsed": progress.started.elapsed().as_secs(),
+            "idle": progress.updated.elapsed().as_secs(), "cancelled": progress.cancelled,
+        }),
+        None => json!({"active": false}),
+    })
 }
 
 impl Drop for Operation {
@@ -75,11 +122,7 @@ pub fn update(phase: &str, item: &str, done: u64, total: Option<u64>) -> Result<
         .lock()
         .map_err(|_| anyhow!("model progress lock poisoned"))?;
     if let Some(progress) = slot.as_mut() {
-        anyhow::ensure!(!progress.cancelled, "model operation cancelled");
-        anyhow::ensure!(
-            progress.started.elapsed().as_secs() < 1800,
-            "model operation timed out after 30 minutes"
-        );
+        check_progress(progress)?;
         if progress.phase != phase || progress.item != item || progress.done != done {
             progress.updated = Instant::now();
         }
@@ -96,16 +139,9 @@ pub fn check() -> Result<()> {
         let slot = CURRENT
             .lock()
             .map_err(|_| anyhow!("model progress lock poisoned"))?;
-        anyhow::ensure!(
-            !slot.as_ref().is_some_and(|p| p.cancelled),
-            "model operation cancelled"
-        );
-        anyhow::ensure!(
-            !slot
-                .as_ref()
-                .is_some_and(|p| p.started.elapsed().as_secs() >= 1800),
-            "model operation timed out after 30 minutes"
-        );
+        if let Some(progress) = slot.as_ref() {
+            check_progress(progress)?;
+        }
     }
     Ok(())
 }

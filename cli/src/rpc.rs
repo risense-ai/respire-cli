@@ -43,6 +43,20 @@ static STATS_FAILED: AtomicUsize = AtomicUsize::new(0);
 const MAX_PENDING_STATS: usize = 16;
 static EXCLUSIVE: OnceLock<Arc<WriteGate>> = OnceLock::new();
 static GENERATION: AtomicUsize = AtomicUsize::new(0);
+static INDEX_ON: AtomicBool = AtomicBool::new(false);
+static INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
+static INDEX_CV: Condvar = Condvar::new();
+static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
+    requested: false,
+    state: "idle",
+    error: None,
+});
+
+struct IndexWork {
+    requested: bool,
+    state: &'static str,
+    error: Option<String>,
+}
 static WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
 static CLASSIFY_RUNNING: AtomicBool = AtomicBool::new(false);
 static SYNC_KICK: Mutex<SyncSchedule> = Mutex::new(SyncSchedule {
@@ -287,6 +301,175 @@ fn context_changed() {
     state.due = Some(Instant::now() + Duration::from_secs(3));
     drop(state);
     SYNC_CV.notify_one();
+    kick_index();
+}
+
+pub(crate) fn index_status() -> Value {
+    let state = match INDEX_WORK.lock() {
+        Ok(state) => state,
+        Err(_) => return json!({"state":"failed", "error":"index work lock poisoned"}),
+    };
+    json!({"state": state.state, "scheduled": state.requested,
+        "worker_active": INDEX_ON.load(Ordering::Acquire),
+        "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
+        "model_setup": (state.state == "failed").then_some("Inspect the reported error; if model files are missing, use `model install-bge` (legacy) or `model install-m3` (m3).")})
+}
+
+pub(crate) fn kick_index() {
+    if STOPPING.load(Ordering::Acquire) {
+        return;
+    }
+    {
+        let mut work = match INDEX_WORK.lock() {
+            Ok(work) => work,
+            Err(_) => {
+                eprintln!("background retrieval indexing failed: index work lock poisoned");
+                return;
+            }
+        };
+        work.requested = true;
+        if !INDEX_RUNNING.load(Ordering::Acquire) && work.error.is_none() {
+            work.state = "scheduled";
+        }
+    }
+    INDEX_CV.notify_one();
+}
+
+fn index_yield_to_foreground(generation: usize) -> Result<()> {
+    let gate = shared_exclusive();
+    let mut state = gate.state.lock().map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?;
+    while state.held || state.foreground > 0 {
+        check_sync_context(generation)?;
+        respire::model_progress::check()?;
+        state = gate.changed.wait_timeout(state, Duration::from_millis(100))
+            .map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?.0;
+    }
+    check_sync_context(generation)?;
+    respire::model_progress::check()
+}
+
+/// The database's source-checked missing artifacts are the resumable work queue.
+/// Model preparation runs on this thread without taking the foreground write gate.
+fn index_loop() {
+    mark_worker();
+    if let Err(error) = index_loop_inner() {
+        eprintln!("background retrieval index worker stopped: {error:#}");
+    }
+    INDEX_RUNNING.store(false, Ordering::Release);
+    INDEX_ON.store(false, Ordering::Release);
+}
+
+fn index_has_work() -> bool {
+    INDEX_RUNNING.load(Ordering::Acquire)
+        || INDEX_WORK.lock().is_ok_and(|work| work.requested)
+}
+
+fn index_loop_inner() -> Result<()> {
+    let mut model_wait_started: Option<Instant> = None;
+    loop {
+        {
+            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            while !work.requested && !STOPPING.load(Ordering::Acquire) {
+                work = INDEX_CV.wait(work).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            }
+            if STOPPING.load(Ordering::Acquire) {
+                work.state = "stopped";
+                work.requested = false;
+                return Ok(());
+            }
+            work.requested = false;
+            work.state = "running";
+        }
+        INDEX_RUNNING.store(true, Ordering::Release);
+        let generation = GENERATION.load(Ordering::Acquire);
+        let result = (|| -> Result<bool> {
+            check_sync_context(generation)?;
+            let store = respire::service::open_store()?;
+            let model = store.retrieval_model()?;
+            if !store.index_pending(&model)? {
+                return Ok(true);
+            }
+            let Some(_operation) = respire::model_progress::Operation::try_begin("index-load")? else {
+                return Ok(false);
+            };
+            index_yield_to_foreground(generation)?;
+            let keys = crate::build_session()?;
+            let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
+            loop {
+                let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
+                    index_yield_to_foreground(generation)?;
+                    respire::model_progress::update("index", &model, done as u64, Some(total as u64))
+                });
+                match rebuilt {
+                    Ok(_) => break,
+                    Err(error) if error.downcast_ref::<respire::transport::local::IndexSourceChanged>().is_some() => {
+                        // Keep this Operation across source changes: cancellation and
+                        // the 30-minute budget apply to the whole resumed task.
+                        respire::model_progress::check()?;
+                        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                        work.error = Some(format!("{error:#}"));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            check_sync_context(generation)?;
+            Ok(true)
+        })();
+        INDEX_RUNNING.store(false, Ordering::Release);
+        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+        match result {
+            Ok(true) => {
+                work.state = "ready";
+                work.error = None;
+                model_wait_started = None;
+            }
+            Ok(false) => {
+                let started = model_wait_started.get_or_insert_with(Instant::now);
+                if started.elapsed() >= Duration::from_secs(1800) {
+                    work.state = "failed";
+                    work.requested = false;
+                    work.error = Some("background indexing timed out waiting for another model operation".into());
+                    model_wait_started = None;
+                    continue;
+                }
+                work.state = "waiting_model";
+                work.requested = true;
+                work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
+                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
+            }
+            Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
+                model_wait_started = None;
+                work.state = "scheduled";
+                work.requested = true;
+                work.error = Some(format!("{error:#}"));
+            }
+            Err(error) if error.downcast_ref::<respire::model_progress::OperationStopped>().is_some() => {
+                model_wait_started = None;
+                work.state = "paused";
+                work.requested = false;
+                work.error = Some(format!("{error:#}"));
+            }
+            Err(error) => {
+                model_wait_started = None;
+                work.state = "failed";
+                work.error = Some(format!("{error:#}"));
+                eprintln!("background retrieval indexing failed: {error:#}");
+            }
+        }
+        drop(work);
+    }
+}
+
+/// An explicit direct command releases its library lock before starting this work.
+pub(crate) fn request_index() -> Result<Value> {
+    if worker_active() {
+        kick_index();
+        return Ok(index_status());
+    }
+    let response = call_method("index.prepare", Vec::new(), true)?;
+    anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
+    response.envelope.map(|envelope| envelope.summary)
+        .ok_or_else(|| anyhow::anyhow!("runtime did not acknowledge background indexing"))
 }
 
 pub(crate) fn sync_running() -> bool {
@@ -442,6 +625,7 @@ fn flight_loop() {
         }
         SYNC_CONTEXT.with(|context| context.set(None));
         SYNC_RUNNING.store(false, Ordering::Release);
+        kick_index();
     }
 }
 
@@ -688,7 +872,7 @@ fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
                 data_dir: None,
             })
         }
-        "cli.exec" | "model.control" => {
+        "cli.exec" | "model.control" | "index.prepare" => {
             let parsed = if method == "cli.exec" {
                 crate::net_rpc::rpc_exec(args.to_vec())?
             } else {
@@ -834,6 +1018,14 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         return hit;
     }
     let response = match request.method.as_str() {
+        "index.prepare" => {
+            kick_index();
+            let mut response = status_response(&request);
+            response.envelope = Some(ResultEnvelope::new(
+                "index.prepare", OutputStatus::Pending, index_status(), Vec::new(),
+            ));
+            response
+        }
         "model.control" => match respire::model_progress::control(
             request.args.first().map(String::as_str).unwrap_or(""),
             request.args.get(1).is_some_and(|arg| arg == "true"),
@@ -981,12 +1173,14 @@ fn execute_json(args: Vec<String>) -> std::result::Result<Value, String> {
 pub(crate) fn request_drain_exit() {
     STOPPING.store(true, Ordering::Release);
     SYNC_CV.notify_all();
+    INDEX_CV.notify_all();
     std::thread::spawn(|| {
         for _ in 0..80 {
             if RUNNING.load(Ordering::Acquire) == 0
                 && !WRITE_RUNNING.load(Ordering::Acquire)
                 && !CLASSIFY_RUNNING.load(Ordering::Acquire)
                 && !sync_running()
+                && !index_has_work()
             {
                 break;
             }
@@ -1023,6 +1217,7 @@ pub(crate) fn health_body() -> Value {
         "exe": exe,
         "data_dir": respire::service::data_dir().display().to_string(),
         "recall_statistics": recall_stats_status(),
+        "retrieval_index": index_status(),
     })
 }
 
@@ -1266,6 +1461,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 }
                 let captured = crate::capture_run(job.args);
                 drop(_held);
+                kick_index();
                 if changing_context {
                     context_changed();
                 }
@@ -1277,6 +1473,17 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
         stop_process(1);
     }
     respire::service::install_autosync_notifier(kick_autosync);
+    respire::service::install_index_notifier(kick_index);
+    INDEX_ON.store(true, Ordering::Release);
+    let indexer = std::thread::Builder::new()
+        .name("respire-index".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(index_loop);
+    if let Err(error) = indexer.as_ref() {
+        eprintln!("runtime failed to start the index worker: {error}");
+        stop_process(1);
+    }
+    kick_index();
     kick_autosync();
     let mut pending = VecDeque::<Job>::new();
     let mut idle_since = Instant::now();
@@ -1361,6 +1568,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 || WRITE_RUNNING.load(Ordering::Acquire)
                 || CLASSIFY_RUNNING.load(Ordering::Acquire)
                 || sync_running()
+                || index_has_work()
                 || !pending.is_empty()
             {
                 idle_since = Instant::now();
@@ -1371,6 +1579,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     }
     STOPPING.store(true, Ordering::Release);
     SYNC_CV.notify_all();
+    INDEX_CV.notify_all();
     if let Ok(mut installed) = WRITE_TX.lock() {
         installed.take();
     }
@@ -1384,6 +1593,11 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     }
     if let Ok(classifier) = classifier {
         let _ = classifier.join();
+    }
+    if let Ok(indexer) = indexer {
+        if indexer.join().is_err() {
+            eprintln!("background index worker panicked during shutdown");
+        }
     }
     while RUNNING.load(Ordering::Acquire) > 0 || sync_running() {
         std::thread::sleep(Duration::from_millis(10));

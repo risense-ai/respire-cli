@@ -424,12 +424,9 @@ fn logout_cli(full: bool) -> Result<LogoutOutcome> {
 /// Candidate set: active entries (shared by recall/list/remember judge-then-store).
 /// After 2026-09-21 dropped the local subtree, there is no scope filter - whole-store semantics.
 fn scoped_candidates(store: &LocalStore) -> Result<Vec<respire::StoredMemory>> {
-    let model = store.retrieval_model()?;
-    if store.index_pending(&model)? {
-        let embedder = BgeEmbedder::load_model(&model)?;
-        store.rebuild_index(&build_session()?, &embedder, &model)?;
-    }
-    store.all(false)
+    let candidates = store.all(false)?;
+    respire::service::require_candidates_ready(store, &candidates)?;
+    Ok(candidates)
 }
 
 fn candidates_preview(store: &LocalStore) -> Result<Vec<respire::StoredMemory>> {
@@ -1607,6 +1604,7 @@ fn run_tree_deepen(
             for r in &roots {
                 let plan = match respire::service::deepen_plan(&app.store, &r.id, min) {
                     Ok((_, p)) if !p.sub_roots.is_empty() => p,
+                    Err(error) if error.downcast_ref::<respire::service::IndexPending>().is_some() => return Err(error),
                     _ => continue,
                 };
                 let titles: Vec<String> = plan.sub_roots.iter().map(|s| s.title.clone()).collect();
@@ -1725,26 +1723,30 @@ fn run_tree_deepen(
             let mut items = Vec::new();
             let mut details = Vec::new();
             for r in all.iter().filter(|m| m.local_parent_id.is_empty()) {
-                if let Ok((_, plan)) = respire::service::deepen_plan(&app.store, &r.id, min) {
-                    if plan.sub_roots.is_empty() {
-                        continue;
+                match respire::service::deepen_plan(&app.store, &r.id, min) {
+                    Ok((_, plan)) => {
+                        if plan.sub_roots.is_empty() {
+                            continue;
+                        }
+                        flat += 1;
+                        let title = if r.local_title.is_empty() {
+                            "(untitled)"
+                        } else {
+                            &r.local_title
+                        };
+                        items.push(OutputItem::new(
+                            respire::service::short_id(&r.id),
+                            OutputStatus::Pending,
+                            format!("title={title}; sub_roots={}", plan.sub_roots.len()),
+                        ));
+                        details.push(serde_json::json!({
+                            "root": r.id,
+                            "title": title,
+                            "sub_roots": plan.sub_roots,
+                        }));
                     }
-                    flat += 1;
-                    let title = if r.local_title.is_empty() {
-                        "(untitled)"
-                    } else {
-                        &r.local_title
-                    };
-                    items.push(OutputItem::new(
-                        respire::service::short_id(&r.id),
-                        OutputStatus::Pending,
-                        format!("title={title}; sub_roots={}", plan.sub_roots.len()),
-                    ));
-                    details.push(serde_json::json!({
-                        "root": r.id,
-                        "title": title,
-                        "sub_roots": plan.sub_roots,
-                    }));
+                    Err(error) if error.downcast_ref::<respire::service::IndexPending>().is_some() => return Err(error),
+                    Err(_) => {}
                 }
             }
             let mut result = ResultEnvelope::new(
@@ -2193,7 +2195,7 @@ fn run_bench(cmd: &BenchCmd) -> Result<()> {
 fn run_bench_mine(out: &str, limit: usize, strict: bool) -> Result<()> {
     let store = build_local()?;
     let rows = store.query_log_rows(limit * 5)?;
-    let active: std::collections::HashSet<String> = scoped_candidates(&store)?
+    let active: std::collections::HashSet<String> = store.all(false)?
         .iter()
         .map(|m| m.id.clone())
         .collect();
@@ -3456,10 +3458,12 @@ fn run_tree_cure(
 ) -> Result<()> {
     if auto {
         let app = respire::service::App::open()?;
+        let candidates = app.store.all(false)?;
+        respire::service::require_candidates_ready(&app.store, &candidates)?;
         let report: respire::core_sdk::reports::TreeCureReport = respire::core_sdk::execute(
             "tree_cure",
             serde_json::json!({
-                "snapshots": respire::core_sdk::metadata_snapshots(&app.store.all(false)?),
+                "snapshots": respire::core_sdk::metadata_snapshots(&candidates),
                 "top": top, "min": min, "auto": true,
             }),
         )?;
@@ -3677,6 +3681,7 @@ fn run_defrag(min: f32, top: usize) -> Result<()> {
     use respire::memory::defrag;
     let store = build_local()?;
     let list = respire::service::tree_scope_list(&store.all(false)?);
+    respire::service::require_candidates_ready(&store, &list)?;
     let report = defrag::analyze(&list, min)?;
     if json_mode() {
         let mut result = ResultEnvelope::new(
@@ -5560,6 +5565,36 @@ fn run(args: Cli) -> Result<()> {
 }
 
 fn run_local(args: Cli) -> Result<()> {
+    let command = match args.command.as_ref() {
+        Some(Command::Recall { .. }) => "recall",
+        Some(Command::Remember { .. }) => "remember",
+        Some(Command::Candidates { .. }) => "candidates",
+        Some(Command::Bench { .. }) => "bench",
+        Some(Command::TreeDeepen { .. }) => "tree-deepen",
+        Some(Command::TreeCure { .. }) => "tree-cure",
+        Some(Command::TreeFloat { .. }) => "tree-float",
+        Some(Command::Defrag { .. }) => "defrag",
+        Some(Command::ShareImport { .. }) => "share-import",
+        _ => "cli",
+    };
+    match run_local_inner(args) {
+        Err(error) if error.downcast_ref::<respire::service::IndexPending>().is_some() => {
+            // run_local_inner has released its direct LibraryLock before this
+            // authenticated request starts the resident index worker.
+            let indexing = rpc::request_index()?;
+            let mut result = ResultEnvelope::new(
+                command, OutputStatus::Pending,
+                serde_json::json!({"state":"index_pending", "retrieval_index":indexing}),
+                vec![OutputItem::new("index", OutputStatus::Pending, error.to_string())],
+            );
+            result.actions.push("status".into());
+            emit_result(result)
+        }
+        result => result,
+    }
+}
+
+fn run_local_inner(args: Cli) -> Result<()> {
     if rpc::worker_active() {
         respire::service::ensure_runtime_profile()?;
     }
@@ -7085,7 +7120,7 @@ fn run_local(args: Cli) -> Result<()> {
         } => {
             let session = build_session()?;
             let store = build_local()?;
-            let mut candidates = scoped_candidates(&store)?;
+            let mut candidates = store.all(false)?;
             let mut filter_summary = serde_json::Value::Null;
             // Time filter (§3.8 tidy intake): --since-resort reads resort_at, --since takes an explicit time;
             // both together take the later (stricter). Old entries with empty created_at are excluded.
@@ -7843,6 +7878,8 @@ fn run_local(args: Cli) -> Result<()> {
                 let live = sync_live();
                 v["sync_scheduler"] = rpc::sync_scheduler_status();
                 v["recall_statistics"] = rpc::recall_stats_status();
+                v["retrieval_index"] = rpc::index_status();
+                v["model_operation"] = respire::model_progress::status()?;
                 v["sync_live"] = serde_json::json!({
                     "phase": if live.phase.is_empty() { "idle" } else { live.phase.as_str() },
                     "pulled": live.pulled,
@@ -7902,6 +7939,8 @@ fn run_local(args: Cli) -> Result<()> {
                     "remote_configured": server.is_some(),
                     "local_alive": count,
                     "local_total": app_status.local_total,
+                    "retrieval_index": rpc::index_status(),
+                    "model_operation": respire::model_progress::status()?,
                     "max_updated_at": app_status.max_updated_at,
                 }),
                 items,

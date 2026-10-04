@@ -61,6 +61,38 @@ fn check_runtime_profile(path: &Path) -> Result<()> {
 }
 
 static AUTO_SYNC_NOTIFY: OnceLock<fn()> = OnceLock::new();
+static INDEX_NOTIFY: OnceLock<fn()> = OnceLock::new();
+
+pub fn install_index_notifier(notify: fn()) {
+    let _ = INDEX_NOTIFY.set(notify);
+}
+
+/// Missing artifacts are durable work; the runtime notification only wakes its worker.
+pub fn notify_index() {
+    if let Some(notify) = INDEX_NOTIFY.get() {
+        notify();
+    }
+}
+
+#[derive(Debug)]
+pub struct IndexPending;
+
+impl std::fmt::Display for IndexPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("local retrieval index is being prepared; retry after indexing completes")
+    }
+}
+
+impl std::error::Error for IndexPending {}
+
+/// Validate the actual snapshot sent to Core, including its opaque index artifacts.
+pub fn require_candidates_ready(store: &LocalStore, candidates: &[crate::StoredMemory]) -> Result<()> {
+    if !store.candidates_index_ready(candidates)? {
+        notify_index();
+        return Err(IndexPending.into());
+    }
+    Ok(())
+}
 
 /// The resident runtime installs its single durable-outbox worker notifier.
 pub fn install_autosync_notifier(notify: fn()) {
@@ -89,10 +121,7 @@ impl App {
             .map_err(|e| anyhow!("session not unlocked ({e}) — register/login or keygen first"))?;
         let store = open_store()?;
         let embedder = BgeEmbedder::load_model(&store.retrieval_model()?)?;
-        // Derived indexes migrate from decrypted entries once per source generation.
-        if store.index_pending(&store.retrieval_model()?)? {
-            store.rebuild_index(&keys, &embedder, &store.retrieval_model()?)?;
-        }
+        notify_index();
         Ok(Self {
             keys,
             store,
@@ -116,6 +145,7 @@ impl App {
     /// List recent (combined-score order, same as CLI list).
     pub fn list(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         let candidates = self.store.all(false)?;
+        require_candidates_ready(&self.store, &candidates)?;
         let q = MemoryQuery::default().limit(limit);
         MemoryEngine::recall_local(&self.keys, &self.embedder, &candidates, &q)
     }
@@ -127,12 +157,12 @@ impl App {
         limit: usize,
         kind: Option<Kind>,
     ) -> Result<Vec<ScoredEntry>> {
-        self.store.rebuild_index(&self.keys, &self.embedder, &self.store.retrieval_model()?)?;
         let mut q = MemoryQuery::new(query).limit(limit);
         if let Some(k) = kind {
             q = q.of_kind(k);
         }
         let candidates = self.store.all(false)?;
+        require_candidates_ready(&self.store, &candidates)?;
         let ranked =
             MemoryEngine::recall_local_scored(&self.keys, &self.embedder, &candidates, &q)?;
         for (score, e) in &ranked {
@@ -295,6 +325,7 @@ impl App {
     /// Ask the private Core for candidate actions; persistence stays in the application.
     pub fn candidates(&self, content: &str) -> Result<CandidateReport> {
         let all = self.store.all(false)?;
+        require_candidates_ready(&self.store, &all)?;
         candidate_report(&self.keys, &self.embedder, &all, content)
     }
 
@@ -1625,11 +1656,12 @@ impl App {
 
 /// Export all plaintext memories as JSON (backup/migrate).
 pub fn export_json(path: &std::path::Path) -> Result<usize> {
-    let app = App::open()?;
-    let blobs = app.store.all(false)?;
+    let keys = auth::load_local_session()?;
+    let store = open_store()?;
+    let blobs = store.all(false)?;
     let mut items = Vec::new();
     for s in &blobs {
-        let e = MemoryEngine::open(&app.keys, s)?;
+        let e = MemoryEngine::open(&keys, s)?;
         items.push(serde_json::to_value(&e)?);
     }
     std::fs::write(path, serde_json::to_string_pretty(&items)?)?;
@@ -1914,6 +1946,7 @@ pub fn share_candidates_with(
     let store = open_store()?;
     let all = store.all(false)?;
     let query = crate::share::mount_query(payload);
+    require_candidates_ready(&store, &all)?;
     let report = candidate_report(&keys, embedder, &all, &query)?;
     let mut out: Vec<serde_json::Value> = Vec::new();
     for (bucket, verdict) in [
@@ -1972,6 +2005,7 @@ pub fn import_share_payload(
     // (e.g. hanging the shared subtree under a same-topic local entry as a supplement) — same as attach skipping store-judge.
     if !force && parent.is_empty() {
         let all = store.all(false)?;
+        require_candidates_ready(&store, &all)?;
         let mut conflicts: Vec<serde_json::Value> = Vec::new();
         for it in &payload.items {
             let q = if it.content.trim().is_empty() {
@@ -2159,6 +2193,7 @@ pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
 pub fn defrag_report(min: f32, top: usize) -> Result<crate::memory::defrag::Report> {
     let app = App::open()?;
     let list = tree_scope_list(&app.store.all(false)?);
+    require_candidates_ready(&app.store, &list)?;
     crate::memory::defrag::analyze(&list, min).map(|mut r| {
         r.clusters.truncate(top);
         r
@@ -2258,6 +2293,7 @@ impl App {
     /// Ask Core for tree adjustments; `go` applies the returned parent changes and syncs.
     pub fn tree_float(&self, go: bool, min_hits: i64) -> Result<TreeFloatReport> {
         let all = self.store.all(false)?;
+        require_candidates_ready(&self.store, &all)?;
         let cands = float_up_candidates(&all, min_hits)?;
         let mut items = Vec::new();
         for (child_id, new_parent) in &cands {
@@ -2301,10 +2337,12 @@ impl App {
 
     /// Request tree suggestions with a user-selected similarity floor.
     pub fn tree_cure_with_min(&self, top: usize, min_sim: f32) -> Result<TreeCureReport> {
+        let candidates = self.store.all(false)?;
+        require_candidates_ready(&self.store, &candidates)?;
         respire_core_sdk::execute(
             "tree_cure",
             serde_json::json!({
-                "snapshots":respire_core_sdk::metadata_snapshots(&self.store.all(false)?), "top":top, "min":min_sim,
+                "snapshots":respire_core_sdk::metadata_snapshots(&candidates), "top":top, "min":min_sim,
             }),
         )
     }
@@ -2334,10 +2372,12 @@ pub fn deepen_plan(
     root_prefix: &str,
     min_sim: f32,
 ) -> Result<(String, DeepenPlan)> {
+    let candidates = store.all(false)?;
+    require_candidates_ready(store, &candidates)?;
     respire_core_sdk::execute(
         "deepen_plan",
         serde_json::json!({
-            "snapshots":respire_core_sdk::metadata_snapshots(&store.all(false)?), "root":root_prefix, "min":min_sim,
+            "snapshots":respire_core_sdk::metadata_snapshots(&candidates), "root":root_prefix, "min":min_sim,
         }),
     )
 }
