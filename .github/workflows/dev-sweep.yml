@@ -243,6 +243,9 @@ jobs:
   api-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    concurrency:
+      group: respire-dev-mailbox-fixture
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
         with:
@@ -260,7 +263,9 @@ jobs:
           RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
           RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
           RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
-        run: python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
+        run: |
+          sleep 61
+          python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
       - uses: actions/upload-artifact@v4
         if: always()
         with:
