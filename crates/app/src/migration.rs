@@ -1,5 +1,9 @@
 //! Copy legacy default homes without modifying the original libraries or credentials.
 
+#[cfg(test)]
+#[path = "migration_readiness_tests.rs"]
+mod readiness_tests;
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -362,6 +366,8 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile]) -> Re
         write_json(&stage.join("session.json"), &session)?;
     } else if encrypted_count(&database)? > 0 {
         bail!("legacy library has ciphertext but no session; recover the original keys before migration");
+    } else {
+        validate_live_memories(&database, None)?;
     }
     for name in ["client.json", "agent.json"] {
         let path = stage.join(name);
@@ -485,6 +491,45 @@ fn encrypted_count(path: &Path) -> Result<usize> {
     Ok(usize::try_from(count)?)
 }
 
+/// Verify live payloads before credential import or a completion receipt. This
+/// reads the snapshot without upgrading it; deleted rows remain opaque bytes.
+fn validate_live_memories(path: &Path, keys: Option<&crate::memory::SessionKeys>) -> Result<()> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let database = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let columns = database
+        .prepare("PRAGMA table_info(memories)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if columns.is_empty() {
+        return Ok(());
+    }
+    // Older compatible schemas acquire deleted=0 only on normal store open.
+    // A NULL marker is not evidence that a memory was deleted.
+    let query = if columns.iter().any(|column| column == "deleted") {
+        "SELECT ciphertext, nonce FROM memories WHERE COALESCE(deleted, 0) = 0"
+    } else {
+        "SELECT ciphertext, nonce FROM memories"
+    };
+    let mut statement = database.prepare(query)?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        let keys = keys.ok_or_else(|| anyhow!(
+            "legacy live ciphertext requires usable session keys; migration was not published"
+        ))?;
+        let mut stored = crate::memory::model::StoredMemory::new_pending(String::new(), String::new());
+        stored.ciphertext = row.get(0).context("legacy live ciphertext is missing or invalid; migration was not published")?;
+        stored.nonce = row.get(1).context("legacy live ciphertext nonce is missing or invalid; migration was not published")?;
+        // Reuse normal supported payload decoding, including legacy defaults.
+        // Do not include decrypted content or identifiers in a failure report.
+        crate::memory::MemoryEngine::open(keys, &stored).map_err(|_| anyhow!(
+            "legacy live ciphertext is unreadable with the recovered account key; migration was not published; original rows were preserved"
+        ))?;
+    }
+    Ok(())
+}
+
 fn validate_schema(path: &Path) -> Result<()> {
     if !path.is_file() {
         return Ok(());
@@ -563,6 +608,7 @@ fn migrate_credentials(profile: &Profile, database: &Path, session: &mut Value) 
         if encrypted_count(database)? > 0 {
             bail!("legacy session has no wrapped key; recover the original keys before migration");
         }
+        validate_live_memories(database, None)?;
         return Ok(());
     }
     let user = session["user"].as_str().unwrap_or("").to_owned();
@@ -596,7 +642,8 @@ fn migrate_credentials(profile: &Profile, database: &Path, session: &mut Value) 
             }
         }
     }
-    let (_, super_pass, legacy_pass) = unlocked.ok_or_else(|| anyhow!("legacy vault could not be unlocked; supply its original recovery key/password; no new vault was created"))?;
+    let (keys, super_pass, legacy_pass) = unlocked.ok_or_else(|| anyhow!("legacy vault could not be unlocked; supply its original recovery key/password; no new vault was created"))?;
+    validate_live_memories(database, Some(&keys))?;
     let alias = format!("legacy-{}", &profile.identity[..16]);
     if let Some(value) = super_pass {
         let backend = crate::keystore::import_credential(&alias, "super", &value)?;
@@ -722,6 +769,7 @@ mod tests {
     #[test]
     fn committed_wal_and_original_files_survive() -> Result<()> {
         let _isolate = crate::test_lock::Isolate::new()?;
+        let _keyring = super::readiness_tests::memory_keyring();
         let home = tempfile::tempdir()?;
         let source = home.path().join(".onememory");
         plaintext_profile(&source, "wal-owner")?;
@@ -786,8 +834,15 @@ mod tests {
         std::fs::remove_file(source.join("session.json"))?;
         assert!(migrate_home(home.path()).is_err());
         assert!(!home.path().join(".rsrs").exists());
-        plaintext_profile(&source, "wal-owner")?;
-        db.execute("UPDATE memories SET ciphertext='',nonce=''", [])?;
+        let secret = crate::memory::crypto::generate_secret_key();
+        let salt = crate::memory::crypto::random_hex(16);
+        let kek = crate::memory::crypto::derive_kek_v4(&secret, &salt)?;
+        let (urk_nonce, wrapped_urk) = crate::memory::crypto::wrap_key(&urk, &kek)?;
+        write_json(&source.join("session.json"), &json!({
+            "user":"wal-owner","addr":"https://1memory.ai","token":"fixture-token",
+            "vault_version":4,"secret_key":secret,"kdf_salt":salt,
+            "urk_nonce":urk_nonce,"wrapped_urk":wrapped_urk
+        }))?;
         std::fs::create_dir_all(source.join("runtime"))?;
         std::fs::write(source.join("runtime/token"), "must-not-copy")?;
         std::fs::create_dir_all(source.join("models"))?;
@@ -812,7 +867,7 @@ mod tests {
                     row.get::<_, i64>(2)?
                 ))
             )?,
-            (String::new(), String::new(), 1)
+            (foreign_ciphertext, foreign_nonce, 1)
         );
         assert_eq!(
             std::fs::read(source.join("session.json"))?,
