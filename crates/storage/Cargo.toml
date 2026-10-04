@@ -3,7 +3,7 @@ name = "respire_storage"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.95"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "SQLite persistence, compatible schema, revisions and sync bookkeeping"
 publish = false
 

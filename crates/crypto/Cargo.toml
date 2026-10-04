@@ -3,7 +3,7 @@ name = "respire_crypto"
 version = "1.0.0"
 edition = "2021"
 rust-version = "1.95"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 description = "Account keys, compatible ciphertext and local memory orchestration"
 publish = false
 

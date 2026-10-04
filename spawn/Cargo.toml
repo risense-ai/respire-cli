@@ -4,7 +4,7 @@ version = "1.0.8"
 edition = "2021"
 rust-version = "1.88"
 description = "Start the respire runtime without inheriting the caller's pipes"
-license = "MIT"
+license = "PolyForm-Noncommercial-1.0.0"
 publish = false
 
 [target.'cfg(windows)'.dependencies]

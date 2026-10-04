@@ -61,6 +61,8 @@ for (const [triple, t] of Object.entries(TARGETS)) {
   const dir = path.join(outDir, t.pkg);
   mkdirSync(path.join(dir, 'bin'), { recursive: true });
   copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(dir, 'LICENSE'));
+  copyFileSync(path.join(repoRoot, 'LICENSE-MIT-LEGACY'), path.join(dir, 'LICENSE-MIT-LEGACY'));
+  copyFileSync(path.join(repoRoot, 'COMMERCIAL-LICENSE.md'), path.join(dir, 'COMMERCIAL-LICENSE.md'));
   const binFile = path.basename(src);
   copyFileSync(src, path.join(dir, 'bin', binFile));
   const runtime = JSON.parse(readFileSync(path.join(path.dirname(src), 'core-runtime.json'), 'utf8'));
@@ -88,7 +90,7 @@ for (const [triple, t] of Object.entries(TARGETS)) {
     name: t.pkg, version,
     description: 'rsrs CLI platform binary',
     repository: { type: 'git', url: 'git+https://github.com/risense-ai/respire-cli.git' },
-    license: 'SEE LICENSE IN bin/core-notices/CORE-SDK-LICENSE.txt', os: t.os, cpu: t.cpu, ...(t.libc ? {libc: t.libc} : {}), files: ['bin', 'LICENSE'],
+    license: 'SEE LICENSE IN LICENSE', os: t.os, cpu: t.cpu, ...(t.libc ? {libc: t.libc} : {}), files: ['bin', 'LICENSE', 'LICENSE-MIT-LEGACY', 'COMMERCIAL-LICENSE.md'],
     exports: { [`./bin/${binFile}`]: `./bin/${binFile}` },
   }, null, 2) + '\n');
   built.push({ name: t.pkg, dir });
@@ -113,13 +115,15 @@ copyFileSync(path.join(repoRoot, 'npm', 'bin', 'cli.js'), path.join(mainDir, 'bi
 chmodSync(path.join(mainDir, 'bin', 'cli.js'), 0o755);
 cpSync(path.join(repoRoot, 'npm', 'README.md'), path.join(mainDir, 'README.md'));
 copyFileSync(path.join(repoRoot, 'LICENSE'), path.join(mainDir, 'LICENSE'));
+copyFileSync(path.join(repoRoot, 'LICENSE-MIT-LEGACY'), path.join(mainDir, 'LICENSE-MIT-LEGACY'));
+copyFileSync(path.join(repoRoot, 'COMMERCIAL-LICENSE.md'), path.join(mainDir, 'COMMERCIAL-LICENSE.md'));
 writeFileSync(path.join(mainDir, 'package.json'), JSON.stringify({
   name: SCOPE, version,
   description: 'rsrs CLI — encrypted cross-device AI memory',
-  license: 'MIT',
+  license: 'PolyForm-Noncommercial-1.0.0',
   repository: { type: 'git', url: 'git+https://github.com/risense-ai/respire-cli.git' },
   bin: { 'rsrs': './bin/cli.js' },
-  files: ['bin', 'README.md', 'LICENSE'],
+  files: ['bin', 'README.md', 'LICENSE', 'LICENSE-MIT-LEGACY', 'COMMERCIAL-LICENSE.md'],
   engines: { node: '>=16' },
   optionalDependencies,
 }, null, 2) + '\n');

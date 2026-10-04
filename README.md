@@ -57,3 +57,10 @@ cargo test --locked --workspace
 ```
 
 Use isolated test data. `RESPIRE_CORE_TEST_MODE` selects existing test fixtures, not a production inference provider. Preserve protocol fields, user data formats and third-party notices. Do not commit credentials, databases, model files or build artifacts.
+
+## License
+
+First-party material is offered under [PolyForm Noncommercial 1.0.0](LICENSE).
+Personal noncommercial use and self-hosting are permitted; commercial use,
+including internal commercial deployment, requires a separate written license.
+See [commercial licensing and component exceptions](COMMERCIAL-LICENSE.md).

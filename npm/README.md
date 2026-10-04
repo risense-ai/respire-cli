@@ -40,4 +40,11 @@ See [CLI source](https://github.com/risense-ai/respire-cli) for builds and runti
 | Models | Separately installed with upstream licenses and source records |
 | Runtime | Host manages lifecycle; sandbox uses authenticated client requests |
 | Sync | Host-side login; encrypted server storage |
-| Core binary | Separate license from the MIT launcher/binding |
+| Core binary | Separate license from the launcher and MIT binding |
+
+## License
+
+First-party material is offered under [PolyForm Noncommercial 1.0.0](https://github.com/risense-ai/respire-cli/blob/main/LICENSE).
+Personal noncommercial use and self-hosting are permitted; commercial use,
+including internal commercial deployment, requires a separate written license.
+See [commercial licensing and component exceptions](https://github.com/risense-ai/respire-cli/blob/main/COMMERCIAL-LICENSE.md).
