@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "inventory_source_sha": "ea5015df651dd0bcc225b6176f2d343e061b4479",
+  "inventory_source_sha": "b18ade542bdb3bb00094d8427fa811f4d0a4d46a",
   "command_paths": [
     {
       "command": "prompt",
