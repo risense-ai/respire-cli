@@ -26,7 +26,7 @@ REQUIRED = ("model_cpu_real", "onememory_multiaccount_wal_migrated",
     "respire_compatibility_migrated", "legacy_keys_migrated_without_super_override",
     "legacy_api_defaults_rewritten", "migration_repeated_start_idempotent",
     "migration_interrupted_restart_recovered", "existing_rsrs_preserved_and_legacy_imported",
-    "migrated_outbox_sync_and_independent_decrypt", "migration_incompatible_primary_keys_rejected",
+    "migrated_outbox_sync_and_independent_decrypt", "migration_historical_schema_preserved",
     "migration_symlink_root_rejected", "migration_client_only_does_not_write")
 
 
@@ -493,9 +493,15 @@ class Smoke(support.Smoke):
             before = digest(source / "onememory.db")
             result = subprocess.run([str(self.args.binary), "--direct", "--json", "status"],
                 env=self.default_env(attempt), cwd=self.root, capture_output=True, timeout=60)
-            require(result.returncode != 0 and not (Path(attempt["HOME"]) / ".rsrs").exists(), "invalid_primary_key_migration_not_rejected")
-            require(digest(source / "onememory.db") == before, "rejected_source_database_changed")
-        self.passed("migration_incompatible_primary_keys_rejected", genuine_ciphertext_preserved=True, variants=2)
+            target = Path(attempt["HOME"]) / ".rsrs"
+            # Copying succeeds independently of whether normal store opening
+            # supports this historical schema.
+            require((target / ".rsrs-migration.json").is_file(), "historical_schema_copy_blocked")
+            with sqlite3.connect(target / "onememory.db") as db:
+                require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
+                    "historical_schema_ciphertext_changed")
+            require(digest(source / "onememory.db") == before, "copied_source_database_changed")
+        self.passed("migration_historical_schema_preserved", genuine_ciphertext_preserved=True, variants=2)
         link_env = self.env("symlink-root")
         link_home = Path(link_env["HOME"])
         (link_home / ".onememory").symlink_to(fixture["source"], target_is_directory=True)
