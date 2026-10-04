@@ -42,6 +42,10 @@ numbers, such as `1.0.8-dev.1`, `1.0.8-dev.2`, and `1.0.8-dev.3`, rather than Ac
 run IDs. Publishing is serialized; existing tags, draft releases and all eight npm
 packages reserve numbers. A partially published version is never reused. The next
 unreleased base starts at `dev.1`; existing published versions remain unchanged.
+CLI releases do not fetch or build Web UI source and do not depend on frontend
+revision pins or browser smoke tests. Homepage, Dashboard and Admin build and
+browser acceptance belong to `risense-ai/respire-site`. The CLI's cloud API
+checks and mailbox helper remain part of API acceptance.
 Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.

@@ -1119,7 +1119,7 @@
     },
     {
       "feature": "Interactive TUI and actual third-party agent integration",
-      "reason": "Requires an interactive desktop or an external agent installation. Browser dashboard behavior is checked separately by real development web end-to-end tests."
+      "reason": "Requires an interactive desktop or an external agent installation. Browser dashboard acceptance belongs to risense-ai/respire-site and is not a CLI release gate."
     },
     {
       "feature": "External paid/provider credentials and provider-specific LLM quality",
