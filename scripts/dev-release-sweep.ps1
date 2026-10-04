@@ -932,7 +932,7 @@ $reembedTask = [Guid]::NewGuid().ToString('N')
 $reembed = Invoke-Om -Name 'reembed' -ArgList @('--json', 'reembed') -DataDir $DirA -TimeoutSec 300 -ModelTaskId $reembedTask
 $invalidProgress = @($reembed.Progress | Where-Object {
     [string]$_.id -cne $reembedTask -or $_.phase -notin @('load', 'index') -or $_.cancelled -ne $false `
-        -or $_.done -isnot [long] -and $_.done -isnot [int] -or $_.done -lt 0 `
+        -or ($_.done -isnot [long] -and $_.done -isnot [int]) -or $_.done -lt 0 `
         -or ($null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done))
 })
 $script:ModelProgressEvidence.contract = @{
