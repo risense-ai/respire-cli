@@ -935,6 +935,18 @@ $invalidProgress = @($reembed.Progress | Where-Object {
         -or $_.done -isnot [long] -and $_.done -isnot [int] -or $_.done -lt 0 `
         -or ($null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done))
 })
+$script:ModelProgressEvidence.contract = @{
+    reembed_ok = [bool]$reembed.Ok
+    invalid_count = $invalidProgress.Count
+    completed_inactive = [bool]$script:ModelProgressEvidence.completed_inactive
+    return_object_count = @($reembed).Count
+    returned_sample_count = @($reembed.Progress).Count
+    invalid_id_count = @($reembed.Progress | Where-Object { [string]$_.id -cne $reembedTask }).Count
+    invalid_phase_count = @($reembed.Progress | Where-Object { $_.phase -notin @('load', 'index') }).Count
+    invalid_cancelled_count = @($reembed.Progress | Where-Object { $_.cancelled -ne $false }).Count
+    invalid_done_count = @($reembed.Progress | Where-Object { ($_.done -isnot [long] -and $_.done -isnot [int]) -or $_.done -lt 0 }).Count
+    invalid_total_count = @($reembed.Progress | Where-Object { $null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done) }).Count
+}
 Assert-Smoke 'reembed-progress-contract' ($reembed.Ok -and $invalidProgress.Count -eq 0 -and $script:ModelProgressEvidence.completed_inactive)
 Assert-Smoke 'reembed-count-dimensions' (($reembed.Envelope.summary.reembedded -is [long] -or $reembed.Envelope.summary.reembedded -is [int]) -and [long]$reembed.Envelope.summary.reembedded -ge 0 -and [int]$reembed.Envelope.summary.dims -eq 768)
 $afterReembed = Invoke-Om -Name 'reembed-after-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
@@ -1036,7 +1048,7 @@ $spaceProfileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
 $missingSpace = "missing$stamp"
 $spaceRejected = Invoke-Om -Name 'space-live-missing-rejected' -ArgList @('--json', 'space', 'use', $missingSpace) -DataDir $DirA -AllowStatus @('fail')
 $spaceRejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 1 -and ($spaceRejected.Envelope.errors -join ' ') -match 'no such space' -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
+Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 1 -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
 $inv = Invoke-Om -Name 'space-invite' -ArgList @('--json', 'space', 'invite', '--note', 'sweep') -DataDir $DirA -Secret
 Invoke-Om -Name 'space-members' -ArgList @('--json', 'space', 'members') -DataDir $DirA | Out-Null
 $inviteCode = ''
