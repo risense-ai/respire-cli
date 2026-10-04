@@ -386,7 +386,7 @@ function Invoke-Om {
     $psi.Environment['ONEMEMORY_MODEL_DIR'] = Join-Path $Root 'models/bge-base-zh-v1.5'
     $psi.Environment['ONEMEMORY_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['ONEMEMORY_RERANKER_DIR'] = Join-Path $Root 'models/bge-reranker-base'
-    $psi.Environment.Remove('ONEMEMORY_SERVER')
+    [void]$psi.Environment.Remove('ONEMEMORY_SERVER')
     Write-Host "STEP $script:Step $Name"
     $readyTries = 0
     do {
@@ -947,7 +947,7 @@ $script:ModelProgressEvidence.contract = @{
     invalid_done_count = @($reembed.Progress | Where-Object { ($_.done -isnot [long] -and $_.done -isnot [int]) -or $_.done -lt 0 }).Count
     invalid_total_count = @($reembed.Progress | Where-Object { $null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done) }).Count
 }
-Assert-Smoke 'reembed-progress-contract' ($reembed.Ok -and $invalidProgress.Count -eq 0 -and $script:ModelProgressEvidence.completed_inactive)
+Assert-Smoke 'reembed-progress-contract' (@($reembed).Count -eq 1 -and $reembed.Ok -and $invalidProgress.Count -eq 0 -and $script:ModelProgressEvidence.completed_inactive)
 Assert-Smoke 'reembed-count-dimensions' (($reembed.Envelope.summary.reembedded -is [long] -or $reembed.Envelope.summary.reembedded -is [int]) -and [long]$reembed.Envelope.summary.reembedded -ge 0 -and [int]$reembed.Envelope.summary.dims -eq 768)
 $afterReembed = Invoke-Om -Name 'reembed-after-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
 Assert-Smoke 'reembed-entry-preserved' ($beforeReembed.Ok -and $afterReembed.Ok -and [string]$afterReembed.Envelope.details.entry.id -ceq $id -and ($afterReembed.Envelope.details.entry | ConvertTo-Json -Depth 20 -Compress) -ceq $entryBeforeReembed)
