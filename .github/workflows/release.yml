@@ -58,6 +58,7 @@ jobs:
             if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
             cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
           }else{
+            if(process.env.RELEASE_PUBLISH==='true') cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
             channel='dev';
             version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
           }

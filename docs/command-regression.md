@@ -51,6 +51,8 @@ previous published release. Drafts do not establish a comparison baseline.
 Use `feat:` and `fix:` commit subjects with clear English descriptions for reliable
 classification; unclassified changes retain their original descriptions. Missing
 baseline history fails publication rather than silently omitting changes.
+Publishing a development ref requires its source to be in `main` history;
+unmerged candidate refs remain available for validation with publication disabled.
 Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.
