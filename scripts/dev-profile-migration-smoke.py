@@ -51,7 +51,7 @@ class Smoke(support.Smoke):
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
 
-    def cli(self, env, *args, timeout=180):
+    def cli(self, env, *args, timeout=180, foreign_tombstones=0):
         try:
             output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
@@ -65,8 +65,23 @@ class Smoke(support.Smoke):
             value = json.loads(output.stdout)
         except (ValueError, UnicodeError):
             pass
-        failed = output.returncode != 0 or not isinstance(value, dict) \
+        foreign_warning = False
+        if foreign_tombstones:
+            require(args == ("sync",), "foreign_tombstone_expectation_requires_sync")
+            summary = value.get("summary", {}) if isinstance(value, dict) else {}
+            counts = ("local_total", "local_alive", "remote_total", "remote_alive",
+                "pending", "conflicts", "undecodable", "protocol")
+            foreign_warning = output.returncode == 2 and isinstance(value, dict) \
+                and value.get("status") == "warn" and not value.get("errors") \
+                and all(type(summary.get(key)) is int for key in counts) \
+                and summary["local_total"] == summary["remote_total"] + foreign_tombstones \
+                and summary["local_alive"] == summary["remote_alive"] == 2 \
+                and summary["pending"] == summary["conflicts"] == summary["undecodable"] == 0 \
+                and summary["protocol"] == 2 and summary.get("total_matched") is False \
+                and summary.get("converged") is False
+        failed = (output.returncode != 0 and not foreign_warning) or not isinstance(value, dict) \
             or value.get("errors") or value.get("status") in ("error", "failed")
+        failed = failed or (foreign_tombstones > 0 and not foreign_warning)
         if failed:
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
             categories = (
@@ -90,6 +105,12 @@ class Smoke(support.Smoke):
             reason = "cli_failed_" if output.returncode != 0 else \
                 "invalid_cli_json_" if not isinstance(value, dict) else "cli_error_"
             raise RuntimeError(reason + args[0])
+        if foreign_warning:
+            self.report.setdefault("foreign_tombstone_sync", []).append({
+                "exit_code": 2, "retained_foreign_deleted": foreign_tombstones,
+                "active_counts_equal": True, "pending": 0, "conflicts": 0, "undecodable": 0,
+                "total_mismatch_is_only_foreign_deleted": True})
+            self.save()
         return value
 
     def reserve_alias(self, source):
@@ -462,7 +483,14 @@ class Smoke(support.Smoke):
                     created = self.cli(profile_env, "remember", "New-directory migration write",
                         "--title", "post-migration", "--force", "--importance", "important")
                     new_id = created["summary"]["id"]
-                    self.cli(profile_env, "sync")
+                    # An intentionally retained foreign tombstone is not part of
+                    # this account's remote inventory. Require that exact warning
+                    # and a fully drained, healthy sync rather than claiming convergence.
+                    self.cli(profile_env, "sync", foreign_tombstones=len(fixture["foreign_tombstones"]))
+                    with sqlite3.connect((fixture["destination"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
+                        for tombstone in fixture["foreign_tombstones"]:
+                            require(db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
+                                (tombstone[0],)).fetchone() == tombstone, "sync_changed_foreign_tombstone")
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
                 remote["ONEMEMORY_SUPER"] = fixture["code"]
