@@ -3,7 +3,6 @@
 //! Do not bind the developer machine's default 15169.
 
 use std::fs;
-use std::io::Read;
 use std::net::TcpListener;
 use std::process::{Child, Command, Stdio};
 use std::thread;
@@ -22,7 +21,6 @@ struct Runtime {
     child: Child,
     dir: tempfile::TempDir,
     port: u16,
-    token: String,
     stderr_path: std::path::PathBuf,
 }
 
@@ -31,20 +29,6 @@ impl Drop for Runtime {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-fn wait_file(path: &std::path::Path, timeout: Duration) -> Result<String, String> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Ok(raw) = fs::read_to_string(path) {
-            let trimmed = raw.trim().to_owned();
-            if !trimmed.is_empty() {
-                return Ok(trimmed);
-            }
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    Err(format!("timed out waiting for {}", path.display()))
 }
 
 fn start_internal_runtime() -> Result<Runtime, String> {
@@ -63,38 +47,23 @@ fn start_internal_runtime() -> Result<Runtime, String> {
         .env("ONEMEMORY_RPC_PORT", port.to_string())
         .env("ONEMEMORY_BIN_DIR", dir.path().join("bin"))
         .env_remove("ONEMEMORY_NO_AUTOSTART")
+        .env_remove("ONEMEMORY_CLIENT_ONLY")
+        .env_remove("ONEMEMORY_RPC_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
         .spawn()
         .map_err(|err| err.to_string())?;
-    let token_path = dir.path().join("runtime").join("token");
-    let token = match wait_file(&token_path, Duration::from_secs(20)) {
-        Ok(token) => token,
-        Err(err) => {
-            let mut extra = String::new();
-            if let Ok(mut file) = fs::File::open(&stderr_path) {
-                let _ = file.read_to_string(&mut extra);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("{err}; stderr={extra}"));
-        }
-    };
     let health_url = format!("http://127.0.0.1:{port}/api/health");
     let start = Instant::now();
     let mut last = String::new();
     while start.elapsed() < Duration::from_secs(20) {
-        match ureq::get(&health_url)
-            .set("Authorization", &format!("Bearer {token}"))
-            .call()
-        {
+        match ureq::get(&health_url).call() {
             Ok(resp) if resp.status() == 200 => {
                 return Ok(Runtime {
                     child,
                     dir,
                     port,
-                    token,
                     stderr_path,
                 });
             }
@@ -104,6 +73,7 @@ fn start_internal_runtime() -> Result<Runtime, String> {
         thread::sleep(Duration::from_millis(50));
     }
     let _ = child.kill();
+    let _ = child.wait();
     Err(format!(
         "health not ready: {last}; stderr={}",
         fs::read_to_string(&stderr_path).unwrap_or_default()
@@ -111,18 +81,13 @@ fn start_internal_runtime() -> Result<Runtime, String> {
 }
 
 #[test]
-fn health_requires_bearer_and_reports_bin() -> Result<(), String> {
+fn health_without_token_reports_bin() -> Result<(), String> {
     let rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/health", rt.port);
-    let denied = ureq::get(&url).call();
-    match denied {
-        Err(ureq::Error::Status(401, _)) => {}
-        other => return Err(format!("expected 401 without token, got {other:?}")),
+    if rt.dir.path().join("runtime").join("token").exists() {
+        return Err("loopback runtime created a token file".into());
     }
-    let ok = ureq::get(&url)
-        .set("Authorization", &format!("Bearer {}", rt.token))
-        .call()
-        .map_err(|err| err.to_string())?;
+    let ok = ureq::get(&url).call().map_err(|err| err.to_string())?;
     let body: serde_json::Value = ok.into_json().map_err(|err| err.to_string())?;
     if body["server"] != "respire" {
         return Err(format!("server {body}"));
@@ -149,7 +114,6 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
         "args": ["--json", "status"]
     });
     let resp = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {}", rt.token))
         .send_json(body)
         .map_err(|err| err.to_string())?;
     let parsed: serde_json::Value = resp.into_json().map_err(|err| err.to_string())?;
@@ -159,6 +123,28 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
     if parsed["envelope"]["command"] != "status" {
         return Err(format!("envelope {parsed}"));
     }
+    // A sandbox may have no access to the host token file; loopback CLI calls
+    // must not attempt to read it. A directory at this path is unreadable as text.
+    fs::create_dir_all(rt.dir.path().join("runtime").join("token"))
+        .map_err(|err| err.to_string())?;
+    let output = Command::new(bin())
+        .args(["--client-only", "status", "--json"])
+        .env("ONEMEMORY_DATA_DIR", rt.dir.path())
+        .env("ONEMEMORY_RPC_PORT", rt.port.to_string())
+        .env_remove("ONEMEMORY_RPC_TOKEN")
+        .output()
+        .map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(format!(
+            "client-only status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+    if envelope["command"] != "status" {
+        return Err(format!("client-only envelope {envelope}"));
+    }
     Ok(())
 }
 
@@ -166,11 +152,9 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
 fn parallel_status_requests_all_complete() -> Result<(), String> {
     let rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/rpc", rt.port);
-    let token = rt.token.clone();
     let mut handles = Vec::new();
     for index in 0..8 {
         let url = url.clone();
-        let token = token.clone();
         handles.push(thread::spawn(move || {
             let body = serde_json::json!({
                 "v": 1,
@@ -179,7 +163,6 @@ fn parallel_status_requests_all_complete() -> Result<(), String> {
                 "args": ["--json", "status"]
             });
             let resp = ureq::post(&url)
-                .set("Authorization", &format!("Bearer {token}"))
                 .timeout(Duration::from_secs(20))
                 .send_json(body)
                 .map_err(|err| err.to_string())?;
@@ -194,7 +177,9 @@ fn parallel_status_requests_all_complete() -> Result<(), String> {
         }));
     }
     for handle in handles {
-        handle.join().map_err(|_| "status worker panicked".to_string())??;
+        handle
+            .join()
+            .map_err(|_| "status worker panicked".to_string())??;
     }
     Ok(())
 }
@@ -204,7 +189,6 @@ fn stop_closes_listen_port() -> Result<(), String> {
     let rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/runtime/stop", rt.port);
     let _ = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {}", rt.token))
         .send_string("{}")
         .map_err(|err| err.to_string())?;
     let start = Instant::now();
