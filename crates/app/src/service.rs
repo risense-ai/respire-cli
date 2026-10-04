@@ -142,7 +142,7 @@ impl App {
         })
     }
 
-    /// List recent (combined-score order, same as CLI list).
+    /// List using Core's combined-score order; CLI list uses metadata ordering.
     pub fn list(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         let candidates = self.store.all(false)?;
         require_candidates_ready(&self.store, &candidates)?;

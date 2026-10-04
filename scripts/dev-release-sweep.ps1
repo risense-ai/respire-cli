@@ -120,6 +120,7 @@ $script:CloudCleanup = @{ passed = $false; events = @(); remaining_users = @() }
 $script:CloudCleanupCompleted = $false
 $script:CloudCleanupRunning = $false
 $script:ModelProgressEvidence = $null
+$script:IndexPendingEvents = New-Object System.Collections.Generic.List[object]
 trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
@@ -142,6 +143,7 @@ function Write-SweepReport {
         observed_version_display = $script:ObservedVersionDisplay
         cloud_cleanup = $script:CloudCleanup
         model_progress = $script:ModelProgressEvidence
+        index_pending_events = @($script:IndexPendingEvents.ToArray())
         binary_sha256 = $script:BinarySha256; catalog = $script:Catalog
         cases = $observed; passed = @($Rows | Where-Object { $_.Ok -and $_.Status -notin @('skip', 'fail') }).Count
         expected_errors = @($Rows | Where-Object { $_.Ok -and $_.Status -eq 'fail' }).Count
@@ -272,7 +274,7 @@ function Get-Leak([string]$Text, [bool]$Secret) {
 }
 
 # Only the endpoint and token beneath the current disposable device are used.
-function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Arguments = @()) {
+function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Arguments = @(), [int]$TimeoutSec = 5) {
     $endpoint = Get-Content -LiteralPath (Join-Path $DataDir 'runtime/endpoint.json') -Raw | ConvertFrom-Json
     $uri = [Uri][string]$endpoint.url
     if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
@@ -283,7 +285,7 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
     $origin = $uri.GetLeftPart([UriPartial]::Authority)
     try {
         if ($Method -eq 'health') {
-            return Invoke-RestMethod -Uri "$origin/api/health" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5
+            return Invoke-RestMethod -Uri "$origin/api/health" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec $TimeoutSec
         }
         $requestId = [Guid]::NewGuid().ToString('N')
         $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
@@ -296,8 +298,8 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
     } catch { throw 'Owned runtime request failed.' }
 }
 
-function Get-OwnedRuntimeHealth([string]$DataDir) {
-    $health = Invoke-OwnedRuntimeRpc $DataDir 'health'
+function Get-OwnedRuntimeHealth([string]$DataDir, [int]$TimeoutSec = 5) {
+    $health = Invoke-OwnedRuntimeRpc $DataDir 'health' -TimeoutSec $TimeoutSec
     $profile = [IO.Path]::GetFullPath([string]$health.data_dir)
     $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $nativeName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
@@ -331,6 +333,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [switch]$AllowIndexWait,
         [string]$ModelTaskId = '',
         [int]$TimeoutSec = 180,
         [string]$StdinText = '',
@@ -354,6 +357,12 @@ function Invoke-Om {
         if ($ArgList -notcontains '--direct') { $ArgList = @('--direct') + $ArgList }
     }
     if ($ModelTaskId) { $ArgList = @('--model-task-id', $ModelTaskId) + $ArgList }
+    if ($AllowIndexWait) {
+        $readCommand = @($ArgList | Where-Object { $_ -notin @('--direct', '--client-only', '--json') })[0]
+        if ($readCommand -notin @('recall', 'candidates') -or $Raw -or $Secret -or $ModelTaskId) {
+            throw 'Index readiness waiting is restricted to explicit JSON retrieval reads.'
+        }
+    }
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     $script:Step++
     $safe = ($Name -replace '[^\w\-]+', '_')
@@ -389,9 +398,17 @@ function Invoke-Om {
     [void]$psi.Environment.Remove('ONEMEMORY_SERVER')
     Write-Host "STEP $script:Step $Name"
     $readyTries = 0
+    $indexRetried = $false
+    $indexEvent = $null
+    $indexCommandBudget = [Diagnostics.Stopwatch]::StartNew()
     do {
         $readyTries++
         if ($readyTries -gt 1) { Write-Host "RETRY $Name" }
+    $attemptTimeout = $TimeoutSec
+    if ($AllowIndexWait) {
+        $attemptTimeout = [int][Math]::Floor($TimeoutSec - $indexCommandBudget.Elapsed.TotalSeconds)
+        if ($attemptTimeout -le 0) { throw 'Index readiness retry exceeded the original command deadline.' }
+    }
     $proc = [System.Diagnostics.Process]::Start($psi)
     if ($StdinText) { $proc.StandardInput.Write($StdinText) }
     $proc.StandardInput.Close()
@@ -408,7 +425,7 @@ function Invoke-Om {
                 $progressSamples.Add($progress) | Out-Null
             } elseif ($progress.active -ne $false) { throw 'Model progress active flag is missing.' }
         }
-    } else { $finished = $proc.WaitForExit($TimeoutSec * 1000) }
+    } else { $finished = $proc.WaitForExit($attemptTimeout * 1000) }
     if (-not $finished) {
         $timedOut = $true
         try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
@@ -468,7 +485,44 @@ function Invoke-Om {
     }
     $readyFail = ($stdout + $stderr) -match 'did not become ready'
         if ($readyFail -and $readyTries -lt 2) { Stop-OurRuntimes; Start-Sleep -Seconds 1 }
-    } while ($readyFail -and $readyTries -lt 2)
+    $retryIndexPending = $AllowIndexWait -and -not $indexRetried -and -not $timedOut `
+        -and $exit -eq 2 -and $status -ceq 'pending' -and [string]$envlp.summary.state -ceq 'index_pending' `
+        -and @($envlp.errors).Count -eq 0 -and $leaks.Count -eq 0
+    if ($retryIndexPending) {
+        $indexRetried = $true
+        # Preserve the first response separately. It is an observed Pending,
+        # not a passing command or a replacement for the final data assertions.
+        [IO.File]::WriteAllText($outFile + '.index-pending', $stdout, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($errFile + '.index-pending', $stderr, [Text.UTF8Encoding]::new($false))
+        $indexEvent = [ordered]@{ case = $Name; exit = 2; state = 'index_pending'; readiness = 'waiting'; polls = 0; wait_ms = 0; retried = $false }
+        $script:IndexPendingEvents.Add($indexEvent) | Out-Null
+        Write-SweepReport
+        $indexWait = [Diagnostics.Stopwatch]::StartNew()
+        $indexWaitBudget = [Math]::Min(120, $TimeoutSec - $indexCommandBudget.Elapsed.TotalSeconds)
+        while ($true) {
+            $remaining = [Math]::Min($indexWaitBudget - $indexWait.Elapsed.TotalSeconds, $TimeoutSec - $indexCommandBudget.Elapsed.TotalSeconds)
+            if ($remaining -lt 1) {
+                $indexEvent.readiness = 'timeout'
+                throw 'Owned retrieval index did not become ready within the bounded command deadline.'
+            }
+            $health = Get-OwnedRuntimeHealth $DataDir -TimeoutSec ([int][Math]::Min(5, [Math]::Floor($remaining)))
+            $indexEvent.polls++
+            $indexEvent.wait_ms = [int]$indexWait.Elapsed.TotalMilliseconds
+            $indexState = [string]$health.retrieval_index.state
+            if ($indexState -ceq 'failed') {
+                $indexEvent.readiness = 'failed'
+                throw 'Owned retrieval index reported failed; the command was not retried.'
+            }
+            if ($indexState -ceq 'ready') {
+                $indexEvent.readiness = 'ready'
+                $indexEvent.retried = $true
+                break
+            }
+            if ($indexState -cnotin @('idle', 'scheduled', 'running')) { throw 'Owned retrieval index readiness state is invalid.' }
+            Start-Sleep -Milliseconds 100
+        }
+    }
+    } while (($readyFail -and $readyTries -lt 2) -or $retryIndexPending)
     if ($readyTries -gt 1) { $Note = ("runtime 重试 $readyTries 次 " + $Note).Trim() }
     $ok = $exitOk -and $statusOk -and ($leaks.Count -eq 0) -and (-not $timedOut)
     $commandTokens = @($ArgList | Where-Object { $_ -notin @('--direct', '--client-only', '--json') })
@@ -1163,7 +1217,7 @@ if ($addrB -ne $Server) { throw "B server_addr=$addrB" }
 $syncB = Invoke-Om -Name 'sync-b' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncB.Ok) { throw 'B 下载同步失败' }
 Assert-Count 'B sync' $syncB.Envelope 'pulled' 1
-$recB = Invoke-Om -Name 'recall-b' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180
+$recB = Invoke-Om -Name 'recall-b' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recB.Stdout -notlike "*$marker*") { throw "B recall 没有召回 A 写入的标记 $marker" }
 Invoke-Om -Name 'show-b' -ArgList @('--json', 'show', $short) -DataDir $DirB | Out-Null
 $bad = Join-Path $Root 'bad'

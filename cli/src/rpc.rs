@@ -408,6 +408,12 @@ fn index_loop_inner() -> Result<()> {
                         respire::model_progress::check()?;
                         let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                         work.error = Some(format!("{error:#}"));
+                        drop(work);
+                        for _ in 0..5 {
+                            check_sync_context(generation)?;
+                            respire::model_progress::check()?;
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                     }
                     Err(error) => return Err(error),
                 }

@@ -28,8 +28,7 @@ function observeStable(version) {
   if (!stable || compare(parts, stable) > 0) stable = parts;
 }
 for (const tag of tags) {
-  const version = tag.replace(/^v/, '');
-  if (/^\d+\.\d+\.\d+$/.test(version)) observeStable(version);
+  if (new RegExp(`^v${integer}\\.${integer}\\.${integer}$`).test(tag)) observeStable(tag.slice(1));
 }
 for (const release of releases) {
   if (typeof release.tag_name !== 'string' || typeof release.draft !== 'boolean' || typeof release.prerelease !== 'boolean') {
@@ -48,7 +47,13 @@ const packages = await Promise.all([manifest.npmScope, ...manifest.targets.map(t
   const metadata = await response.json();
   if (!metadata.versions || typeof metadata.versions !== 'object' || Array.isArray(metadata.versions)) throw new Error(`Invalid npm metadata for ${name}`);
   const latest = metadata['dist-tags']?.latest;
-  if (latest !== undefined) observeStable(latest);
+  if (latest !== undefined) {
+    if (typeof latest !== 'string') throw new Error(`Invalid npm latest metadata for ${name}`);
+    const identifier = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)';
+    const prerelease = new RegExp(`^(${integer}\\.${integer}\\.${integer})-${identifier}(?:\\.${identifier})*(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`).exec(latest);
+    if (prerelease) parse(prerelease[1]);
+    else observeStable(latest);
+  }
   return metadata;
 }));
 let next = target;
