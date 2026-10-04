@@ -492,6 +492,15 @@ struct Job {
 }
 
 pub fn call_from_argv() -> Result<()> {
+    call_from_argv_with_start(true)
+}
+
+/// Poll an existing authenticated runtime without lifecycle or recovery writes.
+pub fn call_existing_from_argv() -> Result<()> {
+    call_from_argv_with_start(false)
+}
+
+fn call_from_argv_with_start(auto_start: bool) -> Result<()> {
     let args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|arg| arg != "--direct" && arg != "--client-only")
@@ -499,7 +508,7 @@ pub fn call_from_argv() -> Result<()> {
     let json = args.iter().any(|arg| arg == "--json")
         || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true");
     crate::set_json_mode(json);
-    let response = call_method("cli.exec", args, true)?;
+    let response = call_method("cli.exec", args, auto_start)?;
     render_response(response, json)
 }
 
@@ -1775,6 +1784,7 @@ mod tests {
         assert!(is_exclusive(&["attach".into(), "id".into()]));
         assert!(!is_exclusive(&["recall".into(), "respire".into()]));
         assert!(!is_exclusive(&["status".into()]));
+        assert!(!is_exclusive(&["memory-revision".into()]));
         assert!(!is_exclusive(&["list".into()]));
         assert!(!is_exclusive(&["show".into(), "id".into()]));
         assert!(!is_exclusive(&["sync-history".into()]));

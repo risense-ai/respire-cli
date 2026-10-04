@@ -819,6 +819,8 @@ enum Command {
     SyncReset,
     /// Status
     Status,
+    /// Read the initialized library's opaque snapshot token without loading a model
+    MemoryRevision,
     /// Recompute all embeddings (for embedder upgrades / dim changes; re-embed by semantics)
     Reembed,
     /// Stock analysis: cluster BGE vectors, flag lone leaves, suggest a tree (read-only)
@@ -5178,7 +5180,7 @@ fn is_off_allowed(c: &Command) -> bool {
         // Self-restore and inject (the only way out of off)
         Command::AgentConfig { .. } | Command::Inject { .. }
         // Status and doctor
-        | Command::Status | Command::Doctor { .. } | Command::UpdateCheck { .. }
+        | Command::Status | Command::MemoryRevision | Command::Doctor { .. } | Command::UpdateCheck { .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
         | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::Model { .. } | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }
@@ -5243,17 +5245,12 @@ fn main_body() -> i32 {
     if std::env::args_os().any(|arg| arg == "--client-only") {
         std::env::set_var("ONEMEMORY_CLIENT_ONLY", "1");
     }
-    if !runtime_policy::client_only() {
-        if let Err(error) = respire::migration::ensure_default_home() {
-            eprintln!("default profile migration failed: {error:#}");
-            return 1;
-        }
-    }
     if std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--internal-inference-worker")
     {
         return match runtime_policy::require_host("inference worker")
+            .and_then(|()| respire::migration::ensure_default_home())
             .and_then(|()| respire::memory::onnx::run_worker())
         {
             Ok(()) => 0,
@@ -5263,36 +5260,30 @@ fn main_body() -> i32 {
             }
         };
     }
-    match std::env::current_exe() {
-        Ok(executable) => {
-            if let Err(error) = respire::memory::onnx::enable_worker(executable) {
-                eprintln!("cannot enable inference worker: {error:#}");
-                return 1;
-            }
-        }
-        Err(error) => {
-            eprintln!("cannot locate inference worker executable: {error}");
-            return 1;
-        }
-    }
     // Parse args, then run the command, so a Windows debug stack does not hold both at once.
     // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.
     let result = match preprocess_args() {
         Preparsed::Version { json } => {
             set_json_mode(json);
-            crate::app_version::emit(json)
+            prepare_command_runtime().and_then(|()| crate::app_version::emit(json))
         }
         Preparsed::Runtime { flags, json } => {
             set_json_mode(json);
-            rpc::runtime_entry(flags)
+            prepare_command_runtime().and_then(|()| rpc::runtime_entry(flags))
         }
         Preparsed::Invalid(error) => Err(anyhow!(error)),
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
-            run(Cli::parse_from(
+            let cli = Cli::parse_from(
                 std::iter::once(std::ffi::OsString::from("rsrs")).chain(args),
-            ))
+            );
+            // A polling probe must not migrate a home, enable inference, or boot a runtime.
+            if matches!(cli.command, Some(Command::MemoryRevision)) {
+                run(cli)
+            } else {
+                prepare_command_runtime().and_then(|()| run(cli))
+            }
         }
     };
     if let Err(error) = result {
@@ -5318,6 +5309,19 @@ fn main_body() -> i32 {
         return exit_code;
     }
     0
+}
+
+/// Normal command bootstrap, intentionally omitted by the read-only revision probe.
+fn prepare_command_runtime() -> Result<()> {
+    if !runtime_policy::client_only() {
+        respire::migration::ensure_default_home()
+            .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| anyhow!("cannot locate inference worker executable: {error}"))?;
+    respire::memory::onnx::enable_worker(executable)
+        .map_err(|error| anyhow!("cannot enable inference worker: {error:#}"))?;
+    Ok(())
 }
 
 enum Preparsed {
@@ -5450,6 +5454,15 @@ fn run_classify_config(
     ))
 }
 
+fn run_memory_revision() -> Result<()> {
+    emit_result(ResultEnvelope::new(
+        "memory-revision",
+        OutputStatus::Ok,
+        serde_json::to_value(respire::service::memory_revision()?)?,
+        Vec::new(),
+    ))
+}
+
 fn changes_profile(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
@@ -5466,6 +5479,17 @@ fn run(args: Cli) -> Result<()> {
     );
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
+    }
+    if matches!(args.command, Some(Command::MemoryRevision)) {
+        if rpc::worker_active() {
+            return run_memory_revision();
+        }
+        if DIRECT_MODE.load(Ordering::Relaxed) {
+            runtime_policy::require_host("direct memory revision read")?;
+            return run_memory_revision();
+        }
+        // No runtime creation, profile takeover, or retry of a failed request.
+        return rpc::call_existing_from_argv();
     }
     if let Some(Command::ClassifyConfig {
         backend,
@@ -5571,6 +5595,9 @@ fn run_local(args: Cli) -> Result<()> {
     }
     if matches!(args.command, Some(Command::Web { .. })) {
         anyhow::bail!("the dashboard launcher does not run inside a command worker");
+    }
+    if matches!(args.command, Some(Command::MemoryRevision)) {
+        return run_memory_revision();
     }
     // The runtime worker already holds lock.db for the process lifetime.
     let _library_lock = if rpc::worker_active() {
@@ -7084,7 +7111,7 @@ fn run_local(args: Cli) -> Result<()> {
             since_resort,
         } => {
             let session = build_session()?;
-            let store = build_local()?;
+            let (profile, store) = respire::service::open_store_with_profile()?;
             let mut candidates = scoped_candidates(&store)?;
             let mut filter_summary = serde_json::Value::Null;
             // Time filter (§3.8 tidy intake): --since-resort reads resort_at, --since takes an explicit time;
@@ -7109,7 +7136,7 @@ fn run_local(args: Cli) -> Result<()> {
             let mut result = ResultEnvelope::new(
                 "list",
                 OutputStatus::Ok,
-                serde_json::json!({"count":out.len(),"limit":limit,"filter":filter_summary}),
+                serde_json::json!({"count":out.len(),"limit":limit,"filter":filter_summary,"profile":profile.to_string_lossy()}),
                 items,
             );
             result.details = serde_json::Value::Array(
@@ -7830,7 +7857,7 @@ fn run_local(args: Cli) -> Result<()> {
                 let mut v = serde_json::json!({
                     "unlocked": unlocked,
                     "offline": !remote_configured() && si.has_local_keys,
-                    "data_dir": respire::service::data_dir().to_string_lossy(),
+                    "data_dir": app_status.data_dir,
                     "session": si,
                     "server_addr": respire::service::server_addr(),
                     "autosync": respire::service::autosync_enabled(),
@@ -8174,7 +8201,10 @@ fn run_local(args: Cli) -> Result<()> {
             schedule_autosync(&session, &store);
         }
         // The commands above already returned at the top of this function (no embedder needed); this arm is unreachable - only to exhaust the match.
-        Command::Keygen { .. } | Command::Session { .. } | Command::Grant { .. } => {
+        Command::MemoryRevision
+        | Command::Keygen { .. }
+        | Command::Session { .. }
+        | Command::Grant { .. } => {
             unreachable!("already returned at the top of main")
         }
         Command::Defrag { .. }
@@ -8263,6 +8293,11 @@ mod capture_tests {
         assert!(super::Cli::try_parse_from(["rsrs", "chain", "entry-id"]).is_ok());
         assert!(super::Cli::try_parse_from(["rsrs", "chain", "--from", "entry-id"]).is_err());
         assert!(super::Cli::try_parse_from(["rsrs", "config", "--data-dir", "isolated"]).is_ok());
+        let revision = super::Cli::try_parse_from(["rsrs", "memory-revision", "--json"])?;
+        assert!(matches!(revision.command, Some(super::Command::MemoryRevision)));
+        assert!(!super::is_write_command(&super::Command::MemoryRevision));
+        assert!(!super::is_write_command_fine(&super::Command::MemoryRevision));
+        assert!(super::is_off_allowed(&super::Command::MemoryRevision));
         assert!(super::Cli::try_parse_from(["rsrs", "v"]).is_ok());
         assert!(super::Cli::try_parse_from(["rsrs", "version"]).is_ok());
         let v_help = command
@@ -8288,6 +8323,33 @@ mod capture_tests {
                 None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
             }
         }
+    }
+
+    #[test]
+    fn memory_revision_capture_preserves_identity_across_status_reads() -> anyhow::Result<()> {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let dir = tempfile::tempdir()?;
+        let _guard = EnvGuard {
+            prev: std::env::var("ONEMEMORY_DATA_DIR").ok(),
+        };
+        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let _store = respire::service::open_store()?;
+        crate::rpc::set_worker_active(true);
+        let before = capture_run(vec!["memory-revision".into(), "--json".into()]);
+        assert_eq!(before.exit, 0);
+        assert_eq!(before.envelope.command, "memory-revision");
+        assert_eq!(before.envelope.summary["profile"], dir.path().to_string_lossy().as_ref());
+        let status = capture_run(vec!["status".into(), "--json".into()]);
+        assert_eq!(status.exit, 0);
+        assert_eq!(status.envelope.summary["data_dir"], before.envelope.summary["profile"]);
+        let after = capture_run(vec!["memory-revision".into(), "--json".into()]);
+        assert_eq!(after.exit, 0);
+        assert_eq!(after.envelope.summary, before.envelope.summary);
+        assert!(!dir.path().join("session.json").exists());
+        assert!(!dir.path().join("model").exists());
+        Ok(())
     }
 
     #[test]

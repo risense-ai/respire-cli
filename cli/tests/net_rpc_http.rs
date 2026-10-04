@@ -217,3 +217,50 @@ fn stop_closes_listen_port() -> Result<(), String> {
     }
     Err("port still open after stop".into())
 }
+
+#[test]
+fn rpc_memory_revision_is_read_only_and_model_free() -> Result<(), String> {
+    let rt = start_internal_runtime()?;
+    let mut baseline = None;
+    for args in [
+        vec!["memory-revision", "--json"],
+        vec!["--client-only", "memory-revision", "--json"],
+        vec!["memory-revision"],
+    ] {
+        let output = Command::new(bin())
+            .args(args)
+            .env("ONEMEMORY_DATA_DIR", rt.dir.path())
+            .env("ONEMEMORY_RPC_PORT", rt.port.to_string())
+            .env("ONEMEMORY_RPC_TOKEN", &rt.token)
+            .env("ONEMEMORY_JSON", "1")
+            .output()
+            .map_err(|err| err.to_string())?;
+        if !output.status.success() {
+            return Err(format!(
+                "revision failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        let envelope: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|err| err.to_string())?;
+        assert_eq!(envelope["command"], "memory-revision");
+        assert_eq!(envelope["status"], "ok");
+        assert_eq!(
+            envelope["summary"]["profile"],
+            rt.dir.path().to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            envelope["summary"]["revision"].as_str().unwrap_or("").len(),
+            32
+        );
+        if let Some(expected) = &baseline {
+            assert_eq!(&envelope["summary"], expected);
+        } else {
+            baseline = Some(envelope["summary"].clone());
+        }
+    }
+    assert!(!rt.dir.path().join("session.json").exists());
+    assert!(!rt.dir.path().join("model").exists());
+    Ok(())
+}

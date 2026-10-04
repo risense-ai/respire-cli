@@ -293,6 +293,11 @@
       "options": []
     },
     {
+      "command": "memory-revision",
+      "source": "cli/src/main.rs:823",
+      "options": []
+    },
+    {
       "command": "reembed",
       "source": "cli/src/main.rs:820",
       "options": []
@@ -935,6 +940,11 @@
     "help-space-use-contract",
     "help-split-contract",
     "help-status-contract",
+    "help-memory-revision-contract",
+    "memory-revision-profile-token",
+    "memory-revision-reads-stable",
+    "memory-revision-after-write",
+    "list-profile-contract",
     "help-super-reset-contract",
     "help-sync-conflicts-contract",
     "help-sync-contract",
