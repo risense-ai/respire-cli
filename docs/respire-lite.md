@@ -15,7 +15,7 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 
 # rsrs 记忆工作流
 
-- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的环回 HTTP runtime（默认 `127.0.0.1:15169`），无需 token；非环回访问必须带 token。不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
+- In a sandbox, use `rsrs --client-only <command>` to connect only to the host loopback HTTP runtime (default `127.0.0.1:15169`) without a token. Non-loopback access requires a token. Do not start, stop, copy or upgrade the service, or use `--direct`. Report connection or authentication failures for the host operator to resolve.
 
 先查后做，所得归档，遇障先翻忆。详细规则由 `rsrs prompt` 提供；本回合首次存储、修改或整理前必须读取全文，不能凭本摘要省略规则。
 

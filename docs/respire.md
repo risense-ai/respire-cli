@@ -34,7 +34,7 @@ Keep the existing `【前因】`, `【行为】` and `【后果】` body markers
 
 # respire（AI记忆体）· 记忆注入源（唯一权威源）
 
-- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的环回 HTTP runtime（默认 `127.0.0.1:15169`），无需 token；非环回访问必须带 token。不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
+- In a sandbox, use `rsrs --client-only <command>` to connect only to the host loopback HTTP runtime (default `127.0.0.1:15169`) without a token. Non-loopback access requires a token. Do not start, stop, copy or upgrade the service, or use `--direct`. Report connection or authentication failures for the host operator to resolve.
 
 > 本文件是记忆铁律与行为约束的唯一权威源（随 Respire CLI 仓版本化），**内嵌于二进制**（`include_str!`）。改后流程：`cargo build --release -p respire` → `rsrs inject` 分发（14 目标；`--targets` 看现状，stale 即需重分发）。
 >
