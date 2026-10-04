@@ -80,6 +80,12 @@ class Smoke(support.Smoke):
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict)}
+            if args[0] == "sync" and isinstance(value, dict):
+                summary = value.get("summary", {})
+                self.report["cli_failure"]["sync_counts"] = {
+                    key: summary[key] for key in ("local_total", "local_alive", "remote_total", "remote_alive",
+                        "pending", "conflicts", "undecodable", "protocol", "total_matched", "converged")
+                    if key in summary and type(summary[key]) in (int, bool)}
             self.save()
             reason = "cli_failed_" if output.returncode != 0 else \
                 "invalid_cli_json_" if not isinstance(value, dict) else "cli_error_"
