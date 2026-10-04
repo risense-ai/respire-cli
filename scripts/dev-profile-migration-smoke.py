@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Hosted CI only: real encrypted profiles, keyring aliases, WAL and restart migration."""
 import argparse
+import base64
 from contextlib import contextmanager
 import hashlib
 import importlib.util
@@ -14,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import uuid
 
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
@@ -252,6 +254,18 @@ class Smoke(support.Smoke):
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("CREATE TABLE IF NOT EXISTS migration_wal_fixture(marker TEXT PRIMARY KEY)")
         connection.execute("INSERT INTO migration_wal_fixture VALUES(?)", (label,))
+        tombstones = []
+        if service != "rsrs":
+            # Discarded foreign-account payloads cannot be opened with this
+            # account's key; preserve their deletion state without indexing them.
+            for _ in range(5):
+                tombstone = (str(uuid.uuid4()), "local",
+                    base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
+                    base64.b64encode(secrets.token_bytes(12)).decode("ascii"), 1)
+                connection.execute(
+                    "INSERT INTO memories (id,user,ciphertext,nonce,deleted,dirty,created_at,updated_at) "
+                    "VALUES (?,?,?,?,?,0,'2026-09-21T00:00:00Z','2026-09-21T00:00:00Z')", tombstone)
+                tombstones.append(tombstone)
         connection.commit()
         require((path / "onememory.db-wal").stat().st_size > 0, "migration_wal_fixture_empty")
         row = connection.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone()
@@ -289,7 +303,8 @@ class Smoke(support.Smoke):
         config_path.write_text(json.dumps(config), encoding="utf-8")
         alias = self.reserve_alias(path)
         return {"account": account, "password": password, "code": code, "service": service,
-            "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": alias}
+            "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": alias,
+            "foreign_tombstones": tombstones}
 
     def migrated(self, home, fixtures):
         root = home / ".rsrs"
@@ -326,12 +341,18 @@ class Smoke(support.Smoke):
             with sqlite3.connect((fixture["source"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as source_db:
                 require(source_db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
                     "legacy_source_ciphertext_changed")
+                for tombstone in fixture["foreign_tombstones"]:
+                    require(source_db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
+                        (tombstone[0],)).fetchone() == tombstone, "legacy_source_foreign_tombstone_changed")
             with sqlite3.connect((profile / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
                 require(db.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "migrated_database_invalid")
                 require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
                     "migration_changed_ciphertext")
                 require(db.execute("SELECT marker FROM migration_wal_fixture").fetchone()[0] == fixture["label"], "migration_lost_committed_wal")
                 require(db.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0, "migration_lost_outbox")
+                for tombstone in fixture["foreign_tombstones"]:
+                    require(db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
+                        (tombstone[0],)).fetchone() == tombstone, "migration_changed_foreign_tombstone")
             fixture["destination"] = profile
         return sessions
 
@@ -421,7 +442,8 @@ class Smoke(support.Smoke):
                 "active_legacy_lock_snapshot_not_declared")
             selected = self.cli(default, "config")["summary"]["data_dir"]
             require(Path(selected).resolve() == fixtures[-1]["destination"].resolve(), "migration_active_account_not_preserved")
-            self.passed("onememory_multiaccount_wal_migrated", profiles=len(fixtures))
+            self.passed("onememory_multiaccount_wal_migrated", profiles=len(fixtures),
+                foreign_deleted_ciphertexts_preserved=sum(len(f["foreign_tombstones"]) for f in fixtures))
             self.passed("legacy_keys_migrated_without_super_override", old_service_unchanged=True)
             self.passed("legacy_api_defaults_rewritten", verified="old defaults to api.rsrs.rs; dev redirect only after verification")
             self.passed("migration_repeated_start_idempotent", profiles=len(fixtures))
@@ -449,7 +471,8 @@ class Smoke(support.Smoke):
         elif interrupt:
             self.passed("migration_interrupted_restart_recovered", real_stage_observed=True)
         elif not target:
-            self.passed("respire_compatibility_migrated", profiles=len(fixtures))
+            self.passed("respire_compatibility_migrated", profiles=len(fixtures),
+                foreign_deleted_ciphertexts_preserved=sum(len(f["foreign_tombstones"]) for f in fixtures))
 
     def run(self):
         expected_server = os.environ.get("RESPIRE_DEV_SERVER_SHA", "")
