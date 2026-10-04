@@ -283,6 +283,7 @@ class Smoke(support.Smoke):
         connection.execute("INSERT INTO migration_wal_fixture VALUES(?)", (label,))
         tombstones = []
         if service != "rsrs":
+            tombstone_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             # Discarded foreign-account payloads cannot be opened with this
             # account's key; preserve their deletion state without indexing them.
             for _ in range(5):
@@ -291,7 +292,7 @@ class Smoke(support.Smoke):
                     base64.b64encode(secrets.token_bytes(12)).decode("ascii"), 1)
                 connection.execute(
                     "INSERT INTO memories (id,user,ciphertext,nonce,deleted,dirty,created_at,updated_at) "
-                    "VALUES (?,?,?,?,?,0,'2026-09-21T00:00:00Z','2026-09-21T00:00:00Z')", tombstone)
+                    "VALUES (?,?,?,?,?,0,?,?)", tombstone + (tombstone_time, tombstone_time))
                 tombstones.append(tombstone)
         connection.commit()
         require((path / "onememory.db-wal").stat().st_size > 0, "migration_wal_fixture_empty")
