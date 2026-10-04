@@ -221,6 +221,7 @@ thread_local! {
     static JSON_MODE: Cell<bool> = const { Cell::new(false) };
     static OUTPUT_EMITTED: Cell<bool> = const { Cell::new(false) };
     static OUTPUT_EXIT_CODE: Cell<u8> = const { Cell::new(0) };
+    static DEFER_PROFILE_OUTPUT: Cell<bool> = const { Cell::new(false) };
 }
 static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<BgeEmbedder>>> = std::sync::Mutex::new(None);
 
@@ -263,7 +264,7 @@ fn emit_result(result: ResultEnvelope) -> Result<()> {
     let mut result = result;
     result.details = output::sanitize_details(&result.command, &result.details);
     let exit_code = status_exit_code(result.status);
-    if rpc::worker_active() {
+    if rpc::worker_active() || DEFER_PROFILE_OUTPUT.get() {
         CAPTURED.with(|slot| *slot.borrow_mut() = Some(result));
         mark_emitted();
         set_exit_code(exit_code);
@@ -5449,6 +5450,15 @@ fn run_classify_config(
     ))
 }
 
+fn changes_profile(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
+        Some(Command::Space { action, .. }) => action == "use",
+        Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
+        _ => false,
+    }
+}
+
 fn run(args: Cli) -> Result<()> {
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
@@ -5513,6 +5523,18 @@ fn run(args: Cli) -> Result<()> {
             anyhow::bail!("mcp uses the resident runtime; do not pass --direct");
         }
         return mcp::serve();
+    }
+    if !DIRECT_MODE.load(Ordering::Relaxed) && changes_profile(args.command.as_ref()) {
+        runtime_policy::require_host("profile switching")?;
+        CAPTURED.with(|slot| *slot.borrow_mut() = None);
+        DEFER_PROFILE_OUTPUT.set(true);
+        let switched = rpc::change_profile(|| run_local(args));
+        DEFER_PROFILE_OUTPUT.set(false);
+        OUTPUT_EMITTED.set(false);
+        OUTPUT_EXIT_CODE.set(0);
+        let result = CAPTURED.with(|slot| slot.borrow_mut().take());
+        switched?;
+        return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
         runtime_policy::require_host("direct local execution")?;
@@ -7886,10 +7908,16 @@ fn run_local(args: Cli) -> Result<()> {
             ))?;
         }
         Command::Reembed => {
+            let _operation = respire::model_progress::Operation::begin("load")?;
             let session = build_session()?;
             let store = build_local()?;
             let model = store.retrieval_model()?;
-            let n = store.rebuild_index(&session, embedder!(), &model)?;
+            let n = store.rebuild_index_with_progress(
+                &session, embedder!(), &model,
+                |done, total| respire::model_progress::update(
+                    "index", &model, done as u64, Some(total as u64),
+                ),
+            )?;
             let dims = embedder!().dims();
             emit_result(ResultEnvelope::new(
                 "reembed",

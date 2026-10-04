@@ -544,6 +544,22 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
+/// Host profile changes release the old library before starting its successor.
+pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    if let Some(health) = probe_runtime()? {
+        stop_occupant(health.pid)?;
+    }
+    let changed = change();
+    // A rejected profile change still restores service for the original profile.
+    let restarted = ensure_daemon_locked();
+    match (changed, restarted) {
+        (Ok(()), result) => result,
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(restart)) => Err(error.context(format!("runtime restart failed: {restart:#}"))),
+    }
+}
+
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
     if flags.status {
         return match call_method("runtime.status", Vec::new(), false) {
@@ -1568,6 +1584,10 @@ fn ensure_daemon() -> Result<()> {
     }
     // Hold across probe, stop, copy, spawn and readiness. Re-probe after waiting.
     let _takeover = crate::runtime_policy::takeover_lock()?;
+    ensure_daemon_locked()
+}
+
+fn ensure_daemon_locked() -> Result<()> {
     let dest = crate::mcp::stable_bin_path();
     let src = std::env::current_exe().context("failed to locate the rsrs binary")?;
     if let Some(health) = probe_runtime()? {

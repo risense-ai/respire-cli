@@ -40,6 +40,12 @@ use the same data flow and diagnostics.
 | `model activate legacy` | Rebuild/resume the retained legacy index |
 | `reembed` | Repair missing/outdated data for the current model |
 
+Automatic index repair has a 15-second foreground budget, checked between entries.
+An in-flight model call retains its own timeout. If repair exceeds the budget,
+the command asks you to run `rsrs reembed` explicitly. Rebuilding checkpoints each
+completed entry and reports progress through the runtime model-operation channel.
+Retrying resumes completed work; encrypted memories and account keys are preserved.
+
 `ONEMEMORY_M3_DIR` selects the model directory. Index work does not alter memory content
 or synced dirty flags. Core artifacts are opaque, versioned local derived data, not
 account keys or an encryption mechanism. Writes and changed sync inputs maintain the

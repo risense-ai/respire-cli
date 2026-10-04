@@ -47,6 +47,8 @@ pub fn instructions_md() -> &'static str {
 /// Inject-block markers (block mode: bound user content vs injected content).
 pub const BLOCK_BEGIN: &str = "<!-- respire:begin -->";
 pub const BLOCK_END: &str = "<!-- respire:end -->";
+const LEGACY_BLOCK_BEGIN: &str = "<!-- 1memory:begin -->";
+const LEGACY_BLOCK_END: &str = "<!-- 1memory:end -->";
 
 /// Path of the inject entity file: Unix `~/.local/share/respire/docs/respire.md`;
 /// Windows `%LOCALAPPDATA%\respire\docs\respire.md` (do not force an XDG path).
@@ -287,6 +289,9 @@ fn check_state(path: std::path::PathBuf, mode: &str) -> &'static str {
             }
             // Block: no markers → not injected; markers present → compare inner content
             _ => {
+                if text.contains(LEGACY_BLOCK_BEGIN) || text.contains(LEGACY_BLOCK_END) {
+                    return "stale";
+                }
                 let ref_md = wb_ref_md(&entity_abs().unwrap_or_default());
                 let expected = match mode {
                     "ref-block" => ref_md.trim_end(),
@@ -618,16 +623,27 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(anyhow!("failed to read {}: {e}", path.display())),
     };
-    let starts: Vec<_> = before.match_indices(BLOCK_BEGIN).map(|(i, _)| i).collect();
-    let ends: Vec<_> = before.match_indices(BLOCK_END).map(|(i, _)| i).collect();
-    let bounds = match (starts.as_slice(), ends.as_slice()) {
-        ([], []) => None,
-        ([start], [end]) if start < end => Some((*start, end + BLOCK_END.len())),
-        _ => anyhow::bail!(
-            "inject markers incomplete or duplicated; fix {} first",
-            path.display()
-        ),
-    };
+    let mut bounds = Vec::new();
+    for (begin, end_marker) in [
+        (BLOCK_BEGIN, BLOCK_END),
+        (LEGACY_BLOCK_BEGIN, LEGACY_BLOCK_END),
+    ] {
+        let starts: Vec<_> = before.match_indices(begin).map(|(i, _)| i).collect();
+        let ends: Vec<_> = before.match_indices(end_marker).map(|(i, _)| i).collect();
+        match (starts.as_slice(), ends.as_slice()) {
+            ([], []) => {}
+            ([start], [end]) if start < end => bounds.push((*start, end + end_marker.len())),
+            _ => anyhow::bail!(
+                "inject markers incomplete or duplicated; fix {} first",
+                path.display()
+            ),
+        }
+    }
+    bounds.sort_unstable();
+    anyhow::ensure!(
+        bounds.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+        "inject markers overlap; fix {} first", path.display()
+    );
     let newline = if before
         .find('\n')
         .is_some_and(|i| i > 0 && before.as_bytes()[i - 1] == b'\r')
@@ -640,11 +656,8 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
         "{BLOCK_BEGIN}{newline}{}{newline}{BLOCK_END}",
         content.trim_end()
     );
-    let after = match (bounds, remove) {
-        (Some((start, end)), true) => format!("{}{}", &before[..start], &before[end..]),
-        (Some((start, end)), false) => format!("{}{block}{}", &before[..start], &before[end..]),
-        (None, true) => before.clone(),
-        (None, false) => {
+    let after = if bounds.is_empty() {
+        if remove { before.clone() } else {
             let sep = if before.is_empty() {
                 String::new()
             } else if before.ends_with("\n\n") {
@@ -656,6 +669,16 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
             };
             format!("{before}{sep}{block}{newline}")
         }
+    } else {
+        let mut after = String::new();
+        let mut cursor = 0;
+        for (index, (start, end)) in bounds.iter().copied().enumerate() {
+            after.push_str(&before[cursor..start]);
+            if index == 0 && !remove { after.push_str(&block); }
+            cursor = end;
+        }
+        after.push_str(&before[cursor..]);
+        after
     };
     let revision = hex::encode(Sha256::digest(before.as_bytes()));
     let changed = before != after;
@@ -742,6 +765,26 @@ mod tests {
         assert!(text.contains("respire"));
         assert!(!text.contains("old\n#"));
         assert_eq!(text.matches(BLOCK_BEGIN).count(), 1);
+        for old in [
+            format!("mine\n{LEGACY_BLOCK_BEGIN}\nlegacy\n{LEGACY_BLOCK_END}\n"),
+            format!("mine\n{LEGACY_BLOCK_BEGIN}\nlegacy\n{LEGACY_BLOCK_END}\nbetween\n{BLOCK_BEGIN}\nold\n{BLOCK_END}\ntail\n"),
+        ] {
+            std::fs::write(&path, old)?;
+            assert_eq!(check_state(path.clone(), "block"), "stale");
+            assert!(write_block(path.clone())?);
+            let migrated = std::fs::read_to_string(&path)?;
+            assert!(migrated.starts_with("mine\n"));
+            assert_eq!(migrated.matches(BLOCK_BEGIN).count(), 1);
+            assert!(!migrated.contains(LEGACY_BLOCK_BEGIN));
+            assert!(!migrated.contains("legacy\n"));
+            assert!(!write_block(path.clone())?);
+            assert!(remove_block(path.clone())?);
+            assert!(!std::fs::read_to_string(&path)?.contains(BLOCK_BEGIN));
+        }
+        let incomplete = format!("mine\n{LEGACY_BLOCK_BEGIN}\nlegacy\n");
+        std::fs::write(&path, &incomplete)?;
+        assert!(write_block(path.clone()).is_err());
+        assert_eq!(std::fs::read_to_string(&path)?, incomplete);
         Ok(())
     }
 
