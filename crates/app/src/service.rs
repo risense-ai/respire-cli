@@ -1267,14 +1267,33 @@ pub fn subtree_members(
 /// a 389MB ONNX (~2s); on Windows each fork also popped a console, stacking into "startup freeze".
 /// status does not need vectors, so this path skips one model load.
 pub fn status_light() -> Result<StatusInfo> {
-    let store = open_store()?;
+    let (root, store) = open_store_with_profile()?;
     let blobs = store.all(true)?;
     Ok(StatusInfo {
         local_total: blobs.len(),
         local_alive: blobs.iter().filter(|m| !m.deleted).count(),
         remote_configured: remote_configured(),
         max_updated_at: store.max_updated_at().ok().flatten(),
-        data_dir: data_dir().to_string_lossy().into_owned(),
+        data_dir: root.to_string_lossy().into_owned(),
+    })
+}
+
+/// Local memory snapshot identity for clients. This is not a sync cursor.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct MemoryRevision {
+    pub profile: String,
+    pub revision: String,
+}
+
+/// Capture the CLI-resolved profile once so identity and token name the same DB.
+/// This path is strictly read-only and does not unlock, initialize, or scan memory.
+pub fn memory_revision() -> Result<MemoryRevision> {
+    let root = data_dir();
+    check_runtime_profile(&root)?;
+    let revision = crate::transport::local::read_memory_revision(&root.join("onememory.db"))?;
+    Ok(MemoryRevision {
+        profile: root.to_string_lossy().into_owned(),
+        revision,
     })
 }
 
@@ -2535,15 +2554,21 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
 // ── small helpers ──
 
 pub fn open_store() -> Result<LocalStore> {
+    open_store_with_profile().map(|(_, store)| store)
+}
+
+/// Return the identity captured for this exact connection, not a later config read.
+pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
     let root = data_dir();
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
     let db = root.join("onememory.db");
-    if RUNTIME_PROFILE.get().is_some() {
+    let store = if RUNTIME_PROFILE.get().is_some() {
         LocalStore::open_existing(&db)
     } else {
         LocalStore::open(&db)
-    }
+    }?;
+    Ok((root, store))
 }
 
 pub fn home_dir() -> Result<PathBuf> {

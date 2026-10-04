@@ -726,6 +726,11 @@ $serverAddr = ''
 if ($st.Envelope.summary.server_addr) { $serverAddr = [string]$st.Envelope.summary.server_addr }
 if ($serverAddr -ne $Server) { throw "status.server_addr=$serverAddr，不是测试服。中止。" }
 Invoke-Om -Name 'status-human' -ArgList @('status') -DataDir $DirA -Raw | Out-Null
+$revisionInitial = Invoke-Om -Name 'memory-revision-json' -ArgList @('--json', 'memory-revision') -DataDir $DirA
+Assert-Smoke 'memory-revision-profile-token' ($revisionInitial.Ok -and [string]$revisionInitial.Envelope.command -ceq 'memory-revision' -and [string]$revisionInitial.Envelope.summary.profile -ceq [string]$st.Envelope.summary.data_dir -and [string]$revisionInitial.Envelope.summary.revision -cmatch '^[0-9a-f]{32}$')
+Invoke-Om -Name 'status-before-revision-repeat' -ArgList @('--json', 'status') -DataDir $DirA | Out-Null
+$revisionRepeat = Invoke-Om -Name 'memory-revision-repeat' -ArgList @('--json', 'memory-revision') -DataDir $DirA
+Assert-Smoke 'memory-revision-reads-stable' ($revisionRepeat.Ok -and [string]$revisionRepeat.Envelope.command -ceq 'memory-revision' -and [string]$revisionRepeat.Envelope.summary.profile -ceq [string]$revisionInitial.Envelope.summary.profile -and [string]$revisionRepeat.Envelope.summary.revision -ceq [string]$revisionInitial.Envelope.summary.revision)
 
 Invoke-Om -Name 'doctor-human' -ArgList @('doctor') -DataDir $DirA -Raw -ExpectExit @(0, 1, 2) -MinStdout 40 -TimeoutSec 180 -Note '退出 1 表示有检查项失败，干净 runner 上允许' | Out-Null
 $docj = Invoke-Om -Name 'doctor-json' -ArgList @('--json', 'doctor') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail', 'skip') -RequireCommand 'doctor' -Note '信封必须是 doctor 且 summary.total 存在'
@@ -772,6 +777,7 @@ Invoke-Om -Name 'inject-tui-no-tty' -ArgList @('inject', '--tui') -DataDir $DirA
 
 # Disable autosync so the later explicit sync owns the push step.
 Invoke-Om -Name 'config-autosync-off-before-write' -ArgList @('--json', 'config', '--autosync', 'false') -DataDir $DirA | Out-Null
+$revisionBeforeWrite = Invoke-Om -Name 'memory-revision-before-write' -ArgList @('--json', 'memory-revision') -DataDir $DirA
 $marker = "sweep-marker-$stamp"
 $title = "sweep标记$stamp"
 $rem = Invoke-Om -Name 'remember-force' -ArgList @(
@@ -781,6 +787,8 @@ $rem = Invoke-Om -Name 'remember-force' -ArgList @(
 $id = ''
 if ($rem.Envelope.summary.id) { $id = [string]$rem.Envelope.summary.id }
 if (-not $id) { throw 'remember 没有 summary.id，后面的提取链无法继续。' }
+$revisionAfterWrite = Invoke-Om -Name 'memory-revision-after-write-read' -ArgList @('--json', 'memory-revision') -DataDir $DirA
+Assert-Smoke 'memory-revision-after-write' ($revisionBeforeWrite.Ok -and $revisionAfterWrite.Ok -and [string]$revisionBeforeWrite.Envelope.command -ceq 'memory-revision' -and [string]$revisionAfterWrite.Envelope.command -ceq 'memory-revision' -and [string]$revisionBeforeWrite.Envelope.summary.profile -ceq [string]$revisionAfterWrite.Envelope.summary.profile -and [string]$revisionBeforeWrite.Envelope.summary.revision -cne [string]$revisionAfterWrite.Envelope.summary.revision)
 $short = $id.Substring(0, [Math]::Min(8, $id.Length))
 Invoke-Om -Name 'remember-human' -ArgList @('remember', "human path $marker", '--title', "人类$stamp", '--force', '--importance', 'trivial') -DataDir $DirA -Raw -TimeoutSec 300 | Out-Null
 $child = Invoke-Om -Name 'remember-parent' -ArgList @(
@@ -850,7 +858,8 @@ $filtered = Invoke-Om -Name 'recall-filtered-titles' -ArgList @('--json', 'recal
 Assert-Smoke 'recall-filtered-marker-title' ($filtered.Ok -and $filtered.Stdout -like "*$title*")
 Invoke-Om -Name 'list-since' -ArgList @('--json', 'list', '--since', '2000-01-01', '--limit', '100') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'list-since-resort' -ArgList @('--json', 'list', '--since-resort', '--limit', '100') -DataDir $DirA | Out-Null
-Invoke-Om -Name 'list' -ArgList @('--json', 'list', '--limit', '10') -DataDir $DirA | Out-Null
+$listSnapshot = Invoke-Om -Name 'list' -ArgList @('--json', 'list', '--limit', '10') -DataDir $DirA
+Assert-Smoke 'list-profile-contract' ($listSnapshot.Ok -and [string]$listSnapshot.Envelope.summary.profile -ceq [string]$revisionInitial.Envelope.summary.profile)
 Invoke-Om -Name 'list-human' -ArgList @('list', '--limit', '5') -DataDir $DirA -Raw | Out-Null
 Invoke-Om -Name 'show' -ArgList @('--json', 'show', $short) -DataDir $DirA | Out-Null
 Invoke-Om -Name 'show-human' -ArgList @('show', $short) -DataDir $DirA -Raw | Out-Null
