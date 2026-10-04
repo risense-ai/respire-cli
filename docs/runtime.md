@@ -45,7 +45,9 @@ requiring token injection. Loopback listeners do not create a token. The runtime
 currently rejects non-loopback bind addresses, so cross-machine runtime access
 is not supported. Non-loopback peers are never exempt from authentication.
 The server checks the actual peer address, not Host or forwarded headers.
-Existing browser Origin checks still apply.
+Every request must use the bound loopback authority or `localhost` with the
+bound port as its Host. Origin checks apply to GET and POST alike. MCP endpoints
+use the actual bound address.
 
 Keep tokens out of prompts and reports. Remote containers do not automatically
 share host loopback addresses.

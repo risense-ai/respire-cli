@@ -98,6 +98,43 @@ fn health_without_token_reports_bin() -> Result<(), String> {
     if body["pid"].as_u64().unwrap_or(0) == 0 {
         return Err(format!("pid {body}"));
     }
+    for path in ["/api/health", "/mcp", "/sse"] {
+        for (header, value, error) in [
+            ("Host", "example.invalid", "forbidden host"),
+            ("Origin", "https://example.invalid", "forbidden origin"),
+        ] {
+            match ureq::get(&format!("http://127.0.0.1:{}{path}", rt.port))
+                .set(header, value)
+                .call()
+            {
+                Err(ureq::Error::Status(403, response)) => {
+                    let denied: serde_json::Value =
+                        response.into_json().map_err(|err| err.to_string())?;
+                    if denied["error"] != error {
+                        return Err(format!("unexpected {path} {header} rejection: {denied}"));
+                    }
+                }
+                other => return Err(format!("expected 403 for {path} {header}, got {other:?}")),
+            }
+        }
+    }
+    let local = ureq::get(&url)
+        .set("Host", &format!("localhost:{}", rt.port))
+        .set("Authorization", "Bearer invalid-local-token")
+        .call()
+        .map_err(|err| err.to_string())?;
+    if local.status() != 200 {
+        return Err("loopback alias or ignored local token was rejected".into());
+    }
+    let endpoint = ureq::get(&format!("http://127.0.0.1:{}/mcp", rt.port))
+        .set("Host", &format!("localhost:{}", rt.port))
+        .call()
+        .map_err(|err| err.to_string())?
+        .into_string()
+        .map_err(|err| err.to_string())?;
+    if !endpoint.contains(&format!("http://127.0.0.1:{}/mcp", rt.port)) {
+        return Err("MCP endpoint did not use the actual bound address".into());
+    }
     let _ = rt.stderr_path.as_path();
     let _ = rt.dir.path();
     Ok(())

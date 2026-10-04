@@ -280,17 +280,16 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
     if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
         throw 'Owned runtime endpoint is not loopback HTTP.'
     }
-    $token = (Get-Content -LiteralPath (Join-Path $DataDir 'runtime/token') -Raw).Trim()
-    if (-not $token) { throw 'Owned runtime token is missing.' }
+    if (Test-Path -LiteralPath (Join-Path $DataDir 'runtime/token')) { throw 'Owned loopback runtime created a token.' }
     $origin = $uri.GetLeftPart([UriPartial]::Authority)
     try {
         if ($Method -eq 'health') {
-            return Invoke-RestMethod -Uri "$origin/api/health" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec $TimeoutSec
+            return Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec $TimeoutSec
         }
         $requestId = [Guid]::NewGuid().ToString('N')
         $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
         $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
-            -Headers @{ Authorization = "Bearer $token" } -Body $body -TimeoutSec 5
+            -Body $body -TimeoutSec 5
         if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne $ExpectVersion) {
             throw 'Owned runtime RPC response identity failed.'
         }
@@ -1410,11 +1409,7 @@ if (Test-Path $endpointFile) {
     $runtimeUri = [Uri]$url
     if ($runtimeUri.Host -notin @('127.0.0.1', 'localhost', '::1')) { throw "Runtime endpoint is not loopback: $url" }
 }
-$rpcToken = ''
 $tokenFile = Join-Path $DirA 'runtime\token'
-if (Test-Path -LiteralPath $tokenFile) {
-    $rpcToken = (Get-Content -LiteralPath $tokenFile -Raw).Trim()
-}
 $origin = $url
 if ($origin -match '^(https?://[^/?]+)') { $origin = $Matches[1] }
 $mcpUrl = ''
@@ -1422,8 +1417,7 @@ if ($origin) { $mcpUrl = ($origin.TrimEnd('/') + '/mcp') }
 $mcpSse = ''
 if ($origin) { $mcpSse = ($origin.TrimEnd('/') + '/sse') }
 $mcpHeaders = @{}
-if ($rpcToken) { $mcpHeaders['Authorization'] = "Bearer $rpcToken" }
-Assert-Smoke 'runtime-endpoint-and-token-present' ([bool]$origin -and [bool]$rpcToken)
+Assert-Smoke 'runtime-endpoint-without-token' ([bool]$origin -and -not (Test-Path -LiteralPath $tokenFile))
 function Invoke-LocalSmoke {
     param([string]$Name, [string]$Path, $Payload, [int]$ExpectedStatus = 200, [hashtable]$Headers = $mcpHeaders, [string]$Method = 'POST', [switch]$RawBody)
     $body = if ($RawBody) { [string]$Payload } else { $Payload | ConvertTo-Json -Compress -Depth 12 }
@@ -1435,8 +1429,9 @@ function Invoke-LocalSmoke {
 }
 $health = Invoke-LocalSmoke -Name 'runtime-http-health' -Path '/api/health' -Method GET
 Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -eq $ExpectVersion)
-Invoke-LocalSmoke -Name 'runtime-http-wrong-token' -Path '/api/rpc' -Payload @{ v = 1; id = 'wrong-token'; method = 'runtime.status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' } -ExpectedStatus 401 | Out-Null
-Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/rpc' -Payload @{ v = 1; id = 'foreign-origin'; method = 'runtime.status' } -Headers @{ Authorization = "Bearer $rpcToken"; Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
+$wrongToken = Invoke-LocalSmoke -Name 'runtime-http-loopback-ignores-token' -Path '/api/rpc' -Payload @{ v = 1; id = 'wrong-token'; method = 'runtime.status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' }
+if ($wrongToken.ok -ne $true -or [string]$wrongToken.id -cne 'wrong-token' -or [string]$wrongToken.bin -cne $ExpectVersion) { throw 'Loopback RPC response identity failed.' }
+Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/rpc' -Payload @{ v = 1; id = 'foreign-origin'; method = 'runtime.status' } -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-malformed-json' -Path '/api/rpc' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-missing-command' -Path '/api/rpc' -Payload @{} -ExpectedStatus 400 | Out-Null
 foreach ($removed in @(@('/', 'GET'), @('/index.html', 'GET'), @('/favicon.ico', 'GET'), @('/api/invoke', 'POST'), @('/api/task/start', 'POST'))) {
@@ -1638,7 +1633,7 @@ Assert-Smoke 'mcp-http-restore-content-persisted' ([string]$httpRestored.details
 $unknownHttp = Invoke-McpHttpRpc 'mcp-http-unknown-tool' @{ jsonrpc = '2.0'; id = 90; method = 'tools/call'; params = @{ name = 'memory_nope'; arguments = @{} } }
 Assert-Smoke 'mcp-http-unknown-tool-is-error' ($unknownHttp.result.isError -eq $true)
 Invoke-LocalSmoke -Name 'mcp-http-malformed-json' -Path '/mcp' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
-Invoke-LocalSmoke -Name 'mcp-http-foreign-origin' -Path '/mcp' -Payload @{} -Headers @{ Authorization = "Bearer $rpcToken"; Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
+Invoke-LocalSmoke -Name 'mcp-http-foreign-origin' -Path '/mcp' -Payload @{} -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 
 $m3Install = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec 1200
 Assert-Smoke 'model-m3-installed-without-activation' ($m3Install.Ok -and $m3Install.Envelope.summary.activated -eq $false -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))

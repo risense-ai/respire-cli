@@ -56,21 +56,11 @@ fn header_value(req: &tiny_http::Request, name: &str) -> String {
     String::new()
 }
 
-fn request_origin(req: &tiny_http::Request) -> String {
-    let host = header_value(req, "Host");
-    if host.is_empty() {
-        crate::net_rpc::rpc_base_url()
-    } else if host.starts_with("http://") || host.starts_with("https://") {
-        host
-    } else {
-        format!("http://{host}")
-    }
-}
-
 fn mcp_http(
     req: &mut tiny_http::Request,
     method: &tiny_http::Method,
     path: &str,
+    bound: SocketAddr,
 ) -> (u16, &'static str, Vec<u8>) {
     let method_name = match *method {
         tiny_http::Method::Get => "GET",
@@ -84,13 +74,13 @@ fn mcp_http(
     crate::mcp::http_response(crate::mcp::HttpIn {
         method: method_name.to_owned(),
         path: path.to_owned(),
-        origin: request_origin(req),
+        origin: format!("http://{bound}"),
         accept: header_value(req, "Accept"),
         body,
     })
 }
 
-fn handle_request(req: &mut tiny_http::Request) -> (u16, &'static str, Vec<u8>) {
+fn handle_request(req: &mut tiny_http::Request, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
     let url = req.url().to_owned();
     let method = req.method().to_owned();
 
@@ -103,21 +93,29 @@ fn handle_request(req: &mut tiny_http::Request) -> (u16, &'static str, Vec<u8>) 
         );
     }
 
-    let path = url.split('?').next().unwrap_or(url.as_str());
-    if method == tiny_http::Method::Post
-        && (path.starts_with("/api/") || path == "/mcp" || path == "/sse")
+    let host = header_value(req, "Host");
+    if !host.eq_ignore_ascii_case(&bound.to_string())
+        && !host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
     {
-        let origin = header_value(req, "Origin");
-        if !crate::net_rpc::origin_ok(&origin, &crate::net_rpc::rpc_base_url()) {
-            return (
-                403,
-                "application/json; charset=utf-8",
-                serde_json::json!({"error":"forbidden origin"})
-                    .to_string()
-                    .into_bytes(),
-            );
-        }
+        return (
+            403,
+            "application/json; charset=utf-8",
+            serde_json::json!({"error":"forbidden host"})
+                .to_string()
+                .into_bytes(),
+        );
     }
+    let origin = header_value(req, "Origin");
+    if !crate::net_rpc::origin_ok(&origin, &format!("http://{bound}")) {
+        return (
+            403,
+            "application/json; charset=utf-8",
+            serde_json::json!({"error":"forbidden origin"})
+                .to_string()
+                .into_bytes(),
+        );
+    }
+    let path = url.split('?').next().unwrap_or(url.as_str());
     if path == "/api/health" && method == tiny_http::Method::Get {
         return (
             200,
@@ -161,7 +159,7 @@ fn handle_request(req: &mut tiny_http::Request) -> (u16, &'static str, Vec<u8>) 
         };
     }
     if path == "/mcp" || path == "/sse" {
-        return mcp_http(req, &method, path);
+        return mcp_http(req, &method, path, bound);
     }
 
     (
@@ -210,11 +208,15 @@ pub(crate) fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<Boun
 }
 
 pub(crate) fn serve_loop(server: tiny_http::Server) -> anyhow::Result<()> {
+    let bound = server
+        .server_addr()
+        .to_ip()
+        .ok_or_else(|| anyhow::anyhow!("runtime listener has no IP address"))?;
     for request in server.incoming_requests() {
         std::thread::Builder::new()
             .name("runtime-http".into())
             .spawn(move || {
-                if let Err(error) = serve_request(request) {
+                if let Err(error) = serve_request(request, bound) {
                     eprintln!("runtime HTTP request failed: {error:#}");
                 }
             })?;
@@ -222,8 +224,8 @@ pub(crate) fn serve_loop(server: tiny_http::Server) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn serve_request(mut request: tiny_http::Request) -> anyhow::Result<()> {
-    let (status, ctype, body) = handle_request(&mut request);
+fn serve_request(mut request: tiny_http::Request, bound: SocketAddr) -> anyhow::Result<()> {
+    let (status, ctype, body) = handle_request(&mut request, bound);
     let stop = status == 200
         && request.method() == &tiny_http::Method::Post
         && request.url().split('?').next() == Some("/api/runtime/stop");

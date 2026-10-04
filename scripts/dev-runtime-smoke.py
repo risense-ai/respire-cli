@@ -139,10 +139,10 @@ class Smoke:
         while time.monotonic() < deadline:
             require(self.child.poll() is None, 'owned_runtime_exited_before_ready')
             token_path = self.root / 'runtime' / 'token'
-            if token_path.is_file():
-                self.token = token_path.read_text(encoding='utf-8').strip()
+            require(not token_path.exists(), 'loopback_runtime_created_token')
+            if (self.root / 'runtime' / 'endpoint.json').is_file():
                 try:
-                    code, health, _ = self.http(self.url, 'GET', '/api/health', token=self.token)
+                    code, health, _ = self.http(self.url, 'GET', '/api/health')
                 except Failure:
                     time.sleep(0.1)
                     continue
@@ -276,9 +276,13 @@ class Smoke:
         status = self.direct(['--runtime-internal', '--status'])['summary']
         require(status.get('state') == 'up' and status.get('pid') == self.child.pid, 'hidden_status_identity_failed')
         self.passed('hidden_runtime_status_up')
-        for token, name in ((None, 'runtime_token_required'), ('ci-invalid-token', 'runtime_wrong_token_rejected')):
+        for token, name in ((None, 'runtime_loopback_without_token'), ('ci-invalid-token', 'runtime_loopback_ignores_token')):
             code, value, _ = self.http(self.url, 'GET', '/api/health', token=token)
-            require(code == 401 and isinstance(value.get('error'), str), 'runtime_auth_not_rejected')
+            require(code == 200 and value.get('v') == 1 and value.get('bin') == self.args.version
+                    and value.get('pid') == self.child.pid
+                    and Path(value.get('exe', '')).resolve() == self.args.binary
+                    and Path(value.get('data_dir', '')).resolve() == self.library
+                    and not (self.root / 'runtime' / 'token').exists(), 'runtime_loopback_health_identity_failed')
             self.passed(name)
         code, value, _ = self.http(self.url, 'POST', '/api/rpc', {}, self.token, {'Origin': 'https://example.invalid'})
         require(code == 403 and value.get('error') == 'forbidden origin', 'runtime_foreign_origin_not_rejected')

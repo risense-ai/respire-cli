@@ -72,11 +72,7 @@ fn read_token() -> Result<Option<String>> {
     if let Some(token) = read_token_file(&token_path())? {
         return Ok(Some(token));
     }
-    read_token_file(
-        &respire::service::data_dir()
-            .join("runtime")
-            .join("token"),
-    )
+    read_token_file(&respire::service::data_dir().join("runtime").join("token"))
 }
 
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
@@ -216,8 +212,9 @@ pub fn origin_ok(origin: &str, bound_origin: &str) -> bool {
     }
     let bound = bound_origin.trim_end_matches('/');
     origin == bound
-        || origin == format!("http://{DEFAULT_RPC_HOST}:{}", rpc_port())
-        || origin == format!("http://localhost:{}", rpc_port())
+        || bound
+            .rsplit_once(':')
+            .is_some_and(|(_, port)| origin == format!("http://localhost:{port}"))
 }
 
 pub fn is_our_health(value: &Value) -> bool {
@@ -406,6 +403,12 @@ mod tests {
         }
         if !origin_ok("http://127.0.0.1:15169", "http://127.0.0.1:15169") {
             return Err("same origin should pass".into());
+        }
+        if !origin_ok("http://localhost:29123", "http://127.0.0.1:29123") {
+            return Err("localhost must use the actual bound port".into());
+        }
+        if origin_ok("http://localhost:15169", "http://127.0.0.1:29123") {
+            return Err("default-port origin must not match a different listener".into());
         }
         Ok(())
     }

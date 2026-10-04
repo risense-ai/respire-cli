@@ -260,15 +260,37 @@ class Fixture:
         env["ONEMEMORY_RPC_PORT"] = str(self.port)
         self.child = subprocess.Popen([str(self.args.binary), "--runtime-internal", "--no-open", "--port", str(self.port)],
                                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        token_path = Path(env["ONEMEMORY_DATA_DIR"]) / "runtime" / "token"
-        wait_for(lambda: token_path.is_file() if self.child.poll() is None else False, 30, "runtime_start_timeout")
-        self.runtime_token = token_path.read_text(encoding="utf-8").strip()
+        data_dir = Path(env["ONEMEMORY_DATA_DIR"])
+        token_path = data_dir / "runtime" / "token"
+        endpoint_path = data_dir / "runtime" / "endpoint.json"
+
+        def ready():
+            require(self.child.poll() is None, "owned_runtime_exited_before_ready")
+            require(not token_path.exists(), "loopback_runtime_created_token")
+            if not endpoint_path.is_file():
+                return False
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:" + str(self.port) + "/api/health", timeout=5) as response:
+                    require(response.status == 200, "runtime_health_status_failed")
+                    health = json.load(response)
+            except urllib.error.HTTPError:
+                raise RuntimeError("runtime_health_status_failed") from None
+            except (OSError, urllib.error.URLError):
+                return False
+            require(health.get("v") == 1 and health.get("bin") == self.args.version
+                    and health.get("pid") == self.child.pid
+                    and Path(health.get("exe", "")).resolve() == self.args.binary
+                    and Path(health.get("data_dir", "")).resolve() == data_dir.resolve(),
+                    "owned_runtime_identity_mismatch")
+            return True
+
+        wait_for(ready, 30, "runtime_start_timeout")
         wait_for(lambda: self.rpc(["status"]).get("ok"), 30, "runtime_ready_timeout")
 
     def rpc(self, command):
         request = urllib.request.Request("http://127.0.0.1:" + str(self.port) + "/api/rpc",
             json.dumps({"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}).encode(),
-            {"Authorization": "Bearer " + self.runtime_token, "Content-Type": "application/json"})
+            {"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
                 return json.load(response)
@@ -297,7 +319,7 @@ class Fixture:
                           proxy_response_parse_failures=self.gate.proxy_response_parse_failures)
         try:
             result["pending"] = self.pending()
-            if result["runtime_alive"] and hasattr(self, "runtime_token"):
+            if result["runtime_alive"]:
                 summary = self.rpc(["status"]).get("envelope", {}).get("summary", {})
                 scheduler = summary.get("sync_scheduler", {})
                 result["scheduler"] = {key: scheduler.get(key) for key in ("state", "next_run_ms", "manual_waiters")}
