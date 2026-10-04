@@ -21,7 +21,7 @@ MIGRATION = {"model_cpu_real", "onememory_multiaccount_wal_migrated", "respire_c
              "legacy_keys_migrated_without_super_override", "legacy_api_defaults_rewritten",
              "migration_repeated_start_idempotent", "migration_interrupted_restart_recovered",
              "existing_rsrs_preserved_and_legacy_imported", "migrated_outbox_sync_and_independent_decrypt",
-             "migration_historical_schema_preserved", "migration_symlink_root_rejected", "migration_client_only_does_not_write"}
+             "migration_incompatible_primary_keys_rejected", "migration_symlink_root_rejected", "migration_client_only_does_not_write"}
 
 
 def require(value, code):
