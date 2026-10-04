@@ -1384,7 +1384,7 @@ Assert-Smoke 'reset-vault-explicit-cloud-key-adopted' ($resetAdopt.Ok)
 $resetSync = Invoke-Om -Name 'reset-vault-sync-after-adoption' -ArgList @('--json', 'sync') -DataDir $resetDir
 $resetCloudRead = Invoke-Om -Name 'reset-vault-cloud-content-readback' -ArgList @('--json', 'show', $id) -DataDir $resetDir
 $resetList = Invoke-Om -Name 'reset-vault-library-readable' -ArgList @('--json', 'list', '--limit', '100') -DataDir $resetDir
-$resetRecall = Invoke-Om -Name 'reset-vault-recall-readable' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $resetDir
+$resetRecall = Invoke-Om -Name 'reset-vault-recall-readable' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $resetDir -TimeoutSec 180 -AllowIndexWait
 Assert-Smoke 'reset-vault-no-undecryptable-old-library' ($resetSync.Ok -and $resetCloudRead.Ok -and $resetList.Ok -and $resetRecall.Ok -and [string]$resetCloudRead.Envelope.details.entry.content -eq "merged $marker" -and ($resetList.Envelope.errors -join ' ') -notmatch 'decrypt|decode' -and ($resetRecall.Envelope.errors -join ' ') -notmatch 'decrypt|decode')
 Invoke-Om -Name 'sync-reset' -ArgList @('--json', 'sync-reset') -DataDir $DirA -TimeoutSec 180 -Note '一次性账号上的快照重建' | Out-Null
 
