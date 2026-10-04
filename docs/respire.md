@@ -4,7 +4,7 @@ Recall before responding or acting, read selected records in JSON, prefer updati
 
 | Contract | Requirement |
 | --- | --- |
-| Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
+| Sandbox | Host loopback runtime without a token; no lifecycle changes or direct execution |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
 | Complete policy | Apply the English rules here together with the existing Chinese workflow below |
 
@@ -34,7 +34,7 @@ Keep the existing `【前因】`, `【行为】` and `【后果】` body markers
 
 # respire（AI记忆体）· 记忆注入源（唯一权威源）
 
-- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的认证 HTTP runtime（默认 `127.0.0.1:15169`）；不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
+- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的环回 HTTP runtime（默认 `127.0.0.1:15169`），无需 token；非环回访问必须带 token。不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
 
 > 本文件是记忆铁律与行为约束的唯一权威源（随 Respire CLI 仓版本化），**内嵌于二进制**（`include_str!`）。改后流程：`cargo build --release -p respire` → `rsrs inject` 分发（14 目标；`--targets` 看现状，stale 即需重分发）。
 >

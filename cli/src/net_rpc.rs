@@ -1,6 +1,6 @@
 //! Loopback HTTP client for the local runtime (`127.0.0.1:15169`).
-//! Named pipes are not the product path. Token: `ONEMEMORY_RPC_TOKEN` then
-//! `<data_dir>/runtime/token`.
+//! Loopback requests do not require a token. Non-loopback HTTP access uses
+//! `ONEMEMORY_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
 
 use std::fs;
 use std::io::Write;
@@ -88,10 +88,6 @@ fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
             Err(RuntimeError::TokenUnreadable(format!("{}: {error}", path.display())).into())
         }
     }
-}
-
-fn require_token() -> Result<String> {
-    read_token()?.ok_or_else(|| RuntimeError::TokenMissing.into())
 }
 
 fn check_connection() -> Result<()> {
@@ -256,18 +252,12 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-fn auth_header(token: &str) -> String {
-    format!("Bearer {token}")
-}
-
 pub fn health() -> Result<Health> {
     check_connection()?;
-    let token = require_token()?;
     let url = format!("{}/api/health", rpc_base_url());
     let resp = agent()
         .get(&url)
         .timeout(Duration::from_secs(2))
-        .set("Authorization", &auth_header(&token))
         .call()
         .map_err(crate::runtime_error::http)?;
     let parsed: Value = resp.into_json().context("runtime health is not JSON")?;
@@ -279,11 +269,9 @@ pub fn health() -> Result<Health> {
 
 pub fn request_stop() -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
-    let token = require_token()?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
     agent()
         .post(&url)
-        .set("Authorization", &auth_header(&token))
         .send_string("{}")
         .map_err(crate::runtime_error::http)?;
     Ok(())
@@ -295,7 +283,6 @@ pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
 
 pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     check_connection()?;
-    let token = require_token()?;
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
         "v": crate::rpc::PROTOCOL_V,
@@ -327,7 +314,6 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     let resp = agent()
         .post(&url)
         .timeout(timeout)
-        .set("Authorization", &auth_header(&token))
         .send_json(body)
         .map_err(crate::runtime_error::http)?;
     let parsed: Value = resp.into_json().context("runtime rpc is not JSON")?;

@@ -4,7 +4,7 @@ Read memories only. Do not store, update, delete, merge, import or modify the tr
 
 | Contract | Requirement |
 | --- | --- |
-| Sandbox | Use `rsrs --client-only <command>` to connect to the authenticated host HTTP runtime at `127.0.0.1:15169` by default; do not use `--direct` or change the runtime lifecycle. |
+| Sandbox | Use `rsrs --client-only <command>` to connect to the host loopback HTTP runtime at `127.0.0.1:15169` without a token; do not use `--direct` or change the runtime lifecycle. |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
 | Complete policy | Original Chinese rules below remain authoritative; this overview does not change them |
 

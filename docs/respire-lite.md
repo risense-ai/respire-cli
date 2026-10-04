@@ -4,7 +4,7 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 
 | Contract | Requirement |
 | --- | --- |
-| Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
+| Sandbox | Host loopback runtime without a token; no lifecycle changes or direct execution |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
 | Complete policy | Apply the English rules here together with the existing Chinese workflow below |
 | Credential references | Inspect content before writing or sharing; omit plaintext passwords, API tokens and private keys, and store only a safe purpose/location reference. Keep secrets out of recall queries. This is an agent rule, not an automatic CLI scanner. |
@@ -15,7 +15,7 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 
 # rsrs 记忆工作流
 
-- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的认证 HTTP runtime（默认 `127.0.0.1:15169`）；不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
+- 沙盒内使用 `rsrs --client-only <命令>`，仅连接宿主的环回 HTTP runtime（默认 `127.0.0.1:15169`），无需 token；非环回访问必须带 token。不得启动、停止、复制或升级服务，不用 `--direct`。连接或鉴权失败应报告，由宿主处理。
 
 先查后做，所得归档，遇障先翻忆。详细规则由 `rsrs prompt` 提供；本回合首次存储、修改或整理前必须读取全文，不能凭本摘要省略规则。
 

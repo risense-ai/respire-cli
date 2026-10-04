@@ -1,4 +1,4 @@
-//! Authenticated local HTTP RPC/MCP transport without a browser UI or static assets.
+//! Local HTTP RPC/MCP transport: loopback peers do not require a token.
 use serde_json::json;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
@@ -8,8 +8,14 @@ fn set_access_token(t: Option<String>) {
     let _ = ACCESS_TOKEN.set(t);
 }
 
-/// Runtime clients authenticate with a header; query tokens are not accepted.
+/// Loopback peers need no token. Other peers must authenticate with a header.
 fn token_ok(req: &tiny_http::Request) -> bool {
+    if req
+        .remote_addr()
+        .is_some_and(|addr| addr.ip().is_loopback())
+    {
+        return true;
+    }
     let Some(Some(expected)) = ACCESS_TOKEN.get() else {
         return false;
     };
@@ -88,7 +94,7 @@ fn handle_request(req: &mut tiny_http::Request) -> (u16, &'static str, Vec<u8>) 
     let url = req.url().to_owned();
     let method = req.method().to_owned();
 
-    // Every runtime request requires the host-owned authentication token.
+    // Only actual loopback peers are exempt; Host and forwarded headers are ignored.
     if !token_ok(req) {
         return (
             401,
@@ -196,8 +202,7 @@ pub(crate) fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<Boun
         );
         SocketAddr::new(ip, actual)
     };
-    let access_token = crate::net_rpc::load_or_create_token()?;
-    set_access_token(Some(access_token));
+    set_access_token(None);
     let server = tiny_http::Server::http(address)
         .map_err(|error| anyhow::anyhow!("failed to bind local runtime at {address}: {error}"))?;
     let url = format!("http://{address}");

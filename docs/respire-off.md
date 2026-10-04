@@ -4,7 +4,7 @@ Memory is disabled. Do not call memory commands, claim remembered facts or retry
 
 | Contract | Requirement |
 | --- | --- |
-| Sandbox | Authenticated host runtime only; no lifecycle changes or direct execution |
+| Sandbox | Host loopback runtime without a token; no lifecycle changes or direct execution |
 | Compatibility | Preserve Chinese body markers, taxonomy names and injection markers |
 | Complete policy | Original Chinese rules below remain authoritative; this overview does not change them |
 

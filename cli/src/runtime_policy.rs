@@ -30,7 +30,7 @@ pub fn client_only() -> bool {
 
 pub fn require_host(action: &str) -> Result<()> {
     if client_only() {
-        bail!("client_only: {action} is host-managed; connect to the authenticated HTTP runtime. Start or update rsrs from the host terminal, outside the sandbox");
+        bail!("client_only: {action} is host-managed; connect to the host loopback HTTP runtime. Start or update rsrs from the host terminal, outside the sandbox");
     }
     Ok(())
 }

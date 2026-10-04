@@ -2,7 +2,7 @@
 
 ```mermaid
 flowchart LR
-  Host[Host terminal] -->|owns lifecycle| Runtime[Authenticated HTTP runtime]
+  Host[Host terminal] -->|owns lifecycle| Runtime[Loopback HTTP runtime]
   Sandbox[Sandbox CLI / TUI / MCP] -->|client-only| Runtime
   Runtime --> Worker[Shared inference worker]
 ```
@@ -10,7 +10,7 @@ flowchart LR
 | Context | Behavior |
 | --- | --- |
 | Host | Starts, stops, updates and recovers the runtime |
-| Sandbox | Connects to the authenticated runtime only |
+| Sandbox | Connects to the host loopback runtime without a token |
 | Restricted Windows token | Automatically selects client-only mode |
 | Other sandboxes | Integration explicitly selects client-only mode |
 
@@ -36,21 +36,24 @@ stopped runtime and does not perform an automatic takeover.
 
 | Setting | Purpose |
 | --- | --- |
-| `ONEMEMORY_CLIENT_ONLY=1` | Authenticated client mode |
+| `ONEMEMORY_CLIENT_ONLY=1` | Host runtime client mode |
 | `ONEMEMORY_NO_AUTOSTART=1` | Compatibility synonym |
 | `ONEMEMORY_RPC_PORT` | Override the default port `15169` |
-| `ONEMEMORY_RPC_TOKEN` | Authentication token |
-| Host `runtime/token` | Alternative token source with read access |
 
-Keep tokens out of prompts and reports. Remote containers do not automatically share
-host loopback addresses.
+CLI / TUI / MCP stdio connect to `127.0.0.1` without reading a token file or
+requiring token injection. Loopback listeners do not create a token. The runtime
+currently rejects non-loopback bind addresses, so cross-machine runtime access
+is not supported. Non-loopback peers are never exempt from authentication.
+The server checks the actual peer address, not Host or forwarded headers.
+Existing browser Origin checks still apply.
+
+Keep tokens out of prompts and reports. Remote containers do not automatically
+share host loopback addresses.
 
 | Error | Meaning | Action |
 | --- | --- | --- |
 | `runtime_unavailable` | Runtime unavailable | Host starts the service |
-| `runtime_token_missing` | No token | Integration supplies token/read access |
-| `runtime_token_unreadable` | Cannot read token | Host repairs access |
-| `runtime_unauthorized` | Authentication rejected | Host repairs authentication |
+| `runtime_unauthorized` | Authentication rejected | Non-loopback client supplies a valid token; a loopback client requires an updated host runtime |
 | `runtime_transport` | Connection failed | Host checks endpoint/network |
 
 ## Server deployment

@@ -1,6 +1,6 @@
 # Respire CLI
 
-Local-first memory for AI tools, with encrypted storage, synchronization, a terminal interface and an authenticated HTTP/MCP runtime. The command is `rsrs`.
+Local-first memory for AI tools, with encrypted storage, synchronization, a terminal interface and an HTTP/MCP runtime. Loopback access needs no token; non-loopback access requires authentication. The command is `rsrs`.
 
 ```mermaid
 flowchart LR
