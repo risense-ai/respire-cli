@@ -245,6 +245,7 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: respire-dev-mailbox-fixture
+      queue: max
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@v5
