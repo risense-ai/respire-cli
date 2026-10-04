@@ -215,6 +215,10 @@ pub fn origin_ok(origin: &str, bound_origin: &str) -> bool {
         || bound
             .rsplit_once(':')
             .is_some_and(|(_, port)| origin == format!("http://localhost:{port}"))
+        || (bound.starts_with("http://")
+            && bound
+                .strip_suffix(":80")
+                .is_some_and(|canonical| origin == canonical || origin == "http://localhost"))
 }
 
 pub fn is_our_health(value: &Value) -> bool {
@@ -409,6 +413,17 @@ mod tests {
         }
         if origin_ok("http://localhost:15169", "http://127.0.0.1:29123") {
             return Err("default-port origin must not match a different listener".into());
+        }
+        if !origin_ok("http://127.0.0.1", "http://127.0.0.1:80")
+            || !origin_ok("http://localhost", "http://127.0.0.1:80")
+            || !origin_ok("http://[::1]", "http://[::1]:80")
+        {
+            return Err("HTTP default-port origins must use their canonical form".into());
+        }
+        if origin_ok("http://localhost", "http://127.0.0.1:29123")
+            || origin_ok("http://evil.example", "http://127.0.0.1:80")
+        {
+            return Err("canonical origins must not exempt other ports or hosts".into());
         }
         Ok(())
     }

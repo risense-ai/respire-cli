@@ -94,8 +94,15 @@ fn handle_request(req: &mut tiny_http::Request, bound: SocketAddr) -> (u16, &'st
     }
 
     let host = header_value(req, "Host");
-    if !host.eq_ignore_ascii_case(&bound.to_string())
+    let authority = bound.to_string();
+    let default_port_host = bound.port() == 80
+        && (host.eq_ignore_ascii_case("localhost")
+            || authority
+                .strip_suffix(":80")
+                .is_some_and(|canonical| host.eq_ignore_ascii_case(canonical)));
+    if !host.eq_ignore_ascii_case(&authority)
         && !host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
+        && !default_port_host
     {
         return (
             403,
