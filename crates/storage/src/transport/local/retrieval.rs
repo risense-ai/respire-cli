@@ -67,7 +67,7 @@ impl LocalStore {
         let started = std::time::Instant::now();
         self.rebuild_index_with_progress(keys, embedder, model, |done, total| {
             anyhow::ensure!(
-                done == total || started.elapsed() < std::time::Duration::from_secs(15),
+                started.elapsed() < std::time::Duration::from_secs(15),
                 "local index rebuild exceeded the foreground budget ({done}/{total} checked); run `rsrs reembed` to resume with progress; saved memories and keys are unchanged"
             );
             Ok(())
@@ -82,12 +82,16 @@ impl LocalStore {
         mut progress: impl FnMut(usize, usize) -> Result<()>,
     ) -> Result<usize> {
         anyhow::ensure!(matches!(model, "legacy" | "m3"), "unknown index model");
+        progress(0, 0)?;
         if self.meta_get("retrieval_model")?.as_deref() == Some(model)
             && !self.index_pending(model)?
         {
+            progress(0, 0)?;
             return Ok(0);
         }
+        progress(0, 0)?;
         let candidates = self.all(false)?;
+        progress(0, candidates.len())?;
         let mut completed = 0;
         for (index, stored) in candidates.iter().enumerate() {
             progress(index, candidates.len())?;
