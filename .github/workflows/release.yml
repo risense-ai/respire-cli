@@ -291,6 +291,14 @@ jobs:
           repository: risense-ai/respire-server
           ref: ${{ vars.RESPIRE_DEV_CONSOLE_SHA }}
           persist-credentials: false
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          path: cli-smoke-tools
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Require successful frontend source CI
         env:
           GH_TOKEN: ${{ github.token }}
@@ -308,6 +316,11 @@ jobs:
       - name: Verify real development website and account consoles
         working-directory: admin-ui
         env:
+          RESPIRE_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
+          RESPIRE_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
+          RESPIRE_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
+          RESPIRE_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
+          RESPIRE_DEV_MAIL_READER: '["python3", "${{ github.workspace }}/cli-smoke-tools/scripts/read-dev-mail.py"]'
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
           RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
