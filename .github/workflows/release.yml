@@ -58,6 +58,7 @@ jobs:
             if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
             cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
           }else{
+            if(process.env.RELEASE_PUBLISH==='true') cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
             channel='dev';
             version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
           }
@@ -287,6 +288,7 @@ jobs:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -333,6 +335,13 @@ jobs:
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci
           node npm/scripts/verify-packages.mjs release-assets
+      - name: Generate release descriptions and the complete commit list
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TAG: ${{ needs.plan.outputs.tag }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/release-notes.mjs "$RUNNER_TEMP/release-notes.md"
       - name: Create a draft and upload every verified artifact
         env:
           GH_TOKEN: ${{ github.token }}
@@ -343,10 +352,11 @@ jobs:
           set -euo pipefail
           if gh release view "$CLI_TAG" --json isDraft >/dev/null 2>&1; then
             test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = true || { echo 'Release is already public; use a new version'; exit 1; }
+            gh release edit "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           elif [ "$CLI_CHANNEL" = dev ]; then
-            gh release create "$CLI_TAG" --draft --prerelease --target "$CLI_SHA" --title "$CLI_TAG" --notes "Validated CLI source: $CLI_SHA"
+            gh release create "$CLI_TAG" --draft --prerelease --target "$CLI_SHA" --title "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
-            gh release create "$CLI_TAG" --draft --target "$CLI_SHA" --title "$CLI_TAG" --notes "Validated CLI source: $CLI_SHA"
+            gh release create "$CLI_TAG" --draft --target "$CLI_SHA" --title "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
           gh release upload "$CLI_TAG" release-assets/* --clobber
           gh release view "$CLI_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"

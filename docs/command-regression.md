@@ -46,6 +46,17 @@ CLI releases do not fetch or build Web UI source and do not depend on frontend
 revision pins or browser smoke tests. Homepage, Dashboard and Admin build and
 browser acceptance belong to `risense-ai/respire-site`. The CLI's cloud API
 checks and mailbox helper remain part of API acceptance.
+Development bases must exceed the current stable version: `1.0.8` ->
+`1.0.9-dev.1` -> `1.0.9` -> `1.0.10-dev.1`.
+Release notes include features, fixes, other changes, every commit, installation
+instructions, source identity and a comparison link. Stable releases summarize
+changes since the previous published stable release; development releases use the
+previous published release. Drafts do not establish a comparison baseline.
+Use `feat:` and `fix:` commit subjects with clear English descriptions for reliable
+classification; unclassified changes retain their original descriptions. Missing
+baseline history fails publication rather than silently omitting changes.
+Publishing a development ref requires its source to be in `main` history;
+unmerged candidate refs remain available for validation with publication disabled.
 Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.

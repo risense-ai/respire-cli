@@ -123,4 +123,5 @@ jobs:
         with:
           node-version: 22
       - run: node --check npm/scripts/pack.mjs
+      - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
