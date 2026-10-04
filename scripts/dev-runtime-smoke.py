@@ -353,8 +353,26 @@ class Smoke:
         # Keep doctor strict: a fresh supported agent must be actually injected.
         result = subprocess.run([str(self.args.binary), '--direct', '--json', 'doctor'], env=self.env,
                                 cwd=self.root, capture_output=True, text=True, timeout=180)
+        self.report['doctor'] = {'exit': result.returncode, 'items': []}
+        try:
+            diagnostic = json.loads(result.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            diagnostic = None
+        if isinstance(diagnostic, dict) and isinstance(diagnostic.get('items'), list):
+            names = {'store', 'data dir', 'mcp bin', 'mcp http', 'session', 'embedder',
+                     'reranker', 'lock', 'remote', 'inject', 'memory status',
+                     'tidy counter', 'CLI version'}
+            statuses = {'ok', 'warn', 'fail', 'skip', 'pending'}
+            self.report['doctor']['items'] = [
+                {'name': item['name'], 'status': item['status']}
+                for item in diagnostic['items']
+                if isinstance(item, dict) and isinstance(item.get('name'), str)
+                and item['name'] in names and isinstance(item.get('status'), str)
+                and item['status'] in statuses
+            ]
         require(result.returncode in (0, 2), 'rerank_doctor_execution_failed')
-        diagnostic = json.loads(result.stdout.strip().splitlines()[-1])
+        require(isinstance(diagnostic, dict) and isinstance(diagnostic.get('items'), list),
+                'doctor_envelope_invalid')
         require(any(item.get('name') == 'inject' and item.get('status') == 'ok'
                     for item in diagnostic.get('items', [])), 'owned_agent_doctor_not_fresh')
         require(any(item.get('name') == 'reranker' and item.get('status') == 'ok'
