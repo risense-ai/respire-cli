@@ -1,0 +1,184 @@
+name: Release validation
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        required: true
+        type: string
+      version:
+        default: ''
+        type: string
+    outputs:
+      sha:
+        value: ${{ jobs.resolve.outputs.sha }}
+      version:
+        value: ${{ jobs.resolve.outputs.version }}
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: CLI commit, branch or tag to validate without publishing
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      version: ${{ steps.source.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+          fetch-depth: 0
+      - id: source
+        env:
+          BUILD_VERSION: ${{ inputs.version }}
+          BUILD_REF: ${{ inputs.ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          # Manual branch candidates need a fresh dev identity; a stale checked-in
+          # prerelease would correctly fail the live registry version diagnostic.
+          if [ -z "$BUILD_VERSION" ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [[ ! "$BUILD_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            BUILD_VERSION="$(node npm/scripts/next-dev-version.mjs)"
+          fi
+          if [ -n "$BUILD_VERSION" ]; then node npm/scripts/set-build-version.mjs "$BUILD_VERSION"; fi
+          node -e 'const fs=require("fs"); const m=require("./npm/artifact-manifest.json"); fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${m.cliVersion}\n`)'
+
+  binaries:
+    needs: resolve
+    name: Release (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
+      - name: Validate release manifests
+        run: |
+          node npm/scripts/check-manifest.mjs
+          node scripts/check-sdk-release.mjs
+      - name: Prepare pinned binary Core SDK
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}
+      - name: Build release binary
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+      - name: Build and verify static musl binary
+        if: contains(matrix.target, '-musl')
+        run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
+      - name: Stage Core runtime and notices
+        if: ${{ !contains(matrix.target, '-musl') }}
+        run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
+      - name: Install and probe BGE CPU inference
+        shell: bash
+        env:
+          ONEMEMORY_ENGINE: cpu
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/release-probe
+          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/release-probe/models/bge-base-zh-v1.5
+          ONEMEMORY_NO_AUTOSYNC: '1'
+          ONEMEMORY_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --version
+          "$exe" --direct model install-bge --json
+          "$exe" --direct model probe --json
+      - name: Install and probe BGE-M3 CPU inference
+        if: matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
+        shell: bash
+        timeout-minutes: 15
+        env:
+          ONEMEMORY_ENGINE: cpu
+          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/release-m3-probe
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/release-m3-probe/models/bge-m3
+          ONEMEMORY_NO_AUTOSYNC: '1'
+          ONEMEMORY_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --direct model install-m3 --json
+          "$exe" --direct model probe --model m3 --json
+      - name: Prepare versioned binary and runtime artifacts
+        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  npm-dry-run:
+    needs: [resolve, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare ephemeral build version
+        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Assemble all seven native packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          node npm/scripts/verify-packages.mjs release-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-validation
+          path: npm/dist/**/*.pack.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-release-packages
+          path: npm/release-packages/*
+          if-no-files-found: error

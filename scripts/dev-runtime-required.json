@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "required_cases": [
+    "artifact_identity_verified",
+    "dashboard_url_without_runtime",
+    "dashboard_browser_launch_verified",
+    "dashboard_legacy_flags_rejected",
+    "hidden_runtime_health_identity",
+    "hidden_runtime_status_up",
+    "runtime_token_required",
+    "runtime_wrong_token_rejected",
+    "runtime_origin_rejected",
+    "runtime_rpc_version_rejected",
+    "runtime_rpc_config_verified",
+    "runtime_rpc_status_unlocked",
+    "runtime_mcp_initialized",
+    "runtime_mcp_tools_list",
+    "removed_ui_routes_not_served",
+    "diary_mode_persisted",
+    "workspace_three_states_persisted",
+    "data_dir_persisted",
+    "rerank_status_real",
+    "classify_config_persisted",
+    "ds_key_saved_without_network",
+    "resume_session_real",
+    "hidden_runtime_stop_clean",
+    "runtime_nonloopback_rejected",
+    "client_only_no_profile_writes"
+  ]
+}
