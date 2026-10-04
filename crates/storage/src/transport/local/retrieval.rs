@@ -64,7 +64,14 @@ impl LocalStore {
         embedder: &E,
         model: &str,
     ) -> Result<usize> {
-        self.rebuild_index_with_progress(keys, embedder, model, |_, _| Ok(()))
+        let started = std::time::Instant::now();
+        self.rebuild_index_with_progress(keys, embedder, model, |done, total| {
+            anyhow::ensure!(
+                done == total || started.elapsed() < std::time::Duration::from_secs(15),
+                "local index rebuild exceeded the foreground budget ({done}/{total} checked); run `rsrs reembed` to resume with progress; saved memories and keys are unchanged"
+            );
+            Ok(())
+        })
     }
 
     pub fn rebuild_index_with_progress<E: crate::memory::search::Embedder>(

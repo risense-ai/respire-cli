@@ -5449,6 +5449,15 @@ fn run_classify_config(
     ))
 }
 
+fn changes_profile(command: Option<&Command>) -> bool {
+    match command {
+        Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
+        Some(Command::Space { action, .. }) => action == "use",
+        Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
+        _ => false,
+    }
+}
+
 fn run(args: Cli) -> Result<()> {
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
@@ -5513,6 +5522,10 @@ fn run(args: Cli) -> Result<()> {
             anyhow::bail!("mcp uses the resident runtime; do not pass --direct");
         }
         return mcp::serve();
+    }
+    if !DIRECT_MODE.load(Ordering::Relaxed) && changes_profile(args.command.as_ref()) {
+        runtime_policy::require_host("profile switching")?;
+        return rpc::change_profile(|| run_local(args));
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
         runtime_policy::require_host("direct local execution")?;
@@ -7886,10 +7899,16 @@ fn run_local(args: Cli) -> Result<()> {
             ))?;
         }
         Command::Reembed => {
+            let _operation = respire::model_progress::Operation::begin("load")?;
             let session = build_session()?;
             let store = build_local()?;
             let model = store.retrieval_model()?;
-            let n = store.rebuild_index(&session, embedder!(), &model)?;
+            let n = store.rebuild_index_with_progress(
+                &session, embedder!(), &model,
+                |done, total| respire::model_progress::update(
+                    "index", &model, done as u64, Some(total as u64),
+                ),
+            )?;
             let dims = embedder!().dims();
             emit_result(ResultEnvelope::new(
                 "reembed",
