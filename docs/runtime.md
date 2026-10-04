@@ -28,6 +28,12 @@ Client-only mode forbids lifecycle changes, binary copies, upgrades, CPU recover
 `--direct` execution. MCP stdio does not copy the executable. A failed request never
 triggers sandbox takeover. An idle runtime stays running until the host stops it.
 
+Host `account <name>`, `account use <name>`, `space use <name>` and
+`config --data-dir <path>` coordinate shutdown, profile selection and restart.
+An invalid target keeps the original profile and restarts its service.
+Client-only tools cannot switch the host profile. `--direct` still requires a
+stopped runtime and does not perform an automatic takeover.
+
 | Setting | Purpose |
 | --- | --- |
 | `ONEMEMORY_CLIENT_ONLY=1` | Authenticated client mode |

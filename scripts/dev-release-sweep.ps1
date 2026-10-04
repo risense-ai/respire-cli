@@ -804,7 +804,13 @@ Assert-Smoke 'diary-filter-contains-marker' ($diaryFiltered.Ok -and $diaryFilter
 Invoke-Om -Name 'history' -ArgList @('--json', 'history', $short, '--limit', '10') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'query-log' -ArgList @('--json', 'query-log', '--limit', '10') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'query-log-stats' -ArgList @('--json', 'query-log', '--stats') -DataDir $DirA | Out-Null
-Invoke-Om -Name 'query-log-mark' -ArgList @('--json', 'query-log', 'mark', $short, '--good') -DataDir $DirA -ExpectExit @(0, 1) -Note '无近窗候选时允许失败' | Out-Null
+$markRecall = Invoke-Om -Name 'query-log-mark-candidates' -ArgList @('--json', 'recall', $marker, '--titles', '--limit', '3') -DataDir $DirA -TimeoutSec 180
+$markCandidates = @($markRecall.Envelope.details)
+if (-not $markRecall.Ok -or $markCandidates.Count -eq 0) { throw 'No fresh candidates for query-log prefix verification' }
+$markId = [string]$markCandidates[0].id
+if ($markId.Length -lt 8) { throw 'Recall did not return a usable candidate UUID' }
+$marked = Invoke-Om -Name 'query-log-mark' -ArgList @('--json', 'query-log', 'mark', $markId.Substring(0, 8), '--good') -DataDir $DirA
+if (-not $marked.Ok -or [int]$marked.Envelope.summary.marked -ne 1) { throw 'Fresh 8-character candidate prefix was not marked' }
 Invoke-Om -Name 'audit' -ArgList @('--json', 'audit') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'resort-status' -ArgList @('--json', 'resort', '--status') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'resort-threshold' -ArgList @('--json', 'resort', '--threshold', '50') -DataDir $DirA | Out-Null
