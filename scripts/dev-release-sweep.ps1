@@ -119,6 +119,7 @@ $script:CloudAccounts = New-Object System.Collections.Generic.List[object]
 $script:CloudCleanup = @{ passed = $false; events = @(); remaining_users = @() }
 $script:CloudCleanupCompleted = $false
 $script:CloudCleanupRunning = $false
+$script:ModelProgressEvidence = $null
 trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
@@ -140,6 +141,7 @@ function Write-SweepReport {
         expected_version = $ExpectVersion; observed_version = $script:ObservedVersion
         observed_version_display = $script:ObservedVersionDisplay
         cloud_cleanup = $script:CloudCleanup
+        model_progress = $script:ModelProgressEvidence
         binary_sha256 = $script:BinarySha256; catalog = $script:Catalog
         cases = $observed; passed = @($Rows | Where-Object { $_.Ok -and $_.Status -notin @('skip', 'fail') }).Count
         expected_errors = @($Rows | Where-Object { $_.Ok -and $_.Status -eq 'fail' }).Count
@@ -269,6 +271,56 @@ function Get-Leak([string]$Text, [bool]$Secret) {
     return $hits
 }
 
+# Only the endpoint and token beneath the current disposable device are used.
+function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Arguments = @()) {
+    $endpoint = Get-Content -LiteralPath (Join-Path $DataDir 'runtime/endpoint.json') -Raw | ConvertFrom-Json
+    $uri = [Uri][string]$endpoint.url
+    if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
+        throw 'Owned runtime endpoint is not loopback HTTP.'
+    }
+    $token = (Get-Content -LiteralPath (Join-Path $DataDir 'runtime/token') -Raw).Trim()
+    if (-not $token) { throw 'Owned runtime token is missing.' }
+    $origin = $uri.GetLeftPart([UriPartial]::Authority)
+    try {
+        if ($Method -eq 'health') {
+            return Invoke-RestMethod -Uri "$origin/api/health" -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 5
+        }
+        $requestId = [Guid]::NewGuid().ToString('N')
+        $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
+        $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } -Body $body -TimeoutSec 5
+        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne $ExpectVersion) {
+            throw 'Owned runtime RPC response identity failed.'
+        }
+        return $response.envelope.summary
+    } catch { throw 'Owned runtime request failed.' }
+}
+
+function Get-OwnedRuntimeHealth([string]$DataDir) {
+    $health = Invoke-OwnedRuntimeRpc $DataDir 'health'
+    $profile = [IO.Path]::GetFullPath([string]$health.data_dir)
+    $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    $nativeName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+    $ownedExecutable = [IO.Path]::GetFullPath((Join-Path $DataDir "bin/$nativeName"))
+    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $ExpectVersion -or [int]$health.pid -le 0 `
+        -or ($profile -ne $device -and -not $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar)) `
+        -or [IO.Path]::GetFullPath([string]$health.exe) -ne $ownedExecutable `
+        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:BinarySha256) {
+        throw 'Owned runtime health identity failed.'
+    }
+    return $health
+}
+
+function Test-RuntimeChanged($Before, $After, [string]$Profile) {
+    # Shutdown and process reaping are asynchronous; bound the observation only.
+    for ($i = 0; $i -lt 20 -and (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue); $i++) {
+        Start-Sleep -Milliseconds 50
+    }
+    return [int]$Before.pid -ne [int]$After.pid `
+        -and -not (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue) `
+        -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile)
+}
+
 function Invoke-Om {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -279,6 +331,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [string]$ModelTaskId = '',
         [int]$TimeoutSec = 180,
         [string]$StdinText = '',
         [string]$Note = '',
@@ -300,6 +353,7 @@ function Invoke-Om {
         Stop-OurRuntimes
         if ($ArgList -notcontains '--direct') { $ArgList = @('--direct') + $ArgList }
     }
+    if ($ModelTaskId) { $ArgList = @('--model-task-id', $ModelTaskId) + $ArgList }
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     $script:Step++
     $safe = ($Name -replace '[^\w\-]+', '_')
@@ -344,7 +398,18 @@ function Invoke-Om {
     $outTask = $proc.StandardOutput.ReadToEndAsync()
     $errTask = $proc.StandardError.ReadToEndAsync()
     $timedOut = $false
-    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+    $progressSamples = New-Object System.Collections.Generic.List[object]
+    $finished = $false
+    if ($ModelTaskId) {
+        $waitStarted = [Diagnostics.Stopwatch]::StartNew()
+        while (-not ($finished = $proc.WaitForExit(25)) -and $waitStarted.Elapsed.TotalSeconds -lt $TimeoutSec) {
+            $progress = Invoke-OwnedRuntimeRpc $DataDir 'model.control' @($ModelTaskId, 'false')
+            if ($progress.active -eq $true) {
+                $progressSamples.Add($progress) | Out-Null
+            } elseif ($progress.active -ne $false) { throw 'Model progress active flag is missing.' }
+        }
+    } else { $finished = $proc.WaitForExit($TimeoutSec * 1000) }
+    if (-not $finished) {
         $timedOut = $true
         try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
         Stop-OurRuntimes
@@ -356,6 +421,16 @@ function Invoke-Om {
     if ($errTask.Wait(10000)) { try { $stderr = $errTask.Result } catch { $stderr = '' } }
     $exit = if ($timedOut) { 124 } else { $proc.ExitCode }
     $blob = $stdout + "`n" + $stderr
+    if ($ModelTaskId) {
+        $finalProgress = Invoke-OwnedRuntimeRpc $DataDir 'model.control' @($ModelTaskId, 'false')
+        $script:ModelProgressEvidence = @{
+            observed = $progressSamples.Count -gt 0; samples = @($progressSamples | ForEach-Object {
+                @{ phase = $_.phase; done = $_.done; total = $_.total; elapsed = $_.elapsed; idle = $_.idle }
+            })
+            completed_inactive = $finalProgress.active -eq $false
+            limitation = 'A completed operation clears progress; a fast operation may finish before a poll observes it. The 15-second foreground budget branch is not exercised by this fixture.'
+        }
+    }
     if ($Secret) {
         [System.IO.File]::WriteAllText((Join-Path $Secrets "$script:Step-$safe.txt"), $blob, [Text.UTF8Encoding]::new($false))
         $stdoutForScan = $stdout
@@ -427,7 +502,7 @@ function Invoke-Om {
         if ($detail.Length -gt 240) { $detail = $detail.Substring($detail.Length - 240) }
         if ($detail) { Write-Host "DETAIL $detail" }
     }
-    return [pscustomobject]@{ Ok = $ok; Exit = $exit; Envelope = $envlp; Stdout = $(if ($Secret) { '' } else { $stdout }); Row = $row }
+    return [pscustomobject]@{ Ok = $ok; Exit = $exit; Envelope = $envlp; Stdout = $(if ($Secret) { '' } else { $stdout }); Row = $row; Progress = @($progressSamples.ToArray()) }
 }
 
 function Assert-Count([string]$Name, $Envelope, [string]$Field, [int]$Min) {
@@ -851,7 +926,21 @@ Invoke-Om -Name 'tree-deepen' -ArgList @('--json', 'tree-deepen', '--root', $sho
 Invoke-Om -Name 'classify-plan' -ArgList @('--json', 'classify', '--plan', '--limit', '5') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'classify-dry-run' -ArgList @('--json', 'classify', '--dry-run', '--limit', '1') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'repack' -ArgList @('--json', 'repack') -DataDir $DirA -TimeoutSec 300 | Out-Null
-Invoke-Om -Name 'reembed' -ArgList @('--json', 'reembed') -DataDir $DirA -TimeoutSec 300 | Out-Null
+$beforeReembed = Invoke-Om -Name 'reembed-before-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
+$entryBeforeReembed = $beforeReembed.Envelope.details.entry | ConvertTo-Json -Depth 20 -Compress
+$reembedTask = [Guid]::NewGuid().ToString('N')
+$reembed = Invoke-Om -Name 'reembed' -ArgList @('--json', 'reembed') -DataDir $DirA -TimeoutSec 300 -ModelTaskId $reembedTask
+$invalidProgress = @($reembed.Progress | Where-Object {
+    [string]$_.id -cne $reembedTask -or $_.phase -notin @('load', 'index') -or $_.cancelled -ne $false `
+        -or $_.done -isnot [long] -and $_.done -isnot [int] -or $_.done -lt 0 `
+        -or ($null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done))
+})
+Assert-Smoke 'reembed-progress-contract' ($reembed.Ok -and $invalidProgress.Count -eq 0 -and $script:ModelProgressEvidence.completed_inactive)
+Assert-Smoke 'reembed-count-dimensions' (($reembed.Envelope.summary.reembedded -is [long] -or $reembed.Envelope.summary.reembedded -is [int]) -and [long]$reembed.Envelope.summary.reembedded -ge 0 -and [int]$reembed.Envelope.summary.dims -eq 768)
+$afterReembed = Invoke-Om -Name 'reembed-after-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
+Assert-Smoke 'reembed-entry-preserved' ($beforeReembed.Ok -and $afterReembed.Ok -and [string]$afterReembed.Envelope.details.entry.id -ceq $id -and ($afterReembed.Envelope.details.entry | ConvertTo-Json -Depth 20 -Compress) -ceq $entryBeforeReembed)
+$cachedReembed = Invoke-Om -Name 'reembed-cached' -ArgList @('--json', 'reembed') -DataDir $DirA -TimeoutSec 300
+Assert-Smoke 'reembed-cached-zero' ($cachedReembed.Ok -and ($cachedReembed.Envelope.summary.reembedded -is [long] -or $cachedReembed.Envelope.summary.reembedded -is [int]) -and [long]$cachedReembed.Envelope.summary.reembedded -eq 0 -and [int]$cachedReembed.Envelope.summary.dims -eq 768)
 Invoke-Om -Name 'book-material' -ArgList @('--json', 'book-material', $short) -DataDir $DirA | Out-Null
 Invoke-Om -Name 'portrait-material' -ArgList @('--json', 'portrait-material', '--limit', '10') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'passport' -ArgList @('--json', 'passport') -DataDir $DirA | Out-Null
@@ -888,7 +977,35 @@ $otherReg = Invoke-Om -Name 'register-second-user' -ArgList @('--json', 'registe
 Confirm-CloudRegistration $otherCloudAccount $otherReg
 if (-not $otherReg.Ok) { throw '已有主账号时 register 第二个用户失败，不能报 none in the local keyring。' }
 if (-not $otherReg.Envelope.summary.super) { throw '第二个用户 register 没有发出新的 super' }
-Invoke-Om -Name 'account-back-after-second-register' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA -HostProfile | Out-Null
+# Exercise host takeover while the actual fixture runtime is still serving.
+Invoke-Om -Name 'account-live-initial-status' -ArgList @('--json', 'status') -DataDir $DirA | Out-Null
+$otherHealth = Get-OwnedRuntimeHealth $DirA
+$accountMain = Invoke-Om -Name 'account-back-after-second-register' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA
+$mainHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'account-live-main-takeover' ($accountMain.Ok -and (Test-RuntimeChanged $otherHealth $mainHealth $DirA))
+$mainEntry = Invoke-Om -Name 'account-live-main-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
+Assert-Smoke 'account-live-main-library-preserved' ($mainEntry.Ok -and [string]$mainEntry.Envelope.details.entry.id -ceq $id -and [string]$mainEntry.Envelope.details.entry.content -ceq [string]$afterReembed.Envelope.details.entry.content)
+$accountOther = Invoke-Om -Name 'account-live-shorthand' -ArgList @('--json', 'account', $otherUser) -DataDir $DirA
+$switchedHealth = Get-OwnedRuntimeHealth $DirA
+$otherStatus = Invoke-Om -Name 'account-live-other-status' -ArgList @('--json', 'status') -DataDir $DirA
+Assert-Smoke 'account-live-shorthand-takeover' ($accountOther.Ok -and (Test-RuntimeChanged $mainHealth $switchedHealth (Join-Path $DirA "accounts/$otherUser")))
+Assert-Smoke 'account-live-other-identity' ($otherStatus.Ok -and [string]$otherStatus.Envelope.summary.session.user -ceq $otherUser -and $otherStatus.Envelope.summary.unlocked -eq $true)
+$profileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$invalidAccount = Invoke-Om -Name 'account-live-invalid-rejected' -ArgList @('--json', 'account', 'use', '../invalid') -DataDir $DirA -AllowStatus @('fail')
+$rejectedHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeChanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
+$clientSwitch = Invoke-Om -Name 'account-live-client-only-rejected' -ArgList @('--client-only', '--json', 'account', 'use', 'main') -DataDir $DirA -AllowStatus @('fail')
+$clientHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'account-live-client-only-preserves-host' ($clientSwitch.Ok -and $clientSwitch.Exit -eq 1 -and ($clientSwitch.Envelope.errors -join ' ') -match 'client.only' -and [int]$clientHealth.pid -eq [int]$rejectedHealth.pid -and [string]$clientHealth.data_dir -ceq [string]$rejectedHealth.data_dir -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
+$accountRestore = Invoke-Om -Name 'account-live-restore-main' -ArgList @('--json', 'account', 'use', 'main') -DataDir $DirA
+$restoredHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'account-live-restore-main-takeover' ($accountRestore.Ok -and (Test-RuntimeChanged $clientHealth $restoredHealth $DirA))
+$configOther = Invoke-Om -Name 'config-live-profile' -ArgList @('--json', 'config', '--data-dir', (Join-Path $DirA "accounts/$otherUser")) -DataDir $DirA
+$configOtherHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'config-live-profile-takeover' ($configOther.Ok -and (Test-RuntimeChanged $restoredHealth $configOtherHealth (Join-Path $DirA "accounts/$otherUser")))
+$configMain = Invoke-Om -Name 'config-live-restore-main' -ArgList @('--json', 'config', '--data-dir', $DirA) -DataDir $DirA
+$configMainHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'config-live-restore-main-takeover' ($configMain.Ok -and (Test-RuntimeChanged $configOtherHealth $configMainHealth $DirA))
 $accountRemove = Invoke-Om -Name 'account-remove-disposable' -ArgList @('--json', 'account', 'remove', $otherUser, '--yes') -DataDir $DirA -HostProfile
 $accountAfterRemove = Invoke-Om -Name 'account-remove-list-readback' -ArgList @('--json', 'account', 'list') -DataDir $DirA
 Assert-Smoke 'account-remove-profile-gone' ($accountRemove.Ok -and $accountAfterRemove.Ok -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$otherUser")) -and @($accountAfterRemove.Envelope.details.accounts | Where-Object { [string]$_.name -eq $otherUser }).Count -eq 0)
@@ -906,6 +1023,20 @@ $spaceWrite = Invoke-Om -Name 'space-owner-write' -ArgList @('--json', 'remember
 $spaceEntryId = [string]$spaceWrite.Envelope.summary.id
 $spaceSync = Invoke-Om -Name 'space-owner-sync' -ArgList @('--json', 'sync') -DataDir $DirA
 Assert-Smoke 'space-owner-entry-synced' ($spaceWrite.Ok -and [bool]$spaceEntryId -and $spaceSync.Ok -and [int]$spaceSync.Envelope.summary.pushed -gt 0)
+$spaceHealth = Get-OwnedRuntimeHealth $DirA
+$spaceMain = Invoke-Om -Name 'space-live-main' -ArgList @('--json', 'space', 'use', 'main') -DataDir $DirA
+$spaceMainHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'space-live-main-takeover' ($spaceMain.Ok -and (Test-RuntimeChanged $spaceHealth $spaceMainHealth $DirA))
+$spaceReturn = Invoke-Om -Name 'space-live-return' -ArgList @('--json', 'space', 'use', 'sweepspace') -DataDir $DirA
+$spaceReturnHealth = Get-OwnedRuntimeHealth $DirA
+$spaceReadback = Invoke-Om -Name 'space-live-return-readback' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $DirA
+Assert-Smoke 'space-live-return-takeover' ($spaceReturn.Ok -and (Test-RuntimeChanged $spaceMainHealth $spaceReturnHealth (Join-Path $DirA 'accounts/sweepspace')))
+Assert-Smoke 'space-live-library-preserved' ($spaceReadback.Ok -and [string]$spaceReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceReadback.Envelope.details.entry.content -ceq $spaceMarker)
+$spaceProfileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$missingSpace = "missing$stamp"
+$spaceRejected = Invoke-Om -Name 'space-live-missing-rejected' -ArgList @('--json', 'space', 'use', $missingSpace) -DataDir $DirA -AllowStatus @('fail')
+$spaceRejectedHealth = Get-OwnedRuntimeHealth $DirA
+Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 1 -and ($spaceRejected.Envelope.errors -join ' ') -match 'no such space' -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
 $inv = Invoke-Om -Name 'space-invite' -ArgList @('--json', 'space', 'invite', '--note', 'sweep') -DataDir $DirA -Secret
 Invoke-Om -Name 'space-members' -ArgList @('--json', 'space', 'members') -DataDir $DirA | Out-Null
 $inviteCode = ''

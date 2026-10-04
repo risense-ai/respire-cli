@@ -181,7 +181,7 @@ class Smoke:
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         TMPDIR=str(self.root / 'tmp'), ONEMEMORY_DATA_DIR=str(self.root),
                         ONEMEMORY_BIN_DIR=str(self.root / 'bin'), ONEMEMORY_ENGINE='cpu',
-                        ONEMEMORY_LANG='en', ONEMEMORY_NO_AUTOSYNC='1',
+                        ONEMEMORY_LANG='en', ONEMEMORY_NO_AUTOSYNC='1', ONEMEMORY_UPDATE_CHECK='0',
                         ONEMEMORY_MODEL_DIR=str(self.root / 'models/bge-base-zh-v1.5'),
                         ONEMEMORY_RERANKER_DIR=str(self.root / 'models/bge-reranker-base'))
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):

@@ -309,18 +309,46 @@ class Smoke:
         self.cli("inject", "--id", "codex", "--expected", preview["revision"], ok=False)
         require(target.read_bytes() == before, "stale_inject_changed_file")
         self.passed("inject_stale_revision_rejected")
-        target.write_text(original + "<!-- respire:begin -->\nbroken\n", encoding="utf-8")
-        before = target.read_bytes()
-        self.cli("inject", "--id", "codex", "--preview", ok=False)
-        require(target.read_bytes() == before, "malformed_inject_changed_file")
-        self.passed("inject_malformed_marker_rejected")
-        legacy = original + "<!-- 1memory:begin -->\nLegacy fixture.\n<!-- 1memory:end -->\n"
-        target.write_text(legacy, encoding="utf-8")
-        self.cli("inject", "--id", "codex")
-        require(legacy in target.read_text() and "<!-- respire:begin -->" in target.read_text(), "legacy_marker_contract_changed")
-        self.cli("inject", "--id", "codex", "--remove")
-        require(legacy in target.read_text() and "<!-- respire:begin -->" not in target.read_text(), "legacy_remove_contract_changed")
-        self.passed("inject_legacy_marker_contract", migration_supported=False, legacy_preserved=True)
+        current = "<!-- respire:begin -->\nCurrent fixture.\n<!-- respire:end -->"
+        old = "<!-- 1memory:begin -->\nLegacy fixture.\n<!-- 1memory:end -->"
+        malformed = (
+            "<!-- respire:begin -->\nbroken\n",
+            "<!-- 1memory:begin -->\nbroken\n",
+            old + "\n" + old,
+            current + "\n" + current,
+            "<!-- 1memory:begin -->\n<!-- respire:begin -->\n"
+            "<!-- 1memory:end -->\n<!-- respire:end -->",
+        )
+        for text in malformed:
+            target.write_text(original + text, encoding="utf-8")
+            before = target.read_bytes()
+            self.cli("inject", "--id", "codex", "--preview", ok=False)
+            require(target.read_bytes() == before, "malformed_inject_changed_file")
+            self.cli("inject", "--id", "codex", "--remove", ok=False)
+            require(target.read_bytes() == before, "malformed_remove_changed_file")
+        self.passed("inject_malformed_marker_rejected", shapes=len(malformed), file_preserved=True)
+        between, tail = "\nUser middle.\n", "\nUser tail.\n"
+        for blocks in ((old,), (old, current), (current, old)):
+            text = original + between.join(blocks) + tail
+            target.write_text(text, encoding="utf-8")
+            preview = self.cli("inject", "--id", "codex", "--preview")["details"]
+            require(target.read_text() == text and preview["changed"], "legacy_preview_changed_file")
+            self.cli("inject", "--id", "codex", "--expected", preview["revision"])
+            migrated = target.read_text()
+            require(migrated == preview["after"] and migrated.count("<!-- respire:begin -->") == 1
+                and migrated.count("<!-- respire:end -->") == 1
+                and "<!-- 1memory:" not in migrated and "Legacy fixture." not in migrated
+                and "Current fixture." not in migrated, "legacy_marker_replacement_failed")
+            owned = re.sub(r"<!-- respire:begin -->.*?<!-- respire:end -->", "", migrated, flags=re.S)
+            expected_user = original + (between if len(blocks) == 2 else "") + tail
+            require(owned == expected_user, "legacy_replace_changed_user_content")
+            verify_policy(migrated, "lite")
+            self.cli("inject", "--id", "codex")
+            require(target.read_text() == migrated, "legacy_replace_not_idempotent")
+            self.cli("inject", "--id", "codex", "--remove")
+            require(target.read_text() == expected_user, "legacy_remove_changed_user_content")
+        self.passed("inject_legacy_marker_contract", migration_supported=True,
+            shapes=3, legacy_removed=True, user_content_preserved=True)
 
     def run(self):
         raw = subprocess.run([str(self.args.binary), "--version"], env=self.env,
