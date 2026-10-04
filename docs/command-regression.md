@@ -42,6 +42,15 @@ numbers, such as `1.0.8-dev.1`, `1.0.8-dev.2`, and `1.0.8-dev.3`, rather than Ac
 run IDs. Publishing is serialized; existing tags, draft releases and all eight npm
 packages reserve numbers. A partially published version is never reused. The next
 unreleased base starts at `dev.1`; existing published versions remain unchanged.
+Development bases must exceed the current stable version: `1.0.8` ->
+`1.0.9-dev.1` -> `1.0.9` -> `1.0.10-dev.1`.
+Release notes include features, fixes, other changes, every commit, installation
+instructions, source identity and a comparison link. Stable releases summarize
+changes since the previous published stable release; development releases use the
+previous published release. Drafts do not establish a comparison baseline.
+Use `feat:` and `fix:` commit subjects with clear English descriptions for reliable
+classification; unclassified changes retain their original descriptions. Missing
+baseline history fails publication rather than silently omitting changes.
 Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.
