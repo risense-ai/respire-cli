@@ -312,7 +312,7 @@ pub(crate) fn index_status() -> Value {
     json!({"state": state.state, "scheduled": state.requested,
         "worker_active": INDEX_ON.load(Ordering::Acquire),
         "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
-        "model_setup": (state.state == "failed").then_some("Inspect the reported error; if model files are missing, use `model install-bge` (legacy) or `model install-m3` (m3).")})
+        "model_setup": (state.state == "failed").then_some("Inspect the reported error; if BGE-M3 files are missing, use `model install`; rebuild an old index with `reembed`.")})
 }
 
 pub(crate) fn kick_index() {

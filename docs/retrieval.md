@@ -33,9 +33,9 @@ use the same data flow and diagnostics.
 
 | Migration step | Behavior |
 | --- | --- |
-| `model install-m3` | Verify pinned files; retain the active model/index |
+| `model install-m3` | Verify pinned files; do not rebuild the index |
 | `model activate m3` | Rebuild/resume locally, then activate after source checks |
-| Interrupted rebuild | Keep checkpoints and active index |
+| Interrupted rebuild | Keep completed checkpoints; resume the M3 rebuild |
 | Concurrent content edit | Reject stale derived data |
 | Legacy index | Rebuild from decrypted source with M3; retired inference never runs |
 | `reembed` | Repair missing/outdated data for the current model |

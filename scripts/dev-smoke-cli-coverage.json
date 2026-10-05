@@ -380,7 +380,7 @@
       ]
     },
     {
-      "command": "model install-m3",
+      "command": "model install",
       "source": "cli/src/main.rs:469",
       "options": [
         "--mirror"
@@ -415,7 +415,7 @@
       ]
     },
     {
-      "command": "model uninstall-m3",
+      "command": "model uninstall",
       "source": "cli/src/main.rs:502",
       "options": []
     },
@@ -872,11 +872,11 @@
     "help-mcp-contract",
     "help-model-activate-contract",
     "help-model-engine-contract",
-    "help-model-install-m3-contract",
+    "help-model-install-contract",
     "help-model-install-engines-contract",
     "help-model-probe-contract",
     "help-model-reset-cpu-contract",
-    "help-model-uninstall-m3-contract",
+    "help-model-uninstall-contract",
     "help-passport-contract",
     "help-plugin-list-contract",
     "help-plugin-test-contract",

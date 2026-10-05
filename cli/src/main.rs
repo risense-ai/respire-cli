@@ -465,7 +465,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum ModelAction {
-    /// Download BGE-M3 without switching the active model or index.
+    /// Download or verify BGE-M3 without rebuilding the index.
     #[command(name = "install", visible_alias = "install-m3")]
     InstallM3 {
         #[arg(long)]
@@ -485,7 +485,7 @@ enum ModelAction {
     },
     /// Install compatible NPU execution providers through Windows ML.
     InstallEngines,
-    /// Run a real BGE inference and report the selected backend.
+    /// Run real BGE-M3 inference and report the selected backend.
     Probe {
         #[arg(long, value_parser = ["m3"])]
         model: Option<String>,

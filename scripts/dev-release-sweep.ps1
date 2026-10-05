@@ -730,8 +730,8 @@ if ($cfgAddr -ne $Server) { throw "config 地址不是测试服：$cfgAddr" }
 $configWrite = Invoke-Om -Name 'config-isolated-settings' -ArgList @('--json', 'config', '--autosync', 'false', '--cure-auto', 'false', '--rpc-parallelism', '1') -DataDir $DirA
 $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'config') -DataDir $DirA
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
-$bgeInstall = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec 900
-Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))
+$bgeInstall = Invoke-Om -Name 'model-install' -ArgList @('--json', 'model', 'install') -DataDir $DirA -TimeoutSec 900
+Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
@@ -741,8 +741,8 @@ foreach ($configuredEngine in @('gpu', 'npu')) {
     Assert-Smoke "model-engine-$configuredEngine-selection-persisted" ($savedEngine.Ok -and [string]$engineSettings.engine -eq $configuredEngine -and $engineSettings.force_cpu -eq $false)
 }
 Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA -HostProfile | Out-Null
-$probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--model', 'm3', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok')
+$probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
+Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok' -and [string]$probe.Envelope.summary.model -eq 'm3' -and [int]$probe.Envelope.summary.dimensions -eq 1024)
 
 $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
@@ -1655,7 +1655,7 @@ Invoke-Om -Name 'runtime-stop' -ArgList @('--json', '--runtime-internal', '--sto
 Stop-OurRuntimes
 $uninstallRerank = Invoke-Om -Name 'model-uninstall-rerank-rejected' -ArgList @('--direct', '--json', 'model', 'uninstall-rerank') -DataDir $DirA -ExpectExit @(2) -Raw
 Assert-Smoke 'model-rerank-command-rejected' ($uninstallRerank.Ok)
-$uninstallBge = Invoke-Om -Name 'model-uninstall-m3' -ArgList @('--direct', '--json', 'model', 'uninstall-m3') -DataDir $DirA
+$uninstallBge = Invoke-Om -Name 'model-uninstall' -ArgList @('--direct', '--json', 'model', 'uninstall') -DataDir $DirA
 Assert-Smoke 'model-bge-removed' ($uninstallBge.Ok -and $uninstallBge.Envelope.summary.removed -eq $true -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3')))
 foreach ($required in $script:Catalog.required_assertions) {
     if (-not @($Rows | Where-Object { $_.Name -ceq $required -and $_.Ok -and $_.Status -ceq 'ok' }).Count) {
