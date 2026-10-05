@@ -110,6 +110,13 @@ class Smoke(support.Smoke):
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict)}
+            self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
+                ("child_exited", "host runtime exited before readiness"),
+                ("startup_identity_changed", "runtime owner changed during startup"),
+                ("readiness_timeout", "host runtime did not become ready"),
+                ("old_runtime_restart_failed", "original runtime restart failed"),
+                ("spawn_failed", "failed to start host runtime"),
+            ) if term in text]
             if args[0] == "sync" and isinstance(value, dict):
                 summary = value.get("summary", {})
                 self.report["cli_failure"]["sync_counts"] = {
