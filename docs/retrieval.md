@@ -59,3 +59,5 @@ Incomplete M3 generations remain resumable; semantic retrieval requires a comple
 source-checked M3 index. Run `rsrs reembed` for a long migration. Existing M3
 artifacts retain their generation identity. Content, timestamps and sync flags
 are unchanged; retired weight files are not deleted automatically.
+
+Recall associations are documented in [associations](associations.md). Use `--no-related` for a per-request original-results comparison.

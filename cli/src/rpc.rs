@@ -161,7 +161,8 @@ impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
         store.write_transaction(|| {
             store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
-            store.bump_recall(&self.candidates)
+            store.bump_recall(&self.candidates)?;
+            store.bump_recall_pairs(&self.candidates)
         })
     }
 }

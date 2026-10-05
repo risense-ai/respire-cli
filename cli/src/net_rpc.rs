@@ -1,5 +1,6 @@
 //! Loopback HTTP client for the local runtime (`127.0.0.1:15169`).
-//! Loopback requests do not require a token. Non-loopback HTTP access uses
+//! Current loopback runtimes need no token; pre-1.0.10 runtimes require the
+//! existing host token after a 401 challenge. Non-loopback HTTP access uses
 //! `ONEMEMORY_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
 
 use std::fs;
@@ -250,17 +251,37 @@ fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(2))
         .timeout(HTTP_TIMEOUT)
+        .redirects(0)
         .build()
+}
+
+/// Legacy runtimes reject before dispatch. Retry only that 401, once, with an
+/// existing credential; transport failures and other statuses never replay RPC.
+fn send_loopback(
+    request: ureq::Request,
+    send: impl Fn(ureq::Request) -> std::result::Result<ureq::Response, ureq::Error>,
+) -> Result<ureq::Response> {
+    let response = match send(request.clone()) {
+        Err(ureq::Error::Status(401, _)) => {
+            let token = read_token()?.ok_or(RuntimeError::Unauthorized)?;
+            send(request.set("Authorization", &format!("Bearer {token}")))
+                .map_err(crate::runtime_error::http)
+        }
+        result => result.map_err(crate::runtime_error::http),
+    }?;
+    if !(200..300).contains(&response.status()) {
+        return Err(RuntimeError::Transport(format!("unexpected HTTP {}", response.status())).into());
+    }
+    Ok(response)
 }
 
 pub fn health() -> Result<Health> {
     check_connection()?;
     let url = format!("{}/api/health", rpc_base_url());
-    let resp = agent()
-        .get(&url)
-        .timeout(Duration::from_secs(2))
-        .call()
-        .map_err(crate::runtime_error::http)?;
+    let resp = send_loopback(
+        agent().get(&url).timeout(Duration::from_secs(2)),
+        |request| request.call(),
+    )?;
     let parsed: Value = resp.into_json().context("runtime health is not JSON")?;
     if !is_our_health(&parsed) {
         bail!("port is not a rsrs runtime");
@@ -271,10 +292,7 @@ pub fn health() -> Result<Health> {
 pub fn request_stop() -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
-    agent()
-        .post(&url)
-        .send_string("{}")
-        .map_err(crate::runtime_error::http)?;
+    send_loopback(agent().post(&url), |request| request.send_string("{}"))?;
     Ok(())
 }
 
@@ -312,11 +330,9 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     } else {
         HTTP_TIMEOUT
     };
-    let resp = agent()
-        .post(&url)
-        .timeout(timeout)
-        .send_json(body)
-        .map_err(crate::runtime_error::http)?;
+    let resp = send_loopback(agent().post(&url).timeout(timeout), |request| {
+        request.send_json(body.clone())
+    })?;
     let parsed: Value = resp.into_json().context("runtime rpc is not JSON")?;
     Ok(parsed)
 }

@@ -30,6 +30,12 @@ the agent during the conversation, not CLI validation or a background reminder.
 Keep the existing `【前因】`, `【行为】` and `【后果】` body markers and use
 `--importance important` or `--importance trivial`, not a numeric score.
 
+## 关联召回
+
+日常先用 `rsrs recall "项目名+核心词" --titles --json`，默认 20 条标题；按相关性用 `show` 读全文，通常最多两轮点深。`related` 是独立关联候选，不是原命中；标题和关系只作查阅线索。`superseded_by` 指向仍活跃的新版时，先读新版，旧版只作历史依据。
+
+新结论替代旧决策并需保留弃因时，用 `remember ... --importance important --supersedes <旧id>`；确需横向关系时用 `--see-also <id,id>`。与修改/合并按事实选择，不为增加关联而新建重复条。库中所有写入端升级后才启用关系写入；旧版重写可能丢字段。
+
 ## 中文完整规则
 
 # respire（AI记忆体）· 记忆注入源（唯一权威源）

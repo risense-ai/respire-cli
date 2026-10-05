@@ -77,3 +77,18 @@ remain compatible.
 `rsrs web` opens `https://dash.rsrs.rs`. `rsrs web --no-open --json` reports that URL without opening a browser. It does not start, stop, or bind the runtime. Former `web --host`, `--port`, `--status`, `--stop`, and `--internal` flags are no longer supported.
 
 The hidden `--runtime-internal` entry is reserved for host lifecycle and automated diagnostics. CLI commands automatically start the loopback runtime when allowed; restricted clients only connect. Local `/api/health`, `/api/rpc`, `/api/runtime/stop`, `/mcp`, and `/sse` accept actual loopback peers without a token. Non-loopback peers are not exempt from token checks, and non-loopback listening is currently unsupported. Browser pages, static assets, `/api/invoke`, and `/api/task` are removed. The non-loopback authentication gate accepts tokens in headers, never dashboard URLs.
+
+## Upgrading an older runtime
+
+The host command `rsrs --runtime-internal --stop` supports runtimes that still
+require a loopback token, including 1.0.9. After an HTTP 401, the client retries
+once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file. It does not
+create or replace credentials. Other HTTP errors and connection failures are
+not retried. Current loopback runtimes continue to work without a token file.
+Health checks and normal RPC use the same compatibility rule, so host upgrades
+can gracefully stop the old runtime before starting the new executable.
+
+Run lifecycle commands from the host terminal; client-only mode does not permit
+shutdown. A missing or rejected legacy token requires the old runtime's existing
+authentication material, rather than bypassing authentication or killing an
+unverified process. HTTP redirects are disabled for the local runtime client.

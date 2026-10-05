@@ -424,6 +424,9 @@ mod tests {
 
     fn entry(id: &str, content: &str) -> MemoryEntry {
         MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: id.to_owned(),
             kind: Kind::Context,
             tags: vec!["t".to_owned()],

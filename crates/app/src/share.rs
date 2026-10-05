@@ -29,6 +29,12 @@ pub const MARK_END: &str = "-----END respire SHARE-----";
 /// One memory in the payload (plaintext form, no embedding/ciphertext/user).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareItem {
+    #[serde(default)]
+    pub supersedes: String,
+    #[serde(default)]
+    pub superseded_by: String,
+    #[serde(default)]
+    pub see_also: Vec<String>,
     /// Source-library id — only for rebuilding the parent chain inside the payload; import always mints new ids.
     pub id: String,
     /// Parent id inside the payload; empty = root of this subtree (attach point is the importer's).
@@ -290,6 +296,9 @@ pub fn items_from(
             e.parent_id.clone()
         };
         out.push(ShareItem {
+            supersedes: if members.contains(&e.supersedes) { e.supersedes.clone() } else { String::new() },
+            superseded_by: if members.contains(&e.superseded_by) { e.superseded_by.clone() } else { String::new() },
+            see_also: e.see_also.iter().filter(|id| members.contains(*id)).cloned().collect(),
             id: e.id.clone(),
             parent_id: parent,
             kind: e.kind.as_str().to_owned(),
@@ -399,6 +408,9 @@ mod tests {
             source_user: "alice".into(),
             items: vec![
                 ShareItem {
+                    supersedes: String::new(),
+                    superseded_by: String::new(),
+                    see_also: Vec::new(),
                     id: "aaaa-root".into(),
                     parent_id: "".into(),
                     kind: "context".into(),
@@ -410,6 +422,9 @@ mod tests {
                     importance: "important".into(),
                 },
                 ShareItem {
+                    supersedes: String::new(),
+                    superseded_by: String::new(),
+                    see_also: Vec::new(),
                     id: "bbbb-child".into(),
                     parent_id: "aaaa-root".into(),
                     kind: "decision".into(),
@@ -546,6 +561,9 @@ mod tests {
 
     fn item(id: &str, parent: &str) -> ShareItem {
         ShareItem {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: id.into(),
             parent_id: parent.into(),
             kind: "context".into(),
@@ -605,6 +623,9 @@ mod tests {
         use crate::memory::model::{Kind, MemoryEntry};
         use std::collections::HashSet;
         let mk = |id: &str, parent: &str| MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: id.into(),
             kind: Kind::Context,
             tags: vec![],

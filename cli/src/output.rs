@@ -59,6 +59,8 @@ pub struct ResultEnvelope {
     pub actions: Vec<String>,
     pub errors: Vec<String>,
     pub details: Value,
+    #[serde(default)]
+    pub related: Vec<respire::memory::model::RelatedMemory>,
 }
 
 impl ResultEnvelope {
@@ -76,6 +78,7 @@ impl ResultEnvelope {
             actions: Vec::new(),
             errors: Vec::new(),
             details: Value::Null,
+            related: Vec::new(),
         }
     }
 

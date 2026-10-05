@@ -133,6 +133,8 @@ fn tools() -> Vec<(&'static str, &'static str, serde_json::Value)> {
                     "parent":{"type":"string","description":"Parent id or catalog title"},
                     "force":{"type":"boolean"},
                     "merge_ids":{"type":"string","description":"Comma-separated ids to merge into this content"},
+                    "supersedes":{"type":"string","description":"Live important memory replaced by this conclusion"},
+                    "see_also":{"type":"array","items":{"type":"string"},"description":"Live important memories to link bidirectionally"},
                     "type":{"type":"string","description":"Memory kind; default context"}
                 },
                 "required":["content"]
@@ -145,7 +147,8 @@ fn tools() -> Vec<(&'static str, &'static str, serde_json::Value)> {
                 "type":"object",
                 "properties":{
                     "query":{"type":"string"},
-                    "limit":{"type":"integer","description":"Default 3"}
+                    "limit":{"type":"integer","description":"Default 20"},
+                    "related":{"type":"boolean","default":true}
                 },
                 "required":["query"]
             }),
@@ -311,6 +314,12 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
             if let Some(merge_ids) = opt_str("merge_ids") {
                 cmd.extend(["--merge-ids".to_owned(), merge_ids.to_owned()]);
             }
+            if let Some(id) = opt_str("supersedes") { cmd.extend(["--supersedes".to_owned(),id.to_owned()]); }
+            if let Some(value) = args.get("see_also") {
+                let ids = value.as_array().ok_or("see_also must be an array")?.iter()
+                    .map(|v| v.as_str().ok_or("see_also IDs must be strings")).collect::<Result<Vec<_>,_>>()?;
+                if !ids.is_empty() { cmd.extend(["--see-also".to_owned(),ids.join(",")]); }
+            }
             if opt_bool("force") == Some(true) {
                 cmd.push("--force".to_owned());
             }
@@ -319,6 +328,7 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
         "memory_recall" => {
             let query = opt_str("query").ok_or("missing query")?;
             let mut cmd = vec!["recall".to_owned(), query.to_owned()];
+            if opt_bool("related") == Some(false) { cmd.push("--no-related".to_owned()); }
             if let Some(limit) = opt_u64("limit") {
                 cmd.extend(["--limit".to_owned(), limit.to_string()]);
             }

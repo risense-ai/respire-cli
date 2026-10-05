@@ -555,6 +555,12 @@ enum Command {
         /// Merge: delete the listed old memories (comma-separated ids) and store this content as the combined entry (inherits the first cause chain)
         #[arg(long)]
         merge_ids: Option<String>,
+        /// This new conclusion replaces a live important memory.
+        #[arg(long, conflicts_with = "merge_ids")]
+        supersedes: Option<String>,
+        /// Bidirectional links to live important memories.
+        #[arg(long, value_delimiter = ',', conflicts_with = "merge_ids")]
+        see_also: Vec<String>,
     },
     /// Import a JSON-array dump: keep fields, rebuild parent links, sync once after the batch
     Import { file: String },
@@ -577,6 +583,9 @@ enum Command {
         /// Return compact IDs and titles in JSON; use show to read full memory content.
         #[arg(long)]
         titles: bool,
+        /// Disable associations for this request (original recall results only).
+        #[arg(long)]
+        no_related: bool,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -3395,6 +3404,9 @@ fn run_root_create(title: &str, content: Option<&str>, yes: bool) -> Result<()> 
     let rid = respire::taxonomy::root_id(title);
     let now = now_stamp();
     let entry = respire::MemoryEntry {
+        supersedes: String::new(),
+        superseded_by: String::new(),
+        see_also: Vec::new(),
         id: rid.clone(),
         kind: Kind::Knowledge,
         tags: vec!["catalog root".to_owned(), "custom".to_owned()],
@@ -6210,7 +6222,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
             parent,
             force,
             merge_ids,
+            supersedes,
+            see_also,
         } => {
+            anyhow::ensure!((supersedes.is_none() && see_also.is_empty()) || importance == "important", "associations require important memory");
             // importance enum check: an illegal value (e.g. a kind name "task" by mistake) cannot be filtered by audit/UI after write
             // 2026-09-19 two-tier: normal is retired - new writes are important/trivial only (stock normal still reads)
             if !matches!(importance.as_str(), "important" | "trivial") {
@@ -6316,6 +6331,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                         }
                         merged.push_str(&line);
                         let e = respire::MemoryEntry {
+                            supersedes: String::new(),
+                            superseded_by: String::new(),
+                            see_also: Vec::new(),
                             id: main.id.clone(),
                             kind: respire::memory::model::Kind::from_str(&main.local_kind),
                             tags: vec![],
@@ -6381,7 +6399,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
 
             // -- Judge-then-store (dedup first, then choose): unless --force/--merge-ids/--parent (explicit attach is intent)
             //    run an internal recall of similar candidates; diary trivia skips dedup (daily log is not a duplicate event; it goes on the time chain) --
-            if !force && merge_ids.is_none() && parent.is_empty() && importance != "trivial" {
+            if !force && merge_ids.is_none() && supersedes.is_none() && see_also.is_empty() && parent.is_empty() && importance != "trivial" {
                 let candidates_all = scoped_candidates(&store)?;
                 let q = MemoryQuery::new(&content).limit(5);
                 let candidates =
@@ -6481,6 +6499,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 let mut entry = respire::MemoryEntry {
+                    supersedes: String::new(),
+                    superseded_by: String::new(),
+                    see_also: Vec::new(),
                     id,
                     kind: Kind::from_str(&r#type),
                     tags: tags
@@ -6568,7 +6589,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 None
             };
             let parent_id = parent_id.unwrap_or_default();
-            let entry = respire::MemoryEntry {
+            let mut entry = respire::MemoryEntry {
+                supersedes: String::new(),
+                superseded_by: String::new(),
+                see_also: Vec::new(),
                 id,
                 kind: Kind::from_str(&r#type),
                 tags: tags
@@ -6590,8 +6614,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 device: respire::service::device_tag(),
                 modified_by: respire::service::device_tag(),
             };
-            let stored = MemoryEngine::seal(&session, embedder!(), &entry, &entry.user)?;
-            store.put(&stored)?;
+            let stored = if supersedes.is_some() || !see_also.is_empty() {
+                respire::service::store_related(&session,&store,embedder!(),&mut entry,supersedes.as_deref(),&see_also)?
+            } else {
+                let sealed = MemoryEngine::seal(&session, embedder!(), &entry, &entry.user)?;
+                anyhow::ensure!(store.put(&sealed)?, "memory was not saved");
+                sealed
+            };
             // Plugin hook post-remember: observe only, never blocks (failure policy is inside hooks::fire)
             {
                 let hv = respire::hooks::fire(
@@ -6690,6 +6719,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             project,
             trace,
             titles,
+            no_related,
         } => {
             let recall_generation = rpc::sync_generation();
             let session = build_session()?;
@@ -6722,6 +6752,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 }
                 None => recall_select::recall(&session, embedder!(), &candidates, &q)?,
             };
+            let hit_ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
+            let associations: respire::memory::model::RelatedResult = if no_related {
+                Default::default()
+            } else { respire::core_sdk::execute("related_business",serde_json::json!({
+                "model":embedder!().model_name(), "snapshots":respire::memory::engine::snapshots(&session,&candidates),
+                "query":q,"ids":hit_ids,"pairs":store.recall_pairs(&hit_ids)?
+            }))? };
             // Query log: each recall writes a candidate record (including empty - negatives are post-training material too).
             // Note: this is the candidate set, not a hit - a hit is the model query-log mark self-grade
             {
@@ -6765,7 +6802,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 ))?;
                 return Ok(());
             }
-            let items = ranked
+            let mut items = ranked
                 .iter()
                 .map(|r| {
                     OutputItem::new(
@@ -6783,25 +6820,41 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     )
                 })
                 .collect::<Vec<_>>();
+            for (hit,row) in ranked.iter().zip(items.iter_mut()) {
+                if associations.superseded.contains_key(&hit.entry.id) { row.value.push_str(" [superseded]"); }
+            }
+            for related in &associations.related {
+                items.push(OutputItem::new(respire::service::short_id(&related.id),OutputStatus::Ok,
+                    format!("≈ {} {}",match related.relation {
+                        respire::memory::model::RelationKind::NewVersion => "new version",
+                        respire::memory::model::RelationKind::OldVersion => "old version",
+                        respire::memory::model::RelationKind::SeeAlso => "see also",
+                        respire::memory::model::RelationKind::CoRecall => "co-recall",
+                        respire::memory::model::RelationKind::Neighbor => "neighbor",
+                    },related.title)));
+            }
             let mut result = ResultEnvelope::new(
                 "recall",
                 OutputStatus::Ok,
                 serde_json::json!({"query":query,"count":ranked.len(),"limit":limit,"project":project,
-                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?}),
+                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len()}),
                 items,
             );
+            result.related = associations.related;
             result.details = if titles {
                 serde_json::json!(ranked
                     .iter()
                     .map(|r| serde_json::json!({
-                        "id":r.entry.id,"title":r.entry.title,"score":r.score
+                        "id":r.entry.id,"title":r.entry.title,"score":r.score,
+                        "superseded_by":associations.superseded.get(&r.entry.id)
                     }))
                     .collect::<Vec<_>>())
             } else {
                 serde_json::json!(ranked
                     .iter()
                     .map(|r| serde_json::json!({
-                        "score":r.score,"entry":r.entry,"ancestors":r.ancestors
+                        "score":r.score,"entry":r.entry,"ancestors":r.ancestors,
+                        "superseded_by":associations.superseded.get(&r.entry.id)
                     }))
                     .collect::<Vec<_>>())
             };

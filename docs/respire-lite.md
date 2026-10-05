@@ -11,6 +11,12 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 | Task conditions | Include a `【触发】` line with a confirmed date (and time zone if needed) or verifiable prerequisite. Ask if unclear; check dates and prerequisite evidence when recalling the task, then mention due conditions. There is no automatic validation or background reminder. |
 | Importance | Use `--importance important` for reusable findings or `--importance trivial` for diary entries; do not use numeric scores. |
 
+## 关联召回
+
+日常先用 `rsrs recall "项目名+核心词" --titles --json`，默认 20 条标题；按相关性用 `show` 读全文，通常最多两轮点深。`related` 是独立关联候选，不是原命中；标题和关系只作查阅线索。`superseded_by` 指向仍活跃的新版时，先读新版，旧版只作历史依据。
+
+新结论替代旧决策并需保留弃因时，用 `remember ... --importance important --supersedes <旧id>`；确需横向关系时用 `--see-also <id,id>`。与修改/合并按事实选择，不为增加关联而新建重复条。库中所有写入端升级后才启用关系写入；旧版重写可能丢字段。
+
 ## 中文完整规则
 
 # rsrs 记忆工作流

@@ -83,6 +83,9 @@ pub fn anchor_text(c: &Category) -> String {
 fn category_entry(c: &Category) -> MemoryEntry {
     let now = Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     MemoryEntry {
+        supersedes: String::new(),
+        superseded_by: String::new(),
+        see_also: Vec::new(),
         id: root_id(c.title),
         kind: Kind::Knowledge,
         tags: vec!["词库纲".to_owned(), if c.ai { "AI域" } else { "人域" }.to_owned()],
