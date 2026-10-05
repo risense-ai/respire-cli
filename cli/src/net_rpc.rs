@@ -263,6 +263,9 @@ fn send_loopback(
 ) -> Result<ureq::Response> {
     let response = match send(request.clone()) {
         Err(ureq::Error::Status(401, _)) => {
+            if crate::runtime_policy::client_only() {
+                return Err(RuntimeError::Unauthorized.into());
+            }
             let token = read_token()?.ok_or(RuntimeError::Unauthorized)?;
             send(request.set("Authorization", &format!("Bearer {token}")))
                 .map_err(crate::runtime_error::http)
