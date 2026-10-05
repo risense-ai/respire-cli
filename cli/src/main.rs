@@ -6823,16 +6823,6 @@ fn run_local_inner(args: Cli) -> Result<()> {
             for (hit,row) in ranked.iter().zip(items.iter_mut()) {
                 if associations.superseded.contains_key(&hit.entry.id) { row.value.push_str(" [superseded]"); }
             }
-            for related in &associations.related {
-                items.push(OutputItem::new(respire::service::short_id(&related.id),OutputStatus::Ok,
-                    format!("≈ {} {}",match related.relation {
-                        respire::memory::model::RelationKind::NewVersion => "new version",
-                        respire::memory::model::RelationKind::OldVersion => "old version",
-                        respire::memory::model::RelationKind::SeeAlso => "see also",
-                        respire::memory::model::RelationKind::CoRecall => "co-recall",
-                        respire::memory::model::RelationKind::Neighbor => "neighbor",
-                    },related.title)));
-            }
             let mut result = ResultEnvelope::new(
                 "recall",
                 OutputStatus::Ok,

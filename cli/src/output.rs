@@ -94,7 +94,7 @@ impl ResultEnvelope {
                 return Ok(instructions.to_owned());
             }
         }
-        let rows = self
+        let mut rows = self
             .items
             .iter()
             .map(|item| {
@@ -106,6 +106,14 @@ impl ResultEnvelope {
                 ]
             })
             .collect::<Vec<_>>();
+        rows.extend(self.related.iter().map(|related| {
+            vec![
+                respire::service::short_id(&related.id),
+                status_label(Status::Ok).to_owned(),
+                related_value(related),
+                String::new(),
+            ]
+        }));
         let mut sections = Vec::new();
         if !self.summary.is_null() {
             let rows = summary_rows(&self.summary);
@@ -150,6 +158,18 @@ impl ResultEnvelope {
         }
         Ok(text)
     }
+}
+
+pub fn related_value(related: &respire::memory::model::RelatedMemory) -> String {
+    use respire::memory::model::RelationKind;
+    let label = match related.relation {
+        RelationKind::NewVersion => "new version",
+        RelationKind::OldVersion => "old version",
+        RelationKind::SeeAlso => "see also",
+        RelationKind::CoRecall => "co-recall",
+        RelationKind::Neighbor => "neighbor",
+    };
+    format!("≈ {label} {}", related.title)
 }
 
 /// Remove persistence and credential material before a result crosses the
