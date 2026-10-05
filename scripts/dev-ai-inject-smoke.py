@@ -141,7 +141,7 @@ class Smoke:
             self.env.pop(name, None)
         self.report = {"binary_sha256": args.binary_sha256, "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"),
-            "version": args.version, "target": "https://dev.rsrs.rs", "cases": {},
+            "version": args.version, "target": "https://api.dev.rsrs.rs", "cases": {},
             "provider_scope": "Deterministic local CLI/provider protocol only; no external LLM quality claim.",
             "cloud_cleanup": {"passed": False, "remaining_users": []}}
         self.provider = None
@@ -182,7 +182,7 @@ class Smoke:
 
         def request(method, path, payload=None):
             body = json.dumps(payload).encode() if payload is not None else None
-            req = urllib.request.Request("https://dev.rsrs.rs" + path, body,
+            req = urllib.request.Request("https://api.dev.rsrs.rs" + path, body,
                 {"Authorization": "Bearer " + self.account_token, "Content-Type": "application/json"},
                 method=method)
             try:
@@ -367,12 +367,12 @@ class Smoke:
         self.report["cloud_cleanup"]["remaining_users"] = [username]
         self.registration_attempted = True
         self.save()
-        registered = self.cli("register", "--addr", "https://dev.rsrs.rs", "--user", username,
+        registered = self.cli("register", "--addr", "https://api.dev.rsrs.rs", "--user", username,
             "--pass=-" + secrets.token_urlsafe(32), timeout=120)
         require(registered["summary"].get("user") == username and registered["summary"].get("ok") is True,
             "registered_user_identity_mismatch")
         session = json.loads((self.root / "library/session.json").read_text())
-        require(session["addr"].rstrip("/") == "https://dev.rsrs.rs" and session["user"] == username
+        require(session["addr"].rstrip("/") == "https://api.dev.rsrs.rs" and session["user"] == username
             and isinstance(session.get("token"), str) and bool(session["token"]),
             "session_not_dev")
         self.created_user = username

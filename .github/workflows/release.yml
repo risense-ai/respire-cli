@@ -99,7 +99,7 @@ jobs:
         env:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
         run: |
-          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://dev.rsrs.rs")'
+          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api.dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api.dev.rsrs.rs")'
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
       - uses: actions/download-artifact@v4

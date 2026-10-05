@@ -23,7 +23,7 @@ import threading
 
 
 REQUIRED = json.loads(Path(__file__).with_name('dev-runtime-required.json').read_text(encoding='utf-8'))['required_cases']
-DEV = 'https://dev.rsrs.rs'
+DEV = 'https://api.dev.rsrs.rs'
 DASH = 'https://dash.rsrs.rs'
 
 
@@ -234,7 +234,7 @@ class Smoke:
         old = client_home / '.onememory'
         old.mkdir(parents=True, mode=0o700)
         marker = old / 'client.json'
-        marker.write_text('{"addr":"https://dev.rsrs.rs"}\n', encoding='utf-8')
+        marker.write_text('{"addr":"https://api.dev.rsrs.rs"}\n', encoding='utf-8')
         before = {str(path.relative_to(client_home)): hashlib.sha256(path.read_bytes()).hexdigest()
                   for path in client_home.rglob('*') if path.is_file()}
         client_env = dict(self.env, HOME=str(client_home), USERPROFILE=str(client_home),

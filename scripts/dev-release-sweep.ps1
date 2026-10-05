@@ -20,7 +20,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') { throw 'Release smoke may run only in GitHub Actions.' }
-if ($Server -cne 'https://dev.rsrs.rs') { throw 'Release smoke requires exactly https://dev.rsrs.rs.' }
+if ($Server -cne 'https://api.dev.rsrs.rs') { throw 'Release smoke requires exactly https://api.dev.rsrs.rs.' }
 if (-not $Exe -or $ExpectVersion -notmatch '^\d+\.\d+\.\d+(-dev\.\d+)?$') {
     throw 'Release smoke requires an exact CI artifact via -Exe and its -ExpectVersion.'
 }

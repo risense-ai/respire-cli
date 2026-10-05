@@ -32,7 +32,7 @@ must describe version, mode, sample and network conditions.
 Runtime checks must not bypass sandbox confinement. Release sweeps must not use real
 user libraries or the production server.
 
-Release smoke uses only `https://dev.rsrs.rs`. The manual `Dev server sweep` requires
+Release smoke uses only `https://api.dev.rsrs.rs`. The manual `Dev server sweep` requires
 the original successful build run and its exact source SHA; it never selects a
 floating npm version. Reports contain no session files, credentials or raw payloads.
 

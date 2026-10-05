@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-UPSTREAM = "https://dev.rsrs.rs"
+UPSTREAM = "https://api.dev.rsrs.rs"
 
 
 def require(condition, code):

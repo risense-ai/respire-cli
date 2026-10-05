@@ -72,7 +72,7 @@ def verify(args, result):
     base = read(args.cli_report)
     identity(base, args, version="observed_version")
     require(base.get("expected_version") == args.version, "base_expected_version_mismatch")
-    require(base.get("server") == "https://dev.rsrs.rs", "base_server_mismatch")
+    require(base.get("server") == "https://api.dev.rsrs.rs", "base_server_mismatch")
     require(base.get("base_complete") is True and base.get("failed") == 0
             and not base.get("required_missing"), "cli_base_incomplete")
     catalog = base.get("catalog", {})

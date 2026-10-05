@@ -83,7 +83,7 @@ class Suite:
         require(os.environ.get('GITHUB_ACTIONS') == 'true', 'github-actions-required')
         require(os.environ.get('RUNNER_OS') == 'Linux', 'isolated-linux-keyring-required')
         require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted', 'ephemeral-github-hosted-runner-required')
-        require(os.environ.get('RESPIRE_DEV_SERVER_ADDR') == 'https://dev.rsrs.rs', 'exact-development-server-required')
+        require(os.environ.get('RESPIRE_DEV_SERVER_ADDR') == 'https://api.dev.rsrs.rs', 'exact-development-server-required')
         require(re.fullmatch('[0-9a-f]{40}', self.args.cli_source_sha) is not None, 'exact-cli-source-sha-required')
         require(os.environ.get('CLI_SHA', os.environ.get('GITHUB_SHA')) == self.args.cli_source_sha, 'cli-build-source-sha-mismatch')
         require(hashlib.sha256(self.args.binary.read_bytes()).hexdigest() == self.args.binary_sha256.lower(), 'exact-cli-binary-sha-mismatch')
@@ -112,7 +112,7 @@ class Suite:
                 and Path(self.env['ONEMEMORY_DATA_DIR']).resolve() == self.root, 'fixture-environment-not-isolated')
         version = subprocess.run([str(self.args.binary), '--version'], env=self.env, capture_output=True, text=True, timeout=20)
         require(version.returncode == 0 and version.stdout.strip().split()[-1] == self.args.version, 'exact-cli-version-mismatch')
-        self.direct(['config', '--data-dir', str(self.library), '--addr', 'https://dev.rsrs.rs', '--autosync', 'false'])
+        self.direct(['config', '--data-dir', str(self.library), '--addr', 'https://api.dev.rsrs.rs', '--autosync', 'false'])
         self.direct(['model', 'install-bge'], timeout=1200)
         probe = self.direct(['model', 'probe', '--model', 'legacy'], timeout=180)
         require(probe.get('status') == 'ok' and probe.get('summary', {}).get('ready') is True
@@ -290,18 +290,18 @@ class Suite:
         key = self.invoke('keygen', {}, lambda v: bool(v.get('super')) and bool(v.get('path')))
         self.super = key['super']
         self.register_attempted = True
-        registered = self.invoke('register', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs'},
+        registered = self.invoke('register', {'user': self.user, 'pass': self.password, 'addr': 'https://api.dev.rsrs.rs'},
                                  lambda v: v.get('ok') is True and v.get('user') == self.user and bool(v.get('super')))
         self.created_user = self.user
         self.super = registered['super']
-        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs', 'super_pass': self.super},
+        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://api.dev.rsrs.rs', 'super_pass': self.super},
                     lambda v: v.get('ok') is True and v.get('user') == self.user)
         self.invoke('resume_session', {}, lambda v: v.get('resumed') is True and v.get('user') == self.user)
-        self.invoke('server_addr_set', {'addr': 'https://dev.rsrs.rs'}, lambda v: v.get('addr') == 'https://dev.rsrs.rs')
-        self.invoke('server_addr_get', {}, lambda v: v.get('addr') == 'https://dev.rsrs.rs')
+        self.invoke('server_addr_set', {'addr': 'https://api.dev.rsrs.rs'}, lambda v: v.get('addr') == 'https://api.dev.rsrs.rs')
+        self.invoke('server_addr_get', {}, lambda v: v.get('addr') == 'https://api.dev.rsrs.rs')
         self.invoke('sync_config_set', {'autosync': False}, lambda v: v.get('autosync') is False)
         self.invoke('cure_config_set', {'on': False}, lambda v: v.get('cure_auto') is False)
-        self.invoke('config_get', {}, lambda v: Path(v['data_dir']).resolve() == self.library and v['addr'] == 'https://dev.rsrs.rs')
+        self.invoke('config_get', {}, lambda v: Path(v['data_dir']).resolve() == self.library and v['addr'] == 'https://api.dev.rsrs.rs')
         self.invoke('data_dir_set', {'dir': str(self.library)}, lambda v: Path(v['data_dir']).resolve() == self.library)
         self.invoke('diary_mode_set', {'mode': 'verbose'}, lambda v: v.get('action') == 'updated'
                     and v.get('key') == 'diary_mode' and v.get('value') == 'verbose')
@@ -405,7 +405,7 @@ class Suite:
         reset = self.invoke('super_reset', {'super_pass': self.super}, lambda v: v.get('ok') is True and bool(v.get('super')))
         self.super = reset['super']
         self.invoke('logout', {}, lambda v: v.get('credentials_cleared') is True)
-        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://dev.rsrs.rs', 'super_pass': self.super}, lambda v: v.get('ok') is True and v.get('user') == self.user, label='post-logout-relogin')
+        self.invoke('login', {'user': self.user, 'pass': self.password, 'addr': 'https://api.dev.rsrs.rs', 'super_pass': self.super}, lambda v: v.get('ok') is True and v.get('user') == self.user, label='post-logout-relogin')
         actual, version = self.request('POST', '/api/invoke', {'cmd': 'update_check', 'args': {}})
         require(actual == 200 and isinstance(version, dict) and version.get('current') == self.args.version, 'update-check-adapter-contract-failed')
         if isinstance(version.get('latest'), str):
@@ -455,8 +455,8 @@ class Suite:
         if self.root_created and self.register_attempted:
             try:
                 session = json.loads((self.library / 'session.json').read_text(encoding='utf-8'))
-                require(session.get('user') == self.user and session.get('addr') == 'https://dev.rsrs.rs', 'cleanup-account-identity-mismatch')
-                request = urllib.request.Request('https://dev.rsrs.rs/api/self/purge',
+                require(session.get('user') == self.user and session.get('addr') == 'https://api.dev.rsrs.rs', 'cleanup-account-identity-mismatch')
+                request = urllib.request.Request('https://api.dev.rsrs.rs/api/self/purge',
                     json.dumps({'confirm': self.user}).encode(),
                     {'Authorization': 'Bearer ' + session['token'], 'Content-Type': 'application/json'}, method='POST')
                 with self.opener.open(request, timeout=30) as response:

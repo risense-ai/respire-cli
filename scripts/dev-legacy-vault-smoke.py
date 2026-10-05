@@ -14,7 +14,7 @@ import sys
 import urllib.error
 import urllib.request
 
-UPSTREAM = "https://dev.rsrs.rs"
+UPSTREAM = "https://api.dev.rsrs.rs"
 REQUIRED = ("model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade", "cloud_v3_secret_key_recovery_upgrade")
 MODEL_HASHES = {
     "onnx/model.onnx": "5e5619f7cca7380b824d329c157dba10bee7cc00d0c139e82fdb7906051b8e4f",
