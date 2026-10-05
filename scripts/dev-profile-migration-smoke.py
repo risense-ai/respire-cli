@@ -96,6 +96,16 @@ class Smoke(support.Smoke):
                 ("vault_unlock", ("failed to decrypt", "vault could not be unlocked", "super password required", "secret key required")),
                 ("entry_not_found", ("not found #", "memory not found")),
                 ("http_transport", ("connection refused", "connection timed out", "network is unreachable", "tls")),
+                ("legacy_vault_login", ("this account uses a legacy vault",)),
+                ("vault_fetch", ("could not fetch the account vault", "vault missing")),
+                ("vault_unlock", ("super password does not unlock this account",)),
+                ("local_key_mismatch", ("local library uses different key material", "local library key compatibility could not be verified")),
+                ("login_destination", ("target account session", "destination belongs to another account", "destination must not be a symbolic link")),
+                ("runtime_readiness", ("did not become ready", "exited before readiness", "runtime owner changed", "runtime is not running")),
+                ("runtime_account_verification", ("runtime account verification failed", "runtime account list missing accounts", "runtime did not report a selected account", "runtime account or directory differs from the authorized account")),
+                ("library_lock", ("library is locked", "database is locked")),
+                ("server_auth", ("http 401", "status: 401", "unauthorized", "invalid password", "invalid credentials")),
+                ("native_credential_cleanup", ("owned_runtime_stop_failed",)),
             )
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,

@@ -1340,7 +1340,7 @@ Assert-Smoke 'session-owner-personal-readonly-readback' ($ownerConfig.Ok -and $o
 Invoke-Om -Name 'logout' -ArgList @('--json', 'logout') -DataDir $DirB | Out-Null
 $loginAgain = Invoke-Om -Name 'login-b-again' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
 if (-not $loginAgain.Ok) { throw '重新登录失败' }
-$recallAgain = Invoke-Om -Name 'recall-after-relogin' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180
+$recallAgain = Invoke-Om -Name 'recall-after-relogin' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recallAgain.Stdout -notlike "*$marker*") { throw '重新登录后没有检索到标记' }
 $syncAgain = Invoke-Om -Name 'sync-after-relogin' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncAgain.Ok) { throw '重新登录后同步失败' }
