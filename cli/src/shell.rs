@@ -34,6 +34,7 @@ const SLOW: Duration = Duration::from_secs(5);
 enum Page {
     Home,
     Accounts,
+    Migration,
     Server,
     Inject,
     Sync,
@@ -46,6 +47,7 @@ enum Page {
 
 enum ConfirmKind {
     Switch(String),
+    Migrate(String, String),
     Sync,
     InstallM3,
     UninstallM3,
@@ -53,7 +55,6 @@ enum ConfirmKind {
     InstallEngines,
     ProbeEngine,
     RecallMode(String),
-    UpgradeM3,
     Workspace(String),
     Autosync(bool),
     Update(String, String),
@@ -91,6 +92,9 @@ struct AccountRow {
 }
 
 struct Live {
+    index: Value,
+    model_progress: Value,
+    engine: String,
     connected: bool,
     error: String,
     notice: String,
@@ -119,6 +123,7 @@ struct Live {
 }
 
 struct App {
+    migration_profiles: Vec<Value>,
     page: Page,
     cursor: usize,
     overlay: Overlay,
@@ -139,6 +144,9 @@ pub fn run() -> Result<()> {
     {
         anyhow::bail!(i18n::text("need_tty"));
     }
+    // Finish host startup before terminal rendering. Polling never takes over a
+    // runtime, and host actions capture their diagnostics instead of drawing them.
+    crate::rpc::ensure_daemon()?;
     enable_raw_mode()?;
     let mut terminal = match setup() {
         Ok(terminal) => terminal,
@@ -254,6 +262,9 @@ pub fn run() -> Result<()> {
 impl Live {
     fn empty() -> Self {
         Self {
+            index: Value::Null,
+            model_progress: Value::Null,
+            engine: String::new(),
             connected: false,
             error: String::new(),
             notice: String::new(),
@@ -284,6 +295,9 @@ impl Live {
 
     fn clone(&self) -> Self {
         Self {
+            index: self.index.clone(),
+            model_progress: self.model_progress.clone(),
+            engine: self.engine.clone(),
             connected: self.connected,
             error: self.error.clone(),
             notice: self.notice.clone(),
@@ -338,6 +352,7 @@ impl AccountRow {
 impl App {
     fn new(shared: Arc<Mutex<Live>>) -> Self {
         Self {
+            migration_profiles: Vec::new(),
             page: Page::Home,
             cursor: 0,
             overlay: Overlay::None,
@@ -371,11 +386,14 @@ fn t(zh_text: &str, en_text: &str) -> String {
 
 fn rpc(args: &[&str]) -> Result<Value, String> {
     let owned: Vec<String> = args.iter().copied().map(str::to_owned).collect();
-    crate::rpc::query_json(owned).map_err(|err| format!("{err:#}"))
+    crate::rpc::query_existing_json(owned).map_err(|err| format!("{err:#}"))
 }
 
 fn retrieval_action(args: &[&str]) -> Result<Value, String> {
-    let result = rpc(args)?;
+    checked_result(rpc(args)?)
+}
+
+fn checked_result(result: Value) -> Result<Value, String> {
     if matches!(result["status"].as_str(), Some("ok" | "skip")) {
         return Ok(result);
     }
@@ -392,7 +410,46 @@ fn retrieval_action(args: &[&str]) -> Result<Value, String> {
             "Cancelled; current index unchanged",
         ));
     }
-    Err(errors)
+    Err(if errors.is_empty() {
+        format!("Command failed: {}", result["status"])
+    } else {
+        errors
+    })
+}
+
+fn switch_account(name: &str) -> Result<String, String> {
+    let switched = host_command(&["account", "use", name])?;
+    let expected_dir = switched["summary"]["dir"].as_str()
+        .ok_or_else(|| "Profile switch did not return its directory".to_owned())?;
+    let accounts = checked_result(rpc(&["account", "list"])?)?;
+    let actual = accounts["details"]["accounts"].as_array()
+        .and_then(|rows| rows.iter().find(|row| row["current"] == true))
+        .ok_or_else(|| "Runtime did not report its current account".to_owned())?;
+    if actual["name"] != name || actual["dir"] != expected_dir {
+        return Err("Runtime account does not match the requested profile".to_owned());
+    }
+    Ok(t("已切换账户", "Account switched"))
+}
+
+fn host_command(args: &[&str]) -> Result<Value, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let mut command = std::process::Command::new(executable);
+    command.arg("--json").args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output().map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        if let Ok(value) = serde_json::from_slice(&output.stdout) {
+            if let Err(error) = checked_result(value) { return Err(error); }
+        }
+        return Err(format!("Host action failed ({}): {}", output.status,
+            String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let envelope = serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+    checked_result(envelope)
 }
 
 fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
@@ -406,6 +463,8 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
         match rpc(&["status"]) {
             Ok(envelope) if envelope["status"] == "ok" => {
                 let summary = &envelope["summary"];
+                next.index = summary["retrieval_index"].clone();
+                next.model_progress = summary["model_operation"].clone();
                 next.connected = true;
                 next.user = summary["session"]["user"].as_str().unwrap_or("").to_owned();
                 next.addr = summary["server_addr"].as_str().unwrap_or("").to_owned();
@@ -437,6 +496,7 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
             next.inject = guard.inject.iter().map(InjectRow::clone_row).collect();
             next.accounts = guard.accounts.iter().map(AccountRow::clone_row).collect();
             next.doctor = guard.doctor.clone();
+            next.engine = guard.engine.clone();
             next.fresh = guard.fresh;
             next.stale = guard.stale;
             next.missing = guard.missing;
@@ -494,7 +554,11 @@ fn refresh_details_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
                 }
             }
         }
+        if let Ok(envelope) = retrieval_action(&["model", "engine"]) {
+            next.engine = envelope["summary"]["engine"].as_str().unwrap_or("").to_owned();
+        }
         if let Ok(mut guard) = shared.lock() {
+            guard.engine = next.engine;
             guard.accounts = next.accounts;
             guard.doctor = next.doctor;
         }
@@ -530,9 +594,10 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
     }
     match app.page {
         Page::Home => home_key(app, code),
-        Page::Accounts => list_key(app, code, app.live.accounts.len(), |app, code| {
+        Page::Accounts => list_key(app, code, app.live.accounts.len() + 1, |app, code| {
             account_key(app, code)
         }),
+        Page::Migration => list_key(app, code, app.migration_profiles.len(), migration_key),
         Page::Server => server_key(app, code),
         Page::Inject => list_key(app, code, app.live.inject.len() + 2, |app, code| {
             inject_key(app, code)
@@ -541,7 +606,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         Page::Model => list_key(
             app,
             code,
-            10 + model_engines().len() + usize::from(cfg!(windows)),
+            9 + model_engines().len() + usize::from(cfg!(windows)),
             |app, code| model_key(app, code),
         ),
         Page::Workspace => workspace_key(app, code),
@@ -645,6 +710,17 @@ fn account_key(app: &mut App, code: KeyCode) {
     if code != KeyCode::Enter {
         return;
     }
+    if app.cursor == app.live.accounts.len() {
+        match respire::migration::list_legacy_profiles() {
+            Ok(value) => {
+                app.migration_profiles = value["profiles"].as_array().cloned().unwrap_or_default();
+                app.cursor = 0;
+                app.page = Page::Migration;
+            }
+            Err(error) => app.set_notice(format!("{error:#}")),
+        }
+        return;
+    }
     let Some(row) = app.live.accounts.get(app.cursor) else {
         return;
     };
@@ -661,6 +737,21 @@ fn account_key(app: &mut App, code: KeyCode) {
         ),
         ConfirmKind::Switch(name),
     );
+}
+
+fn migration_key(app: &mut App, code: KeyCode) {
+    if code != KeyCode::Enter { return; }
+    let Some(row) = app.migration_profiles.get(app.cursor) else { return; };
+    if !row["migrated_to"].is_null() {
+        app.set_notice(t("该来源已迁移，不会重复复制", "Already migrated; no duplicate copy"));
+        return;
+    }
+    let (Some(id), Some(account)) = (row["source_id"].as_str(), row["account"].as_str()) else { return; };
+    let id = id.to_owned();
+    let account = account.to_owned();
+    ask(app, t(&format!("将所选旧账户复制为 {account}？当前账户保持不变。"),
+        &format!("Copy the selected legacy account into {account}? Current account stays active.")),
+        ConfirmKind::Migrate(id, account));
 }
 
 fn server_key(app: &mut App, code: KeyCode) -> bool {
@@ -883,17 +974,9 @@ fn model_key(app: &mut App, code: KeyCode) {
                         ),
                         ConfirmKind::RecallMode("quality".to_owned()),
                     ),
-                    Some(2) => ask(
-                        app,
-                        t(
-                            "下载 BGE-M3 并重建索引？约 1.15GB，完成前保留旧索引。",
-                            "Download BGE-M3 and rebuild the index? About 1.15GB. The old index remains until complete.",
-                        ),
-                        ConfirmKind::UpgradeM3,
-                    ),
-                    Some(3) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
-                    Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
-                    Some(5) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
+                    Some(2) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
+                    Some(3) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
+                    Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
                     _ => {}
                 }
             }
@@ -1026,7 +1109,6 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
     let task = matches!(
         &kind,
         ConfirmKind::InstallM3
-            | ConfirmKind::UpgradeM3
     )
     .then(model_task::Task::start);
     let cancel = task.as_ref().map(|task| Arc::clone(&task.cancel));
@@ -1042,6 +1124,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             &format!("正在切换到 {name}"),
             &format!("Switching to {name}"),
         ),
+        ConfirmKind::Migrate(_, _) => t("正在迁移所选旧账户", "Migrating selected legacy account"),
         ConfirmKind::Sync => t("正在同步", "Syncing"),
         ConfirmKind::InstallM3 => t("正在安装或校验 BGE-M3", "Installing or verifying BGE-M3"),
         ConfirmKind::UninstallM3 => t("正在卸载 BGE-M3", "Uninstalling BGE-M3"),
@@ -1049,10 +1132,6 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
         ConfirmKind::InstallEngines => t("正在下载 NPU 推理引擎", "Downloading NPU providers"),
         ConfirmKind::ProbeEngine => t("正在验证推理引擎", "Checking inference engine"),
         ConfirmKind::RecallMode(_) => t("正在保存召回模式", "Saving recall mode"),
-        ConfirmKind::UpgradeM3 => t(
-            "正在下载 M3 并重建索引，请等待完成",
-            "Downloading M3 and rebuilding the index; please wait",
-        ),
         ConfirmKind::Workspace(_) => t("正在切换工作区", "Changing workspace"),
         ConfirmKind::Autosync(_) => t("正在保存自动同步", "Saving auto-sync"),
         ConfirmKind::Update(tool, spec) => t(
@@ -1079,8 +1158,10 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
         };
         let result = match kind {
             ConfirmKind::Switch(name) => {
-                rpc(&["account", "use", &name]).map(|_| t("已切换账户", "Account switched"))
+                switch_account(&name)
             }
+            ConfirmKind::Migrate(id, account) => host_command(&["migrate", "--source", &id, "--account", &account])
+                .map(|_| t("迁移完成；可在账户页面切换", "Migration complete; select it on the Accounts page")),
             ConfirmKind::Sync => rpc(&["sync"]).map(|value| sync_notice(&value)),
             ConfirmKind::InstallM3 => model_action(&["model", "install-m3"])
                 .map(|_| t("BGE-M3 处理结束", "BGE-M3 step finished")),
@@ -1103,25 +1184,6 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                     },
                 )
             }
-            ConfirmKind::UpgradeM3 => model_action(&["model", "install-m3"])
-                .and_then(|_| {
-                    if cancel
-                        .as_ref()
-                        .is_some_and(|flag| flag.load(Ordering::Acquire))
-                    {
-                        return Err(t(
-                            "已取消，当前索引保持不变",
-                            "Cancelled; current index unchanged",
-                        ));
-                    }
-                    model_action(&["model", "activate", "m3"])
-                })
-                .map(|_| {
-                    t(
-                        "BGE-M3 和分块索引已启用",
-                        "BGE-M3 and chunked retrieval are active",
-                    )
-                }),
             ConfirmKind::InstallEngines => rpc(&["model", "install-engines"]).map(|v| {
                 format!(
                     "{}: {}",
@@ -1441,6 +1503,7 @@ fn draw(frame: &mut Frame, app: &App) {
         match app.page {
             Page::Home => home_body(app, chunks[0].width.saturating_sub(2) as usize),
             Page::Accounts => accounts_body(app),
+            Page::Migration => migration_body(app),
             Page::Server => server_body(app),
             Page::Inject => Vec::new(),
             Page::Sync => sync_body(app),
@@ -1805,8 +1868,26 @@ fn accounts_body(app: &App) -> Vec<Line<'static>> {
     }
     lines.push(choice(
         app.cursor == app.live.accounts.len(),
+        t("迁移旧版本", "Migrate old version"),
+    ));
+    lines.push(choice(
+        app.cursor == app.live.accounts.len() + 1,
         t("0  返回", "0  Back"),
     ));
+    lines
+}
+
+fn migration_body(app: &App) -> Vec<Line<'static>> {
+    let mut lines = vec![line(t("选择来源目录和旧账户，回车确认；不会覆盖已有库。",
+        "Choose the source directory and legacy account. Existing libraries are preserved."))];
+    for (index, row) in app.migration_profiles.iter().enumerate() {
+        let state = if row["migrated_to"].is_null() { "" } else { " [migrated]" };
+        lines.push(choice(index == app.cursor, format!("{} | {} → {}{state}",
+            row["source"].as_str().unwrap_or(""), row["user"].as_str().unwrap_or(""),
+            row["account"].as_str().unwrap_or(""))));
+    }
+    if app.migration_profiles.is_empty() { lines.push(line(t("没有可迁移的旧库", "No legacy libraries found"))); }
+    lines.push(line(t("0  返回", "0  Back")));
     lines
 }
 
@@ -1956,9 +2037,7 @@ fn sync_body(app: &App) -> Vec<Line<'static>> {
 
 fn model_body(app: &App) -> Vec<Line<'static>> {
     let bge = doctor_value(&app.live, "embedder");
-    let engine = respire::memory::onnx::configured_engine()
-        .map(|e| format!("{e:?}"))
-        .unwrap_or_else(|e| e.to_string());
+    let engine = &app.live.engine;
     let mut lines = vec![
         line(format!("BGE-M3  {bge}")),
         choice(
@@ -2012,13 +2091,11 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             "High quality (model selects titles; API required)",
         ),
     ));
-    lines.push(choice(
-        app.cursor == index + 3,
-        t(
-            "下载 BGE-M3 并重建索引",
-            "Install BGE-M3 and rebuild index",
-        ),
-    ));
+    lines.push(line(format!("{}: {}", t("后台索引", "Background index"), app.live.index)));
+    if app.live.model_progress["active"] == true {
+        lines.push(line(format!("{}: {}  {} / {}", app.live.model_progress["phase"],
+            app.live.model_progress["item"], app.live.model_progress["done"], app.live.model_progress["total"])));
+    }
     lines.push(line(t(
         "默认 CPU；加载超时 120 秒，推理超时 15 秒；失败报错，不切换引擎。",
         "CPU by default; load timeout 120s, inference 15s; failures report errors without switching engines.",
@@ -2028,21 +2105,21 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         "If stuck, run in terminal: rsrs model reset-cpu",
     )));
     lines.push(choice(
-        app.cursor == index + 4,
+        app.cursor == index + 3,
         t(
             "配置高质量召回 API（地址 / 模型 / 密钥）",
             "Configure recall API (URL / model / key)",
         ),
     ));
     lines.push(choice(
-        app.cursor == index + 5,
+        app.cursor == index + 4,
         t("测试快速召回", "Test fast recall"),
     ));
     lines.push(choice(
-        app.cursor == index + 6,
+        app.cursor == index + 5,
         t("测试高质量召回", "Test high-quality recall"),
     ));
-    lines.push(choice(app.cursor == index + 7, t("0  返回", "0  Back")));
+    lines.push(choice(app.cursor == index + 6, t("0  返回", "0  Back")));
     lines
 }
 

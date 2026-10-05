@@ -1103,6 +1103,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Explicitly copy a selected old library into a new account; no startup migration.
+    Migrate {
+        #[arg(long, requires = "account")]
+        source: Option<String>,
+        #[arg(long, requires = "source")]
+        account: Option<String>,
+    },
     /// Spaces (virtual accounts): an owner can create several virtual accounts; each is a space with its own super key and data dir.
     /// Join = a member builds that space's profile on their machine from an invite; they can switch freely; leaving is `kick`.
     Space {
@@ -5221,7 +5228,7 @@ fn main_body() -> i32 {
     }
     if !runtime_policy::client_only() {
         if let Err(error) = respire::migration::ensure_default_home() {
-            eprintln!("default profile migration failed: {error:#}");
+            eprintln!("default profile configuration failed: {error:#}");
             return 1;
         }
     }
@@ -5440,6 +5447,17 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    if let Some(Command::Migrate { source, account }) = args.command.as_ref() {
+        runtime_policy::require_host("explicit legacy migration")?;
+        let value = match (source.as_deref(), account.as_deref()) {
+            (Some(source), Some(account)) => respire::migration::migrate_profile(source, account)?,
+            (None, None) => respire::migration::list_legacy_profiles()?,
+            _ => anyhow::bail!("migration requires both --source and --account"),
+        };
+        let mut envelope = ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
+        envelope.details = value;
+        return emit_result(envelope);
+    }
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
@@ -5504,7 +5522,14 @@ fn run(args: Cli) -> Result<()> {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);
-        let switched = rpc::change_profile(|| run_local(args));
+        let switched = rpc::change_profile(|| {
+            run_local(args)?;
+            if exit_code() != 0 {
+                let errors = CAPTURED.with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
+                anyhow::bail!("{}", errors.unwrap_or_else(|| "profile change failed".to_owned()));
+            }
+            Ok(())
+        });
         DEFER_PROFILE_OUTPUT.set(false);
         OUTPUT_EMITTED.set(false);
         OUTPUT_EXIT_CODE.set(0);
@@ -8184,6 +8209,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Repack
         | Command::Logout { .. }
         | Command::Account { .. }
+        | Command::Migrate { .. }
         | Command::Space { .. }
         | Command::Resort { .. }
         | Command::AgentConfig { .. }

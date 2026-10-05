@@ -823,7 +823,8 @@ pub fn env_root_dir() -> Option<PathBuf> {
 /// after teardown the real library status became "user local, 0 entries" until data_dir was cleared by hand).
 /// An isolated root carries its own client.json — config follows the library — and cannot self-lock, because
 /// data_dir is decided by the env var (in-tree first), not this file.
-fn client_config_path() -> PathBuf {
+/// Host profile transactions preserve the complete configuration on failure.
+pub fn client_config_path() -> PathBuf {
     if let Some(root) = env_root_dir() {
         return root.join("client.json");
     }

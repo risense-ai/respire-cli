@@ -313,7 +313,7 @@ pub(crate) fn index_status() -> Value {
     json!({"state": state.state, "scheduled": state.requested,
         "worker_active": INDEX_ON.load(Ordering::Acquire),
         "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
-        "model_setup": (state.state == "failed").then_some("Inspect the reported error; if BGE-M3 files are missing, use `model install`; rebuild an old index with `reembed`.")})
+        "model_setup": (state.state == "failed").then_some("Automatic BGE-M3 preparation or indexing failed; inspect the reported error and download source settings.")})
 }
 
 pub(crate) fn kick_index() {
@@ -395,6 +395,11 @@ fn index_loop_inner() -> Result<()> {
             };
             index_yield_to_foreground(generation)?;
             let keys = crate::build_session()?;
+            if model == "m3" {
+                respire::model_progress::update("prepare", "BGE-M3", 0, None)?;
+                respire::model_install::prepare_m3_for_index()?;
+                check_sync_context(generation)?;
+            }
             let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
             loop {
                 let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
@@ -702,13 +707,22 @@ pub fn runtime_is_up() -> bool {
 /// Starts the runtime if it is not up yet. The envelope is returned even when
 /// the command status is fail, so a dashboard can show the failing checks.
 pub fn query_json(args: Vec<String>) -> Result<serde_json::Value> {
+    query_json_with_start(args, true)
+}
+
+/// TUI polling must not start or replace a runtime while a host action is running.
+pub(crate) fn query_existing_json(args: Vec<String>) -> Result<serde_json::Value> {
+    query_json_with_start(args, false)
+}
+
+fn query_json_with_start(args: Vec<String>, auto_start: bool) -> Result<serde_json::Value> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--json".to_owned());
     full.extend(args);
     if JOB_TX.get().is_some() {
         return execute_json(full).map_err(|err| anyhow::anyhow!("{err}"));
     }
-    let response = call_method("cli.exec", full, true)?;
+    let response = call_method("cli.exec", full, auto_start)?;
     if let Some(envelope) = response.envelope {
         return Ok(serde_json::to_value(envelope).context("runtime envelope could not be encoded")?);
     }
@@ -738,17 +752,34 @@ pub fn stop_if_running() -> Result<()> {
 /// Host profile changes release the old library before starting its successor.
 pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
+    let config_path = respire::service::client_config_path();
+    let original = match std::fs::read(&config_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
-    let changed = change();
-    // A rejected profile change still restores service for the original profile.
-    let restarted = ensure_daemon_locked();
-    match (changed, restarted) {
-        (Ok(()), result) => result,
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(restart)) => Err(error.context(format!("runtime restart failed: {restart:#}"))),
+    let changed = change().and_then(|_| ensure_daemon_locked());
+    if let Err(error) = changed {
+        // Startup failure must restore the original selection and all API fields,
+        // including the distinction between an absent config and an empty one.
+        match original {
+            Some(bytes) => std::fs::write(&config_path, bytes)
+                .context("profile switch failed and original configuration could not be restored")?,
+            None => match std::fs::remove_file(&config_path) {
+                Ok(()) => {}
+                Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {}
+                Err(remove) => return Err(error.context(format!("configuration rollback failed: {remove}"))),
+            },
+        }
+        return match ensure_daemon_locked() {
+            Ok(()) => Err(error),
+            Err(restart) => Err(error.context(format!("original runtime restart failed: {restart:#}"))),
+        };
     }
+    Ok(())
 }
 
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
@@ -1815,7 +1846,7 @@ fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
     }
 }
 
-fn ensure_daemon() -> Result<()> {
+pub(crate) fn ensure_daemon() -> Result<()> {
     if crate::runtime_policy::client_only() {
         crate::net_rpc::health()?;
         return Ok(());
@@ -1858,6 +1889,8 @@ fn ensure_daemon_locked() -> Result<()> {
 }
 
 fn stop_occupant(pid: u32) -> Result<()> {
+    let health = crate::net_rpc::health()?;
+    anyhow::ensure!(health.pid == pid, "runtime owner changed before shutdown");
     crate::net_rpc::request_stop()?;
     if crate::net_rpc::wait_until_down().is_err() {
         // Reauthenticate before escalation; a different owner may have bound.
@@ -1867,6 +1900,12 @@ fn stop_occupant(pid: u32) -> Result<()> {
             crate::net_rpc::wait_until_down()?;
         }
     }
+    crate::net_rpc::wait_until_exited(pid)?;
+    // Prove lock.db has been released before a successor opens the library.
+    let released = respire::lock::LibraryLock::acquire(
+        std::path::Path::new(&health.data_dir), Duration::from_secs(15),
+    ).context("stopped runtime has not released its library lock")?;
+    drop(released);
     Ok(())
 }
 
@@ -1881,7 +1920,8 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
             anyhow::ensure!(
                 health.pid == child.id()
                     && crate::mcp::exe_matches_dest(&health.exe, executable)
-                    && health.bin == env!("CARGO_PKG_VERSION"),
+                    && health.bin == env!("CARGO_PKG_VERSION")
+                    && health.data_dir == respire::service::data_dir().display().to_string(),
                 "runtime owner changed during startup"
             );
             return Ok(());

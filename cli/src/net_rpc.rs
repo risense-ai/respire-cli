@@ -354,6 +354,32 @@ pub fn wait_until_down() -> Result<()> {
     bail!("runtime did not exit after stop")
 }
 
+/// A closed listener does not prove that the library holder has exited.
+pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
+    for _ in 0..STOP_POLLS {
+        #[cfg(windows)]
+        let output = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .output().context("cannot check stopped runtime process")?;
+        #[cfg(unix)]
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output().context("cannot check stopped runtime process")?;
+        let text = String::from_utf8_lossy(&output.stdout);
+        #[cfg(windows)]
+        let alive = {
+            anyhow::ensure!(output.status.success(), "runtime process inspection failed");
+            text.lines().any(|line| line.split(',').nth(1)
+                .is_some_and(|value| value.trim_matches('"') == pid.to_string()))
+        };
+        #[cfg(unix)]
+        let alive = text.trim() == pid.to_string();
+        if !alive { return Ok(()); }
+        std::thread::sleep(STOP_WAIT);
+    }
+    bail!("runtime listener closed but process {pid} has not exited")
+}
+
 pub(crate) fn kill_pid(pid: u32) {
     if pid == 0 || pid == std::process::id() {
         return;
