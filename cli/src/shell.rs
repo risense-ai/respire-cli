@@ -149,13 +149,7 @@ pub fn run() -> Result<()> {
     // runtime, and host actions capture their diagnostics instead of drawing them.
     crate::rpc::ensure_daemon()?;
     enable_raw_mode()?;
-    let mut terminal = match setup() {
-        Ok(terminal) => terminal,
-        Err(error) => {
-            disable_raw_mode()?;
-            return Err(error);
-        }
-    };
+    let mut terminal = setup()?;
     let stop = Arc::new(AtomicBool::new(false));
     let shared = Arc::new(Mutex::new(Live::empty()));
     let worker_stop = Arc::clone(&stop);
@@ -260,7 +254,13 @@ pub fn run() -> Result<()> {
             disable_raw_mode()?;
             let login = crate::login::run(None, None, None, None, true, false, None, false);
             enable_raw_mode()?;
-            terminal = setup()?;
+            terminal = match setup() {
+                Ok(terminal) => terminal,
+                Err(error) => {
+                    stop.store(true, Ordering::Relaxed);
+                    return Err(error);
+                }
+            };
             app.set_notice(match login {
                 Ok(()) => t("登录成功；账户已验证", "Signed in; account verified"),
                 Err(error) => format!("{error:#}"),
@@ -2309,8 +2309,20 @@ fn fail_line(text: String) -> Line<'static> {
 }
 
 fn setup() -> Result<Terminal<CrosstermBackend<Stdout>>> {
-    execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
-    Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
+    let result = (|| -> Result<_> {
+        execute!(stdout(), EnterAlternateScreen, event::EnableBracketedPaste)?;
+        Ok(Terminal::new(CrosstermBackend::new(stdout()))?)
+    })();
+    match result {
+        Ok(terminal) => Ok(terminal),
+        Err(mut error) => {
+            let restore = execute!(stdout(), event::DisableBracketedPaste, LeaveAlternateScreen, crossterm::cursor::Show);
+            let raw_mode = disable_raw_mode();
+            if let Err(cleanup) = restore { error = error.context(format!("terminal restoration failed: {cleanup}")); }
+            if let Err(cleanup) = raw_mode { error = error.context(format!("disabling raw mode failed: {cleanup}")); }
+            Err(error)
+        }
+    }
 }
 
 fn restore(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {

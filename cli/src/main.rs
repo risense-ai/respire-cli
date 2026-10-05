@@ -3849,7 +3849,7 @@ fn run_keygen(pass: Option<&str>, force: bool) -> Result<()> {
     );
     result
         .actions
-        .push("login --user <user> --pass <password>".into());
+        .push("login --interactive --user <user> --pass <password>".into());
     emit_result(result)
 }
 

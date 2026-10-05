@@ -55,6 +55,14 @@ impl PreparedLogin {
         let user = authorized["user"].as_str().context("authorization did not return a user")?;
         let keys = crate::auth::unlock_session_keys(&local, password, legacy_super, user)?;
         let cloud = Self::fetch_vault(addr, authorized)?;
+        if cloud["version"].as_i64() == Some(4) {
+            // A prior publication can have committed even when both its response
+            // and the confirmation fetch were lost. Resume only with the saved
+            // recovery code and proof that both wraps contain the same data key.
+            let recovery = new_super.filter(|code| !code.is_empty())
+                .context("cloud vault is already v4; resume with --new-super <displayed-recovery-code>")?;
+            return Self::prepare_with_vault(addr, authorized, recovery.to_owned(), cloud, Some((original, keys.urk)));
+        }
         ensure!(cloud["version"].as_i64().is_some_and(|version| (2..=3).contains(&version))
             && ["kdf_salt", "wrapped_urk", "urk_nonce"].iter().all(|field| cloud[*field] == local[*field]),
             "cloud vault differs from the selected legacy library; original keys and data were preserved");
