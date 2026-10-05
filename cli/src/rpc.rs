@@ -1007,9 +1007,10 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
     if probe_runtime()?.is_some() {
         return Ok(());
     }
+    let name = pipe_name()?;
     #[cfg(unix)]
     clear_dead_socket();
-    let listener = match ListenerOptions::new().name(pipe_name()?).create_sync() {
+    let listener = match ListenerOptions::new().name(name).create_sync() {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             drop(boot);
@@ -1839,18 +1840,40 @@ fn pipe_name() -> Result<Name<'static>> {
 /// tests, and each test points `ONEMEMORY_DATA_DIR` somewhere else.
 #[cfg(unix)]
 fn socket_path() -> PathBuf {
-    runtime_dir().join("rpc.sock")
+    use std::os::unix::ffi::OsStrExt;
+    use sha2::{Digest, Sha256};
+    let path = runtime_dir().join("rpc.sock");
+    // macOS has 104 bytes in sun_path, including its terminating NUL.
+    if path.as_os_str().as_bytes().len() < 104 {
+        return path;
+    }
+    let identity = hex::encode(Sha256::digest(path.as_os_str().as_bytes()));
+    PathBuf::from(format!("/tmp/rsrs-runtime-{}", respire_spawn::effective_user_id()))
+        .join(format!("{}.sock", &identity[..32]))
 }
 
-/// Unix keeps the socket inside the data dir so a dead runtime can be cleared.
-/// A namespaced name under `/tmp` or `$TMPDIR` stays behind after a crash and the
-/// next `--runtime-internal` never becomes ready.
+/// Short library paths keep the socket beside the runtime record. Long paths
+/// use a private per-user directory; clear_dead_socket handles crash leftovers.
 #[cfg(unix)]
 fn unix_socket_name() -> Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = socket_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if path == runtime_dir().join("rpc.sock") {
+            std::fs::create_dir_all(parent)?;
+        } else {
+            match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(error) => return Err(error.into()),
+            }
+            let metadata = std::fs::symlink_metadata(parent)?;
+            anyhow::ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
+                && metadata.uid() == respire_spawn::effective_user_id()
+                && metadata.mode() & 0o777 == 0o700,
+                "runtime socket directory must be owned by this user with mode 0700");
+        }
     }
     path.to_fs_name::<GenericFilePath>()
         .context("failed to build the runtime socket name")

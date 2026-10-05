@@ -200,6 +200,9 @@ class Fixture:
                    ONEMEMORY_NO_AUTOSYNC="1")
         for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "ONEMEMORY_DATA_DIR", "ONEMEMORY_BIN_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            env['ONEMEMORY_RPC_PORT'] = str(listener.getsockname()[1])
         return env
 
     def direct(self, env, command, allow_pending=False, timeout=150):
@@ -244,6 +247,9 @@ class Fixture:
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
         self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+            env=self.b, capture_output=True, timeout=60)
+        require(stopped.returncode == 0, 'independent_login_runtime_stop_failed')
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address

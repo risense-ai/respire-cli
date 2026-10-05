@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -139,6 +140,9 @@ class Smoke:
             DS_API_KEY="ci-local-fixture", NO_PROXY="127.0.0.1,localhost")
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             self.env.pop(name, None)
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            self.env['ONEMEMORY_RPC_PORT'] = str(listener.getsockname()[1])
         self.report = {"binary_sha256": args.binary_sha256, "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"),
             "version": args.version, "target": "https://api.dev.rsrs.rs", "cases": {},

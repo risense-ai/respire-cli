@@ -623,7 +623,11 @@ class Smoke(support.Smoke):
             result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
                 "--source", candidates[0]["source_id"], "--account", "rejected-schema"],
                 env=self.default_env(attempt), cwd=self.root, capture_output=True, timeout=60)
-            require(result.returncode != 0 and not (Path(attempt["HOME"]) / ".rsrs").exists(), "invalid_primary_key_migration_not_rejected")
+            rejected = json.loads(result.stdout)
+            require(result.returncode == 1 and rejected.get("status") == "fail"
+                and any("incompatible pre-encrypted demo format" in error for error in rejected.get("errors", []))
+                and not (Path(attempt["HOME"]) / ".rsrs/accounts/rejected-schema").exists(),
+                "invalid_primary_key_migration_not_rejected")
             require(digest(source / "onememory.db") == before, "rejected_source_database_changed")
         self.passed("migration_incompatible_primary_keys_rejected", genuine_ciphertext_preserved=True, variants=2)
         link_env = self.env("symlink-root")
