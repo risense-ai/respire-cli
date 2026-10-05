@@ -608,10 +608,28 @@ class Smoke(support.Smoke):
         link_env = self.env("symlink-root")
         link_home = Path(link_env["HOME"])
         (link_home / ".onememory").symlink_to(fixture["source"], target_is_directory=True)
-        result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
-            "--source", "symlink-source", "--account", "rejected-link"],
+        source_database = digest(fixture["source"] / "onememory.db")
+        source_session = digest(fixture["source"] / "session.json")
+        listed = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate"],
             env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
-        require(result.returncode != 0 and not (link_home / ".rsrs").exists(), "symlink_root_migration_not_rejected")
+        listing = json.loads(listed.stdout)
+        if listed.returncode != 0:
+            require(listing.get("status") == "fail" and any("symbolic link" in error
+                for error in listing.get("errors", [])), "symlink_listing_failed_for_unrelated_reason")
+        else:
+            require(listing.get("status") == "ok", "symlink_listing_status_invalid")
+            for row in listing["details"]["profiles"]:
+                result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
+                    "--source", row["source_id"], "--account", "rejected-link"],
+                    env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
+                rejection = json.loads(result.stdout)
+                require(result.returncode != 0 and rejection.get("status") == "fail"
+                    and any("symbolic link" in error for error in rejection.get("errors", [])),
+                    "symlink_root_migration_not_rejected")
+        require(not (link_home / ".rsrs").exists(), "symlink_root_migration_created_destination")
+        require(digest(fixture["source"] / "onememory.db") == source_database
+            and digest(fixture["source"] / "session.json") == source_session,
+            "rejected_symlink_source_changed")
         self.passed("migration_symlink_root_rejected", external_target_is_owned_fixture=True)
         source_session = digest(fixture["source"] / "session.json")
         candidate = self.cli(self.default_env(env), "migrate")["details"]["profiles"][0]
