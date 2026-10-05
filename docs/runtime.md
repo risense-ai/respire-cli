@@ -82,7 +82,9 @@ The hidden `--runtime-internal` entry is reserved for host lifecycle and automat
 
 The host command `rsrs --runtime-internal --stop` supports runtimes that still
 require a loopback token, including 1.0.9. After an HTTP 401, the client retries
-once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file. It does not
+once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file, after the
+host endpoint record and OS listener PID identify a running Respire process. An
+unverified listener receives no token. The client does not
 create or replace credentials. Other HTTP errors and connection failures are
 not retried. Current loopback runtimes continue to work without a token file.
 Health checks and normal RPC use the same compatibility rule, so host upgrades

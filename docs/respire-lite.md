@@ -11,11 +11,11 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 | Task conditions | Include a `【触发】` line with a confirmed date (and time zone if needed) or verifiable prerequisite. Ask if unclear; check dates and prerequisite evidence when recalling the task, then mention due conditions. There is no automatic validation or background reminder. |
 | Importance | Use `--importance important` for reusable findings or `--importance trivial` for diary entries; do not use numeric scores. |
 
-## 关联召回
+## Related recall
 
-日常先用 `rsrs recall "项目名+核心词" --titles --json`，默认 20 条标题；按相关性用 `show` 读全文，通常最多两轮点深。`related` 是独立关联候选，不是原命中；标题和关系只作查阅线索。`superseded_by` 指向仍活跃的新版时，先读新版，旧版只作历史依据。
+Start routine searches with `rsrs recall "project name + key terms" --titles --json`, which returns up to 20 titles by default. Read selected records with `show --json`, usually within two rounds. `related` contains separate lookup hints, not primary hits. If `superseded_by` points to a live newer record, read it first and treat the old record as historical evidence.
 
-新结论替代旧决策并需保留弃因时，用 `remember ... --importance important --supersedes <旧id>`；确需横向关系时用 `--see-also <id,id>`。与修改/合并按事实选择，不为增加关联而新建重复条。库中所有写入端升级后才启用关系写入；旧版重写可能丢字段。
+Use `remember ... --importance important --supersedes <old-id>` when a new conclusion replaces an old decision, and retain the reason for replacement. Use `--see-also <id,id>` for necessary cross-references. Choose edits or merges based on the facts; do not create duplicates just to add a relation. Enable relation writes only after every writer for the library is upgraded; older writers may drop fields when resealing.
 
 ## 中文完整规则
 

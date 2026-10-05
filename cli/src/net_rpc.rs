@@ -266,6 +266,10 @@ fn send_loopback(
             if crate::runtime_policy::client_only() {
                 return Err(RuntimeError::Unauthorized.into());
             }
+            let pid = pid_listening_on(rpc_port()).ok_or(RuntimeError::Unauthorized)?;
+            if !crate::rpc::recorded_runtime_listener(pid) || !pid_is_respire(pid) {
+                return Err(RuntimeError::Unauthorized.into());
+            }
             let token = read_token()?.ok_or(RuntimeError::Unauthorized)?;
             send(request.set("Authorization", &format!("Bearer {token}")))
                 .map_err(crate::runtime_error::http)
