@@ -46,7 +46,6 @@ jobs:
         env:
           ONEMEMORY_ENGINE: ${{ inputs.engine }}
           ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/model
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
           PROBE_MODEL: ${{ inputs.model }}
           ONEMEMORY_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}

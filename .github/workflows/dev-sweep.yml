@@ -135,7 +135,6 @@ jobs:
           ONEMEMORY_ENGINE: cpu
           CLI_SHA: ${{ inputs.cli_sha }}
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'

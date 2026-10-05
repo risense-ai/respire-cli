@@ -133,7 +133,6 @@ jobs:
           CLI_SHA: ${{ needs.plan.outputs.sha }}
           ONEMEMORY_ENGINE: cpu
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
