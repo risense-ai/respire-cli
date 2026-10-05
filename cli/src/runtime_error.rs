@@ -15,7 +15,7 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::Unavailable => write!(f, "runtime_unavailable: host HTTP runtime is not running at {}; start `rsrs --runtime-internal` in the host terminal", crate::net_rpc::rpc_base_url()),
             Self::TokenUnreadable(detail) => write!(f, "runtime_token_unreadable: {detail}; have the host provide RPC authentication"),
-            Self::Unauthorized => write!(f, "runtime_unauthorized: HTTP runtime rejected the request; loopback clients need an updated host runtime, and non-loopback clients need a valid token"),
+            Self::Unauthorized => write!(f, "runtime_unauthorized: HTTP runtime rejected authentication; legacy loopback runtimes require their existing ONEMEMORY_RPC_TOKEN or runtime token file, and non-loopback clients need a valid token"),
             Self::Transport(detail) => write!(f, "runtime_transport: {detail}; check sandbox access to the host HTTP runtime"),
         }
     }
