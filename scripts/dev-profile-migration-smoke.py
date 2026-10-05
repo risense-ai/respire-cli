@@ -513,8 +513,11 @@ class Smoke(support.Smoke):
         expected_server = os.environ.get("RESPIRE_DEV_SERVER_SHA", "")
         require(os.environ.get("RESPIRE_DEV_SERVER_ADDR") == support.UPSTREAM
             and re.fullmatch("[0-9a-f]{40}", expected_server), "exact_development_server_required")
-        with self.opener.open(support.UPSTREAM + "/ready", timeout=45) as ready:
-            require(ready.status == 200 and ready.headers.get("X-Respire-Server-SHA") == expected_server,
+        with self.opener.open(support.UPSTREAM + "/health", timeout=45) as health:
+            raw = health.read(1024 * 1024 + 1)
+            require(len(raw) <= 1024 * 1024, "deployment_response_too_large")
+            value = json.loads(raw)
+            require(health.status == 200 and isinstance(value, dict) and value.get("source_revision") == expected_server,
                 "development_server_revision_mismatch")
         self.report["server_sha"] = expected_server
         self.keys = keyring_backend.create(self.root / "keyring-home")

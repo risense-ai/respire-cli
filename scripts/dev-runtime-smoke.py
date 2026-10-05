@@ -253,8 +253,8 @@ class Smoke:
         expected = os.environ.get('RESPIRE_DEV_SERVER_SHA', '')
         require(os.environ.get('RESPIRE_DEV_SERVER_ADDR') == DEV and re.fullmatch('[0-9a-f]{40}', expected),
                 'exact_development_server_required')
-        code, ready, headers = self.http(DEV, 'GET', '/ready')
-        require(code == 200 and headers.get('X-Respire-Server-SHA', '') == expected,
+        code, health, _ = self.http(DEV, 'GET', '/health')
+        require(code == 200 and isinstance(health, dict) and health.get('source_revision') == expected,
                 'development_server_revision_mismatch')
         self.report['server_sha'] = expected
         self.direct(['config', '--data-dir', str(self.library), '--addr', DEV, '--autosync', 'false', '--cure-auto', 'false'])
