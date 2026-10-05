@@ -79,7 +79,7 @@ if (!commits.length) lines.push('No additional commits since the previous releas
 if (previous) lines.push(`[Full comparison](https://github.com/${repository}/compare/${previous.release.tag_name}...${sha})`, '');
 lines.push('## Install', '', '```sh', `npm install -g @rsrsai/cli@${tag.slice(1)}`, 'rsrs --version', '```', '', '## Source and validation', '',
   `- Source: [\`${sha}\`](https://github.com/${repository}/commit/${sha}).`,
-  '- Publication requires the existing platform, CLI, API and real development website acceptance gates.');
+  '- Publication requires the existing platform, CLI and development API acceptance gates.');
 if (process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID)) lines.push(`- [Release workflow](https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}).`);
 lines.push('');
 writeFileSync(output, lines.join('\n'), 'utf8');
