@@ -29,7 +29,8 @@ REQUIRED = ("model_cpu_real", "onememory_multiaccount_wal_migrated",
     "legacy_api_defaults_rewritten", "migration_repeated_start_idempotent",
     "migration_interrupted_restart_recovered", "existing_rsrs_preserved_and_legacy_imported",
     "migrated_outbox_sync_and_independent_decrypt", "migration_incompatible_primary_keys_rejected",
-    "migration_symlink_root_rejected", "migration_client_only_does_not_write")
+    "migration_symlink_root_rejected", "migration_client_only_does_not_write",
+    "startup_does_not_migrate", "migration_source_order_and_backup_only_idempotent")
 
 
 class Smoke(support.Smoke):
@@ -410,18 +411,35 @@ class Smoke(support.Smoke):
             current_env = dict(env, ONEMEMORY_DATA_DIR=str(current["source"]))
             current_session = self.session(current_env)
         default = self.default_env(env)
+        self.cli(default, "status")
+        root = home / ".rsrs"
+        require(not list(root.rglob(".rsrs-migration.json")), "startup_automatically_migrated_profiles")
+        require(not any(json.loads(p.read_text()).get("user") in {f["account"]["user"] for f in fixtures}
+            for p in root.rglob("session.json")), "startup_copied_legacy_accounts")
+        original_config = (root / "client.json").read_bytes() if (root / "client.json").exists() else None
+        original_selection = self.cli(default, "config")["summary"]["data_dir"]
+        self.passed("startup_does_not_migrate", existing_target=target)
+        candidates = self.cli(default, "migrate")["details"]["profiles"]
+        for fixture in fixtures:
+            rows = [row for row in candidates if Path(row["source"]).resolve() == fixture["source"].resolve()]
+            require(len(rows) == 1 and rows[0]["user"] == fixture["account"]["user"], "selected_migration_source_not_unique")
+            fixture["source_id"] = rows[0]["source_id"]
+            fixture["destination_account"] = rows[0]["account"]
+            fixture["destination"] = root / "accounts" / rows[0]["account"]
         if interrupt:
             padding = fixtures[0]["source"] / "migration-copy-fixture.bin"
             with padding.open("wb") as stream:
                 for _ in range(64):
                     stream.write(bytes(1024 * 1024))
-            process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "status"],
+            process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
+                "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
                 env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             deadline = time.monotonic() + 30
             stage_seen = False
             while process.poll() is None and time.monotonic() < deadline:
                 stage = home / ".rsrs-migration-staging"
-                if stage.is_dir() and any(p.is_dir() for p in stage.iterdir()) and not (home / ".rsrs").exists():
+                if stage.is_dir() and any((p / "onememory.db").is_file() for p in stage.iterdir()) \
+                    and not fixtures[0]["destination"].exists():
                     stage_seen = True
                     process.kill()
                     break
@@ -430,12 +448,17 @@ class Smoke(support.Smoke):
                 process.kill()
             process.wait(timeout=10)
             require(stage_seen, "interruption_fixture_did_not_reach_real_stage")
-            require(not (home / ".rsrs").exists(), "interruption_fixture_missed_prepublication_window")
-        self.cli(default, "status")
+            require(not fixtures[0]["destination"].exists(), "interruption_fixture_missed_prepublication_window")
+        for fixture in fixtures:
+            migrated = self.cli(default, "migrate", "--source", fixture["source_id"],
+                "--account", fixture["destination_account"])["summary"]
+            require(migrated.get("state") == "migrated" and Path(migrated["dir"]).resolve() == fixture["destination"].resolve(),
+                "selected_migration_not_published")
+            require(((root / "client.json").read_bytes() if (root / "client.json").exists() else None) == original_config,
+                "explicit_migration_changed_current_configuration")
         self.migrated(home, fixtures)
-        if name == "multiaccount":
-            selected = self.cli(default, "config")["summary"]["data_dir"]
-            require(Path(selected).resolve() == fixtures[-1]["destination"].resolve(), "migration_active_account_not_preserved")
+        selected = self.cli(default, "config")["summary"]["data_dir"]
+        require(Path(selected).resolve() == Path(original_selection).resolve(), "migration_changed_selected_account")
         for fixture in fixtures:
             with self.selected_profile(default, fixture) as user_env:
                 require("ONEMEMORY_SUPER" not in user_env, "migration_super_override_present")
@@ -469,7 +492,29 @@ class Smoke(support.Smoke):
             require(receipt.get("snapshot_only") is True and receipt.get("legacy_runtime_active") is True,
                 "active_legacy_lock_snapshot_not_declared")
             selected = self.cli(default, "config")["summary"]["data_dir"]
-            require(Path(selected).resolve() == fixtures[-1]["destination"].resolve(), "migration_active_account_not_preserved")
+            require(Path(selected).resolve() == Path(original_selection).resolve(), "migration_changed_selected_account")
+            # A newly appearing earlier source and backup-only directory must
+            # not change the identity of already copied profiles.
+            backup = home / ".respire" / "bak"
+            backup.mkdir(parents=True)
+            shutil.copyfile(fixtures[0]["source"] / "session.json", backup / "session.json")
+            rows = self.cli(default, "migrate")["details"]["profiles"]
+            require({row["source_id"] for row in rows} == {f["source_id"] for f in fixtures},
+                "backup_only_directory_became_migration_source")
+            earlier = home / ".respire" / "accounts" / "aaa"
+            earlier.mkdir(parents=True)
+            shutil.copyfile(fixtures[0]["source"] / "session.json", earlier / "session.json")
+            reordered = self.cli(default, "migrate")["details"]["profiles"]
+            require(len(reordered) == len(fixtures) + 1, "source_order_fixture_not_observed")
+            for fixture in reversed(fixtures):
+                repeated = self.cli(default, "migrate", "--source", fixture["source_id"], "--account", "different-name")["summary"]
+                require(repeated.get("state") == "already_migrated"
+                    and Path(repeated["dir"]).resolve() == fixture["destination"].resolve(),
+                    "source_order_changed_existing_migration_identity")
+            require(before == {str(p.relative_to(home)): digest(p) for p in root.rglob(".rsrs-migration.json")},
+                "repeat_explicit_migration_changed_receipts")
+            require(not (root / "accounts" / "different-name").exists(), "repeat_explicit_migration_duplicated_account")
+            self.passed("migration_source_order_and_backup_only_idempotent", selected_sources=len(fixtures), new_earlier_source=True)
             self.passed("onememory_multiaccount_wal_migrated", profiles=len(fixtures),
                 foreign_deleted_ciphertexts_preserved=sum(len(f["foreign_tombstones"]) for f in fixtures))
             self.passed("legacy_keys_migrated_without_super_override", old_service_unchanged=True)
@@ -552,7 +597,10 @@ class Smoke(support.Smoke):
                 db.execute("INSERT INTO memories VALUES(?,?,?,?,?,?,?)", (fixture["id"],fixture["account"]["user"],label,
                     fixture["cipher"][0],fixture["cipher"][1],"2026-10-03T00:00:00Z","2026-10-03T00:00:00Z"))
             before = digest(source / "onememory.db")
-            result = subprocess.run([str(self.args.binary), "--direct", "--json", "status"],
+            candidates = self.cli(self.default_env(attempt), "migrate")["details"]["profiles"]
+            require(len(candidates) == 1, "invalid_schema_source_fixture_missing")
+            result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
+                "--source", candidates[0]["source_id"], "--account", "rejected-schema"],
                 env=self.default_env(attempt), cwd=self.root, capture_output=True, timeout=60)
             require(result.returncode != 0 and not (Path(attempt["HOME"]) / ".rsrs").exists(), "invalid_primary_key_migration_not_rejected")
             require(digest(source / "onememory.db") == before, "rejected_source_database_changed")
@@ -560,11 +608,13 @@ class Smoke(support.Smoke):
         link_env = self.env("symlink-root")
         link_home = Path(link_env["HOME"])
         (link_home / ".onememory").symlink_to(fixture["source"], target_is_directory=True)
-        result = subprocess.run([str(self.args.binary), "--direct", "--json", "status"],
+        result = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate",
+            "--source", "symlink-source", "--account", "rejected-link"],
             env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
         require(result.returncode != 0 and not (link_home / ".rsrs").exists(), "symlink_root_migration_not_rejected")
         self.passed("migration_symlink_root_rejected", external_target_is_owned_fixture=True)
         source_session = digest(fixture["source"] / "session.json")
+        candidate = self.cli(self.default_env(env), "migrate")["details"]["profiles"][0]
         for variable in ("ONEMEMORY_CLIENT_ONLY", "ONEMEMORY_NO_AUTOSTART"):
             guarded = self.default_env(env)
             guarded[variable] = "1"
@@ -572,6 +622,12 @@ class Smoke(support.Smoke):
                 cwd=self.root, capture_output=True, timeout=30)
             require(result.returncode == 0 and not (Path(env["HOME"]) / ".rsrs").exists()
                 and digest(fixture["source"] / "session.json") == source_session, "client_only_migration_wrote_data")
+            blocked = subprocess.run([str(self.args.binary), "--json", "migrate",
+                "--source", candidate["source_id"], "--account", "blocked"], env=guarded,
+                cwd=self.root, capture_output=True, timeout=30)
+            require(blocked.returncode != 0 and not (Path(env["HOME"]) / ".rsrs").exists()
+                and digest(fixture["source"] / "session.json") == source_session,
+                "client_only_explicit_migration_wrote_data")
         self.passed("migration_client_only_does_not_write", guards=2)
 
 

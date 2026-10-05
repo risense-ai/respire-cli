@@ -4033,7 +4033,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
                 &mut items,
                 "embedder",
                 false,
-                format!("unavailable: {e} (action: rsrs model install or rsrs doctor --fix)"),
+                format!("unavailable: {e} (the runtime prepares BGE-M3 automatically for pending index work; inspect model-task progress and download source settings)"),
             );
         }
         Err(_) => {
@@ -4068,7 +4068,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     let store = build_local()?;
     match store.index_pending("m3") {
         Ok(pending) => add(&mut items, "model index", !pending,
-            if pending { "BGE-M3 index needs rebuilding; run rsrs reembed".to_owned() } else { "BGE-M3 index ready".to_owned() }),
+            if pending { "BGE-M3 index pending; the runtime prepares the model and rebuilds automatically in the background".to_owned() } else { "BGE-M3 index ready".to_owned() }),
         Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
     }
 
