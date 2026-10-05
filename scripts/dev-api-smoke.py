@@ -211,7 +211,6 @@ class Smoke:
 
     def user_and_sync(self, a, b):
         token = a['token']
-        self.check('GET', '/health', predicate=lambda r: r.get('ok') is True and r.get('service') == 'respire', label='service-liveness')
         self.check('GET', '/ready', predicate=lambda r: r.get('database') == 'ready' and r.get('ok') is True, label='database-readiness')
         for path in ('/health', '/ready'):
             self.check('DELETE', path, token=token, status=404, predicate=lambda r: 'error' in r,
@@ -497,6 +496,7 @@ class Smoke:
     def run(self):
         self.preflight()
         # Check deployment identity before any fixture creation or privileged write.
+        self.check('GET', '/health', predicate=lambda r: r.get('ok') is True and r.get('service') == 'respire', label='service-liveness')
         self.check('GET', '/ready', predicate=lambda r: r.get('database') == 'ready' and r.get('ok') is True,
                    label='exact-server-deployment-ready')
         self.check('GET', '/admin/me', token=self.seed, predicate=lambda r: r.get('role') == 'owner', label='development-seed-owner-check')
