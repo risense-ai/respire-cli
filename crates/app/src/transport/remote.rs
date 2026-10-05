@@ -2,7 +2,7 @@
 //!
 //! local-first: server = dumb ciphertext store. The client only moves two ways:
 //!   push (local → cloud upsert, LWW), pull (cloud → local full, LWW).
-//! Search / decrypt / rerank are all local; the server does not take part.
+//! Search / decrypt are all local; the server does not take part.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

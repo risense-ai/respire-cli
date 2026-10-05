@@ -525,12 +525,12 @@ class Smoke(support.Smoke):
         env = self.env("model-probe")
         version = subprocess.run([str(self.args.binary), "--version"], env=env, capture_output=True, timeout=20)
         require(version.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", version.stdout.decode()), "binary_version_mismatch")
-        self.cli(env, "model", "install-bge", timeout=900)
+        self.cli(env, "model", "install-m3", timeout=900)
         require(all(digest(self.model / p) == h for p, h in support.MODEL_HASHES.items()), "model_hash_mismatch")
         self.cli(env, "model", "engine", "cpu")
-        probe = self.cli(env, "model", "probe", "--model", "legacy")["summary"]
-        require(probe.get("ready") is True and probe.get("dimensions") == 768 and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
-        self.passed("model_cpu_real", dimensions=768)
+        probe = self.cli(env, "model", "probe", "--model", "m3")["summary"]
+        require(probe.get("ready") is True and probe.get("dimensions") == 1024 and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
+        self.passed("model_cpu_real", dimensions=1024)
         self.case("multiaccount", [(".onememory", "1memory")])
         self.case("respire", [(".respire", "respire")])
         self.case("interrupted", [(".respire", "respire")], interrupt=True)

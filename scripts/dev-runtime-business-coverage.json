@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "scope": "Observed CLI and authenticated runtime equivalents for the former 72 dashboard actions.",
-  "retained": 66,
-  "removed_by_requirement": 6,
+  "retained": 64,
+  "removed_by_requirement": 8,
   "actions": [
     {
       "action": "status",
@@ -405,27 +405,19 @@
         },
         {
           "suite": "runtime",
-          "case": "rerank_status_real"
+          "case": "m3_status_real"
         }
       ]
     },
     {
       "action": "rerank_model_status",
-      "evidence": [
-        {
-          "suite": "runtime",
-          "case": "rerank_status_real"
-        }
-      ]
+      "removed_by_requirement": true,
+      "reason": "The local cross-encoder model was explicitly removed; only BGE-M3 embeddings remain."
     },
     {
       "action": "rerank_model_install",
-      "evidence": [
-        {
-          "suite": "cli",
-          "case": "model-install-rerank"
-        }
-      ]
+      "removed_by_requirement": true,
+      "reason": "The local cross-encoder model was explicitly removed; only BGE-M3 embeddings remain."
     },
     {
       "action": "inject_targets",

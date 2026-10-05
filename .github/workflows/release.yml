@@ -132,7 +132,7 @@ jobs:
           RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
           ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/sweep-model/bge-base-zh-v1.5
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'

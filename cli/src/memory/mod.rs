@@ -7,7 +7,7 @@
 //! - public surface is `MemoryEngine` plus pure domain types
 //! - server, client, and CLI all go through this facade
 
-pub use respire_app::memory::{bge, crypto, defrag, engine, onnx, rerank, search};
+pub use respire_app::memory::{bge, crypto, defrag, engine, onnx, search};
 pub use respire_app::memory::{hydrate_local, reembed_embedding, MemoryEngine, SessionKeys};
 
 pub mod model {

@@ -391,9 +391,8 @@ function Invoke-Om {
     $psi.Environment['USERPROFILE'] = $SmokeHome
     $psi.Environment['XDG_CONFIG_HOME'] = Join-Path $SmokeHome '.config'
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
-    $psi.Environment['ONEMEMORY_MODEL_DIR'] = Join-Path $Root 'models/bge-base-zh-v1.5'
     $psi.Environment['ONEMEMORY_M3_DIR'] = Join-Path $Root 'models/bge-m3'
-    $psi.Environment['ONEMEMORY_RERANKER_DIR'] = Join-Path $Root 'models/bge-reranker-base'
+    $psi.Environment['ONEMEMORY_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     [void]$psi.Environment.Remove('ONEMEMORY_SERVER')
     Write-Host "STEP $script:Step $Name"
     $readyTries = 0
@@ -731,8 +730,8 @@ if ($cfgAddr -ne $Server) { throw "config 地址不是测试服：$cfgAddr" }
 $configWrite = Invoke-Om -Name 'config-isolated-settings' -ArgList @('--json', 'config', '--autosync', 'false', '--cure-auto', 'false', '--rpc-parallelism', '1') -DataDir $DirA
 $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'config') -DataDir $DirA
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
-$bgeInstall = Invoke-Om -Name 'model-install-bge' -ArgList @('--json', 'model', 'install-bge') -DataDir $DirA -TimeoutSec 900
-Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-base-zh-v1.5/onnx/model.onnx')))
+$bgeInstall = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec 900
+Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
@@ -742,8 +741,8 @@ foreach ($configuredEngine in @('gpu', 'npu')) {
     Assert-Smoke "model-engine-$configuredEngine-selection-persisted" ($savedEngine.Ok -and [string]$engineSettings.engine -eq $configuredEngine -and $engineSettings.force_cpu -eq $false)
 }
 Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA -HostProfile | Out-Null
-$probe = Invoke-Om -Name 'model-probe-legacy' -ArgList @('--json', 'model', 'probe', '--model', 'legacy', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'model-legacy-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok')
+$probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--model', 'm3', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
+Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok')
 
 $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
@@ -1001,11 +1000,11 @@ $script:ModelProgressEvidence.contract = @{
     invalid_total_count = @($reembed.Progress | Where-Object { $null -ne $_.total -and (($_.total -isnot [long] -and $_.total -isnot [int]) -or $_.total -lt $_.done) }).Count
 }
 Assert-Smoke 'reembed-progress-contract' (@($reembed).Count -eq 1 -and $reembed.Ok -and $invalidProgress.Count -eq 0 -and $script:ModelProgressEvidence.completed_inactive)
-Assert-Smoke 'reembed-count-dimensions' (($reembed.Envelope.summary.reembedded -is [long] -or $reembed.Envelope.summary.reembedded -is [int]) -and [long]$reembed.Envelope.summary.reembedded -ge 0 -and [int]$reembed.Envelope.summary.dims -eq 768)
+Assert-Smoke 'reembed-count-dimensions' (($reembed.Envelope.summary.reembedded -is [long] -or $reembed.Envelope.summary.reembedded -is [int]) -and [long]$reembed.Envelope.summary.reembedded -ge 0 -and [int]$reembed.Envelope.summary.dims -eq 1024)
 $afterReembed = Invoke-Om -Name 'reembed-after-readback' -ArgList @('--json', 'show', $id) -DataDir $DirA
 Assert-Smoke 'reembed-entry-preserved' ($beforeReembed.Ok -and $afterReembed.Ok -and [string]$afterReembed.Envelope.details.entry.id -ceq $id -and ($afterReembed.Envelope.details.entry | ConvertTo-Json -Depth 20 -Compress) -ceq $entryBeforeReembed)
 $cachedReembed = Invoke-Om -Name 'reembed-cached' -ArgList @('--json', 'reembed') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'reembed-cached-zero' ($cachedReembed.Ok -and ($cachedReembed.Envelope.summary.reembedded -is [long] -or $cachedReembed.Envelope.summary.reembedded -is [int]) -and [long]$cachedReembed.Envelope.summary.reembedded -eq 0 -and [int]$cachedReembed.Envelope.summary.dims -eq 768)
+Assert-Smoke 'reembed-cached-zero' ($cachedReembed.Ok -and ($cachedReembed.Envelope.summary.reembedded -is [long] -or $cachedReembed.Envelope.summary.reembedded -is [int]) -and [long]$cachedReembed.Envelope.summary.reembedded -eq 0 -and [int]$cachedReembed.Envelope.summary.dims -eq 1024)
 Invoke-Om -Name 'book-material' -ArgList @('--json', 'book-material', $short) -DataDir $DirA | Out-Null
 Invoke-Om -Name 'portrait-material' -ArgList @('--json', 'portrait-material', '--limit', '10') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'passport' -ArgList @('--json', 'passport') -DataDir $DirA | Out-Null
@@ -1174,7 +1173,7 @@ $autoRevoked = Invoke-Om -Name 'grant-delete-root-readback' -ArgList @('--json',
 Assert-Smoke 'grant-delete-root-auto-revoked' ($deleteGrant.Ok -and [bool]$deleteGrantId -and @($autoRevoked.Envelope.details.grants | Where-Object { $_.id -eq $deleteGrantId -and $_.revoked -eq $true }).Count -eq 1)
 Invoke-Om -Name 'session-list' -ArgList @('--json', 'session', 'list') -DataDir $DirA -TimeoutSec 120 | Out-Null
 Invoke-Om -Name 'session-revoke-bogus' -ArgList @('--json', 'session', 'revoke', '00000000-0000-0000-0000-000000000000') -DataDir $DirA -ExpectExit @(0, 1) -Note '不撤销当前会话' | Out-Null
-Invoke-Om -Name 'model-install-rerank' -ArgList @('--json', 'model', 'install-rerank') -DataDir $DirA -TimeoutSec 180 -Note '已存在则跳过，不重下' | Out-Null
+$retiredInstall = Invoke-Om -Name 'model-install-rerank' -ArgList @('--json', 'model', 'install-rerank') -DataDir $DirA -ExpectExit @(2) -Raw
 
 $syncA = Invoke-Om -Name 'sync-a' -ArgList @('--json', 'sync') -DataDir $DirA -TimeoutSec 180
 if (-not $syncA.Ok) { throw 'A 同步失败' }
@@ -1452,7 +1451,7 @@ Assert-Smoke 'runtime-cli-diary-mode-contract' ([string]$runtimeAgent.summary.di
 Invoke-RuntimeCli 'runtime-cli-list' @('list', '--limit', '5') | Out-Null
 Invoke-RuntimeCli 'runtime-cli-tree' @('tree', '--depth', '3') | Out-Null
 Invoke-RuntimeCli 'runtime-cli-inject-targets' @('inject', '--targets') | Out-Null
-Assert-Smoke 'runtime-cli-rerank-installed' (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base/onnx/model_quantized.onnx'))
+Assert-Smoke 'runtime-cli-retired-rerank-rejected' ($retiredInstall.Ok -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base')))
 $runtimeCreated = Invoke-RuntimeCli 'runtime-cli-create' @('remember', "runtime-rpc-$stamp", '--title', "runtime-$stamp", '--importance', 'important', '--force', '--parent', $id)
 $runtimeId = [string]$runtimeCreated.summary.id
 Assert-Smoke 'runtime-cli-created-id' ([bool]$runtimeId)
@@ -1642,17 +1641,11 @@ Assert-Smoke 'model-m3-probe-success' ($m3Probe.Ok -and [string]$m3Probe.Envelop
 $activateM3 = Invoke-Om -Name 'model-activate-m3' -ArgList @('--json', 'model', 'activate', 'm3') -DataDir $DirA -TimeoutSec 900
 $m3Recall = Invoke-Om -Name 'model-m3-recall-existing-content' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $DirA -TimeoutSec 300
 $m3MarkerHits = @($m3Recall.Envelope.details | Where-Object { [string]$_.entry.content -like "*$marker*" })
-Assert-Smoke 'model-m3-index-and-recall' ($activateM3.Ok -and [string]$activateM3.Envelope.summary.model -eq 'm3' -and [int]$activateM3.Envelope.summary.indexed -gt 0 -and $m3Recall.Ok -and [string]$m3Recall.Envelope.summary.embedding_model -eq 'm3' -and $m3MarkerHits.Count -gt 0)
-$activateLegacy = Invoke-Om -Name 'model-activate-legacy' -ArgList @('--json', 'model', 'activate', 'legacy') -DataDir $DirA -TimeoutSec 600
-$legacyRecall = Invoke-Om -Name 'model-legacy-recall-after-switch' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $DirA -TimeoutSec 300
-# Existing source-checked generation artifacts are reused; indexed counts only
-# newly prepared rows, so a successful switch can legitimately report zero.
-$legacyIndexed = $activateLegacy.Envelope.summary.indexed
-$legacyIndexedNumber = $legacyIndexed -is [int] -or $legacyIndexed -is [long]
-$legacyMarkerHits = @($legacyRecall.Envelope.details | Where-Object { [string]$_.entry.content -like "*$marker*" })
-# Recall reports the persisted active model; lightweight JSON status does not.
-$legacyContent = Invoke-Om -Name 'model-legacy-show-preserved-content' -ArgList @('--json', 'show', $httpId) -DataDir $DirA
-Assert-Smoke 'model-legacy-switch-back-preserves-content' ($activateLegacy.Ok -and [string]$activateLegacy.Envelope.summary.model -eq 'legacy' -and $legacyIndexedNumber -and $legacyIndexed -ge 0 -and $legacyRecall.Ok -and [string]$legacyRecall.Envelope.summary.embedding_model -eq 'legacy' -and $legacyMarkerHits.Count -gt 0 -and $legacyContent.Ok -and [string]$legacyContent.Envelope.details.entry.id -eq $httpId -and [string]$legacyContent.Envelope.details.entry.content -ceq $httpMarker)
+Assert-Smoke 'model-m3-index-and-recall' ($activateM3.Ok -and [string]$activateM3.Envelope.summary.model -eq 'm3' -and [int]$activateM3.Envelope.summary.indexed -ge 0 -and $m3Recall.Ok -and [string]$m3Recall.Envelope.summary.embedding_model -eq 'm3' -and $m3MarkerHits.Count -gt 0)
+$activateLegacy = Invoke-Om -Name 'model-activate-legacy-rejected' -ArgList @('--json', 'model', 'activate', 'legacy') -DataDir $DirA -ExpectExit @(2) -Raw
+$m3AfterReject = Invoke-Om -Name 'model-m3-recall-after-retired-request' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $DirA -TimeoutSec 300
+$preservedContent = Invoke-Om -Name 'model-show-preserved-content' -ArgList @('--json', 'show', $httpId) -DataDir $DirA
+Assert-Smoke 'model-retired-request-preserves-content' ($activateLegacy.Ok -and $m3AfterReject.Ok -and [string]$m3AfterReject.Envelope.summary.embedding_model -eq 'm3' -and $preservedContent.Ok -and [string]$preservedContent.Envelope.details.entry.content -ceq $httpMarker)
 $revealed = Invoke-Om -Name 'secret-reveal-isolated' -ArgList @('--json', 'secret', '--reveal') -DataDir $DirA -Secret -AllowStatus @('warn')
 Assert-Smoke 'secret-reveal-current-recovery-code' ($revealed.Ok -and [string]$revealed.Envelope.details.secret -eq $newSuper)
 Invoke-Om -Name 'model-reset-cpu' -ArgList @('--json', 'model', 'reset-cpu') -DataDir $DirA -HostProfile | Out-Null
@@ -1660,10 +1653,10 @@ $resetEngine = Invoke-Om -Name 'model-reset-cpu-readback' -ArgList @('--json', '
 Assert-Smoke 'model-reset-cpu-engine' ($resetEngine.Ok -and [string]$resetEngine.Envelope.summary.engine -eq 'cpu')
 Invoke-Om -Name 'runtime-stop' -ArgList @('--json', '--runtime-internal', '--stop') -DataDir $DirA -ExpectExit @(0, 2) -Raw | Out-Null
 Stop-OurRuntimes
-$uninstallRerank = Invoke-Om -Name 'model-uninstall-rerank' -ArgList @('--direct', '--json', 'model', 'uninstall-rerank') -DataDir $DirA
-Assert-Smoke 'model-rerank-removed' ($uninstallRerank.Ok -and $uninstallRerank.Envelope.summary.removed -eq $true -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base')))
-$uninstallBge = Invoke-Om -Name 'model-uninstall-bge' -ArgList @('--direct', '--json', 'model', 'uninstall-bge') -DataDir $DirA
-Assert-Smoke 'model-bge-removed' ($uninstallBge.Ok -and $uninstallBge.Envelope.summary.removed -eq $true -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-base-zh-v1.5')))
+$uninstallRerank = Invoke-Om -Name 'model-uninstall-rerank-rejected' -ArgList @('--direct', '--json', 'model', 'uninstall-rerank') -DataDir $DirA -ExpectExit @(2) -Raw
+Assert-Smoke 'model-rerank-command-rejected' ($uninstallRerank.Ok)
+$uninstallBge = Invoke-Om -Name 'model-uninstall-m3' -ArgList @('--direct', '--json', 'model', 'uninstall-m3') -DataDir $DirA
+Assert-Smoke 'model-bge-removed' ($uninstallBge.Ok -and $uninstallBge.Envelope.summary.removed -eq $true -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3')))
 foreach ($required in $script:Catalog.required_assertions) {
     if (-not @($Rows | Where-Object { $_.Name -ceq $required -and $_.Ok -and $_.Status -ceq 'ok' }).Count) {
         Add-SweepRow "missing-required-$required" $false 'required positive assertion was not observed'

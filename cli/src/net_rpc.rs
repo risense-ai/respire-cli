@@ -305,7 +305,7 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
         command.as_slice(),
         [
             "model",
-            "install-m3" | "install-bge" | "install-rerank" | "activate"
+            "install" | "install-m3" | "activate"
         ]
     ) {
         Duration::from_secs(30 * 60)

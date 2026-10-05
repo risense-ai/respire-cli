@@ -105,16 +105,15 @@ class Suite:
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         TMPDIR=str(self.root / 'tmp'), ONEMEMORY_BIN_DIR=str(self.root / 'bin'),
                         ONEMEMORY_DATA_DIR=str(self.root),
-                        ONEMEMORY_MODEL_DIR=str(self.root / 'models' / 'bge-base-zh-v1.5'),
-                        ONEMEMORY_RERANKER_DIR=str(self.root / 'models' / 'bge-reranker-base'),
+                        ONEMEMORY_M3_DIR=str(self.root / 'models' / 'bge-m3'),
                         ONEMEMORY_ENGINE='cpu', ONEMEMORY_NO_AUTOSYNC='1')
         require('RESPIRE_CORE_TEST_MODE' not in self.env
                 and Path(self.env['ONEMEMORY_DATA_DIR']).resolve() == self.root, 'fixture-environment-not-isolated')
         version = subprocess.run([str(self.args.binary), '--version'], env=self.env, capture_output=True, text=True, timeout=20)
         require(version.returncode == 0 and version.stdout.strip().split()[-1] == self.args.version, 'exact-cli-version-mismatch')
         self.direct(['config', '--data-dir', str(self.library), '--addr', 'https://api.dev.rsrs.rs', '--autosync', 'false'])
-        self.direct(['model', 'install-bge'], timeout=1200)
-        probe = self.direct(['model', 'probe', '--model', 'legacy'], timeout=180)
+        self.direct(['model', 'install-m3'], timeout=1200)
+        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180)
         require(probe.get('status') == 'ok' and probe.get('summary', {}).get('ready') is True
                 and probe['summary'].get('dimensions', 0) > 0, 'real-cpu-model-probe-failed')
         self.model_dimensions = probe['summary']['dimensions']
@@ -228,7 +227,7 @@ class Suite:
         # Raw RPC preserves a failed diagnostic envelope. Only allowlisted
         # names/statuses and numeric counts leave memory; never item values.
         names = {'store', 'data dir', 'mcp bin', 'mcp http', 'session', 'embedder',
-                 'reranker', 'lock', 'remote', 'inject', 'memory status', 'tidy counter', 'CLI version'}
+                 'lock', 'remote', 'inject', 'memory status', 'tidy counter', 'CLI version'}
         statuses = {'ok', 'warn', 'fail', 'skip', 'pending'}
         try:
             status, response = self.request('POST', '/api/rpc',
@@ -371,11 +370,6 @@ class Suite:
         self.invoke('inject_remove', {'id': 'codex'}, lambda v: v.get('id') == 'codex' and v.get('changed') is True)
         require('<!-- respire:begin -->' not in (self.home / '.codex' / 'AGENTS.md').read_text(encoding='utf-8'),
                 'injection-removal-readback-failed')
-        reranker = self.root / 'models' / 'bge-reranker-base'
-        self.invoke('rerank_model_install', {}, lambda v: v.get('model') == 'bge-reranker-base'
-                    and Path(v.get('dir', '')).resolve() == reranker and (reranker / 'onnx' / 'model_quantized.onnx').is_file(), timeout=1200)
-        self.invoke('rerank_model_status', {}, lambda v: v.get('installed') is True and v.get('size_mb', 0) > 0
-                    and Path(v.get('dir', '')).resolve() == reranker)
         self.invoke('classify_backend_set', {'backend': 'ds'}, lambda v: v.get('backend') == 'ds')
         self.invoke('classify_backend_get', {}, lambda v: v.get('backend') == 'ds')
         self.invoke('ds_key_save', {'key': 'ci-disposable-unused-key', 'base': 'http://127.0.0.1:9/v1', 'model': 'ci-no-provider'},

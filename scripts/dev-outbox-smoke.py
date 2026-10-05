@@ -196,7 +196,7 @@ class Fixture:
                    XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
                    ONEMEMORY_DATA_DIR=str(profile / "library"), ONEMEMORY_BIN_DIR=str(profile / "bin"),
-                   ONEMEMORY_MODEL_DIR=str(self.args.model_dir), ONEMEMORY_ENGINE="cpu",
+                   ONEMEMORY_M3_DIR=str(self.args.model_dir), ONEMEMORY_ENGINE="cpu",
                    ONEMEMORY_NO_AUTOSYNC="1")
         for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "ONEMEMORY_DATA_DIR", "ONEMEMORY_BIN_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -424,9 +424,9 @@ def run(args, report):
         require(any(value == args.version for node in objects(version) for value in node.values() if isinstance(value, str)), "binary_version_mismatch")
         args.model_dir.mkdir(mode=0o700)
         # The CLI sweep can uninstall its models; install independently through the pinned CLI flow.
-        fixture.direct(fixture.a, ["model", "install-bge"], timeout=600)
+        fixture.direct(fixture.a, ["model", "install-m3"], timeout=600)
         require(all(path.is_file() and path.stat().st_size > 0 for path in
-                    (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model.onnx")),
+                    (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model_fp16.onnx")),
                 "installed_model_files_missing")
         fixture.prepare()
         seed_content = "Development queued foreground seed " + secrets.token_hex(16)

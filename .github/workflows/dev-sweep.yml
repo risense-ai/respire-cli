@@ -134,7 +134,7 @@ jobs:
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
           ONEMEMORY_ENGINE: cpu
           CLI_SHA: ${{ inputs.cli_sha }}
-          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/sweep-model/bge-base-zh-v1.5
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'

@@ -17,8 +17,8 @@ import urllib.request
 UPSTREAM = "https://api.dev.rsrs.rs"
 REQUIRED = ("model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade", "cloud_v3_secret_key_recovery_upgrade")
 MODEL_HASHES = {
-    "onnx/model.onnx": "5e5619f7cca7380b824d329c157dba10bee7cc00d0c139e82fdb7906051b8e4f",
-    "tokenizer.json": "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839",
+    "onnx/model_fp16.onnx": "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9",
+    "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
 }
 
 
@@ -66,7 +66,7 @@ class Smoke:
     def __init__(self, args):
         self.args = args
         self.root = args.root
-        self.model = self.root / "models/bge-base-zh-v1.5"
+        self.model = self.root / "models/bge-m3"
         self.root.mkdir()
         self.base_env = {k: v for k, v in os.environ.items()
             if not k.startswith(("ONEMEMORY_", "RESPIRE_", "XDG_", "DS_", "JEV_"))
@@ -92,7 +92,7 @@ class Smoke:
             XDG_CONFIG_HOME=str(path / "config"), XDG_DATA_HOME=str(path / "data"),
             XDG_CACHE_HOME=str(path / "cache"), TMPDIR=str(path / "tmp"),
             ONEMEMORY_DATA_DIR=str(path / "library"), ONEMEMORY_BIN_DIR=str(path / "bin"),
-            ONEMEMORY_MODEL_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
+            ONEMEMORY_M3_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(path / "tmp/missing-keyring.sock"))
         if user:
             self.write_session(env, {"user": user})
@@ -262,13 +262,13 @@ class Smoke:
         env = self.env("model-probe")
         output = subprocess.run([str(self.args.binary), "--version"], env=env, capture_output=True, timeout=20)
         require(output.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", output.stdout.decode()), "binary_version_mismatch")
-        self.cli(env, "model", "install-bge", timeout=900)
+        self.cli(env, "model", "install-m3", timeout=900)
         require(all(digest(self.model / p) == h for p, h in MODEL_HASHES.items()), "model_hash_mismatch")
         self.cli(env, "model", "engine", "cpu")
-        probe = self.cli(env, "model", "probe", "--model", "legacy", "--text", "Legacy recovery CPU probe")["summary"]
-        require(probe.get("ready") is True and probe.get("dimensions") == 768
+        probe = self.cli(env, "model", "probe", "--model", "m3", "--text", "Legacy recovery CPU probe")["summary"]
+        require(probe.get("ready") is True and probe.get("dimensions") == 1024
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
-        self.passed("model_cpu_real", dimensions=768, model_hashes=MODEL_HASHES)
+        self.passed("model_cpu_real", dimensions=1024, model_hashes=MODEL_HASHES)
         for version in (1, 2, 3):
             self.run_version(version)
         self.report["status"] = "passed"

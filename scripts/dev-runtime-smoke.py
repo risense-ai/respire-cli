@@ -182,8 +182,8 @@ class Smoke:
                         TMPDIR=str(self.root / 'tmp'), ONEMEMORY_DATA_DIR=str(self.root),
                         ONEMEMORY_BIN_DIR=str(self.root / 'bin'), ONEMEMORY_ENGINE='cpu',
                         ONEMEMORY_LANG='en', ONEMEMORY_NO_AUTOSYNC='1', ONEMEMORY_UPDATE_CHECK='0',
-                        ONEMEMORY_MODEL_DIR=str(self.root / 'models/bge-base-zh-v1.5'),
-                        ONEMEMORY_RERANKER_DIR=str(self.root / 'models/bge-reranker-base'))
+                        ONEMEMORY_M3_DIR=str(self.root / 'models/bge-m3'),
+                        )
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
             self.env.pop(key, None)
         with socket.socket() as port:
@@ -262,9 +262,9 @@ class Smoke:
         require(Path(config.get('data_dir', '')).resolve() == self.library and config.get('addr') == DEV,
                 'data_dir_configuration_failed')
         self.passed('data_dir_persisted')
-        self.direct(['model', 'install-bge'], timeout=1200)
-        probe = self.direct(['model', 'probe', '--model', 'legacy'], timeout=180)['summary']
-        require(probe.get('ready') is True and probe.get('dimensions') == 768
+        self.direct(['model', 'install-m3'], timeout=1200)
+        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180)['summary']
+        require(probe.get('ready') is True and probe.get('dimensions') == 1024
                 and str(probe.get('selected', '')).lower() == 'cpu', 'real_bge_cpu_probe_failed')
         self.attempted = True
         registered = self.direct(['register', '--user', self.user, '--pass=' + self.password, '--addr', DEV])
@@ -341,11 +341,9 @@ class Smoke:
                 'stored_session_not_resumed')
         self.passed('resume_session_real', method='fresh_runtime_reuses_owned_session_and_keyring_no_password_input')
         self.stop()
-        install = self.direct(['model', 'install-rerank'], timeout=1200)['summary']
-        folder = Path(install.get('dir', '')).resolve()
-        require(folder == self.root / 'models/bge-reranker-base'
-                and (folder / 'onnx/model_quantized.onnx').stat().st_size > 1024 * 1024
-                and (folder / 'tokenizer.json').is_file(), 'owned_rerank_model_not_real')
+        retired = subprocess.run([str(self.args.binary), '--direct', '--json', 'model', 'install-rerank'], env=self.env,
+                                 cwd=self.root, capture_output=True, text=True, timeout=30)
+        require(retired.returncode == 2, 'retired_reranker_command_was_accepted')
         agent_file = self.root / 'home/.codex/AGENTS.md'
         agent_file.parent.mkdir()
         original = '# Disposable runtime fixture\nKeep this text.\n'
@@ -364,7 +362,7 @@ class Smoke:
             diagnostic = None
         if isinstance(diagnostic, dict) and isinstance(diagnostic.get('items'), list):
             names = {'store', 'data dir', 'mcp bin', 'mcp http', 'session', 'embedder',
-                     'reranker', 'lock', 'remote', 'inject', 'memory status',
+                     'lock', 'remote', 'inject', 'memory status',
                      'tidy counter', 'CLI version'}
             statuses = {'ok', 'warn', 'fail', 'skip', 'pending'}
             self.report['doctor']['items'] = [
@@ -374,14 +372,14 @@ class Smoke:
                 and item['name'] in names and isinstance(item.get('status'), str)
                 and item['status'] in statuses
             ]
-        require(result.returncode in (0, 2), 'rerank_doctor_execution_failed')
+        require(result.returncode in (0, 2), 'm3_doctor_execution_failed')
         require(isinstance(diagnostic, dict) and isinstance(diagnostic.get('items'), list),
                 'doctor_envelope_invalid')
         require(any(item.get('name') == 'inject' and item.get('status') == 'ok'
                     for item in diagnostic.get('items', [])), 'owned_agent_doctor_not_fresh')
-        require(any(item.get('name') == 'reranker' and item.get('status') == 'ok'
-                    for item in diagnostic.get('items', [])), 'rerank_doctor_status_not_ready')
-        self.passed('rerank_status_real', model_sha256=hashlib.sha256((folder / 'onnx/model_quantized.onnx').read_bytes()).hexdigest())
+        require(not any(item.get('name') == 'reranker' for item in diagnostic.get('items', [])), 'retired_reranker_doctor_entry_present')
+        require(any(item.get('name') == 'embedder' and item.get('status') == 'ok' for item in diagnostic.get('items', [])), 'm3_doctor_not_ready')
+        self.passed('m3_status_real', retired_command_exit=retired.returncode)
         self.direct(['classify-config', '--set', '--backend', 'jev'])
         require(self.direct(['classify-config'])['summary'].get('backend') == 'jev', 'backend_not_persisted')
         self.passed('classify_config_persisted')

@@ -24,8 +24,8 @@ REQUIRED = (
     "tree_deepen_auto_applied", "tree_cure_auto_applied",
 )
 MODEL_HASHES = {
-    "onnx/model.onnx": "5e5619f7cca7380b824d329c157dba10bee7cc00d0c139e82fdb7906051b8e4f",
-    "tokenizer.json": "7dfbf1966ebf99d471c3796e9b457329d2b2182b817e144f1e904b957745c839",
+    "onnx/model_fp16.onnx": "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9",
+    "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
 }
 
 
@@ -120,7 +120,7 @@ class Smoke:
     def __init__(self, args):
         self.args = args
         self.root = args.root
-        self.model = args.model_dir or self.root / "data/models/bge-base-zh-v1.5"
+        self.model = args.model_dir or self.root / "data/models/bge-m3"
         require(self.model.is_relative_to(self.root) and not self.model.exists(), "model_directory_not_fresh")
         self.env = {k: v for k, v in os.environ.items()
             if not k.startswith(("ONEMEMORY_", "RESPIRE_", "XDG_", "DS_", "JEV_"))
@@ -134,7 +134,7 @@ class Smoke:
             XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
             XDG_CACHE_HOME=str(self.root / "cache"), TMPDIR=str(self.root / "tmp"),
             ONEMEMORY_DATA_DIR=str(self.root / "library"), ONEMEMORY_BIN_DIR=str(self.root / "bin"),
-            ONEMEMORY_MODEL_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
+            ONEMEMORY_M3_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(self.root / "tmp/missing-keyring.sock"),
             DS_API_KEY="ci-local-fixture", NO_PROXY="127.0.0.1,localhost")
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
@@ -354,12 +354,12 @@ class Smoke:
         raw = subprocess.run([str(self.args.binary), "--version"], env=self.env,
             capture_output=True, timeout=20)
         require(raw.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", raw.stdout.decode()), "binary_version_mismatch")
-        self.cli("model", "install-bge", timeout=900)
+        self.cli("model", "install-m3", timeout=900)
         for relative, expected in MODEL_HASHES.items():
             require(digest(self.model / relative) == expected, "model_hash_mismatch")
         self.cli("model", "engine", "cpu")
-        probe = self.cli("model", "probe", "--model", "legacy", "--text", "CPU inference contract fixture")["summary"]
-        require(probe["ready"] and probe["dimensions"] == 768 and str(probe["selected"]).lower() == "cpu", "real_cpu_probe_failed")
+        probe = self.cli("model", "probe", "--model", "m3", "--text", "CPU inference contract fixture")["summary"]
+        require(probe["ready"] and probe["dimensions"] == 1024 and str(probe["selected"]).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=probe["dimensions"], model_hashes=MODEL_HASHES)
         self.inject()
         username = "ci-ai-" + secrets.token_hex(8)

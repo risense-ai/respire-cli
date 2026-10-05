@@ -466,13 +466,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum ModelAction {
     /// Download BGE-M3 without switching the active model or index.
+    #[command(name = "install", visible_alias = "install-m3")]
     InstallM3 {
         #[arg(long)]
         mirror: Option<String>,
     },
     /// Build a resumable index generation and activate it after complete validation.
     Activate {
-        #[arg(value_parser = ["m3", "legacy"])]
+        #[arg(value_parser = ["m3"])]
         model: String,
     },
     /// Force CPU and terminate the runtime, even when inference or RPC is stuck.
@@ -486,33 +487,16 @@ enum ModelAction {
     InstallEngines,
     /// Run a real BGE inference and report the selected backend.
     Probe {
-        #[arg(long, value_parser = ["legacy", "m3"])]
+        #[arg(long, value_parser = ["m3"])]
         model: Option<String>,
         /// Text to compare against the CPU baseline, including long-input checks.
         #[arg(long, default_value = "本地推理引擎验证：记忆检索")]
         text: String,
     },
-    /// Download and install the BGE embedder (tokenizer.json + onnx/model.onnx, ~390MB)
-    InstallBge {
-        /// Mirror origin (host only), e.g. https://hf-mirror.com
-        #[arg(long)]
-        mirror: Option<String>,
-    },
-    /// Delete the user-installed BGE model files and drop the in-process session
-    UninstallBge,
-    /// Download and install the cross-encoder rerank model (quantized bge-reranker-base, ~280MB; optional)
-    InstallRerank {
-        /// Mirror origin (host only), e.g. https://hf-mirror.com
-        #[arg(long)]
-        mirror: Option<String>,
-        /// Custom model source: paste the full URL of any file in the repo (resolve/blob both work;
-        /// origin/repo/revision are taken from it; missing revision defaults to main), e.g.
-        /// https://huggingface.co/Xenova/bge-reranker-base/resolve/main/tokenizer.json
-        #[arg(long)]
-        source: Option<String>,
-    },
-    /// Delete the user-installed rerank model files and drop the in-process session
-    UninstallRerank,
+    /// Delete the user-installed BGE-M3 files.
+    #[command(name = "uninstall", visible_alias = "uninstall-m3")]
+    UninstallM3,
+
 }
 
 #[derive(Subcommand)]
@@ -940,7 +924,7 @@ enum Command {
         #[arg(long)]
         key_stdin: bool,
     },
-    /// Model management: install or uninstall BGE and the optional rerank model
+    /// Model management: install, verify or uninstall BGE-M3
     Model {
         #[command(subcommand)]
         action: ModelAction,
@@ -3998,12 +3982,10 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     // 3) BGE model: diagnostics are read-only unless --fix is explicit.
     let active_model = build_local()?.retrieval_model()?;
     match BgeEmbedder::load_model(&active_model) {
-        Ok(e) => add(
-            &mut items,
-            "embedder",
-            true,
-            format!("{} {} dims", e.model_name(), e.dims()),
-        ),
+        Ok(e) => match e.probe("BGE-M3 doctor inference") {
+            Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({})", e.dims(), probe["selected"])),
+            Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed: {error:#}")),
+        },
         Err(e) if !fix => {
             add(
                 &mut items,
@@ -4013,25 +3995,15 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
             );
         }
         Err(_) => {
-            eprintln!("embedder missing; installing BGE automatically (~100MB; in CN set ONEMEMORY_MIRROR=https://hf-mirror.com)...");
+            eprintln!("embedder missing; installing BGE-M3 FP16 (~1.15GB)...");
             let mirror = respire::model_install::mirror_from_env();
-            let install = if active_model == "m3" {
-                respire::model_install::install_m3(mirror.as_deref())
-            } else {
-                respire::model_install::install(None, mirror.as_deref())
-            };
+            let install = respire::model_install::install_m3(mirror.as_deref());
             match install {
                 Ok(report) => match BgeEmbedder::load_model(&active_model) {
-                    Ok(e) => add(
-                        &mut items,
-                        "embedder",
-                        true,
-                        format!(
-                            "bge {} dims (auto-installed {})",
-                            e.dims(),
-                            report.dir.display()
-                        ),
-                    ),
+                    Ok(e) => match e.probe("BGE-M3 doctor inference") {
+                        Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({}) (auto-installed {})", e.dims(), probe["selected"], report.dir.display())),
+                        Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed after install: {error:#}")),
+                    },
                     Err(e) => add(
                         &mut items,
                         "embedder",
@@ -4051,22 +4023,11 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         }
     }
 
-    // 3.5) cross-encoder rerank model (**optional**): report if present, hint if not -
-    //      extra size (279MB), not auto-downloaded with BGE; run `rsrs model install-rerank`.
-    match respire::memory::rerank::resolve_reranker_dir() {
-        Ok(dir) => add(
-            &mut items,
-            "reranker",
-            true,
-            format!("bge-reranker-base ready ({})", dir.display()),
-        ),
-        Err(_) => add(
-            &mut items,
-            "reranker",
-            true,
-            "not installed (optional; recall still works; enable: rsrs model install-rerank)"
-                .to_owned(),
-        ),
+    let store = build_local()?;
+    match store.index_pending("m3") {
+        Ok(pending) => add(&mut items, "model index", !pending,
+            if pending { "BGE-M3 index needs rebuilding; run rsrs reembed".to_owned() } else { "BGE-M3 index ready".to_owned() }),
+        Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
     }
 
     // 4) lock: main already holds it exclusively (reaching here proves lock.db is takeable) - never take it twice; two connections in one process deadlock
@@ -4194,9 +4155,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     let rows: Vec<OutputItem> = items
         .iter()
         .map(|(name, ok, note)| {
-            let status = if name == "reranker" && note.starts_with("not installed") {
-                OutputStatus::Skip
-            } else if name == "remote" && note.starts_with("not configured") {
+            let status = if name == "remote" && note.starts_with("not configured") {
                 OutputStatus::Skip
             } else if name == "CLI version" && note.contains("not checked") {
                 OutputStatus::Skip
@@ -6025,11 +5984,11 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     emit_result(ResultEnvelope::new(
                         "model install-m3",
                         OutputStatus::Ok,
-                        serde_json::json!({"dir":report.dir,"skipped":report.skipped,"activated":false}),
+                        serde_json::json!({"dir":report.dir,"skipped":report.skipped,"activated":false,"model":"m3"}),
                         vec![OutputItem::new(
                             "model",
                             OutputStatus::Ok,
-                            "BGE-M3 downloaded; activate to rebuild the index",
+                            "BGE-M3 ready; run rsrs reembed to rebuild an old index",
                         )],
                     ))?;
                     Ok(())
@@ -6106,27 +6065,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     ))?;
                     Ok(())
                 }
-                ModelAction::InstallBge { mirror } => {
-                    let report = respire::model_install::install(
-                        None,
-                        mirror
-                            .as_deref()
-                            .or(respire::model_install::mirror_from_env().as_deref()),
-                    )?;
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        OutputStatus::Ok,
-                        serde_json::json!({"dir":report.dir.display().to_string(),"skipped":report.skipped,"model":"bge-base-zh-v1.5"}),
-                        vec![OutputItem::new(
-                            "model",
-                            OutputStatus::Ok,
-                            report.dir.display().to_string(),
-                        )],
-                    ))?;
-                    Ok(())
-                }
-                ModelAction::UninstallBge => {
-                    let report = respire::model_install::uninstall_bge()?;
+                ModelAction::UninstallM3 => {
+                    let report = respire::model_install::uninstall_m3()?;
                     let status = if report.removed {
                         OutputStatus::Ok
                     } else {
@@ -6135,50 +6075,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     emit_result(ResultEnvelope::new(
                         "model",
                         status,
-                        serde_json::json!({"dir":report.dir.display().to_string(),"removed":report.removed,"model":"bge-base-zh-v1.5"}),
-                        vec![OutputItem::new(
-                            "model",
-                            status,
-                            if report.removed {
-                                report.dir.display().to_string()
-                            } else {
-                                "not installed".to_owned()
-                            },
-                        )],
-                    ))?;
-                    Ok(())
-                }
-                ModelAction::InstallRerank { mirror, source } => {
-                    let report = respire::model_install::install_rerank(
-                        None,
-                        mirror
-                            .as_deref()
-                            .or(respire::model_install::mirror_from_env().as_deref()),
-                        source.as_deref(),
-                    )?;
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        OutputStatus::Ok,
-                        serde_json::json!({"dir":report.dir.display().to_string(),"skipped":report.skipped,"model":"bge-reranker-base"}),
-                        vec![OutputItem::new(
-                            "model",
-                            OutputStatus::Ok,
-                            report.dir.display().to_string(),
-                        )],
-                    ))?;
-                    Ok(())
-                }
-                ModelAction::UninstallRerank => {
-                    let report = respire::model_install::uninstall_rerank()?;
-                    let status = if report.removed {
-                        OutputStatus::Ok
-                    } else {
-                        OutputStatus::Skip
-                    };
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        status,
-                        serde_json::json!({"dir":report.dir.display().to_string(),"removed":report.removed,"model":"bge-reranker-base"}),
+                        serde_json::json!({"dir":report.dir.display().to_string(),"removed":report.removed,"model":"bge-m3"}),
                         vec![OutputItem::new(
                             "model",
                             status,

@@ -1,19 +1,7 @@
 [
   {
-    "model": "bge-base-zh-v1.5",
-    "revision": "f03589ceff5aac7111bd60cfc7d497ca17ecac65",
-    "license": "mit",
-    "files": []
-  },
-  {
     "model": "bge-m3",
     "revision": "5617a9f61b028005a4858fdac845db406aefb181",
-    "license": "mit",
-    "files": []
-  },
-  {
-    "model": "bge-reranker-base",
-    "revision": "2cfc18c9415c912f9d8155881c133215df768a70",
     "license": "mit",
     "files": []
   }

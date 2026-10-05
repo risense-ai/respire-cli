@@ -47,16 +47,13 @@ enum Page {
 enum ConfirmKind {
     Switch(String),
     Sync,
-    InstallBge,
-    UninstallBge,
-    InstallRerank,
-    UninstallRerank,
+    InstallM3,
+    UninstallM3,
     Engine(String),
     InstallEngines,
     ProbeEngine,
     RecallMode(String),
     UpgradeM3,
-    LegacyModel,
     Workspace(String),
     Autosync(bool),
     Update(String, String),
@@ -65,6 +62,7 @@ enum ConfirmKind {
 enum Overlay {
     None,
     RecallApi(recall_api::Form),
+    ModelMirror(text_input::Input),
     RecallTest(recall_test::Form),
     ModelTask(model_task::Task),
     Confirm {
@@ -192,6 +190,7 @@ pub fn run() -> Result<()> {
         if let Event::Paste(text) = &event {
             match &mut app.overlay {
                 Overlay::RecallApi(form) => form.paste(text),
+                Overlay::ModelMirror(input) => input.paste(text),
                 Overlay::RecallTest(form) => form.paste(text),
                 _ => {}
             }
@@ -200,6 +199,25 @@ pub fn run() -> Result<()> {
             continue;
         };
         if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        if let Overlay::ModelMirror(input) = &mut app.overlay {
+            if key.code == KeyCode::Esc { app.overlay = Overlay::None; }
+            else if key.code == KeyCode::Enter {
+                let value = input.text.trim().to_owned();
+                let result = respire::model_install::validate_mirror(&value)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| retrieval_action(&["agent-config", "--set", &format!("model_mirror={value}")]).map(|_| ()));
+                match result {
+                    Ok(()) => { app.overlay = Overlay::None; app.set_notice(t("下载源已保存", "Download source saved")); }
+                    Err(error) => app.set_notice(error),
+                }
+            } else if matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                let presets = respire::model_install::MIRRORS;
+                let index = presets.iter().position(|v| *v == input.text).unwrap_or(0);
+                let next = if key.code == KeyCode::Down { (index + 1) % presets.len() } else { (index + presets.len() - 1) % presets.len() };
+                *input = text_input::Input::new(presets[next].to_owned());
+            } else { input.key(key); }
             continue;
         }
         if let Overlay::RecallApi(form) = &mut app.overlay {
@@ -523,7 +541,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         Page::Model => list_key(
             app,
             code,
-            12 + model_engines().len() + usize::from(cfg!(windows)),
+            10 + model_engines().len() + usize::from(cfg!(windows)),
             |app, code| model_key(app, code),
         ),
         Page::Workspace => workspace_key(app, code),
@@ -817,40 +835,28 @@ fn model_key(app: &mut App, code: KeyCode) {
         0 => ask(
             app,
             t(
-                "安装或校验 BGE？已存在则跳过。",
-                "Install or verify BGE? An existing model is skipped.",
+                "安装或校验 BGE-M3？已存在则跳过。",
+                "Install or verify BGE-M3? An existing model is skipped.",
             ),
-            ConfirmKind::InstallBge,
+            ConfirmKind::InstallM3,
         ),
         1 => ask(
             app,
             t(
-                "卸载 BGE 并删除模型文件？卸载后 recall 需要重新安装。",
-                "Uninstall BGE and delete its files? Recall will need a reinstall.",
+                "卸载 BGE-M3 并删除模型文件？卸载后 recall 需要重新安装。",
+                "Uninstall BGE-M3 and delete its files? Recall will need a reinstall.",
             ),
-            ConfirmKind::UninstallBge,
+            ConfirmKind::UninstallM3,
         ),
-        2 => ask(
-            app,
-            t(
-                "安装可选精排模型？体积大约 280MB。",
-                "Install the optional rerank model? About 280MB.",
-            ),
-            ConfirmKind::InstallRerank,
-        ),
-        3 => ask(
-            app,
-            t(
-                "卸载精排模型并删除文件？卸载后 recall 仍可用，只是不再精排。",
-                "Uninstall the rerank model and delete its files? Recall still works without it.",
-            ),
-            ConfirmKind::UninstallRerank,
-        ),
+        2 => {
+            let current = respire::model_install::mirror_from_env().unwrap_or_else(|| "auto".to_owned());
+            app.overlay = Overlay::ModelMirror(text_input::Input::new(current));
+        }
         cursor => {
             let engines = model_engines();
-            if let Some(engine) = cursor.checked_sub(4).and_then(|index| engines.get(index)) {
+            if let Some(engine) = cursor.checked_sub(3).and_then(|index| engines.get(index)) {
                 run_confirm(app, ConfirmKind::Engine((*engine).to_owned()));
-            } else if cfg!(windows) && cursor == 4 + engines.len() {
+            } else if cfg!(windows) && cursor == 3 + engines.len() {
                 ask(
                     app,
                     t(
@@ -859,10 +865,10 @@ fn model_key(app: &mut App, code: KeyCode) {
                     ),
                     ConfirmKind::InstallEngines,
                 );
-            } else if cursor == 4 + engines.len() + usize::from(cfg!(windows)) {
+            } else if cursor == 3 + engines.len() + usize::from(cfg!(windows)) {
                 run_confirm(app, ConfirmKind::ProbeEngine);
             } else {
-                let index = 5 + engines.len() + usize::from(cfg!(windows));
+                let index = 4 + engines.len() + usize::from(cfg!(windows));
                 match cursor.checked_sub(index) {
                     Some(0) => run_confirm(app, ConfirmKind::RecallMode("fast".to_owned())),
                     Some(1) if !recall_api::ready() => {
@@ -885,14 +891,9 @@ fn model_key(app: &mut App, code: KeyCode) {
                         ),
                         ConfirmKind::UpgradeM3,
                     ),
-                    Some(3) => ask(
-                        app,
-                        t("重建并切回旧版 BGE 索引？", "Rebuild and return to the legacy BGE index?"),
-                        ConfirmKind::LegacyModel,
-                    ),
-                    Some(4) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
-                    Some(5) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
-                    Some(6) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
+                    Some(3) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
+                    Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
+                    Some(5) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
                     _ => {}
                 }
             }
@@ -1024,10 +1025,8 @@ fn confirm_key(app: &mut App, code: KeyCode) -> bool {
 fn run_confirm(app: &mut App, kind: ConfirmKind) {
     let task = matches!(
         &kind,
-        ConfirmKind::InstallBge
-            | ConfirmKind::InstallRerank
+        ConfirmKind::InstallM3
             | ConfirmKind::UpgradeM3
-            | ConfirmKind::LegacyModel
     )
     .then(model_task::Task::start);
     let cancel = task.as_ref().map(|task| Arc::clone(&task.cancel));
@@ -1044,10 +1043,8 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             &format!("Switching to {name}"),
         ),
         ConfirmKind::Sync => t("正在同步", "Syncing"),
-        ConfirmKind::InstallBge => t("正在安装或校验 BGE", "Installing or verifying BGE"),
-        ConfirmKind::UninstallBge => t("正在卸载 BGE", "Uninstalling BGE"),
-        ConfirmKind::InstallRerank => t("正在安装精排模型", "Installing the rerank model"),
-        ConfirmKind::UninstallRerank => t("正在卸载精排模型", "Uninstalling the rerank model"),
+        ConfirmKind::InstallM3 => t("正在安装或校验 BGE-M3", "Installing or verifying BGE-M3"),
+        ConfirmKind::UninstallM3 => t("正在卸载 BGE-M3", "Uninstalling BGE-M3"),
         ConfirmKind::Engine(_) => t("正在保存推理引擎", "Saving inference engine"),
         ConfirmKind::InstallEngines => t("正在下载 NPU 推理引擎", "Downloading NPU providers"),
         ConfirmKind::ProbeEngine => t("正在验证推理引擎", "Checking inference engine"),
@@ -1056,7 +1053,6 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             "正在下载 M3 并重建索引，请等待完成",
             "Downloading M3 and rebuilding the index; please wait",
         ),
-        ConfirmKind::LegacyModel => t("正在恢复旧版模型索引", "Restoring the legacy model index"),
         ConfirmKind::Workspace(_) => t("正在切换工作区", "Changing workspace"),
         ConfirmKind::Autosync(_) => t("正在保存自动同步", "Saving auto-sync"),
         ConfirmKind::Update(tool, spec) => t(
@@ -1086,15 +1082,11 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                 rpc(&["account", "use", &name]).map(|_| t("已切换账户", "Account switched"))
             }
             ConfirmKind::Sync => rpc(&["sync"]).map(|value| sync_notice(&value)),
-            ConfirmKind::InstallBge => model_action(&["model", "install-bge"])
-                .map(|_| t("BGE 处理结束", "BGE step finished")),
-            ConfirmKind::UninstallBge => {
-                rpc(&["model", "uninstall-bge"]).map(|_| t("BGE 已卸载", "BGE uninstalled"))
+            ConfirmKind::InstallM3 => model_action(&["model", "install-m3"])
+                .map(|_| t("BGE-M3 处理结束", "BGE-M3 step finished")),
+            ConfirmKind::UninstallM3 => {
+                rpc(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 已卸载", "BGE-M3 uninstalled"))
             }
-            ConfirmKind::InstallRerank => model_action(&["model", "install-rerank"])
-                .map(|_| t("精排模型处理结束", "Rerank step finished")),
-            ConfirmKind::UninstallRerank => rpc(&["model", "uninstall-rerank"])
-                .map(|_| t("精排模型已卸载", "Rerank uninstalled")),
             ConfirmKind::Engine(engine) => rpc(&["model", "engine", &engine]).map(|_| {
                 t(
                     "推理引擎已保存，下次加载模型生效",
@@ -1130,8 +1122,6 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                         "BGE-M3 and chunked retrieval are active",
                     )
                 }),
-            ConfirmKind::LegacyModel => model_action(&["model", "activate", "legacy"])
-                .map(|_| t("旧版模型索引已恢复", "Legacy model index restored")),
             ConfirmKind::InstallEngines => rpc(&["model", "install-engines"]).map(|v| {
                 format!(
                     "{}: {}",
@@ -1966,29 +1956,20 @@ fn sync_body(app: &App) -> Vec<Line<'static>> {
 
 fn model_body(app: &App) -> Vec<Line<'static>> {
     let bge = doctor_value(&app.live, "embedder");
-    let rerank = doctor_value(&app.live, "reranker");
     let engine = respire::memory::onnx::configured_engine()
         .map(|e| format!("{e:?}"))
         .unwrap_or_else(|e| e.to_string());
     let mut lines = vec![
-        line(format!("BGE  {bge}")),
+        line(format!("BGE-M3  {bge}")),
         choice(
             app.cursor == 0,
-            t("安装或校验 BGE", "Install or verify BGE"),
+            t("安装或校验 BGE-M3", "Install or verify BGE-M3"),
         ),
         choice(
             app.cursor == 1,
-            t("卸载 BGE（删除文件）", "Uninstall BGE (delete files)"),
+            t("卸载 BGE-M3（删除文件）", "Uninstall BGE-M3 (delete files)"),
         ),
-        line(format!("{}  {rerank}", t("精排", "Rerank"))),
-        choice(app.cursor == 2, t("安装精排模型", "Install rerank model")),
-        choice(
-            app.cursor == 3,
-            t(
-                "卸载精排模型（删除文件）",
-                "Uninstall rerank (delete files)",
-            ),
-        ),
+        choice(app.cursor == 2, format!("{}: {}", t("下载源（回车配置）", "Download source (Enter to configure)"), respire::model_install::mirror_from_env().unwrap_or_else(|| "auto".to_owned()))),
         line(format!(
             "{}: {engine}",
             t("当前推理设置", "Inference setting")
@@ -2001,9 +1982,9 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             "gpu" => "GPU".to_owned(),
             _ => t("CPU（默认）", "CPU (default)"),
         };
-        lines.push(choice(app.cursor == index + 4, label));
+        lines.push(choice(app.cursor == index + 3, label));
     }
-    let mut index = 4 + model_engines().len();
+    let mut index = 3 + model_engines().len();
     if cfg!(windows) {
         lines.push(choice(
             app.cursor == index,
@@ -2034,38 +2015,34 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
     lines.push(choice(
         app.cursor == index + 3,
         t(
-            "升级 BGE-M3 并重建索引",
-            "Upgrade to BGE-M3 and rebuild index",
+            "下载 BGE-M3 并重建索引",
+            "Install BGE-M3 and rebuild index",
         ),
     ));
-    lines.push(choice(
-        app.cursor == index + 4,
-        t("恢复旧版 BGE 模型索引", "Restore legacy BGE index"),
-    ));
     lines.push(line(t(
-        "默认 CPU；加载超时 30 秒，推理超时 15 秒；失败报错，不切换引擎。",
-        "CPU by default; load timeout 30s, inference 15s; failures report errors without switching engines.",
+        "默认 CPU；加载超时 120 秒，推理超时 15 秒；失败报错，不切换引擎。",
+        "CPU by default; load timeout 120s, inference 15s; failures report errors without switching engines.",
     )));
     lines.push(line(t(
         "卡住时在终端运行：rsrs model reset-cpu",
         "If stuck, run in terminal: rsrs model reset-cpu",
     )));
     lines.push(choice(
-        app.cursor == index + 5,
+        app.cursor == index + 4,
         t(
             "配置高质量召回 API（地址 / 模型 / 密钥）",
             "Configure recall API (URL / model / key)",
         ),
     ));
     lines.push(choice(
-        app.cursor == index + 6,
+        app.cursor == index + 5,
         t("测试快速召回", "Test fast recall"),
     ));
     lines.push(choice(
-        app.cursor == index + 7,
+        app.cursor == index + 6,
         t("测试高质量召回", "Test high-quality recall"),
     ));
-    lines.push(choice(app.cursor == index + 8, t("0  返回", "0  Back")));
+    lines.push(choice(app.cursor == index + 7, t("0  返回", "0  Back")));
     lines
 }
 
@@ -2154,6 +2131,13 @@ fn workspace_label(mode: &str) -> String {
 fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
     match &app.overlay {
         Overlay::None => None,
+        Overlay::ModelMirror(input) => Some(vec![
+            line(t("BGE-M3 下载源", "BGE-M3 download source")),
+            input.line(70, true, false),
+            line(t("上下键选自动 / 国内镜像一 / 国内镜像二 / 官方；也可输入自定义镜像地址。", "Up/down: auto / mirror 1 / mirror 2 / official; or enter a custom mirror URL.")),
+            line(t("回车保存，Esc 放弃；显式下载源失败会报错。", "Enter saves; Esc discards; explicit source failures are reported.")),
+            line(t("ONEMEMORY_MIRROR 环境变量优先于此设置。", "ONEMEMORY_MIRROR overrides this setting.")),
+        ]),
         Overlay::RecallApi(_) | Overlay::RecallTest(_) => Some(Vec::new()),
         Overlay::ModelTask(task) => Some(task.lines()),
         Overlay::Edit { buf, cursor } => {

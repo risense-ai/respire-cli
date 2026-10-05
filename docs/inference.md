@@ -23,12 +23,24 @@ Provider names do not prove execution of every operation on the requested device
 
 | Command | Purpose |
 | --- | --- |
-| `model install-bge` | Pinned legacy BGE artifact |
-| `model install-m3` | Install M3 without activation |
-| `model install-rerank` | Optional reranker |
+| `model install` / `model install-m3` | Install or verify pinned BGE-M3 FP16 (~1.15GB) |
+| `model uninstall` / `model uninstall-m3` | Delete user-installed M3 files |
+| `model activate m3` / `reembed` | Rebuild/resume the M3 index |
 | `model install-engines` | Explicit Windows provider installation |
-| `model probe --json` | Actual inference diagnostics |
+| `model probe --json` | Actual M3 inference diagnostics |
 | `model reset-cpu` | Host-only CPU runtime recovery |
+
+BGE-M3 is the sole embedding model (1024 dimensions, CLS pooling). Legacy BGE
+and cross-encoder rerank models cannot be installed, loaded or executed.
+The TUI download-source editor offers auto, hf-mirror.com, hf-mirror.net and the
+official Hugging Face origin, plus a custom URL. `--mirror` overrides
+`ONEMEMORY_MIRROR`, then the persisted `model_mirror` setting; default is auto.
+Explicit sources fail without switching; auto tries each source once. All
+downloads retain the same pinned revision and SHA-256 checks. Files are staged
+before replacement; cancellation cleans temporary files.
+`ONEMEMORY_M3_DIR` overrides `~/.respire/models/bge-m3`. Old BGE directories and
+`ONEMEMORY_MODEL_DIR` are not used. Loading has a 120-second deadline; inference
+retains its 15-second deadline.
 
 The supervised worker shares local model execution. Health requests remain independent
 of inference. Recovery does not delete models or memories. Sandboxes cannot take over

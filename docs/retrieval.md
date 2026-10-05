@@ -37,7 +37,7 @@ use the same data flow and diagnostics.
 | `model activate m3` | Rebuild/resume locally, then activate after source checks |
 | Interrupted rebuild | Keep checkpoints and active index |
 | Concurrent content edit | Reject stale derived data |
-| `model activate legacy` | Rebuild/resume the retained legacy index |
+| Legacy index | Rebuild from decrypted source with M3; retired inference never runs |
 | `reembed` | Repair missing/outdated data for the current model |
 
 Automatic index repair has a 15-second foreground budget, checked between entries.
@@ -53,3 +53,9 @@ active index; deleted content is excluded from retrieval.
 
 `--titles --json` requests IDs, titles and final scores; `show <id> --json` reads selected
 memories. Binary updates do not rewrite agent files; run `rsrs inject` after prompt changes.
+
+New profiles use M3. Existing legacy metadata does not select the retired model.
+Incomplete M3 generations remain resumable; semantic retrieval requires a complete
+source-checked M3 index. Run `rsrs reembed` for a long migration. Existing M3
+artifacts retain their generation identity. Content, timestamps and sync flags
+are unchanged; retired weight files are not deleted automatically.

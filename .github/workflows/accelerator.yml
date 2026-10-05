@@ -18,7 +18,7 @@ on:
       model:
         description: 'Embedding model to validate on the requested hardware'
         type: choice
-        options: [legacy, m3]
+        options: [m3]
         default: m3
 permissions:
   contents: read
@@ -46,7 +46,7 @@ jobs:
         env:
           ONEMEMORY_ENGINE: ${{ inputs.engine }}
           ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
-          ONEMEMORY_MODEL_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/model
+          ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/model
           ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
           PROBE_MODEL: ${{ inputs.model }}
           ONEMEMORY_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}
@@ -56,7 +56,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $name = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
           $exe = Join-Path 'target/hardware/release' $name
-          $install = if ($env:PROBE_MODEL -eq 'm3') { 'install-m3' } else { 'install-bge' }
+          $install = if ($env:PROBE_MODEL -eq 'm3') { 'install-m3' } else { 'install-m3' }
           & $exe --direct model $install --json
           if ($LASTEXITCODE -ne 0) { throw 'Model installation failed' }
           if ($IsWindows -and $env:INSTALL_PROVIDERS -eq 'true') {

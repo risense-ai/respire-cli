@@ -415,28 +415,8 @@
       ]
     },
     {
-      "command": "model install-bge",
-      "source": "cli/src/main.rs:496",
-      "options": [
-        "--mirror"
-      ]
-    },
-    {
-      "command": "model uninstall-bge",
+      "command": "model uninstall-m3",
       "source": "cli/src/main.rs:502",
-      "options": []
-    },
-    {
-      "command": "model install-rerank",
-      "source": "cli/src/main.rs:504",
-      "options": [
-        "--mirror",
-        "--source"
-      ]
-    },
-    {
-      "command": "model uninstall-rerank",
-      "source": "cli/src/main.rs:515",
       "options": []
     },
     {
@@ -892,14 +872,11 @@
     "help-mcp-contract",
     "help-model-activate-contract",
     "help-model-engine-contract",
-    "help-model-install-bge-contract",
-    "help-model-install-engines-contract",
     "help-model-install-m3-contract",
-    "help-model-install-rerank-contract",
+    "help-model-install-engines-contract",
     "help-model-probe-contract",
     "help-model-reset-cpu-contract",
-    "help-model-uninstall-bge-contract",
-    "help-model-uninstall-rerank-contract",
+    "help-model-uninstall-m3-contract",
     "help-passport-contract",
     "help-plugin-list-contract",
     "help-plugin-test-contract",
@@ -1018,12 +995,12 @@
     "model-engine-cpu-selected",
     "model-engine-gpu-selection-persisted",
     "model-engine-npu-selection-persisted",
-    "model-legacy-probe-success",
-    "model-legacy-switch-back-preserves-content",
+    "model-m3-default-probe-success",
+    "model-retired-request-preserves-content",
     "model-m3-index-and-recall",
     "model-m3-installed-without-activation",
     "model-m3-probe-success",
-    "model-rerank-removed",
+    "model-rerank-command-rejected",
     "model-reset-cpu-engine",
     "prompt-instructions-present",
     "purge-removes-current-entry",
@@ -1057,7 +1034,7 @@
     "runtime-cli-created-id",
     "runtime-cli-diary-mode-contract",
     "runtime-cli-parent-persisted",
-    "runtime-cli-rerank-installed",
+    "runtime-cli-retired-rerank-rejected",
     "runtime-cli-restore-preserved-content",
     "runtime-cli-status-approved-server",
     "runtime-cli-update-persisted",
@@ -1142,11 +1119,6 @@
       "feature": "Grant token consumption through CLI/Web/MCP/RPC",
       "source": "crates/storage/src/transport/local/grants.rs:91",
       "reason": "grant_snapshot has no callable public transport consumer; no nonexistent endpoint is added. Existing CLI CRUD, persistence and automatic root revocation remain required."
-    },
-    {
-      "feature": "M3-specific uninstall command",
-      "source": "cli/src/main.rs:467",
-      "reason": "The implemented CLI exposes uninstall-bge and uninstall-rerank, but no uninstall-m3 subcommand. Both existing uninstall operations are required."
     }
   ],
   "coverage_scope": "Existing callable operations and semantic effects; not an infinite Cartesian product of flags. Historical vault input formats require controlled legacy fixtures before claiming compatibility coverage.",

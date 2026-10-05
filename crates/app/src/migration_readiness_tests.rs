@@ -239,8 +239,8 @@ fn readable_live_rows_and_unreadable_tombstones_are_copied_unchanged() -> Result
     );
     let store = crate::transport::local::LocalStore::open(&fixture.target().join("onememory.db"))?;
     let embedder = crate::memory::search::HashingEmbedder::default();
-    assert_eq!(store.rebuild_index(&fixture.keys, &embedder, "legacy")?, 1);
-    assert!(!store.index_pending("legacy")?);
+    assert_eq!(store.rebuild_index(&fixture.keys, &embedder, "m3")?, 1);
+    assert!(!store.index_pending("m3")?);
     Ok(())
 }
 

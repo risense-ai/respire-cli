@@ -820,8 +820,8 @@ mod tests {
             .ok_or_else(|| anyhow!("copied tombstone missing"))?;
         assert!(crate::memory::MemoryEngine::open(&keys, tombstone).is_err());
         let embedder = crate::memory::search::HashingEmbedder::default();
-        assert_eq!(store.rebuild_index(&keys, &embedder, "legacy")?, 1);
-        assert!(!store.index_pending("legacy")?);
+        assert_eq!(store.rebuild_index(&keys, &embedder, "m3")?, 1);
+        assert!(!store.index_pending("m3")?);
         assert_eq!(store.all(false)?.len(), 1);
         assert_eq!(
             (tombstone.ciphertext.clone(), tombstone.nonce.clone()),

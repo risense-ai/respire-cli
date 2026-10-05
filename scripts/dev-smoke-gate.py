@@ -140,7 +140,7 @@ def verify(args, result):
     suites = {"cli": base_observed, "runtime": {name for name, row in runtime.get("cases", {}).items() if row.get("passed") is True},
               "ai_inject": {name for name, row in ai.get("cases", {}).items() if row.get("passed") is True},
               "legacy_vault": {name for name, row in legacy.get("cases", {}).items() if row.get("passed") is True}}
-    retired = {"list_system_fonts", "pick_save_file", "pick_open_file", "pick_directory", "task_status", "db_stamp"}
+    retired = {"list_system_fonts", "pick_save_file", "pick_open_file", "pick_directory", "task_status", "db_stamp", "rerank_model_status", "rerank_model_install"}
     observations = []
     for action in actions:
         if action["action"] in retired:

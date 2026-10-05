@@ -19,7 +19,7 @@
     "diary_mode_persisted",
     "workspace_three_states_persisted",
     "data_dir_persisted",
-    "rerank_status_real",
+    "m3_status_real",
     "classify_config_persisted",
     "ds_key_saved_without_network",
     "resume_session_real",
