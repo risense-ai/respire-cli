@@ -1394,6 +1394,7 @@ dependencies = [
  "tiny_http",
  "unicode-width 0.2.0",
  "ureq",
+ "url",
  "uuid",
 ]
 

@@ -23,6 +23,7 @@ mod bench;
 mod classify;
 mod classify_config;
 mod i18n;
+mod login;
 mod mcp;
 mod net_rpc;
 mod output;
@@ -1142,7 +1143,7 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// Log in: login password to the server; a new device must also give the super password to download the key wrap.
+    /// Log in through browser authorization, or use --interactive for password and TOTP prompts.
     /// Address defaults to the last server this machine used (kept in session.json by register/logout).
     /// Missing user/password drops into an interactive prompt (TTY only).
     Login {
@@ -1150,16 +1151,22 @@ enum Command {
         addr: Option<String>,
         #[arg(long)]
         user: Option<String>,
-        #[arg(long)]
+        #[arg(long, requires = "interactive")]
         pass: Option<String>,
         #[arg(long = "super")]
         super_pass: Option<String>,
-        /// Secret Key (vault v3, generated on this machine; the server never has it)
-        #[arg(long = "secret-key")]
-        secret_key: Option<String>,
-        /// When the server has data but no key wrap, explicitly drop the old data and start from this machine's new keys
+        /// Complete password and TOTP prompts in this terminal instead of the browser
         #[arg(long)]
-        reset_vault: bool,
+        interactive: bool,
+        /// Explicitly select browser authorization (also the default)
+        #[arg(long, conflicts_with = "interactive")]
+        oauth: bool,
+        /// Dashboard origin for a custom server
+        #[arg(long, conflicts_with = "interactive")]
+        dashboard: Option<String>,
+        /// Display the authorization URL without opening a browser
+        #[arg(long, conflicts_with = "interactive")]
+        no_open: bool,
     },
     /// Book material: a root subtree -> volume/chapter full text (for an AI to draft)
     BookMaterial { root: String },
@@ -4852,63 +4859,6 @@ fn run_register(
     emit_result(result)
 }
 
-fn run_login(
-    addr: Option<&str>,
-    user: Option<&str>,
-    pass: Option<&str>,
-    super_pass: Option<&str>,
-    secret_key: Option<&str>,
-    reset_vault: bool,
-) -> Result<()> {
-    // Address default: last server this machine used (register / last logout keep it in session.json).
-    let last = if addr.map(|s| s.trim()).filter(|s| !s.is_empty()).is_none() {
-        respire::auth::read_session_json().ok().and_then(|d| {
-            d["addr"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned())
-        })
-    } else {
-        None
-    };
-    let addr: &str = match addr.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(a) => a,
-        None => match last.as_deref() {
-            Some(a) => a,
-            // New machine with no stored address: default official server (same as register); --addr is no longer required
-            None => respire::service::DEFAULT_SERVER_ADDR,
-        },
-    };
-    // Missing args: interactive prompt (TTY and not --json).
-    let interactive = respire::prompt::interactive();
-    let user: String = match user.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(u) => u.to_owned(),
-        None if interactive => {
-            eprintln!("login server={addr}");
-            respire::prompt::ask("username: ")?
-        }
-        None => {
-            return Err(anyhow::anyhow!(
-            "missing --user <username> (bare `rsrs login` in a TTY opens an interactive prompt)"
-        ))
-        }
-    };
-    let pass: String = match pass.filter(|s| !s.is_empty()) {
-        Some(p) => p.to_owned(),
-        None if interactive => respire::prompt::ask_secret("login password: ")?,
-        None => return Err(anyhow::anyhow!("missing --pass <login-password>")),
-    };
-    let issued = respire::service::login(addr, &user, &pass, super_pass, secret_key, reset_vault)?;
-    let mut result = ResultEnvelope::new(
-        "login",
-        OutputStatus::Ok,
-        serde_json::json!({"ok":true,"user":user,"addr":addr,"super_issued":issued}),
-        vec![OutputItem::new("session", OutputStatus::Ok, "ready")],
-    );
-    result.actions.push("secret --reveal".into());
-    emit_result(result)
-}
-
 fn run_book_material(root: &str) -> Result<()> {
     let app = respire::service::App::open()?;
     let m = app.book_material(root)?;
@@ -5480,6 +5430,9 @@ fn run(args: Cli) -> Result<()> {
             *set,
             *key_stdin,
         );
+    }
+    if let Some(Command::Login { addr, user, pass, super_pass, interactive, dashboard, no_open, .. }) = args.command.as_ref() {
+        return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), *interactive, dashboard.as_deref(), *no_open);
     }
     if rpc::worker_active() {
         return run_local(args);
@@ -6179,23 +6132,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 super_pass.as_deref(),
             )
         }
-        Some(Command::Login {
-            addr,
-            user,
-            pass,
-            super_pass,
-            secret_key,
-            reset_vault,
-        }) => {
-            return run_login(
-                addr.as_deref(),
-                user.as_deref(),
-                pass.as_deref(),
-                super_pass.as_deref(),
-                secret_key.as_deref(),
-                *reset_vault,
-            )
-        }
+        Some(Command::Login { .. }) => anyhow::bail!("login must run in the host terminal"),
         Some(Command::BookMaterial { root }) => return run_book_material(root),
         Some(Command::PortraitMaterial { limit }) => return run_portrait_material(*limit),
         Some(Command::Taxonomy { list, ensure }) => return run_taxonomy(*list, ensure.as_deref()),

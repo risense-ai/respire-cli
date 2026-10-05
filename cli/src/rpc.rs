@@ -751,6 +751,14 @@ pub fn stop_if_running() -> Result<()> {
 
 /// Host profile changes release the old library before starting its successor.
 pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
+    change_profile_with_rollback(change, || Ok(()))
+}
+
+pub fn change_profile_with_rollback(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>) -> Result<()> {
+    change_profile_with_verification(change, rollback, || Ok(()))
+}
+
+pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>, verify: impl FnOnce() -> Result<()>) -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let config_path = respire::service::client_config_path();
     let original = match std::fs::read(&config_path) {
@@ -761,8 +769,10 @@ pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
-    let changed = change().and_then(|_| ensure_daemon_locked());
+    let changed = change().and_then(|_| ensure_daemon_locked()).and_then(|_| verify());
     if let Err(error) = changed {
+        if let Some(health) = probe_runtime()? { stop_occupant(health.pid)?; }
+        let rollback_error = rollback().err();
         // Startup failure must restore the original selection and all API fields,
         // including the distinction between an absent config and an empty one.
         match original {
@@ -774,6 +784,10 @@ pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
                 Err(remove) => return Err(error.context(format!("configuration rollback failed: {remove}"))),
             },
         }
+        let error = match rollback_error {
+            Some(rollback) => error.context(format!("account session rollback failed: {rollback:#}")),
+            None => error,
+        };
         return match ensure_daemon_locked() {
             Ok(()) => Err(error),
             Err(restart) => Err(error.context(format!("original runtime restart failed: {restart:#}"))),

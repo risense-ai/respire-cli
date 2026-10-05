@@ -643,6 +643,12 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
 }
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
+pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
+    let mut authorization = serde_json::json!({});
+    authenticate_session(&mut authorization, addr, user, pass)?;
+    Ok(authorization)
+}
+
 fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str) -> Result<()> {
     // Owner check was replaced by login's auto profile switch: logging into another account switches data dir; the old profile stays.
     let auth_salt = crypto::derive_auth_salt(user)?;

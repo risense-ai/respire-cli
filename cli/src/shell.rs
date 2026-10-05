@@ -1514,16 +1514,26 @@ fn draw(frame: &mut Frame, app: &App) {
             Page::Web => web_body(app),
         }
     };
-    // Keep the selected model option visible as the menu grows or the terminal shrinks.
-    if matches!(app.page, Page::Model) {
+    // Account for wrapped diagnostics when keeping a menu selection visible.
+    if matches!(app.overlay, Overlay::None) {
         let height = chunks[0].height.saturating_sub(3) as usize;
+        let width = usize::from(chunks[0].width.saturating_sub(2)).max(1);
+        let rows = |line: &Line<'_>| line.width().max(1).div_ceil(width);
         let selected = body.iter().position(|line| {
             line.spans
                 .iter()
                 .any(|span| span.style.add_modifier.contains(Modifier::REVERSED))
         });
-        if let Some(selected) = selected.filter(|&index| index >= height.saturating_sub(2)) {
-            body.drain(..selected.saturating_sub(height / 2));
+        if let Some(selected) = selected {
+            if body[..selected].iter().map(rows).sum::<usize>() >= height.saturating_sub(2) {
+                let mut start = selected;
+                let mut visible = rows(&body[selected]);
+                while start > 0 && visible + rows(&body[start - 1]) <= height / 2 {
+                    start -= 1;
+                    visible += rows(&body[start]);
+                }
+                body.drain(..start);
+            }
         }
     }
     let mut lines = vec![banner()];
@@ -2091,10 +2101,16 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             "High quality (model selects titles; API required)",
         ),
     ));
-    lines.push(line(format!("{}: {}", t("后台索引", "Background index"), app.live.index)));
+    let index_state = app.live.index["state"].as_str().unwrap_or("unknown");
+    lines.push(line(format!("{}: {}", t("后台索引", "Background index"), index_state)));
+    if let Some(error) = app.live.index["error"].as_str() {
+        lines.push(fail_line(error.to_owned()));
+    }
     if app.live.model_progress["active"] == true {
-        lines.push(line(format!("{}: {}  {} / {}", app.live.model_progress["phase"],
-            app.live.model_progress["item"], app.live.model_progress["done"], app.live.model_progress["total"])));
+        lines.push(line(format!("{}: {}  {} / {}",
+            app.live.model_progress["phase"].as_str().unwrap_or(""),
+            app.live.model_progress["item"].as_str().unwrap_or(""),
+            app.live.model_progress["done"], app.live.model_progress["total"])));
     }
     lines.push(line(t(
         "默认 CPU；加载超时 120 秒，推理超时 15 秒；失败报错，不切换引擎。",
