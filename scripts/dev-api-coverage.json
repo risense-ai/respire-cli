@@ -1,8 +1,12 @@
 {
   "schema": 1,
-  "authority": "Cloud serve route implementations; reviewed 2026-10-04",
-  "expected_route_count": 61,
+  "authority": "Cloud serve route implementations; reviewed 2026-10-06",
+  "expected_route_count": 65,
   "routes": [
+    { "method": "POST", "path": "/oauth/device/code", "group": "auth" },
+    { "method": "POST", "path": "/oauth/token", "group": "auth" },
+    { "method": "GET", "path": "/api/self/cli-authorization/{code}", "group": "user" },
+    { "method": "POST", "path": "/api/self/cli-authorization/{code}", "group": "user" },
     {
       "method": "GET",
       "path": "/health",
@@ -309,5 +313,5 @@
       "group": "admin"
     }
   ],
-  "server_source_sha": "294482158dc9ca78ae8234285446659d65142752"
+  "server_source_sha": "80171289141a89ef8019ef6bb558525da5c2860c"
 }

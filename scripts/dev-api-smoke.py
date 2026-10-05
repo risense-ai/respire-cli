@@ -86,7 +86,7 @@ class Smoke:
             raise SmokeFailure('exact-server-sha-required')
         if self.contract.get('server_source_sha') != self.expected_server_sha:
             raise SmokeFailure('route-contract-server-revision-mismatch')
-        if self.contract.get('expected_route_count') != 61 or len(self.routes) != 61:
+        if self.contract.get('expected_route_count') != 65 or len(self.routes) != 65:
             raise SmokeFailure('route-contract-count-mismatch')
 
     def key(self, method, path):
@@ -103,9 +103,9 @@ class Smoke:
         headers = {'Accept': 'application/json'}
         if token:
             headers['Authorization'] = 'Bearer ' + token
-        data = None if body is None else json.dumps(body).encode('utf-8')
+        data = None if body is None else (body if isinstance(body, str) else json.dumps(body)).encode('utf-8')
         if data is not None:
-            headers['Content-Type'] = 'application/json'
+            headers['Content-Type'] = 'application/x-www-form-urlencoded' if isinstance(body, str) else 'application/json'
         req = urllib.request.Request(self.base + path, data=data, headers=headers, method=method)
         try:
             response = self.http.open(req, timeout=30)
@@ -200,7 +200,7 @@ class Smoke:
         for key, route in self.routes.items():
             if route['group'] == 'public':
                 continue
-            path = route['path'].replace('{user}', self.namespace + '-missing').replace('{id}', 'missing')
+            path = route['path'].replace('{user}', self.namespace + '-missing').replace('{id}', 'missing').replace('{code}', '000000000000')
             unauth = route['group'] == 'auth'
             # Serde accepts [] for TotpIn: all three fields have defaults.
             # That is an empty ticket/code authentication attempt, not bad JSON.
@@ -360,6 +360,31 @@ class Smoke:
         a['token'] = authenticated['token']
         self.check('POST', '/api/self/totp/disable', {'code': totp(setup['secret'])}, a['token'], predicate=lambda r: r.get('totp') is False, label='fixture-totp-disabled')
 
+    def oauth_flow(self, a, b):
+        form = urllib.parse.urlencode({'client_id': 'respire-cli', 'device_name': 'API acceptance', 'expected_user': a['user']})
+        grant = self.check('POST', '/oauth/device/code', form,
+                           predicate=lambda r: bool(re.fullmatch('[0-9a-fA-F]{12}', r.get('user_code', ''))) and
+                           urllib.parse.urlsplit(r.get('verification_uri_complete', '')).netloc == 'dash.dev.rsrs.rs',
+                           label='device-grant-development-dashboard')
+        path = '/api/self/cli-authorization/' + grant['user_code']
+        self.check('GET', path, token=a['token'], predicate=lambda r: r.get('device_name') == 'API acceptance',
+                   label='device-grant-details')
+        self.check('POST', path, {'approve': True}, b['token'], status=409,
+                   predicate=lambda r: 'error' in r, kind='negative', label='wrong-account-approval-rejected')
+        self.check('POST', path, {'approve': True}, a['token'], predicate=lambda r: r.get('ok') is True,
+                   label='device-grant-approved')
+        poll = urllib.parse.urlencode({'client_id': 'respire-cli', 'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+                                      'device_code': grant['device_code']})
+        access = self.check('POST', '/oauth/token', poll,
+                            predicate=lambda r: r.get('token_type') == 'Bearer' and r.get('user') == a['user'] and bool(r.get('access_token')),
+                            label='approved-grant-exchanged')
+        self.check('GET', '/api/self', token=access['access_token'], predicate=lambda r: r.get('user') == a['user'],
+                   label='oauth-session-account-readback')
+        self.check('POST', '/oauth/token', poll, status=400, predicate=lambda r: r.get('error') == 'invalid_grant',
+                   kind='negative', label='device-grant-replay-rejected')
+        self.check('GET', '/api/self/cli-authorization/000000000000', token=a['token'], status=404,
+                   predicate=lambda r: 'error' in r, kind='negative', label='unknown-authorization-code')
+
     def admin_flow(self, owner, a):
         self.owned(owner['user'], admin=True)
         token = owner['token']
@@ -505,6 +530,7 @@ class Smoke:
         a, b = self.register('a'), self.register('b')
         self.user_and_sync(a, b)
         self.email_and_totp(a, owner)
+        self.oauth_flow(a, b)
         self.admin_flow(owner, a)
         self.owned(b['user'])
         self.check('POST', '/api/self/purge', {'confirm': 'not-the-fixture'}, b['token'], status=400,
