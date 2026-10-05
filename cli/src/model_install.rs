@@ -553,10 +553,10 @@ fn download_response(url: &str, dest: &Path) -> Result<ureq::Response> {
     use std::time::Duration;
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, 0, None)?;
-    // Bound each blocking network read so cancellation cannot wait for the entire download.
+    // Allow CDN body stalls while bounding cancellation latency to one 30-second read.
     let response = ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(30))
         .timeout_write(Duration::from_secs(10))
         .build()
         .get(url)
