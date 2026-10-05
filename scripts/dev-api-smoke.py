@@ -115,11 +115,6 @@ class Smoke:
             raise SmokeFailure('network-request-failed') from None
         with response:
             status = response.code
-            if path == '/ready':
-                advertised = response.headers.get('X-Respire-Server-SHA', '').lower()
-                self.actual_server_sha = advertised if re.fullmatch('[0-9a-f]{40}', advertised) else None
-                if self.actual_server_sha != self.expected_server_sha:
-                    raise SmokeFailure('development-server-sha-mismatch')
             raw = response.read(8 * 1024 * 1024 + 1)
         if len(raw) > 8 * 1024 * 1024:
             raise SmokeFailure('response-size-limit-exceeded')
@@ -129,6 +124,11 @@ class Smoke:
             raise SmokeFailure('response-not-json') from None
         if not isinstance(value, dict):
             raise SmokeFailure('response-not-object')
+        if method == 'GET' and path == '/health':
+            advertised = value.get('source_revision')
+            self.actual_server_sha = advertised if isinstance(advertised, str) and re.fullmatch('[0-9a-f]{40}', advertised) else None
+            if self.actual_server_sha != self.expected_server_sha:
+                raise SmokeFailure('development-server-sha-mismatch')
         return status, value
 
     def check(self, method, path, body=None, token=None, status=200,
