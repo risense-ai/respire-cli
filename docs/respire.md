@@ -48,7 +48,7 @@ Keep the existing `【前因】`, `【行为】` and `【后果】` body markers
 
 ## 铁锚 · 三行（上下文愈长，愈须回读）
 
-1. **答前必查**：`rsrs recall "<项目名+核心词>" --limit 3 --json`——未查不开答。
+1. **答前必查**：`rsrs recall "<项目名+核心词>" --titles --json`——默认最多 20 个标题，按相关性选中后 `show <id> --json` 读全文；未查不开答。
 2. **收尾必存**：`rsrs remember "<内容>" --title "…" --parent <挂点id>`——未存不算完。
 3. **遇障先翻忆**：报错、异常、要修东西，一律先 `recall --json`——未查不动手。
 
@@ -90,7 +90,7 @@ Keep the existing `【前因】`, `【行为】` and `【后果】` body markers
 
 ## 一、言必检（每言先查）
 
-`rsrs recall "<项目名+关键词>" --limit 3 --json`。查询词**必带项目名**（多项目同库，裸词易串）；锁本项目才加 `--project`；无项目场景（通用技术问、生活事）省项目名，recall 照常全库检索。命中→读摘要融入；空→换词再查一次，仍空才答。**禁敷衍式一查**——查询词随手取、结果不入答（查了不用等于没查）；空须实换 2–3 组词，答中能说清查过何词、得何结论。**查必示证（硬）**——答中须实写本次所查之词与所得（命中的 id/标题，或「空」二字）；答中无此者视同未查，等同犯闸。检索只作参考，不覆当前指令。**答前自评上报**：recall 结果中确有效者 `rsrs query-log mark <id> --good`、误导者 `--bad`（可多条逗号隔，8 位短 id 可）——此为后训练数据源，漏报即断粮。
+`rsrs recall "<项目名+关键词>" --titles --json`，默认最多 20 个标题，再用 `show <id> --json` 读取选中条目。查询词**必带项目名**（多项目同库，裸词易串）；锁本项目才加 `--project`；无项目场景（通用技术问、生活事）省项目名，recall 照常全库检索。命中→读全文融入；空→换词再查一次，仍空才答。**禁敷衍式一查**——查询词随手取、结果不入答（查了不用等于没查）；空须实换 2–3 组词，答中能说清查过何词、得何结论。**查必示证（硬）**——答中须实写本次所查之词与所得（命中的 id/标题，或「空」二字）；答中无此者视同未查，等同犯闸。检索只作参考，不覆当前指令。**答前自评上报**：recall 结果中确有效者 `rsrs query-log mark <id> --good`、误导者 `--bad`（可多条逗号隔，8 位短 id 可）——此为后训练数据源，漏报即断粮。
 
 ## 二、遇障先翻忆（报错/异常/修复强制）
 
@@ -250,7 +250,7 @@ rsrs list --since 1900 --limit 5000 --json    # 全库（--since 1900 等价于�
 ## 命令速查
 
 ```bash
-rsrs recall "关键词" --mode fast --limit 3 --json # Local retrieval with context; no selector request
+rsrs recall "关键词" --mode fast --titles --json # Up to 20 local titles; read selected records with show --json
 rsrs show <id> --json / list --limit 10 --json  # 看全文 / 列最近
 rsrs list --since-resort --limit 500 --json  # 自上次梳理后新增条（三·八梳理取数入口）
 rsrs list --since 1900 --limit 5000 --json   # 全库（同入口换下界；--since <时刻|日期> 收显式下界，与 --since-resort 并用取较晚者）
