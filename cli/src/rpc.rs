@@ -389,7 +389,7 @@ fn index_loop_inner() -> Result<()> {
             if !store.index_pending(&model)? {
                 return Ok(true);
             }
-            let Some(_operation) = respire::model_progress::Operation::try_begin("index-load")? else {
+            let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
                 return Ok(false);
             };
             index_yield_to_foreground(generation)?;
@@ -404,7 +404,7 @@ fn index_loop_inner() -> Result<()> {
                     Ok(_) => break,
                     Err(error) if error.downcast_ref::<respire::transport::local::IndexSourceChanged>().is_some() => {
                         // Keep this Operation across source changes: cancellation and
-                        // the 30-minute budget apply to the whole resumed task.
+                        // the 30-minute idle budget apply to the whole resumed task.
                         respire::model_progress::check()?;
                         let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                         work.error = Some(format!("{error:#}"));

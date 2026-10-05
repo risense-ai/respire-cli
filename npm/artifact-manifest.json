@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "cliVersion": "1.0.9",
+  "cliVersion": "1.0.10",
   "binaryName": "rsrs",
   "commandAliases": [],
   "npmScope": "@rsrsai/cli",

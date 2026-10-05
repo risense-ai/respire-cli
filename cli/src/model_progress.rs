@@ -30,6 +30,7 @@ struct Progress {
     total: Option<u64>,
     started: Instant,
     updated: Instant,
+    idle_timeout: bool,
     cancelled: bool,
 }
 
@@ -39,6 +40,7 @@ pub struct Operation;
 pub enum OperationStopped {
     Cancelled,
     TimedOut,
+    IdleTimedOut,
 }
 
 impl std::fmt::Display for OperationStopped {
@@ -46,6 +48,7 @@ impl std::fmt::Display for OperationStopped {
         formatter.write_str(match self {
             Self::Cancelled => "model operation cancelled",
             Self::TimedOut => "model operation timed out after 30 minutes",
+            Self::IdleTimedOut => "background indexing made no progress for 30 minutes",
         })
     }
 }
@@ -56,7 +59,11 @@ fn check_progress(progress: &Progress) -> Result<()> {
     if progress.cancelled {
         return Err(OperationStopped::Cancelled.into());
     }
-    if progress.started.elapsed().as_secs() >= 1800 {
+    if progress.idle_timeout {
+        if progress.updated.elapsed().as_secs() >= 1800 {
+            return Err(OperationStopped::IdleTimedOut.into());
+        }
+    } else if progress.started.elapsed().as_secs() >= 1800 {
         return Err(OperationStopped::TimedOut.into());
     }
     Ok(())
@@ -67,8 +74,17 @@ impl Operation {
         Self::try_begin(phase)?.ok_or_else(|| anyhow!("another model operation is running"))
     }
 
-    /// Background indexing waits for the existing model operation instead of racing it.
+    /// Reserve the model slot without waiting, with the foreground total budget.
     pub fn try_begin(phase: &str) -> Result<Option<Self>> {
+        Self::try_begin_with_idle_timeout(phase, false)
+    }
+
+    /// Large libraries may take hours; only a lack of progress pauses indexing.
+    pub fn try_begin_background_index() -> Result<Option<Self>> {
+        Self::try_begin_with_idle_timeout("index-load", true)
+    }
+
+    fn try_begin_with_idle_timeout(phase: &str, idle_timeout: bool) -> Result<Option<Self>> {
         let mut slot = CURRENT
             .lock()
             .map_err(|_| anyhow!("model progress lock poisoned"))?;
@@ -85,6 +101,7 @@ impl Operation {
             total: None,
             started: Instant::now(),
             updated: Instant::now(),
+            idle_timeout,
             cancelled: false,
         });
         TRACKED.set(true);
