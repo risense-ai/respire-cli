@@ -1214,7 +1214,7 @@ if ($stB.Envelope.summary.server_addr) { $addrB = [string]$stB.Envelope.summary.
 if ($addrB -ne $Server) { throw "B server_addr=$addrB" }
 $syncB = Invoke-Om -Name 'sync-b' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncB.Ok) { throw 'B 下载同步失败' }
-Assert-Count 'B sync' $syncB.Envelope 'pulled' 1
+Assert-Smoke 'device-b-sync-converged' ($syncB.Envelope.summary.converged -eq $true -and [int]$syncB.Envelope.summary.pending -eq 0)
 $recB = Invoke-Om -Name 'recall-b' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recB.Stdout -notlike "*$marker*") { throw "B recall 没有召回 A 写入的标记 $marker" }
 Invoke-Om -Name 'show-b' -ArgList @('--json', 'show', $short) -DataDir $DirB | Out-Null

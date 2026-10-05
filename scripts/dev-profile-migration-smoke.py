@@ -61,6 +61,10 @@ class Smoke(support.Smoke):
                 "error_class": "timeout"}
             self.save()
             raise
+        finally:
+            stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                cwd=self.root, env=env, capture_output=True, timeout=60)
+            require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
         value = None
         try:
             value = json.loads(output.stdout)

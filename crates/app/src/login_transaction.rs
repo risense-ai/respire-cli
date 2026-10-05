@@ -130,8 +130,23 @@ impl PreparedLogin {
             if has_memories {
                 let count: i64 = database.query_row("SELECT count(*) FROM memories WHERE ciphertext <> ''", [], |row| row.get(0))?;
                 if count > 0 {
-                    ensure!(legacy.is_some() || (session["kdf_salt"] == vault["kdf_salt"] && session["wrapped_urk"] == vault["wrapped_urk"] && session["urk_nonce"] == vault["urk_nonce"]),
-                        "local library uses different key material; migrate or export it before login; original data was preserved");
+                    let same_wrap = session["kdf_salt"] == vault["kdf_salt"] && session["wrapped_urk"] == vault["wrapped_urk"] && session["urk_nonce"] == vault["urk_nonce"];
+                    if legacy.is_none() && !same_wrap {
+                        // Full logout removes the wrap, and a super-password change can
+                        // rewrap the same URK. Prove compatibility against local data.
+                        let mut statement = database.prepare("SELECT ciphertext,nonce FROM memories WHERE ciphertext <> '' AND COALESCE(deleted,0)=0")?;
+                        let mut rows = statement.query([])?;
+                        let mut verified_rows = 0;
+                        while let Some(row) = rows.next()? {
+                            let mut stored = crate::memory::model::StoredMemory::new_pending(String::new(), String::new());
+                            stored.ciphertext = row.get(0)?;
+                            stored.nonce = row.get(1)?;
+                            crate::memory::MemoryEngine::open(&verified, &stored)
+                                .context("local library uses different key material; original data was preserved")?;
+                            verified_rows += 1;
+                        }
+                        ensure!(verified_rows > 0, "local library key compatibility could not be verified; original data was preserved");
+                    }
                 }
             }
         }

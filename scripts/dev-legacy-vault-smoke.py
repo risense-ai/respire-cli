@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -94,13 +95,23 @@ class Smoke:
             ONEMEMORY_DATA_DIR=str(path / "library"), ONEMEMORY_BIN_DIR=str(path / "bin"),
             ONEMEMORY_M3_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(path / "tmp/missing-keyring.sock"))
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            env['ONEMEMORY_RPC_PORT'] = str(listener.getsockname()[1])
         if user:
             self.write_session(env, {"user": user})
         return env
 
     def cli(self, env, *args, timeout=180):
-        output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
-            cwd=self.root, env=env, capture_output=True, timeout=timeout)
+        try:
+            output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
+                cwd=self.root, env=env, capture_output=True, timeout=timeout)
+        finally:
+            # Login and automatic indexing can start this fixture's runtime.
+            # Release it before subsequent direct database consumers.
+            stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                cwd=self.root, env=env, capture_output=True, timeout=60)
+            require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
         require(output.returncode == 0, "cli_failed_" + args[0])
         try:
             value = json.loads(output.stdout)
