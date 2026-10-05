@@ -495,7 +495,7 @@ class Smoke(support.Smoke):
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
                 remote["ONEMEMORY_SUPER"] = fixture["code"]
-                self.cli(remote, "login", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
+                self.cli(remote, "login", "--interactive", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
                 fixture["account"]["token"] = self.session(remote)["token"]
                 self.cli(remote, "sync")
                 self.read_entry(remote, fixture["id"], fixture["text"])

@@ -243,7 +243,7 @@ class Fixture:
         super_key = registration.get("summary", {}).get("super")
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
-        self.direct(self.b, ["login", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address

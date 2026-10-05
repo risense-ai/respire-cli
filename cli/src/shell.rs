@@ -123,6 +123,7 @@ struct Live {
 }
 
 struct App {
+    login_requested: bool,
     migration_profiles: Vec<Value>,
     page: Page,
     cursor: usize,
@@ -252,6 +253,19 @@ pub fn run() -> Result<()> {
         if handle(&mut app, key.code) {
             break Ok(());
         }
+        if app.login_requested {
+            app.login_requested = false;
+            // Give secret prompts sole ownership of the normal terminal, then redraw the TUI.
+            restore(&mut terminal)?;
+            disable_raw_mode()?;
+            let login = crate::login::run(None, None, None, None, true, false, None, false);
+            enable_raw_mode()?;
+            terminal = setup()?;
+            app.set_notice(match login {
+                Ok(()) => t("登录成功；账户已验证", "Signed in; account verified"),
+                Err(error) => format!("{error:#}"),
+            });
+        }
     };
     stop.store(true, Ordering::Relaxed);
     restore(&mut terminal)?;
@@ -352,6 +366,7 @@ impl AccountRow {
 impl App {
     fn new(shared: Arc<Mutex<Live>>) -> Self {
         Self {
+            login_requested: false,
             migration_profiles: Vec::new(),
             page: Page::Home,
             cursor: 0,
@@ -594,7 +609,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
     }
     match app.page {
         Page::Home => home_key(app, code),
-        Page::Accounts => list_key(app, code, app.live.accounts.len() + 1, |app, code| {
+        Page::Accounts => list_key(app, code, app.live.accounts.len() + 2, |app, code| {
             account_key(app, code)
         }),
         Page::Migration => list_key(app, code, app.migration_profiles.len(), migration_key),
@@ -708,6 +723,10 @@ fn list_key(
 
 fn account_key(app: &mut App, code: KeyCode) {
     if code != KeyCode::Enter {
+        return;
+    }
+    if app.cursor == app.live.accounts.len() + 1 {
+        app.login_requested = true;
         return;
     }
     if app.cursor == app.live.accounts.len() {
@@ -1854,8 +1873,8 @@ fn banner() -> Line<'static> {
 
 fn accounts_body(app: &App) -> Vec<Line<'static>> {
     let mut lines = vec![line(t(
-        "选择账户后回车。没有钥匙的档案不能在这里登录。",
-        "Enter switches account. A profile without keys cannot sign in here.",
+        "选择账户后回车切换；新账户使用登录入口。",
+        "Enter switches account; use Sign in for a new account.",
     ))];
     if app.live.accounts.is_empty() {
         lines.push(line(t("没有读到账户", "No accounts read")));
@@ -1882,6 +1901,10 @@ fn accounts_body(app: &App) -> Vec<Line<'static>> {
     ));
     lines.push(choice(
         app.cursor == app.live.accounts.len() + 1,
+        t("登录（OAuth / 密码与 TOTP）", "Sign in (OAuth / password and TOTP)"),
+    ));
+    lines.push(choice(
+        app.cursor == app.live.accounts.len() + 2,
         t("0  返回", "0  Back"),
     ));
     lines

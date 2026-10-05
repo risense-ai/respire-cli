@@ -6,7 +6,9 @@ use serde_json::{json, Value};
 
 fn origin(value: &str) -> Result<String> {
     let url = url::Url::parse(value).context("login server must be an absolute origin")?;
-    let local = matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "::1"));
+    let local = matches!(url.host(), Some(url::Host::Domain("localhost")))
+        || matches!(url.host(), Some(url::Host::Ipv4(address)) if address.is_loopback())
+        || matches!(url.host(), Some(url::Host::Ipv6(address)) if address.is_loopback());
     ensure!(url.scheme() == "https" || (url.scheme() == "http" && local), "login requires HTTPS, except loopback fixtures");
     ensure!(url.username().is_empty() && url.password().is_none() && url.path() == "/" && url.query().is_none() && url.fragment().is_none(), "login origin must not include credentials, paths, queries or fragments");
     Ok(url.origin().ascii_serialization())
@@ -17,6 +19,7 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
         Some(value) => origin(value)?,
         None if addr == "https://api.rsrs.rs" => "https://dash.rsrs.rs".to_owned(),
         None if addr == "https://api.dev.rsrs.rs" => "https://dash.dev.rsrs.rs".to_owned(),
+        None if respire::prompt::interactive() => origin(&respire::prompt::ask("dashboard origin: ")?)?,
         None => anyhow::bail!("custom login servers require --dashboard <dashboard-origin>"),
     };
     let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(30)).build();
@@ -55,12 +58,18 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
     Err(anyhow!("browser authorization timed out; original account was preserved"))
 }
 
-pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, super_password: Option<&str>, interactive: bool, dashboard: Option<&str>, no_open: bool) -> Result<()> {
+pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, super_password: Option<&str>, interactive: bool, oauth: bool, dashboard: Option<&str>, no_open: bool) -> Result<()> {
     crate::runtime_policy::require_host("account authorization and profile switching")?;
     ensure!(!crate::rpc::worker_active(), "login must run in the host terminal, not runtime RPC");
     let last = respire::auth::read_session_json().ok().and_then(|session| session["addr"].as_str().map(ToOwned::to_owned));
     let addr = origin(addr.or(last.as_deref()).unwrap_or(respire::service::DEFAULT_SERVER_ADDR))?;
-    let authorization = if interactive {
+    let password_mode = if interactive && !oauth && pass.is_none() && respire::prompt::interactive() {
+        let choice = respire::prompt::ask("login method: 1 OAuth (default), 2 password/TOTP: ")?;
+        ensure!(matches!(choice.trim(), "" | "1" | "2"), "select login method 1 or 2");
+        choice.trim() == "2"
+    } else { interactive && !oauth };
+    ensure!(!password_mode || (dashboard.is_none() && !no_open), "--dashboard and --no-open apply to OAuth login");
+    let authorization = if password_mode {
         let user = match user {
             Some(user) => user.to_owned(),
             None if respire::prompt::interactive() => respire::prompt::ask("username: ")?,
@@ -78,7 +87,12 @@ pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, su
         _ if respire::prompt::interactive() => respire::prompt::ask_secret("super password (A3-…): ")?,
         _ => anyhow::bail!("authorization succeeded; enter the super password in an interactive terminal or supply --super; original account was preserved"),
     };
-    let prepared = RefCell::new(respire_app::login_transaction::PreparedLogin::prepare(&addr, &authorization, super_password)?);
+    let prepared = respire_app::login_transaction::PreparedLogin::prepare(&addr, &authorization, super_password)?;
+    commit_verified(&addr, &authorization, prepared, "login")
+}
+
+fn commit_verified(addr: &str, authorization: &Value, prepared: respire_app::login_transaction::PreparedLogin, command: &str) -> Result<()> {
+    let prepared = RefCell::new(prepared);
     crate::rpc::change_profile_with_verification(|| prepared.borrow_mut().commit(), || prepared.borrow_mut().rollback(), || {
         let actual = crate::rpc::query_existing_json(vec!["account".to_owned(), "list".to_owned()])?;
         ensure!(actual["status"] == "ok", "runtime account verification failed");
@@ -86,11 +100,31 @@ pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, su
         let current = accounts.iter().find(|account| account["current"].as_bool() == Some(true)).context("runtime did not report a selected account")?;
         let expected = prepared.borrow();
         ensure!(current["user"].as_str() == Some(expected.user.as_str()) && current["dir"].as_str() == Some(expected.directory.to_string_lossy().as_ref()), "runtime account or directory differs from the authorized account");
+        expected.finish_migration(addr, authorization)?;
         Ok(())
     })?;
     let committed = prepared.borrow();
     crate::emit_result(crate::output::ResultEnvelope::new(
-        "login", crate::output::Status::Ok,
-        json!({"ok":true,"user":committed.user,"addr":addr,"dir":committed.directory.to_string_lossy()}), Vec::new(),
+        command, crate::output::Status::Ok,
+        json!({"ok":true,"user":committed.user,"addr":addr,"dir":committed.directory.to_string_lossy(),"super_issued":committed.migration_super_password()}), Vec::new(),
     ))
+}
+
+pub(crate) fn migrate_vault(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, legacy_super: Option<&str>, secret_key: Option<&str>, new_super: Option<&str>) -> Result<()> {
+    crate::runtime_policy::require_host("explicit legacy vault migration")?;
+    ensure!(!crate::rpc::worker_active(), "vault migration requires the host terminal");
+    let local = respire::auth::read_session_json()?;
+    let addr = origin(addr.or(local["addr"].as_str()).context("legacy server address required")?)?;
+    let user = user.or(local["user"].as_str()).filter(|value| !value.is_empty()).context("select the legacy account first")?;
+    let password = match pass {
+        Some(value) => value.to_owned(),
+        None if respire::prompt::interactive() => respire::prompt::ask_secret("login password: ")?,
+        None => anyhow::bail!("migration requires --pass or an interactive terminal"),
+    };
+    let authorization = respire::auth::password_authorization(&addr, user, &password)?;
+    let prepared = respire_app::login_transaction::PreparedLogin::prepare_migration(&addr, &authorization, &password, legacy_super, secret_key, new_super)?;
+    if let Some(code) = prepared.migration_super_password() {
+        eprintln!("Keep this recovery code before migration: {code}");
+    }
+    commit_verified(&addr, &authorization, prepared, "migrate")
 }

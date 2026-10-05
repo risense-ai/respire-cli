@@ -766,32 +766,66 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error.into()),
     };
+    let backup = if let Some(bytes) = original.as_ref() {
+        let parent = config_path.parent().context("configuration has no parent directory")?;
+        let path = parent.join(format!(".client-before-switch-{}.json", uuid::Uuid::new_v4().simple()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Some(path)
+    } else { None };
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
     let changed = change().and_then(|_| ensure_daemon_locked()).and_then(|_| verify());
     if let Err(error) = changed {
-        if let Some(health) = probe_runtime()? { stop_occupant(health.pid)?; }
-        let rollback_error = rollback().err();
+        let cleanup = probe_runtime().and_then(|health| match health {
+            Some(health) => stop_occupant(health.pid), None => Ok(()),
+        });
+        let mut failures = Vec::new();
+        if let Err(error) = &cleanup { failures.push(format!("target runtime cleanup failed: {error:#}")); }
+        if let Err(error) = rollback() { failures.push(format!("account session rollback failed: {error:#}")); }
         // Startup failure must restore the original selection and all API fields,
         // including the distinction between an absent config and an empty one.
-        match original {
-            Some(bytes) => std::fs::write(&config_path, bytes)
-                .context("profile switch failed and original configuration could not be restored")?,
-            None => match std::fs::remove_file(&config_path) {
-                Ok(()) => {}
-                Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => {}
-                Err(remove) => return Err(error.context(format!("configuration rollback failed: {remove}"))),
+        let restored = match original {
+            Some(bytes) => {
+                let temporary = config_path.with_file_name(format!(".client-restore-{}.json", uuid::Uuid::new_v4().simple()));
+                (|| -> Result<()> {
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+                    let mut file = options.open(&temporary)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::rename(&temporary, &config_path)?;
+                    Ok(())
+                })()
             },
+            None => match std::fs::remove_file(&config_path) {
+                Ok(()) => Ok(()),
+                Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(remove) => Err(remove.into()),
+            },
+        };
+        if let Err(error) = &restored { failures.push(format!("configuration rollback failed: {error:#}")); }
+        if cleanup.is_ok() && restored.is_ok() {
+            if let Err(error) = ensure_daemon_locked() { failures.push(format!("original runtime restart failed: {error:#}")); }
         }
-        let error = match rollback_error {
-            Some(rollback) => error.context(format!("account session rollback failed: {rollback:#}")),
-            None => error,
-        };
-        return match ensure_daemon_locked() {
-            Ok(()) => Err(error),
-            Err(restart) => Err(error.context(format!("original runtime restart failed: {restart:#}"))),
-        };
+        if !failures.is_empty() {
+            if let Some(path) = backup { failures.push(format!("original configuration backup: {}", path.display())); }
+            return Err(error.context(failures.join("; ")));
+        }
+        if let Some(path) = backup {
+            if let Err(cleanup) = std::fs::remove_file(&path) { return Err(error.context(format!("configuration restored; backup retained at {}: {cleanup}", path.display()))); }
+        }
+        return Err(error);
+    }
+    if let Some(path) = backup {
+        if let Err(error) = std::fs::remove_file(&path) { eprintln!("profile verified; configuration backup retained at {}: {error}", path.display()); }
     }
     Ok(())
 }

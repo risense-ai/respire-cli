@@ -1106,10 +1106,26 @@ enum Command {
     },
     /// Explicitly copy a selected old library into a new account; no startup migration.
     Migrate {
-        #[arg(long, requires = "account")]
+        #[arg(long, requires = "account", conflicts_with = "vault")]
         source: Option<String>,
         #[arg(long, requires = "source")]
         account: Option<String>,
+        /// Upgrade only the explicitly selected legacy account vault, preserving its data key
+        #[arg(long)]
+        vault: bool,
+        #[arg(long, requires = "vault")]
+        addr: Option<String>,
+        #[arg(long, requires = "vault")]
+        user: Option<String>,
+        #[arg(long, requires = "vault")]
+        pass: Option<String>,
+        #[arg(long = "super", requires = "vault")]
+        super_pass: Option<String>,
+        #[arg(long, requires = "vault")]
+        secret_key: Option<String>,
+        /// Explicit v4 recovery code for the unchanged data key (required on a headless host without keyring)
+        #[arg(long, requires = "vault")]
+        new_super: Option<String>,
     },
     /// Spaces (virtual accounts): an owner can create several virtual accounts; each is a space with its own super key and data dir.
     /// Join = a member builds that space's profile on their machine from an invite; they can switch freely; leaving is `kick`.
@@ -1151,21 +1167,21 @@ enum Command {
         addr: Option<String>,
         #[arg(long)]
         user: Option<String>,
-        #[arg(long, requires = "interactive")]
+        #[arg(long, requires = "interactive", conflicts_with = "oauth")]
         pass: Option<String>,
         #[arg(long = "super")]
         super_pass: Option<String>,
-        /// Complete password and TOTP prompts in this terminal instead of the browser
+        /// Choose OAuth or password/TOTP in this terminal (a supplied --pass selects password login)
         #[arg(long)]
         interactive: bool,
         /// Explicitly select browser authorization (also the default)
-        #[arg(long, conflicts_with = "interactive")]
+        #[arg(long)]
         oauth: bool,
         /// Dashboard origin for a custom server
-        #[arg(long, conflicts_with = "interactive")]
+        #[arg(long)]
         dashboard: Option<String>,
         /// Display the authorization URL without opening a browser
-        #[arg(long, conflicts_with = "interactive")]
+        #[arg(long)]
         no_open: bool,
     },
     /// Book material: a root subtree -> volume/chapter full text (for an AI to draft)
@@ -4645,14 +4661,14 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
              wrapped_urk: {wrapped_urk}\n\
              urk_nonce: {urk_nonce}\n\n\
              -- import on a new machine --\n\
-             rsrs login --user {user} --pass <login-password> --super {super_key}\n\
+             rsrs login --interactive --user {user} --pass <login-password> --super {super_key}\n\
              (or fill the same super password on the website Keys & Recovery page after login)\n"
         )
     } else {
         format!(
             "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
              user: {user}\nserver: {addr}\n\n\
-             -- decrypt keys (v3 two-factor: passphrase + recovery code; login auto-upgrades to v4) --\n\
+             -- decrypt keys (v3 two-factor: passphrase + recovery code; explicit migration upgrades to v4) --\n\
              super password (passphrase): {legacy_super}\n\
              Secret Key (recovery code): {super_key}\n\n\
              -- vault wrap material (listed for lookup) --\n\
@@ -4660,12 +4676,12 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
              kdf_salt: {kdf_salt}\n\
              wrapped_urk: {wrapped_urk}\n\
              urk_nonce: {urk_nonce}\n\n\
-             -- import on a new machine --\n\
-             rsrs login --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
+             -- explicitly copy and select the old profile before upgrading its vault --\n\
+             rsrs migrate --vault --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
         )
     };
     if !(is_v4 || is_v3) {
-        eprintln!("WARN this machine still has a v1/v2 key wrap - rsrs login to upgrade to v4 before exporting");
+        eprintln!("WARN this machine still has a v1/v2 key wrap - use rsrs migrate --vault on the selected old profile before exporting");
     }
     match out {
         Some(path) => {
@@ -5397,8 +5413,11 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
-    if let Some(Command::Migrate { source, account }) = args.command.as_ref() {
+    if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
         runtime_policy::require_host("explicit legacy migration")?;
+        if *vault {
+            return login::migrate_vault(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), secret_key.as_deref(), new_super.as_deref());
+        }
         let value = match (source.as_deref(), account.as_deref()) {
             (Some(source), Some(account)) => respire::migration::migrate_profile(source, account)?,
             (None, None) => respire::migration::list_legacy_profiles()?,
@@ -5431,8 +5450,8 @@ fn run(args: Cli) -> Result<()> {
             *key_stdin,
         );
     }
-    if let Some(Command::Login { addr, user, pass, super_pass, interactive, dashboard, no_open, .. }) = args.command.as_ref() {
-        return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), *interactive, dashboard.as_deref(), *no_open);
+    if let Some(Command::Login { addr, user, pass, super_pass, interactive, oauth, dashboard, no_open }) = args.command.as_ref() {
+        return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), *interactive, *oauth, dashboard.as_deref(), *no_open);
     }
     if rpc::worker_active() {
         return run_local(args);

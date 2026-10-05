@@ -67,9 +67,13 @@ pub fn prepare_m3_for_index() -> Result<()> {
         }
         candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
     }
-    if !candidates.iter().any(|path| model_files_present(path)) {
-        install_m3_inner(None)?;
+    for path in candidates {
+        if file_valid(&path.join("tokenizer.json"), TOKENIZER_SHA256)?
+            && file_valid(&path.join("onnx/model_fp16.onnx"), ONNX_SHA256)? {
+            return Ok(());
+        }
     }
+    install_m3_inner(None)?;
     Ok(())
 }
 

@@ -190,20 +190,21 @@ class Smoke:
         require(self.api(account, "POST", "/api/self/vault", old_vault).get("ok") is True, "legacy_vault_not_written")
         fetched = self.api(account, "GET", "/api/self/vault")
         require(all(fetched.get(k) == v for k, v in old_vault.items()), "legacy_vault_not_read_back")
+        session.update(vault_version=version, kdf_salt=salt, wrapped_urk=wrapped, urk_nonce=nonce.hex())
         if version == 1:
-            session.update(vault_version=1, kdf_salt=salt, wrapped_urk=wrapped, urk_nonce=nonce.hex(), secret=secret)
+            session["secret"] = secret
             session.pop("secret_key", None)
-            self.write_session(env, session)
-            upgraded_env = env
-        else:
-            upgraded_env = self.env(f"v{version}-legacy-recovery", user)
-        command = ["login", "--addr", UPSTREAM, "--user", user, "--pass=" + password]
+        self.write_session(env, session)
+        upgraded_env = env
+        # Select the legacy profile explicitly; ordinary login never reconciles old wraps.
+        command = ["migrate", "--vault", "--addr", UPSTREAM, "--user", user, "--pass=" + password,
+            "--new-super=" + original_code]
         if version != 1:
             command += ["--super=" + legacy_pass]
         if version == 3:
             command += ["--secret-key=" + secret]
         result = self.cli(upgraded_env, *command)
-        new_code = secret if version == 3 else result["summary"].get("super_issued")
+        new_code = result["summary"].get("super_issued")
         require(isinstance(new_code, str) and bool(new_code), "upgraded_recovery_code_missing")
         upgraded_env["ONEMEMORY_SUPER"] = new_code
         upgraded = self.session(upgraded_env)
@@ -221,7 +222,7 @@ class Smoke:
         require(original == (ciphertext, item_nonce), "upgrade_changed_original_ciphertext")
         final_env = self.env(f"v{version}-new-device", user)
         final_env["ONEMEMORY_SUPER"] = new_code
-        self.cli(final_env, "login", "--addr", UPSTREAM, "--user", user, "--pass=" + password, "--super=" + new_code)
+        self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, "--pass=" + password, "--super=" + new_code)
         final_session = self.session(final_env)
         require(final_session.get("user") == user and final_session.get("addr") == UPSTREAM
             and isinstance(final_session.get("token"), str) and bool(final_session["token"]),

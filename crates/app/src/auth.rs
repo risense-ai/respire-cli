@@ -111,7 +111,7 @@ pub fn try_session() -> Result<Option<SessionKeys>> {
     }
 }
 
-fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
+pub(crate) fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
     let kdf_salt = crypto::random_hex(16);
     let kek = crypto::derive_kek_v4(super_pass, &kdf_salt)?;
     let (urk_nonce, wrapped_urk) = crypto::wrap_key(urk, &kek)?;
@@ -369,7 +369,7 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         Ok(r) => r,
         Err(ureq::Error::Status(code, _r)) if code == 409 => {
             return Err(anyhow::anyhow!(
-                "user \"{user}\" is already registered on this server — use rsrs login --user {user} --pass <password>",
+                "user \"{user}\" is already registered on this server — use rsrs login --interactive --user {user} --pass <password>",
             ));
         }
         Err(e) => return Err(anyhow::anyhow!("register request failed: {e}")),
