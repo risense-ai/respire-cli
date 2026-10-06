@@ -86,7 +86,7 @@ class Smoke:
             raise SmokeFailure('exact-server-sha-required')
         if self.contract.get('server_source_sha') != self.expected_server_sha:
             raise SmokeFailure('route-contract-server-revision-mismatch')
-        if self.contract.get('expected_route_count') != 65 or len(self.routes) != 65:
+        if self.contract.get('expected_route_count') != 66 or len(self.routes) != 66:
             raise SmokeFailure('route-contract-count-mismatch')
 
     def key(self, method, path):
@@ -391,6 +391,27 @@ class Smoke:
         self.check('GET', '/admin/me', token=token, predicate=lambda r: r.get('user') == owner['user'] and r.get('role') == 'owner', label='fixture-owner-identity')
         viewer = self.create_admin('viewer', 'viewer', token)
         admin = self.create_admin('operator', 'admin', token)
+        def valid_stats(reply, days):
+            since = reply.get('memory_tracking_since', '')
+            points = reply.get('series', [])
+            return (reply.get('days') == days and reply.get('timezone') == 'Asia/Shanghai'
+                    and reply.get('historical_baseline') == 'retained_registrations_and_sessions'
+                    and bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', since)) and len(points) == days
+                    and all((i == 0 or points[i - 1]['date'] < point['date'])
+                            and isinstance(point.get('registrations'), int) and point['registrations'] >= 0
+                            and isinstance(point.get('sessions'), int) and point['sessions'] >= 0
+                            and (point.get('memories') is None if point['date'] < since else
+                                 isinstance(point.get('memories'), int) and point['memories'] >= 0)
+                            for i, point in enumerate(points)))
+        self.check('GET', '/admin/stats', token=token, predicate=lambda r: valid_stats(r, 30), label='owner-daily-stats-default')
+        for days in [7, 90]:
+            self.check('GET', f'/admin/stats?days={days}', token=admin['token'],
+                       predicate=lambda r, days=days: valid_stats(r, days), label=f'admin-daily-stats-{days}-days')
+        for days in ['6', '91', 'abc', '7.5']:
+            self.check('GET', '/admin/stats?days=' + days, token=token, status=400,
+                       predicate=lambda r: 'error' in r, kind='negative', label='stats-invalid-days-rejected')
+        self.check('GET', '/admin/stats', token=viewer['token'], status=403,
+                   predicate=lambda r: r.get('error') == 'forbidden', kind='negative', label='viewer-daily-stats-blocked')
         self.check('GET', '/admin/admins', token=token,
                    predicate=lambda r: any(x.get('user') == viewer['user'] for x in r.get('admins', [])), label='fixture-admin-visible')
         forbidden = self.namespace + '-forbidden'
