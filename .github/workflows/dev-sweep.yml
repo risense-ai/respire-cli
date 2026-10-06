@@ -266,9 +266,12 @@ jobs:
         run: |
           sleep 61
           python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
+          python3 scripts/dev-github-api-smoke.py --report "$RUNNER_TEMP/dev-github-api-coverage.json"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: dev-api-coverage
-          path: ${{ runner.temp }}/dev-api-coverage.json
+          path: |
+            ${{ runner.temp }}/dev-api-coverage.json
+            ${{ runner.temp }}/dev-github-api-coverage.json
           if-no-files-found: error

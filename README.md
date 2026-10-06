@@ -36,6 +36,10 @@ rsrs recall "query" --titles --json
 
 The default profile is `~/.rsrs`, the local runtime port is `15169`, and the default sync API is `https://api.rsrs.rs`.
 
+Use `rsrs login --oauth` for browser authorization, or `rsrs login --interactive` to choose OAuth or password/TOTP. The TUI account login offers the same choices. Select GitHub in the dashboard when the server has enabled it; complete any TOTP challenge and approve CLI access, then enter your super password in the terminal. Authorization alone does not decrypt your memories. Cancelled or failed login preserves the original account.
+
+For DEV acceptance, use `rsrs login --addr https://api.dev.rsrs.rs --oauth`. GitHub binding and unbinding are in the dashboard security page. Unbinding preserves the session; a GitHub-only account needs another login password before it can unlink GitHub. Production activation is separate from DEV delivery.
+
 Startup preserves the selected account and does not import old profiles automatically. Use the TUI's Migrate old version action or `rsrs migrate` to choose a source and target account. Migration preserves encrypted data, settings and available credentials, keeps original directories intact and does not overwrite an existing account. Missing decryption credentials require the original recovery material.
 
 `rsrs classify-config` reports classification configuration without invoking a model. Select a backend with `rsrs classify-config --set --backend jev` or `--backend ds --api-base <URL> --model <MODEL>`. Add `--key-stdin` to read a key from redirected input into the OS keyring; keys are never printed or stored in ordinary config files.

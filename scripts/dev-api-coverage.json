@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "authority": "Cloud serve route implementations; reviewed 2026-10-06",
+  "authority": "Baseline cloud routes; GitHub transport/security is checked separately by dev-github-api-smoke.py; reviewed 2026-10-06",
   "expected_route_count": 65,
   "routes": [
     { "method": "POST", "path": "/oauth/device/code", "group": "auth" },
@@ -313,5 +313,5 @@
       "group": "admin"
     }
   ],
-  "server_source_sha": "80171289141a89ef8019ef6bb558525da5c2860c"
+  "server_source_sha": "029f21aea5af9d641f3cc3a8ea17d9595f2955a8"
 }
