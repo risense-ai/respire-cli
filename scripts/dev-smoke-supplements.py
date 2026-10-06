@@ -32,6 +32,7 @@ def main():
         ("runtime", "dev-runtime-smoke.py", common + ["--root", str(root / "runtime"), "--report", str(root / "runtime-coverage.json")]),
         ("legacy_vault", "dev-legacy-vault-smoke.py", common + ["--root", str(root / "legacy-vault")]),
         ("profile_migration", "dev-profile-migration-smoke.py", common + ["--root", str(root / "profile-migration")]),
+        ("login_interruption", "dev-login-interruption-smoke.py", common + ["--root", str(root / "login-interruption"), "--model-dir", str(root / "outbox/models")]),
     ]
     outcomes = []
     for name, script, flags in commands:
@@ -55,6 +56,7 @@ def main():
             "--outbox", str(root / "outbox/outbox-coverage.json"), "--ai-inject", str(root / "ai-inject/ai-inject-coverage.json"),
             "--runtime", str(root / "runtime-coverage.json"), "--legacy-vault", str(root / "legacy-vault/legacy-vault-coverage.json"),
             "--profile-migration", str(root / "profile-migration/migration-coverage.json"),
+            "--login-interruption", str(root / "login-interruption/interruption-coverage.json"),
             "--report", str(root / "combined-coverage.json"), "--source-sha", args.source_sha,
             "--version", args.version, "--binary-sha256", args.binary_sha256]
     result = subprocess.run(gate, timeout=30)

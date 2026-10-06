@@ -138,6 +138,11 @@ fn credential_account(user: &str) -> String {
 
 /// Import into a separate namespace. Existing credentials are never overwritten.
 pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Result<&'static str> {
+    import_credential_checkpoint(account, slot, value, |_| Ok(()))
+}
+
+/// Record the selected backend before a credential can be created.
+pub(crate) fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut checkpoint: impl FnMut(&str) -> Result<()>) -> Result<&'static str> {
     let label = format!("{slot}:{account}");
     if read_credentials(VAULT_SERVICE, &label)
         .iter()
@@ -158,6 +163,7 @@ pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Resul
             }
             Ok(_) => {}
             Err(keyring::Error::NoEntry) => {
+                checkpoint(backend.name())?;
                 if entry.set_password(value).is_err() {
                     continue;
                 }

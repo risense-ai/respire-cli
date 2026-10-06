@@ -61,6 +61,7 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
 pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, super_password: Option<&str>, interactive: bool, oauth: bool, dashboard: Option<&str>, no_open: bool) -> Result<()> {
     crate::runtime_policy::require_host("account authorization and profile switching")?;
     ensure!(!crate::rpc::worker_active(), "login must run in the host terminal, not runtime RPC");
+    crate::rpc::recover_interrupted_login()?;
     let last = respire::auth::read_session_json().ok().and_then(|session| session["addr"].as_str().map(ToOwned::to_owned));
     let addr = origin(addr.or(last.as_deref()).unwrap_or(respire::service::DEFAULT_SERVER_ADDR))?;
     let password_mode = if interactive && !oauth && pass.is_none() && respire::prompt::interactive() {
@@ -101,6 +102,7 @@ fn commit_verified(addr: &str, authorization: &Value, prepared: respire_app::log
         let expected = prepared.borrow();
         ensure!(current["user"].as_str() == Some(expected.user.as_str()) && current["dir"].as_str() == Some(expected.directory.to_string_lossy().as_ref()), "runtime account or directory differs from the authorized account");
         expected.finish_migration(addr, authorization)?;
+        expected.complete()?;
         Ok(())
     })?;
     let committed = prepared.borrow();
@@ -113,6 +115,7 @@ fn commit_verified(addr: &str, authorization: &Value, prepared: respire_app::log
 pub(crate) fn migrate_vault(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, legacy_super: Option<&str>, secret_key: Option<&str>, new_super: Option<&str>) -> Result<()> {
     crate::runtime_policy::require_host("explicit legacy vault migration")?;
     ensure!(!crate::rpc::worker_active(), "vault migration requires the host terminal");
+    crate::rpc::recover_interrupted_login()?;
     let local = respire::auth::read_session_json()?;
     let addr = origin(addr.or(local["addr"].as_str()).context("legacy server address required")?)?;
     let user = user.or(local["user"].as_str()).filter(|value| !value.is_empty()).context("select the legacy account first")?;

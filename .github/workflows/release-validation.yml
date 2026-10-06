@@ -152,6 +152,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node npm/scripts/test-wrapper.mjs
+          python3 scripts/test-dev-smoke-gate.py
           node npm/scripts/verify-packages.mjs release-assets --assets-only
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci

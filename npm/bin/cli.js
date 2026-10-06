@@ -3,7 +3,8 @@
 // Locate the platform package binary and forward CLI arguments.
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { existsSync } = require('fs');
+const { existsSync, readFileSync } = require('fs');
+const version = require('../package.json').version;
 
 const PKGS = {
   'linux-x64': '@rsrsai/linux-x64',
@@ -58,7 +59,17 @@ function resolveBin(pkgName, exeName) {
 }
 const bin = resolveBin(pkg, exe);
 if (!bin) {
-  console.error(`rsrs: platform package ${pkg} is missing. Install: npm i -g ${pkg}`);
+  console.error(`rsrs: platform package ${pkg} is missing. Install: npm i -g ${pkg}@${version}`);
+  process.exit(1);
+}
+
+try {
+  const platform = JSON.parse(readFileSync(path.join(path.dirname(path.dirname(bin)), 'package.json'), 'utf8'));
+  if (platform.name !== pkg || platform.version !== version) {
+    throw new Error(`expected ${pkg}@${version}, found ${platform.name}@${platform.version}`);
+  }
+} catch (error) {
+  console.error(`rsrs: incompatible platform package: ${error.message}. Install: npm i -g ${pkg}@${version}`);
   process.exit(1);
 }
 
