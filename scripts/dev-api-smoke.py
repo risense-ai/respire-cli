@@ -398,10 +398,10 @@ class Smoke:
                     and reply.get('historical_baseline') == 'retained_registrations_and_sessions'
                     and bool(re.fullmatch(r'\d{4}-\d{2}-\d{2}', since)) and len(points) == days
                     and all((i == 0 or points[i - 1]['date'] < point['date'])
-                            and isinstance(point.get('registrations'), int) and point['registrations'] >= 0
-                            and isinstance(point.get('sessions'), int) and point['sessions'] >= 0
+                            and type(point.get('registrations')) is int and point['registrations'] >= 0
+                            and type(point.get('sessions')) is int and point['sessions'] >= 0
                             and (point.get('memories') is None if point['date'] < since else
-                                 isinstance(point.get('memories'), int) and point['memories'] >= 0)
+                                 type(point.get('memories')) is int and point['memories'] >= 0)
                             for i, point in enumerate(points)))
         self.check('GET', '/admin/stats', token=token, predicate=lambda r: valid_stats(r, 30), label='owner-daily-stats-default')
         for days in [7, 90]:
