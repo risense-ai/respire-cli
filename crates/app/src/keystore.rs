@@ -5,7 +5,7 @@
 //! > none. Plaintext is never written to session.json from v4 on — a disk copy cannot decrypt.
 //! Headless servers (no keyring) use ONEMEMORY_SUPER or pass --super each time.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 const SERVICE: &str = "rsrs";
 const VAULT_SERVICE: &str = "rsrs";
@@ -124,7 +124,7 @@ fn credential_account(user: &str) -> String {
         };
         if session_user == account {
             if let Some(alias) = session["keyring_account"].as_str().filter(|alias| {
-                alias.starts_with("legacy-")
+                (alias.starts_with("legacy-") || alias.starts_with("login-"))
                     && alias
                         .chars()
                         .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
@@ -149,6 +149,7 @@ pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Resul
     }
     for backend in backends() {
         let entry = credential_entry(VAULT_SERVICE, &label, *backend)?;
+        let mut created = false;
         match entry.get_password() {
             Ok(existing) if existing != value => {
                 return Err(anyhow!(
@@ -160,6 +161,7 @@ pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Resul
                 if entry.set_password(value).is_err() {
                     continue;
                 }
+                created = true;
             }
             Err(keyring::Error::Ambiguous(_))
             | Err(keyring::Error::BadEncoding(_))
@@ -168,21 +170,46 @@ pub(crate) fn import_credential(account: &str, slot: &str, value: &str) -> Resul
             }
             Err(_) => continue,
         }
-        let readback = credential_entry(VAULT_SERVICE, &label, *backend)?;
-        match readback.get_password() {
+        let readback = credential_entry(VAULT_SERVICE, &label, *backend)
+            .and_then(|entry| entry.get_password().map_err(Into::into));
+        match readback {
             Ok(found) if found == value => {
                 if backend.name() == "kernel" {
                     eprintln!("warning: migrated credentials use the volatile Linux kernel keyring; original keys were preserved; restore or re-import them into an available Secret Service store for reboot-safe storage");
                 }
                 return Ok(backend.name());
             }
-            Ok(_) => return Err(anyhow!("migration keyring readback mismatch")),
-            Err(_) => continue,
+            Ok(_) => {
+                if created {
+                    entry.delete_credential().context("remove new credential after readback mismatch")?;
+                }
+                return Err(anyhow!("migration keyring readback mismatch"));
+            },
+            Err(_) => {
+                if created {
+                    match entry.delete_credential() {
+                        Ok(()) | Err(keyring::Error::NoEntry) => {},
+                        Err(error) => return Err(anyhow!("credential readback failed and its new entry could not be removed: {error}")),
+                    }
+                }
+                continue;
+            },
         }
     }
     Err(anyhow!(
         "migration keyring write/readback failed; no snapshot was published"
     ))
+}
+
+/// Remove only the entry created by this login when its transaction rolls back.
+pub(crate) fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<()> {
+    let backend = backends().iter().find(|backend| backend.name() == backend_name)
+        .ok_or_else(|| anyhow!("credential backend is unavailable during login rollback"))?;
+    let entry = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(error) => Err(anyhow!("login credential rollback failed: {error}")),
+    }
 }
 
 /// Classification settings are global per endpoint, unlike per-library vaults.

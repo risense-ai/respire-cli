@@ -22,6 +22,8 @@ use crate::transport::MemoryTransport;
 
 mod merge;
 pub use merge::merge_entries;
+mod related;
+pub use related::{store_related, remap_relations};
 
 static RUNTIME_PROFILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -331,6 +333,7 @@ impl App {
 
     /// Store a memory (after picking one of three): force write / parent as cause / merge_ids merge (delete old, store new, rehang children, inherit first item's parent).
     pub fn create(&self, req: &CreateReq) -> Result<MemoryEntry> {
+        anyhow::ensure!(req.merge_ids.is_none() || (req.supersedes.is_none() && req.see_also.is_empty()), "merge and associations are mutually exclusive");
         let stamp = now_stamp();
         let title = if req.title.trim().is_empty() {
             derive_title(&req.content)
@@ -345,6 +348,9 @@ impl App {
             final_parent = resolve_prefix(&all, &final_parent).unwrap_or_default();
         }
         let mut entry = MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id,
             kind: Kind::from_str(&req.kind),
             tags: split_tags(&req.tags),
@@ -377,6 +383,8 @@ impl App {
                 req.parent.as_deref().unwrap_or_default(),
                 false,
             )?;
+        } else if req.supersedes.is_some() || !req.see_also.is_empty() {
+            store_related(&self.keys,&self.store,&self.embedder,&mut entry,req.supersedes.as_deref(),&req.see_also)?;
         } else {
             let stored = MemoryEngine::seal(&self.keys, &self.embedder, &entry, &entry.user)?;
             self.store.put(&stored)?;
@@ -621,6 +629,8 @@ pub struct CreateReq {
     pub emotion: Option<f32>,
     pub parent: Option<String>,
     pub merge_ids: Option<Vec<String>>,
+    pub supersedes: Option<String>,
+    pub see_also: Vec<String>,
     pub force: bool,
     /// importance (two-tier): important (main library) | trivial (diary); default trivial (normal retired)
     pub importance: Option<String>,
@@ -813,7 +823,8 @@ pub fn env_root_dir() -> Option<PathBuf> {
 /// after teardown the real library status became "user local, 0 entries" until data_dir was cleared by hand).
 /// An isolated root carries its own client.json — config follows the library — and cannot self-lock, because
 /// data_dir is decided by the env var (in-tree first), not this file.
-fn client_config_path() -> PathBuf {
+/// Host profile transactions preserve the complete configuration on failure.
+pub fn client_config_path() -> PathBuf {
     if let Some(root) = env_root_dir() {
         return root.join("client.json");
     }
@@ -1684,6 +1695,12 @@ impl Default for ImportTags {
 #[derive(serde::Deserialize)]
 struct ImportItem {
     #[serde(default)]
+    supersedes: String,
+    #[serde(default)]
+    superseded_by: String,
+    #[serde(default)]
+    see_also: Vec<String>,
+    #[serde(default)]
     id: String,
     #[serde(default, alias = "type")]
     kind: Option<String>,
@@ -1775,6 +1792,9 @@ pub fn import_json(path: &std::path::Path) -> Result<ImportReport> {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| created_at.clone());
         entries.push(MemoryEntry {
+            supersedes: item.supersedes,
+            superseded_by: item.superseded_by,
+            see_also: item.see_also,
             id: uuid::Uuid::new_v4().to_string(),
             kind: Kind::from_str(&kind),
             tags: match item.tags {
@@ -1812,6 +1832,8 @@ pub fn import_json(path: &std::path::Path) -> Result<ImportReport> {
         done.extend(chain);
     }
     let new_ids: Vec<_> = entries.iter().map(|entry| entry.id.clone()).collect();
+    let relation_ids: HashMap<String,String> = old_ids.iter().map(|(id,i)| (id.clone(),new_ids[*i].clone())).collect();
+    remap_relations(&mut entries,&relation_ids)?;
     for entry in &mut entries {
         if entry.parent_id.is_empty() {
             continue;
@@ -1881,6 +1903,9 @@ pub fn export_subtree_payload(root_prefix: &str) -> Result<(crate::share::ShareP
             .get(id)
             .and_then(|s| MemoryEngine::open(&keys, s).ok())
             .map(|entry| MemoryEntry {
+                supersedes: entry.supersedes,
+                superseded_by: entry.superseded_by,
+                see_also: entry.see_also,
                 id: entry.id,
                 kind: Kind::from_str(entry.kind.as_str()),
                 tags: entry.tags,
@@ -2108,6 +2133,9 @@ pub fn import_share_payload(
             it.updated_at.clone()
         };
         entries.push(MemoryEntry {
+            supersedes: it.supersedes.clone(),
+            superseded_by: it.superseded_by.clone(),
+            see_also: it.see_also.clone(),
             id: new_ids[i].clone(),
             kind: Kind::from_str(&kind),
             tags: it.tags.clone(),
@@ -2126,6 +2154,9 @@ pub fn import_share_payload(
             importance: importance.to_owned(),
         });
     }
+    let relation_ids: HashMap<String,String> = payload.items.iter().zip(new_ids.iter())
+        .filter(|(item,_)| !item.content.trim().is_empty()).map(|(item,id)| (item.id.clone(),id.clone())).collect();
+    remap_relations(&mut entries,&relation_ids)?;
     let report = ImportReport {
         imported: entries.len(),
         skipped,
@@ -2410,6 +2441,9 @@ pub fn deepen_apply<E: crate::memory::search::Embedder>(
     let mut moved = 0usize;
     for (sub, title) in plan.sub_roots.iter().zip(titles) {
         let node = MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             kind: Kind::Context,
             tags: {
@@ -2532,6 +2566,9 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
         };
         let stamp = now_stamp();
         let child = MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             kind: Kind::from_str(&op.kind),
             tags: {
@@ -3110,6 +3147,9 @@ mod tests {
 
     fn test_entry(content: &str) -> MemoryEntry {
         MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: "test-1".into(),
             kind: Kind::Context,
             tags: vec![],

@@ -1369,7 +1369,7 @@ dependencies = [
 
 [[package]]
 name = "respire"
-version = "1.0.10"
+version = "1.0.11"
 dependencies = [
  "anyhow",
  "base64",
@@ -1394,6 +1394,7 @@ dependencies = [
  "tiny_http",
  "unicode-width 0.2.0",
  "ureq",
+ "url",
  "uuid",
 ]
 
@@ -1427,7 +1428,7 @@ dependencies = [
 
 [[package]]
 name = "respire_core_sdk"
-version = "1.0.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1458,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "1.0.0"
+version = "2.0.0-dev.1"
 dependencies = [
  "anyhow",
  "serde",

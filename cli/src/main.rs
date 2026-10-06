@@ -23,6 +23,7 @@ mod bench;
 mod classify;
 mod classify_config;
 mod i18n;
+mod login;
 mod mcp;
 mod net_rpc;
 mod output;
@@ -555,6 +556,12 @@ enum Command {
         /// Merge: delete the listed old memories (comma-separated ids) and store this content as the combined entry (inherits the first cause chain)
         #[arg(long)]
         merge_ids: Option<String>,
+        /// This new conclusion replaces a live important memory.
+        #[arg(long, conflicts_with = "merge_ids")]
+        supersedes: Option<String>,
+        /// Bidirectional links to live important memories.
+        #[arg(long, value_delimiter = ',', conflicts_with = "merge_ids")]
+        see_also: Vec<String>,
     },
     /// Import a JSON-array dump: keep fields, rebuild parent links, sync once after the batch
     Import { file: String },
@@ -577,6 +584,9 @@ enum Command {
         /// Return compact IDs and titles in JSON; use show to read full memory content.
         #[arg(long)]
         titles: bool,
+        /// Disable associations for this request (original recall results only).
+        #[arg(long)]
+        no_related: bool,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -1094,6 +1104,29 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Explicitly copy a selected old library into a new account; no startup migration.
+    Migrate {
+        #[arg(long, requires = "account", conflicts_with = "vault")]
+        source: Option<String>,
+        #[arg(long, requires = "source")]
+        account: Option<String>,
+        /// Upgrade only the explicitly selected legacy account vault, preserving its data key
+        #[arg(long)]
+        vault: bool,
+        #[arg(long, requires = "vault")]
+        addr: Option<String>,
+        #[arg(long, requires = "vault")]
+        user: Option<String>,
+        #[arg(long, requires = "vault")]
+        pass: Option<String>,
+        #[arg(long = "super", requires = "vault")]
+        super_pass: Option<String>,
+        #[arg(long, requires = "vault")]
+        secret_key: Option<String>,
+        /// Explicit v4 recovery code for the unchanged data key (required on a headless host without keyring)
+        #[arg(long, requires = "vault")]
+        new_super: Option<String>,
+    },
     /// Spaces (virtual accounts): an owner can create several virtual accounts; each is a space with its own super key and data dir.
     /// Join = a member builds that space's profile on their machine from an invite; they can switch freely; leaving is `kick`.
     Space {
@@ -1126,7 +1159,7 @@ enum Command {
         #[arg(long)]
         full: bool,
     },
-    /// Log in: login password to the server; a new device must also give the super password to download the key wrap.
+    /// Log in through browser authorization, or use --interactive for password and TOTP prompts.
     /// Address defaults to the last server this machine used (kept in session.json by register/logout).
     /// Missing user/password drops into an interactive prompt (TTY only).
     Login {
@@ -1134,16 +1167,22 @@ enum Command {
         addr: Option<String>,
         #[arg(long)]
         user: Option<String>,
-        #[arg(long)]
+        #[arg(long, requires = "interactive", conflicts_with = "oauth")]
         pass: Option<String>,
         #[arg(long = "super")]
         super_pass: Option<String>,
-        /// Secret Key (vault v3, generated on this machine; the server never has it)
-        #[arg(long = "secret-key")]
-        secret_key: Option<String>,
-        /// When the server has data but no key wrap, explicitly drop the old data and start from this machine's new keys
+        /// Choose OAuth or password/TOTP in this terminal (a supplied --pass selects password login)
         #[arg(long)]
-        reset_vault: bool,
+        interactive: bool,
+        /// Explicitly select browser authorization (also the default)
+        #[arg(long)]
+        oauth: bool,
+        /// Dashboard origin for a custom server
+        #[arg(long)]
+        dashboard: Option<String>,
+        /// Display the authorization URL without opening a browser
+        #[arg(long)]
+        no_open: bool,
     },
     /// Book material: a root subtree -> volume/chapter full text (for an AI to draft)
     BookMaterial { root: String },
@@ -3395,6 +3434,9 @@ fn run_root_create(title: &str, content: Option<&str>, yes: bool) -> Result<()> 
     let rid = respire::taxonomy::root_id(title);
     let now = now_stamp();
     let entry = respire::MemoryEntry {
+        supersedes: String::new(),
+        superseded_by: String::new(),
+        see_also: Vec::new(),
         id: rid.clone(),
         kind: Kind::Knowledge,
         tags: vec!["catalog root".to_owned(), "custom".to_owned()],
@@ -3807,7 +3849,7 @@ fn run_keygen(pass: Option<&str>, force: bool) -> Result<()> {
     );
     result
         .actions
-        .push("login --user <user> --pass <password>".into());
+        .push("login --interactive --user <user> --pass <password>".into());
     emit_result(result)
 }
 
@@ -3991,7 +4033,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
                 &mut items,
                 "embedder",
                 false,
-                format!("unavailable: {e} (action: rsrs model install or rsrs doctor --fix)"),
+                format!("unavailable: {e} (the runtime prepares BGE-M3 automatically for pending index work; inspect model-task progress and download source settings)"),
             );
         }
         Err(_) => {
@@ -4026,7 +4068,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     let store = build_local()?;
     match store.index_pending("m3") {
         Ok(pending) => add(&mut items, "model index", !pending,
-            if pending { "BGE-M3 index needs rebuilding; run rsrs reembed".to_owned() } else { "BGE-M3 index ready".to_owned() }),
+            if pending { "BGE-M3 index pending; the runtime prepares the model and rebuilds automatically in the background".to_owned() } else { "BGE-M3 index ready".to_owned() }),
         Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
     }
 
@@ -4619,14 +4661,14 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
              wrapped_urk: {wrapped_urk}\n\
              urk_nonce: {urk_nonce}\n\n\
              -- import on a new machine --\n\
-             rsrs login --user {user} --pass <login-password> --super {super_key}\n\
+             rsrs login --interactive --user {user} --pass <login-password> --super {super_key}\n\
              (or fill the same super password on the website Keys & Recovery page after login)\n"
         )
     } else {
         format!(
             "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
              user: {user}\nserver: {addr}\n\n\
-             -- decrypt keys (v3 two-factor: passphrase + recovery code; login auto-upgrades to v4) --\n\
+             -- decrypt keys (v3 two-factor: passphrase + recovery code; explicit migration upgrades to v4) --\n\
              super password (passphrase): {legacy_super}\n\
              Secret Key (recovery code): {super_key}\n\n\
              -- vault wrap material (listed for lookup) --\n\
@@ -4634,12 +4676,12 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
              kdf_salt: {kdf_salt}\n\
              wrapped_urk: {wrapped_urk}\n\
              urk_nonce: {urk_nonce}\n\n\
-             -- import on a new machine --\n\
-             rsrs login --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
+             -- explicitly copy and select the old profile before upgrading its vault --\n\
+             rsrs migrate --vault --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
         )
     };
     if !(is_v4 || is_v3) {
-        eprintln!("WARN this machine still has a v1/v2 key wrap - rsrs login to upgrade to v4 before exporting");
+        eprintln!("WARN this machine still has a v1/v2 key wrap - use rsrs migrate --vault on the selected old profile before exporting");
     }
     match out {
         Some(path) => {
@@ -4828,63 +4870,6 @@ fn run_register(
         OutputStatus::Ok,
         serde_json::json!({"ok":true,"user":user,"addr":addr,"super":super_key}),
         vec![OutputItem::new("account", OutputStatus::Ok, user.clone())],
-    );
-    result.actions.push("secret --reveal".into());
-    emit_result(result)
-}
-
-fn run_login(
-    addr: Option<&str>,
-    user: Option<&str>,
-    pass: Option<&str>,
-    super_pass: Option<&str>,
-    secret_key: Option<&str>,
-    reset_vault: bool,
-) -> Result<()> {
-    // Address default: last server this machine used (register / last logout keep it in session.json).
-    let last = if addr.map(|s| s.trim()).filter(|s| !s.is_empty()).is_none() {
-        respire::auth::read_session_json().ok().and_then(|d| {
-            d["addr"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_owned())
-        })
-    } else {
-        None
-    };
-    let addr: &str = match addr.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(a) => a,
-        None => match last.as_deref() {
-            Some(a) => a,
-            // New machine with no stored address: default official server (same as register); --addr is no longer required
-            None => respire::service::DEFAULT_SERVER_ADDR,
-        },
-    };
-    // Missing args: interactive prompt (TTY and not --json).
-    let interactive = respire::prompt::interactive();
-    let user: String = match user.map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        Some(u) => u.to_owned(),
-        None if interactive => {
-            eprintln!("login server={addr}");
-            respire::prompt::ask("username: ")?
-        }
-        None => {
-            return Err(anyhow::anyhow!(
-            "missing --user <username> (bare `rsrs login` in a TTY opens an interactive prompt)"
-        ))
-        }
-    };
-    let pass: String = match pass.filter(|s| !s.is_empty()) {
-        Some(p) => p.to_owned(),
-        None if interactive => respire::prompt::ask_secret("login password: ")?,
-        None => return Err(anyhow::anyhow!("missing --pass <login-password>")),
-    };
-    let issued = respire::service::login(addr, &user, &pass, super_pass, secret_key, reset_vault)?;
-    let mut result = ResultEnvelope::new(
-        "login",
-        OutputStatus::Ok,
-        serde_json::json!({"ok":true,"user":user,"addr":addr,"super_issued":issued}),
-        vec![OutputItem::new("session", OutputStatus::Ok, "ready")],
     );
     result.actions.push("secret --reveal".into());
     emit_result(result)
@@ -5209,7 +5194,7 @@ fn main_body() -> i32 {
     }
     if !runtime_policy::client_only() {
         if let Err(error) = respire::migration::ensure_default_home() {
-            eprintln!("default profile migration failed: {error:#}");
+            eprintln!("default profile configuration failed: {error:#}");
             return 1;
         }
     }
@@ -5428,6 +5413,20 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
+        runtime_policy::require_host("explicit legacy migration")?;
+        if *vault {
+            return login::migrate_vault(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), secret_key.as_deref(), new_super.as_deref());
+        }
+        let value = match (source.as_deref(), account.as_deref()) {
+            (Some(source), Some(account)) => respire::migration::migrate_profile(source, account)?,
+            (None, None) => respire::migration::list_legacy_profiles()?,
+            _ => anyhow::bail!("migration requires both --source and --account"),
+        };
+        let mut envelope = ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
+        envelope.details = value;
+        return emit_result(envelope);
+    }
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
@@ -5450,6 +5449,9 @@ fn run(args: Cli) -> Result<()> {
             *set,
             *key_stdin,
         );
+    }
+    if let Some(Command::Login { addr, user, pass, super_pass, interactive, oauth, dashboard, no_open }) = args.command.as_ref() {
+        return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), *interactive, *oauth, dashboard.as_deref(), *no_open);
     }
     if rpc::worker_active() {
         return run_local(args);
@@ -5492,7 +5494,14 @@ fn run(args: Cli) -> Result<()> {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);
-        let switched = rpc::change_profile(|| run_local(args));
+        let switched = rpc::change_profile(|| {
+            run_local(args)?;
+            if exit_code() != 0 {
+                let errors = CAPTURED.with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
+                anyhow::bail!("{}", errors.unwrap_or_else(|| "profile change failed".to_owned()));
+            }
+            Ok(())
+        });
         DEFER_PROFILE_OUTPUT.set(false);
         OUTPUT_EMITTED.set(false);
         OUTPUT_EXIT_CODE.set(0);
@@ -6142,23 +6151,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 super_pass.as_deref(),
             )
         }
-        Some(Command::Login {
-            addr,
-            user,
-            pass,
-            super_pass,
-            secret_key,
-            reset_vault,
-        }) => {
-            return run_login(
-                addr.as_deref(),
-                user.as_deref(),
-                pass.as_deref(),
-                super_pass.as_deref(),
-                secret_key.as_deref(),
-                *reset_vault,
-            )
-        }
+        Some(Command::Login { .. }) => anyhow::bail!("login must run in the host terminal"),
         Some(Command::BookMaterial { root }) => return run_book_material(root),
         Some(Command::PortraitMaterial { limit }) => return run_portrait_material(*limit),
         Some(Command::Taxonomy { list, ensure }) => return run_taxonomy(*list, ensure.as_deref()),
@@ -6210,7 +6203,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
             parent,
             force,
             merge_ids,
+            supersedes,
+            see_also,
         } => {
+            anyhow::ensure!((supersedes.is_none() && see_also.is_empty()) || importance == "important", "associations require important memory");
             // importance enum check: an illegal value (e.g. a kind name "task" by mistake) cannot be filtered by audit/UI after write
             // 2026-09-19 two-tier: normal is retired - new writes are important/trivial only (stock normal still reads)
             if !matches!(importance.as_str(), "important" | "trivial") {
@@ -6316,6 +6312,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                         }
                         merged.push_str(&line);
                         let e = respire::MemoryEntry {
+                            supersedes: String::new(),
+                            superseded_by: String::new(),
+                            see_also: Vec::new(),
                             id: main.id.clone(),
                             kind: respire::memory::model::Kind::from_str(&main.local_kind),
                             tags: vec![],
@@ -6381,7 +6380,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
 
             // -- Judge-then-store (dedup first, then choose): unless --force/--merge-ids/--parent (explicit attach is intent)
             //    run an internal recall of similar candidates; diary trivia skips dedup (daily log is not a duplicate event; it goes on the time chain) --
-            if !force && merge_ids.is_none() && parent.is_empty() && importance != "trivial" {
+            if !force && merge_ids.is_none() && supersedes.is_none() && see_also.is_empty() && parent.is_empty() && importance != "trivial" {
                 let candidates_all = scoped_candidates(&store)?;
                 let q = MemoryQuery::new(&content).limit(5);
                 let candidates =
@@ -6481,6 +6480,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 let mut entry = respire::MemoryEntry {
+                    supersedes: String::new(),
+                    superseded_by: String::new(),
+                    see_also: Vec::new(),
                     id,
                     kind: Kind::from_str(&r#type),
                     tags: tags
@@ -6568,7 +6570,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 None
             };
             let parent_id = parent_id.unwrap_or_default();
-            let entry = respire::MemoryEntry {
+            let mut entry = respire::MemoryEntry {
+                supersedes: String::new(),
+                superseded_by: String::new(),
+                see_also: Vec::new(),
                 id,
                 kind: Kind::from_str(&r#type),
                 tags: tags
@@ -6590,8 +6595,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 device: respire::service::device_tag(),
                 modified_by: respire::service::device_tag(),
             };
-            let stored = MemoryEngine::seal(&session, embedder!(), &entry, &entry.user)?;
-            store.put(&stored)?;
+            let stored = if supersedes.is_some() || !see_also.is_empty() {
+                respire::service::store_related(&session,&store,embedder!(),&mut entry,supersedes.as_deref(),&see_also)?
+            } else {
+                let sealed = MemoryEngine::seal(&session, embedder!(), &entry, &entry.user)?;
+                anyhow::ensure!(store.put(&sealed)?, "memory was not saved");
+                sealed
+            };
             // Plugin hook post-remember: observe only, never blocks (failure policy is inside hooks::fire)
             {
                 let hv = respire::hooks::fire(
@@ -6690,6 +6700,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             project,
             trace,
             titles,
+            no_related,
         } => {
             let recall_generation = rpc::sync_generation();
             let session = build_session()?;
@@ -6722,6 +6733,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 }
                 None => recall_select::recall(&session, embedder!(), &candidates, &q)?,
             };
+            let hit_ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
+            let associations: respire::memory::model::RelatedResult = if no_related {
+                Default::default()
+            } else { respire::core_sdk::execute("related_business",serde_json::json!({
+                "model":embedder!().model_name(), "snapshots":respire::memory::engine::snapshots(&session,&candidates),
+                "query":q,"ids":hit_ids,"pairs":store.recall_pairs(&hit_ids)?
+            }))? };
             // Query log: each recall writes a candidate record (including empty - negatives are post-training material too).
             // Note: this is the candidate set, not a hit - a hit is the model query-log mark self-grade
             {
@@ -6765,7 +6783,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 ))?;
                 return Ok(());
             }
-            let items = ranked
+            let mut items = ranked
                 .iter()
                 .map(|r| {
                     OutputItem::new(
@@ -6783,25 +6801,31 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     )
                 })
                 .collect::<Vec<_>>();
+            for (hit,row) in ranked.iter().zip(items.iter_mut()) {
+                if associations.superseded.contains_key(&hit.entry.id) { row.value.push_str(" [superseded]"); }
+            }
             let mut result = ResultEnvelope::new(
                 "recall",
                 OutputStatus::Ok,
                 serde_json::json!({"query":query,"count":ranked.len(),"limit":limit,"project":project,
-                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?}),
+                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len()}),
                 items,
             );
+            result.related = associations.related;
             result.details = if titles {
                 serde_json::json!(ranked
                     .iter()
                     .map(|r| serde_json::json!({
-                        "id":r.entry.id,"title":r.entry.title,"score":r.score
+                        "id":r.entry.id,"title":r.entry.title,"score":r.score,
+                        "superseded_by":associations.superseded.get(&r.entry.id)
                     }))
                     .collect::<Vec<_>>())
             } else {
                 serde_json::json!(ranked
                     .iter()
                     .map(|r| serde_json::json!({
-                        "score":r.score,"entry":r.entry,"ancestors":r.ancestors
+                        "score":r.score,"entry":r.entry,"ancestors":r.ancestors,
+                        "superseded_by":associations.superseded.get(&r.entry.id)
                     }))
                     .collect::<Vec<_>>())
             };
@@ -8141,6 +8165,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Repack
         | Command::Logout { .. }
         | Command::Account { .. }
+        | Command::Migrate { .. }
         | Command::Space { .. }
         | Command::Resort { .. }
         | Command::AgentConfig { .. }

@@ -606,7 +606,7 @@ function Invoke-CloudCleanup {
             if (-not $account.Confirmed) { throw 'registration_outcome_unconfirmed' }
             if ($account.User -notmatch "^(sweep|oth|sps)$stamp$") { throw 'cleanup_scope_mismatch' }
             $dataDir = Join-Path $Root "cleanup/$($account.User)"
-            $login = Invoke-Om -Name 'cleanup-owned-account-login' -ArgList @('--json', 'login', '--addr', $Server, '--user', $account.User, '--pass', $account.Password, '--super', $account.Super) -DataDir $dataDir -Secret -HostProfile -TimeoutSec 120
+            $login = Invoke-Om -Name 'cleanup-owned-account-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $account.User, '--pass', $account.Password, '--super', $account.Super) -DataDir $dataDir -Secret -HostProfile -TimeoutSec 120
             if (-not $login.Ok -or [string]$login.Envelope.summary.user -cne $account.User) { throw 'cleanup_login_failed' }
             $session = Get-SmokeSession $dataDir $account.User
             if ([string]$session.Value.addr -cne $Server) { throw 'cleanup_session_server_mismatch' }
@@ -1206,7 +1206,7 @@ Invoke-Om -Name 'sync-resolve-bogus' -ArgList @(
 ) -DataDir $DirA -AllowStatus @('fail') -Note '无冲突时必须失败' | Out-Null
 
 Invoke-Om -Name 'config-addr-b' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirB | Out-Null
-$loginB = Invoke-Om -Name 'login-b' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -HostProfile -TimeoutSec 180
+$loginB = Invoke-Om -Name 'login-b' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -HostProfile -TimeoutSec 180
 if (-not $loginB.Ok) { throw 'B 登录失败。super 必须用 register 响应里的 summary.super。已中止，避免后续命令走默认正式服。' }
 $stB = Invoke-Om -Name 'status-b' -ArgList @('--json', 'status') -DataDir $DirB
 $addrB = ''
@@ -1214,13 +1214,13 @@ if ($stB.Envelope.summary.server_addr) { $addrB = [string]$stB.Envelope.summary.
 if ($addrB -ne $Server) { throw "B server_addr=$addrB" }
 $syncB = Invoke-Om -Name 'sync-b' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncB.Ok) { throw 'B 下载同步失败' }
-Assert-Count 'B sync' $syncB.Envelope 'pulled' 1
+Assert-Smoke 'device-b-sync-converged' ($syncB.Envelope.summary.converged -eq $true -and [int]$syncB.Envelope.summary.pending -eq 0)
 $recB = Invoke-Om -Name 'recall-b' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recB.Stdout -notlike "*$marker*") { throw "B recall 没有召回 A 写入的标记 $marker" }
 Invoke-Om -Name 'show-b' -ArgList @('--json', 'show', $short) -DataDir $DirB | Out-Null
 $bad = Join-Path $Root 'bad'
 Invoke-Om -Name 'config-addr-bad' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $bad | Out-Null
-Invoke-Om -Name 'login-wrong-pass' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', 'wrong-pass-000') -DataDir $bad -AllowStatus @('fail') -Secret -HostProfile -Note '错误口令应失败' | Out-Null
+Invoke-Om -Name 'login-wrong-pass' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', 'wrong-pass-000') -DataDir $bad -AllowStatus @('fail') -Secret -HostProfile -Note '错误口令应失败' | Out-Null
 
 # The second device uses fivekeys. Read material from device A without printing it.
 $sessionPath = Join-Path $DirA 'session.json'
@@ -1338,9 +1338,9 @@ Assert-Smoke 'session-owner-personal-readonly-cleared' ($ownerClear.Ok -and [str
 $ownerConfig = Invoke-Om -Name 'session-owner-agent-config-readback' -ArgList @('--json', 'agent-config') -DataDir $DirB
 Assert-Smoke 'session-owner-personal-readonly-readback' ($ownerConfig.Ok -and $ownerConfig.Envelope.summary.readonly -eq $false -and $ownerConfig.Envelope.summary.readonly_team -ne $true)
 Invoke-Om -Name 'logout' -ArgList @('--json', 'logout') -DataDir $DirB | Out-Null
-$loginAgain = Invoke-Om -Name 'login-b-again' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
+$loginAgain = Invoke-Om -Name 'login-b-again' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
 if (-not $loginAgain.Ok) { throw '重新登录失败' }
-$recallAgain = Invoke-Om -Name 'recall-after-relogin' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180
+$recallAgain = Invoke-Om -Name 'recall-after-relogin' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recallAgain.Stdout -notlike "*$marker*") { throw '重新登录后没有检索到标记' }
 $syncAgain = Invoke-Om -Name 'sync-after-relogin' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncAgain.Ok) { throw '重新登录后同步失败' }
@@ -1351,18 +1351,18 @@ $afterReset = Invoke-Om -Name 'super-reset-memory-readback' -ArgList @('--json',
 Assert-Smoke 'super-reset-preserves-memory' ($superReset.Ok -and [bool]$newSuper -and $newSuper -ne $super -and $afterReset.Ok -and [string]$afterReset.Envelope.details.entry.content -eq "merged $marker")
 $oldRecoveryDir = Join-Path $Root 'old-recovery'
 Invoke-Om -Name 'old-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $oldRecoveryDir | Out-Null
-$oldRecovery = Invoke-Om -Name 'super-reset-old-code-refused' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $oldRecoveryDir -Secret -HostProfile -AllowStatus @('fail')
+$oldRecovery = Invoke-Om -Name 'super-reset-old-code-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $oldRecoveryDir -Secret -HostProfile -AllowStatus @('fail')
 Assert-Smoke 'super-reset-old-code-rejected' ($oldRecovery.Ok -and $oldRecovery.Exit -eq 1 -and ($oldRecovery.Envelope.errors -join ' ') -match 'unwrap|decrypt')
 $recoveryDir = Join-Path $Root 'new-recovery'
 Invoke-Om -Name 'new-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $recoveryDir | Out-Null
-$newRecovery = Invoke-Om -Name 'super-reset-new-code-login' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper, '--secret-key', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
+$newRecovery = Invoke-Om -Name 'super-reset-new-code-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
 $newRecoverySync = Invoke-Om -Name 'super-reset-new-code-sync' -ArgList @('--json', 'sync') -DataDir $recoveryDir
 $newRecoveryRead = Invoke-Om -Name 'super-reset-new-code-readback' -ArgList @('--json', 'show', $id) -DataDir $recoveryDir
 Assert-Smoke 'super-reset-new-code-recovers-cloud-content' ($newRecovery.Ok -and $newRecoverySync.Ok -and $newRecoveryRead.Ok -and [string]$newRecoveryRead.Envelope.details.entry.content -eq "merged $marker")
 $recoverySession = Get-SmokeSession $recoveryDir $user
 $fullLogout = Invoke-Om -Name 'cloud-full-logout' -ArgList @('--json', 'logout', '--full') -DataDir $recoveryDir -HostProfile
 Assert-Smoke 'cloud-full-logout-removes-session' ($fullLogout.Ok -and [string]$fullLogout.Envelope.summary.mode -eq 'full' -and -not (Test-Path -LiteralPath $recoverySession.Path))
-$recoveredAfterFull = Invoke-Om -Name 'cloud-login-after-full-logout' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
+$recoveredAfterFull = Invoke-Om -Name 'cloud-login-after-full-logout' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
 $fullRead = Invoke-Om -Name 'cloud-full-logout-login-readback' -ArgList @('--json', 'show', $id) -DataDir $recoveryDir
 Assert-Smoke 'cloud-full-logout-recovery-preserves-library' ($recoveredAfterFull.Ok -and $fullRead.Ok -and [string]$fullRead.Envelope.details.entry.content -eq "merged $marker")
 
@@ -1370,20 +1370,19 @@ Assert-Smoke 'cloud-full-logout-recovery-preserves-library' ($recoveredAfterFull
 # risking the main sweep account's local library or exporting old ciphertext.
 $resetDir = Join-Path $Root 'reset-vault'
 Invoke-Om -Name 'reset-vault-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $resetDir | Out-Null
-Invoke-Om -Name 'reset-vault-baseline-login' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile | Out-Null
+Invoke-Om -Name 'reset-vault-baseline-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile | Out-Null
 Invoke-Om -Name 'reset-vault-local-keygen' -ArgList @('--json', 'keygen', '--force') -DataDir $resetDir -Secret -HostProfile | Out-Null
 $mismatched = Invoke-Om -Name 'reset-vault-old-local-write' -ArgList @('--json', 'remember', "reset-local-old-key-$stamp", '--title', "reset-local-$stamp", '--importance', 'important', '--force') -DataDir $resetDir
 $mismatchedId = [string]$mismatched.Envelope.summary.id
 Assert-Smoke 'reset-vault-mismatched-fixture-written' ($mismatched.Ok -and [bool]$mismatchedId)
-$resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile -AllowStatus @('fail')
-Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 -and ($resetGuard.Envelope.errors -join ' ') -match 'reset-vault|undecryptable')
-$resetAdopt = Invoke-Om -Name 'reset-vault-explicit-adopt-cloud' -ArgList @('--json', 'login', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper, '--reset-vault') -DataDir $resetDir -Secret -HostProfile
-Assert-Smoke 'reset-vault-explicit-cloud-key-adopted' ($resetAdopt.Ok)
-$resetSync = Invoke-Om -Name 'reset-vault-sync-after-adoption' -ArgList @('--json', 'sync') -DataDir $resetDir
-$resetCloudRead = Invoke-Om -Name 'reset-vault-cloud-content-readback' -ArgList @('--json', 'show', $id) -DataDir $resetDir
-$resetList = Invoke-Om -Name 'reset-vault-library-readable' -ArgList @('--json', 'list', '--limit', '100') -DataDir $resetDir
-$resetRecall = Invoke-Om -Name 'reset-vault-recall-readable' -ArgList @('--json', 'recall', $marker, '--limit', '5') -DataDir $resetDir -TimeoutSec 180 -AllowIndexWait
-Assert-Smoke 'reset-vault-no-undecryptable-old-library' ($resetSync.Ok -and $resetCloudRead.Ok -and $resetList.Ok -and $resetRecall.Ok -and [string]$resetCloudRead.Envelope.details.entry.content -eq "merged $marker" -and ($resetList.Envelope.errors -join ' ') -notmatch 'decrypt|decode' -and ($resetRecall.Envelope.errors -join ' ') -notmatch 'decrypt|decode')
+$resetProfile = [string](Invoke-Om -Name 'reset-vault-selected-profile' -ArgList @('--json', 'config') -DataDir $resetDir).Envelope.summary.data_dir
+$resetSession = Join-Path $resetProfile 'session.json'
+$beforeResetSession = (Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash
+$resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile -AllowStatus @('fail')
+Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 -and ($resetGuard.Envelope.errors -join ' ') -match 'different key material|destination belongs to another account')
+Assert-Smoke 'login-key-mismatch-original-session-preserved' ((Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash -ceq $beforeResetSession)
+$resetRead = Invoke-Om -Name 'login-key-mismatch-original-readback' -ArgList @('--json', 'show', $mismatchedId) -DataDir $resetDir
+Assert-Smoke 'login-key-mismatch-original-data-readable' ($resetRead.Ok -and [string]$resetRead.Envelope.details.entry.content -ceq "reset-local-old-key-$stamp")
 Invoke-Om -Name 'sync-reset' -ArgList @('--json', 'sync-reset') -DataDir $DirA -TimeoutSec 180 -Note '一次性账号上的快照重建' | Out-Null
 
 # Web opens the hosted dashboard; runtime lifecycle is a separate hidden command.

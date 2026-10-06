@@ -8,6 +8,7 @@
 mod test_lock;
 
 pub mod auth;
+pub mod login_transaction;
 pub mod inject;
 pub mod lock;
 pub mod migration;

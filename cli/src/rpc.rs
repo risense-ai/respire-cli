@@ -161,7 +161,8 @@ impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
         store.write_transaction(|| {
             store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
-            store.bump_recall(&self.candidates)
+            store.bump_recall(&self.candidates)?;
+            store.bump_recall_pairs(&self.candidates)
         })
     }
 }
@@ -312,7 +313,7 @@ pub(crate) fn index_status() -> Value {
     json!({"state": state.state, "scheduled": state.requested,
         "worker_active": INDEX_ON.load(Ordering::Acquire),
         "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
-        "model_setup": (state.state == "failed").then_some("Inspect the reported error; if BGE-M3 files are missing, use `model install`; rebuild an old index with `reembed`.")})
+        "model_setup": (state.state == "failed").then_some("Automatic BGE-M3 preparation or indexing failed; inspect the reported error and download source settings.")})
 }
 
 pub(crate) fn kick_index() {
@@ -394,6 +395,11 @@ fn index_loop_inner() -> Result<()> {
             };
             index_yield_to_foreground(generation)?;
             let keys = crate::build_session()?;
+            if model == "m3" {
+                respire::model_progress::update("prepare", "BGE-M3", 0, None)?;
+                respire::model_install::prepare_m3_for_index()?;
+                check_sync_context(generation)?;
+            }
             let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
             loop {
                 let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
@@ -701,13 +707,22 @@ pub fn runtime_is_up() -> bool {
 /// Starts the runtime if it is not up yet. The envelope is returned even when
 /// the command status is fail, so a dashboard can show the failing checks.
 pub fn query_json(args: Vec<String>) -> Result<serde_json::Value> {
+    query_json_with_start(args, true)
+}
+
+/// TUI polling must not start or replace a runtime while a host action is running.
+pub(crate) fn query_existing_json(args: Vec<String>) -> Result<serde_json::Value> {
+    query_json_with_start(args, false)
+}
+
+fn query_json_with_start(args: Vec<String>, auto_start: bool) -> Result<serde_json::Value> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--json".to_owned());
     full.extend(args);
     if JOB_TX.get().is_some() {
         return execute_json(full).map_err(|err| anyhow::anyhow!("{err}"));
     }
-    let response = call_method("cli.exec", full, true)?;
+    let response = call_method("cli.exec", full, auto_start)?;
     if let Some(envelope) = response.envelope {
         return Ok(serde_json::to_value(envelope).context("runtime envelope could not be encoded")?);
     }
@@ -736,18 +751,83 @@ pub fn stop_if_running() -> Result<()> {
 
 /// Host profile changes release the old library before starting its successor.
 pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
+    change_profile_with_rollback(change, || Ok(()))
+}
+
+pub fn change_profile_with_rollback(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>) -> Result<()> {
+    change_profile_with_verification(change, rollback, || Ok(()))
+}
+
+pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>, verify: impl FnOnce() -> Result<()>) -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
+    let config_path = respire::service::client_config_path();
+    let original = match std::fs::read(&config_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let backup = if let Some(bytes) = original.as_ref() {
+        let parent = config_path.parent().context("configuration has no parent directory")?;
+        let path = parent.join(format!(".client-before-switch-{}.json", uuid::Uuid::new_v4().simple()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        let mut file = options.open(&path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        Some(path)
+    } else { None };
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
-    let changed = change();
-    // A rejected profile change still restores service for the original profile.
-    let restarted = ensure_daemon_locked();
-    match (changed, restarted) {
-        (Ok(()), result) => result,
-        (Err(error), Ok(())) => Err(error),
-        (Err(error), Err(restart)) => Err(error.context(format!("runtime restart failed: {restart:#}"))),
+    let changed = change().and_then(|_| ensure_daemon_locked()).and_then(|_| verify());
+    if let Err(error) = changed {
+        let cleanup = probe_runtime().and_then(|health| match health {
+            Some(health) => stop_occupant(health.pid), None => Ok(()),
+        });
+        let mut failures = Vec::new();
+        if let Err(error) = &cleanup { failures.push(format!("target runtime cleanup failed: {error:#}")); }
+        if let Err(error) = rollback() { failures.push(format!("account session rollback failed: {error:#}")); }
+        // Startup failure must restore the original selection and all API fields,
+        // including the distinction between an absent config and an empty one.
+        let restored = match original {
+            Some(bytes) => {
+                let temporary = config_path.with_file_name(format!(".client-restore-{}.json", uuid::Uuid::new_v4().simple()));
+                (|| -> Result<()> {
+                    let mut options = std::fs::OpenOptions::new();
+                    options.write(true).create_new(true);
+                    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+                    let mut file = options.open(&temporary)?;
+                    file.write_all(&bytes)?;
+                    file.sync_all()?;
+                    drop(file);
+                    std::fs::rename(&temporary, &config_path)?;
+                    Ok(())
+                })()
+            },
+            None => match std::fs::remove_file(&config_path) {
+                Ok(()) => Ok(()),
+                Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(remove) => Err(remove.into()),
+            },
+        };
+        if let Err(error) = &restored { failures.push(format!("configuration rollback failed: {error:#}")); }
+        if cleanup.is_ok() && restored.is_ok() {
+            if let Err(error) = ensure_daemon_locked() { failures.push(format!("original runtime restart failed: {error:#}")); }
+        }
+        if !failures.is_empty() {
+            if let Some(path) = backup { failures.push(format!("original configuration backup: {}", path.display())); }
+            return Err(error.context(failures.join("; ")));
+        }
+        if let Some(path) = backup {
+            if let Err(cleanup) = std::fs::remove_file(&path) { return Err(error.context(format!("configuration restored; backup retained at {}: {cleanup}", path.display()))); }
+        }
+        return Err(error);
     }
+    if let Some(path) = backup {
+        if let Err(error) = std::fs::remove_file(&path) { eprintln!("profile verified; configuration backup retained at {}: {error}", path.display()); }
+    }
+    Ok(())
 }
 
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
@@ -927,9 +1007,10 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
     if probe_runtime()?.is_some() {
         return Ok(());
     }
+    let name = pipe_name()?;
     #[cfg(unix)]
     clear_dead_socket();
-    let listener = match ListenerOptions::new().name(pipe_name()?).create_sync() {
+    let listener = match ListenerOptions::new().name(name).create_sync() {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             drop(boot);
@@ -1685,6 +1766,23 @@ fn endpoint_pid() -> Option<u32> {
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
+/// The host-owned endpoint record must identify the actual loopback listener.
+pub(crate) fn recorded_runtime_listener(pid: u32) -> bool {
+    let Ok(text) = std::fs::read_to_string(endpoint_path()) else {
+        return false;
+    };
+    let Ok(data) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    data["pid"].as_u64() == Some(u64::from(pid))
+        && data["v"].as_u64() == Some(u64::from(PROTOCOL_V))
+        && data["bin"].as_str().is_some_and(|version| !version.is_empty())
+        && data["url"].as_str().is_some_and(|url| {
+            url == crate::net_rpc::rpc_base_url()
+                || url == format!("http://localhost:{}", crate::net_rpc::rpc_port())
+        })
+}
+
 /// Recovery must not wait on RPC, model locks or a library lock.
 pub(crate) fn force_stop_for_reset() -> Result<Option<u32>> {
     let port = crate::net_rpc::rpc_port();
@@ -1742,18 +1840,40 @@ fn pipe_name() -> Result<Name<'static>> {
 /// tests, and each test points `ONEMEMORY_DATA_DIR` somewhere else.
 #[cfg(unix)]
 fn socket_path() -> PathBuf {
-    runtime_dir().join("rpc.sock")
+    use std::os::unix::ffi::OsStrExt;
+    use sha2::{Digest, Sha256};
+    let path = runtime_dir().join("rpc.sock");
+    // macOS has 104 bytes in sun_path, including its terminating NUL.
+    if path.as_os_str().as_bytes().len() < 104 {
+        return path;
+    }
+    let identity = hex::encode(Sha256::digest(path.as_os_str().as_bytes()));
+    PathBuf::from(format!("/tmp/rsrs-runtime-{}", respire_spawn::effective_user_id()))
+        .join(format!("{}.sock", &identity[..32]))
 }
 
-/// Unix keeps the socket inside the data dir so a dead runtime can be cleared.
-/// A namespaced name under `/tmp` or `$TMPDIR` stays behind after a crash and the
-/// next `--runtime-internal` never becomes ready.
+/// Short library paths keep the socket beside the runtime record. Long paths
+/// use a private per-user directory; clear_dead_socket handles crash leftovers.
 #[cfg(unix)]
 fn unix_socket_name() -> Result<Name<'static>> {
     use interprocess::local_socket::GenericFilePath;
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     let path = socket_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        if path == runtime_dir().join("rpc.sock") {
+            std::fs::create_dir_all(parent)?;
+        } else {
+            match std::fs::DirBuilder::new().mode(0o700).create(parent) {
+                Ok(()) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
+                Err(error) => return Err(error.into()),
+            }
+            let metadata = std::fs::symlink_metadata(parent)?;
+            anyhow::ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
+                && metadata.uid() == respire_spawn::effective_user_id()
+                && metadata.mode() & 0o777 == 0o700,
+                "runtime socket directory must be owned by this user with mode 0700");
+        }
     }
     path.to_fs_name::<GenericFilePath>()
         .context("failed to build the runtime socket name")
@@ -1797,7 +1917,7 @@ fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
     }
 }
 
-fn ensure_daemon() -> Result<()> {
+pub(crate) fn ensure_daemon() -> Result<()> {
     if crate::runtime_policy::client_only() {
         crate::net_rpc::health()?;
         return Ok(());
@@ -1840,6 +1960,8 @@ fn ensure_daemon_locked() -> Result<()> {
 }
 
 fn stop_occupant(pid: u32) -> Result<()> {
+    let health = crate::net_rpc::health()?;
+    anyhow::ensure!(health.pid == pid, "runtime owner changed before shutdown");
     crate::net_rpc::request_stop()?;
     if crate::net_rpc::wait_until_down().is_err() {
         // Reauthenticate before escalation; a different owner may have bound.
@@ -1849,6 +1971,12 @@ fn stop_occupant(pid: u32) -> Result<()> {
             crate::net_rpc::wait_until_down()?;
         }
     }
+    crate::net_rpc::wait_until_exited(pid)?;
+    // Prove lock.db has been released before a successor opens the library.
+    let released = respire::lock::LibraryLock::acquire(
+        std::path::Path::new(&health.data_dir), Duration::from_secs(15),
+    ).context("stopped runtime has not released its library lock")?;
+    drop(released);
     Ok(())
 }
 
@@ -1863,7 +1991,8 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
             anyhow::ensure!(
                 health.pid == child.id()
                     && crate::mcp::exe_matches_dest(&health.exe, executable)
-                    && health.bin == env!("CARGO_PKG_VERSION"),
+                    && health.bin == env!("CARGO_PKG_VERSION")
+                    && health.data_dir == respire::service::data_dir().display().to_string(),
                 "runtime owner changed during startup"
             );
             return Ok(());

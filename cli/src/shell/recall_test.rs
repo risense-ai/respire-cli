@@ -127,6 +127,18 @@ impl Form {
                             .map(|text| line(text.to_owned())),
                     );
                 }
+                if let Some(related) = value.get("related") {
+                    match serde_json::from_value::<Vec<respire::memory::model::RelatedMemory>>(
+                        related.clone(),
+                    ) {
+                        Ok(related) => self.result.extend(
+                            related
+                                .iter()
+                                .map(|entry| line(crate::output::related_value(entry))),
+                        ),
+                        Err(error) => self.result.push(fail_line(error.to_string())),
+                    }
+                }
             }
         }
     }

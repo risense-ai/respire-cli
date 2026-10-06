@@ -74,8 +74,7 @@ fn equivalent_path(left: &Path, right: &Path) -> bool {
     }
 }
 
-/// Run before command parsing or runtime creation. Explicit isolated roots never
-/// import default-home state. A failed attempt leaves source and staging intact.
+/// Configure the current home before parsing. Legacy import is always explicit.
 pub fn ensure_default_home() -> Result<()> {
     if ["ONEMEMORY_CLIENT_ONLY", "ONEMEMORY_NO_AUTOSTART"]
         .iter()
@@ -95,13 +94,111 @@ pub fn ensure_default_home() -> Result<()> {
             return Ok(());
         }
     }
-    let home = crate::service::home_dir().context("cannot locate the user home for migration")?;
-    migrate_home(&home)?;
+    let home = crate::service::home_dir().context("cannot locate the user home")?;
     let root = home.join(".rsrs");
     // This occurs at single-threaded startup, before Core or runtime workers exist.
     std::env::set_var("ONEMEMORY_DATA_DIR", &root);
     std::env::set_var(DEFAULT_ENV, &root);
     Ok(())
+}
+
+fn legacy_profiles(home: &Path) -> Result<Vec<Profile>> {
+    let mut result = Vec::new();
+    for (label, services) in [
+        ("respire", ["respire", "memocap", "1memory"]),
+        ("onememory", ["1memory", "memocap", "respire"]),
+    ] {
+        let root = home.join(format!(".{label}"));
+        if root.exists() { meaningful(&root)?; }
+        let mut candidates = vec![("main".to_owned(), root.clone())];
+        if root.join("accounts").is_dir() {
+            meaningful(&root.join("accounts"))?;
+            for entry in std::fs::read_dir(root.join("accounts"))? {
+                let entry = entry?;
+                candidates.push((entry.file_name().to_string_lossy().into_owned(), entry.path()));
+            }
+        }
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+        for (name, source) in candidates {
+            if !source.join("onememory.db").is_file() && !source.join("session.json").is_file() {
+                continue;
+            }
+            // Reject symlinks before reading identity or any credential material.
+            meaningful(&source)?;
+            result.push(Profile {
+                identity: identity(&source)?, source,
+                destination: crate::service::accounts_root().join(format!("legacy-{label}-{}", safe_name(&name))),
+                services,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn migrated_destination(source_id: &str) -> Result<Option<PathBuf>> {
+    let mut destinations = vec![crate::service::main_data_dir()];
+    let accounts = crate::service::accounts_root();
+    if accounts.is_dir() {
+        for entry in std::fs::read_dir(accounts)? {
+            destinations.push(entry?.path());
+        }
+    }
+    for destination in destinations {
+        if destination.is_dir() {
+            meaningful(&destination)?;
+            if receipt_matches(&destination, source_id)? { return Ok(Some(destination)); }
+        }
+    }
+    Ok(None)
+}
+
+/// Enumerate actual legacy profiles; backup-only roots do not constitute a library.
+pub fn list_legacy_profiles() -> Result<Value> {
+    let home = crate::service::home_dir()?;
+    let mut rows = Vec::new();
+    for profile in legacy_profiles(&home)? {
+        rows.push(json!({"source_id":profile.identity,"source":profile.source,
+            "user":crate::service::session_user_of_dir(&profile.source),
+            "account":profile.destination.file_name().map(|name| name.to_string_lossy().into_owned()),
+            "migrated_to":migrated_destination(&profile.identity)?}));
+    }
+    Ok(json!({"profiles":rows}))
+}
+
+/// Copy only the selected profile into a new account, keeping current selection intact.
+pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
+    crate::service::require_profile_change_host()?;
+    anyhow::ensure!(!account.is_empty() && account != "main" && safe_name(account) == account,
+        "migration needs a new account name containing letters, digits, '-' or '_'");
+    let home = crate::service::home_dir()?;
+    let lock_root = home.join(".rsrs-migration-lock");
+    private_directory(&lock_root)?;
+    let _lock = crate::lock::LibraryLock::acquire(&lock_root, Duration::from_secs(30))?;
+    let mut profiles = legacy_profiles(&home)?;
+    let selected = profiles.iter().position(|profile| profile.identity == source_id)
+        .ok_or_else(|| anyhow!("legacy source is no longer available; list sources again"))?;
+    if let Some(destination) = migrated_destination(source_id)? {
+        return Ok(json!({"state":"already_migrated","dir":destination}));
+    }
+    let accounts = crate::service::accounts_root();
+    if accounts.exists() {
+        anyhow::ensure!(!std::fs::symlink_metadata(&accounts)?.file_type().is_symlink(),
+            "account root is a symbolic link; no external data was written");
+    }
+    profiles[selected].destination = accounts.join(account);
+    anyhow::ensure!(!profiles[selected].destination.exists(), "migration account already exists; nothing was overwritten");
+    let staging_root = home.join(".rsrs-migration-staging");
+    private_directory(&staging_root)?;
+    let stage = staging_root.join(uuid::Uuid::new_v4().to_string());
+    snapshot_profile(&profiles[selected], &stage, &profiles)?;
+    private_directory(&accounts)?;
+    // rename must never replace an existing empty directory either.
+    std::fs::create_dir(&profiles[selected].destination)
+        .context("migration destination changed; nothing was overwritten")?;
+    std::fs::remove_dir(&profiles[selected].destination)?;
+    std::fs::rename(&stage, &profiles[selected].destination)?;
+    Ok(json!({"state":"migrated","account":account,"dir":profiles[selected].destination,
+        "source":profiles[selected].source,"original_preserved":true}))
 }
 
 fn meaningful(path: &Path) -> Result<bool> {
@@ -165,6 +262,7 @@ fn safe_name(value: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 fn destination_for(base: PathBuf, id: &str, reserved: &mut BTreeSet<PathBuf>) -> Result<PathBuf> {
     if (!base.exists() || !meaningful(&base)? || receipt_matches(&base, id)?)
         && reserved.insert(base.clone())
@@ -186,6 +284,7 @@ fn destination_for(base: PathBuf, id: &str, reserved: &mut BTreeSet<PathBuf>) ->
 }
 
 /// Also used by fixture-only tests; it does not replace HOME or access runtime services.
+#[cfg(test)]
 fn migrate_home(home: &Path) -> Result<()> {
     let target = home.join(".rsrs");
     if let Ok(metadata) = std::fs::symlink_metadata(target.join("accounts")) {

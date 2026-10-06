@@ -38,7 +38,7 @@ official Hugging Face origin, plus a custom URL. `--mirror` overrides
 Explicit sources fail without switching; auto tries each source once. All
 downloads retain the same pinned revision and SHA-256 checks. Files are staged
 before replacement; cancellation cleans temporary files.
-`ONEMEMORY_M3_DIR` overrides `~/.respire/models/bge-m3`. Old BGE directories and
+`ONEMEMORY_M3_DIR` overrides `~/.rsrs/models/bge-m3`. Old BGE directories and
 `ONEMEMORY_MODEL_DIR` are not used. Loading has a 120-second deadline; inference
 retains its 15-second deadline.
 

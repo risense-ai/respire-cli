@@ -52,6 +52,32 @@ pub fn install_target_dir(explicit: Option<&str>) -> PathBuf {
 
 pub fn install_m3(mirror: Option<&str>) -> Result<InstallReport> {
     let _operation = model_progress::Operation::begin("verify")?;
+    install_m3_inner(mirror)
+}
+
+/// Called with the background index operation already reserved. Preparing files
+/// must not try to reserve that operation a second time or acquire a library lock.
+pub fn prepare_m3_for_index() -> Result<()> {
+    let user = install_target_dir(None);
+    let explicit = std::env::var("ONEMEMORY_M3_DIR").ok().is_some_and(|value| !value.trim().is_empty());
+    let mut candidates = vec![user];
+    if !explicit {
+        if let Some(parent) = std::env::current_exe()?.parent() {
+            candidates.push(parent.join("models/bge-m3"));
+        }
+        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+    }
+    for path in candidates {
+        if file_valid(&path.join("tokenizer.json"), TOKENIZER_SHA256)?
+            && file_valid(&path.join("onnx/model_fp16.onnx"), ONNX_SHA256)? {
+            return Ok(());
+        }
+    }
+    install_m3_inner(None)?;
+    Ok(())
+}
+
+fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
     let dest = install_target_dir(None);
     let setting = mirror.map(str::to_owned).or_else(mirror_from_env).unwrap_or_else(|| "auto".to_owned());
     let origins = if setting.trim() == "auto" {

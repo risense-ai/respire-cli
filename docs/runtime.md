@@ -68,7 +68,7 @@ share host loopback addresses.
 | Administration | `https://admin.rsrs.rs` |
 | Default API | `https://api.rsrs.rs` |
 
-The default API can be changed through the server settings. Respire uses `~/.rsrs` and port `15169`; supported old default profiles are copied safely on startup while the original directories remain. Explicit
+The default API can be changed through the server settings. Respire uses `~/.rsrs` and port `15169`; startup preserves the selected account and does not import old profiles automatically. Use the TUI's Migrate old version action or `rsrs migrate` to select a source and target account. Original directories remain intact and existing accounts are not overwritten. Explicit
 `ONEMEMORY_*` overrides remain supported, and the database filename and wire format
 remain compatible.
 
@@ -76,4 +76,21 @@ remain compatible.
 
 `rsrs web` opens `https://dash.rsrs.rs`. `rsrs web --no-open --json` reports that URL without opening a browser. It does not start, stop, or bind the runtime. Former `web --host`, `--port`, `--status`, `--stop`, and `--internal` flags are no longer supported.
 
-The hidden `--runtime-internal` entry is reserved for host lifecycle and automated diagnostics. CLI commands automatically start the loopback runtime when allowed; restricted clients only connect. Local `/api/health`, `/api/rpc`, `/api/runtime/stop`, `/mcp`, and `/sse` accept actual loopback peers without a token. Non-loopback peers are not exempt from token checks, and non-loopback listening is currently unsupported. Browser pages, static assets, `/api/invoke`, and `/api/task` are removed. The non-loopback authentication gate accepts tokens in headers, never dashboard URLs.
+The hidden `--runtime-internal` entry is reserved for host lifecycle and automated diagnostics. Commands that require the runtime automatically start it when allowed; restricted clients only connect. Local `/api/health`, `/api/rpc`, `/api/runtime/stop`, `/mcp`, and `/sse` accept actual loopback peers without a token. Non-loopback peers are not exempt from token checks, and non-loopback listening is currently unsupported. Browser pages, static assets, `/api/invoke`, and `/api/task` are removed. The non-loopback authentication gate accepts tokens in headers, never dashboard URLs.
+
+## Upgrading an older runtime
+
+The host command `rsrs --runtime-internal --stop` supports runtimes that still
+require a loopback token, including 1.0.9. After an HTTP 401, the client retries
+once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file, after the
+host endpoint record and OS listener PID identify a running Respire process. An
+unverified listener receives no token. The client does not
+create or replace credentials. Other HTTP errors and connection failures are
+not retried. Current loopback runtimes continue to work without a token file.
+Health checks and normal RPC use the same compatibility rule, so host upgrades
+can gracefully stop the old runtime before starting the new executable.
+
+Run lifecycle commands from the host terminal; client-only mode does not permit
+shutdown or the legacy-token retry. A missing or rejected legacy token requires the old runtime's existing
+authentication material, rather than bypassing authentication or killing an
+unverified process. HTTP redirects are disabled for the local runtime client.

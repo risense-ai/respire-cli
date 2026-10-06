@@ -11,6 +11,12 @@ Recall titles first and read selected records in JSON. Load the complete `rsrs p
 | Task conditions | Include a `【触发】` line with a confirmed date (and time zone if needed) or verifiable prerequisite. Ask if unclear; check dates and prerequisite evidence when recalling the task, then mention due conditions. There is no automatic validation or background reminder. |
 | Importance | Use `--importance important` for reusable findings or `--importance trivial` for diary entries; do not use numeric scores. |
 
+## Related recall
+
+Start routine searches with `rsrs recall "project name + key terms" --titles --json`, which returns up to 20 titles by default. Read selected records with `show --json`, usually within two rounds. `related` contains separate lookup hints, not primary hits. If `superseded_by` points to a live newer record, read it first and treat the old record as historical evidence.
+
+Use `remember ... --importance important --supersedes <old-id>` when a new conclusion replaces an old decision, and retain the reason for replacement. Use `--see-also <id,id>` for necessary cross-references. Choose edits or merges based on the facts; do not create duplicates just to add a relation. Enable relation writes only after every writer for the library is upgraded; older writers may drop fields when resealing.
+
 ## 中文完整规则
 
 # rsrs 记忆工作流

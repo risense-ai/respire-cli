@@ -111,7 +111,7 @@ pub fn try_session() -> Result<Option<SessionKeys>> {
     }
 }
 
-fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
+pub(crate) fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
     let kdf_salt = crypto::random_hex(16);
     let kek = crypto::derive_kek_v4(super_pass, &kdf_salt)?;
     let (urk_nonce, wrapped_urk) = crypto::wrap_key(urk, &kek)?;
@@ -369,7 +369,7 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         Ok(r) => r,
         Err(ureq::Error::Status(code, _r)) if code == 409 => {
             return Err(anyhow::anyhow!(
-                "user \"{user}\" is already registered on this server — use rsrs login --user {user} --pass <password>",
+                "user \"{user}\" is already registered on this server — use rsrs login --interactive --user {user} --pass <password>",
             ));
         }
         Err(e) => return Err(anyhow::anyhow!("register request failed: {e}")),
@@ -405,6 +405,8 @@ pub fn login(
     secret_key: Option<&str>,
     reset_vault: bool,
 ) -> Result<Option<String>> {
+    let mut authenticated = serde_json::json!({});
+    authenticate_session(&mut authenticated, addr, user, pass)?;
     let mut data = read_session_json().unwrap_or_else(|_| serde_json::json!({}));
     if let Some(s) = secret_key.filter(|s| !s.is_empty()) {
         data["secret_key"] = serde_json::Value::String(s.to_owned());
@@ -439,7 +441,9 @@ pub fn login(
     // 1. Auth first: send the login password to the server. On failure local material is untouched —
     // the old impl unlocked locally first and died on "local key unlock failed" when material was
     // stale, never reaching the cloud or asking for the super password (reported 2026-09-16 on a new device).
-    authenticate_session(&mut data, addr, user, pass)?;
+    for field in ["user", "addr", "token", "session_id", "auth_salt", "pass"] {
+        data[field] = authenticated[field].clone();
+    }
     if let Err(e) = crate::keystore::save_login_pass(user, pass) {
         eprintln!("warning: login password not stored in keyring: {e}");
     }
@@ -639,6 +643,12 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
 }
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
+pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
+    let mut authorization = serde_json::json!({});
+    authenticate_session(&mut authorization, addr, user, pass)?;
+    Ok(authorization)
+}
+
 fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str) -> Result<()> {
     // Owner check was replaced by login's auto profile switch: logging into another account switches data dir; the old profile stays.
     let auth_salt = crypto::derive_auth_salt(user)?;
@@ -651,9 +661,21 @@ fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pa
             "device_name": device_name(),
         }))
         .map_err(|e| anyhow::anyhow!("login request failed: {e}"))?;
-    let reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
+    let mut reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
     if reply["totp_required"].as_bool() == Some(true) {
-        return Err(anyhow!("this account has TOTP enabled; finish login on the web /dashboard or disable TOTP"));
+        if !crate::prompt::interactive() {
+            anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
+        }
+        let ticket = reply["ticket"].as_str().ok_or_else(|| anyhow!("TOTP challenge did not return a ticket"))?;
+        let code = crate::prompt::ask_secret("TOTP code (6 digits): ")?;
+        let code = code.trim();
+        if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            anyhow::bail!("TOTP code must contain 6 digits");
+        }
+        let response = ureq::post(&format!("{}/login/totp", addr.trim().trim_end_matches('/')))
+            .send_json(serde_json::json!({"ticket":ticket,"code":code,"device_name":device_name()}))
+            .map_err(|error| anyhow!("TOTP verification failed: {error}"))?;
+        reply = response.into_json().map_err(|error| anyhow!("failed to parse TOTP response: {error}"))?;
     }
     let token = reply["token"]
         .as_str()

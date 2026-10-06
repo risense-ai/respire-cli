@@ -85,6 +85,36 @@ pub fn merge_entries<E: Embedder>(
         if inherit_importance {
             entry.importance = source.local_importance.clone();
         }
+        let selected_entries = resolved.iter().map(|id| {
+            MemoryEngine::open(keys,by_id.get(id.as_str()).copied().ok_or_else(|| anyhow!("missing merge source"))?)
+        }).collect::<Result<Vec<_>>>()?;
+        let mut links = std::collections::BTreeSet::new();
+        let mut replaces = std::collections::BTreeSet::new();
+        for old in &selected_entries {
+            links.extend(old.see_also.iter().filter(|id| !selected.contains(*id)).cloned());
+            if !old.supersedes.is_empty() && !selected.contains(&old.supersedes) { replaces.insert(old.supersedes.clone()); }
+        }
+        anyhow::ensure!(replaces.len() <= 1, "merge would combine distinct supersedes chains");
+        entry.supersedes = replaces.into_iter().next().unwrap_or_default();
+        entry.see_also = links.into_iter().collect();
+        // Collapsing nonadjacent versions must not close a replacement cycle.
+        let mut cursor = entry.supersedes.clone();
+        let mut seen = HashSet::new();
+        while !cursor.is_empty() {
+            anyhow::ensure!(cursor != entry.id && seen.insert(cursor.clone()),
+                "merge would create a supersedes cycle");
+            let Some(row) = by_id.get(cursor.as_str()).filter(|row| !row.deleted) else { break };
+            cursor = MemoryEngine::open(keys, row)?.supersedes;
+            if selected.contains(&cursor) { cursor = entry.id.clone(); }
+        }
+        let mut successors = HashSet::new();
+        for row in all.iter().filter(|row| !row.deleted && !selected.contains(&row.id)) {
+            if selected.contains(&MemoryEngine::open(keys,row)?.supersedes) {
+                successors.insert(row.id.clone());
+            }
+        }
+        anyhow::ensure!(successors.len() <= 1, "merge would combine competing active replacements");
+        entry.superseded_by = successors.into_iter().next().unwrap_or_default();
         let replacement = MemoryEngine::seal(keys, embedder, entry, &entry.user)?;
         for (row, parent) in moves {
             let moved =
@@ -95,6 +125,21 @@ pub fn merge_entries<E: Embedder>(
         }
         if !store.put(&replacement)? {
             bail!("merge replacement was not written: {}", entry.id);
+        }
+        // Read after parent edits so relation resealing cannot revert a reparent.
+        for row in store.all(false)?.iter().filter(|r| r.id != entry.id && !selected.contains(&r.id)) {
+            let current = MemoryEngine::open(keys,row)?;
+            if selected.contains(&current.supersedes) || selected.contains(&current.superseded_by)
+                || current.see_also.iter().any(|id| selected.contains(id)) {
+                let updated = MemoryEngine::reseal_edges(keys,row,&store.edit_stamp(&row.id)?,|p| {
+                    if selected.contains(&p.supersedes) { p.supersedes = entry.id.clone(); }
+                    if selected.contains(&p.superseded_by) { p.superseded_by = entry.id.clone(); }
+                    p.see_also = p.see_also.iter().map(|id| if selected.contains(id) { entry.id.clone() } else { id.clone() })
+                        .collect::<std::collections::BTreeSet<_>>().into_iter().collect();
+                    p.modified_by = super::device_tag();
+                })?;
+                anyhow::ensure!(store.put(&updated)?, "merge association was not saved");
+            }
         }
         for id in &resolved {
             if !store.forget(id)? {
@@ -192,6 +237,9 @@ mod tests {
 
     fn entry(id: &str, parent: &str) -> MemoryEntry {
         MemoryEntry {
+            supersedes: String::new(),
+            superseded_by: String::new(),
+            see_also: Vec::new(),
             id: id.into(),
             kind: Kind::Context,
             tags: vec![],
