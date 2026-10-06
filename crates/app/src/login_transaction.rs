@@ -78,6 +78,10 @@ fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)?;
+        #[cfg(unix)] {
+            let parent = path.parent().context("private write target has no parent")?;
+            std::fs::File::open(parent)?.sync_all()?;
+        }
         Ok(())
     })();
     if result.is_err() && temporary.exists() { std::fs::remove_file(&temporary)?; }
