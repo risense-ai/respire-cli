@@ -658,17 +658,36 @@ class Smoke(support.Smoke):
         self.passed("migration_symlink_root_rejected", external_target_is_owned_fixture=True)
         source_session = digest(fixture["source"] / "session.json")
         candidate = self.cli(self.default_env(env), "migrate")["details"]["profiles"][0]
+        destination = Path(env["HOME"]) / ".rsrs"
+
+        def destination_snapshot():
+            if not destination.exists():
+                return None
+            snapshot = {}
+            for path in (destination, *sorted(destination.rglob("*"))):
+                stat = path.lstat()
+                snapshot[str(path.relative_to(destination))] = (
+                    stat.st_mode, stat.st_size, stat.st_mtime_ns,
+                    digest(path) if path.is_file() else None)
+            return snapshot
+
+        # The host-side cleanup above can already create runtime bookkeeping.
+        # Client-only commands must preserve that baseline as well as source data.
+        destination_before = destination_snapshot()
         for variable in ("ONEMEMORY_CLIENT_ONLY", "ONEMEMORY_NO_AUTOSTART"):
             guarded = self.default_env(env)
             guarded[variable] = "1"
             result = subprocess.run([str(self.args.binary), "--version"], env=guarded,
                 cwd=self.root, capture_output=True, timeout=30)
-            require(result.returncode == 0 and not (Path(env["HOME"]) / ".rsrs").exists()
+            require(result.returncode == 0 and destination_snapshot() == destination_before
                 and digest(fixture["source"] / "session.json") == source_session, "client_only_migration_wrote_data")
             blocked = subprocess.run([str(self.args.binary), "--json", "migrate",
                 "--source", candidate["source_id"], "--account", "blocked"], env=guarded,
                 cwd=self.root, capture_output=True, timeout=30)
-            require(blocked.returncode != 0 and not (Path(env["HOME"]) / ".rsrs").exists()
+            rejection = json.loads(blocked.stdout)
+            require(blocked.returncode == 1 and rejection.get("status") == "fail"
+                and any("client_only:" in error for error in rejection.get("errors", []))
+                and destination_snapshot() == destination_before
                 and digest(fixture["source"] / "session.json") == source_session,
                 "client_only_explicit_migration_wrote_data")
         self.passed("migration_client_only_does_not_write", guards=2)
