@@ -3954,6 +3954,7 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
 /// --remote also probes server /health. Per-item ok/fail; exit code stays 0 (diagnosis is not failure).
 fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     let mut items: Vec<(String, bool, String)> = Vec::new();
+    let mut model_warnings = Vec::new();
     let add = |items: &mut Vec<(String, bool, String)>, name: &str, ok: bool, note: String| {
         items.push((name.to_owned(), ok, note));
     };
@@ -4021,54 +4022,89 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         Err(e) => add(&mut items, "session", false, format!("{e}")),
     }
 
-    // 3) BGE model: diagnostics are read-only unless --fix is explicit.
-    let active_model = build_local()?.retrieval_model()?;
-    match BgeEmbedder::load_model(&active_model) {
-        Ok(e) => match e.probe("BGE-M3 doctor inference") {
-            Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({})", e.dims(), probe["selected"])),
-            Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed: {error:#}")),
-        },
-        Err(e) if !fix => {
-            add(
-                &mut items,
-                "embedder",
-                false,
-                format!("unavailable: {e} (the runtime prepares BGE-M3 automatically for pending index work; inspect model-task progress and download source settings)"),
-            );
+    // The resident index worker owns preparation. Do not start a second installer
+    // while it downloads, or wait here while holding its foreground command slot.
+    let store = build_local()?;
+    let active_model = store.retrieval_model()?;
+    let pending_index = store.index_pending(&active_model);
+    let model_task = respire::model_progress::status()?;
+    let model_busy = model_task["active"].as_bool() == Some(true);
+    let index_state = rpc::index_status();
+    let defer_preparation = rpc::worker_active()
+        && pending_index.as_ref().is_ok_and(|pending| *pending)
+        && (fix || model_busy || index_state["scheduled"].as_bool() == Some(true)
+            || index_state["running"].as_bool() == Some(true));
+    if defer_preparation {
+        if fix {
+            rpc::kick_index();
         }
-        Err(_) => {
-            eprintln!("embedder missing; installing BGE-M3 FP16 (~1.15GB)...");
-            let mirror = respire::model_install::mirror_from_env();
-            let install = respire::model_install::install_m3(mirror.as_deref());
-            match install {
-                Ok(report) => match BgeEmbedder::load_model(&active_model) {
-                    Ok(e) => match e.probe("BGE-M3 doctor inference") {
-                        Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({}) (auto-installed {})", e.dims(), probe["selected"], report.dir.display())),
-                        Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed after install: {error:#}")),
+        model_warnings.push("embedder");
+        add(&mut items, "embedder", false,
+            format!("BGE-M3 preparation/indexing {} through the runtime; model task: {}. No second installer started",
+                if model_busy { "in progress" } else { "scheduled" }, model_task));
+    } else if model_busy {
+        model_warnings.push("embedder");
+        add(&mut items, "embedder", false,
+            format!("Model operation in progress: {model_task}; inference check deferred"));
+    } else {
+        // Diagnostics remain read-only unless --fix is explicit.
+        match BgeEmbedder::load_model(&active_model) {
+            Ok(e) => match e.probe("BGE-M3 doctor inference") {
+                Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({})", e.dims(), probe["selected"])),
+                Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed: {error:#}")),
+            },
+            Err(e) if !fix => {
+                add(
+                    &mut items,
+                    "embedder",
+                    false,
+                    format!("unavailable: {e} (the runtime prepares BGE-M3 automatically for pending index work; inspect model-task progress and download source settings)"),
+                );
+            }
+            Err(_) => {
+                eprintln!("embedder missing; installing BGE-M3 FP16 (~1.15GB)...");
+                let mirror = respire::model_install::mirror_from_env();
+                let install = respire::model_install::install_m3(mirror.as_deref());
+                match install {
+                    Ok(report) => match BgeEmbedder::load_model(&active_model) {
+                        Ok(e) => match e.probe("BGE-M3 doctor inference") {
+                            Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({}) (auto-installed {})", e.dims(), probe["selected"], report.dir.display())),
+                            Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed after install: {error:#}")),
+                        },
+                        Err(e) => add(
+                            &mut items,
+                            "embedder",
+                            false,
+                            format!("still failed to load after install: {e}"),
+                        ),
                     },
                     Err(e) => add(
                         &mut items,
                         "embedder",
                         false,
-                        format!("still failed to load after install: {e}"),
+                        format!(
+                            "auto-install failed: {e}"
+                        ),
                     ),
-                },
-                Err(e) => add(
-                    &mut items,
-                    "embedder",
-                    false,
-                    format!(
-                        "auto-install failed: {e} (check the network and rerun rsrs doctor --fix)"
-                    ),
-                ),
+                }
             }
         }
     }
 
-    let store = build_local()?;
-    match store.index_pending("m3") {
-        Ok(pending) => add(&mut items, "model index", !pending,
-            if pending { "BGE-M3 index pending; the runtime prepares the model and rebuilds automatically in the background".to_owned() } else { "BGE-M3 index ready".to_owned() }),
+    match pending_index {
+        Ok(true) => {
+            let indexing = rpc::index_status();
+            let progressing = (fix || indexing["state"].as_str() != Some("failed"))
+                && (defer_preparation || model_busy
+                || indexing["running"].as_bool() == Some(true)
+                || indexing["scheduled"].as_bool() == Some(true));
+            if progressing {
+                model_warnings.push("model index");
+            }
+            add(&mut items, "model index", false,
+                format!("BGE-M3 index pending; runtime status: {indexing}"));
+        }
+        Ok(false) => add(&mut items, "model index", true, "BGE-M3 index ready".to_owned()),
         Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
     }
 
@@ -4202,6 +4238,8 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
             } else if name == "CLI version" && note.contains("not checked") {
                 OutputStatus::Skip
             } else if name == "tidy counter" && *ok && note.contains("threshold is hit") {
+                OutputStatus::Warn
+            } else if model_warnings.contains(&name.as_str()) {
                 OutputStatus::Warn
             } else if *ok {
                 OutputStatus::Ok
@@ -8308,6 +8346,26 @@ mod capture_tests {
                 ));
             }
         }
+        // A live background task must not make --fix launch a second installer.
+        let operation = respire::model_progress::Operation::begin("download")
+            .map_err(|err| err.to_string())?;
+        for fix in [false, true] {
+            let mut args = vec!["--json".to_owned(), "doctor".to_owned()];
+            if fix {
+                args.push("--fix".to_owned());
+            }
+            let captured = capture_run(args);
+            let embedder = captured.envelope.items.iter()
+                .find(|item| item.name == "embedder")
+                .ok_or("doctor did not report the embedder")?;
+            if !matches!(embedder.status, crate::OutputStatus::Warn) {
+                return Err("active model preparation must be WARN, not FAIL or PASS".to_owned());
+            }
+            if respire::model_progress::status().map_err(|err| err.to_string())?["phase"] != "download" {
+                return Err("doctor replaced the active model task".to_owned());
+            }
+        }
+        drop(operation);
         drop(guard);
         match prev_bin {
             Some(value) => std::env::set_var("ONEMEMORY_BIN_DIR", value),
