@@ -76,7 +76,8 @@ class GithubSmoke(baseline.Smoke):
             state = self.grant(start, auth)
             payload = {'state': state, 'code': 'invalid-fixture-' + secrets.token_hex(16)}
             self.probe('POST', exchange, payload, auth, expected=502,
-                       predicate=lambda r: r.get('error') == 'GitHub authorization failed; please start again',
+                       predicate=lambda r: r.get('error') == 'GitHub authorization failed; please start again'
+                       and not any(field in r for field in ('token', 'access_token', 'refresh_token', 'session_id')),
                        label='invalid-provider-code-no-session')
             self.probe('POST', exchange, payload, auth, expected=400,
                        predicate=lambda r: 'error' in r, label='consumed-state-replay-rejected')
