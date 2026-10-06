@@ -1,5 +1,17 @@
 # Existing command checks
 
+`--json` keeps command errors in the result envelope. Invalid IDs, malformed or
+inapplicable split/resort/deepen input use `reason: invalid_input`,
+`details.error_type: user` and exit 2. Storage, transport and engine failures keep
+`reason: runtime_error`, `error_type: runtime` and exit 1. Pending or warning
+results also use exit 2; automation must read `status` and `reason`.
+
+Host `space create`, `space use` and confirmed `space remove --yes` coordinate
+runtime shutdown and restart, preserve configuration and verify the resulting
+profile. The active space cannot be removed. Sandbox clients cannot manage this
+lifecycle. `update-check` uses an arrow only for an available upgrade; equal or
+ahead builds report their state without offering a downgrade.
+
 Current parser behavior and `rsrs --help` define the command contract.
 
 | Scenario | Command |

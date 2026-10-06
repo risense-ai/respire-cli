@@ -7,6 +7,78 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
 }
 
+#[test]
+fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::Error>> {
+    use serde_json::{json, Value};
+    let home = tempfile::tempdir()?;
+    let library = home.path().join(".rsrs");
+    std::fs::create_dir(&library)?;
+    let config = library.join("client.json");
+    std::fs::write(&config, serde_json::to_vec(&json!({
+        "data_dir":library,"api_base":"https://fixture.invalid","custom":"preserve"
+    }))?)?;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    let invoke = |args: &[&str], expected: i32| -> Result<Value, Box<dyn std::error::Error>> {
+        let output = Command::new(bin()).arg("--json").args(args)
+            .env("HOME",home.path()).env("USERPROFILE",home.path())
+            .env("ONEMEMORY_DATA_DIR",&library).env("ONEMEMORY_RPC_PORT",port.to_string())
+            .env("ONEMEMORY_NO_AUTOSYNC","1").env("ONEMEMORY_UPDATE_CHECK","0")
+            .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
+            .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
+            .output()?;
+        let stdout = String::from_utf8(output.stdout)?;
+        if output.status.code()!=Some(expected) {
+            return Err(format!("owned space command {args:?} exited {:?}: {stdout} {}",output.status.code(),String::from_utf8_lossy(&output.stderr)).into());
+        }
+        Ok(serde_json::from_str(stdout.trim())?)
+    };
+    let health = |profile: &std::path::Path| -> Result<u64, Box<dyn std::error::Error>> {
+        let status:Value=ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
+            .timeout(Duration::from_secs(5)).call()?.into_json()?;
+        if status["data_dir"].as_str().map(std::path::Path::new)!=Some(profile)
+            || status["bin"]!=env!("CARGO_PKG_VERSION") {
+            return Err(format!("runtime profile readback failed: {status}").into());
+        }
+        status["pid"].as_u64().ok_or_else(|| "runtime PID missing".into())
+    };
+    let result=(|| -> Result<(), Box<dyn std::error::Error>> {
+        invoke(&["space","list"],0)?;
+        let original_pid=health(&library)?;
+        invoke(&["space","create","probe"],0)?;
+        let probe=library.join("accounts/probe");
+        assert!(probe.join("space_owner.json").is_file());
+        assert_ne!(health(&probe)?,original_pid);
+        let before=std::fs::read(&config)?;
+        let blocked=invoke(&["space","remove","probe"],2)?;
+        assert_eq!(blocked["summary"]["reason"],"invalid_input");
+        assert_eq!(std::fs::read(&config)?,before);
+        let blocked=invoke(&["space","remove","probe","--yes"],2)?;
+        assert_eq!(blocked["details"]["error_type"],"user");
+        assert!(probe.is_dir());
+        health(&probe)?;
+        invoke(&["space","use","main"],0)?;
+        health(&library)?;
+        let before=std::fs::read(&config)?;
+        invoke(&["space","use","missing"],2)?;
+        assert_eq!(std::fs::read(&config)?,before);
+        health(&library)?;
+        invoke(&["space","remove","probe","--yes"],0)?;
+        assert!(!probe.exists());
+        health(&library)?;
+        let preserved:Value=serde_json::from_slice(&std::fs::read(&config)?)?;
+        assert_eq!(preserved["api_base"],"https://fixture.invalid");
+        assert_eq!(preserved["custom"],"preserve");
+        Ok(())
+    })();
+    let cleanup=invoke(&["--runtime-internal","--stop"],0);
+    result?;
+    cleanup?;
+    assert!(std::net::TcpStream::connect(("127.0.0.1",port)).is_err());
+    Ok(())
+}
+
 fn run(dir: &std::path::Path, args: &[&str]) -> std::io::Result<Output> {
     Command::new(bin())
         .args(args)

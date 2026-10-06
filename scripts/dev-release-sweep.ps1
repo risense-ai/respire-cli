@@ -467,7 +467,9 @@ function Invoke-Om {
         $exitOk = $ExpectExit -contains [int]$exit
         $statusOk = $true
     } else {
-        $want = switch ($status) { 'ok' { 0 } 'skip' { 0 } 'warn' { 2 } 'pending' { 2 } 'fail' { 1 } default { -1 } }
+        $want = switch ($status) { 'ok' { 0 } 'skip' { 0 } 'warn' { 2 } 'pending' { 2 } 'fail' {
+            if ([string]$envlp.summary.reason -eq 'invalid_input' -and [string]$envlp.details.error_type -eq 'user') { 2 } else { 1 }
+        } default { -1 } }
         $exitOk = ($exit -eq $want)
         $statusOk = $AllowStatus -contains $status
     }

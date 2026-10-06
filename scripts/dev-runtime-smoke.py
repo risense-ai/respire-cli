@@ -559,6 +559,120 @@ class Smoke:
                     self.env['ONEMEMORY_MIRROR'] = previous_mirror
 
 
+    def validation_errors(self):
+        entry = self.direct(['remember', 'Owned validation fixture.', '--title', 'Validation leaf',
+                             '--force', '--importance', 'important'])['summary']['id']
+        commands = [
+            ['resort', '--spec', '{"ops":[{"id":"aaaaaaaa","parent":"aaaaaaaa"}]}'],
+            ['resort', '--spec', '{'], ['resort', '--spec', '{"ops":[]}'],
+            ['split', entry, '--go', '--spec', '{"items":[]}'],
+            ['split', entry, '--go', '--spec', '{'], ['tree-deepen', '--root', entry],
+        ]
+        for command in commands:
+            result = subprocess.run([str(self.args.binary), '--direct', *command, '--json'],
+                                    env=self.env, cwd=self.root, capture_output=True, text=True, timeout=90)
+            require(result.returncode == 2, 'direct_validation_exit_not_user_error')
+            value = json.loads(result.stdout.strip())
+            require(value.get('status') == 'fail', 'direct_validation_status_not_fail')
+            require(value['summary'].get('reason') == 'invalid_input'
+                    and value['details'].get('error_type') == 'user', 'direct_validation_error_not_typed')
+        self.start()
+        try:
+            for command in commands:
+                value = self.rpc(command, expected=2)
+                require(value['summary'].get('reason') == 'invalid_input'
+                        and value['details'].get('error_type') == 'user', 'rpc_validation_error_not_typed')
+        finally:
+            self.stop()
+        self.passed('runtime_validation_errors_typed', direct_cases=len(commands), rpc_cases=len(commands))
+
+    def host_space_commands(self):
+        home = self.root / 'space-command-home'
+        library = home / '.rsrs'
+        library.mkdir(parents=True)
+        config = library / 'client.json'
+        config.write_text(json.dumps({'data_dir': str(library), 'api_base': 'https://fixture.invalid',
+                                      'custom': 'preserve'}), encoding='utf-8')
+        env = self.env.copy()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            port = listener.getsockname()[1]
+        url = 'http://127.0.0.1:' + str(port)
+        env.update(HOME=str(home), USERPROFILE=str(home), ONEMEMORY_DATA_DIR=str(library),
+                   ONEMEMORY_RPC_PORT=str(port), XDG_RUNTIME_DIR=str(home / 'runtime'))
+        def cli(args, expected=0):
+            result = subprocess.run([str(self.args.binary), '--json', *args], env=env, cwd=home,
+                                    capture_output=True, text=True, timeout=90)
+            require(result.returncode == expected, 'space_host_cli_exit_mismatch')
+            value = json.loads(result.stdout.strip())
+            require(value['status'] == ('ok' if expected == 0 else 'fail'), 'space_host_cli_status_mismatch')
+            return value
+        def health(profile):
+            code, actual, _ = self.http(url, 'GET', '/api/health')
+            require(code == 200 and actual['bin'] == self.args.version
+                    and hashlib.sha256(Path(actual['exe']).read_bytes()).hexdigest() == self.args.binary_sha256
+                    and Path(actual['data_dir']).resolve() == profile.resolve(), 'space_host_runtime_readback_failed')
+            return actual['pid']
+        try:
+            cli(['space', 'list'])
+            old_pid = health(library)
+            cli(['space', 'create', 'probe'])
+            probe = library / 'accounts/probe'
+            require(probe.joinpath('space_owner.json').is_file() and health(probe) != old_pid,
+                    'space_create_did_not_take_over_runtime')
+            before = config.read_bytes()
+            denied = cli(['space', 'remove', 'probe'], 2)
+            require(denied['summary']['reason'] == 'invalid_input' and config.read_bytes() == before,
+                    'space_remove_without_confirmation_changed_profile')
+            cli(['space', 'remove', 'probe', '--yes'], 2)
+            require(probe.is_dir(), 'space_removed_active_profile')
+            health(probe)
+            cli(['space', 'use', 'main'])
+            health(library)
+            before = config.read_bytes()
+            cli(['space', 'use', 'missing'], 2)
+            require(config.read_bytes() == before, 'space_failed_switch_changed_configuration')
+            health(library)
+            cli(['space', 'remove', 'probe', '--yes'])
+            require(not probe.exists(), 'space_remove_did_not_remove_profile')
+            health(library)
+            preserved = json.loads(config.read_text(encoding='utf-8'))
+            require(preserved['api_base'] == 'https://fixture.invalid' and preserved['custom'] == 'preserve',
+                    'space_host_command_lost_configuration')
+        finally:
+            cli(['--runtime-internal', '--stop'])
+        with socket.socket() as listener:
+            listener.settimeout(2)
+            require(listener.connect_ex(('127.0.0.1', port)) != 0, 'space_fixture_runtime_not_closed')
+        self.passed('host_space_lifecycle', runtime_cleanup=True, configuration_preserved=True)
+
+    def update_check_comparisons(self):
+        previous = self.env.get('ONEMEMORY_UPDATE_CHECK')
+        self.env['ONEMEMORY_UPDATE_CHECK'] = '1'
+        cache = self.library / 'update_check.json'
+        try:
+            for latest, ahead, outdated in [('0.0.1', True, False), (self.args.version, False, False),
+                                             ('99.0.0', False, True)]:
+                cache.write_text(json.dumps({'checked_at': int(time.time()), 'latest': latest, 'ok': True}),
+                                 encoding='utf-8')
+                result = subprocess.run([str(self.args.binary), '--direct', '--json', 'update-check'],
+                                        env=self.env, cwd=self.root, capture_output=True, text=True, timeout=30)
+                require(result.returncode == (2 if outdated else 0), 'update_check_exit_mismatch')
+                value = json.loads(result.stdout.strip())
+                require(value['summary'].get('ahead') is ahead and value['summary'].get('outdated') is outdated
+                        and value['summary'].get('cached') is True, 'update_comparison_state_wrong')
+                display = value['items'][0]['value']
+                require((' -> ' in display) is outdated and ('ahead of published latest' in display) is ahead
+                        and bool(value['actions']) is outdated, 'update_comparison_offers_downgrade')
+        finally:
+            cache.unlink(missing_ok=True)
+            if previous is None:
+                self.env.pop('ONEMEMORY_UPDATE_CHECK', None)
+            else:
+                self.env['ONEMEMORY_UPDATE_CHECK'] = previous
+        self.passed('update_check_comparison', states=3)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, required=True)
@@ -581,6 +695,9 @@ def main():
         smoke.transport()
         smoke.settings()
         smoke.doctor_model_recovery()
+        smoke.validation_errors()
+        smoke.host_space_commands()
+        smoke.update_check_comparisons()
     except Exception as error:
         smoke.report['failure_code'] = str(error) if isinstance(error, Failure) else type(error).__name__
     finally:

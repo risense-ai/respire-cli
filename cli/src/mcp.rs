@@ -977,8 +977,7 @@ mod tests {
 
     #[test]
     fn default_bin_dir_is_under_data_dir() -> Result<(), String> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev_data = std::env::var("ONEMEMORY_DATA_DIR").ok();
         let prev_bin = std::env::var("ONEMEMORY_BIN_DIR").ok();
@@ -1006,8 +1005,7 @@ mod tests {
 
     #[test]
     fn materialize_bin_honors_override_dir() -> Result<(), String> {
-        static BIN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = BIN_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev = std::env::var("ONEMEMORY_BIN_DIR").ok();
         std::env::set_var("ONEMEMORY_BIN_DIR", dir.path());

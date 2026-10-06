@@ -306,6 +306,18 @@ fn output_emitted() -> bool {
     OUTPUT_EMITTED.with(|flag| flag.get())
 }
 
+fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
+    let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
+    let mut envelope = ResultEnvelope::new(
+        "cli", OutputStatus::Fail,
+        serde_json::json!({"reason": if input { "invalid_input" } else { "runtime_error" }}),
+        Vec::new(),
+    );
+    envelope.errors.push(format!("{error:#}"));
+    envelope.details = serde_json::json!({"error_type": if input { "user" } else { "runtime" }});
+    (envelope, if input { 2 } else { 1 })
+}
+
 /// Run one command on the runtime worker thread and keep the envelope instead of printing it.
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
@@ -330,6 +342,8 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
                 Vec::new(),
             );
             if code != 0 {
+                envelope.summary = serde_json::json!({"reason":"invalid_input"});
+                envelope.details = serde_json::json!({"error_type":"user"});
                 envelope.errors.push(error.to_string());
             }
             CAPTURED.with(|slot| *slot.borrow_mut() = Some(envelope));
@@ -340,16 +354,9 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     };
     if let Err(error) = ran {
         if !output_emitted() {
-            let mut envelope = ResultEnvelope::new(
-                "cli",
-                OutputStatus::Fail,
-                serde_json::json!({"reason": "runtime_error"}),
-                Vec::new(),
-            );
-            envelope.errors.push(format!("{error:#}"));
-            envelope.details = serde_json::json!({"error_type": "runtime"});
+            let (envelope, code) = command_failure(&error);
             CAPTURED.with(|slot| *slot.borrow_mut() = Some(envelope));
-            set_exit_code(1);
+            set_exit_code(code);
         }
     }
     let envelope = CAPTURED
@@ -1446,35 +1453,35 @@ fn run_resort(
             ));
         }
     }
-    let spec = spec.ok_or_else(|| anyhow::anyhow!("need --spec (or --status to inspect the counter / --reset to zero it / --threshold to set it)"))?;
+    let spec = spec.ok_or_else(|| respire_app::input_error::InputError("need --spec (or --status to inspect the counter / --reset to zero it / --threshold to set it)".into()))?;
     let session = build_session()?;
     let store = build_local()?;
     let v: serde_json::Value = serde_json::from_str(spec).map_err(|e| {
-        anyhow::anyhow!("spec JSON failed to parse: {e} (shape {{\"ops\":[{{\"id\":\"child\",\"parent\":\"parent\"}}]}})")
+        respire_app::input_error::InputError(format!("spec JSON failed to parse: {e} (shape {{\"ops\":[{{\"id\":\"child\",\"parent\":\"parent\"}}]}})"))
     })?;
     let ops = v["ops"].as_array().cloned().unwrap_or_default();
     if ops.is_empty() {
-        anyhow::bail!("spec has no ops (shape {{\"ops\":[{{\"id\":...,\"parent\":...}}]}})");
+        return Err(respire_app::input_error::InputError("spec has no ops (shape {\"ops\":[{\"id\":...,\"parent\":...}]})".into()).into());
     }
     let all = store.all(true)?;
     let mut moved = 0usize;
     let mut rows = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         let (Some(cid), Some(pid)) = (op["id"].as_str(), op["parent"].as_str()) else {
-            anyhow::bail!("op#{i} missing id/parent string");
+            return Err(respire_app::input_error::InputError(format!("op#{i} missing id/parent string")).into());
         };
         let child = respire::service::resolve_prefix(&all, cid)?;
         let parent = respire::service::resolve_prefix(&all, pid)?;
         if child == parent {
-            anyhow::bail!("op#{i} cannot parent itself: {child}");
+            return Err(respire_app::input_error::InputError(format!("op#{i} cannot parent itself: {child}")).into());
         }
         for anc in store.ancestor_chain(&parent)? {
             if anc == child {
-                anyhow::bail!(
+                return Err(respire_app::input_error::InputError(format!(
                     "op#{i} cycle: new parent {} is a descendant of {}",
                     respire::service::short_id(&parent),
                     respire::service::short_id(&child)
-                );
+                )).into());
             }
         }
         if go {
@@ -1957,12 +1964,12 @@ fn run_split(id: &str, go: bool, spec_json: Option<&str>) -> Result<()> {
         return emit_result(result);
     }
     let Some(spec_json) = spec_json else {
-        anyhow::bail!(
-            "--go requires --spec '<split-plan JSON>' (run with no flags first to get material)"
-        );
+        return Err(respire_app::input_error::InputError(
+            "--go requires --spec '<split-plan JSON>' (run with no flags first to get material)".into()
+        ).into());
     };
     let spec: respire::service::SplitSpec =
-        serde_json::from_str(spec_json).map_err(|e| anyhow!("plan JSON failed to parse: {e}"))?;
+        serde_json::from_str(spec_json).map_err(|e| respire_app::input_error::InputError(format!("plan JSON failed to parse: {e}")))?;
     let n =
         respire::service::split_exec(&app.keys, &app.embedder, &app.store, &detail.entry, &spec)?;
     let mut result = ResultEnvelope::new(
@@ -3923,11 +3930,11 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
             let mut result = ResultEnvelope::new(
                 "update-check",
                 status,
-                serde_json::json!({"current":s.current.clone(),"latest":s.latest.clone(),"outdated":s.outdated,"cached":s.cached}),
+                serde_json::json!({"current":s.current.clone(),"latest":s.latest.clone(),"outdated":s.outdated,"ahead":uc::is_newer(&s.current,&s.latest),"cached":s.cached}),
                 vec![OutputItem::new(
                     "version",
                     status,
-                    format!("{} -> {}", s.current, s.latest),
+                    s.comparison(),
                 )],
             );
             if s.outdated {
@@ -4503,7 +4510,7 @@ fn run_space(
         }
         "create" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("create needs a space name: rsrs space create <name>"))?;
+                .ok_or_else(|| respire_app::input_error::InputError("create needs a space name: rsrs space create <name>".into()))?;
             let v = space::space_create(n)?;
             let mut result = ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"create","name":v["name"]}), vec![OutputItem::new("space", OutputStatus::Ok, v["name"].as_str().unwrap_or(""))]);
             result.actions.push(v["hint"].as_str().unwrap_or("").to_owned());
@@ -4512,7 +4519,7 @@ fn run_space(
         }
         "use" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("use needs a space name: rsrs space use <name>"))?;
+                .ok_or_else(|| respire_app::input_error::InputError("use needs a space name: rsrs space use <name>".into()))?;
             let v = space::space_use(n)?;
             let mut result = ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"use","name":v["name"]}), vec![OutputItem::new("space", OutputStatus::Ok, v["name"].as_str().unwrap_or("")), OutputItem::new("directory", OutputStatus::Ok, v["dir"].as_str().unwrap_or(""))]);
             result.details = v;
@@ -4561,9 +4568,9 @@ fn run_space(
         }
         "remove" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("remove needs a space name: rsrs space remove <name> --yes"))?;
+                .ok_or_else(|| respire_app::input_error::InputError("remove needs a space name: rsrs space remove <name> --yes".into()))?;
             if !yes {
-                anyhow::bail!("deleting a space profile wipes the local store and keys and is unrecoverable - add --yes to confirm");
+                return Err(respire_app::input_error::InputError("deleting a space profile wipes the local store and keys and is unrecoverable - add --yes to confirm".into()).into());
             }
             space::space_remove(n)?;
             emit_result(ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"remove","name":n}), vec![OutputItem::new("space", OutputStatus::Ok, "deleted")]))
@@ -5226,6 +5233,8 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    set_json_mode(std::env::args_os().any(|arg| arg == "--json")
+        || std::env::var("ONEMEMORY_JSON").is_ok_and(|value| value == "1" || value == "true"));
     if std::env::args_os().any(|arg| arg == "--client-only") {
         std::env::set_var("ONEMEMORY_CLIENT_ONLY", "1");
     }
@@ -5273,31 +5282,28 @@ fn main_body() -> i32 {
             set_json_mode(json);
             rpc::runtime_entry(flags)
         }
-        Preparsed::Invalid(error) => Err(anyhow!(error)),
+        Preparsed::Invalid(error) => Err(respire_app::input_error::InputError(error).into()),
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
-            run(Cli::parse_from(
+            match Cli::try_parse_from(
                 std::iter::once(std::ffi::OsString::from("rsrs")).chain(args),
-            ))
+            ) {
+                Ok(cli) => run(cli),
+                Err(error) if error.exit_code() == 0 => error.print().map_err(Into::into),
+                Err(error) => Err(respire_app::input_error::InputError(error.to_string()).into()),
+            }
         }
     };
     if let Err(error) = result {
+        let (failure, code) = command_failure(&error);
         if output_emitted() {
             eprintln!("ERROR: {error:#}");
         } else {
-            let mut failure = ResultEnvelope::new(
-                "cli",
-                OutputStatus::Fail,
-                serde_json::json!({"reason":"runtime_error"}),
-                Vec::new(),
-            );
-            failure.errors.push(format!("{error:#}"));
-            failure.details = serde_json::json!({"error_type":"runtime"});
             if let Err(render_error) = emit_result(failure) {
                 eprintln!("ERROR: {error:#}; output_error: {render_error:#}");
             }
         }
-        std::process::exit(1);
+        return code;
     }
     let exit_code = exit_code();
     if exit_code != 0 {
@@ -5439,7 +5445,7 @@ fn run_classify_config(
 fn changes_profile(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
-        Some(Command::Space { action, .. }) => action == "use",
+        Some(Command::Space { action, yes, .. }) => matches!(action.as_str(), "create" | "use") || (action == "remove" && *yes),
         Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
         _ => false,
     }
@@ -8279,6 +8285,24 @@ mod capture_tests {
     }
 
     use super::capture_run;
+
+    #[test]
+    fn input_failures_remain_distinct_from_runtime_failures() {
+        let input: anyhow::Error = respire_app::input_error::InputError("no such entry: fixture".into()).into();
+        let (envelope, code) = super::command_failure(&input.context("resort validation"));
+        assert_eq!(code, 2);
+        assert_eq!(envelope.summary["reason"], "invalid_input");
+        assert_eq!(envelope.details["error_type"], "user");
+        let runtime: anyhow::Error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "owned fixture I/O failure").into();
+        let (envelope, code) = super::command_failure(&runtime);
+        assert_eq!(code, 1);
+        assert_eq!(envelope.summary["reason"], "runtime_error");
+        assert_eq!(envelope.details["error_type"], "runtime");
+        let parsed = capture_run(vec!["--json".into(), "--not-a-command".into()]);
+        assert_eq!(parsed.exit, 2);
+        assert_eq!(parsed.envelope.summary["reason"], "invalid_input");
+        assert_eq!(parsed.envelope.details["error_type"], "user");
+    }
 
     struct EnvGuard {
         prev: Option<String>,
