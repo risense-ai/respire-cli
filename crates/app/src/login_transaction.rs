@@ -2,6 +2,134 @@
 use std::path::{Path, PathBuf};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use std::io::Write;
+
+#[derive(Serialize, Deserialize)]
+struct Recovery {
+    directory: PathBuf,
+    original: Option<Vec<u8>>,
+    config: Option<Vec<u8>>,
+    alias: String,
+    backends: Vec<String>,
+    directory_existed: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_login_restores_existing_and_new_profiles() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let previous_root = std::env::var_os("ONEMEMORY_DATA_DIR");
+        let previous_super = std::env::var_os("ONEMEMORY_SUPER");
+        std::env::set_var("ONEMEMORY_DATA_DIR", root.path());
+        let code = crate::memory::crypto::generate_secret_key();
+        std::env::set_var("ONEMEMORY_SUPER", &code);
+        let result = (|| -> Result<()> {
+            let config = br#"{"custom":"preserve","api_base":"https://previous.invalid"}"#;
+            let old = br#"{"user":"existing","token":"old-token"}"#;
+            std::fs::write(crate::service::client_config_path(), config)?;
+            let existing = crate::service::account_dir("existing")?;
+            std::fs::create_dir_all(&existing)?;
+            std::fs::write(existing.join("session.json"), old)?;
+            let (salt, wrapped, nonce) = crate::auth::wrap_with_v4(&code, &[42; 32])?;
+            let vault = json!({"version":4,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+            for user in ["existing", "new-account"] {
+                let mut prepared = PreparedLogin::prepare_with_vault("https://fixture.invalid", &json!({"user":user,"token":"new-token"}), code.clone(), vault.clone(), None)?;
+                let directory = prepared.directory.clone();
+                prepared.commit()?;
+                ensure!(recovery_pending(), "commit did not retain recovery state");
+                #[cfg(unix)] {
+                    use std::os::unix::fs::PermissionsExt;
+                    ensure!(std::fs::metadata(recovery_path())?.permissions().mode() & 0o777 == 0o600, "recovery is not private");
+                }
+                let record = std::fs::read_to_string(recovery_path())?;
+                ensure!(!record.contains(&code), "recovery persisted the super password");
+                drop(prepared); // Simulate process loss: only the durable record remains.
+                recover_interrupted()?;
+                recover_interrupted()?; // Recovery must be idempotent.
+                ensure!(std::fs::read(crate::service::client_config_path())? == config, "configuration changed");
+                ensure!(std::fs::read(existing.join("session.json"))? == old, "existing session changed");
+                if user == "new-account" { ensure!(!directory.exists(), "failed new account remained selectable"); }
+                ensure!(!recovery_pending(), "completed recovery retained its journal");
+            }
+            Ok(())
+        })();
+        match previous_root { Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value), None => std::env::remove_var("ONEMEMORY_DATA_DIR") }
+        match previous_super { Some(value) => std::env::set_var("ONEMEMORY_SUPER", value), None => std::env::remove_var("ONEMEMORY_SUPER") }
+        result
+    }
+}
+
+fn recovery_path() -> PathBuf {
+    crate::service::client_config_path().with_file_name(".login-recovery.json")
+}
+
+fn private_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temporary = path.with_file_name(format!(".login-write-{}", uuid::Uuid::new_v4().simple()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+    let result = (|| -> Result<()> {
+        let mut file = options.open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        #[cfg(unix)] {
+            let parent = path.parent().context("private write target has no parent")?;
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && temporary.exists() { std::fs::remove_file(&temporary)?; }
+    result
+}
+
+fn restore(path: &Path, bytes: Option<&[u8]>) -> Result<()> {
+    match bytes {
+        Some(bytes) => private_write(path, bytes),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        },
+    }
+}
+
+pub fn recovery_pending() -> bool { recovery_path().exists() }
+
+/// Called by the host under its takeover lock, after stopping the interrupted runtime.
+/// Roll back local state only. A published cloud v4 wrap is resumed by the existing
+/// migration path, which proves that the old and new wraps contain the same URK.
+pub fn recover_interrupted() -> Result<()> {
+    crate::service::require_profile_change_host()?;
+    let path = recovery_path();
+    ensure!(!std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()), "login recovery record must not be a symbolic link");
+    let record: Recovery = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).context("invalid login recovery record; retain it for recovery")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(record.alias.starts_with("login-") && record.alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'), "invalid recovery credential alias");
+    ensure!(record.directory.exists() || record.original.is_none(), "original account directory is missing; retain the recovery record");
+    if record.directory.exists() {
+        read_original(&record.directory)?;
+        restore(&record.directory.join("session.json"), record.original.as_deref())?;
+    }
+    restore(&crate::service::client_config_path(), record.config.as_deref())?;
+    for backend in &record.backends {
+        crate::keystore::remove_imported(&record.alias, "super", backend)?;
+    }
+    if !record.directory_existed && record.directory.exists() {
+        let parent = record.directory.parent().context("recovery directory has no parent")?;
+        std::fs::rename(&record.directory, parent.join(format!(".failed-{}", record.alias)))?;
+    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
 
 pub struct PreparedLogin {
     pub user: String,
@@ -10,9 +138,7 @@ pub struct PreparedLogin {
     session: Value,
     super_password: String,
     alias: String,
-    backend: Option<String>,
-    directory_created: bool,
-    session_written: bool,
+    recovery_written: bool,
     migration_cloud: Option<Value>,
 }
 
@@ -49,11 +175,13 @@ impl PreparedLogin {
         let mut local = crate::auth::read_session_json()?;
         ensure!(local["user"] == authorized["user"], "select the copied legacy account before migrating its vault");
         let version = local["vault_version"].as_i64().unwrap_or(1);
-        ensure!((1..=3).contains(&version), "selected account does not use a legacy vault");
+        ensure!((1..=4).contains(&version), "selected account has an unsupported vault version");
         let original = local.clone();
         if let Some(secret) = secret_key { local["secret_key"] = json!(secret); }
         let user = authorized["user"].as_str().context("authorization did not return a user")?;
-        let keys = crate::auth::unlock_session_keys(&local, password, legacy_super, user)?;
+        let unlock = if version == 4 { Some(new_super.filter(|code| !code.is_empty())
+            .context("interrupted v4 migration requires --new-super <saved-recovery-code>")?) } else { legacy_super };
+        let keys = crate::auth::unlock_session_keys(&local, password, unlock, user)?;
         let cloud = Self::fetch_vault(addr, authorized)?;
         if cloud["version"].as_i64() == Some(4) {
             // A prior publication can have committed even when both its response
@@ -63,9 +191,20 @@ impl PreparedLogin {
                 .context("cloud vault is already v4; resume with --new-super <displayed-recovery-code>")?;
             return Self::prepare_with_vault(addr, authorized, recovery.to_owned(), cloud, Some((original, keys.urk)));
         }
-        ensure!(cloud["version"].as_i64().is_some_and(|version| (2..=3).contains(&version))
-            && ["kdf_salt", "wrapped_urk", "urk_nonce"].iter().all(|field| cloud[*field] == local[*field]),
+        ensure!(cloud["version"].as_i64().is_some_and(|version| (2..=3).contains(&version)),
             "cloud vault differs from the selected legacy library; original keys and data were preserved");
+        if version == 4 {
+            // Repair pre-journal DEV interruptions only after proving the cloud
+            // legacy wrap and the saved local v4 wrap hold the same data key.
+            let mut legacy_cloud = cloud.clone();
+            legacy_cloud["vault_version"] = cloud["version"].clone();
+            if let Some(secret) = secret_key { legacy_cloud["secret_key"] = json!(secret); }
+            let cloud_keys = crate::auth::unlock_session_keys(&legacy_cloud, password, legacy_super, user)?;
+            ensure!(cloud_keys.urk == keys.urk, "cloud and local vault data keys differ; original data was preserved");
+        } else {
+            ensure!(["kdf_salt", "wrapped_urk", "urk_nonce"].iter().all(|field| cloud[*field] == local[*field]),
+                "cloud vault differs from the selected legacy library; original keys and data were preserved");
+        }
         let super_password = if let Some(code) = new_super.filter(|code| !code.is_empty()) { code.to_owned() } else if version == 3 {
             local["secret_key"].as_str().context("legacy Secret Key is required")?.to_owned()
         } else { crate::memory::crypto::generate_secret_key() };
@@ -161,7 +300,7 @@ impl PreparedLogin {
         session["wrapped_urk"] = vault["wrapped_urk"].clone();
         session["urk_nonce"] = vault["urk_nonce"].clone();
         session["keyring_account"] = json!(alias);
-        Ok(Self { user, directory, original, session, super_password, alias, backend: None, directory_created: false, session_written: false, migration_cloud: None })
+        Ok(Self { user, directory, original, session, super_password, alias, recovery_written: false, migration_cloud: None })
     }
 
     pub fn commit(&mut self) -> Result<()> {
@@ -174,53 +313,47 @@ impl PreparedLogin {
     }
 
     fn commit_inner(&mut self) -> Result<()> {
+        let path = recovery_path();
+        ensure!(!path.exists(), "interrupted login must be recovered before another commit");
+        let config = match std::fs::read(crate::service::client_config_path()) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        let mut recovery = Recovery { directory: self.directory.clone(), original: self.original.clone(), config,
+            alias: self.alias.clone(), backends: Vec::new(), directory_existed: self.directory.exists() };
+        std::fs::create_dir_all(path.parent().context("recovery root is missing")?)?;
+        private_write(&path, &serde_json::to_vec(&recovery)?)?;
+        self.recovery_written = true;
         if std::env::var("ONEMEMORY_SUPER").is_ok_and(|value| value == self.super_password) {
             // Headless hosts explicitly supply the same verified key to their runtime.
             self.session.as_object_mut().map(|object| { object.remove("keyring_account"); object.remove("keyring_backend"); });
         } else {
-            self.backend = Some(crate::keystore::import_credential(&self.alias, "super", &self.super_password)?.to_owned());
-            self.session["keyring_backend"] = json!(self.backend);
+            let backend = crate::keystore::import_credential_checkpoint(&self.alias, "super", &self.super_password, |backend| {
+                recovery.backends.push(backend.to_owned());
+                private_write(&path, &serde_json::to_vec(&recovery)?)
+            })?;
+            self.session["keyring_backend"] = json!(backend);
         }
         if !self.directory.exists() {
             let parent = self.directory.parent().context("account directory has no parent")?;
             std::fs::create_dir_all(parent)?;
             std::fs::create_dir(&self.directory)?;
-            self.directory_created = true;
         }
-        // Keep the original bytes in memory until runtime startup is verified.
-        self.session_written = true;
-        std::fs::write(self.directory.join("session.json"), serde_json::to_vec_pretty(&self.session)?)?;
+        private_write(&self.directory.join("session.json"), &serde_json::to_vec_pretty(&self.session)?)?;
         crate::service::set_data_dir(&self.directory.to_string_lossy())?;
         Ok(())
     }
 
     pub fn rollback(&mut self) -> Result<()> {
-        let mut errors = Vec::new();
-        if self.session_written {
-            let restored = match &self.original {
-                Some(bytes) => std::fs::write(self.directory.join("session.json"), bytes),
-                None => match std::fs::remove_file(self.directory.join("session.json")) {
-                    Ok(()) => Ok(()), Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()), Err(error) => Err(error),
-                },
-            };
-            if let Err(error) = restored { errors.push(format!("session restoration: {error}")); }
-            else { self.session_written = false; }
+        if self.recovery_written {
+            recover_interrupted()?;
+            self.recovery_written = false;
         }
-        if let Some(backend) = self.backend.as_deref() {
-            if let Err(error) = crate::keystore::remove_imported(&self.alias, "super", backend) { errors.push(error.to_string()); }
-            else { self.backend = None; }
-        }
-        if self.directory_created && !self.session_written {
-            // A failed runtime can have written files: retain them outside the selectable account path.
-            match crate::service::accounts_root().parent() {
-                None => errors.push("profile recovery root is unavailable".to_owned()),
-                Some(root) => {
-                    let recovered = root.join(format!(".failed-{}", self.alias));
-                    if let Err(error) = std::fs::rename(&self.directory, recovered) { errors.push(format!("account rollback: {error}")); }
-                    else { self.directory_created = false; }
-                }
-            }
-        }
-        if errors.is_empty() { Ok(()) } else { Err(anyhow!(errors.join("; "))) }
+        Ok(())
+    }
+
+    pub fn complete(&self) -> Result<()> {
+        std::fs::remove_file(recovery_path()).context("login verified but recovery record could not be retired")
     }
 }

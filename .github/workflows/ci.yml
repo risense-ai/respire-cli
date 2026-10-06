@@ -125,3 +125,5 @@ jobs:
       - run: node --check npm/scripts/pack.mjs
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
+      - run: node npm/scripts/test-wrapper.mjs
+      - run: python3 scripts/test-dev-smoke-gate.py

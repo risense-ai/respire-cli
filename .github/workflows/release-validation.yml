@@ -124,6 +124,22 @@ jobs:
           "$exe" --direct model probe --json
       - name: Prepare versioned binary and runtime artifacts
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
+      - name: Verify GNU login interruption recovery with this release binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/login-regression-python"
+          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ needs.resolve.outputs.version }}' --source-sha '${{ needs.resolve.outputs.sha }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always() && matrix.target == 'x86_64-unknown-linux-gnu'
+        with:
+          name: gnu-login-interruption
+          path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: cli-release-${{ matrix.target }}
@@ -152,6 +168,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          node npm/scripts/test-wrapper.mjs
+          python3 scripts/test-dev-smoke-gate.py
           node npm/scripts/verify-packages.mjs release-assets --assets-only
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci

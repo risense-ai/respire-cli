@@ -30,6 +30,19 @@ def require(value, code):
         raise RuntimeError(code)
 
 
+def business_summary(observations, mapping):
+    names = [row["action"] for row in observations]
+    passed = {row["action"] for row in observations if row.get("passed") is True}
+    retired = {row["action"] for row in observations if row.get("removed_by_requirement") is True}
+    expected = [row["action"] for row in mapping["actions"]]
+    require(len(names) == len(set(names)) and len(expected) == len(set(expected))
+            and set(names) == set(expected), "business_summary_action_mismatch")
+    require(not passed & retired and len(passed) + len(retired) == len(names), "business_summary_partition_mismatch")
+    require(len(passed) == mapping["retained"] and len(retired) == mapping["removed_by_requirement"],
+            "business_summary_contract_mismatch")
+    return {"passed": True, "observed": len(passed), "removed_by_requirement": len(retired)}
+
+
 def read(path):
     value = json.loads(path.read_text(encoding="utf-8-sig"))
     require(isinstance(value, dict), "report_not_object")
@@ -131,6 +144,14 @@ def verify(args, result):
 
     verify_migration(args, result)
 
+    interruption = read(args.login_interruption)
+    identity(interruption, args)
+    require(interruption.get("passed") is True and interruption.get("runtime_cleanup", {}).get("passed") is True,
+            "login_interruption_incomplete")
+    cases(interruption, {"before_publish_SIGINT_retry", "after_publish_SIGINT_retry", "pre_journal_DEV4_recovery"},
+          "login_interruption_cases_missing")
+    result["components"]["login_interruption"] = {"passed": True, "required_observed": 3}
+
     mapping = read(Path(__file__).with_name("dev-runtime-business-coverage.json"))
     original = read(Path(__file__).with_name("dev-local-api-coverage.json"))["actions"]
     actions = mapping["actions"]
@@ -153,7 +174,7 @@ def verify(args, result):
                                  for item in evidence), "business_observation_missing:" + action["action"])
         observations.append({"action": action["action"], "passed": True, "evidence": evidence})
     result["business_actions"] = observations
-    result["components"]["business_equivalence"] = {"passed": True, "observed": 66, "removed_by_requirement": 6}
+    result["components"]["business_equivalence"] = business_summary(observations, mapping)
     result["complete"] = True
     result["conditional_unverified"] = catalog.get("conditional_unverified", [])
     result["excluded_not_implemented"] = catalog.get("excluded_not_implemented", [])
@@ -163,7 +184,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("cli-report", "profile-migration", "report"):
         parser.add_argument("--" + name, type=Path, required=True)
-    for name in ("outbox", "ai-inject", "runtime", "legacy-vault"):
+    for name in ("outbox", "ai-inject", "runtime", "legacy-vault", "login-interruption"):
         parser.add_argument("--" + name, type=Path)
     parser.add_argument("--migration-only", action="store_true",
                         help="Verify this native platform's base and migration only; not the full supplemental gate.")

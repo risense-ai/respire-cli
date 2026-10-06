@@ -209,6 +209,7 @@ jobs:
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/release-supplements/outbox/models"
           root="$RUNNER_TEMP/secret-service-profile-migration"
           suite_exit=0
           dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
@@ -222,6 +223,7 @@ jobs:
           path: |
             ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
             ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json
+            ${{ runner.temp }}/native-login-interruption/interruption-coverage.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
@@ -237,6 +239,7 @@ jobs:
             ${{ runner.temp }}/release-supplements/runtime-coverage.json
             ${{ runner.temp }}/release-supplements/legacy-vault/legacy-vault-coverage.json
             ${{ runner.temp }}/release-supplements/profile-migration/migration-coverage.json
+            ${{ runner.temp }}/release-supplements/login-interruption/interruption-coverage.json
           if-no-files-found: error
 
   api-smoke:

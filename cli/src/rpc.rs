@@ -750,6 +750,15 @@ pub fn stop_if_running() -> Result<()> {
 }
 
 /// Host profile changes release the old library before starting its successor.
+pub fn recover_interrupted_login() -> Result<()> {
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    if !respire_app::login_transaction::recovery_pending() { return Ok(()); }
+    if let Some(health) = probe_runtime()? { stop_occupant(health.pid)?; }
+    respire_app::login_transaction::recover_interrupted()?;
+    eprintln!("Recovered an interrupted login; the original account and configuration were restored.");
+    Ok(())
+}
+
 pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_rollback(change, || Ok(()))
 }

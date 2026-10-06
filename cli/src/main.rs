@@ -5413,6 +5413,12 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    if !rpc::worker_active() && !runtime_policy::client_only()
+        && !matches!(args.command, Some(Command::V))
+        && respire_app::login_transaction::recovery_pending()
+    {
+        rpc::recover_interrupted_login()?;
+    }
     if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
         runtime_policy::require_host("explicit legacy migration")?;
         if *vault {
