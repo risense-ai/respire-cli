@@ -4094,10 +4094,9 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     match pending_index {
         Ok(true) => {
             let indexing = rpc::index_status();
-            let progressing = (fix || indexing["state"].as_str() != Some("failed"))
-                && (defer_preparation || model_busy
-                || indexing["running"].as_bool() == Some(true)
-                || indexing["scheduled"].as_bool() == Some(true));
+            let progressing = indexing["running"].as_bool() == Some(true)
+                || indexing["scheduled"].as_bool() == Some(true)
+                || (model_busy && indexing["state"].as_str() != Some("failed"));
             if progressing {
                 model_warnings.push("model index");
             }

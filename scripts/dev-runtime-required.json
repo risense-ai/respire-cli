@@ -25,6 +25,11 @@
     "resume_session_real",
     "hidden_runtime_stop_clean",
     "runtime_nonloopback_rejected",
-    "client_only_no_profile_writes"
+    "client_only_no_profile_writes",
+    "doctor_model_failed_download_visible",
+    "doctor_model_failed_download_retry",
+    "doctor_model_active_download_no_duplicate",
+    "doctor_model_repair_ready",
+    "doctor_model_repair_preserves_source"
   ]
 }

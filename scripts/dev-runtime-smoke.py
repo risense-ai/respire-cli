@@ -13,6 +13,7 @@ import platform
 import re
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -438,6 +439,125 @@ class Smoke:
         self.report['cloud_cleanup'] = {'passed': self.cloud_clean,
                                         'remaining_users': [] if self.cloud_clean else [self.user] if self.attempted else []}
 
+    def doctor_model_recovery(self):
+        """Exercise a real failed download and retry against the exact artifact."""
+        require(self.child is None, 'doctor_fixture_requires_stopped_runtime')
+        model = Path(self.env['ONEMEMORY_M3_DIR'])
+        cache = self.root / 'doctor-model-cache'
+        model.rename(cache)
+        database = self.library / 'onememory.db'
+
+        def snapshot():
+            with sqlite3.connect(database) as db:
+                return (db.execute('SELECT id,user,ciphertext,nonce,dirty,deleted,created_at,updated_at FROM memories ORDER BY id').fetchall(),
+                        db.execute('SELECT * FROM sync_outbox ORDER BY seq').fetchall())
+
+        before = snapshot()
+        session = (self.library / 'session.json').read_bytes()
+        with sqlite3.connect(database) as db:
+            db.execute('DELETE FROM core_artifacts')
+            db.commit()
+        allowed, started, release = threading.Event(), threading.Event(), threading.Event()
+        requests = []
+        prefix = '/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/'
+
+        class ModelSource(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_GET(self):
+                if not allowed.is_set():
+                    self.send_response(503)
+                    self.end_headers()
+                    return
+                name = self.path.removeprefix(prefix)
+                if not self.path.startswith(prefix) or name not in ('tokenizer.json', 'onnx/model_fp16.onnx'):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                requests.append(name)
+                path = cache / name
+                self.send_response(200)
+                self.send_header('Content-Length', str(path.stat().st_size))
+                self.end_headers()
+                try:
+                    with path.open('rb') as stream:
+                        first = True
+                        while chunk := stream.read(256 * 1024):
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                            if first and name.startswith('onnx/'):
+                                started.set()
+                                if not release.wait(45):
+                                    return
+                            first = False
+                except (BrokenPipeError, ConnectionResetError):
+                    return
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), ModelSource)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        previous_mirror = self.env.get('ONEMEMORY_MIRROR')
+        self.env['ONEMEMORY_MIRROR'] = 'http://127.0.0.1:' + str(server.server_port)
+
+        def doctor(fix=False):
+            code, reply, _ = self.http(self.url, 'POST', '/api/rpc',
+                {'v': 1, 'id': secrets.token_hex(8), 'method': 'cli.exec',
+                 'args': ['--json', 'doctor', *(['--fix'] if fix else [])]}, self.token)
+            envelope = reply.get('envelope', {})
+            require(code == 200 and envelope.get('command') == 'doctor'
+                    and reply.get('exit') in (0, 1, 2), 'doctor_repair_envelope_invalid')
+            rows = {row['name']: row for row in envelope.get('items', [])
+                    if row.get('name') in ('embedder', 'model index')}
+            require(len(rows) == 2, 'doctor_model_rows_missing')
+            return rows
+
+        def wait_index(want, seconds=90):
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                index = self.rpc(['status'])['summary']['retrieval_index']
+                if index.get('state') == want:
+                    return index
+                time.sleep(.2)
+            raise Failure('doctor_index_' + want + '_timeout')
+
+        try:
+            self.start()
+            wait_index('failed')
+            failed = doctor()
+            require(all(row['status'] == 'fail' for row in failed.values())
+                    and '503' in str(failed['model index'].get('value')), 'doctor_download_error_hidden')
+            self.passed('doctor_model_failed_download_visible', http_status=503)
+            allowed.set()
+            scheduled = doctor(True)
+            require(all(row['status'] == 'warn' for row in scheduled.values()), 'doctor_retry_not_scheduled')
+            require(started.wait(45), 'doctor_retry_did_not_download')
+            self.passed('doctor_model_failed_download_retry')
+            busy = doctor(True)
+            require(all(row['status'] == 'warn' for row in busy.values())
+                    and requests.count('onnx/model_fp16.onnx') == 1, 'doctor_competing_installer_started')
+            self.passed('doctor_model_active_download_no_duplicate', model_downloads=1)
+            release.set()
+            wait_index('ready', 240)
+            ready = doctor()
+            require(all(row['status'] == 'ok' for row in ready.values()), 'doctor_ready_model_not_pass')
+            self.passed('doctor_model_repair_ready')
+            require(snapshot() == before and (self.library / 'session.json').read_bytes() == session,
+                    'doctor_repair_changed_source_or_session')
+            self.passed('doctor_model_repair_preserves_source')
+        finally:
+            release.set()
+            try:
+                self.stop()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                if previous_mirror is None:
+                    self.env.pop('ONEMEMORY_MIRROR', None)
+                else:
+                    self.env['ONEMEMORY_MIRROR'] = previous_mirror
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -460,6 +580,7 @@ def main():
         smoke.account()
         smoke.transport()
         smoke.settings()
+        smoke.doctor_model_recovery()
     except Exception as error:
         smoke.report['failure_code'] = str(error) if isinstance(error, Failure) else type(error).__name__
     finally:
