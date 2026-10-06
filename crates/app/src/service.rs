@@ -1013,10 +1013,10 @@ pub fn account_remove(name: &str) -> Result<()> {
     require_profile_change_host()?;
     let dir = account_dir(name)?;
     if !dir.exists() {
-        anyhow::bail!("no such account profile: {}", dir.display());
+        return Err(crate::input_error::InputError(format!("no such account profile: {}", dir.display())).into());
     }
     if data_dir() == dir {
-        anyhow::bail!("this profile is in use — run rsrs account use <other> before deleting");
+        return Err(crate::input_error::InputError("this profile is in use — run rsrs account use <other> before deleting".into()).into());
     }
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -2404,6 +2404,26 @@ pub fn deepen_plan(
     min_sim: f32,
 ) -> Result<(String, DeepenPlan)> {
     let candidates = store.all(false)?;
+    let root_id = resolve_prefix(&candidates, root_prefix)?;
+    let direct: HashSet<&str> = candidates.iter()
+        .filter(|entry| entry.local_parent_id == root_id)
+        .map(|entry| entry.id.as_str()).collect();
+    let mut descendants = HashSet::new();
+    let mut pending: Vec<&str> = direct.iter().copied().collect();
+    while let Some(parent) = pending.pop() {
+        for entry in candidates.iter().filter(|entry| entry.local_parent_id == parent) {
+            if descendants.insert(entry.id.as_str()) {
+                pending.push(entry.id.as_str());
+            }
+        }
+    }
+    // Core's deepen contract requires at least 15 children and a mostly flat root.
+    if direct.len() < 15 || descendants.len() * 3 > direct.len() * 2 {
+        return Err(crate::input_error::InputError(format!(
+            "this root is not flat ({} direct children, {} in the grandchild chain) — hierarchy already exists or too few entries to deepen",
+            direct.len(), descendants.len(),
+        )).into());
+    }
     require_candidates_ready(store, &candidates)?;
     respire_core_sdk::execute(
         "deepen_plan",
@@ -2549,12 +2569,12 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
     spec: &SplitSpec,
 ) -> Result<usize> {
     if spec.items.is_empty() {
-        anyhow::bail!("split spec has no children");
+        return Err(crate::input_error::InputError("split spec has no children".into()).into());
     }
     if spec.summary.is_none() && spec.items.len() == 1 {
-        anyhow::bail!(
-            "a single child without keeping the outline is a rewrite — edit instead of split"
-        );
+        return Err(crate::input_error::InputError(
+            "a single child without keeping the outline is a rewrite — edit instead of split".into()
+        ).into());
     }
     let user = entry.user.clone();
     let all = store.all(true)?;
@@ -2767,8 +2787,8 @@ pub fn resolve_prefix(all: &[crate::memory::model::StoredMemory], prefix: &str) 
         .collect();
     match hits.len() {
         1 => Ok(hits[0].clone()),
-        0 => anyhow::bail!("no such entry: {prefix}"),
-        n => anyhow::bail!("prefix is not unique ({n} hits): {prefix}"),
+        0 => Err(crate::input_error::InputError(format!("no such entry: {prefix}")).into()),
+        n => Err(crate::input_error::InputError(format!("prefix is not unique ({n} hits): {prefix}")).into()),
     }
 }
 

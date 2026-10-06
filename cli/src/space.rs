@@ -38,18 +38,18 @@ pub const OWNER_FILE: &str = "space_owner.json";
 pub fn validate_space_name(name: &str) -> Result<()> {
     let n = name.trim();
     if n.is_empty() {
-        return Err(anyhow!("space name must not be empty"));
+        return Err(respire_app::input_error::InputError("space name must not be empty".into()).into());
     }
     if n.len() > 40 {
-        return Err(anyhow!("space name too long (<=40 bytes)"));
+        return Err(respire_app::input_error::InputError("space name too long (<=40 bytes)".into()).into());
     }
     if !n
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(anyhow!(
+        return Err(respire_app::input_error::InputError(format!(
             "space name allows only letters/digits/-/_, got \"{name}\""
-        ));
+        )).into());
     }
     Ok(())
 }
@@ -99,14 +99,15 @@ pub fn space_create(name: &str) -> Result<serde_json::Value> {
     validate_space_name(name)?;
     let n = name.trim();
     if n == "main" {
-        return Err(anyhow!(
+        return Err(respire_app::input_error::InputError(
             "\"main\" is reserved for the primary profile; pick another space name"
-        ));
+                .into()
+        ).into());
     }
     if account_dir(n)?.exists() {
-        return Err(anyhow!(
+        return Err(respire_app::input_error::InputError(format!(
             "space \"{n}\" already exists - pick another name, or run rsrs space use {n}"
-        ));
+        )).into());
     }
     let v = account_use(n)?;
     let dir = std::path::Path::new(v["dir"].as_str().unwrap_or("")).to_path_buf();
@@ -298,10 +299,10 @@ pub fn space_use(name: &str) -> Result<serde_json::Value> {
     validate_space_name(name)?;
     let n = name.trim();
     if n != "main" && !account_dir(n)?.exists() {
-        return Err(anyhow!(
+        return Err(respire_app::input_error::InputError(format!(
             "space \"{n}\" does not exist - rsrs space list to see current spaces; \
              to create one, run rsrs space create {n}"
-        ));
+        )).into());
     }
     account_use(n)
 }

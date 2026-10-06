@@ -30,6 +30,9 @@
     "doctor_model_failed_download_retry",
     "doctor_model_active_download_no_duplicate",
     "doctor_model_repair_ready",
-    "doctor_model_repair_preserves_source"
+    "doctor_model_repair_preserves_source",
+    "runtime_validation_errors_typed",
+    "host_space_lifecycle",
+    "update_check_comparison"
   ]
 }

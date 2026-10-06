@@ -159,6 +159,17 @@ pub struct UpdateStatus {
 }
 
 impl UpdateStatus {
+    /// Only a real upgrade uses an arrow; an ahead build is not a downgrade offer.
+    pub fn comparison(&self) -> String {
+        if self.outdated {
+            format!("{} -> {}", self.current, self.latest)
+        } else if is_newer(&self.current, &self.latest) {
+            format!("{} (ahead of published latest {})", self.current, self.latest)
+        } else {
+            format!("{} (up to date)", self.current)
+        }
+    }
+
     /// User-facing hint line (only worth showing when outdated).
     pub fn message(&self) -> String {
         format!(
@@ -249,6 +260,20 @@ mod tests {
         assert!(is_newer("v0.2.44", "0.2.43"));
         assert!(!is_newer("0.2.44-rc1", "0.2.44"));
         assert!(is_newer("0.2.44", "0.2.44-rc1"));
+    }
+
+    #[test]
+    fn comparisons_do_not_offer_downgrades() {
+        for (current, latest, expected) in [
+            ("1.0.9", "1.0.10", "1.0.9 -> 1.0.10"),
+            ("1.0.10", "1.0.10", "1.0.10 (up to date)"),
+            ("1.0.10", "1.0.9", "1.0.10 (ahead of published latest 1.0.9)"),
+            ("1.0.11-dev.6", "1.0.11-dev.5", "1.0.11-dev.6 (ahead of published latest 1.0.11-dev.5)"),
+        ] {
+            let status = UpdateStatus { current: current.into(), latest: latest.into(),
+                outdated: is_newer(latest, current), cached: false };
+            assert_eq!(status.comparison(), expected);
+        }
     }
 
     #[test]
