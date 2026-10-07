@@ -23,14 +23,23 @@ Provider names do not prove execution of every operation on the requested device
 
 | Command | Purpose |
 | --- | --- |
-| `model install` / `model install-m3` | Install or verify pinned BGE-M3 FP16 (~1.15GB) |
+| `model install` / `model install-m3` | Install or verify pinned BGE-M3 quantized (543 MiB model plus tokenizer) |
 | `model uninstall` / `model uninstall-m3` | Delete user-installed M3 files |
 | `model activate m3` / `reembed` | Rebuild/resume the M3 index |
 | `model install-engines` | Explicit Windows provider installation |
 | `model probe --json` | Actual M3 inference diagnostics |
 | `model reset-cpu` | Host-only CPU runtime recovery |
+| `restart --timeout 10` | Graceful restart; terminate the verified runtime after the deadline |
 
-BGE-M3 is the sole embedding model (1024 dimensions, CLS pooling). Legacy BGE
+BGE-M3 uses `onnx/model_quantized.onnx` from `Xenova/bge-m3` revision
+`4de13258303883538bd53b696b452bf8099f0858`: 569694530 bytes, SHA-256
+`0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d`.
+The tokenizer remains pinned to the same revision and checksum. FP16 and
+`model_int8.onnx` cannot substitute for this file. This model has its own index
+generation; old vectors are rebuilt using resumable checkpoints and the completed
+generation is activated atomically. Subsequent restarts reuse this generation.
+
+BGE-M3 is the sole embedding model (1024 dimensions, CLS pooling, L2 normalization). Legacy BGE
 and cross-encoder rerank models cannot be installed, loaded or executed.
 The TUI download-source editor offers auto, hf-mirror.com, hf-mirror.net and the
 official Hugging Face origin, plus a custom URL. `--mirror` overrides

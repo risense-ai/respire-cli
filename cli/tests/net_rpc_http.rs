@@ -125,6 +125,31 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests() -> Result<()
 }
 
 #[test]
+fn client_only_rejects_stalled_inference_before_submitting_a_write() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+    let port = server.server_addr().to_ip().ok_or("no server port")?.port();
+    let worker = thread::spawn(move || -> Result<String, String> {
+        let request = server.recv_timeout(Duration::from_secs(10)).map_err(|error| error.to_string())?
+            .ok_or("client did not inspect health")?;
+        let path = request.url().to_owned();
+        let body = serde_json::json!({"server":"respire","bin":env!("CARGO_PKG_VERSION"),"pid":1,"v":1,
+            "inference":{"host_recovery_required":true}});
+        request.respond(tiny_http::Response::from_string(body.to_string())).map_err(|error| error.to_string())?;
+        Ok(path)
+    });
+    let output = Command::new(bin()).args(["--client-only","remember","synthetic pending write","--force","--json"])
+        .env("ONEMEMORY_DATA_DIR",dir.path()).env("ONEMEMORY_RPC_PORT",port.to_string())
+        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+    assert_eq!(worker.join().map_err(|_| "HTTP fixture panicked")??, "/api/health");
+    assert!(!output.status.success());
+    let message = format!("{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
+    assert!(message.contains("request was not submitted"), "{message}");
+    assert!(!dir.path().join("onememory.db").exists(), "rejected client created a local store");
+    Ok(())
+}
+
+#[test]
 fn health_without_token_reports_bin() -> Result<(), String> {
     let rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/health", rt.port);

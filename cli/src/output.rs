@@ -656,13 +656,13 @@ mod tests {
             Item::new("model index", Status::Warn, "BGE-M3 index pending; runtime status: {\"state\":\"running\"}"),
         ];
         result.details = serde_json::json!({
-            "model_operation": {"active":true, "phase":"download", "item":"model_fp16.onnx",
-                "done":29007544, "total":1133992936, "elapsed":45, "idle":0},
+            "model_operation": {"active":true, "phase":"download", "item":"model_quantized.onnx",
+                "done":29007544, "total":569694530, "elapsed":45, "idle":0},
             "retrieval_index": {"state":"running", "error":null},
         });
         let progress_text = result.render(false)?;
-        anyhow::ensure!(progress_text.contains("2.6%") && progress_text.contains("29.0/1134.0 MB"), "{progress_text}");
-        anyhow::ensure!(progress_text.contains("model_fp16.onnx") && !progress_text.contains("Elapsed"), "{progress_text}");
+        anyhow::ensure!(progress_text.contains("5.1%") && progress_text.contains("29.0/569.7 MB"), "{progress_text}");
+        anyhow::ensure!(progress_text.contains("model_quantized.onnx") && !progress_text.contains("Elapsed"), "{progress_text}");
         anyhow::ensure!(!progress_text.contains('{') && !progress_text.contains("worker_active"), "{progress_text}");
         let json: Value = serde_json::from_str(&result.render(true)?)?;
         anyhow::ensure!(json["details"]["model_operation"]["done"] == 29007544);

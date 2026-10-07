@@ -203,7 +203,7 @@ jobs:
                       assert hashlib.file_digest(stream,'sha256').hexdigest()==report[field+'_sha256']
               binaries.extend(['--binary',str(root/report['binary_file'])])
           subprocess.run([sys.executable,'scripts/test-real-m3-account-switch.py',*binaries,
-              '--model-dir','native-model','--output-dir','native-model-results'],check=True)
+              '--model-dir','native-model','--model-file','model_fp16.onnx','--output-dir','native-model-results'],check=True)
           PY
       - uses: actions/upload-artifact@v4
         if: always()

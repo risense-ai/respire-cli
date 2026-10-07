@@ -58,6 +58,9 @@ impl Scope {
                                 if value["model_operation"]["active"] == true {
                                     phase = crate::output::model_task_text(&value["model_operation"]);
                                 }
+                                if let Some(inference) = inference_progress_text(&value["inference"]) {
+                                    phase = format!("{phase} · {inference}");
+                                }
                             }
                             Err(_) => phase = text("等待 runtime 响应", "Waiting for runtime response"),
                         }
@@ -90,6 +93,22 @@ impl Drop for Scope {
 
 fn text(zh: &str, en: &str) -> String {
     if crate::i18n::lang() == crate::i18n::Lang::Zh { zh } else { en }.to_owned()
+}
+
+pub(crate) fn inference_progress_text(status: &serde_json::Value) -> Option<String> {
+    if status["host_recovery_required"] == true {
+        return Some(text("推理无响应，需要宿主恢复", "Inference unresponsive; host recovery required"));
+    }
+    let queued = status["queued"].as_u64()?;
+    if status["active"] == true || queued > 0 {
+        let label = if status["phase"] == "loading" {
+            text("加载共享模型；排队", "Loading shared model; queued")
+        } else {
+            text("共享推理运行中；排队", "Shared inference active; queued")
+        };
+        return Some(format!("{label} {queued}"));
+    }
+    None
 }
 
 pub fn phase(zh: &str, en: &str) {
@@ -146,6 +165,15 @@ fn write_line(writer: &mut impl Write, phase: &str, elapsed: u64, tty: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inference_progress_is_brief_and_reports_stalls() {
+        assert!(inference_progress_text(&serde_json::json!({"active":false,"queued":0})).is_none());
+        let busy = inference_progress_text(&serde_json::json!({"active":true,"queued":3}));
+        assert!(busy.is_some_and(|text| text.ends_with("3") && !text.contains('{')));
+        let stalled = inference_progress_text(&serde_json::json!({"host_recovery_required":true}));
+        assert!(stalled.is_some_and(|text| !text.contains('{')));
+    }
 
     #[test]
     fn json_is_silent_and_redirected_progress_has_no_terminal_codes() -> anyhow::Result<()> {

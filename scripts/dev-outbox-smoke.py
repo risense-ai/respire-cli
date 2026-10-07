@@ -432,7 +432,7 @@ def run(args, report):
         # The CLI sweep can uninstall its models; install independently through the pinned CLI flow.
         fixture.direct(fixture.a, ["model", "install-m3"], timeout=600)
         require(all(path.is_file() and path.stat().st_size > 0 for path in
-                    (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model_fp16.onnx")),
+                    (args.model_dir / "tokenizer.json", args.model_dir / "onnx" / "model_quantized.onnx")),
                 "installed_model_files_missing")
         fixture.prepare()
         seed_content = "Development queued foreground seed " + secrets.token_hex(16)

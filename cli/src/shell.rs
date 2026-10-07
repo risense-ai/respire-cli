@@ -94,6 +94,7 @@ struct AccountRow {
 }
 
 struct Live {
+    inference: Value,
     index: Value,
     model_progress: Value,
     engine: String,
@@ -160,6 +161,9 @@ pub fn run() -> Result<()> {
     let worker_stop = Arc::clone(&stop);
     let worker_shared = Arc::clone(&shared);
     std::thread::spawn(move || refresh_details_loop(worker_stop, worker_shared));
+    let worker_stop = stop.clone();
+    let worker_shared = shared.clone();
+    std::thread::spawn(move || refresh_inference_loop(worker_stop, worker_shared));
     let mut app = App::new(Arc::clone(&shared));
     let result = loop {
         if let Overlay::RecallTest(form) = &mut app.overlay {
@@ -285,6 +289,7 @@ pub fn run() -> Result<()> {
 impl Live {
     fn empty() -> Self {
         Self {
+            inference: Value::Null,
             index: Value::Null,
             model_progress: Value::Null,
             engine: String::new(),
@@ -318,6 +323,7 @@ impl Live {
 
     fn clone(&self) -> Self {
         Self {
+            inference: self.inference.clone(),
             index: self.index.clone(),
             model_progress: self.model_progress.clone(),
             engine: self.engine.clone(),
@@ -514,6 +520,7 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
             }
         }
         if let Ok(mut guard) = shared.lock() {
+            next.inference = guard.inference.clone();
             next.notice = guard.notice.clone();
             next.ver_line = guard.ver_line.clone();
             next.update_spec = guard.update_spec.clone();
@@ -527,6 +534,17 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
             *guard = next;
         }
         std::thread::sleep(FAST.saturating_sub(started.elapsed()));
+    }
+}
+
+fn refresh_inference_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
+    while !stop.load(Ordering::Relaxed) {
+        let inference = match crate::net_rpc::health() {
+            Ok(health) => health.inference,
+            Err(error) => serde_json::json!({"phase":"unavailable","error":format!("{error:#}")}),
+        };
+        if let Ok(mut state) = shared.lock() { state.inference = inference; }
+        std::thread::sleep(FAST);
     }
 }
 
@@ -975,8 +993,8 @@ fn model_key(app: &mut App, code: KeyCode) {
         0 => ask(
             app,
             t(
-                "安装或校验 BGE-M3？已存在则跳过。",
-                "Install or verify BGE-M3? An existing model is skipped.",
+                "安装或校验 BGE-M3 量化模型（543 MiB）？校验通过则跳过。",
+                "Install or verify BGE-M3 quantized (543 MiB model)? Verified files are skipped.",
             ),
             ConfirmKind::InstallM3,
         ),
@@ -1251,11 +1269,13 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
                     },
                 )
             }
-            ConfirmKind::InstallEngines => rpc(&["model", "install-engines"]).map(|v| {
+            ConfirmKind::InstallEngines => host_command(&["model", "install-engines"]).map(|v| {
                 format!(
                     "{}: {}",
                     t("推理引擎", "Providers"),
-                    v["summary"]["providers"]
+                    v["summary"]["providers"].as_array().map(|providers|
+                        providers.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", "))
+                        .unwrap_or_default()
                 )
             }),
             ConfirmKind::ProbeEngine => rpc(&["model", "probe"]).map(|v| {
@@ -2123,7 +2143,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         line(format!("BGE-M3  {bge}")),
         choice(
             app.cursor == 0,
-            t("安装或校验 BGE-M3", "Install or verify BGE-M3"),
+            t("安装或校验 BGE-M3 量化模型（543 MiB）", "Install or verify BGE-M3 quantized (543 MiB)"),
         ),
         choice(
             app.cursor == 1,
@@ -2180,6 +2200,11 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
     if app.live.model_progress["active"] == true {
         lines.push(line(crate::output::model_task_text(&app.live.model_progress)));
     }
+    if let Some(status) = crate::progress::inference_progress_text(&app.live.inference) {
+        if app.live.inference["host_recovery_required"] == true { lines.push(fail_line(status)); }
+        else { lines.push(line(status)); }
+    }
+    if let Some(error) = app.live.inference["error"].as_str() { lines.push(fail_line(error.to_owned())); }
     lines.push(line(t(
         "默认 CPU；runtime 内共享模型与推理；失败报错，不切换引擎。",
         "CPU by default; shared model and inference inside runtime; failures report errors without switching engines.",
@@ -2313,10 +2338,20 @@ mod model_menu_tests {
             assert_eq!(input.text, "http://127.0.0.1:9999");
             let picker = overlay_lines(&app).ok_or_else(|| anyhow::anyhow!("mirror picker has no rows"))?;
             assert!(picker.iter().any(|line| line.to_string().contains("hf-mirror.com")));
-            app.live.model_progress = serde_json::json!({"id":"fixture-task","active":true,"phase":"download","item":"model_fp16.onnx","done":25,"total":100});
+            app.live.model_progress = serde_json::json!({"id":"fixture-task","active":true,"phase":"download","item":"model_quantized.onnx","done":25,"total":100});
             let rows = model_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
             assert!(rows.contains("25.0%"));
-            assert!(rows.contains("model_fp16.onnx"));
+            assert!(rows.contains("model_quantized.onnx"));
+            app.live.inference = serde_json::json!({"active":true,"queued":3,"phase":"loading"});
+            let busy_rows = model_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            let inference_text = crate::progress::inference_progress_text(&app.live.inference)
+                .ok_or_else(|| anyhow::anyhow!("missing inference status"))?;
+            assert!(busy_rows.contains(&inference_text));
+            app.live.inference = serde_json::json!({"host_recovery_required":true});
+            let stalled_rows = model_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            let stalled_text = crate::progress::inference_progress_text(&app.live.inference)
+                .ok_or_else(|| anyhow::anyhow!("missing stalled status"))?;
+            assert!(stalled_rows.contains(&stalled_text));
             app.cursor = 9 + model_engines().len() + usize::from(cfg!(windows));
             model_key(&mut app, KeyCode::Enter);
             assert!(matches!(&app.overlay, Overlay::Confirm { kind: ConfirmKind::CancelModel(id), .. } if id == "fixture-task"));

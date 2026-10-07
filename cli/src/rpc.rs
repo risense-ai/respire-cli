@@ -777,6 +777,69 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
+/// Explicit host recovery also handles a runtime whose HTTP listener is stuck.
+pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
+    crate::runtime_policy::require_host("runtime restart")?;
+    let _takeover = crate::runtime_policy::takeover_lock()?;
+    crate::progress::phase("检查 runtime 进程", "Checking runtime process");
+    let health = match probe_runtime() {
+        Ok(health) => health,
+        Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+            Some(crate::runtime_error::RuntimeError::Transport(_))) => None,
+        Err(error) => return Err(error),
+    };
+    let listener = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
+    let pid = health.as_ref().map(|health| health.pid).or(listener)
+        .or_else(|| endpoint_pid().filter(|pid| crate::net_rpc::pid_is_respire(*pid)));
+    let mut forced = false;
+    if let Some(pid) = pid {
+        anyhow::ensure!(pid != std::process::id() && crate::net_rpc::pid_is_respire(pid),
+            "cannot verify runtime process {pid}; restart refused");
+        anyhow::ensure!(listener.is_none() || listener == Some(pid), "runtime port owner changed");
+        let identity = crate::net_rpc::runtime_process_identity(pid)?;
+        if health.is_none() {
+            anyhow::ensure!(endpoint_pid() == Some(pid), "unresponsive process does not match this runtime endpoint");
+        }
+        crate::progress::phase("请求优雅退出；等待进程释放", "Requesting graceful shutdown; waiting for process exit");
+        let deadline = Instant::now() + timeout;
+        if crate::net_rpc::port_is_open() {
+            match crate::net_rpc::request_stop_with_timeout(timeout.min(Duration::from_secs(2))) {
+                Ok(()) => {},
+                Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+                    Some(crate::runtime_error::RuntimeError::Transport(_) | crate::runtime_error::RuntimeError::Unavailable)) => {},
+                Err(error) => return Err(error),
+            }
+        }
+        while Instant::now() < deadline && crate::net_rpc::process_is_running(pid)? {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if crate::net_rpc::process_is_running(pid)? {
+            let owner = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
+            anyhow::ensure!(owner.is_none() || owner == Some(pid), "runtime port owner changed before recovery");
+            crate::progress::phase("退出超时；终止 runtime 进程", "Shutdown timed out; terminating runtime process");
+            crate::net_rpc::kill_runtime(pid, &identity)?;
+            forced = true;
+        }
+        crate::net_rpc::wait_until_exited(pid)?;
+        crate::net_rpc::wait_until_down()?;
+        let data_dir = health.as_ref().map(|health| PathBuf::from(&health.data_dir))
+            .unwrap_or_else(respire::service::data_dir);
+        crate::progress::phase("等待数据库锁释放", "Waiting for database lock release");
+        let released = respire::lock::LibraryLock::acquire(&data_dir, Duration::from_secs(15))?;
+        drop(released);
+        if endpoint_pid() == Some(pid) && endpoint_path().exists() {
+            std::fs::remove_file(endpoint_path())?;
+        }
+    } else {
+        anyhow::ensure!(!crate::net_rpc::port_is_open(), "cannot identify the process occupying the runtime port");
+    }
+    crate::progress::phase("启动 runtime；等待就绪", "Starting runtime; waiting for readiness");
+    ensure_daemon_locked()?;
+    let ready = crate::net_rpc::health()?;
+    Ok(json!({"state":"ready", "stopped_pid":pid, "pid":ready.pid,
+        "forced":forced, "data_dir":ready.data_dir, "version":ready.bin}))
+}
+
 /// Host profile changes release the old library before starting its successor.
 pub fn recover_interrupted_login() -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
@@ -948,6 +1011,9 @@ fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcR
     // Once submitted, a disconnect must not cause a mutating command to be replayed.
     if auto {
         ensure_daemon()?;
+    } else if method == "cli.exec" && needs_inference(&args) && crate::runtime_policy::client_only() {
+        anyhow::ensure!(!crate::net_rpc::health()?.inference_stalled(),
+            "inference is unresponsive after cancellation; run rsrs from the host terminal to recover the runtime; this request was not submitted");
     }
     let response = http_roundtrip(method, &args)?;
     if !compatible(&response) {
@@ -1201,9 +1267,12 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         "runtime.status" => status_response(&request),
         "cli.progress" => {
             let mut response = status_response(&request);
+            let mut summary = crate::progress::status(request.args.first().map(String::as_str).unwrap_or(""));
+            if summary.is_null() { summary = json!({}); }
+            summary["inference"] = inference_health_status();
             response.envelope = Some(ResultEnvelope::new(
                 "cli.progress", OutputStatus::Ok,
-                crate::progress::status(request.args.first().map(String::as_str).unwrap_or("")), Vec::new(),
+                summary, Vec::new(),
             ));
             response
         }
@@ -1274,6 +1343,9 @@ fn submit(
     args: Vec<String>,
     stop: bool,
 ) -> std::result::Result<crate::Captured, String> {
+    if !stop && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
+        return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
+    }
     let slots = WORKERS.load(Ordering::Acquire).max(1);
     if !stop
         && is_status(&args)
@@ -1367,7 +1439,15 @@ pub(crate) fn handle_http_rpc(body: &[u8]) -> Result<RpcResponse> {
     Ok(dispatch(request, &tx))
 }
 
+fn inference_health_status() -> Value {
+    match respire::memory::onnx::inference_status() {
+        Ok(status) => status,
+        Err(error) => json!({"state":"error","error":format!("{error:#}")}),
+    }
+}
+
 pub(crate) fn health_body() -> Value {
+    let inference = inference_health_status();
     let exe = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
@@ -1382,6 +1462,7 @@ pub(crate) fn health_body() -> Value {
         "data_dir": respire::service::data_dir().display().to_string(),
         "recall_statistics": recall_stats_status(),
         "retrieval_index": index_status(),
+        "inference": inference,
     })
 }
 
@@ -1775,9 +1856,20 @@ fn is_status(args: &[String]) -> bool {
 }
 
 fn command_name(args: &[String]) -> Option<&str> {
-    args.iter()
-        .find(|arg| !arg.starts_with('-'))
-        .map(String::as_str)
+    let mut values = args.iter();
+    while let Some(arg) = values.next() {
+        if matches!(arg.as_str(), "--progress-id" | "--model-task-id") {
+            let _ = values.next();
+        } else if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
+}
+
+fn needs_inference(args: &[String]) -> bool {
+    matches!(command_name(args), Some("remember" | "recall" | "related" | "reembed" | "classify" | "update"))
+        || (command_name(args) == Some("model") && args.iter().any(|arg| arg == "probe"))
 }
 
 fn cached(id: &str) -> Option<RpcResponse> {
@@ -1997,9 +2089,14 @@ fn ensure_daemon_locked() -> Result<()> {
         if same_lib
             && same_ver
             && same_path
+            && !health.inference_stalled()
             && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?
         {
             return Ok(());
+        }
+        if health.inference_stalled() {
+            anyhow::ensure!(crate::net_rpc::pid_is_respire(health.pid), "cannot verify the unresponsive runtime process; no lifecycle action taken");
+            crate::progress::phase("推理无响应；宿主正在恢复 runtime", "Inference unresponsive; host recovering runtime");
         }
         stop_occupant(health.pid)?;
     }
@@ -2200,6 +2297,12 @@ mod tests {
         );
         assert!(is_status(&["--json".into(), "status".into()]));
         assert!(!is_status(&["remember".into()]));
+        let tracked = ["--json", "--progress-id", "request-one", "--model-task-id", "task-one", "remember", "body"]
+            .map(String::from);
+        assert_eq!(command_name(&tracked), Some("remember"));
+        assert!(is_exclusive(&tracked));
+        assert!(needs_inference(&tracked));
+        assert!(!needs_inference(&["status".into()]));
     }
 
     #[test]
@@ -2258,7 +2361,9 @@ mod tests {
         assert!(response.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_string()));
         let mut request = req("cli.progress", "progress-other");
         request.args = vec!["foreground-other".into()];
-        assert!(dispatch(request, &tx).envelope.as_ref().is_some_and(|value| value.summary.is_null()));
+        let unrelated = dispatch(request, &tx);
+        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_null()));
+        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["inference"]["capacity"] == 32));
         drop(scope);
         assert!(crate::progress::status("foreground-one").is_null());
     }

@@ -471,7 +471,7 @@ class Smoke:
                     self.end_headers()
                     return
                 name = self.path.removeprefix(prefix)
-                if not self.path.startswith(prefix) or name not in ('tokenizer.json', 'onnx/model_fp16.onnx'):
+                if not self.path.startswith(prefix) or name not in ('tokenizer.json', 'onnx/model_quantized.onnx'):
                     self.send_response(404)
                     self.end_headers()
                     return
@@ -535,7 +535,7 @@ class Smoke:
             self.passed('doctor_model_failed_download_retry')
             busy = doctor(True)
             require(all(row['status'] == 'warn' for row in busy.values())
-                    and requests.count('onnx/model_fp16.onnx') == 1, 'doctor_competing_installer_started')
+                    and requests.count('onnx/model_quantized.onnx') == 1, 'doctor_competing_installer_started')
             self.passed('doctor_model_active_download_no_duplicate', model_downloads=1)
             release.set()
             wait_index('ready', 240)

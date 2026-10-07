@@ -175,6 +175,22 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
+    let health_url = format!("http://127.0.0.1:{port}/api/health");
+    let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let restarted = run(dir.path(), port, &["--json", "restart", "--timeout", "2"])?;
+    if !restarted.status.success() {
+        return Err(format!("restart failed: {} {}", String::from_utf8_lossy(&restarted.stdout), String::from_utf8_lossy(&restarted.stderr)).into());
+    }
+    let restarted: serde_json::Value = serde_json::from_slice(&restarted.stdout)?;
+    assert_eq!(restarted["command"], "restart");
+    assert_eq!(restarted["summary"]["forced"], false);
+    assert_eq!(restarted["summary"]["stopped_pid"], before["pid"]);
+    assert_ne!(restarted["summary"]["pid"], before["pid"]);
+    assert_eq!(restarted["summary"]["data_dir"], before["data_dir"]);
+    let rejected = run(dir.path(), port, &["--client-only", "--json", "restart"])?;
+    assert_eq!(rejected.status.code(), Some(1));
+    let after: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    assert_eq!(after["pid"], restarted["summary"]["pid"]);
     let stopped = run(dir.path(), port, &["--runtime-internal", "--stop"])?;
     if !stopped.status.success() {
         return Err(format!("stop failed: {}", String::from_utf8(stopped.stderr)?).into());

@@ -32,6 +32,14 @@ pub struct Health {
     pub exe: String,
     #[serde(default)]
     pub data_dir: String,
+    #[serde(default)]
+    pub inference: Value,
+}
+
+impl Health {
+    pub fn inference_stalled(&self) -> bool {
+        self.inference["host_recovery_required"] == true
+    }
 }
 
 pub fn rpc_port() -> u16 {
@@ -287,9 +295,13 @@ pub fn health() -> Result<Health> {
 }
 
 pub fn request_stop() -> Result<()> {
+    request_stop_with_timeout(HTTP_TIMEOUT)
+}
+
+pub(crate) fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
-    send_loopback(agent().post(&url), |request| request.send_string("{}"))?;
+    send_loopback(agent().post(&url).timeout(timeout), |request| request.send_string("{}"))?;
     Ok(())
 }
 
@@ -349,6 +361,13 @@ pub fn wait_until_down() -> Result<()> {
 /// A closed listener does not prove that the library holder has exited.
 pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
+        if !process_is_running(pid)? { return Ok(()); }
+        std::thread::sleep(STOP_WAIT);
+    }
+    bail!("runtime listener closed but process {pid} has not exited")
+}
+
+pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
         #[cfg(windows)]
         let output = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
@@ -366,10 +385,77 @@ pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
         };
         #[cfg(unix)]
         let alive = text.trim() == pid.to_string();
-        if !alive { return Ok(()); }
-        std::thread::sleep(STOP_WAIT);
+        Ok(alive)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeProcessIdentity {
+    started_at: String,
+    executable: String,
+}
+
+/// An endpoint PID is only a locator. Verify runtime arguments and creation time
+/// before waiting, then compare again before forcefully terminating the process.
+pub(crate) fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
+    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid), "cannot verify runtime process {pid}");
+    #[cfg(windows)]
+    {
+        let script = format!(r#"$ErrorActionPreference='Stop'; $runtimeProc=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if ($null -eq $runtimeProc) {{ exit 0 }}; $runtimeArgs=$runtimeProc.CommandLine -split '\s+'; $isRuntime=($runtimeArgs -contains '--runtime-internal') -or (($runtimeArgs -contains 'web') -and ($runtimeArgs -contains '--internal')); [pscustomobject]@{{started_at=$runtimeProc.CreationDate.ToUniversalTime().Ticks.ToString(); executable=$runtimeProc.ExecutablePath; runtime=$isRuntime}} | ConvertTo-Json -Compress"#);
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script]).output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+        #[derive(serde::Deserialize)]
+        struct Process { started_at: String, executable: String, runtime: bool }
+        let process: Process = serde_json::from_slice(&output.stdout)
+            .context("runtime process disappeared or could not be identified")?;
+        anyhow::ensure!(process.runtime, "process {pid} is not a runtime; restart refused");
+        Ok(RuntimeProcessIdentity { started_at: process.started_at, executable: process.executable })
     }
-    bail!("runtime listener closed but process {pid} has not exited")
+    #[cfg(target_os = "linux")]
+    {
+        let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let command = std::fs::read(directory.join("cmdline"))?;
+        let args: Vec<_> = command.split(|byte| *byte == 0)
+            .filter_map(|arg| std::str::from_utf8(arg).ok()).collect();
+        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")),
+            "process {pid} is not a runtime; restart refused");
+        let stat = std::fs::read_to_string(directory.join("stat"))?;
+        let started_at = stat.rsplit_once(')').and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .context("runtime process creation time missing")?.to_owned();
+        let executable = std::fs::read_link(directory.join("exe"))?.to_string_lossy().into_owned();
+        Ok(RuntimeProcessIdentity { started_at, executable })
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
+            .env("LC_ALL", "C").output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+        let text = String::from_utf8(output.stdout)?;
+        let text = text.trim_end();
+        let started_at = text.get(..24).context("runtime process creation time missing")?.to_owned();
+        let command = text.get(24..).context("runtime process command missing")?.trim();
+        let args: Vec<_> = command.split_whitespace().collect();
+        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")),
+            "process {pid} is not a runtime; restart refused");
+        Ok(RuntimeProcessIdentity { started_at, executable: command.to_owned() })
+    }
+}
+
+pub(crate) fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
+    crate::runtime_policy::require_host("runtime recovery")?;
+    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid),
+        "refusing to terminate an unverified runtime process {pid}");
+    anyhow::ensure!(&runtime_process_identity(pid)? == identity,
+        "runtime process {pid} changed during shutdown; termination refused");
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()?;
+    #[cfg(unix)]
+    let status = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status()?;
+    anyhow::ensure!(status.success(), "failed to terminate runtime process {pid}");
+    Ok(())
 }
 
 pub(crate) fn kill_pid(pid: u32) {

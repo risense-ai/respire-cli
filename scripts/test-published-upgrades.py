@@ -5,13 +5,14 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--binary',required=True)
 parser.add_argument('--target',required=True)
 parser.add_argument('--model-dir',required=True)
+parser.add_argument('--legacy-model-dir',required=True)
 parser.add_argument('--output-dir',required=True)
 args=parser.parse_args()
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
 def command(*values):
     executable=shutil.which(values[0])
     assert executable,'required tool missing: '+values[0]
-    return subprocess.check_output([executable,*values[1:]],text=True,timeout=60).strip()
+    return subprocess.check_output([executable,*values[1:]],text=True,encoding='utf-8',timeout=60).strip()
 releases=[]
 for page in range(1,101):
     batch=json.loads(command('gh','api',f'repos/risense-ai/respire-cli/releases?per_page=100&page={page}'))
@@ -62,7 +63,8 @@ try:
         shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
         result=folder/'results'
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
-            '--binary',args.binary,'--seed-binary',str(old),'--expect-in-process','--model-dir',args.model_dir,'--output-dir',str(result)],check=True)
+            '--binary',args.binary,'--seed-binary',str(old),'--expect-in-process','--model-dir',args.model_dir,
+            '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
         checks=json.loads((result/'real-account-return-verification.json').read_text())
         assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
         report['sources'].append({'version':tag[1:],'formal':stable(tag),'passed':True,'report':str(result/'real-account-return-verification.json')})

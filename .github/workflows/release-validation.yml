@@ -136,8 +136,16 @@ jobs:
             exe="$exe.exe"
           fi
           "$py" -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.0.0
+          # Only the real historical baseline uses FP16; the candidate uses quantized.
+          mkdir -p native-legacy-model/onnx
+          cp "$RUNNER_TEMP/release-probe/models/bge-m3/tokenizer.json" native-legacy-model/tokenizer.json
+          cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.onnx" native-legacy-model/onnx/model_quantized.onnx
+          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
+            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' \
+            --output native-legacy-model/onnx/model_fp16.onnx
           "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
+            --legacy-model-dir native-legacy-model \
             --output-dir "$RUNNER_TEMP/published-upgrades"
       - uses: actions/upload-artifact@v4
         if: always()

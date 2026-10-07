@@ -521,6 +521,12 @@ enum ModelAction {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Restart the resident runtime; kill the verified process if graceful shutdown times out.
+    Restart {
+        /// Seconds to wait for graceful shutdown before force termination.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+    },
     /// Read the full memory workflow before storing or maintaining memories.
     Prompt,
     /// Print the embedded CLI version (same as `--version` / `-v`)
@@ -5513,6 +5519,18 @@ fn run(args: Cli) -> Result<()> {
     if rpc::worker_active() {
         return run_local(args);
     }
+    if let Some(Command::Restart { timeout }) = args.command.as_ref() {
+        let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
+        return emit_result(ResultEnvelope::new("restart", OutputStatus::Ok, result, Vec::new()));
+    }
+    if matches!(args.command, Some(Command::Model { action: ModelAction::InstallEngines })) {
+        runtime_policy::require_host("inference engine installation")?;
+        progress::phase("安装推理引擎；等待 Windows ML", "Installing inference providers; waiting for Windows ML");
+        let mut providers = Vec::new();
+        rpc::change_profile(|| { providers = respire::model_install::install_engines()?; Ok(()) })?;
+        return emit_result(ResultEnvelope::new("model", OutputStatus::Ok,
+            serde_json::json!({"providers":providers}), Vec::new()));
+    }
     if matches!(
         args.command,
         Some(Command::Model {
@@ -5629,7 +5647,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
-    if matches!(args.command, Some(Command::Web { .. })) {
+    if matches!(args.command, Some(Command::Web { .. } | Command::Restart { .. })) {
         anyhow::bail!("the dashboard launcher does not run inside a command worker");
     }
     // The runtime worker already holds lock.db for the process lifetime.
@@ -6117,14 +6135,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     Ok(())
                 }
                 ModelAction::InstallEngines => {
-                    let providers = respire::memory::onnx::install_accelerators()?;
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        OutputStatus::Ok,
-                        serde_json::json!({"providers":providers}),
-                        vec![],
-                    ))?;
-                    Ok(())
+                    anyhow::bail!("inference engine installation is host-managed; run rsrs model install-engines from the host terminal")
                 }
                 ModelAction::Probe { text, model } => {
                     let selected = match model {
@@ -8244,6 +8255,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Bench { .. }
         | Command::Classify { .. }
         | Command::Web { .. }
+        | Command::Restart { .. }
         | Command::ClassifyConfig { .. } => unreachable!(
             "commands that do not need the embedder already returned at the top of main"
         ),

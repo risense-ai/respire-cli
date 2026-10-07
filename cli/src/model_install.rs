@@ -1,4 +1,4 @@
-//! Explicitly install the local BGE-M3 model (tokenizer.json + onnx/model_fp16.onnx).
+//! Explicitly install the local BGE-M3 quantized model (tokenizer.json + onnx/model_quantized.onnx).
 //!
 //! Does not touch the session or create a memory store. A failed download leaves
 //! partial files outside the loader's paths. A model that already
@@ -14,11 +14,31 @@ use sha2::{Digest, Sha256};
 use crate::memory::bge::{expand_home, model_files_present};
 use crate::model_progress;
 
+pub fn install_engines() -> Result<Vec<String>> {
+    #[cfg(windows)]
+    {
+        let dll = crate::memory::onnx::accelerator_catalog_path()?.context("Windows ML catalog path missing")?;
+        let paths = respire_spawn::install_accelerators(&dll)?;
+        let directory = dll.parent().and_then(Path::parent).context("Windows ML engine directory missing")?;
+        let target = directory.join("providers.json");
+        let staged = directory.join(format!(".providers-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&staged, serde_json::to_vec_pretty(&paths)?)?;
+        if let Err(error) = respire_spawn::replace_provider_manifest(&staged, &target) {
+            let _ = std::fs::remove_file(&staged);
+            return Err(error.into());
+        }
+        Ok(paths.into_keys().collect())
+    }
+    #[cfg(not(windows))]
+    { Ok(Vec::new()) }
+}
+
 /// HuggingFace repo (where the ONNX actually lives, not the BAAI source repo).
 pub const MODEL_REPO: &str = "Xenova/bge-m3";
 /// Verified revision (this commit's tokenizer/onnx hashes match the local read-only model).
 pub const MODEL_REVISION: &str = "4de13258303883538bd53b696b452bf8099f0858";
-const ONNX_SHA256: &str = "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9";
+const ONNX_SHA256: &str = "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d";
+const ONNX_SIZE: u64 = 569694530;
 const TOKENIZER_SHA256: &str = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
 
 /// Preserve the upstream model card/license separately from the Core SDK license.
@@ -74,7 +94,7 @@ pub fn prepare_m3_for_index() -> Result<()> {
     }
     for path in candidates {
         if file_valid(&path.join("tokenizer.json"), TOKENIZER_SHA256)?
-            && file_valid(&path.join("onnx/model_fp16.onnx"), ONNX_SHA256)? {
+            && m3_model_valid(&path.join("onnx/model_quantized.onnx"))? {
             return Ok(());
         }
     }
@@ -88,7 +108,7 @@ fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
     let origins = if setting.trim() == "auto" {
         MIRRORS[1..].iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()
     } else { vec![origin_from_mirror(&setting)?] };
-    let files = [("tokenizer.json", TOKENIZER_SHA256), ("onnx/model_fp16.onnx", ONNX_SHA256)];
+    let files = [("tokenizer.json", TOKENIZER_SHA256), ("onnx/model_quantized.onnx", ONNX_SHA256)];
     std::fs::create_dir_all(&dest)?;
     // A pinned revision allows cancellation, restart and mirror changes to reuse
     // partial bytes without exposing an incomplete file to the model loader.
@@ -125,7 +145,7 @@ fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
     std::fs::create_dir_all(dest.join("onnx"))?;
     for (name, _) in files { if tmp.join(name).is_file() { replace_file(&tmp.join(name), &dest.join(name))?; } }
     std::fs::remove_dir_all(&tmp)?;
-    anyhow::ensure!(model_files_present(&dest), "BGE-M3 install is incomplete");
+    anyhow::ensure!(model_files_present(&dest) && m3_model_valid(&dest.join("onnx/model_quantized.onnx"))?, "BGE-M3 quantized install is incomplete");
     write_model_notices(&dest, "m3", MODEL_REPO, MODEL_REVISION)?;
     Ok(InstallReport { dir: dest, skipped })
 }
@@ -222,10 +242,15 @@ fn replace_file(from: &Path, to: &Path) -> Result<()> {
     std::fs::rename(from, to).map_err(|e| anyhow!("failed to place {}: {e}", to.display()))
 }
 
+fn m3_model_valid(path: &Path) -> Result<bool> {
+    file_valid(path, ONNX_SHA256)
+}
+
 fn file_valid(path: &Path, expected: &str) -> Result<bool> {
     if !path.is_file() {
         return Ok(false);
     }
+    if expected == ONNX_SHA256 && path.metadata()?.len() != ONNX_SIZE { return Ok(false); }
     let actual = sha256_file(path)?;
     Ok(actual.eq_ignore_ascii_case(expected))
 }
@@ -303,6 +328,12 @@ fn download_verified(url: &str, dest: &Path, expected: &str) -> Result<()> {
     model_progress::update("verify", &item, written, Some(written))?;
     let actual = sha256_file(dest)?;
     if !actual.eq_ignore_ascii_case(expected) {
+        // A saved prefix can be corrupt. Retry this source once from byte zero;
+        // the fresh request cannot enter this branch with a nonzero offset.
+        if resumed && offset > 0 {
+            std::fs::remove_file(dest)?;
+            return download_verified(url, dest, expected);
+        }
         // Unknown-length EOF may be a truncated response. Preserve resumable bytes.
         if total.is_some() { let _ = std::fs::remove_file(dest); }
         anyhow::bail!(
@@ -513,7 +544,7 @@ mod tests {
         let body: Vec<u8> = (0..128 * 1024).map(|index| (index % 251) as u8).collect();
         let expected = hex::encode(Sha256::digest(&body));
         let dir = tempfile::tempdir()?;
-        let target = dir.path().join("model_fp16.onnx");
+        let target = dir.path().join("model_quantized.onnx");
         let parts = target.with_extension("onnx.parts");
         std::fs::create_dir(&parts)?;
         for index in 0..4 {
@@ -659,11 +690,23 @@ mod tests {
             assert!(request.headers().iter().any(|header| header.field.equiv("Range") && header.value.as_str() == "bytes=3-"));
             let range = tiny_http::Header::from_bytes("Content-Range", "bytes 3-5/6").map_err(|_| anyhow!("range header"))?;
             request.respond(tiny_http::Response::from_string("def").with_status_code(206).with_header(range))?;
+            let request = server.recv_timeout(std::time::Duration::from_secs(10))?
+                .ok_or_else(|| anyhow!("corrupt-prefix resume request missing"))?;
+            assert!(request.headers().iter().any(|header| header.field.equiv("Range") && header.value.as_str() == "bytes=3-"));
+            let range = tiny_http::Header::from_bytes("Content-Range", "bytes 3-5/6").map_err(|_| anyhow!("range header"))?;
+            request.respond(tiny_http::Response::from_string("def").with_status_code(206).with_header(range))?;
+            let request = server.recv_timeout(std::time::Duration::from_secs(10))?
+                .ok_or_else(|| anyhow!("fresh request after corrupt prefix missing"))?;
+            assert!(!request.headers().iter().any(|header| header.field.equiv("Range")));
+            request.respond(tiny_http::Response::from_string("abcdef"))?;
             Ok(())
         });
         let expected = hex::encode(Sha256::digest(b"abcdef"));
         assert!(download_verified(&url, &target, &expected).is_err());
         assert_eq!(std::fs::read(&target)?, b"abc");
+        download_verified(&url, &target, &expected)?;
+        assert_eq!(std::fs::read(&target)?, b"abcdef");
+        std::fs::write(&target, b"bad")?;
         download_verified(&url, &target, &expected)?;
         handler.join().map_err(|_| anyhow!("test server panicked"))??;
         assert_eq!(std::fs::read(target)?, b"abcdef");
@@ -679,7 +722,7 @@ mod tests {
         let bge = root.path().join("bge-m3");
         std::fs::create_dir_all(bge.join("onnx"))?;
         std::fs::write(bge.join("tokenizer.json"), b"{}")?;
-        std::fs::write(bge.join("onnx").join("model_fp16.onnx"), b"onnx")?;
+        std::fs::write(bge.join("onnx").join("model_quantized.onnx"), b"onnx")?;
         let saved_bge = std::env::var("ONEMEMORY_M3_DIR").ok();
         std::env::set_var("ONEMEMORY_M3_DIR", &bge);
 
