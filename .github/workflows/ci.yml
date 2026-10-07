@@ -6,19 +6,32 @@ on:
         description: Test real M3 inference and global engine settings on published dev.5 and dev.7 only
         type: boolean
         default: false
+      artifact_run:
+        description: Existing seven-platform validation run with the GNU artifact
+        required: true
+        type: string
+      artifact_source:
+        description: Exact source SHA recorded in that binary artifact
+        required: true
+        type: string
+      version:
+        description: Exact artifact version
+        required: true
+        type: string
   push:
     branches: [main]
   pull_request:
     branches: [main]
 permissions:
   contents: read
+  actions: read
 concurrency:
-  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}
+  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}-${{ inputs.artifact_run || 'source' }}
   cancel-in-progress: true
 jobs:
   platform-build:
     # Release builds all seven targets. Keep the separate compile matrix manual.
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.native_published_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.native_published_only && !inputs.artifact_run }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -97,7 +110,7 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
   check:
-    if: ${{ !inputs.native_published_only }}
+    if: ${{ !inputs.native_published_only && !inputs.artifact_run }}
     runs-on: ubuntu-latest
     env:
       RSRS_ENGINE: cpu
@@ -215,3 +228,60 @@ jobs:
           name: native-published-m3-${{ matrix.target }}
           path: native-model-results/real-account-return-verification.json
           if-no-files-found: warn
+
+  gnu-login-recovery:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.artifact_run != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLI_TARGET: x86_64-unknown-linux-gnu
+      CLI_SHA: ${{ inputs.artifact_source }}
+      CLI_VERSION: ${{ inputs.version }}
+      ARTIFACT_RUN: ${{ inputs.artifact_run }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate existing artifact identity
+        run: |
+          node -e 'if (!/^[0-9]+$/.test(process.env.ARTIFACT_RUN) || !/^[a-f0-9]{40}$/.test(process.env.CLI_SHA) || !/^\d+\.\d+\.\d+-dev\.\d+$/.test(process.env.CLI_VERSION)) throw Error("Invalid artifact identity")'
+          node npm/scripts/set-build-version.mjs "$CLI_VERSION"
+      - uses: actions/download-artifact@v4
+        with:
+          name: cli-release-x86_64-unknown-linux-gnu
+          path: validated-cli
+          run-id: ${{ inputs.artifact_run }}
+          github-token: ${{ github.token }}
+      - name: Extract the checksum-verified binary
+        run: node npm/scripts/extract-artifact.mjs validated-cli candidate
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/release-probe/models/bge-m3
+          key: release-m3-quantized-0826f8c1-gnu-recovery
+      - name: Prepare the model only in the owned test directory
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: candidate/rsrs --direct model install-m3 --json
+      - name: Run the existing interruption and complete migration verification
+        run: |
+          python3 -m venv "$RUNNER_TEMP/recovery-python"
+          "$RUNNER_TEMP/recovery-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
+          binary="$(realpath candidate/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          "$RUNNER_TEMP/recovery-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gnu-login-interruption
+          path: ${{ runner.temp }}/gnu-login-interruption/
+          if-no-files-found: ignore
