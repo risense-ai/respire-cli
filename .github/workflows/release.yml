@@ -23,13 +23,14 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: cli-release-publication
-  cancel-in-progress: false
-
 jobs:
   plan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: cli-release-publication
+      cancel-in-progress: false
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
       version: ${{ steps.plan.outputs.version }}
@@ -67,6 +68,11 @@ jobs:
             version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
           }
           const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+          // Drafts reserve DEV numbers; only planning/publication hold this lock.
+          if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true'){
+            cp.execFileSync('gh',['release','create',`v${version}`,'--draft','--prerelease',
+              '--target',sha,'--title',`v${version}`,'--notes','Build and regression results pending.'],{stdio:'inherit'});
+          }
           fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
           NODE
 
@@ -327,6 +333,9 @@ jobs:
     needs: [plan, validate]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    concurrency:
+      group: cli-release-publication
+      cancel-in-progress: false
     permissions:
       contents: write
       actions: read
