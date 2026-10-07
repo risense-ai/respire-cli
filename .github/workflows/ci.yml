@@ -8,15 +8,15 @@ on:
         default: false
       artifact_run:
         description: Existing seven-platform validation run with the GNU artifact
-        required: true
+        required: false
         type: string
       artifact_source:
         description: Exact source SHA recorded in that binary artifact
-        required: true
+        required: false
         type: string
       version:
         description: Exact artifact version
-        required: true
+        required: false
         type: string
   push:
     branches: [main]
