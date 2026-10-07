@@ -20,7 +20,7 @@ function compare(left, right) {
 const target = parse(manifest.cliVersion, true);
 const tags = execFileSync('git', ['tag', '--list'], {encoding: 'utf8'}).trim().split(/\r?\n/).filter(Boolean);
 const repository = process.env.GITHUB_REPOSITORY || 'risense-ai/respire-cli';
-const releases = execFileSync('gh', ['api', `repos/${repository}/releases?per_page=100`, '--paginate', '--jq', '.[] | @json'], {encoding: 'utf8'})
+const releases = execFileSync('gh', ['api', `repos/${repository}/releases?per_page=100`, '--paginate', '--jq', '.[] | {tag_name,draft,prerelease} | @json'], {encoding: 'utf8'})
   .trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 let stable;
 function observeStable(version) {
