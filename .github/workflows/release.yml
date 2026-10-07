@@ -357,7 +357,8 @@ jobs:
             const deadline=Date.now()+20*60*1000;
             while(Date.now()<deadline){
               const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
-              const run=result.workflow_runs.filter(run=>run.head_sha===sha).sort((a,b)=>b.id-a.id)[0];
+              // Focused artifact runs can exercise an older binary and skip source checks.
+              const run=result.workflow_runs.filter(run=>run.head_sha===sha&&run.event==='push').sort((a,b)=>b.id-a.id)[0];
               if(run?.status==='completed'){
                 if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
                 console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
