@@ -567,7 +567,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = respire::env::var("RSRS_DATA_DIR").ok();
+        let saved = std::env::var("RSRS_DATA_DIR").ok();
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert!(space_create("main").is_err());
         let created = space_create("team_a")?;

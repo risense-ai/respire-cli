@@ -363,7 +363,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = respire::env::var("RSRS_DATA_DIR").ok();
+        let saved = std::env::var("RSRS_DATA_DIR").ok();
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         let cfg = serde_json::json!({
             "hooks": {
@@ -405,7 +405,7 @@ mod tests {
     fn hook_failure_policies_and_explicit_veto() -> anyhow::Result<()> {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = respire::env::var_os("RSRS_DATA_DIR");
+        let saved = std::env::var_os("RSRS_DATA_DIR");
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> anyhow::Result<()> {
             for (event, policy, blocked, warned) in [

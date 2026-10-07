@@ -56,7 +56,9 @@ if (selection === 'sdk') {
   const before = readFileSync(join(source, 'core-sdk.lock.json'));
   if (!before.equals(readFileSync(join(directory, 'core-sdk.lock.json')))) throw new Error('Packaged SDK pins differ');
   const sdk = join(output, 'consumer-sdk');
-  run(process.execPath, [join(directory, 'prepare-sdk.mjs'), target, sdk], { env: environment });
+  const consumerEnvironment = { ...environment };
+  for (const name of ['RSRS_CORE_SDK_DIR', 'ONEMEMORY_CORE_SDK_DIR', 'RESPIRE_CORE_SDK_DIR']) delete consumerEnvironment[name];
+  run(process.execPath, [join(directory, 'prepare-sdk.mjs'), target, sdk], { env: consumerEnvironment });
   const consumer = join(output, 'consumer');
   mkdirSync(join(consumer, 'src'), { recursive: true });
   writeFileSync(join(consumer, 'Cargo.toml'), `[package]\nname = "respire-sdk-package-check"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n[dependencies]\nanyhow = "1.0"\nrespire_core_sdk = { path = "${directory.replaceAll('\\', '/')}" }\n[workspace]\n`);

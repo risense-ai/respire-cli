@@ -591,7 +591,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let explicit = install_target_dir(Some("D:/models/bge"));
         assert!(explicit.ends_with("bge") || explicit.to_string_lossy().contains("models"));
-        let saved = respire::env::var("RSRS_M3_DIR").ok();
+        let saved = std::env::var("RSRS_M3_DIR").ok();
         std::env::set_var("RSRS_M3_DIR", "/tmp/om-model-test");
         let from_env = install_target_dir(None);
         assert!(from_env.to_string_lossy().contains("om-model-test"));
@@ -723,7 +723,7 @@ mod tests {
         std::fs::create_dir_all(bge.join("onnx"))?;
         std::fs::write(bge.join("tokenizer.json"), b"{}")?;
         std::fs::write(bge.join("onnx").join("model_quantized.onnx"), b"onnx")?;
-        let saved_bge = respire::env::var("RSRS_M3_DIR").ok();
+        let saved_bge = std::env::var("RSRS_M3_DIR").ok();
         std::env::set_var("RSRS_M3_DIR", &bge);
 
         let gone_bge = uninstall_m3()?;

@@ -316,7 +316,7 @@ mod tests {
         let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let saved = respire::env::var("RSRS_UPDATE_CHECK").ok();
+        let saved = std::env::var("RSRS_UPDATE_CHECK").ok();
         std::env::remove_var("RSRS_UPDATE_CHECK");
         assert!(enabled(), "enabled by default");
         std::env::set_var("RSRS_UPDATE_CHECK", "0");
