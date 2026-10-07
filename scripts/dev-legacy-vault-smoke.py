@@ -145,11 +145,12 @@ class Smoke:
             if session_path.is_file():
                 session = json.loads(session_path.read_text())
                 secrets_to_redact.update(session.get(key) for key in
-                    ("pass", "super", "token", "secret", "secret_key", "wrapped_urk", "urk_nonce", "kdf_salt")
+                    ("pass", "pass_hash", "super", "token", "secret", "secret_key", "wrapped_urk", "urk_nonce", "kdf_salt")
                     if isinstance(session.get(key), str) and session[key])
             for secret in sorted(secrets_to_redact, key=len, reverse=True):
                 diagnostic = diagnostic.replace(secret, "[redacted]")
             diagnostic = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", diagnostic)
+            diagnostic = re.sub(r"(?i)\b(?:A3-)?[a-f0-9]{24,}\b", "[redacted]", diagnostic)
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "stage": self.report.get("stage"), "error": diagnostic[:1500] or "no structured error"}
             self.save()
@@ -224,6 +225,7 @@ class Smoke:
         urk = AESGCM(v4_kek(code, vault["kdf_salt"], vault["wrapped_urk"])).decrypt(
             bytes.fromhex(vault["urk_nonce"]), encrypted_bytes(vault["wrapped_urk"]), None)
         require(len(urk) == 32, "original_urk_invalid")
+        self.diagnostic_secrets.add(urk.hex())
         plaintext = f"Synthetic legacy version {version} preserves this original encrypted content."
         title = f"CI legacy vault {version}"
         self.cli(env, "remember", plaintext, "--title", title, "--force", "--importance", "important")
