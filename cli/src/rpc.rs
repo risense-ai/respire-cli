@@ -457,12 +457,6 @@ fn index_loop_inner() -> Result<()> {
                 work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
                     .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
             }
-            Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
-                model_wait_started = None;
-                work.state = "scheduled";
-                work.requested = true;
-                work.error = Some(format!("{error:#}"));
-            }
             Err(error) if error.downcast_ref::<respire::model_progress::OperationStopped>().is_some() => {
                 model_wait_started = None;
                 if work.prepare_mirror.is_some() {
@@ -474,6 +468,12 @@ fn index_loop_inner() -> Result<()> {
                     work.requested = false;
                     work.error = Some(format!("{error:#}"));
                 }
+            }
+            Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
+                model_wait_started = None;
+                work.state = "scheduled";
+                work.requested = true;
+                work.error = Some(format!("{error:#}"));
             }
             Err(error) => {
                 model_wait_started = None;

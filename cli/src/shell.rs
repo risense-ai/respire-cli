@@ -967,11 +967,16 @@ fn selected_model_mirror() -> String {
 fn cancel_model(id: &str) -> Result<(), String> {
     if id.is_empty() { return Ok(()); }
     let started = Instant::now();
+    let mut cancellation_accepted = false;
     loop {
         let progress = crate::rpc::model_control(id, true).map_err(|error| error.to_string())?;
         if progress["stale"] == true {
+            // The original task finished after accepting cancellation. A newly
+            // scheduled task must not be cancelled or reported as its failure.
+            if cancellation_accepted { return Ok(()); }
             return Err(t("模型任务已变化；刷新进度后重试", "The model task changed; refresh progress and retry"));
         }
+        cancellation_accepted |= progress["cancelled"] == true;
         if progress["active"] != true { return Ok(()); }
         if started.elapsed() >= Duration::from_secs(45) {
             return Err(t("取消尚未完成；等待当前网络读取结束后重试", "Cancellation is still pending; wait for the current network read before retrying"));
