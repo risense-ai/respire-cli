@@ -35,10 +35,9 @@ pub fn store_related<E: Embedder>(
                 .find(|r| r.id == old)
                 .context("missing superseded memory")?;
             let mut previous = MemoryEngine::open(keys, row)?;
-            ensure!(
-                previous.importance == "important",
-                "cannot supersede diary memory"
-            );
+            if previous.importance != "important" {
+                return Err(crate::input_error::InputError("cannot supersede diary memory".into()).into());
+            }
             ensure!(
                 !all.iter()
                     .filter(|r| r.id != entry.id)
@@ -79,7 +78,9 @@ pub fn store_related<E: Embedder>(
                 edits.insert(full.clone(), (row, MemoryEngine::open(keys, row)?));
             }
             let (_, other) = edits.get_mut(&full).context("missing association edit")?;
-            ensure!(other.importance == "important", "cannot link diary memory");
+            if other.importance != "important" {
+                return Err(crate::input_error::InputError("cannot link diary memory".into()).into());
+            }
             if !other.see_also.contains(&entry.id) {
                 other.see_also.push(entry.id.clone());
             }

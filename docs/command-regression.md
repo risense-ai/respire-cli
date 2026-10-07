@@ -1,12 +1,14 @@
 # Existing command checks
 
 `--json` keeps command errors in the result envelope. Invalid IDs, malformed or
-inapplicable split/resort/deepen input use `reason: invalid_input`,
+inapplicable split/resort/deepen input, unknown restore IDs, diary association
+targets, self/cyclic attachment, invalid grant roots, missing kick targets and
+missing user-selected import/benchmark/share files use `reason: invalid_input`,
 `details.error_type: user` and exit 2. Storage, transport and engine failures keep
 `reason: runtime_error`, `error_type: runtime` and exit 1. Pending or warning
 results also use exit 2; automation must read `status` and `reason`.
 
-Host `space create`, `space use` and confirmed `space remove --yes` coordinate
+Host `space create`, `space use`, `space join` and confirmed `space remove --yes` coordinate
 runtime shutdown and restart, preserve configuration and verify the resulting
 profile. The active space cannot be removed. Sandbox clients cannot manage this
 lifecycle. `update-check` uses an arrow only for an available upgrade; equal or
@@ -72,3 +74,11 @@ unmerged candidate refs remain available for validation with publication disable
 Interactive UI, real GPU/NPU hardware and
 paid provider quality require separate validation; a deterministic provider fixture
 does not measure model quality.
+
+The manual `CLI CI` input `native_published_only` compares the exact published
+DEV5 and DEV7 binaries on Windows, macOS and Linux with pinned, real M3 weights.
+It verifies CPU inference after main → alternate → main, global engine settings,
+distinct vault keys and unchanged source rows, queues and complete index artifacts.
+This diagnostic run does not replace the release gate or claim that a reported
+inference failure is fixed. Its reports retain failures; unexecuted platforms
+must not be reported as passed.

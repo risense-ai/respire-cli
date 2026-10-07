@@ -37,20 +37,25 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
     } else {
         None
     };
-    let result: RecallResult = respire::core_sdk::execute(
+    let mut transport = |request: &Value| -> Result<Value> {
+        let backend = provider.as_ref().ok_or_else(|| anyhow::anyhow!("model provider is not configured"))?;
+        crate::classify::call_api(backend, request)
+    };
+    let result: RecallResult = respire::core_sdk::execute_with_transport(
         "query_business",
         json!({
             "model": embedder.model_name(),
             "snapshots": respire::memory::engine::snapshots(keys, candidates),
             "query": query,
             "mode": mode,
-            "provider": provider,
+            "provider": provider.as_ref().map(|backend| json!({"name":backend.name,"model":backend.model})),
         }),
+        &mut transport,
     )?;
     Ok((result.items, result.mode, result.warning))
 }
 
-fn configured_provider() -> Option<Value> {
+fn configured_provider() -> Option<crate::classify::Backend> {
     let config = respire::service::read_agent_config();
     let base = config["recall_api_base"]
         .as_str()
@@ -65,5 +70,6 @@ fn configured_provider() -> Option<Value> {
     let model = config["recall_model"]
         .as_str()
         .unwrap_or(crate::classify::DEFAULT_DS_MODEL);
-    Some(json!({"endpoint": crate::classify::ds_endpoint(&base), "key": key, "model": model}))
+    Some(crate::classify::Backend { name: "ds", endpoint: crate::classify::ds_endpoint(&base),
+        key, model: model.to_owned(), base_shown: base })
 }

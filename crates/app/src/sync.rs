@@ -55,6 +55,7 @@ impl std::error::Error for SyncBoundaryChanged {}
 
 /// Controls local consistency phases independently from network calls.
 pub trait SyncControl {
+    fn progress(&self, _phase: &str) {}
     fn boundary_changed(&self) -> Result<()> {
         Ok(())
     }
@@ -92,6 +93,7 @@ pub fn sync_controlled(
     let started = std::time::Instant::now();
     let mut stats = SyncStats::default();
     let cached_epoch = control.local(|| local.meta_get("sync_v2_epoch"))?;
+    control.progress("capabilities");
     let cached_support = control.local(|| local.meta_get("sync_v2_resolution_support"))?;
     let capability =
         if let Some(epoch) = cached_epoch.filter(|_| cached_support.as_deref() == Some("1")) {
@@ -149,7 +151,9 @@ pub fn sync_controlled(
                 epoch: cap.epoch.clone(),
                 items,
             };
+            control.progress("push");
             let reply = control.remote(|| remote.push_v2(&request))?;
+            control.progress("apply");
             stats.pushed +=
                 control.local(|| local.acknowledge(&request.items, &reply.results, false))?;
         }
@@ -157,6 +161,7 @@ pub fn sync_controlled(
             pull_pages(keys, local, remote, control, &cap.epoch, false, &mut stats)?;
         }
         let mut materialized_after = String::new();
+        control.progress("materialize");
         while let Some(next) =
             control.local(|| local.materialize_received_batch(keys, &materialized_after))?
         {
@@ -166,6 +171,7 @@ pub fn sync_controlled(
             pull_resolution_pages(local, remote, control, &cap.epoch)?;
         }
         let mut classified_after = 0;
+        control.progress("conflicts");
         while let Some(next) = control.local(|| {
             local.classify_conflicts_batch(keys, cap.conflict_resolution, classified_after)
         })? {
@@ -206,9 +212,11 @@ pub fn sync_controlled(
         let cursor = control
             .local(|| local.meta_get("sync_cursor"))?
             .and_then(|s| s.parse().ok());
+        control.progress("pull");
         let reply = control.remote(|| remote.fetch_rev(cursor))?;
         stats.remote_total = reply.total as usize;
         stats.remote_alive = reply.alive as usize;
+        control.progress("apply");
         stats.pulled += control.local(|| local.apply_legacy(keys, reply.blobs, reply.cursor))?;
         let mut sent = false;
         loop {
@@ -218,6 +226,7 @@ pub fn sync_controlled(
             }
             sent = true;
             let blobs: Vec<_> = items.iter().map(|o| o.blob.clone()).collect();
+            control.progress("push");
             let replaced = control.remote(|| remote.put_batch(&blobs))?;
             if replaced.len() != items.len() {
                 anyhow::bail!("batch response length mismatch");
@@ -235,6 +244,7 @@ pub fn sync_controlled(
             stats.pushed += control.local(|| local.acknowledge(&items, &receipts, true))?;
         }
         if sent {
+            control.progress("pull");
             let again = control.remote(|| remote.fetch_rev(Some(reply.cursor)))?;
             stats.remote_total = again.total as usize;
             stats.remote_alive = again.alive as usize;
@@ -242,6 +252,7 @@ pub fn sync_controlled(
                 control.local(|| local.apply_legacy(keys, again.blobs, again.cursor))?;
         }
     }
+    control.progress("verify");
     (stats.pending, stats.conflicts, stats.undecodable) = control.local(|| local.sync_counts())?;
     (
         stats.conflict_history,
@@ -320,10 +331,12 @@ fn pull_pages(
         None
     };
     loop {
+        control.progress("pull");
         let page = control.remote(|| remote.pull_v2(epoch, after, until, snapshot))?;
         if page.epoch != epoch || until.is_some_and(|h| h != page.until) {
             anyhow::bail!("server page snapshot changed");
         }
+        control.progress("apply");
         stats.pulled += control.local(|| local.apply_page(keys, &page, snapshot))?;
         stats.remote_total = page.total as usize;
         stats.remote_alive = page.alive as usize;

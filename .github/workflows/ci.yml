@@ -1,14 +1,23 @@
 name: CLI CI
 on:
   workflow_dispatch:
+    inputs:
+      native_published_only:
+        description: Test real M3 inference and global engine settings on published dev.5 and dev.7 only
+        type: boolean
+        default: false
   push:
     branches: [main]
   pull_request:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}
+  cancel-in-progress: true
 jobs:
   platform-build:
+    if: ${{ !inputs.native_published_only }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -87,6 +96,7 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
   check:
+    if: ${{ !inputs.native_published_only }}
     runs-on: ubuntu-latest
     env:
       ONEMEMORY_ENGINE: cpu
@@ -127,3 +137,80 @@ jobs:
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
+
+  native-published-m3:
+    if: ${{ inputs.native_published_only }}
+    name: Published M3 (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography
+      - uses: actions/cache@v4
+        with:
+          path: native-model
+          key: pinned-m3-fp16-4de13258303883538bd53b696b452bf8099f0858
+      - name: Fetch the pinned model and exact published runtime bundles
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p native-model/onnx native-published
+          for file in tokenizer.json onnx/model_fp16.onnx; do
+            if [ ! -f "native-model/$file" ]; then
+              curl --fail --location --retry 2 --connect-timeout 10 --max-time 900 \
+                "https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/$file" \
+                --output "native-model/$file.partial"
+              mv "native-model/$file.partial" "native-model/$file"
+            fi
+          done
+          for version in 1.0.11-dev.5 1.0.11-dev.7; do
+            extension=''; if [[ "$TARGET" == *windows* ]]; then extension='.exe'; fi
+            gh release download "v$version" --repo risense-ai/respire-cli --dir "native-published/$version" \
+              --pattern "rsrs-$TARGET$extension" --pattern "rsrs-$TARGET-runtime.tar.gz" --pattern "cli-build-$TARGET.json"
+            tar -xzf "native-published/$version/rsrs-$TARGET-runtime.tar.gz" -C "native-published/$version"
+            if [ -z "$extension" ]; then chmod +x "native-published/$version/rsrs-$TARGET"; fi
+          done
+      - name: Validate artifact hashes and real main to alternate to main inference
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          import hashlib,json,os,pathlib,subprocess,sys
+          target=os.environ['TARGET']; binaries=[]
+          for version in ['1.0.11-dev.5','1.0.11-dev.7']:
+              root=pathlib.Path('native-published')/version
+              report=json.loads((root/f'cli-build-{target}.json').read_text())
+              assert report['version']==version and report['target']==target
+              for field in ['binary','runtime']:
+                  with (root/report[field+'_file']).open('rb') as stream:
+                      assert hashlib.file_digest(stream,'sha256').hexdigest()==report[field+'_sha256']
+              binaries.extend(['--binary',str(root/report['binary_file'])])
+          subprocess.run([sys.executable,'scripts/test-real-m3-account-switch.py',*binaries,
+              '--model-dir','native-model','--model-file','model_fp16.onnx','--output-dir','native-model-results'],check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-published-m3-${{ matrix.target }}
+          path: native-model-results/real-account-return-verification.json
+          if-no-files-found: warn

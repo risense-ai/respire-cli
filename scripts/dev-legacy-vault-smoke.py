@@ -18,7 +18,7 @@ import urllib.request
 UPSTREAM = "https://api.dev.rsrs.rs"
 REQUIRED = ("model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade", "cloud_v3_secret_key_recovery_upgrade")
 MODEL_HASHES = {
-    "onnx/model_fp16.onnx": "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9",
+    "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
 }
 

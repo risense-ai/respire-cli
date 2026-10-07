@@ -60,7 +60,7 @@ if (selection === 'sdk') {
   const consumer = join(output, 'consumer');
   mkdirSync(join(consumer, 'src'), { recursive: true });
   writeFileSync(join(consumer, 'Cargo.toml'), `[package]\nname = "respire-sdk-package-check"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n[dependencies]\nanyhow = "1.0"\nrespire_core_sdk = { path = "${directory.replaceAll('\\', '/')}" }\n[workspace]\n`);
-  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0000), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
+  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0001), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
   run('cargo', ['run', '--manifest-path', join(consumer, 'Cargo.toml')], { env: { ...environment, RESPIRE_CORE_SDK_DIR: sdk, CARGO_TARGET_DIR: join(output, 'consumer-target') } });
   const lock = readFileSync(join(consumer, 'Cargo.lock'), 'utf8');
   if (!/name = "respire_protocol"\r?\nversion = "[^"]+"\r?\nsource = "registry\+https:\/\/github.com\/rust-lang\/crates.io-index"/.test(lock)) throw new Error('Consumer protocol did not resolve from crates.io');

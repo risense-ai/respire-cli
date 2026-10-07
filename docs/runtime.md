@@ -4,7 +4,7 @@
 flowchart LR
   Host[Host terminal] -->|owns lifecycle| Runtime[Loopback HTTP runtime]
   Sandbox[Sandbox CLI / TUI / MCP] -->|client-only| Runtime
-  Runtime --> Worker[Shared inference worker]
+  Runtime --> Inference[Shared ONNX session inside runtime]
 ```
 
 | Context | Behavior |
@@ -33,6 +33,19 @@ Host `account <name>`, `account use <name>`, `space use <name>` and
 An invalid target keeps the original profile and restarts its service.
 Client-only tools cannot switch the host profile. `--direct` still requires a
 stopped runtime and does not perform an automatic takeover.
+
+`space join` also runs on the host coordinator. Invalid invites and existing
+targets are rejected before stopping the runtime. Joining creates the invited
+profile and restarts the original selected profile; `space use <name>` switches
+to the joined profile explicitly. Read-only joins and keyring warnings count as
+successful joins. Failed server requests restore the original configuration and
+runtime.
+
+Human CLI requests use a hidden request ID and the additive `cli.progress` RPC
+to read their current stage outside the worker queue. `--json` does not start a
+human progress display. `model.prepare` schedules preparation from the selected
+mirror on the existing background model worker; `model.control` cancels only the
+matching active task. Cancellation must release its model slot before restart.
 
 | Setting | Purpose |
 | --- | --- |
@@ -81,16 +94,31 @@ The hidden `--runtime-internal` entry is reserved for host lifecycle and automat
 ## Upgrading an older runtime
 
 The host command `rsrs --runtime-internal --stop` supports runtimes that still
-require a loopback token, including 1.0.9. After an HTTP 401, the client retries
-once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file, after the
-host endpoint record and OS listener PID identify a running Respire process. An
-unverified listener receives no token. The client does not
-create or replace credentials. Other HTTP errors and connection failures are
-not retried. Current loopback runtimes continue to work without a token file.
+require a loopback token, including 1.0.9. The client sends the existing
+`ONEMEMORY_RPC_TOKEN` or runtime token file on the initial request. It does not
+create or replace credentials, and it never replays a failed request. Current
+loopback runtimes ignore the header and also work without a token file.
 Health checks and normal RPC use the same compatibility rule, so host upgrades
 can gracefully stop the old runtime before starting the new executable.
 
 Run lifecycle commands from the host terminal; client-only mode does not permit
-shutdown or the legacy-token retry. A missing or rejected legacy token requires the old runtime's existing
+shutdown. Client-only requests also preserve existing authentication headers.
+A missing or rejected legacy token requires the old runtime's existing
 authentication material, rather than bypassing authentication or killing an
 unverified process. HTTP redirects are disabled for the local runtime client.
+
+## Model downloads and account switches
+
+Model weights and inference engine selection are global to the installation
+root (`ONEMEMORY_DATA_DIR` for isolated installations); the selected account's
+library directory does not select another engine or require another model copy.
+Account switching must preserve the global configuration and reuse compatible,
+complete M3 artifacts. Only missing, changed or corrupt artifacts need indexing.
+
+Large ONNX downloads use at most four HTTP ranges when the source honors range
+requests. Sources without range support use one connection. Pinned-revision
+temporary files and segment checkpoints survive interruption and mirror changes;
+completed files are published only after their SHA256 matches the pinned model.
+Progressing downloads do not expire merely because 30 minutes elapsed. The
+existing bounded network-read timeout still applies. Parallel connections do not
+guarantee faster transfers when the server or network limits total bandwidth.

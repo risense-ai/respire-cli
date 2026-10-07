@@ -1,6 +1,6 @@
 //! Loopback HTTP client for the local runtime (`127.0.0.1:15169`).
 //! Current loopback runtimes need no token; pre-1.0.10 runtimes require the
-//! existing host token after a 401 challenge. Non-loopback HTTP access uses
+//! existing host token on the initial request. Non-loopback HTTP access uses
 //! `ONEMEMORY_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
 
 use std::fs;
@@ -32,6 +32,14 @@ pub struct Health {
     pub exe: String,
     #[serde(default)]
     pub data_dir: String,
+    #[serde(default)]
+    pub inference: Value,
+}
+
+impl Health {
+    pub fn inference_stalled(&self) -> bool {
+        self.inference["host_recovery_required"] == true
+    }
 }
 
 pub fn rpc_port() -> u16 {
@@ -79,7 +87,7 @@ fn read_token() -> Result<Option<String>> {
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
-        Ok(_) => Err(RuntimeError::TokenUnreadable(format!("{} is empty", path.display())).into()),
+        Ok(_) => Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => {
             Err(RuntimeError::TokenUnreadable(format!("{}: {error}", path.display())).into())
@@ -255,27 +263,17 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-/// Legacy runtimes reject before dispatch. Retry only that 401, once, with an
-/// existing credential; transport failures and other statuses never replay RPC.
+/// Preserve existing credentials on the first request, including health and stop.
+/// New loopback servers ignore the header. Never replay a failed request.
 fn send_loopback(
     request: ureq::Request,
     send: impl Fn(ureq::Request) -> std::result::Result<ureq::Response, ureq::Error>,
 ) -> Result<ureq::Response> {
-    let response = match send(request.clone()) {
-        Err(ureq::Error::Status(401, _)) => {
-            if crate::runtime_policy::client_only() {
-                return Err(RuntimeError::Unauthorized.into());
-            }
-            let pid = pid_listening_on(rpc_port()).ok_or(RuntimeError::Unauthorized)?;
-            if !crate::rpc::recorded_runtime_listener(pid) || !pid_is_respire(pid) {
-                return Err(RuntimeError::Unauthorized.into());
-            }
-            let token = read_token()?.ok_or(RuntimeError::Unauthorized)?;
-            send(request.set("Authorization", &format!("Bearer {token}")))
-                .map_err(crate::runtime_error::http)
-        }
-        result => result.map_err(crate::runtime_error::http),
-    }?;
+    let request = match read_token()? {
+        Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+        None => request,
+    };
+    let response = send(request).map_err(crate::runtime_error::http)?;
     if !(200..300).contains(&response.status()) {
         return Err(RuntimeError::Transport(format!("unexpected HTTP {}", response.status())).into());
     }
@@ -297,9 +295,13 @@ pub fn health() -> Result<Health> {
 }
 
 pub fn request_stop() -> Result<()> {
+    request_stop_with_timeout(HTTP_TIMEOUT)
+}
+
+pub(crate) fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
-    send_loopback(agent().post(&url), |request| request.send_string("{}"))?;
+    send_loopback(agent().post(&url).timeout(timeout), |request| request.send_string("{}"))?;
     Ok(())
 }
 
@@ -308,7 +310,7 @@ pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
 }
 
 pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
-    check_connection()?;
+    if method != "cli.progress" { check_connection()?; }
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
         "v": crate::rpc::PROTOCOL_V,
@@ -317,14 +319,16 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
         "args": args,
     });
     // Downloading M3 or rebuilding a library can legitimately exceed the normal RPC budget.
-    // Inference workers retain their own short deadlines; a request is never replayed here.
+    // Native inference runs inside the runtime; a request is never replayed here.
     let command: Vec<&str> = args
         .iter()
         .map(String::as_str)
         .filter(|s| !s.starts_with('-'))
         .take(2)
         .collect();
-    let timeout = if method == "model.control" {
+    let timeout = if method == "cli.progress" {
+        Duration::from_secs(1)
+    } else if method == "model.control" {
         Duration::from_secs(3)
     } else if matches!(
         command.as_slice(),
@@ -357,13 +361,20 @@ pub fn wait_until_down() -> Result<()> {
 /// A closed listener does not prove that the library holder has exited.
 pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
+        if !process_is_running(pid)? { return Ok(()); }
+        std::thread::sleep(STOP_WAIT);
+    }
+    bail!("runtime listener closed but process {pid} has not exited")
+}
+
+pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
         #[cfg(windows)]
         let output = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
             .output().context("cannot check stopped runtime process")?;
         #[cfg(unix)]
         let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .args(["-p", &pid.to_string(), "-o", "pid=", "-o", "stat="])
             .output().context("cannot check stopped runtime process")?;
         let text = String::from_utf8_lossy(&output.stdout);
         #[cfg(windows)]
@@ -373,11 +384,85 @@ pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
                 .is_some_and(|value| value.trim_matches('"') == pid.to_string()))
         };
         #[cfg(unix)]
-        let alive = text.trim() == pid.to_string();
-        if !alive { return Ok(()); }
-        std::thread::sleep(STOP_WAIT);
+        let alive = {
+            anyhow::ensure!(output.status.success() || output.stderr.is_empty(), "runtime process inspection failed");
+            let mut fields = text.split_whitespace();
+            // An unreaped child still has a PID, but has exited and released its
+            // listener, native session and database locks. Do not wait for its parent.
+            fields.next() == Some(pid.to_string().as_str())
+                && fields.next().is_some_and(|state| !state.starts_with('Z'))
+        };
+        Ok(alive)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeProcessIdentity {
+    started_at: String,
+    executable: String,
+}
+
+/// An endpoint PID is only a locator. Verify runtime arguments and creation time
+/// before waiting, then compare again before forcefully terminating the process.
+pub(crate) fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
+    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid), "cannot verify runtime process {pid}");
+    #[cfg(windows)]
+    {
+        let script = format!(r#"$ErrorActionPreference='Stop'; $runtimeProc=Get-CimInstance Win32_Process -Filter 'ProcessId={pid}'; if ($null -eq $runtimeProc) {{ exit 0 }}; $runtimeArgs=$runtimeProc.CommandLine -split '\s+'; $isRuntime=($runtimeArgs -contains '--runtime-internal') -or (($runtimeArgs -contains 'web') -and ($runtimeArgs -contains '--internal')); [pscustomobject]@{{started_at=$runtimeProc.CreationDate.ToUniversalTime().Ticks.ToString(); executable=$runtimeProc.ExecutablePath; runtime=$isRuntime}} | ConvertTo-Json -Compress"#);
+        let output = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script]).output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+        #[derive(serde::Deserialize)]
+        struct Process { started_at: String, executable: String, runtime: bool }
+        let process: Process = serde_json::from_slice(&output.stdout)
+            .context("runtime process disappeared or could not be identified")?;
+        anyhow::ensure!(process.runtime, "process {pid} is not a runtime; restart refused");
+        Ok(RuntimeProcessIdentity { started_at: process.started_at, executable: process.executable })
     }
-    bail!("runtime listener closed but process {pid} has not exited")
+    #[cfg(target_os = "linux")]
+    {
+        let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let command = std::fs::read(directory.join("cmdline"))?;
+        let args: Vec<_> = command.split(|byte| *byte == 0)
+            .filter_map(|arg| std::str::from_utf8(arg).ok()).collect();
+        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")),
+            "process {pid} is not a runtime; restart refused");
+        let stat = std::fs::read_to_string(directory.join("stat"))?;
+        let started_at = stat.rsplit_once(')').and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .context("runtime process creation time missing")?.to_owned();
+        let executable = std::fs::read_link(directory.join("exe"))?.to_string_lossy().into_owned();
+        Ok(RuntimeProcessIdentity { started_at, executable })
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
+            .env("LC_ALL", "C").output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+        let text = String::from_utf8(output.stdout)?;
+        let text = text.trim_end();
+        let started_at = text.get(..24).context("runtime process creation time missing")?.to_owned();
+        let command = text.get(24..).context("runtime process command missing")?.trim();
+        let args: Vec<_> = command.split_whitespace().collect();
+        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")),
+            "process {pid} is not a runtime; restart refused");
+        Ok(RuntimeProcessIdentity { started_at, executable: command.to_owned() })
+    }
+}
+
+pub(crate) fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
+    crate::runtime_policy::require_host("runtime recovery")?;
+    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid),
+        "refusing to terminate an unverified runtime process {pid}");
+    anyhow::ensure!(&runtime_process_identity(pid)? == identity,
+        "runtime process {pid} changed during shutdown; termination refused");
+    #[cfg(windows)]
+    let status = std::process::Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/F"])
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status()?;
+    #[cfg(unix)]
+    let status = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status()?;
+    anyhow::ensure!(status.success(), "failed to terminate runtime process {pid}");
+    Ok(())
 }
 
 pub(crate) fn kill_pid(pid: u32) {
@@ -410,6 +495,15 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_child_is_not_a_running_library_holder() -> Result<()> {
+        let mut child = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+        let exited = wait_until_exited(child.id());
+        child.wait()?;
+        exited
+    }
 
     #[test]
     fn port_is_open_sees_local_listener() -> Result<(), String> {

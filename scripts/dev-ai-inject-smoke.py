@@ -25,7 +25,7 @@ REQUIRED = (
     "tree_deepen_auto_applied", "tree_cure_auto_applied",
 )
 MODEL_HASHES = {
-    "onnx/model_fp16.onnx": "4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9",
+    "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
 }
 

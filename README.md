@@ -34,6 +34,12 @@ rsrs recall "query" --titles --json
 
 `rsrs web` opens https://dash.rsrs.rs without starting a local Web server. No dashboard assets are embedded in the CLI.
 
+Commands display compact human-readable tables by default, without duplicate summaries, empty action columns or result footers. Use `--json` for the machine-readable result envelope and diagnostic details. During automatic BGE-M3 preparation, `rsrs doctor` shows the current file, download percentage, transferred MB and background index state; `rsrs doctor --json` retains the complete task and index objects in `details`.
+
+Blocking human commands report progress on stderr while keeping stdout as the final table. `sync` and `doctor` report their current stage and what they are waiting for; model installation reports file and transfer progress. Interactive terminals update one status line, and redirected stderr receives plain lines on stage changes or every five seconds while waiting. Fast commands avoid progress chatter. `--json` disables human progress.
+
+In the TUI model page, choose a preset or custom download mirror. Saving a source during a download offers cancellation and restart. You can also cancel a model task or restart from the selected source; the runtime waits for cancellation before starting the replacement. Verified model files and the original memory data/index are retained.
+
 The default profile is `~/.rsrs`, the local runtime port is `15169`, and the default sync API is `https://api.rsrs.rs`.
 
 Use `rsrs login --oauth` for browser authorization, or `rsrs login --interactive` to choose OAuth or password/TOTP. The TUI account login offers the same choices. Select GitHub in the dashboard when the server has enabled it; complete any TOTP challenge and approve CLI access, then enter your super password in the terminal. Authorization alone does not decrypt your memories. Cancelled or failed login preserves the original account.

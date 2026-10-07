@@ -48,7 +48,7 @@ impl std::fmt::Display for OperationStopped {
         formatter.write_str(match self {
             Self::Cancelled => "model operation cancelled",
             Self::TimedOut => "model operation timed out after 30 minutes",
-            Self::IdleTimedOut => "background indexing made no progress for 30 minutes",
+            Self::IdleTimedOut => "model operation made no progress for 30 minutes",
         })
     }
 }
@@ -70,6 +70,11 @@ fn check_progress(progress: &Progress) -> Result<()> {
 }
 
 impl Operation {
+    /// Download duration depends on bandwidth. Keep progressing downloads alive.
+    pub fn begin_download() -> Result<Self> {
+        Self::try_begin_with_idle_timeout("verify", true)?
+            .ok_or_else(|| anyhow!("another model operation is running"))
+    }
     pub fn begin(phase: &str) -> Result<Self> {
         Self::try_begin(phase)?.ok_or_else(|| anyhow!("another model operation is running"))
     }
@@ -171,7 +176,7 @@ pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
         return Ok(json!({"active":false}));
     };
     if p.id != task_id {
-        return Ok(json!({"active":false}));
+        return Ok(json!({"active":true,"stale":true}));
     }
     if cancel {
         p.cancelled = true;

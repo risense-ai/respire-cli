@@ -27,6 +27,7 @@ mod login;
 mod mcp;
 mod net_rpc;
 mod output;
+mod progress;
 mod rpc;
 mod runtime_error;
 mod runtime_http;
@@ -99,10 +100,7 @@ fn run_sync_attempts<T>(mut once: impl FnMut() -> Result<T>) -> Result<T> {
         match once() {
             Ok(value) => return Ok(value),
             Err(err) if attempt + 1 < SYNC_ATTEMPTS && is_retriable_sync_error(&err) => {
-                eprintln!(
-                    "command=sync status=warn mode=retry attempt={} error={err}",
-                    attempt + 1
-                );
+                progress::phase("同步连接失败；等待重试", "Sync connection failed; waiting to retry");
                 let pause = if cfg!(test) {
                     std::time::Duration::from_millis(0)
                 } else {
@@ -123,6 +121,18 @@ struct RuntimeSyncControl {
     generation: usize,
 }
 impl respire::sync::SyncControl for RuntimeSyncControl {
+    fn progress(&self, phase: &str) {
+        match phase {
+            "capabilities" => progress::phase("协商同步协议；等待服务器", "Negotiating sync protocol; waiting for server"),
+            "pull" => progress::phase("下载变更；等待服务器", "Downloading changes; waiting for server"),
+            "push" => progress::phase("上传变更；等待服务器确认", "Uploading changes; waiting for server acknowledgement"),
+            "apply" => progress::phase("保存同步数据", "Saving synchronized data"),
+            "materialize" => progress::phase("解密同步数据", "Decrypting synchronized data"),
+            "conflicts" => progress::phase("检查同步冲突", "Checking sync conflicts"),
+            "verify" => progress::phase("核对同步结果", "Verifying sync result"),
+            _ => {}
+        }
+    }
     fn boundary_changed(&self) -> Result<()> {
         if rpc::worker_active() {
             rpc::invalidate_sync_boundary(self.generation)?;
@@ -183,11 +193,8 @@ fn sync_tracked_boundary(
     let control = RuntimeSyncControl {
         generation: rpc::sync_generation(),
     };
-    let result = if rpc::worker_active() {
-        respire::sync::sync_controlled(session, local, remote, &control, Some(boundary))
-    } else {
-        respire::sync::sync_all(session, local, remote)
-    };
+    let result = respire::sync::sync_controlled(session, local, remote, &control,
+        rpc::worker_active().then_some(boundary));
     {
         let mut guard = SYNC_LIVE.lock().unwrap_or_else(|err| err.into_inner());
         match &result {
@@ -252,6 +259,7 @@ fn json_mode() -> bool {
 /// for long async jobs: stdout stays JSON (for the bridge), stderr streams progress
 /// (so the UI can "scroll"). Without that env var, a TTY decides - same as before.
 fn progress_enabled() -> bool {
+    if json_mode() { return false; }
     if std::env::var("ONEMEMORY_PROGRESS")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -271,6 +279,7 @@ fn emit_result(result: ResultEnvelope) -> Result<()> {
         set_exit_code(exit_code);
         return Ok(());
     }
+    progress::finish();
     println!("{}", result.render(json_mode())?);
     mark_emitted();
     set_exit_code(exit_code);
@@ -461,12 +470,15 @@ fn candidates_count_normal(all: &[respire::StoredMemory]) -> usize {
     after_help = "Sandbox: use --client-only or ONEMEMORY_CLIENT_ONLY=1 to connect to the host HTTP runtime without managing its lifecycle."
 )]
 struct Cli {
-    /// Machine-readable output: stdout is JSON only (progress goes to stderr) - for thin client shells
+    /// Machine-readable output: JSON only, without human progress.
     #[arg(long, global = true)]
     json: bool,
     /// Correlates TUI progress and cancellation with this model task only.
     #[arg(long, global = true, hide = true)]
     model_task_id: Option<String>,
+    /// Foreground request progress, independent from model cancellation.
+    #[arg(long, global = true, hide = true)]
+    progress_id: Option<String>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -509,6 +521,12 @@ enum ModelAction {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Restart the resident runtime; kill the verified process if graceful shutdown times out.
+    Restart {
+        /// Seconds to wait for graceful shutdown before force termination.
+        #[arg(long, default_value_t = 10, value_parser = clap::value_parser!(u64).range(1..=300))]
+        timeout: u64,
+    },
     /// Read the full memory workflow before storing or maintaining memories.
     Prompt,
     /// Print the embedded CLI version (same as `--version` / `-v`)
@@ -2266,8 +2284,7 @@ fn run_bench_run(
     baseline: Option<&str>,
     verbose: bool,
 ) -> Result<()> {
-    let text = std::fs::read_to_string(file)
-        .map_err(|e| anyhow!("failed to read evalset: {file} ({e})"))?;
+    let text = respire_app::input_error::read_file(std::path::Path::new(file), "evalset")?;
     let cases = bench::parse_evalset(&text)?;
     anyhow::ensure!(!cases.is_empty(), "evalset is empty: {file}");
 
@@ -2305,7 +2322,7 @@ fn run_bench_run(
     let mut latency = Vec::new();
     let mut selector_fallbacks = 0usize;
     for (i, c) in cases.iter().enumerate() {
-        eprintln!("[{}/{}] {}", i + 1, cases.len(), c.query);
+        progress::phase(&format!("评估召回 {}/{}", i + 1, cases.len()), &format!("Evaluating recall {}/{}", i + 1, cases.len()));
         let mut q = MemoryQuery::new(&c.query).limit(topk);
         if let Some(p) = &c.project {
             if !p.is_empty() {
@@ -3960,6 +3977,7 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
 /// Self-check (OpenViking doctor absorbed): model/store/lock/remote/inject/scope in one pass.
 /// --remote also probes server /health. Per-item ok/fail; exit code stays 0 (diagnosis is not failure).
 fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
+    progress::phase("检查本地数据和文件", "Checking local data and files");
     let mut items: Vec<(String, bool, String)> = Vec::new();
     let mut model_warnings = Vec::new();
     let add = |items: &mut Vec<(String, bool, String)>, name: &str, ok: bool, note: String| {
@@ -4019,6 +4037,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     );
 
     // 2) session (can we unlock)
+    progress::phase("检查账户和解密密钥", "Checking account and decryption keys");
     match auth::load_local_session() {
         Ok(_) => add(
             &mut items,
@@ -4033,10 +4052,11 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     // while it downloads, or wait here while holding its foreground command slot.
     let store = build_local()?;
     let active_model = store.retrieval_model()?;
+    progress::phase("检查模型和索引", "Checking model and index");
     let pending_index = store.index_pending(&active_model);
     let model_task = respire::model_progress::status()?;
     let model_busy = model_task["active"].as_bool() == Some(true);
-    let index_state = rpc::index_status();
+    let mut index_state = rpc::index_status();
     let defer_preparation = rpc::worker_active()
         && pending_index.as_ref().is_ok_and(|pending| *pending)
         && (fix || model_busy || index_state["scheduled"].as_bool() == Some(true)
@@ -4069,7 +4089,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
                 );
             }
             Err(_) => {
-                eprintln!("embedder missing; installing BGE-M3 FP16 (~1.15GB)...");
+                progress::phase("下载 BGE-M3 模型", "Downloading BGE-M3 model");
                 let mirror = respire::model_install::mirror_from_env();
                 let install = respire::model_install::install_m3(mirror.as_deref());
                 match install {
@@ -4101,6 +4121,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     match pending_index {
         Ok(true) => {
             let indexing = rpc::index_status();
+            index_state = indexing.clone();
             let progressing = indexing["running"].as_bool() == Some(true)
                 || indexing["scheduled"].as_bool() == Some(true)
                 || (model_busy && indexing["state"].as_str() != Some("failed"));
@@ -4124,6 +4145,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
 
     // 5) remote (config + optional reachability)
     let configured = remote_configured();
+    progress::phase("检查服务器连接；等待响应", "Checking server connection; waiting for response");
     if configured {
         let (addr, _tok) = remote_config_from_session_or_env()?.unwrap_or_default();
         if check_remote {
@@ -4162,6 +4184,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     }
 
     // 6) inject status
+    progress::phase("检查工具注入状态", "Checking tool injection status");
     match respire::inject::targets() {
         Ok(ts) => {
             let fresh = ts.iter().filter(|t| t.state == "fresh").count();
@@ -4201,6 +4224,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     // 9) CLI version (--check-update or ONEMEMORY_UPDATE_CHECK=1 hits the network; default reads cache, no network)
     //    Doctor must not stall on the network, so it does not force a query - report known result, hint how to check if no cache.
     if respire::update_check::enabled() {
+        progress::phase("检查 CLI 版本；等待版本源", "Checking CLI version; waiting for version registry");
         let force = check_update;
         match respire::update_check::check(force) {
             Some(s) if s.outdated => add(
@@ -4272,12 +4296,17 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         .iter()
         .filter(|i| matches!(i.status, OutputStatus::Skip))
         .count();
-    emit_result(ResultEnvelope::new(
+    let mut result = ResultEnvelope::new(
         "doctor",
         status,
         serde_json::json!({ "version": respire::VERSION, "pass": pass, "warn": warn, "fail": fail, "skip": skip, "total": rows.len() }),
         rows,
-    ))
+    );
+    result.details = serde_json::json!({
+        "model_operation": model_task,
+        "retrieval_index": index_state,
+    });
+    emit_result(result)
 }
 
 /// One bounded network pass on the runtime synchronization worker.
@@ -4535,7 +4564,7 @@ fn run_space(
         }
         "join" => {
             let c = code.or(name).filter(|c| !c.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("join needs an invite code: rsrs space join <code>"))?;
+                .ok_or_else(|| respire_app::input_error::InputError("join needs an invite code: rsrs space join <code>".into()))?;
             let v = space::space_join(c)?;
             let status = if v["readonly"].as_bool() == Some(true) || v["keyring"].as_bool() == Some(false) { OutputStatus::Warn } else { OutputStatus::Ok };
             let mut result = ResultEnvelope::new("space", status, serde_json::json!({"action":"join","space":v["space"]}), vec![OutputItem::new("space", status, v["space"].as_str().unwrap_or(""))]);
@@ -4555,7 +4584,7 @@ fn run_space(
         }
         "kick" => {
             if !session.map(|s| !s.trim().is_empty()).unwrap_or(false) && !all {
-                anyhow::bail!("kick needs --session <id> or --all (kick = revoke the member session; they lose access immediately)");
+                return Err(respire_app::input_error::InputError("kick needs --session <id> or --all".into()).into());
             }
             let v = space::space_kick(session, all)?;
             let revoked = v["revoked"].as_array().cloned().unwrap_or_default();
@@ -5244,32 +5273,6 @@ fn main_body() -> i32 {
             return 1;
         }
     }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--internal-inference-worker")
-    {
-        return match runtime_policy::require_host("inference worker")
-            .and_then(|()| respire::memory::onnx::run_worker())
-        {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("inference worker: {error:#}");
-                1
-            }
-        };
-    }
-    match std::env::current_exe() {
-        Ok(executable) => {
-            if let Err(error) = respire::memory::onnx::enable_worker(executable) {
-                eprintln!("cannot enable inference worker: {error:#}");
-                return 1;
-            }
-        }
-        Err(error) => {
-            eprintln!("cannot locate inference worker executable: {error}");
-            return 1;
-        }
-    }
     // Parse args, then run the command, so a Windows debug stack does not hold both at once.
     // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.
@@ -5445,7 +5448,7 @@ fn run_classify_config(
 fn changes_profile(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
-        Some(Command::Space { action, yes, .. }) => matches!(action.as_str(), "create" | "use") || (action == "remove" && *yes),
+        Some(Command::Space { action, yes, .. }) => matches!(action.as_str(), "create" | "use" | "join") || (action == "remove" && *yes),
         Some(Command::Config { data_dir, .. }) => data_dir.is_some(),
         _ => false,
     }
@@ -5456,6 +5459,17 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    let display = !json_mode() && !rpc::worker_active() && args.command.is_some()
+        && !matches!(args.command, Some(Command::Mcp | Command::Login { .. } | Command::V));
+    let _progress = progress::Scope::start(args.progress_id.clone(), display,
+        matches!(args.command, Some(Command::Sync | Command::Doctor { .. })));
+    if let Some(Command::Space { action, code, name, .. }) = args.command.as_ref() {
+        if action == "join" {
+            let code = code.as_deref().or(name.as_deref())
+                .ok_or_else(|| respire_app::input_error::InputError("join needs an invite code".into()))?;
+            respire::space::validate_join(code)?;
+        }
+    }
     if !rpc::worker_active() && !runtime_policy::client_only()
         && !matches!(args.command, Some(Command::V))
         && respire_app::login_transaction::recovery_pending()
@@ -5505,6 +5519,18 @@ fn run(args: Cli) -> Result<()> {
     if rpc::worker_active() {
         return run_local(args);
     }
+    if let Some(Command::Restart { timeout }) = args.command.as_ref() {
+        let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
+        return emit_result(ResultEnvelope::new("restart", OutputStatus::Ok, result, Vec::new()));
+    }
+    if matches!(args.command, Some(Command::Model { action: ModelAction::InstallEngines })) {
+        runtime_policy::require_host("inference engine installation")?;
+        progress::phase("安装推理引擎；等待 Windows ML", "Installing inference providers; waiting for Windows ML");
+        let mut providers = Vec::new();
+        rpc::change_profile(|| { providers = respire::model_install::install_engines()?; Ok(()) })?;
+        return emit_result(ResultEnvelope::new("model", OutputStatus::Ok,
+            serde_json::json!({"providers":providers}), Vec::new()));
+    }
     if matches!(
         args.command,
         Some(Command::Model {
@@ -5545,7 +5571,7 @@ fn run(args: Cli) -> Result<()> {
         DEFER_PROFILE_OUTPUT.set(true);
         let switched = rpc::change_profile(|| {
             run_local(args)?;
-            if exit_code() != 0 {
+            if CAPTURED.with(|slot| slot.borrow().as_ref().is_some_and(|value| matches!(value.status, OutputStatus::Fail))) {
                 let errors = CAPTURED.with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
                 anyhow::bail!("{}", errors.unwrap_or_else(|| "profile change failed".to_owned()));
             }
@@ -5621,10 +5647,11 @@ fn run_local_inner(args: Cli) -> Result<()> {
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
-    if matches!(args.command, Some(Command::Web { .. })) {
+    if matches!(args.command, Some(Command::Web { .. } | Command::Restart { .. })) {
         anyhow::bail!("the dashboard launcher does not run inside a command worker");
     }
     // The runtime worker already holds lock.db for the process lifetime.
+    progress::phase("打开本地库；等待数据库锁", "Opening local library; waiting for database lock");
     let _library_lock = if rpc::worker_active() {
         None
     } else {
@@ -5633,6 +5660,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             std::time::Duration::from_secs(120),
         )?)
     };
+    progress::phase("执行本地操作", "Executing local operation");
     // -- Read-only gate (added 2026-09-20; same-day audit moved it) --
     // When this space's agent.json has readonly=true, every write command is refused.
     //
@@ -5679,6 +5707,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let store = respire::service::open_store()?;
             let (action, result) = match command {
                 GrantCommand::Create { root, label } => {
+                    uuid::Uuid::parse_str(root).map_err(|error| respire_app::input_error::InputError(format!("grant root must be a full UUID: {error}")))?;
+                    if label.trim().is_empty() || label.len() > 128 {
+                        return Err(respire_app::input_error::InputError("grant label must be 1–128 bytes of non-empty text".into()).into());
+                    }
+                    if !store.all(false)?.iter().any(|entry| entry.id == *root) {
+                        return Err(respire_app::input_error::InputError("grant root does not exist or is deleted".into()).into());
+                    }
                     let (grant, token) = store.create_grant(root, label)?;
                     (
                         "create",
@@ -6100,14 +6135,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     Ok(())
                 }
                 ModelAction::InstallEngines => {
-                    let providers = respire::memory::onnx::install_accelerators()?;
-                    emit_result(ResultEnvelope::new(
-                        "model",
-                        OutputStatus::Ok,
-                        serde_json::json!({"providers":providers}),
-                        vec![],
-                    ))?;
-                    Ok(())
+                    anyhow::bail!("inference engine installation is host-managed; run rsrs model install-engines from the host terminal")
                 }
                 ModelAction::Probe { text, model } => {
                     let selected = match model {
@@ -6888,12 +6916,12 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let child = respire::service::resolve_prefix(&all, &id)?;
             let parent_full = respire::service::resolve_prefix(&all, &parent)?;
             if child == parent_full {
-                anyhow::bail!("cannot attach to itself");
+                return Err(respire_app::input_error::InputError("cannot attach to itself".into()).into());
             }
             // Cycle guard: the new parent's cause chain must not contain the child
             for anc in store.ancestor_chain(&parent_full)? {
                 if anc == child {
-                    anyhow::bail!("cycle: new parent is a descendant of this entry");
+                    return Err(respire_app::input_error::InputError("cycle: new parent is a descendant of this entry".into()).into());
                 }
             }
             respire::service::reparent(&session, &store, &child, &parent_full)?;
@@ -7185,6 +7213,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
             }
         }
         Command::Restore { id } => {
+            if !build_local()?.all(true)?.iter().any(|entry| entry.id == id) {
+                return Err(respire_app::input_error::InputError(format!("not found #{id}")).into());
+            }
             let app = respire::service::App::open()?;
             let entry = app.restore(&id)?;
             emit_result(ResultEnvelope::new(
@@ -7685,6 +7716,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             emit_result(result)?;
         }
         Command::Sync => {
+            progress::phase("读取账户和待同步数据", "Reading account and pending sync data");
             let session = sync_phase(build_session)?;
             let local = sync_phase(build_local)?;
             let remote = sync_phase(build_remote)?;
@@ -8223,6 +8255,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Bench { .. }
         | Command::Classify { .. }
         | Command::Web { .. }
+        | Command::Restart { .. }
         | Command::ClassifyConfig { .. } => unreachable!(
             "commands that do not need the embedder already returned at the top of main"
         ),
@@ -8306,6 +8339,42 @@ mod capture_tests {
 
     struct EnvGuard {
         prev: Option<String>,
+    }
+
+    #[test]
+    fn residual_input_errors_use_user_envelopes() -> anyhow::Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let _guard = EnvGuard { prev: std::env::var("ONEMEMORY_DATA_DIR").ok() };
+        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        crate::rpc::set_worker_active(true);
+        respire::service::keygen()?;
+        let missing = dir.path().join("missing.json").to_string_lossy().into_owned();
+        for command in [
+            vec!["restore", "deadbeef"],
+            vec!["grant", "create", "--root", "deadbeef", "--label", "probe"],
+            vec!["grant", "create", "--root", "00000000-0000-0000-0000-000000000000", "--label", "probe"],
+            vec!["space", "kick"],
+            vec!["import", &missing],
+            vec!["bench", "run", &missing],
+            vec!["share-import", &missing],
+        ] {
+            let mut args = vec!["--json".to_owned()];
+            args.extend(command.iter().map(|arg| (*arg).to_owned()));
+            let result = capture_run(args);
+            assert_eq!(result.exit, 2, "{command:?}: {:?}", result.envelope);
+            assert_eq!(result.envelope.summary["reason"], "invalid_input", "{command:?}");
+            assert_eq!(result.envelope.details["error_type"], "user", "{command:?}");
+            if matches!(command[0], "import" | "bench" | "share-import") {
+                assert!(result.envelope.errors.iter().any(|error| error.contains("failed to read")), "{command:?}: {:?}", result.envelope.errors);
+            }
+        }
+        let invalid = dir.path().join("invalid-utf8.json");
+        std::fs::write(&invalid, [0xff])?;
+        let error = respire_app::input_error::read_file(&invalid, "fixture").err()
+            .ok_or_else(|| anyhow::anyhow!("invalid UTF-8 was accepted"))?;
+        assert_eq!(super::command_failure(&error).1, 1);
+        Ok(())
     }
 
     impl Drop for EnvGuard {
