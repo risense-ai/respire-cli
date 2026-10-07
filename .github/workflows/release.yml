@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    paths-ignore:
+      - '.github/**'
+      - 'docs/**'
+      - '**/*.md'
   workflow_dispatch:
     inputs:
       ref:
@@ -12,7 +16,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish after all binary, package and development-server checks
+        description: Publish DEV after build/package/CI gates; stable also requires full regression
         default: false
         type: boolean
 
@@ -69,6 +73,14 @@ jobs:
   validate:
     needs: plan
     uses: ./.github/workflows/release-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
+      full_validation: false
+
+  native-regression:
+    needs: [plan, validate]
+    uses: ./.github/workflows/release-native-validation.yml
     with:
       ref: ${{ needs.plan.outputs.sha }}
       version: ${{ needs.plan.outputs.version }}
@@ -311,7 +323,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [plan, validate, cloud-sweep, api-smoke]
+    # DEV regression continues independently; stable still waits for every result.
+    needs: [plan, validate]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -356,6 +369,36 @@ jobs:
           requireCi().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - run: npm install --global npm@11.5.1
+      - name: Require all regressions before stable publication
+        if: needs.plan.outputs.channel == 'latest'
+        timeout-minutes: 121
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireRegression(){
+            const deadline=Date.now()+120*60*1000;
+            while(Date.now()<deadline){
+              const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
+                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`
+              ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
+              const native=jobs.filter(job=>job.name.startsWith('native-regression / Native ('));
+              const cloud=jobs.filter(job=>job.name.startsWith('cloud-sweep ('));
+              const api=jobs.filter(job=>job.name==='api-smoke');
+              const required=[...native,...cloud,...api];
+              const failed=required.find(job=>job.status==='completed'&&job.conclusion!=='success');
+              if(failed) throw new Error(`Stable publication refused: ${failed.name} ${failed.conclusion}`);
+              if(native.length===7&&cloud.length===3&&api.length===1&&required.every(job=>job.conclusion==='success')){
+                console.log('All seven native upgrades, three system regressions and API checks passed');return;
+              }
+              console.log('Waiting for full stable regression; DEV does not use this gate');
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error('Stable regression did not complete within 120 minutes');
+          }
+          requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
       - uses: actions/download-artifact@v4
