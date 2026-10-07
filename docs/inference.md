@@ -54,7 +54,14 @@ switching accounts does not select another engine or model directory.
 The runtime loads one shared native ONNX session and executes inference in process.
 There is no inference child process or pipe protocol. Native calls execute on the
 command/background threads; health and progress requests remain independent.
-The former 120-second load and 15-second pipe-response deadlines no longer apply.
+Admission uses a FIFO queue with at most 32 waiting requests and a 120-second
+queue wait. A full queue rejects admission; an expired waiter is removed before
+native execution. Native model loading and inference each have a 120-second
+deadline. The former 15-second pipe-response timeout no longer applies.
+Deadline expiry requests cooperative native cancellation and rejects late results.
+It cannot guarantee that every provider releases a stuck native call. If a provider
+ignores cancellation, the host must use `rsrs restart --timeout 10` to recover the
+runtime; its verified process is terminated when graceful shutdown times out.
 Native execution errors retain their underlying cause and do not switch engines
 or permanently disable an engine after one failed call. Host recovery stops the
 runtime when native execution is stuck. Recovery does not delete models or memories. Sandboxes cannot take over
