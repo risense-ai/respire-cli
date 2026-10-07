@@ -344,6 +344,10 @@ class Smoke:
             require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
                 "new_device_ciphertext_differs")
         if version == 1:
+            # --pass authorizes login; matching RSRS_PASS exercises the headless
+            # commit and follow-up read contract, not authorization fallback.
+            # Owned native passwords remain available, so this does not prove
+            # recovery on a host without any native credential store.
             headless_env = dict(final_env, RSRS_PASS=password)
             self.cli(headless_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
                 "--pass=" + password)
@@ -368,6 +372,7 @@ class Smoke:
             secret_key_recovery=version == 3, cloud_v1_recovery_supported=version == 1,
             original_account_secret_preserved=version == 1,
             headless_password_login_verified=version == 1,
+            headless_password_login_scope="matching_environment_commit_and_followup_read; authorization_fallback_and_absent_native_store_not_tested" if version == 1 else None,
             recovery_factor="login_password_and_account_secret" if version == 1 else "original_super")
 
     def cleanup(self):
