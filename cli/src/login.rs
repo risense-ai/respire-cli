@@ -70,7 +70,7 @@ pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, su
         choice.trim() == "2"
     } else { interactive && !oauth };
     ensure!(!password_mode || (dashboard.is_none() && !no_open), "--dashboard and --no-open apply to OAuth login");
-    let authorization = if password_mode {
+    let mut authorization = if password_mode {
         let user = match user {
             Some(user) => user.to_owned(),
             None if respire::prompt::interactive() => respire::prompt::ask("username: ")?,
@@ -83,12 +83,46 @@ pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, su
         };
         respire::auth::password_authorization(&addr, user.trim(), &password)?
     } else { browser_authorization(&addr, user, dashboard, no_open)? };
-    let super_password = match super_password {
-        Some(value) if !value.is_empty() => value.to_owned(),
-        _ if respire::prompt::interactive() => respire::prompt::ask_secret("super password (A3-…): ")?,
-        _ => anyhow::bail!("authorization succeeded; enter the super password in an interactive terminal or supply --super; original account was preserved"),
+    let vault = respire_app::login_transaction::PreparedLogin::fetch_vault(&addr, &authorization)?;
+    ensure!(!vault.is_null(), "account has no cloud vault; explicitly migrate the original local library before login");
+    let super_password = if vault["version"] == 1 {
+        ensure!(super_password.is_none(), "v1 requires the original login password and Account Secret, not --super");
+        let user = authorization["user"].as_str().context("authorization did not return a user")?;
+        let current = respire::service::data_dir();
+        let main = respire::service::main_data_dir();
+        let directory = if respire::service::session_user_of_dir(&current) == user { current }
+            else if respire::service::session_user_of_dir(&main) == user { main }
+            else { respire::service::account_dir(user)? };
+        let local: Value = match std::fs::read(directory.join("session.json")) {
+            Ok(bytes) => serde_json::from_slice(&bytes).context("target account session is invalid")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({}),
+            Err(error) => return Err(error.into()),
+        };
+        let password = authorization["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
+            .or_else(|| pass.filter(|value| !value.is_empty()).map(str::to_owned))
+            .or_else(|| respire::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()))
+            .or_else(|| local["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
+            .or_else(|| respire::keystore::load_login_pass(local["keyring_account"].as_str().unwrap_or(user)));
+        authorization["pass"] = json!(match password {
+            Some(value) => value,
+            None if respire::prompt::interactive() => respire::prompt::ask_secret("original v1 login password: ")?,
+            None => anyhow::bail!("v1 recovery requires the original login password; original account was preserved"),
+        });
+        let secret = local["secret"].as_str().filter(|value| !value.is_empty()).map(str::to_owned);
+        authorization["secret"] = json!(match secret {
+            Some(value) => value,
+            None if respire::prompt::interactive() => respire::prompt::ask_secret("original v1 Account Secret: ")?,
+            None => anyhow::bail!("v1 recovery requires interactive Account Secret input; original account was preserved"),
+        });
+        String::new()
+    } else {
+        match super_password {
+            Some(value) if !value.is_empty() => value.to_owned(),
+            _ if respire::prompt::interactive() => respire::prompt::ask_secret("super password (A3-…): ")?,
+            _ => anyhow::bail!("authorization succeeded; enter the super password in an interactive terminal or supply --super; original account was preserved"),
+        }
     };
-    let prepared = respire_app::login_transaction::PreparedLogin::prepare(&addr, &authorization, super_password)?;
+    let prepared = respire_app::login_transaction::PreparedLogin::prepare_with_vault(&addr, &authorization, super_password, vault, None)?;
     commit_verified(&addr, &authorization, prepared, "login")
 }
 

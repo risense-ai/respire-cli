@@ -31,10 +31,19 @@ if 'v1.0.6' not in sources:
     baseline=next((item for item in releases if item['tag_name']=='v1.0.6-dev.37075716045' and not item['draft']),None)
     assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
     sources[baseline['tag_name']]=baseline
+# The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
+additional_draft_baselines=[]
+if 'v1.0.10' not in formal_sources:
+    # Draft assets retain their release/asset IDs even when the tag endpoint omits them.
+    baseline=json.loads(command('gh','api','repos/risense-ai/respire-cli/releases/403872621'))
+    assert baseline['tag_name']=='v1.0.10' and baseline['draft'],'1.0.10 compatibility baseline identity mismatch'
+    sources[baseline['tag_name']]=baseline
+    additional_draft_baselines.append(baseline['tag_name'])
 assert sources,'no upgrade source versions discovered'
 report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
         'published_formal_sources':formal_sources,
-        'unpublished_draft_stables':sorted(item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])),
+        'additional_draft_baselines':additional_draft_baselines,
+        'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
 try:
@@ -54,7 +63,13 @@ try:
                 with path.open('rb') as stream:
                     if hashlib.file_digest(stream,'sha256').hexdigest()!=digest[7:]: needed.append(name)
         if needed:
-            subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
+            if release['draft']:
+                for name in needed:
+                    with (folder/name).open('wb') as output:
+                        subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
+                            '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180)
+            else:
+                subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
         for name in names:
             digest=assets[name].get('digest')
             assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
@@ -72,7 +87,7 @@ try:
             '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
         checks=json.loads((result/'real-account-return-verification.json').read_text())
         assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
-        report['sources'].append({'version':tag[1:],'formal':stable(tag),'passed':True,'report':str(result/'real-account-return-verification.json')})
+        report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')})
     report['passed']=True
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')

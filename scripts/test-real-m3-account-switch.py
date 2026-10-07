@@ -70,6 +70,8 @@ for binary in BINARIES:
         artifacts = sorted((path.name,hashlib.sha256(path.read_bytes()).hexdigest()) for path in (profile/'core-index').iterdir())
         return (rows,artifacts,(profile/'session.json').read_bytes())
     old_runtime=None
+    old_rpc_checked=False
+    old_rpc_authenticated=False
     public_config={'addr':'https://fixture.invalid','autosync':False,'custom':'preserve-upgrade-fixture'}
     def select(profile):
         (main/'client.json').write_text(json.dumps({**public_config,'data_dir':str(profile)}),encoding='utf-8')
@@ -105,6 +107,18 @@ for binary in BINARIES:
                     break
                 except OSError: time.sleep(.1)
             else: raise RuntimeError('published old runtime did not become ready')
+            # The new client must exercise the old HTTP RPC, not only health/stop.
+            # Client-only status is read-only and cannot take over the old runtime.
+            original_token=token.read_bytes() if token.is_file() else None
+            old_status=run('--client-only','status')
+            assert old_status.get('status')=='ok','new client could not read the old runtime through HTTP RPC'
+            assert old_runtime.poll() is None,'client-only RPC replaced or stopped the old runtime'
+            request=urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers=headers)
+            with urllib.request.urlopen(request,timeout=2) as response: after_rpc=json.load(response)
+            assert after_rpc['pid']==old_runtime.pid,'client-only RPC changed runtime ownership'
+            assert (token.read_bytes() if token.is_file() else None)==original_token,'client-only RPC changed the old token file'
+            old_rpc_checked=True
+            old_rpc_authenticated=bool(original_token and original_token.strip())
         statuses=[]
         visited=set()
         generation_changes={}
@@ -204,7 +218,8 @@ for binary in BINARIES:
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,'source_and_keys_unchanged':True,
-            'compatible_index_reused':True,'forced_restart_checked':restart_checked,'initial_generation_changes':generation_changes,'fixture':str(root)})
+            'compatible_index_reused':True,'forced_restart_checked':restart_checked,'old_rpc_checked':old_rpc_checked,
+            'old_rpc_authenticated':old_rpc_authenticated,'initial_generation_changes':generation_changes,'fixture':str(root)})
         print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
     except Exception as error:
         reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000]})
