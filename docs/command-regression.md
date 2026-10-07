@@ -22,7 +22,7 @@ Current parser behavior and `rsrs --help` define the command contract.
 | Plugins | `plugin list`; `plugin test <EVENT> --payload <JSON>` |
 | Causal chain | `chain <ID> --depth <N>` |
 | Importance | `--importance important|trivial` |
-| Isolated data | `ONEMEMORY_DATA_DIR=<path>` |
+| Isolated data | `RSRS_DATA_DIR=<path>` |
 | Split | `split <ID>` preview; `split <ID> --go --spec <JSON>` apply |
 | Tree maintenance | `tree-cure` report; explicit `--id` and `--parent` apply |
 

@@ -83,7 +83,7 @@ class Suite:
         require(os.environ.get('GITHUB_ACTIONS') == 'true', 'github-actions-required')
         require(os.environ.get('RUNNER_OS') == 'Linux', 'isolated-linux-keyring-required')
         require(os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted', 'ephemeral-github-hosted-runner-required')
-        require(os.environ.get('RESPIRE_DEV_SERVER_ADDR') == 'https://api.dev.rsrs.rs', 'exact-development-server-required')
+        require(os.environ.get('RSRS_DEV_SERVER_ADDR') == 'https://api.dev.rsrs.rs', 'exact-development-server-required')
         require(re.fullmatch('[0-9a-f]{40}', self.args.cli_source_sha) is not None, 'exact-cli-source-sha-required')
         require(os.environ.get('CLI_SHA', os.environ.get('GITHUB_SHA')) == self.args.cli_source_sha, 'cli-build-source-sha-mismatch')
         require(hashlib.sha256(self.args.binary.read_bytes()).hexdigest() == self.args.binary_sha256.lower(), 'exact-cli-binary-sha-mismatch')
@@ -103,12 +103,12 @@ class Suite:
         self.env.update(HOME=str(self.home), USERPROFILE=str(self.home),
                         XDG_CONFIG_HOME=str(self.root / 'config'), XDG_DATA_HOME=str(self.root / 'data'),
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
-                        TMPDIR=str(self.root / 'tmp'), ONEMEMORY_BIN_DIR=str(self.root / 'bin'),
-                        ONEMEMORY_DATA_DIR=str(self.root),
-                        ONEMEMORY_M3_DIR=str(self.root / 'models' / 'bge-m3'),
-                        ONEMEMORY_ENGINE='cpu', ONEMEMORY_NO_AUTOSYNC='1')
-        require('RESPIRE_CORE_TEST_MODE' not in self.env
-                and Path(self.env['ONEMEMORY_DATA_DIR']).resolve() == self.root, 'fixture-environment-not-isolated')
+                        TMPDIR=str(self.root / 'tmp'), RSRS_BIN_DIR=str(self.root / 'bin'),
+                        RSRS_DATA_DIR=str(self.root),
+                        RSRS_M3_DIR=str(self.root / 'models' / 'bge-m3'),
+                        RSRS_ENGINE='cpu', RSRS_NO_AUTOSYNC='1')
+        require('RSRS_CORE_TEST_MODE' not in self.env
+                and Path(self.env['RSRS_DATA_DIR']).resolve() == self.root, 'fixture-environment-not-isolated')
         version = subprocess.run([str(self.args.binary), '--version'], env=self.env, capture_output=True, text=True, timeout=20)
         require(version.returncode == 0 and version.stdout.strip().split()[-1] == self.args.version, 'exact-cli-version-mismatch')
         self.direct(['config', '--data-dir', str(self.library), '--addr', 'https://api.dev.rsrs.rs', '--autosync', 'false'])
@@ -142,7 +142,7 @@ class Suite:
             port.bind(('127.0.0.1', 0))
             self.port = port.getsockname()[1]
         self.url = 'http://127.0.0.1:' + str(self.port)
-        env = dict(self.env, ONEMEMORY_RPC_PORT=str(self.port))
+        env = dict(self.env, RSRS_RPC_PORT=str(self.port))
         self.runtime = subprocess.Popen([str(self.args.binary), 'web', '--internal', '--no-open', '--port', str(self.port)],
                                         env=env, cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 40

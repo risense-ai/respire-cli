@@ -189,20 +189,20 @@ class Fixture:
         profile = self.root / name
         (profile / "home").mkdir(parents=True, mode=0o700)
         env = {key: value for key, value in os.environ.items()
-               if not key.startswith(("ONEMEMORY_", "RESPIRE_", "XDG_"))
+               if not key.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
                and not key.endswith(("_TOKEN", "_API_KEY"))
                and key not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
         env.update(HOME=str(profile / "home"), USERPROFILE=str(profile / "home"),
                    XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
-                   ONEMEMORY_DATA_DIR=str(profile / "library"), ONEMEMORY_BIN_DIR=str(profile / "bin"),
-                   ONEMEMORY_M3_DIR=str(self.args.model_dir), ONEMEMORY_ENGINE="cpu",
-                   ONEMEMORY_NO_AUTOSYNC="1")
-        for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "ONEMEMORY_DATA_DIR", "ONEMEMORY_BIN_DIR"):
+                   RSRS_DATA_DIR=str(profile / "library"), RSRS_BIN_DIR=str(profile / "bin"),
+                   RSRS_M3_DIR=str(self.args.model_dir), RSRS_ENGINE="cpu",
+                   RSRS_NO_AUTOSYNC="1")
+        for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "RSRS_DATA_DIR", "RSRS_BIN_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
-            env['ONEMEMORY_RPC_PORT'] = str(listener.getsockname()[1])
+            env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
         return env
 
     def direct(self, env, command, allow_pending=False, timeout=150):
@@ -238,7 +238,7 @@ class Fixture:
         self.created = True
         self.cleanup_report["unconfirmed_users"].remove(self.user)
         self.cleanup_report["remaining_users"].append(self.user)
-        session_path = Path(self.a["ONEMEMORY_DATA_DIR"]) / "session.json"
+        session_path = Path(self.a["RSRS_DATA_DIR"]) / "session.json"
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("user") == self.user and session.get("addr") == UPSTREAM
                 and isinstance(session.get("token"), str) and bool(session["token"]), "created_user_session_mismatch")
@@ -262,11 +262,11 @@ class Fixture:
             self.port = sock.getsockname()[1]
         env = self.a.copy()
         if automatic:
-            env.pop("ONEMEMORY_NO_AUTOSYNC", None)
-        env["ONEMEMORY_RPC_PORT"] = str(self.port)
+            env.pop("RSRS_NO_AUTOSYNC", None)
+        env["RSRS_RPC_PORT"] = str(self.port)
         self.child = subprocess.Popen([str(self.args.binary), "--runtime-internal", "--no-open", "--port", str(self.port)],
                                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        data_dir = Path(env["ONEMEMORY_DATA_DIR"])
+        data_dir = Path(env["RSRS_DATA_DIR"])
         token_path = data_dir / "runtime" / "token"
         endpoint_path = data_dir / "runtime" / "endpoint.json"
 
@@ -310,7 +310,7 @@ class Fixture:
         else:
             result = self.rpc(command)
             require(result.get("ok") and result.get("exit") == 0, "foreground_save_failed")
-        with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
             row = db.execute("SELECT id FROM memories WHERE title=? AND deleted=0", (title,)).fetchone()
         require(row is not None, "saved_memory_missing")
         return row[0]
@@ -337,11 +337,11 @@ class Fixture:
         report.setdefault("diagnostics", []).append(result)
 
     def pending(self):
-        with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
             return db.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0]
 
     def snapshot(self):
-        with sqlite3.connect(Path(self.a["ONEMEMORY_DATA_DIR"]) / "onememory.db") as db:
+        with sqlite3.connect(Path(self.a["RSRS_DATA_DIR"]) / "rsrs.db") as db:
             return {
                 "pending": db.execute("SELECT seq,id FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),
                 "envelopes": db.execute("SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted FROM sync_outbox WHERE state='pending' ORDER BY seq").fetchall(),

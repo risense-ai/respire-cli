@@ -10,7 +10,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$Server = $env:RESPIRE_DEV_SERVER_ADDR,
+    [string]$Server = $env:RSRS_DEV_SERVER_ADDR,
     [string]$Package = '@rsrsai/cli@dev',
     [string]$Root = '',
     [string]$Exe = '',
@@ -25,8 +25,8 @@ if (-not $Exe -or $ExpectVersion -notmatch '^\d+\.\d+\.\d+(-dev\.\d+)?$') {
     throw 'Release smoke requires an exact CI artifact via -Exe and its -ExpectVersion.'
 }
 if ($env:CLI_SHA -notmatch '^[0-9a-fA-F]{40}$') { throw 'CLI_SHA must identify the verified artifact source commit.' }
-if ([string]::IsNullOrWhiteSpace($env:RESPIRE_DEV_SERVER_ADDR) -or $Server -ne $env:RESPIRE_DEV_SERVER_ADDR) {
-    throw 'Configure RESPIRE_DEV_SERVER_ADDR with the approved development server before running this sweep.'
+if ([string]::IsNullOrWhiteSpace($env:RSRS_DEV_SERVER_ADDR) -or $Server -ne $env:RSRS_DEV_SERVER_ADDR) {
+    throw 'Configure RSRS_DEV_SERVER_ADDR with the approved development server before running this sweep.'
 }
 $pkgMatch = [regex]::Match($Package, '^@rsrsai/cli@(dev|\d+\.\d+\.\d+(-dev\.\d+)?)$')
 if (-not $pkgMatch.Success) {
@@ -385,15 +385,15 @@ function Invoke-Om {
     $psi.StandardErrorEncoding = $utf8
     $psi.StandardInputEncoding = $utf8
     foreach ($a in $ArgList) { $psi.ArgumentList.Add([string]$a) }
-    $psi.Environment['ONEMEMORY_DATA_DIR'] = $DataDir
-    $psi.Environment['ONEMEMORY_LANG'] = 'en'
+    $psi.Environment['RSRS_DATA_DIR'] = $DataDir
+    $psi.Environment['RSRS_LANG'] = 'en'
     $psi.Environment['HOME'] = $SmokeHome
     $psi.Environment['USERPROFILE'] = $SmokeHome
     $psi.Environment['XDG_CONFIG_HOME'] = Join-Path $SmokeHome '.config'
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
-    $psi.Environment['ONEMEMORY_M3_DIR'] = Join-Path $Root 'models/bge-m3'
-    $psi.Environment['ONEMEMORY_M3_DIR'] = Join-Path $Root 'models/bge-m3'
-    [void]$psi.Environment.Remove('ONEMEMORY_SERVER')
+    $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
+    $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
+    [void]$psi.Environment.Remove('RSRS_SERVER')
     Write-Host "STEP $script:Step $Name"
     $readyTries = 0
     $indexRetried = $false

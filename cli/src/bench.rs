@@ -296,19 +296,19 @@ pub struct BenchReport {
 
 /// Env vars that affect retrieval (recorded in the report).
 pub const PARAM_KEYS: &[&str] = &[
-    "ONEMEMORY_RECALL_MIN_SCORE",
-    "ONEMEMORY_MMR_LAMBDA",
-    "ONEMEMORY_ANCESTOR_BUDGET",
-    "ONEMEMORY_ANCESTOR_ROOT_FLOOR",
-    "ONEMEMORY_M3_DIR",
-    "ONEMEMORY_DEBUG_SCORE",
+    "RSRS_RECALL_MIN_SCORE",
+    "RSRS_MMR_LAMBDA",
+    "RSRS_ANCESTOR_BUDGET",
+    "RSRS_ANCESTOR_ROOT_FLOOR",
+    "RSRS_M3_DIR",
+    "RSRS_DEBUG_SCORE",
 ];
 
 /// Env snapshot (only vars that are set).
 pub fn snapshot_params() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     for k in PARAM_KEYS {
-        if let Ok(v) = std::env::var(k) {
+        if let Ok(v) = respire::env::var(k) {
             if !v.trim().is_empty() {
                 m.insert((*k).to_owned(), v);
             }

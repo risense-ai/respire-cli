@@ -187,14 +187,14 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
+        .env("PATH", respire_app::env::var("PATH").unwrap_or_default())
+        .env("HOME", respire_app::env::var("HOME").unwrap_or_default())
         .env(
-            "ONEMEMORY_HOOK_EVENT",
+            "RSRS_HOOK_EVENT",
             envelope["event"].as_str().unwrap_or(""),
         );
     #[cfg(windows)]
-    if let Some(root) = std::env::var_os("SystemRoot") {
+    if let Some(root) = respire_app::env::var_os("SystemRoot") {
         spawn.env("SystemRoot", root);
     }
     let mut child = match spawn.spawn() {
@@ -339,14 +339,14 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         // config_path points at a missing test dir -> empty config, fire allows
         std::env::set_var(
-            "ONEMEMORY_DATA_DIR",
+            "RSRS_DATA_DIR",
             "/tmp/onememory-hooks-test-nonexistent",
         );
         let cfg = read_config();
         assert!(cfg.hooks.is_empty());
         let v = fire(HookEvent::PreRemember, serde_json::json!({}));
         assert!(!v.blocked);
-        std::env::remove_var("ONEMEMORY_DATA_DIR");
+        std::env::remove_var("RSRS_DATA_DIR");
     }
 
     #[test]
@@ -363,8 +363,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = respire::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let cfg = serde_json::json!({
             "hooks": {
                 "pre-remember": [{"cmd": "exit 0", "timeout_ms": 2000, "on_error": "warn"}]
@@ -382,8 +382,8 @@ mod tests {
         let v = fire(HookEvent::PreRemember, serde_json::json!({}));
         assert!(v.blocked);
         match saved {
-            Some(s) => std::env::set_var("ONEMEMORY_DATA_DIR", s),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(s) => std::env::set_var("RSRS_DATA_DIR", s),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }
@@ -405,8 +405,8 @@ mod tests {
     fn hook_failure_policies_and_explicit_veto() -> anyhow::Result<()> {
         let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var_os("ONEMEMORY_DATA_DIR");
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = respire::env::var_os("RSRS_DATA_DIR");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> anyhow::Result<()> {
             for (event, policy, blocked, warned) in [
                 (HookEvent::PreRemember, "", false, true),
@@ -446,8 +446,8 @@ mod tests {
             Ok(())
         })();
         match saved {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         result
     }

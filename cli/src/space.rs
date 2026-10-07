@@ -60,7 +60,7 @@ pub fn validate_space_name(name: &str) -> Result<()> {
 /// before register, so every directory under accounts/ counts as a space.
 pub fn space_list() -> Result<serde_json::Value> {
     let current = data_dir();
-    // "primary" = the space-profile root (`ONEMEMORY_DATA_DIR` or its default), **not** current -
+    // "primary" = the space-profile root (`RSRS_DATA_DIR` or its default), **not** current -
     // current may already be a space profile after a switch. Treating current as main makes
     // the main row always "current" and the real profile look inactive (2026-09-20: GUI showed
     // "current: main   teamA").
@@ -151,7 +151,7 @@ pub fn space_invite(note: Option<&str>, readonly: bool) -> Result<serde_json::Va
         return Err(anyhow!("this profile has no token - login/register first"));
     }
     let super_pass = crate::keystore::load_super(&user).ok_or_else(|| {
-        anyhow!("cannot load this space's super password (not in the keyring and ONEMEMORY_SUPER is unset) - login --super <code> to store it")
+        anyhow!("cannot load this space's super password (not in the keyring and RSRS_SUPER is unset) - login --super <code> to store it")
     })?;
     let name = space_name_of(&dir).unwrap_or_else(|| user.clone());
 
@@ -567,8 +567,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = respire::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert!(space_create("main").is_err());
         let created = space_create("team_a")?;
         assert_eq!(created["name"], "team_a");
@@ -586,8 +586,8 @@ mod tests {
         space_use("main")?;
         space_remove("team_a")?;
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }

@@ -46,17 +46,25 @@ for binary in BINARIES:
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0)); port = listener.getsockname()[1]
     env = os.environ.copy()
-    for key in ['ONEMEMORY_CLIENT_ONLY','ONEMEMORY_NO_AUTOSTART','ONEMEMORY_RUNTIME_WORKER','RESPIRE_CORE_TEST_MODE','ONEMEMORY_RPC_TOKEN','ONEMEMORY_ENGINE','ONEMEMORY_ADDR','ONEMEMORY_TOKEN','ONEMEMORY_JSON','ONEMEMORY_ORT_DEBUG']:
-        env.pop(key,None)
-    env.update(HOME=str(root), USERPROFILE=str(root), ONEMEMORY_DATA_DIR=str(main), ONEMEMORY_RPC_PORT=str(port),
-        ONEMEMORY_SUPER=code,ONEMEMORY_NO_AUTOSYNC='1',ONEMEMORY_UPDATE_CHECK='0',ONEMEMORY_M3_DIR=str(CACHE))
-    seed_env={**env,'ONEMEMORY_M3_DIR':str(LEGACY_CACHE)}
+    for suffix in ['CLIENT_ONLY','NO_AUTOSTART','RUNTIME_WORKER','CORE_TEST_MODE','RPC_TOKEN','ENGINE','ADDR','TOKEN','JSON','ORT_DEBUG']:
+        for prefix in ['RSRS_', 'ONEMEMORY_', 'RESPIRE_']:
+            env.pop(prefix + suffix,None)
+    env.update(HOME=str(root), USERPROFILE=str(root), RSRS_DATA_DIR=str(main), RSRS_RPC_PORT=str(port),
+        RSRS_SUPER=code,RSRS_NO_AUTOSYNC='1',RSRS_UPDATE_CHECK='0',RSRS_M3_DIR=str(CACHE))
+    seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
+    # Historical artifacts predate RSRS_*; keep their inputs explicit and
+    # isolated instead of accidentally testing the operator's default library.
+    for key, value in list(seed_env.items()):
+        if key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_')):
+            seed_env['ONEMEMORY_' + key[5:]] = value
     def run(*args, allow_failure=False):
         result = subprocess.run([str(binary),'--json',*args],env=env,capture_output=True,timeout=120)
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
         return json.loads(result.stdout)
     def snapshot(profile):
-        with sqlite3.connect(profile/'onememory.db') as db:
+        database = profile/'rsrs.db'
+        if not database.exists(): database = profile/'onememory.db'
+        with sqlite3.connect(database) as db:
             rows = [db.execute(query).fetchall() for query in ['SELECT id,ciphertext,nonce,dirty,deleted FROM memories ORDER BY id',
                 'SELECT * FROM sync_outbox ORDER BY seq','SELECT * FROM core_artifacts ORDER BY memory_id,model']]
         artifacts = sorted((path.name,hashlib.sha256(path.read_bytes()).hexdigest()) for path in (profile/'core-index').iterdir())

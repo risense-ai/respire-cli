@@ -260,7 +260,7 @@ pub fn sync_controlled(
         stats.historical_conflicts,
         stats.resolving_conflicts,
     ) = control.local(|| local.conflict_metrics())?;
-    if std::env::var_os("ONEMEMORY_SYNC_TIMING").is_some() {
+    if crate::env::var_os("RSRS_SYNC_TIMING").is_some() {
         eprintln!(
             "sync protocol={} elapsed_ms={} pulled={} pushed={} pending={} conflicts={}",
             stats.protocol,
@@ -369,11 +369,11 @@ pub fn build_remote_from_env() -> Result<RemoteTransport> {
         }
     }
     // 2) env vars
-    let addr = std::env::var("ONEMEMORY_ADDR").map_err(|_| {
-        anyhow::anyhow!("sync needs ONEMEMORY_ADDR (server address) or a prior register/login")
+    let addr = crate::env::var("RSRS_ADDR").map_err(|_| {
+        anyhow::anyhow!("sync needs RSRS_ADDR (server address) or a prior register/login")
     })?;
-    let token = std::env::var("ONEMEMORY_TOKEN")
-        .map_err(|_| anyhow::anyhow!("sync needs ONEMEMORY_TOKEN"))?;
+    let token = crate::env::var("RSRS_TOKEN")
+        .map_err(|_| anyhow::anyhow!("sync needs RSRS_TOKEN"))?;
     Ok(RemoteTransport::new(
         crate::transport::remote::RemoteConfig {
             address: addr,
@@ -394,7 +394,7 @@ pub fn remote_configured() -> bool {
             }
         }
     }
-    std::env::var("ONEMEMORY_ADDR")
+    crate::env::var("RSRS_ADDR")
         .map(|a| !a.trim().is_empty())
         .unwrap_or(false)
 }
@@ -549,18 +549,18 @@ mod tests {
 
     fn remote_configured_flag() -> anyhow::Result<()> {
         // Isolate: temp HOME (no session.json), only test the env-var branch
-        let saved_home = std::env::var("HOME").ok();
+        let saved_home = crate::env::var("HOME").ok();
         let dir = tempfile::tempdir()?;
         std::env::set_var("HOME", dir.path());
-        let saved = std::env::var("ONEMEMORY_ADDR").ok();
-        std::env::remove_var("ONEMEMORY_ADDR");
+        let saved = crate::env::var("RSRS_ADDR").ok();
+        std::env::remove_var("RSRS_ADDR");
         assert!(!remote_configured());
-        std::env::set_var("ONEMEMORY_ADDR", "http://x");
+        std::env::set_var("RSRS_ADDR", "http://x");
         assert!(remote_configured());
         // restore
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_ADDR", v),
-            None => std::env::remove_var("ONEMEMORY_ADDR"),
+            Some(v) => std::env::set_var("RSRS_ADDR", v),
+            None => std::env::remove_var("RSRS_ADDR"),
         }
         match saved_home {
             Some(v) => std::env::set_var("HOME", v),

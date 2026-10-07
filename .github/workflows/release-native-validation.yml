@@ -69,11 +69,11 @@ jobs:
       - name: Install and probe BGE CPU inference
         shell: bash
         env:
-          ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/release-probe
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
-          ONEMEMORY_NO_AUTOSYNC: '1'
-          ONEMEMORY_UPDATE_CHECK: '0'
+          RSRS_ENGINE: cpu
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/release/rsrs

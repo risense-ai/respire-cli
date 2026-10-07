@@ -19,7 +19,7 @@ On a glibc Linux host, prepare the SDK and compile the native GNU target:
 ```sh
 target="$(uname -m)-unknown-linux-gnu"
 node scripts/fetch-core-sdk.mjs "$target"
-export RESPIRE_CORE_SDK_DIR="$PWD/.sdk/$target"
+export RSRS_CORE_SDK_DIR="$PWD/.sdk/$target"
 cargo build --release --locked -p respire --bin rsrs --target "$target" --target-dir target/ci
 node scripts/stage-core-runtime.mjs "target/ci/$target/release"
 ```

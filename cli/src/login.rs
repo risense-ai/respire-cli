@@ -33,7 +33,7 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
     let expires = grant["expires_in"].as_u64().filter(|seconds| *seconds > 0 && *seconds <= 600).context("authorization response has an invalid expiry")?;
     let mut interval = grant["interval"].as_u64().filter(|seconds| *seconds > 0 && *seconds <= 30).context("authorization response has an invalid polling interval")?;
     let url = format!("{dashboard}/#/authorize?code={code}");
-    ensure!(grant["verification_uri_complete"].as_str() == Some(url.as_str()), "server dashboard differs from the expected dashboard; configure RESPIRE_DASHBOARD_URL on the server or --dashboard in the CLI");
+    ensure!(grant["verification_uri_complete"].as_str() == Some(url.as_str()), "server dashboard differs from the expected dashboard; configure RSRS_DASHBOARD_URL on the server or --dashboard in the CLI");
     eprintln!("Authorize CLI: {url}\nCheck code: {code}");
     if !no_open { crate::web::open_browser(&url)?; }
     let deadline = Instant::now() + Duration::from_secs(expires);

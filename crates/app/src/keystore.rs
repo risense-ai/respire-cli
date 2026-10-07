@@ -1,9 +1,9 @@
 //! keystore — super-password (v4 single-factor key) storage.
 //!
 //! Priority: persistent Secret Service on Linux, then its volatile kernel store;
-//! Keychain/Credential Manager elsewhere; finally env ONEMEMORY_SUPER.
+//! Keychain/Credential Manager elsewhere; finally env RSRS_SUPER.
 //! > none. Plaintext is never written to session.json from v4 on — a disk copy cannot decrypt.
-//! Headless servers (no keyring) use ONEMEMORY_SUPER or pass --super each time.
+//! Headless servers (no keyring) use RSRS_SUPER or pass --super each time.
 
 use anyhow::{anyhow, Context, Result};
 
@@ -280,14 +280,14 @@ pub fn delete_login_pass(user: &str) {
     delete_label(&format!("pass:{}", credential_account(user)));
 }
 
-/// Load super password: OS keyring → env ONEMEMORY_SUPER → None.
+/// Load super password: OS keyring → env RSRS_SUPER → None.
 /// Any failure of entry()/get_password() (headless, no keyring) must fall through to the env var.
 pub fn load_super(user: &str) -> Option<String> {
     let from_ring = read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
         .into_iter()
         .next();
     from_ring.or_else(|| {
-        std::env::var("ONEMEMORY_SUPER")
+        crate::env::var("RSRS_SUPER")
             .ok()
             .filter(|s| !s.is_empty())
     })
@@ -330,13 +330,13 @@ mod host_tests {
     #[test]
     fn load_super_falls_back_to_env() {
         let _guard = crate::test_lock::guard();
-        let saved = std::env::var("ONEMEMORY_SUPER").ok();
-        std::env::set_var("ONEMEMORY_SUPER", "env-super");
+        let saved = crate::env::var("RSRS_SUPER").ok();
+        std::env::set_var("RSRS_SUPER", "env-super");
         let got = load_super("no-such-user-zzzz");
         assert_eq!(got.as_deref(), Some("env-super"));
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_SUPER", v),
-            None => std::env::remove_var("ONEMEMORY_SUPER"),
+            Some(v) => std::env::set_var("RSRS_SUPER", v),
+            None => std::env::remove_var("RSRS_SUPER"),
         }
     }
 }
@@ -357,7 +357,7 @@ pub fn load_classify_key(backend: &str) -> Option<String> {
         } else {
             "TYPESAFE_API_KEY"
         };
-        std::env::var(var).ok().filter(|s| !s.is_empty())
+        crate::env::var(var).ok().filter(|s| !s.is_empty())
     })
 }
 

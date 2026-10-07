@@ -63,7 +63,7 @@ fn configured_provider() -> Option<crate::classify::Backend> {
         .or_else(respire::keystore::load_ds_last_base)
         .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned());
     let slot = format!("ds@{}", respire::keystore::host_of(&base));
-    let key = std::env::var("ONEMEMORY_RECALL_API_KEY")
+    let key = respire::env::var("RSRS_RECALL_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| respire::keystore::load_classify_key(&slot))?;

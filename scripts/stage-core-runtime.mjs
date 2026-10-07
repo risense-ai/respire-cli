@@ -3,8 +3,9 @@ import {copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const [destination] = process.argv.slice(2);
-if (!destination || !process.env.RESPIRE_CORE_SDK_DIR) throw new Error('Set RESPIRE_CORE_SDK_DIR and pass the binary directory');
-const sdk = resolve(process.env.RESPIRE_CORE_SDK_DIR), output = resolve(destination);
+const configured = process.env.RSRS_CORE_SDK_DIR ?? process.env.ONEMEMORY_CORE_SDK_DIR ?? process.env.RESPIRE_CORE_SDK_DIR;
+if (!destination || !configured) throw new Error('Set RSRS_CORE_SDK_DIR and pass the binary directory');
+const sdk = resolve(configured), output = resolve(destination);
 const manifest = JSON.parse(readFileSync(join(sdk,'manifest.json'),'utf8'));
 const files = [];
 for (const file of manifest.files) {

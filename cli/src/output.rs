@@ -609,15 +609,15 @@ mod tests {
         let guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let prev = std::env::var("ONEMEMORY_LANG").ok();
-        std::env::set_var("ONEMEMORY_LANG", "en");
+        let prev = respire::env::var("RSRS_LANG").ok();
+        std::env::set_var("RSRS_LANG", "en");
         (guard, prev)
     }
 
     fn restore_lang(prev: Option<String>) {
         match prev {
-            Some(value) => std::env::set_var("ONEMEMORY_LANG", value),
-            None => std::env::remove_var("ONEMEMORY_LANG"),
+            Some(value) => std::env::set_var("RSRS_LANG", value),
+            None => std::env::remove_var("RSRS_LANG"),
         }
     }
 
@@ -671,7 +671,7 @@ mod tests {
         result.details["retrieval_index"]["error"] = serde_json::json!("download failed");
         let pending = result.render(false)?;
         anyhow::ensure!(pending.contains("waiting for progress") && pending.contains("download failed"), "{pending}");
-        std::env::set_var("ONEMEMORY_LANG", "zh");
+        std::env::set_var("RSRS_LANG", "zh");
         let chinese = result.render(false)?;
         anyhow::ensure!(chinese.contains("下载中") && chinese.contains("等待进度") && chinese.contains("后台索引"), "{chinese}");
         restore_lang(prev);
@@ -745,7 +745,7 @@ mod tests {
             "{nested:?}"
         );
         anyhow::ensure!(nested.iter().any(|row| row[1] == "2"), "{nested:?}");
-        std::env::set_var("ONEMEMORY_LANG", "zh");
+        std::env::set_var("RSRS_LANG", "zh");
         anyhow::ensure!(humanize_value("converged") == "已对齐");
         anyhow::ensure!(humanize_value("12 total / 3 active").contains("总数"));
         anyhow::ensure!(humanize_value("pulled 1 / pushed 2").contains("下载"));
@@ -764,7 +764,7 @@ mod tests {
         let text = result.render(false)?;
         anyhow::ensure!(text.contains("动作"), "{text}");
         anyhow::ensure!(!text.contains('{'), "{text}");
-        std::env::set_var("ONEMEMORY_LANG", "en");
+        std::env::set_var("RSRS_LANG", "en");
         let text = result.render(false)?;
         anyhow::ensure!(text.contains("ACTION"), "{text}");
         restore_lang(prev);

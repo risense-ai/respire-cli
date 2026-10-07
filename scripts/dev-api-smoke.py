@@ -2,8 +2,8 @@
 """Opt-in cloud API smoke for Actions and api.dev.rsrs.rs; never prints credentials.
 
 Run: python3 scripts/dev-api-smoke.py --scope all --report <coverage.json>
-Requires GITHUB_ACTIONS=true, RESPIRE_DEV_SERVER_ADDR=https://api.dev.rsrs.rs,
-RESPIRE_DEV_API_ADMIN_APPROVED=true and secret RESPIRE_DEV_ADMIN_TOKEN.
+Requires GITHUB_ACTIONS=true, RSRS_DEV_SERVER_ADDR=https://api.dev.rsrs.rs,
+RSRS_DEV_API_ADMIN_APPROVED=true and secret RSRS_DEV_ADMIN_TOKEN.
 This supplements CLI smoke. Synthetic opaque ciphertext checks the server
 contract; actual client encryption/decryption belongs to the separate CLI run.
 """
@@ -57,9 +57,9 @@ class Smoke:
         self.cleanup_events = []
         self.users = {}
         self.admins = set()
-        self.seed = os.environ.get('RESPIRE_DEV_ADMIN_TOKEN', '')
-        self.base = os.environ.get('RESPIRE_DEV_SERVER_ADDR', '').rstrip('/')
-        self.expected_server_sha = os.environ.get('RESPIRE_DEV_SERVER_SHA', '').lower()
+        self.seed = os.environ.get('RSRS_DEV_ADMIN_TOKEN', '')
+        self.base = os.environ.get('RSRS_DEV_SERVER_ADDR', '').rstrip('/')
+        self.expected_server_sha = os.environ.get('RSRS_DEV_SERVER_SHA', '').lower()
         self.actual_server_sha = None
         self.unconfirmed_creations = set()
         run = os.environ.get('GITHUB_RUN_ID', '')
@@ -78,7 +78,7 @@ class Smoke:
             raise SmokeFailure('github-run-identity-required')
         if self.args.scope != 'all':
             raise SmokeFailure('full-scope-required-no-partial-success')
-        if os.environ.get('RESPIRE_DEV_API_ADMIN_APPROVED') != 'true':
+        if os.environ.get('RSRS_DEV_API_ADMIN_APPROVED') != 'true':
             raise SmokeFailure('development-admin-scope-not-approved')
         if not self.seed.strip():
             raise SmokeFailure('development-admin-secret-missing')
@@ -334,7 +334,7 @@ class Smoke:
 
     def email_and_totp(self, a, owner):
         self.owned(a['user'])
-        email = os.environ.get('RESPIRE_DEV_MAIL_ADDRESS', '')
+        email = os.environ.get('RSRS_DEV_MAIL_ADDRESS', '')
         if not email:
             raise SmokeFailure('development-test-mailbox-not-configured')
         requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat()

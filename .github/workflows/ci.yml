@@ -77,9 +77,9 @@ jobs:
       - name: Verify musl CPU inference
         if: contains(matrix.target, '-musl')
         env:
-          ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/musl-probe
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/musl-probe/model
+          RSRS_ENGINE: cpu
+          RSRS_DATA_DIR: ${{ runner.temp }}/musl-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/musl-probe/model
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/release/rsrs
@@ -88,9 +88,9 @@ jobs:
       - name: Verify glibc CPU inference
         if: contains(matrix.target, '-gnu')
         env:
-          ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/glibc-probe
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/glibc-probe/model
+          RSRS_ENGINE: cpu
+          RSRS_DATA_DIR: ${{ runner.temp }}/glibc-probe
+          RSRS_M3_DIR: ${{ runner.temp }}/glibc-probe/model
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/debug/rsrs
@@ -100,10 +100,10 @@ jobs:
     if: ${{ !inputs.native_published_only }}
     runs-on: ubuntu-latest
     env:
-      ONEMEMORY_ENGINE: cpu
+      RSRS_ENGINE: cpu
       # Several existing tests change process-global data-dir/language variables.
       # Their own parallel-request checks still create concurrent client threads.
-      RESPIRE_CORE_TEST_MODE: '1'
+      RSRS_CORE_TEST_MODE: '1'
       RUST_TEST_THREADS: '1'
     steps:
       - uses: actions/checkout@v4

@@ -31,7 +31,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         self.normalized_current_entries = set()
         self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
         require(sys.platform.startswith("linux")
-                and os.environ.get("RESPIRE_SS_FIXTURE_BUS") == "private"
+                and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
                 and self.bus.startswith("unix:"), "private_fixture_session_bus_required")
         require(version("SecretStorage") == "3.3.3" and version("jeepney") == "0.9.0",
                 "secret_service_fixture_dependencies_not_pinned")
@@ -103,7 +103,7 @@ class SecretServiceKeys(_base.TrackedKeys):
     def configure_env(self, env):
         super().configure_env(env)
         env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
-        env["RESPIRE_SS_FIXTURE_BUS"] = "private"
+        env["RSRS_SS_FIXTURE_BUS"] = "private"
         return env
 
     @staticmethod

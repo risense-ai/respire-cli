@@ -2,7 +2,7 @@
 
 MCP connector for [WorkBuddy](https://open.workbuddy.cn/docs/connector). Type is `mcp`, not `cli`.
 
-WorkBuddy's default sandbox cannot run the npm-wrapped `rsrs` CLI against `~/.respire`. This package starts `rsrs mcp` in WorkBuddy's Node runtime (outside Bash) and teaches the model to use MCP tools only.
+WorkBuddy's default sandbox cannot run the npm-wrapped `rsrs` CLI against `~/.rsrs`. This package starts `rsrs mcp` in WorkBuddy's Node runtime (outside Bash) and teaches the model to use MCP tools only.
 
 ## Layout
 

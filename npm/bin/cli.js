@@ -17,7 +17,7 @@ const PKGS = {
 const key = `${process.platform}-${process.arch}`;
 let pkg = PKGS[key];
 if (process.platform === 'linux') {
-  const libc = process.env.RSRS_LIBC || 'musl';
+  const libc = process.env.RSRS_LIBC ?? process.env.ONEMEMORY_LIBC ?? process.env.RESPIRE_LIBC ?? 'musl';
   if (libc !== 'musl' && libc !== 'glibc') {
     console.error('rsrs: RSRS_LIBC must be musl or glibc.');
     process.exit(1);

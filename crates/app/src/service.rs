@@ -799,11 +799,11 @@ pub fn expand_tilde(v: &str) -> PathBuf {
     PathBuf::from(v)
 }
 
-/// Resolve `ONEMEMORY_DATA_DIR` to an absolute path (None if unset or empty).
+/// Resolve `RSRS_DATA_DIR` to an absolute path (None if unset or empty).
 /// Semantics: the env var names the profile root — the `main` profile is that root, space profiles live under its `accounts/`,
 /// and client.json lives there too (an isolated instance must not write config into the real user dir).
 pub fn env_root_dir() -> Option<PathBuf> {
-    let v = std::env::var("ONEMEMORY_DATA_DIR").ok()?;
+    let v = crate::env::var("RSRS_DATA_DIR").ok()?;
     let v = v.trim();
     if v.is_empty() {
         return None;
@@ -817,7 +817,7 @@ pub fn env_root_dir() -> Option<PathBuf> {
 /// client.json path is special: it itself decides data_dir, so **usually** we always read the copy in the default dir
 /// (otherwise after changing data_dir the new dir has no client.json and config locks itself).
 ///
-/// **Exception (2026-09-20)**: when `ONEMEMORY_DATA_DIR` is set, client.json is read from that root
+/// **Exception (2026-09-20)**: when `RSRS_DATA_DIR` is set, client.json is read from that root
 /// (`<root>/client.json`). Why: that env var is the only isolation entry for tests/multi-lib; if config still landed in the real
 /// user dir, an isolated instance switching profiles would write the real client.json and pollute the user env (hit twice:
 /// after teardown the real library status became "user local, 0 entries" until data_dir was cleared by hand).
@@ -850,7 +850,7 @@ fn write_client_config(data: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-// ── data dir (client.json data_dir → ONEMEMORY_DATA_DIR → ~/.rsrs) ──
+// ── data dir (client.json data_dir → RSRS_DATA_DIR → ~/.rsrs) ──
 // For tests and multi-lib maintenance: changing data_dir switches the whole library (db/session/lock follow).
 // Order: env var wins (one-shot override for CI/tests) → client.json data_dir → default ~/.rsrs.
 
@@ -860,7 +860,7 @@ pub fn default_data_dir() -> PathBuf {
         .join(".rsrs")
 }
 
-/// Main-profile dir: `ONEMEMORY_DATA_DIR` when isolated, else default `~/.rsrs`.
+/// Main-profile dir: `RSRS_DATA_DIR` when isolated, else default `~/.rsrs`.
 /// **Every "back to main" path must use this**, not a hard `default_data_dir()` — otherwise an isolated instance
 /// switching back to main would land in the real user dir (hit 2026-09-20).
 pub fn main_data_dir() -> PathBuf {
@@ -869,11 +869,11 @@ pub fn main_data_dir() -> PathBuf {
 
 /// Effective data dir. Empty/missing fall back to default — never panics.
 ///
-/// Order: `ONEMEMORY_DATA_DIR` (test/CI one-shot) > client.json data_dir > default.
+/// Order: `RSRS_DATA_DIR` (test/CI one-shot) > client.json data_dir > default.
 ///
-/// **Exception (2026-09-20)**: if client.json data_dir sits inside the `ONEMEMORY_DATA_DIR` tree,
+/// **Exception (2026-09-20)**: if client.json data_dir sits inside the `RSRS_DATA_DIR` tree,
 /// prefer it. Why: `space use` writes client.json data_dir, which always lives under
-/// that root (`accounts_root()` also follows ONEMEMORY_DATA_DIR); if the env var still always won,
+/// that root (`accounts_root()` also follows RSRS_DATA_DIR); if the env var still always won,
 /// switching spaces in isolation would **silently fail** — session falls back to the root, the space profile is empty (hit in tests).
 /// Semantically the env var names the root; switching moves inside the root; they do not conflict.
 pub fn data_dir() -> PathBuf {
@@ -923,7 +923,7 @@ pub fn set_data_dir(dir: &str) -> Result<()> {
 // ── multi-account profiles on one machine: each account has its own data dir (library/keys/session switch with data_dir) ──
 // Profile root is accounts/ under the default dir (**does not follow client.json data_dir** — otherwise after a switch
 // accounts_root would become <profile>/accounts and other profiles would vanish).
-// But **when ONEMEMORY_DATA_DIR is set it must follow** (fixed 2026-09-20): that var is the only isolation entry
+// But **when RSRS_DATA_DIR is set it must follow** (fixed 2026-09-20): that var is the only isolation entry
 // for tests/multi-lib; if the profile root still landed in real HOME, isolated space profiles polluted the user dir (hit:
 // a web isolation instance created work/sales under ~/.rsrs/accounts).
 // Scene: several accounts on one machine (work/personal/test); login no longer needs logout --full to wipe key material.
@@ -968,7 +968,7 @@ pub fn account_list() -> Result<serde_json::Value> {
         names.sort();
         for n in names {
             let dir = accounts_root().join(&n);
-            if !dir.join("session.json").exists() && !dir.join("onememory.db").exists() {
+            if !dir.join("session.json").exists() && !database_path(&dir)?.exists() {
                 continue;
             }
             rows.push(serde_json::json!({
@@ -1025,7 +1025,7 @@ pub fn account_remove(name: &str) -> Result<()> {
 // ── maintenance counter (auto-triggers memory resort) ──
 // data_dir/maintenance.json: writes_since_resort write count (remember/merge success +1),
 // at threshold the store output prints a broom alert — the AI then runs §3.8 resort; resort --go success zeros it.
-// Default threshold 30; env ONEMEMORY_RESORT_HINT can override (tests).
+// Default threshold 30; env RSRS_RESORT_HINT can override (tests).
 
 pub fn maintenance_path() -> PathBuf {
     data_dir().join("maintenance.json")
@@ -1038,7 +1038,7 @@ pub fn counter_bump(path: &Path) -> Result<(u64, u64)> {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     let n = v["writes_since_resort"].as_u64().unwrap_or(0) + 1;
-    let threshold = std::env::var("ONEMEMORY_RESORT_HINT")
+    let threshold = crate::env::var("RSRS_RESORT_HINT")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|t| *t > 0)
@@ -1414,11 +1414,11 @@ pub fn set_server_addr(addr: &str) -> Result<()> {
     write_client_config(&data)
 }
 
-/// Auto-sync switch: ONEMEMORY_NO_AUTOSYNC env wins (set and not 0 → off);
+/// Auto-sync switch: RSRS_NO_AUTOSYNC env wins (set and not 0 → off);
 /// then client.json autosync (the client "auto-sync after write" toggle);
 /// default = on (if remote is configured, auto-sync; backward compatible).
 pub fn autosync_enabled() -> bool {
-    if std::env::var("ONEMEMORY_NO_AUTOSYNC").is_ok_and(|v| v != "0") {
+    if crate::env::var("RSRS_NO_AUTOSYNC").is_ok_and(|v| v != "0") {
         return false;
     }
     read_client_config()
@@ -2182,7 +2182,7 @@ pub fn import_share_payload(
 
 /// SQLite consistent snapshot, including committed WAL; dest must be a new file, never overwrite existing data.
 pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
-    let src = data_dir().join("onememory.db");
+    let src = database_path(&data_dir())?;
     let connection =
         rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let target = dest
@@ -2633,7 +2633,7 @@ pub fn open_store() -> Result<LocalStore> {
     let root = data_dir();
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
-    let db = root.join("onememory.db");
+    let db = database_path(&root)?;
     if RUNTIME_PROFILE.get().is_some() {
         LocalStore::open_existing(&db)
     } else {
@@ -2641,8 +2641,17 @@ pub fn open_store() -> Result<LocalStore> {
     }
 }
 
+/// New libraries use rsrs.db; opening an existing library never renames it.
+pub fn database_path(root: &Path) -> Result<PathBuf> {
+    let current = root.join("rsrs.db");
+    let legacy = root.join("onememory.db");
+    anyhow::ensure!(!(current.exists() && legacy.exists()),
+        "both rsrs.db and the legacy database exist; select the intended library explicitly");
+    Ok(if current.exists() || !legacy.exists() { current } else { legacy })
+}
+
 pub fn home_dir() -> Result<PathBuf> {
-    if let Ok(home) = std::env::var("HOME") {
+    if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {
             return Ok(PathBuf::from(home));
         }
@@ -2697,7 +2706,7 @@ pub fn now_stamp() -> String {
 }
 
 pub fn current_user() -> String {
-    std::env::var("ONEMEMORY_USER").unwrap_or_else(|_| "local".to_owned())
+    crate::env::var("RSRS_USER").unwrap_or_else(|_| "local".to_owned())
 }
 
 /// Filter candidates: trim, drop empty, take the first non-empty (an env var set to empty is also dropped —
@@ -2716,8 +2725,8 @@ fn first_non_empty<I: IntoIterator<Item = String>>(vals: I) -> Option<String> {
 pub fn host_name() -> Option<String> {
     first_non_empty([
         std::fs::read_to_string("/etc/hostname").unwrap_or_default(),
-        std::env::var("COMPUTERNAME").unwrap_or_default(),
-        std::env::var("HOSTNAME").unwrap_or_default(),
+        crate::env::var("COMPUTERNAME").unwrap_or_default(),
+        crate::env::var("HOSTNAME").unwrap_or_default(),
         whoami::hostname().unwrap_or_default(),
     ])
 }
@@ -2983,8 +2992,8 @@ mod tests {
     fn session_info_v4_recognizes_wrapped_urk_as_local_keys() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved_dir = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved_dir = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         // v4 shape: wrap material only, no user/token/plaintext keys (keygen output looks like this)
         std::fs::write(
             dir.path().join("session.json"),
@@ -3003,8 +3012,8 @@ mod tests {
         );
         assert!(!si.has_token, "offline mode has no token");
         match saved_dir {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }
@@ -3013,8 +3022,8 @@ mod tests {
     fn resume_session_skips_the_form_when_the_wrap_exists() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved_dir = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved_dir = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         std::fs::write(
             dir.path().join("session.json"),
             serde_json::to_vec(&serde_json::json!({
@@ -3028,8 +3037,8 @@ mod tests {
         )?;
         let got = resume_session()?;
         match saved_dir {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         if got["resumed"] != true {
             anyhow::bail!("wrapped key should resume without a form");
@@ -3047,12 +3056,12 @@ mod tests {
     fn resume_session_fills_the_public_server_when_nothing_is_stored() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved_dir = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved_dir = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let got = resume_session()?;
         match saved_dir {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         if got["need_login"] != true {
             anyhow::bail!("empty profile should still need a login password");
@@ -3186,18 +3195,18 @@ mod tests {
         }
     }
 
-    /// Auto-sync switch contract: ONEMEMORY_NO_AUTOSYNC non-empty and not 0 means off (every write path must use this).
+    /// Auto-sync switch contract: RSRS_NO_AUTOSYNC non-empty and not 0 means off (every write path must use this).
     #[test]
     fn autosync_disabled_by_env_is_off() {
         let _guard = crate::test_lock::guard();
-        let saved = std::env::var("ONEMEMORY_NO_AUTOSYNC").ok();
-        std::env::set_var("ONEMEMORY_NO_AUTOSYNC", "1");
+        let saved = crate::env::var("RSRS_NO_AUTOSYNC").ok();
+        std::env::set_var("RSRS_NO_AUTOSYNC", "1");
         assert!(!autosync_enabled(), "auto-sync must be off when set to 1");
-        std::env::set_var("ONEMEMORY_NO_AUTOSYNC", "yes");
+        std::env::set_var("RSRS_NO_AUTOSYNC", "yes");
         assert!(!autosync_enabled(), "any non-zero value must turn it off");
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_NO_AUTOSYNC", v),
-            None => std::env::remove_var("ONEMEMORY_NO_AUTOSYNC"),
+            Some(v) => std::env::set_var("RSRS_NO_AUTOSYNC", v),
+            None => std::env::remove_var("RSRS_NO_AUTOSYNC"),
         }
     }
 
@@ -3208,8 +3217,8 @@ mod tests {
     #[test]
     fn split_exec_lands_children_and_summary() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
-        let saved = std::env::var("ONEMEMORY_NO_AUTOSYNC").ok();
-        std::env::set_var("ONEMEMORY_NO_AUTOSYNC", "1");
+        let saved = crate::env::var("RSRS_NO_AUTOSYNC").ok();
+        std::env::set_var("RSRS_NO_AUTOSYNC", "1");
         let dir = tempfile::tempdir()?;
         let store = LocalStore::open(&dir.path().join("t.db"))?;
         let keys = crate::memory::SessionKeys::from_urk([7u8; 32])?;
@@ -3265,8 +3274,8 @@ mod tests {
         };
         assert!(split_exec(&keys, &embedder, &store, &entry, &spec2).is_ok());
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_NO_AUTOSYNC", v),
-            None => std::env::remove_var("ONEMEMORY_NO_AUTOSYNC"),
+            Some(v) => std::env::set_var("RSRS_NO_AUTOSYNC", v),
+            None => std::env::remove_var("RSRS_NO_AUTOSYNC"),
         }
         Ok(())
     }
@@ -3318,8 +3327,8 @@ mod tests {
     fn workspace_and_agent_config_roundtrip() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert_eq!(workspace_mode(), "normal");
         assert_eq!(diary_mode(), "concise");
         set_workspace_mode("readonly")?;
@@ -3336,8 +3345,8 @@ mod tests {
         assert_eq!(diary_mode(), "verbose");
         assert!(set_workspace_mode("nope").is_err());
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }
@@ -3346,8 +3355,8 @@ mod tests {
     fn accounts_list_use_remove() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let listed = account_list()?;
         assert_eq!(listed["accounts"][0]["name"], "main");
         let used = account_use("work")?;
@@ -3359,8 +3368,8 @@ mod tests {
         account_remove("work")?;
         assert!(account_remove("missing").is_err());
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }
@@ -3458,16 +3467,16 @@ mod tests {
     fn status_light_and_titles() -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let info = status_light()?;
         assert_eq!(info.local_total, 0);
         assert_eq!(derive_title("【经验】first line\nsecond"), "first line");
         assert_eq!(derive_title(""), "(untitled)");
         assert!(diary_mode() == "concise" || diary_mode() == "verbose");
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         Ok(())
     }

@@ -1,8 +1,11 @@
 #![forbid(unsafe_code)]
 
+
 //! respire_app — auth, service, taxonomy, inject, lock, sync, and remote transport
 //!
 //! Public application services use the binary Core SDK and public ciphertext helpers.
+
+pub use respire_core_sdk::env;
 
 #[cfg(test)]
 mod test_lock;
