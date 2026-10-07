@@ -55,11 +55,11 @@ for binary in BINARIES:
         for profile in [main,alternate]:
             select(profile)
             if args.seed_binary:
-                for command in [('model','activate','m3'),('remember','Real account return fixture '+profile.name,'--title',profile.name,'--force')]:
+                for command in [('model','activate','m3'),('remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')]:
                     seeded=subprocess.run([str(pathlib.Path(args.seed_binary).resolve()),'--json','--direct',*command],env=env,capture_output=True,timeout=180)
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
             else:
-                run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--force')
+                run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
         select(main)
         if args.seed_binary:
@@ -123,7 +123,8 @@ for binary in BINARIES:
             config=json.loads((main/'client.json').read_text())
             assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
             assert snapshot(profile)==original[str(profile)],'switch/probe changed source data or rebuilt existing index'
-            written=run('remember','Post-upgrade real inference '+account+' '+str(time.time_ns()),'--title','post-upgrade-'+account,'--force')
+            # Independent important entries avoid the intentional daily-trivia append behavior.
+            written=run('remember','Post-upgrade real inference '+account+' '+str(time.time_ns()),'--title','post-upgrade-'+account,'--importance','important','--force')
             assert written['summary'].get('id'),'real post-upgrade remember did not commit'
             updated=snapshot(profile)
             assert all(row in updated[0][0] for row in original[str(profile)][0][0]),'remember changed an existing ciphertext'
