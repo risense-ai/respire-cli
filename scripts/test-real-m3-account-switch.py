@@ -28,6 +28,11 @@ if args.seed_binary:
 reports = []
 for binary in BINARIES:
     root = BASE / ('account-return-real-' + str(time.time_ns()))
+    if os.name == 'posix' and args.seed_binary:
+        # Historical runtimes bind rpc.sock under the library. A nested CI
+        # report directory exceeds Unix socket path limits; keep the owned
+        # fixture in a short workspace directory and retain reports in BASE.
+        root = pathlib.Path.cwd() / ('rsrs-up-' + secrets.token_hex(6))
     main = root / '.rsrs'
     alternate = main / 'accounts/alternate'
     alternate.mkdir(parents=True)
