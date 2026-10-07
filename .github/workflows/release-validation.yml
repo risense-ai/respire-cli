@@ -122,6 +122,31 @@ jobs:
           "$exe" --version
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+      - name: Require every published stable upgrade and the 1.0.6 baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          exe="target/ci/${{ matrix.target }}/release/rsrs"
+          if [ "$RUNNER_OS" = Windows ]; then
+            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+            exe="$exe.exe"
+          fi
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.0.0
+          "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
+            --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
+            --output-dir "$RUNNER_TEMP/published-upgrades"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: published-upgrades-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/published-upgrades/published-upgrades.json
+            ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+          if-no-files-found: error
       - name: Prepare versioned binary and runtime artifacts
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
       - name: Verify GNU login interruption recovery with this release binary

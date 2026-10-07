@@ -303,7 +303,8 @@ fn download_verified(url: &str, dest: &Path, expected: &str) -> Result<()> {
     model_progress::update("verify", &item, written, Some(written))?;
     let actual = sha256_file(dest)?;
     if !actual.eq_ignore_ascii_case(expected) {
-        let _ = std::fs::remove_file(dest);
+        // Unknown-length EOF may be a truncated response. Preserve resumable bytes.
+        if total.is_some() { let _ = std::fs::remove_file(dest); }
         anyhow::bail!(
             "checksum failed: {} SHA256={actual} (expected {expected})",
             dest.display()
@@ -615,6 +616,8 @@ mod tests {
         waiting.recv_timeout(Duration::from_secs(10))?;
         let status = model_progress::status()?;
         let id = status["id"].as_str().ok_or_else(|| anyhow!("task id missing"))?;
+        assert_eq!(model_progress::control("stale-task", true)?["stale"], true);
+        assert_eq!(model_progress::status()?["cancelled"], false);
         assert_eq!(model_progress::control(id, true)?["cancelled"], true);
         release.send(())?;
         server.join().map_err(|_| anyhow!("download server panicked"))??;
@@ -638,6 +641,32 @@ mod tests {
         server.join().map_err(|_| anyhow!("replacement server panicked"))??;
         assert_eq!(std::fs::read(target)?, b"replacement body");
         assert_eq!(std::fs::read(verified)?, b"keep verified file");
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_length_partial_is_retained_and_resumed_after_checksum_failure() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("partial");
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+        let url = format!("http://{}/model", server.server_addr());
+        let handler = std::thread::spawn(move || -> Result<()> {
+            let request = server.recv()?;
+            request.respond(tiny_http::Response::new(tiny_http::StatusCode(200), vec![],
+                std::io::Cursor::new(b"abc"), None, None))?;
+            let request = server.recv()?;
+            assert!(request.headers().iter().any(|header| header.field.equiv("Range") && header.value.as_str() == "bytes=3-"));
+            let range = tiny_http::Header::from_bytes("Content-Range", "bytes 3-5/6").map_err(|_| anyhow!("range header"))?;
+            request.respond(tiny_http::Response::from_string("def").with_status_code(206).with_header(range))?;
+            Ok(())
+        });
+        let expected = hex::encode(Sha256::digest(b"abcdef"));
+        assert!(download_verified(&url, &target, &expected).is_err());
+        assert_eq!(std::fs::read(&target)?, b"abc");
+        download_verified(&url, &target, &expected)?;
+        handler.join().map_err(|_| anyhow!("test server panicked"))??;
+        assert_eq!(std::fs::read(target)?, b"abcdef");
         Ok(())
     }
 

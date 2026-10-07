@@ -176,7 +176,7 @@ pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
         return Ok(json!({"active":false}));
     };
     if p.id != task_id {
-        return Ok(json!({"active":false}));
+        return Ok(json!({"active":true,"stale":true}));
     }
     if cancel {
         p.cancelled = true;

@@ -37,13 +37,18 @@ official Hugging Face origin, plus a custom URL. `--mirror` overrides
 `ONEMEMORY_MIRROR`, then the persisted `model_mirror` setting; default is auto.
 Explicit sources fail without switching; auto tries each source once. All
 downloads retain the same pinned revision and SHA-256 checks. Files are staged
-before replacement; cancellation cleans temporary files.
+before replacement; cancellation preserves pinned-revision partial files for resume.
 `ONEMEMORY_M3_DIR` overrides `~/.rsrs/models/bge-m3`. Old BGE directories and
-`ONEMEMORY_MODEL_DIR` are not used. Loading has a 120-second deadline; inference
-retains its 15-second deadline.
+`ONEMEMORY_MODEL_DIR` are not used. Model weights and engine selection are global;
+switching accounts does not select another engine or model directory.
 
-The supervised worker shares local model execution. Health requests remain independent
-of inference. Recovery does not delete models or memories. Sandboxes cannot take over
+The runtime loads one shared native ONNX session and executes inference in process.
+There is no inference child process or pipe protocol. Native calls execute on the
+command/background threads; health and progress requests remain independent.
+The former 120-second load and 15-second pipe-response deadlines no longer apply.
+Native execution errors retain their underlying cause and do not switch engines
+or permanently disable an engine after one failed call. Host recovery stops the
+runtime when native execution is stuck. Recovery does not delete models or memories. Sandboxes cannot take over
 runtime lifecycle. Models retain upstream cards, licenses and source information;
 SDK runtime bundles carry native and model notices. ONNX Runtime's license does not
 replace model-weight licenses. See [notice sources](model-notices/sources.json).

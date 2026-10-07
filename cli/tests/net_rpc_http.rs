@@ -81,6 +81,50 @@ fn start_internal_runtime() -> Result<Runtime, String> {
 }
 
 #[test]
+fn client_sends_existing_token_on_initial_health_and_rpc_requests() -> Result<(), Box<dyn std::error::Error>> {
+    use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+    let dir = tempfile::tempdir()?;
+    fs::create_dir(dir.path().join("runtime"))?;
+    fs::write(dir.path().join("runtime/token"), "synthetic-upgrade-token")?;
+    let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+    let port = server.server_addr().to_ip().ok_or("no server port")?.port();
+    let done = Arc::new(AtomicBool::new(false));
+    let finished = Arc::clone(&done);
+    let worker = thread::spawn(move || -> Result<Vec<String>, String> {
+        let mut paths = Vec::new();
+        while !finished.load(Ordering::Acquire) {
+            let Some(mut request) = server.recv_timeout(Duration::from_millis(100)).map_err(|error| error.to_string())? else { continue; };
+            if !request.headers().iter().any(|header| header.field.equiv("Authorization") && header.value.as_str() == "Bearer synthetic-upgrade-token") {
+                return Err("initial request omitted the existing runtime token".into());
+            }
+            paths.push(request.url().to_owned());
+            let response = if request.url() == "/api/health" {
+                serde_json::json!({"server":"respire","bin":"1.0.9","pid":1,"v":1})
+            } else {
+                let body: serde_json::Value = serde_json::from_reader(request.as_reader()).map_err(|error| error.to_string())?;
+                serde_json::json!({"v":1,"id":body["id"],"ok":true,"exit":0,"bin":"1.0.9",
+                    "envelope":{"command":"status","status":"ok","summary":{},"items":[],"actions":[],"errors":[],"details":null,"related":[]}})
+            };
+            request.respond(tiny_http::Response::from_string(response.to_string())).map_err(|error| error.to_string())?;
+        }
+        Ok(paths)
+    });
+    let output = Command::new(bin()).args(["--client-only", "status", "--json"])
+        .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
+        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+    let health = Command::new(bin()).args(["--client-only", "--runtime-internal", "--status", "--json"])
+        .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
+        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+    done.store(true, Ordering::Release);
+    let paths = worker.join().map_err(|_| "HTTP fixture panicked")??;
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    assert!(health.status.success(), "{}", String::from_utf8_lossy(&health.stdout));
+    assert!(paths.iter().any(|path| path == "/api/health"));
+    assert!(paths.iter().any(|path| path == "/api/rpc"));
+    Ok(())
+}
+
+#[test]
 fn health_without_token_reports_bin() -> Result<(), String> {
     let rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/health", rt.port);
@@ -160,9 +204,8 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
     if parsed["envelope"]["command"] != "status" {
         return Err(format!("envelope {parsed}"));
     }
-    // A sandbox may have no access to the host token file; loopback CLI calls
-    // must not attempt to read it. A directory at this path is unreadable as text.
-    fs::create_dir_all(rt.dir.path().join("runtime").join("token"))
+    // Existing host credentials remain usable; the new runtime ignores the header.
+    fs::write(rt.dir.path().join("runtime").join("token"), "synthetic-old-runtime-token")
         .map_err(|err| err.to_string())?;
     let output = Command::new(bin())
         .args(["--client-only", "status", "--json"])

@@ -5267,32 +5267,6 @@ fn main_body() -> i32 {
             return 1;
         }
     }
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--internal-inference-worker")
-    {
-        return match runtime_policy::require_host("inference worker")
-            .and_then(|()| respire::memory::onnx::run_worker())
-        {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("inference worker: {error:#}");
-                1
-            }
-        };
-    }
-    match std::env::current_exe() {
-        Ok(executable) => {
-            if let Err(error) = respire::memory::onnx::enable_worker(executable) {
-                eprintln!("cannot enable inference worker: {error:#}");
-                return 1;
-            }
-        }
-        Err(error) => {
-            eprintln!("cannot locate inference worker executable: {error}");
-            return 1;
-        }
-    }
     // Parse args, then run the command, so a Windows debug stack does not hold both at once.
     // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.

@@ -4,7 +4,7 @@
 flowchart LR
   Host[Host terminal] -->|owns lifecycle| Runtime[Loopback HTTP runtime]
   Sandbox[Sandbox CLI / TUI / MCP] -->|client-only| Runtime
-  Runtime --> Worker[Shared inference worker]
+  Runtime --> Inference[Shared ONNX session inside runtime]
 ```
 
 | Context | Behavior |
@@ -94,17 +94,16 @@ The hidden `--runtime-internal` entry is reserved for host lifecycle and automat
 ## Upgrading an older runtime
 
 The host command `rsrs --runtime-internal --stop` supports runtimes that still
-require a loopback token, including 1.0.9. After an HTTP 401, the client retries
-once using the existing `ONEMEMORY_RPC_TOKEN` or runtime token file, after the
-host endpoint record and OS listener PID identify a running Respire process. An
-unverified listener receives no token. The client does not
-create or replace credentials. Other HTTP errors and connection failures are
-not retried. Current loopback runtimes continue to work without a token file.
+require a loopback token, including 1.0.9. The client sends the existing
+`ONEMEMORY_RPC_TOKEN` or runtime token file on the initial request. It does not
+create or replace credentials, and it never replays a failed request. Current
+loopback runtimes ignore the header and also work without a token file.
 Health checks and normal RPC use the same compatibility rule, so host upgrades
 can gracefully stop the old runtime before starting the new executable.
 
 Run lifecycle commands from the host terminal; client-only mode does not permit
-shutdown or the legacy-token retry. A missing or rejected legacy token requires the old runtime's existing
+shutdown. Client-only requests also preserve existing authentication headers.
+A missing or rejected legacy token requires the old runtime's existing
 authentication material, rather than bypassing authentication or killing an
 unverified process. HTTP redirects are disabled for the local runtime client.
 

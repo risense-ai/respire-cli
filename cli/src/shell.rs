@@ -956,6 +956,9 @@ fn cancel_model(id: &str) -> Result<(), String> {
     let started = Instant::now();
     loop {
         let progress = crate::rpc::model_control(id, true).map_err(|error| error.to_string())?;
+        if progress["stale"] == true {
+            return Err(t("模型任务已变化；刷新进度后重试", "The model task changed; refresh progress and retry"));
+        }
         if progress["active"] != true { return Ok(()); }
         if started.elapsed() >= Duration::from_secs(45) {
             return Err(t("取消尚未完成；等待当前网络读取结束后重试", "Cancellation is still pending; wait for the current network read before retrying"));
@@ -2178,8 +2181,8 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         lines.push(line(crate::output::model_task_text(&app.live.model_progress)));
     }
     lines.push(line(t(
-        "默认 CPU；加载超时 120 秒，推理超时 15 秒；失败报错，不切换引擎。",
-        "CPU by default; load timeout 120s, inference 15s; failures report errors without switching engines.",
+        "默认 CPU；runtime 内共享模型与推理；失败报错，不切换引擎。",
+        "CPU by default; shared model and inference inside runtime; failures report errors without switching engines.",
     )));
     lines.push(line(t(
         "卡住时在终端运行：rsrs model reset-cpu",

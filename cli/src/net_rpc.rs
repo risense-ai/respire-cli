@@ -1,6 +1,6 @@
 //! Loopback HTTP client for the local runtime (`127.0.0.1:15169`).
 //! Current loopback runtimes need no token; pre-1.0.10 runtimes require the
-//! existing host token after a 401 challenge. Non-loopback HTTP access uses
+//! existing host token on the initial request. Non-loopback HTTP access uses
 //! `ONEMEMORY_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
 
 use std::fs;
@@ -79,7 +79,7 @@ fn read_token() -> Result<Option<String>> {
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
     match fs::read_to_string(path) {
         Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
-        Ok(_) => Err(RuntimeError::TokenUnreadable(format!("{} is empty", path.display())).into()),
+        Ok(_) => Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => {
             Err(RuntimeError::TokenUnreadable(format!("{}: {error}", path.display())).into())
@@ -255,27 +255,17 @@ fn agent() -> ureq::Agent {
         .build()
 }
 
-/// Legacy runtimes reject before dispatch. Retry only that 401, once, with an
-/// existing credential; transport failures and other statuses never replay RPC.
+/// Preserve existing credentials on the first request, including health and stop.
+/// New loopback servers ignore the header. Never replay a failed request.
 fn send_loopback(
     request: ureq::Request,
     send: impl Fn(ureq::Request) -> std::result::Result<ureq::Response, ureq::Error>,
 ) -> Result<ureq::Response> {
-    let response = match send(request.clone()) {
-        Err(ureq::Error::Status(401, _)) => {
-            if crate::runtime_policy::client_only() {
-                return Err(RuntimeError::Unauthorized.into());
-            }
-            let pid = pid_listening_on(rpc_port()).ok_or(RuntimeError::Unauthorized)?;
-            if !crate::rpc::recorded_runtime_listener(pid) || !pid_is_respire(pid) {
-                return Err(RuntimeError::Unauthorized.into());
-            }
-            let token = read_token()?.ok_or(RuntimeError::Unauthorized)?;
-            send(request.set("Authorization", &format!("Bearer {token}")))
-                .map_err(crate::runtime_error::http)
-        }
-        result => result.map_err(crate::runtime_error::http),
-    }?;
+    let request = match read_token()? {
+        Some(token) => request.set("Authorization", &format!("Bearer {token}")),
+        None => request,
+    };
+    let response = send(request).map_err(crate::runtime_error::http)?;
     if !(200..300).contains(&response.status()) {
         return Err(RuntimeError::Transport(format!("unexpected HTTP {}", response.status())).into());
     }
@@ -317,7 +307,7 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
         "args": args,
     });
     // Downloading M3 or rebuilding a library can legitimately exceed the normal RPC budget.
-    // Inference workers retain their own short deadlines; a request is never replayed here.
+    // Native inference runs inside the runtime; a request is never replayed here.
     let command: Vec<&str> = args
         .iter()
         .map(String::as_str)
