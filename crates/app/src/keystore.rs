@@ -1,7 +1,8 @@
 //! keystore — super-password (v4 single-factor key) storage.
 //!
-//! Priority: persistent Secret Service on Linux, then its volatile kernel store;
-//! Keychain/Credential Manager elsewhere; finally env RSRS_SUPER.
+//! Read priority: explicit nonempty RSRS_SUPER, then native credentials.
+//! Native priority: persistent Secret Service on Linux, then its volatile kernel
+//! store; Keychain/Credential Manager elsewhere.
 //! > none. Plaintext is never written to session.json from v4 on — a disk copy cannot decrypt.
 //! Headless servers (no keyring) use RSRS_SUPER or pass --super each time.
 
@@ -280,16 +281,14 @@ pub fn delete_login_pass(user: &str) {
     delete_label(&format!("pass:{}", credential_account(user)));
 }
 
-/// Load super password: OS keyring → env RSRS_SUPER → None.
-/// Any failure of entry()/get_password() (headless, no keyring) must fall through to the env var.
+/// Load super password: explicit nonempty RSRS_SUPER → OS keyring → None.
+/// Headless login supplies its verified key through the environment; an old
+/// credential for the same user must not replace that explicitly selected key.
 pub fn load_super(user: &str) -> Option<String> {
-    let from_ring = read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
-        .into_iter()
-        .next();
-    from_ring.or_else(|| {
-        crate::env::var("RSRS_SUPER")
-            .ok()
-            .filter(|s| !s.is_empty())
+    crate::env::var("RSRS_SUPER").ok().filter(|s| !s.is_empty()).or_else(|| {
+        read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
+            .into_iter()
+            .next()
     })
 }
 
