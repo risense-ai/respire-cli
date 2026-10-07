@@ -30,6 +30,7 @@ jobs:
       contents: write
     concurrency:
       group: cli-release-publication
+      queue: max
       cancel-in-progress: false
     outputs:
       sha: ${{ steps.plan.outputs.sha }}
@@ -335,6 +336,7 @@ jobs:
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
+      queue: max
       cancel-in-progress: false
     permissions:
       contents: write
