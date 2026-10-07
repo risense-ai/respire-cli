@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish DEV after build/package/CI gates; stable also requires full regression
+        description: Publish after build, CI, native upgrades and development regressions pass
         default: false
         type: boolean
 
@@ -330,8 +330,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # DEV regression continues independently; stable still waits for every result.
-    needs: [plan, validate]
+    # Build once, share artifacts, and publish only after the same-source regressions pass.
+    needs: [plan, validate, native-regression, cloud-sweep, api-smoke]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     concurrency:
