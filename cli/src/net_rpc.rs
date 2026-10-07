@@ -308,7 +308,7 @@ pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
 }
 
 pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
-    check_connection()?;
+    if method != "cli.progress" { check_connection()?; }
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
         "v": crate::rpc::PROTOCOL_V,
@@ -324,7 +324,9 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
         .filter(|s| !s.starts_with('-'))
         .take(2)
         .collect();
-    let timeout = if method == "model.control" {
+    let timeout = if method == "cli.progress" {
+        Duration::from_secs(1)
+    } else if method == "model.control" {
         Duration::from_secs(3)
     } else if matches!(
         command.as_slice(),

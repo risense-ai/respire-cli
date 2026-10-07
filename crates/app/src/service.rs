@@ -446,7 +446,7 @@ impl App {
         let stored = all
             .iter()
             .find(|m| m.id == id)
-            .ok_or_else(|| anyhow!("not found #{id}"))?;
+            .ok_or_else(|| crate::input_error::InputError(format!("not found #{id}")))?;
         let mut entry = MemoryEngine::open(&self.keys, stored)?;
         if !stored.deleted {
             return Ok(entry);
@@ -466,11 +466,11 @@ impl App {
         let child = resolve_prefix(&all, id)?;
         let parent_full = resolve_prefix(&all, parent)?;
         if child == parent_full {
-            anyhow::bail!("cannot attach to self");
+            return Err(crate::input_error::InputError("cannot attach to self".into()).into());
         }
         for anc in self.store.ancestor_chain(&parent_full)? {
             if anc == child {
-                anyhow::bail!("cycle: new parent is a descendant of this entry");
+                return Err(crate::input_error::InputError("cycle: new parent is a descendant of this entry".into()).into());
             }
         }
         reparent(&self.keys, &self.store, &child, &parent_full)?;
@@ -1737,8 +1737,7 @@ pub struct ImportReport {
 
 /// Import a copy: validate parent chains first, mint all new ids, then atomic write, then one auto-sync.
 pub fn import_json(path: &std::path::Path) -> Result<ImportReport> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| anyhow!("failed to read import file: {e}"))?;
+    let text = crate::input_error::read_file(path, "import file")?;
     let items: Vec<ImportItem> =
         serde_json::from_str(&text).map_err(|e| anyhow!("failed to parse import JSON: {e}"))?;
     let mut report = ImportReport {
@@ -1952,8 +1951,7 @@ pub fn export_subtree_payload(root_prefix: &str) -> Result<(crate::share::ShareP
 
 /// Read a share file → payload.
 pub fn read_share_file(path: &std::path::Path) -> Result<crate::share::SharePayload> {
-    let text =
-        std::fs::read_to_string(path).map_err(|e| anyhow!("failed to read share file: {e}"))?;
+    let text = crate::input_error::read_file(path, "share file")?;
     crate::share::decode(&text)
 }
 
@@ -3430,6 +3428,29 @@ mod tests {
         let _ = app.tree_cure(3)?;
         let _ = app.tree_float(false, 1)?;
         let _ = app.portrait_material(5)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejected_associations_restore_and_attach_are_input_errors_without_writes() -> anyhow::Result<()> {
+        let _guard = crate::test_lock::guard();
+        let dir = tempfile::tempdir()?;
+        let app = test_app(dir.path())?;
+        let diary = app.create(&CreateReq { title: "diary".into(), content: "diary body".into(), ..CreateReq::default() })?;
+        let parent = app.create(&important("parent", "parent body"))?;
+        let child = app.create(&CreateReq { parent: Some(parent.id.clone()), ..important("child", "child body") })?;
+        let before = serde_json::to_value(app.store.all(true)?)?;
+        let supersede = app.create(&CreateReq { supersedes: Some(diary.id.clone()), ..important("replacement", "replacement body") });
+        let link = app.create(&CreateReq { see_also: vec![diary.id.clone()], ..important("linked", "linked body") });
+        for error in [supersede.err(), link.err(), app.restore("deadbeef").err(), app.attach(&child.id, &child.id).err(), app.attach(&parent.id, &child.id).err()] {
+            let error = error.ok_or_else(|| anyhow!("invalid input was accepted"))?;
+            assert!(error.downcast_ref::<crate::input_error::InputError>().is_some(), "{error:#}");
+        }
+        assert_eq!(serde_json::to_value(app.store.all(true)?)?, before);
+        // A cryptographic failure is still a runtime error, not malformed command input.
+        let wrong = App { keys: crate::memory::SessionKeys::from_urk([9; 32])?, store: app.store, embedder: app.embedder };
+        let error = wrong.restore(&child.id).err().ok_or_else(|| anyhow!("wrong key was accepted"))?;
+        assert!(error.downcast_ref::<crate::input_error::InputError>().is_none());
         Ok(())
     }
 

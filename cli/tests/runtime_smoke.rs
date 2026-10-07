@@ -29,10 +29,14 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
-        if output.status.code()!=Some(expected) {
+        let value:Value=serde_json::from_str(stdout.trim())?;
+        // Headless systems can join successfully without an available OS keyring.
+        let keyring_warning = expected == 0 && args.first() == Some(&"space") && args.get(1) == Some(&"join")
+            && output.status.code() == Some(2) && value["status"] == "warn" && value["details"]["keyring"] == false;
+        if output.status.code()!=Some(expected) && !keyring_warning {
             return Err(format!("owned space command {args:?} exited {:?}: {stdout} {}",output.status.code(),String::from_utf8_lossy(&output.stderr)).into());
         }
-        Ok(serde_json::from_str(stdout.trim())?)
+        Ok(value)
     };
     let health = |profile: &std::path::Path| -> Result<u64, Box<dyn std::error::Error>> {
         let status:Value=ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
@@ -46,6 +50,60 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let result=(|| -> Result<(), Box<dyn std::error::Error>> {
         invoke(&["space","list"],0)?;
         let original_pid=health(&library)?;
+        let before=std::fs::read(&config)?;
+        for args in [vec!["space","join","BADCODE"],vec!["space","join","--code","BADCODE"]] {
+            let rejected=invoke(&args,2)?;
+            assert_eq!(rejected["summary"]["reason"],"invalid_input");
+            assert_eq!(rejected["details"]["error_type"],"user");
+            assert_eq!(health(&library)?,original_pid, "bad invite must not stop the current runtime");
+            assert_eq!(std::fs::read(&config)?,before);
+        }
+        for readonly in [false,true] {
+            let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
+            let name=if readonly {"joined-readonly"} else {"joined-writable"};
+            let user=format!("join-fixture-{}",uuid::Uuid::new_v4());
+            let payload=json!({"space":name,"addr":format!("http://{}",server.server_addr()),"user":user,"token":"synthetic-member-token","super":"synthetic-super","readonly":readonly});
+            let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter().map(|byte|format!("{byte:02x}")).collect::<String>());
+            let worker=std::thread::spawn(move || -> Result<(),String> {
+                let request=server.recv_timeout(Duration::from_secs(20)).map_err(|error|error.to_string())?.ok_or("join never fetched the vault")?;
+                if request.url()!="/api/self/vault" || !request.headers().iter().any(|header|header.field.equiv("Authorization") && header.value.as_str()=="Bearer synthetic-member-token") {
+                    return Err("join did not authenticate its vault request".into());
+                }
+                request.respond(tiny_http::Response::from_string(json!({"version":4,"kdf_salt":"synthetic-salt","wrapped_urk":"synthetic-wrap","urk_nonce":"synthetic-nonce"}).to_string())).map_err(|error|error.to_string())
+            });
+            let joined=invoke(&["space","join",&code],if readonly {2} else {0});
+            let served=worker.join().map_err(|_|"join fixture panicked")?;
+            respire_app::keystore::delete_super(&user);
+            served.map_err(|error|format!("join server: {error}"))?;
+            let joined=joined?;
+            assert_eq!(joined["status"],if readonly || joined["details"]["keyring"] == false {"warn"} else {"ok"});
+            assert_eq!(joined["details"]["readonly"],readonly);
+            assert_eq!(std::fs::read(&config)?,before);
+            assert_ne!(health(&library)?,original_pid);
+            let target=library.join("accounts").join(name);
+            let session:Value=serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
+            assert_eq!(session["user"],user);
+            if readonly {
+                let agent:Value=serde_json::from_slice(&std::fs::read(target.join("agent.json"))?)?;
+                assert_eq!(agent["readonly_team"],true);
+            }
+            let pid=health(&library)?;
+            invoke(&["space","join","--code",&code],2)?;
+            assert_eq!(health(&library)?,pid,"existing target must fail before stopping the runtime");
+        }
+        let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
+        let payload=json!({"space":"rejected-join","addr":format!("http://{}",server.server_addr()),"user":"fixture-rejected","token":"revoked-token","super":"synthetic-super"});
+        let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter().map(|byte|format!("{byte:02x}")).collect::<String>());
+        let worker=std::thread::spawn(move || -> Result<(),String> {
+            let request=server.recv_timeout(Duration::from_secs(20)).map_err(|error|error.to_string())?.ok_or("rejected join never fetched the vault")?;
+            request.respond(tiny_http::Response::empty(401)).map_err(|error|error.to_string())
+        });
+        let rejected=invoke(&["space","join",&code],1);
+        worker.join().map_err(|_|"rejected join fixture panicked")?.map_err(|error|format!("join server: {error}"))?;
+        assert_eq!(rejected?["details"]["error_type"],"runtime");
+        assert_eq!(std::fs::read(&config)?,before);
+        assert!(!library.join("accounts/rejected-join").exists());
+        health(&library)?;
         invoke(&["space","create","probe"],0)?;
         let probe=library.join("accounts/probe");
         assert!(probe.join("space_owner.json").is_file());
@@ -79,10 +137,15 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn run(dir: &std::path::Path, args: &[&str]) -> std::io::Result<Output> {
+fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Output> {
     Command::new(bin())
         .args(args)
         .env("ONEMEMORY_DATA_DIR", dir)
+        .env("HOME", dir).env("USERPROFILE", dir)
+        .env("ONEMEMORY_RPC_PORT", port.to_string())
+        .env("ONEMEMORY_NO_AUTOSYNC", "1").env("ONEMEMORY_UPDATE_CHECK", "0")
+        .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
+        .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
         .env_remove("ONEMEMORY_LANG")
         .output()
 }
@@ -90,7 +153,8 @@ fn run(dir: &std::path::Path, args: &[&str]) -> std::io::Result<Output> {
 #[test]
 fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let status = run(dir.path(), &["status", "--json"])?;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let status = run(dir.path(), port, &["status", "--json"])?;
     let stdout = String::from_utf8(status.stdout)?;
     let stderr = String::from_utf8(status.stderr)?;
     if !status.status.success() {
@@ -101,7 +165,7 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("status envelope command was {}", value["command"]).into());
     }
 
-    let again = run(dir.path(), &["--runtime-internal", "--status"])?;
+    let again = run(dir.path(), port, &["--runtime-internal", "--status"])?;
     let text = String::from_utf8(again.stdout)?;
     if !text.contains("runtime=up") {
         return Err(format!(
@@ -111,12 +175,12 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let stopped = run(dir.path(), &["--runtime-internal", "--stop"])?;
+    let stopped = run(dir.path(), port, &["--runtime-internal", "--stop"])?;
     if !stopped.status.success() {
         return Err(format!("stop failed: {}", String::from_utf8(stopped.stderr)?).into());
     }
     std::thread::sleep(Duration::from_millis(300));
-    let down = run(dir.path(), &["--runtime-internal", "--status"])?;
+    let down = run(dir.path(), port, &["--runtime-internal", "--status"])?;
     let down_text = String::from_utf8(down.stdout)?;
     if down.status.code() != Some(2)
         && !down_text.contains("没有在运行")
@@ -481,7 +545,8 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
 #[test]
 fn no_command_without_tty_exits_2() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let output = run(dir.path(), &[])?;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let output = run(dir.path(), port, &[])?;
     if output.status.code() != Some(2) {
         return Err(format!(
             "exit {:?} stderr {}",
@@ -491,4 +556,75 @@ fn no_command_without_tty_exits_2() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
     Ok(())
+}
+
+#[test]
+fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let dir = tempfile::tempdir()?;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+    let addr = format!("http://{}", server.server_addr());
+    let worker = std::thread::spawn(move || -> Result<(), String> {
+        for _ in 0..2 {
+            let request = server.recv_timeout(Duration::from_secs(30)).map_err(|error| error.to_string())?.ok_or("doctor never probed the server")?;
+            if request.url() != "/health" { return Err("unexpected doctor request".into()); }
+            std::thread::sleep(Duration::from_millis(1500));
+            request.respond(tiny_http::Response::from_string("{}")) .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    let command = |json: bool| {
+        let mut command = Command::new(bin());
+        command.args(["doctor", "--remote"]);
+        if json { command.arg("--json"); }
+        command.env("HOME", dir.path()).env("USERPROFILE", dir.path())
+            .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
+            .env("ONEMEMORY_ADDR", &addr).env("ONEMEMORY_LANG", "en")
+            .env("ONEMEMORY_TOKEN", "synthetic-probe-token")
+            .env("ONEMEMORY_NO_AUTOSYNC", "1").env("ONEMEMORY_UPDATE_CHECK", "0")
+            .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
+            .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+    };
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let mut child = command(false).spawn()?;
+        let stderr = child.stderr.take().ok_or("human stderr missing")?;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                if sender.send(line).is_err() { break; }
+            }
+        });
+        let mut saw_wait = false;
+        let mut phases = Vec::new();
+        while let Ok(line) = receiver.recv_timeout(Duration::from_secs(20)) {
+            let line = line?;
+            phases.push(line.clone());
+            assert!(!line.contains('\u{1b}'), "redirected progress must be plain text");
+            if line.contains("Checking server connection; waiting for response") {
+                assert!(child.try_wait()?.is_none(), "progress arrived only after completion");
+                saw_wait = true;
+                break;
+            }
+        }
+        let human = child.wait_with_output()?;
+        reader.join().map_err(|_| "progress reader panicked")?;
+        if !saw_wait {
+            return Err(format!("doctor never reported its real server wait; phases={phases:?}; stdout={}", String::from_utf8_lossy(&human.stdout)).into());
+        }
+        assert!(String::from_utf8(human.stdout)?.contains("STATUS"));
+        let json = command(true).output()?;
+        let envelope: serde_json::Value = serde_json::from_slice(&json.stdout)?;
+        assert_eq!(envelope["command"], "doctor");
+        assert!(json.stderr.is_empty(), "JSON emitted human progress: {}", String::from_utf8_lossy(&json.stderr));
+        Ok(())
+    })();
+    let cleanup = run(dir.path(), port, &["--runtime-internal", "--stop"]);
+    let served = worker.join().map_err(|_| "doctor server panicked")?;
+    result?;
+    cleanup?;
+    served.map_err(Into::into)
 }

@@ -10,3 +10,15 @@ impl std::fmt::Display for InputError {
 }
 
 impl std::error::Error for InputError {}
+
+/// Missing user-selected files are input errors. Other I/O failures remain runtime failures.
+pub fn read_file(path: &std::path::Path, purpose: &str) -> anyhow::Result<String> {
+    std::fs::read_to_string(path).map_err(|error| {
+        let message = format!("failed to read {purpose}: {} ({error})", path.display());
+        if error.kind() == std::io::ErrorKind::NotFound {
+            InputError(message).into()
+        } else {
+            anyhow::Error::new(error).context(message)
+        }
+    })
+}

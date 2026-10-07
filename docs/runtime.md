@@ -34,6 +34,19 @@ An invalid target keeps the original profile and restarts its service.
 Client-only tools cannot switch the host profile. `--direct` still requires a
 stopped runtime and does not perform an automatic takeover.
 
+`space join` also runs on the host coordinator. Invalid invites and existing
+targets are rejected before stopping the runtime. Joining creates the invited
+profile and restarts the original selected profile; `space use <name>` switches
+to the joined profile explicitly. Read-only joins and keyring warnings count as
+successful joins. Failed server requests restore the original configuration and
+runtime.
+
+Human CLI requests use a hidden request ID and the additive `cli.progress` RPC
+to read their current stage outside the worker queue. `--json` does not start a
+human progress display. `model.prepare` schedules preparation from the selected
+mirror on the existing background model worker; `model.control` cancels only the
+matching active task. Cancellation must release its model slot before restart.
+
 | Setting | Purpose |
 | --- | --- |
 | `ONEMEMORY_CLIENT_ONLY=1` | Host runtime client mode |
@@ -94,3 +107,19 @@ Run lifecycle commands from the host terminal; client-only mode does not permit
 shutdown or the legacy-token retry. A missing or rejected legacy token requires the old runtime's existing
 authentication material, rather than bypassing authentication or killing an
 unverified process. HTTP redirects are disabled for the local runtime client.
+
+## Model downloads and account switches
+
+Model weights and inference engine selection are global to the installation
+root (`ONEMEMORY_DATA_DIR` for isolated installations); the selected account's
+library directory does not select another engine or require another model copy.
+Account switching must preserve the global configuration and reuse compatible,
+complete M3 artifacts. Only missing, changed or corrupt artifacts need indexing.
+
+Large ONNX downloads use at most four HTTP ranges when the source honors range
+requests. Sources without range support use one connection. Pinned-revision
+temporary files and segment checkpoints survive interruption and mirror changes;
+completed files are published only after their SHA256 matches the pinned model.
+Progressing downloads do not expire merely because 30 minutes elapsed. The
+existing bounded network-read timeout still applies. Parallel connections do not
+guarantee faster transfers when the server or network limits total bandwidth.

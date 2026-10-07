@@ -51,6 +51,8 @@ enum ConfirmKind {
     Sync,
     InstallM3,
     UninstallM3,
+    CancelModel(String),
+    RestartM3(String, String),
     Engine(String),
     InstallEngines,
     ProbeEngine,
@@ -212,7 +214,14 @@ pub fn run() -> Result<()> {
                     .map_err(|e| e.to_string())
                     .and_then(|_| retrieval_action(&["agent-config", "--set", &format!("model_mirror={value}")]).map(|_| ()));
                 match result {
-                    Ok(()) => { app.overlay = Overlay::None; app.set_notice(t("下载源已保存", "Download source saved")); }
+                    Ok(()) => {
+                        app.overlay = Overlay::None;
+                        app.set_notice(t("下载源已保存", "Download source saved"));
+                        if let Some(id) = app.live.model_progress["id"].as_str().filter(|_| app.live.model_progress["active"] == true) {
+                            let id = id.to_owned();
+                            ask(&mut app, t("取消当前任务，使用所选下载源重新下载？", "Cancel the current task and restart using the selected source?"), ConfirmKind::RestartM3(id, value));
+                        }
+                    }
                     Err(error) => app.set_notice(error),
                 }
             } else if matches!(key.code, KeyCode::Up | KeyCode::Down) {
@@ -621,7 +630,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         Page::Model => list_key(
             app,
             code,
-            9 + model_engines().len() + usize::from(cfg!(windows)),
+            11 + model_engines().len() + usize::from(cfg!(windows)),
             |app, code| model_key(app, code),
         ),
         Page::Workspace => workspace_key(app, code),
@@ -937,6 +946,24 @@ fn model_engines() -> &'static [&'static str] {
     }
 }
 
+fn selected_model_mirror() -> String {
+    respire::service::read_agent_config()["model_mirror"].as_str().map(str::to_owned)
+        .or_else(respire::model_install::mirror_from_env).unwrap_or_else(|| "auto".to_owned())
+}
+
+fn cancel_model(id: &str) -> Result<(), String> {
+    if id.is_empty() { return Ok(()); }
+    let started = Instant::now();
+    loop {
+        let progress = crate::rpc::model_control(id, true).map_err(|error| error.to_string())?;
+        if progress["active"] != true { return Ok(()); }
+        if started.elapsed() >= Duration::from_secs(45) {
+            return Err(t("取消尚未完成；等待当前网络读取结束后重试", "Cancellation is still pending; wait for the current network read before retrying"));
+        }
+        std::thread::sleep(FAST);
+    }
+}
+
 fn model_key(app: &mut App, code: KeyCode) {
     if code != KeyCode::Enter {
         return;
@@ -959,7 +986,7 @@ fn model_key(app: &mut App, code: KeyCode) {
             ConfirmKind::UninstallM3,
         ),
         2 => {
-            let current = respire::model_install::mirror_from_env().unwrap_or_else(|| "auto".to_owned());
+            let current = selected_model_mirror();
             app.overlay = Overlay::ModelMirror(text_input::Input::new(current));
         }
         cursor => {
@@ -996,6 +1023,17 @@ fn model_key(app: &mut App, code: KeyCode) {
                     Some(2) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
                     Some(3) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
                     Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
+                    Some(5) => {
+                        if let Some(id) = app.live.model_progress["id"].as_str().filter(|_| app.live.model_progress["active"] == true) {
+                            let id = id.to_owned();
+                            ask(app, t("取消当前模型任务？已完成的模型文件和原索引会保留。", "Cancel the current model task? Completed files and the original index are kept."), ConfirmKind::CancelModel(id));
+                        } else { app.set_notice(t("没有正在运行的模型任务", "No model task is running")); }
+                    }
+                    Some(6) => {
+                        let id = app.live.model_progress["id"].as_str().unwrap_or("").to_owned();
+                        ask(app, t("取消当前任务并从所选下载源重新下载未完成文件？", "Cancel the current task and redownload unfinished files from the selected source?"), ConfirmKind::RestartM3(id, selected_model_mirror()));
+                    }
+                    Some(7) => app.page = Page::Home,
                     _ => {}
                 }
             }
@@ -1147,6 +1185,8 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
         ConfirmKind::Sync => t("正在同步", "Syncing"),
         ConfirmKind::InstallM3 => t("正在安装或校验 BGE-M3", "Installing or verifying BGE-M3"),
         ConfirmKind::UninstallM3 => t("正在卸载 BGE-M3", "Uninstalling BGE-M3"),
+        ConfirmKind::CancelModel(_) => t("正在取消模型任务，等待当前网络读取结束", "Cancelling model task; waiting for the current network read"),
+        ConfirmKind::RestartM3(_, _) => t("正在取消旧任务并重新安排下载", "Cancelling the old task and scheduling a new download"),
         ConfirmKind::Engine(_) => t("正在保存推理引擎", "Saving inference engine"),
         ConfirmKind::InstallEngines => t("正在下载 NPU 推理引擎", "Downloading NPU providers"),
         ConfirmKind::ProbeEngine => t("正在验证推理引擎", "Checking inference engine"),
@@ -1182,8 +1222,13 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             ConfirmKind::Migrate(id, account) => host_command(&["migrate", "--source", &id, "--account", &account])
                 .map(|_| t("迁移完成；可在账户页面切换", "Migration complete; select it on the Accounts page")),
             ConfirmKind::Sync => rpc(&["sync"]).map(|value| sync_notice(&value)),
-            ConfirmKind::InstallM3 => model_action(&["model", "install-m3"])
+            ConfirmKind::InstallM3 => model_action(&["model", "install-m3", "--mirror", &selected_model_mirror()])
                 .map(|_| t("BGE-M3 处理结束", "BGE-M3 step finished")),
+            ConfirmKind::CancelModel(id) => cancel_model(&id)
+                .map(|_| t("已取消模型任务", "Model task cancelled")),
+            ConfirmKind::RestartM3(id, mirror) => cancel_model(&id)
+                .and_then(|_| crate::rpc::prepare_model(&mirror).map_err(|error| error.to_string()))
+                .map(|_| t("已重新安排下载；可在模型页面查看进度", "Download rescheduled; progress is shown on the Models page")),
             ConfirmKind::UninstallM3 => {
                 rpc(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 已卸载", "BGE-M3 uninstalled"))
             }
@@ -2081,7 +2126,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             app.cursor == 1,
             t("卸载 BGE-M3（删除文件）", "Uninstall BGE-M3 (delete files)"),
         ),
-        choice(app.cursor == 2, format!("{}: {}", t("下载源（回车配置）", "Download source (Enter to configure)"), respire::model_install::mirror_from_env().unwrap_or_else(|| "auto".to_owned()))),
+        choice(app.cursor == 2, format!("{}: {}", t("下载源（回车选择）", "Download source (Enter to choose)"), selected_model_mirror())),
         line(format!(
             "{}: {engine}",
             t("当前推理设置", "Inference setting")
@@ -2130,10 +2175,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         lines.push(fail_line(error.to_owned()));
     }
     if app.live.model_progress["active"] == true {
-        lines.push(line(format!("{}: {}  {} / {}",
-            app.live.model_progress["phase"].as_str().unwrap_or(""),
-            app.live.model_progress["item"].as_str().unwrap_or(""),
-            app.live.model_progress["done"], app.live.model_progress["total"])));
+        lines.push(line(crate::output::model_task_text(&app.live.model_progress)));
     }
     lines.push(line(t(
         "默认 CPU；加载超时 120 秒，推理超时 15 秒；失败报错，不切换引擎。",
@@ -2158,7 +2200,9 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
         app.cursor == index + 5,
         t("测试高质量召回", "Test high-quality recall"),
     ));
-    lines.push(choice(app.cursor == index + 6, t("0  返回", "0  Back")));
+    lines.push(choice(app.cursor == index + 6, t("取消当前模型任务", "Cancel current model task")));
+    lines.push(choice(app.cursor == index + 7, t("从所选下载源重新下载", "Restart download from selected source")));
+    lines.push(choice(app.cursor == index + 8, t("0  返回", "0  Back")));
     lines
 }
 
@@ -2229,11 +2273,61 @@ fn detect_preferred() -> Manager {
 }
 
 fn doctor_value(live: &Live, name: &str) -> String {
+    if name == "embedder" && live.model_progress["active"] == true {
+        return t("正在后台准备模型", "Preparing model in background");
+    }
     live.doctor
         .iter()
         .find(|(item, _, _)| item == name)
-        .map(|(_, status, value)| format!("{status}  {value}"))
+        .map(|(_, status, value)| {
+            let value = if value.starts_with("BGE-M3 preparation/indexing ") || value.starts_with("Model operation in progress:") {
+                t("已安排后台准备", "Background preparation scheduled")
+            } else if value.starts_with("BGE-M3 index pending;") {
+                t("等待后台重建", "Waiting for background rebuild")
+            } else { value.clone() };
+            format!("{status}  {value}")
+        })
         .unwrap_or_else(|| t("还没有读到", "not read yet"))
+}
+
+#[cfg(test)]
+mod model_menu_tests {
+    use super::*;
+
+    #[test]
+    fn mirror_cancel_restart_keys_and_live_progress_match_the_menu() -> anyhow::Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let previous = std::env::var("ONEMEMORY_DATA_DIR").ok();
+        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let result = (|| -> anyhow::Result<()> {
+            respire::service::write_agent_config_key("model_mirror", &serde_json::json!("http://127.0.0.1:9999"))?;
+            let mut app = App::new(Arc::new(Mutex::new(Live::empty())));
+            app.page = Page::Model;
+            app.cursor = 2;
+            model_key(&mut app, KeyCode::Enter);
+            let Overlay::ModelMirror(input) = &app.overlay else { anyhow::bail!("mirror picker did not open"); };
+            assert_eq!(input.text, "http://127.0.0.1:9999");
+            let picker = overlay_lines(&app).ok_or_else(|| anyhow::anyhow!("mirror picker has no rows"))?;
+            assert!(picker.iter().any(|line| line.to_string().contains("hf-mirror.com")));
+            app.live.model_progress = serde_json::json!({"id":"fixture-task","active":true,"phase":"download","item":"model_fp16.onnx","done":25,"total":100});
+            let rows = model_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(rows.contains("25.0%"));
+            assert!(rows.contains("model_fp16.onnx"));
+            app.cursor = 9 + model_engines().len() + usize::from(cfg!(windows));
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(&app.overlay, Overlay::Confirm { kind: ConfirmKind::CancelModel(id), .. } if id == "fixture-task"));
+            app.cursor += 1;
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(&app.overlay, Overlay::Confirm { kind: ConfirmKind::RestartM3(id, mirror), .. } if id == "fixture-task" && mirror == "http://127.0.0.1:9999"));
+            app.cursor += 1;
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(app.page, Page::Home));
+            Ok(())
+        })();
+        match previous { Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value), None => std::env::remove_var("ONEMEMORY_DATA_DIR") }
+        result
+    }
 }
 
 fn workspace_label(mode: &str) -> String {
@@ -2247,13 +2341,14 @@ fn workspace_label(mode: &str) -> String {
 fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
     match &app.overlay {
         Overlay::None => None,
-        Overlay::ModelMirror(input) => Some(vec![
-            line(t("BGE-M3 下载源", "BGE-M3 download source")),
-            input.line(70, true, false),
-            line(t("上下键选自动 / 国内镜像一 / 国内镜像二 / 官方；也可输入自定义镜像地址。", "Up/down: auto / mirror 1 / mirror 2 / official; or enter a custom mirror URL.")),
-            line(t("回车保存，Esc 放弃；显式下载源失败会报错。", "Enter saves; Esc discards; explicit source failures are reported.")),
-            line(t("ONEMEMORY_MIRROR 环境变量优先于此设置。", "ONEMEMORY_MIRROR overrides this setting.")),
-        ]),
+        Overlay::ModelMirror(input) => {
+            let mut lines = vec![line(t("BGE-M3 下载源", "BGE-M3 download source"))];
+            lines.extend(respire::model_install::MIRRORS.iter().map(|mirror| choice(input.text == *mirror, (*mirror).to_owned())));
+            lines.push(input.line(70, true, false));
+            lines.push(line(t("上下键选择，也可输入自定义地址；回车保存，Esc 返回。", "Up/down selects; custom URL supported; Enter saves, Esc returns.")));
+            lines.push(line(t("运行中的下载不会直接换源；保存后可取消并重新下载。", "An active download keeps its source; cancel and restart after saving.")));
+            Some(lines)
+        }
         Overlay::RecallApi(_) | Overlay::RecallTest(_) => Some(Vec::new()),
         Overlay::ModelTask(task) => Some(task.lines()),
         Overlay::Edit { buf, cursor } => {

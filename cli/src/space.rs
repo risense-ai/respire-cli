@@ -193,7 +193,7 @@ pub fn parse_invite(code: &str) -> Result<serde_json::Value> {
     let raw = code.trim();
     let hexed = raw.strip_prefix(INVITE_PREFIX).unwrap_or(raw);
     if hexed.is_empty() || hexed.len() % 2 != 0 {
-        return Err(anyhow!("invite code format is wrong (odd length)"));
+        return Err(respire_app::input_error::InputError("invite code format is wrong (odd length)".into()).into());
     }
     let cs: Vec<char> = hexed.chars().collect();
     let mut bytes = Vec::with_capacity(cs.len() / 2);
@@ -201,34 +201,41 @@ pub fn parse_invite(code: &str) -> Result<serde_json::Value> {
         let s: String = pair.iter().collect();
         bytes.push(
             u8::from_str_radix(&s, 16)
-                .map_err(|_| anyhow!("invite code contains illegal characters"))?,
+                .map_err(|_| respire_app::input_error::InputError("invite code contains illegal characters".into()))?,
         );
     }
-    let text = String::from_utf8(bytes).map_err(|_| anyhow!("invite code is not valid text"))?;
+    let text = String::from_utf8(bytes).map_err(|_| respire_app::input_error::InputError("invite code is not valid text".into()))?;
     let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| anyhow!("invite code failed to parse"))?;
+        serde_json::from_str(&text).map_err(|_| respire_app::input_error::InputError("invite code failed to parse".into()))?;
     for k in ["space", "addr", "user", "token", "super"] {
         if v[k].as_str().unwrap_or("").trim().is_empty() {
-            return Err(anyhow!(
+            return Err(respire_app::input_error::InputError(format!(
                 "invite code missing field \"{k}\" - the code may be truncated"
-            ));
+            )).into());
         }
     }
     Ok(v)
 }
 
+/// Validate user input before a host stops its current runtime.
+pub fn validate_join(code: &str) -> Result<serde_json::Value> {
+    let value = parse_invite(code)?;
+    let name = value["space"].as_str().unwrap_or("").trim();
+    validate_space_name(name)?;
+    if account_dir(name)?.exists() {
+        return Err(respire_app::input_error::InputError(format!(
+            "this machine already has space \"{name}\"; choose another space or remove the old profile explicitly"
+        )).into());
+    }
+    Ok(value)
+}
+
 /// Join a space: decode invite -> create profile -> fetch vault with the member token -> write session -> super password into the keyring.
 pub fn space_join(code: &str) -> Result<serde_json::Value> {
     respire_app::service::require_profile_change_host()?;
-    let v = parse_invite(code)?;
+    let v = validate_join(code)?;
     let name = v["space"].as_str().unwrap_or("").trim().to_owned();
-    validate_space_name(&name)?;
     let dir = account_dir(&name)?;
-    if dir.exists() {
-        return Err(anyhow!(
-            "this machine already has space \"{name}\" - if it is a stale copy, run rsrs space remove {name} --yes then join again"
-        ));
-    }
     let addr = v["addr"]
         .as_str()
         .unwrap_or("")

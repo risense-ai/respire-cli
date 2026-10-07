@@ -50,12 +50,14 @@ static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
     requested: false,
     state: "idle",
     error: None,
+    prepare_mirror: None,
 });
 
 struct IndexWork {
     requested: bool,
     state: &'static str,
     error: Option<String>,
+    prepare_mirror: Option<String>,
 }
 static WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
 static CLASSIFY_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -387,19 +389,25 @@ fn index_loop_inner() -> Result<()> {
             check_sync_context(generation)?;
             let store = respire::service::open_store()?;
             let model = store.retrieval_model()?;
-            if !store.index_pending(&model)? {
+            let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
+            let pending = store.index_pending(&model)?;
+            if !pending && !prepare_requested {
                 return Ok(true);
             }
             let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
                 return Ok(false);
             };
             index_yield_to_foreground(generation)?;
-            let keys = crate::build_session()?;
-            if model == "m3" {
+            let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
+            if let Some(mirror) = mirror {
+                respire::model_install::prepare_m3_from_mirror(&mirror)?;
+            } else if model == "m3" {
                 respire::model_progress::update("prepare", "BGE-M3", 0, None)?;
                 respire::model_install::prepare_m3_for_index()?;
                 check_sync_context(generation)?;
             }
+            if !pending { return Ok(true); }
+            let keys = crate::build_session()?;
             let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
             loop {
                 let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
@@ -457,9 +465,15 @@ fn index_loop_inner() -> Result<()> {
             }
             Err(error) if error.downcast_ref::<respire::model_progress::OperationStopped>().is_some() => {
                 model_wait_started = None;
-                work.state = "paused";
-                work.requested = false;
-                work.error = Some(format!("{error:#}"));
+                if work.prepare_mirror.is_some() {
+                    work.state = "scheduled";
+                    work.requested = true;
+                    work.error = None;
+                } else {
+                    work.state = "paused";
+                    work.requested = false;
+                    work.error = Some(format!("{error:#}"));
+                }
             }
             Err(error) => {
                 model_wait_started = None;
@@ -688,19 +702,33 @@ struct Job {
 }
 
 pub fn call_from_argv() -> Result<()> {
-    let args: Vec<String> = std::env::args()
+    let mut args: Vec<String> = std::env::args()
         .skip(1)
         .filter(|arg| arg != "--direct" && arg != "--client-only")
         .collect();
     let json = args.iter().any(|arg| arg == "--json")
         || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true");
     crate::set_json_mode(json);
+    if let Some(id) = crate::progress::remote_id() {
+        let insertion = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+        let mut progress_args = vec!["--progress-id".to_owned(), id.clone()];
+        if command_name(&args) == Some("model") && !args.iter().any(|arg| arg == "--model-task-id") {
+            progress_args.extend(["--model-task-id".to_owned(), id]);
+        }
+        args.splice(insertion..insertion, progress_args);
+    }
     let response = call_method("cli.exec", args, true)?;
     render_response(response, json)
 }
 
 pub fn runtime_is_up() -> bool {
     call_method("runtime.status", Vec::new(), false).is_ok()
+}
+
+pub(crate) fn foreground_progress(id: &str) -> Result<Value> {
+    let response = call_method("cli.progress", vec![id.to_owned()], false)?;
+    anyhow::ensure!(response.ok, "runtime progress unavailable");
+    Ok(response.envelope.map(|envelope| envelope.summary).unwrap_or(Value::Null))
 }
 
 /// Run one command through the resident runtime and return its JSON envelope.
@@ -768,6 +796,7 @@ pub fn change_profile_with_rollback(change: impl FnOnce() -> Result<()>, rollbac
 }
 
 pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>, verify: impl FnOnce() -> Result<()>) -> Result<()> {
+    crate::progress::phase("协调账户操作；等待当前 runtime 释放", "Coordinating account operation; waiting for current runtime to release");
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let config_path = respire::service::client_config_path();
     let original = match std::fs::read(&config_path) {
@@ -789,7 +818,10 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
-    let changed = change().and_then(|_| ensure_daemon_locked()).and_then(|_| verify());
+    let changed = change().and_then(|_| {
+        crate::progress::phase("启动 runtime；核对账户和路径", "Starting runtime; verifying account and path");
+        ensure_daemon_locked()
+    }).and_then(|_| verify());
     if let Err(error) = changed {
         let cleanup = probe_runtime().and_then(|health| match health {
             Some(health) => stop_occupant(health.pid), None => Ok(()),
@@ -896,6 +928,7 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
     if let Some(envelope) = response.envelope {
+        crate::progress::finish();
         println!("{}", envelope.render(json)?);
         crate::mark_emitted();
         crate::set_exit_code(response.exit);
@@ -933,6 +966,12 @@ pub(crate) fn model_control(task_id: &str, cancel: bool) -> Result<Value> {
         .ok_or_else(|| anyhow::anyhow!("runtime did not return model progress"))
 }
 
+pub(crate) fn prepare_model(mirror: &str) -> Result<()> {
+    let response = call_method("model.prepare", vec![mirror.to_owned()], false)?;
+    anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
+    Ok(())
+}
+
 fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
     match method {
         "runtime.status" => {
@@ -967,7 +1006,7 @@ fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
                 data_dir: None,
             })
         }
-        "cli.exec" | "model.control" | "index.prepare" => {
+        "cli.exec" | "cli.progress" | "model.control" | "model.prepare" | "index.prepare" => {
             let parsed = if method == "cli.exec" {
                 crate::net_rpc::rpc_exec(args.to_vec())?
             } else {
@@ -1114,6 +1153,27 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         return hit;
     }
     let response = match request.method.as_str() {
+        "model.prepare" => {
+            let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
+            match respire::model_install::validate_mirror(mirror).and_then(|_| {
+                anyhow::ensure!(!respire::service::readonly_mode(), "model preparation is not allowed in read-only mode");
+                let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+                work.prepare_mirror = Some(mirror.to_owned());
+                work.requested = true;
+                work.error = None;
+                work.state = "scheduled";
+                drop(work);
+                INDEX_CV.notify_one();
+                Ok(())
+            }) {
+                Ok(()) => {
+                    let mut response = status_response(&request);
+                    response.envelope = Some(ResultEnvelope::new("model.prepare", OutputStatus::Pending, index_status(), Vec::new()));
+                    response
+                }
+                Err(error) => error_response(&request, "model_prepare_failed", &error.to_string()),
+            }
+        }
         "index.prepare" => {
             kick_index();
             let mut response = status_response(&request);
@@ -1139,6 +1199,14 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             Err(error) => error_response(&request, "model_control_failed", &error.to_string()),
         },
         "runtime.status" => status_response(&request),
+        "cli.progress" => {
+            let mut response = status_response(&request);
+            response.envelope = Some(ResultEnvelope::new(
+                "cli.progress", OutputStatus::Ok,
+                crate::progress::status(request.args.first().map(String::as_str).unwrap_or("")), Vec::new(),
+            ));
+            response
+        }
         "runtime.stop" => {
             request_drain_exit();
             status_response(&request)
@@ -2199,6 +2267,17 @@ mod tests {
         let unknown = dispatch(req("nope", "unknown-1"), &tx);
         assert_eq!(unknown.code.as_deref(), Some("protocol_version_mismatch"));
         assert!(unknown.error.unwrap_or_default().contains("unknown method"));
+        let scope = crate::progress::Scope::start(Some("foreground-one".into()), false, false);
+        crate::progress::phase("等待服务器", "Waiting for server");
+        let mut request = req("cli.progress", "progress-one");
+        request.args = vec!["foreground-one".into()];
+        let response = dispatch(request, &tx);
+        assert!(response.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_string()));
+        let mut request = req("cli.progress", "progress-other");
+        request.args = vec!["foreground-other".into()];
+        assert!(dispatch(request, &tx).envelope.as_ref().is_some_and(|value| value.summary.is_null()));
+        drop(scope);
+        assert!(crate::progress::status("foreground-one").is_null());
     }
 
     #[test]

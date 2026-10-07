@@ -101,7 +101,7 @@ impl ResultEnvelope {
                 vec![
                     crate::i18n::field_label(&item.name),
                     status_label(item.status).to_owned(),
-                    humanize_value(&item.value),
+                    self.human_item_value(item),
                     item.action.clone().unwrap_or_default(),
                 ]
             })
@@ -115,41 +115,35 @@ impl ResultEnvelope {
             ]
         }));
         let mut sections = Vec::new();
-        if !self.summary.is_null() {
-            let rows = summary_rows(&self.summary);
-            if !rows.is_empty() {
-                let table = render_table(
+        // Items are the declared human view. Summary and diagnostics remain in JSON.
+        if rows.is_empty() && !self.summary.is_null() {
+            let mut summary = human_summary(&self.command, &self.summary);
+            if !matches!(self.status, Status::Ok) && !summary.is_empty() {
+                summary.insert(0, vec![crate::i18n::chrome("status").to_owned(), status_label(self.status).to_owned()]);
+            }
+            if !summary.is_empty() {
+                sections.push(render_table(
                     &[crate::i18n::chrome("item"), crate::i18n::chrome("value")],
-                    &rows,
-                );
-                sections.push(format!("{}\n{table}", crate::i18n::chrome("summary")));
+                    &summary,
+                ));
             }
         }
         if !rows.is_empty() {
-            sections.push(render_table(
-                &[
-                    crate::i18n::chrome("item"),
-                    crate::i18n::chrome("status"),
-                    crate::i18n::chrome("value"),
-                    crate::i18n::chrome("action"),
-                ],
-                &rows,
-            ));
+            let show_action = rows.iter().any(|row| !row[3].is_empty());
+            let mut headers = vec![
+                crate::i18n::chrome("item"),
+                crate::i18n::chrome("status"),
+                crate::i18n::chrome("value"),
+            ];
+            if show_action {
+                headers.push(crate::i18n::chrome("action"));
+            }
+            sections.push(render_table(&headers, &rows));
         }
         let mut text = sections.join("\n");
-        // `details` is a machine-readable extension point.  It can contain
-        // large diagnostic structures and, historically, accidentally exposed
-        // sealed storage rows.  Human output is intentionally limited to the
-        // declared summary/items/actions/errors table; callers that need
-        // details must opt into `--json`.
-        if !text.is_empty() {
-            text.push('\n');
+        if text.is_empty() {
+            text = status_label(self.status).to_owned();
         }
-        text.push_str(&format!(
-            "{}: {}",
-            crate::i18n::chrome("result"),
-            status_label(self.status)
-        ));
         for action in &self.actions {
             text.push_str(&format!("\n{}: {action}", crate::i18n::chrome("action")));
         }
@@ -158,6 +152,68 @@ impl ResultEnvelope {
         }
         Ok(text)
     }
+
+    fn human_item_value(&self, item: &Item) -> String {
+        if self.command == "doctor" {
+            let zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
+            if item.name == "embedder" && (item.value.starts_with("BGE-M3 preparation/indexing ")
+                || item.value.starts_with("Model operation in progress:")) {
+                let task = &self.details["model_operation"];
+                if task["active"] == true {
+                    return model_task_text(task);
+                }
+                return if zh { "已安排后台准备" } else { "Background preparation scheduled" }.to_owned();
+            }
+            if item.name == "model index" && item.value.starts_with("BGE-M3 index pending;") {
+                let index = &self.details["retrieval_index"];
+                let state = index["state"].as_str().unwrap_or("pending");
+                let mut text = format!("{}: {}", if zh { "后台索引" } else { "Background index" }, task_phase(state));
+                if let Some(error) = index["error"].as_str() {
+                    text.push_str(&format!("; {error}"));
+                }
+                return text;
+            }
+        }
+        humanize_value(&item.value)
+    }
+}
+
+pub(crate) fn model_task_text(task: &Value) -> String {
+    let zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
+    let done = task["done"].as_u64().unwrap_or(0);
+    let total = task["total"].as_u64().unwrap_or(0);
+    let phase = task["phase"].as_str().unwrap_or("unknown");
+    let progress = if total > 0 && phase == "download" {
+        format!("{:.1}% ({:.1}/{:.1} MB)", done as f64 / total as f64 * 100.0,
+            done as f64 / 1_000_000.0, total as f64 / 1_000_000.0)
+    } else if total > 0 {
+        format!("{:.1}% ({done}/{total})", done as f64 / total as f64 * 100.0)
+    } else {
+        if zh { "等待进度" } else { "waiting for progress" }.to_owned()
+    };
+    format!("{} {} {}", task_phase(phase), progress,
+        task["item"].as_str().unwrap_or("")).trim_end().to_owned()
+}
+
+fn task_phase(phase: &str) -> String {
+    if crate::i18n::lang() != crate::i18n::Lang::Zh {
+        return phase.to_owned();
+    }
+    match phase {
+        "download" => "下载中",
+        "connect" => "连接下载源",
+        "prepare" => "准备模型",
+        "index-load" => "加载索引模型",
+        "verify" => "校验中",
+        "index" => "重建索引",
+        "load" => "加载模型",
+        "running" => "处理中",
+        "scheduled" | "pending" => "等待处理",
+        "failed" => "失败",
+        "ready" => "就绪",
+        "unknown" => "未知",
+        other => other,
+    }.to_owned()
 }
 
 pub fn related_value(related: &respire::memory::model::RelatedMemory) -> String {
@@ -229,6 +285,24 @@ fn summary_rows(value: &Value) -> Vec<Vec<String>> {
     rows
 }
 
+fn human_summary(command: &str, value: &Value) -> Vec<Vec<String>> {
+    let fields: &[&str] = match command {
+        "sync" => &["pulled", "pushed", "local_alive", "remote_alive", "pending", "conflicts", "undecodable", "index_pending", "converged"],
+        "status" => &["state", "workers", "session.user", "local_alive", "workspace", "server_addr", "autosync", "retrieval_index.state", "retrieval_index.error"],
+        _ => return summary_rows(value),
+    };
+    let mut rows: Vec<Vec<String>> = fields.iter().filter_map(|field| {
+        let mut child = value;
+        for key in field.split('.') { child = child.get(key)?; }
+        if child.is_null() { return None; }
+        Some(vec![crate::i18n::field_label(field), compact_human(child)])
+    }).collect();
+    if command == "status" && value["model_operation"]["active"] == true {
+        rows.push(vec![crate::i18n::field_label("model"), model_task_text(&value["model_operation"])]);
+    }
+    rows
+}
+
 fn humanize_value(raw: &str) -> String {
     let trimmed = raw.trim();
     if let Some(text) = json_as_text(trimmed) {
@@ -283,7 +357,8 @@ fn split_ends<'a>(text: &'a str, mid: &str, end: &str) -> Option<(&'a str, &'a s
 fn json_as_text(text: &str) -> Option<String> {
     let object = text.starts_with('{') && text.ends_with('}');
     let array = text.starts_with('[') && text.ends_with(']');
-    if !object && !array {
+    let quoted = text.starts_with('"') && text.ends_with('"');
+    if !object && !array && !quoted {
         return None;
     }
     let value: Value = serde_json::from_str(text).ok()?;
@@ -420,6 +495,7 @@ fn scalar_text(value: &Value) -> String {
         Value::String(text) => text.clone(),
         Value::Null => String::new(),
         Value::Bool(flag) => crate::i18n::yes_no(*flag).to_owned(),
+        Value::Object(_) | Value::Array(_) => compact_human(value),
         other => other.to_string(),
     }
 }
@@ -463,14 +539,7 @@ pub fn render_table(headers: &[&str], rows: &[Vec<String>]) -> String {
             .to_owned()
     };
     let head = headers.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-    let mut out = vec![
-        line(&head),
-        widths
-            .iter()
-            .map(|w| "-".repeat(*w))
-            .collect::<Vec<_>>()
-            .join("  "),
-    ];
+    let mut out = vec![line(&head)];
     out.extend(rows.iter().map(|row| line(row)));
     out.join("\n")
 }
@@ -506,7 +575,7 @@ mod tests {
     fn table_is_aligned_and_compact() {
         assert_eq!(
             render_table(&["NAME", "STATUS"], &[vec!["store".into(), "PASS".into()]]),
-            "NAME   STATUS\n-----  ------\nstore  PASS"
+            "NAME   STATUS\nstore  PASS"
         );
     }
 
@@ -533,7 +602,7 @@ mod tests {
         );
         assert!(table.contains("中文  one two"));
         assert!(table.contains("a     plain"));
-        assert_eq!(table.lines().count(), 4);
+        assert_eq!(table.lines().count(), 3);
     }
 
     fn pin_english() -> (std::sync::MutexGuard<'static, ()>, Option<String>) {
@@ -567,7 +636,7 @@ mod tests {
         assert!(value["actions"].is_array());
         let text = result.render(false)?;
         restore_lang(prev);
-        assert!(text.contains("RESULT: PENDING"), "{text}");
+        assert!(text.contains("PENDING") && !text.contains("RESULT:"), "{text}");
         Ok(())
     }
 
@@ -582,13 +651,35 @@ mod tests {
         );
         result.details = serde_json::json!({"source":"local"});
         let text = result.render(false)?;
+        result.items = vec![
+            Item::new("embedder", Status::Warn, "BGE-M3 preparation/indexing in progress through the runtime; model task: {\"active\":true}"),
+            Item::new("model index", Status::Warn, "BGE-M3 index pending; runtime status: {\"state\":\"running\"}"),
+        ];
+        result.details = serde_json::json!({
+            "model_operation": {"active":true, "phase":"download", "item":"model_fp16.onnx",
+                "done":29007544, "total":1133992936, "elapsed":45, "idle":0},
+            "retrieval_index": {"state":"running", "error":null},
+        });
+        let progress_text = result.render(false)?;
+        anyhow::ensure!(progress_text.contains("2.6%") && progress_text.contains("29.0/1134.0 MB"), "{progress_text}");
+        anyhow::ensure!(progress_text.contains("model_fp16.onnx") && !progress_text.contains("Elapsed"), "{progress_text}");
+        anyhow::ensure!(!progress_text.contains('{') && !progress_text.contains("worker_active"), "{progress_text}");
+        let json: Value = serde_json::from_str(&result.render(true)?)?;
+        anyhow::ensure!(json["details"]["model_operation"]["done"] == 29007544);
+        anyhow::ensure!(json["items"][0]["value"] == result.items[0].value);
+        result.details["model_operation"]["total"] = serde_json::json!(0);
+        result.details["retrieval_index"]["error"] = serde_json::json!("download failed");
+        let pending = result.render(false)?;
+        anyhow::ensure!(pending.contains("waiting for progress") && pending.contains("download failed"), "{pending}");
+        std::env::set_var("ONEMEMORY_LANG", "zh");
+        let chinese = result.render(false)?;
+        anyhow::ensure!(chinese.contains("下载中") && chinese.contains("等待进度") && chinese.contains("后台索引"), "{chinese}");
         restore_lang(prev);
-        assert!(text.contains("SUMMARY"));
-        assert!(text.contains("Pass"));
-        assert!(text.contains("1"));
+        assert!(!text.contains("SUMMARY") && !text.contains("ACTION"));
+        assert!(text.contains("session") && text.contains("missing"));
         assert!(!text.contains('{'), "{text}");
         assert!(!text.contains("DETAILS:"));
-        assert!(text.contains("RESULT: WARN"), "{text}");
+        assert!(text.contains("WARN") && !text.contains("RESULT:"), "{text}");
         Ok(())
     }
 
@@ -603,7 +694,7 @@ mod tests {
                 "local_alive": 3190,
                 "converged": true
             }),
-            vec![Item::new("state", Status::Warn, "converged")],
+            vec![],
         );
         let text = result.render(false)?;
         restore_lang(prev);
@@ -646,6 +737,8 @@ mod tests {
             "{object}"
         );
         anyhow::ensure!(humanize_value("[1,true]").contains("yes"));
+        let deep = humanize_value(r#"{"state":{"task":{"active":true,"files":["model.onnx",{"done":29}]}}}"#);
+        anyhow::ensure!(!deep.contains('{') && !deep.contains('[') && deep.contains("model.onnx"), "{deep}");
         let nested = summary_rows(&serde_json::json!({"outer":{"inner":{"a":1}},"ids":[1,2]}));
         anyhow::ensure!(
             nested.iter().any(|row| row[0].contains("inner")),
