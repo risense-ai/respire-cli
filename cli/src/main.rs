@@ -7,7 +7,7 @@
 //! (2) user client (account/keys/inject distribution) (3) server + frontend (respire-server).
 //! The CLI logs in itself: `register` / `login` write session.json (addr/token/user).
 //! Without a token, sync and post-write auto-sync cannot reach the server.
-//! An existing session.json, or ONEMEMORY_ADDR/TOKEN, also works.
+//! An existing session.json, or RSRS_ADDR/TOKEN, also works.
 
 use std::cell::Cell;
 use std::path::PathBuf;
@@ -255,12 +255,12 @@ fn json_mode() -> bool {
     JSON_MODE.with(|flag| flag.get())
 }
 
-/// Whether to print progress lines on stderr. The web bridge sets ONEMEMORY_PROGRESS=1
+/// Whether to print progress lines on stderr. The web bridge sets RSRS_PROGRESS=1
 /// for long async jobs: stdout stays JSON (for the bridge), stderr streams progress
 /// (so the UI can "scroll"). Without that env var, a TTY decides - same as before.
 fn progress_enabled() -> bool {
     if json_mode() { return false; }
-    if std::env::var("ONEMEMORY_PROGRESS")
+    if respire::env::var("RSRS_PROGRESS")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
@@ -467,7 +467,7 @@ fn candidates_count_normal(all: &[respire::StoredMemory]) -> usize {
     name = "rsrs",
     version,
     about = "跨设备跨软件统一 AI 记忆系统（local-first）",
-    after_help = "Sandbox: use --client-only or ONEMEMORY_CLIENT_ONLY=1 to connect to the host HTTP runtime without managing its lifecycle."
+    after_help = "Sandbox: use --client-only or RSRS_CLIENT_ONLY=1 to connect to the host HTTP runtime without managing its lifecycle."
 )]
 struct Cli {
     /// Machine-readable output: JSON only, without human progress.
@@ -1550,10 +1550,10 @@ fn now_stamp() -> String {
 }
 
 fn current_user() -> String {
-    std::env::var("ONEMEMORY_USER").unwrap_or_else(|_| "local".to_owned())
+    respire::env::var("RSRS_USER").unwrap_or_else(|_| "local".to_owned())
 }
 
-/// Assemble transport: ONEMEMORY_ADDR (or session.json addr) -> remote backup store; else local store.
+/// Assemble transport: RSRS_ADDR (or session.json addr) -> remote backup store; else local store.
 fn build_transport() -> Result<Arc<dyn MemoryTransport>> {
     if let Some((addr, token)) = remote_config_from_session_or_env()? {
         return Ok(Arc::new(RemoteTransport::new(RemoteConfig {
@@ -1580,10 +1580,10 @@ fn remote_config_from_session_or_env() -> Result<Option<(String, String)>> {
         }
     }
     // 2) env vars
-    if let Ok(addr) = std::env::var("ONEMEMORY_ADDR") {
+    if let Ok(addr) = respire::env::var("RSRS_ADDR") {
         if !addr.trim().is_empty() {
-            let token = std::env::var("ONEMEMORY_TOKEN")
-                .map_err(|_| anyhow!("remote mode needs ONEMEMORY_TOKEN"))?;
+            let token = respire::env::var("RSRS_TOKEN")
+                .map_err(|_| anyhow!("remote mode needs RSRS_TOKEN"))?;
             return Ok(Some((addr, token)));
         }
     }
@@ -1592,7 +1592,7 @@ fn remote_config_from_session_or_env() -> Result<Option<(String, String)>> {
 
 fn build_remote() -> Result<RemoteTransport> {
     let (addr, token) = remote_config_from_session_or_env()?
-        .ok_or_else(|| anyhow!("remote store is not configured - have the client/account tool write session.json (addr/token), or set ONEMEMORY_ADDR and ONEMEMORY_TOKEN"))?;
+        .ok_or_else(|| anyhow!("remote store is not configured - have the client/account tool write session.json (addr/token), or set RSRS_ADDR and RSRS_TOKEN"))?;
     Ok(RemoteTransport::new(RemoteConfig {
         address: addr,
         token,
@@ -1609,19 +1609,19 @@ fn build_session() -> Result<SessionKeys> {
         anyhow::bail!(
             "no local session: rsrs keygen --pass <password> to start fully local (no cloud); \
              or rsrs register / login for a cloud identity; or set the five-keys env vars \
-             (ONEMEMORY_PASS/SECRET/KDF_SALT/WRAPPED_URK/URK_NONCE)"
+             (RSRS_PASS/SECRET/KDF_SALT/WRAPPED_URK/URK_NONCE)"
         );
     }
-    let password = std::env::var("ONEMEMORY_PASS")
-        .map_err(|_| anyhow!("need ONEMEMORY_PASS (master password)"))?;
-    let secret = std::env::var("ONEMEMORY_SECRET")
-        .map_err(|_| anyhow!("need ONEMEMORY_SECRET (recovery key)"))?;
-    let kdf_salt = std::env::var("ONEMEMORY_KDF_SALT")
-        .map_err(|_| anyhow!("need ONEMEMORY_KDF_SALT (from keygen/register)"))?;
-    let wrapped_urk = std::env::var("ONEMEMORY_WRAPPED_URK")
-        .map_err(|_| anyhow!("need ONEMEMORY_WRAPPED_URK (from keygen/login)"))?;
-    let urk_nonce = std::env::var("ONEMEMORY_URK_NONCE")
-        .map_err(|_| anyhow!("need ONEMEMORY_URK_NONCE (from keygen/login)"))?;
+    let password = respire::env::var("RSRS_PASS")
+        .map_err(|_| anyhow!("need RSRS_PASS (master password)"))?;
+    let secret = respire::env::var("RSRS_SECRET")
+        .map_err(|_| anyhow!("need RSRS_SECRET (recovery key)"))?;
+    let kdf_salt = respire::env::var("RSRS_KDF_SALT")
+        .map_err(|_| anyhow!("need RSRS_KDF_SALT (from keygen/register)"))?;
+    let wrapped_urk = respire::env::var("RSRS_WRAPPED_URK")
+        .map_err(|_| anyhow!("need RSRS_WRAPPED_URK (from keygen/login)"))?;
+    let urk_nonce = respire::env::var("RSRS_URK_NONCE")
+        .map_err(|_| anyhow!("need RSRS_URK_NONCE (from keygen/login)"))?;
     SessionKeys::unlock(&password, &secret, &kdf_salt, &wrapped_urk, &urk_nonce)
 }
 
@@ -2890,7 +2890,7 @@ fn classify_source_revision(memories: &[respire::StoredMemory]) -> serde_json::V
 
 /// JEV API key: TYPESAFE_API_KEY env first, then api_key in <data-dir>/classify.json.
 fn classify_api_key() -> Result<String> {
-    if let Ok(k) = std::env::var("TYPESAFE_API_KEY") {
+    if let Ok(k) = respire::env::var("TYPESAFE_API_KEY") {
         let k = k.trim().to_owned();
         if !k.is_empty() {
             return Ok(k);
@@ -3007,7 +3007,7 @@ fn run_audit(json_flag: bool) -> Result<()> {
     let max_depth = active.iter().map(|m| depth(&m.id)).max().unwrap_or(0);
 
     // M2 (2026-09-20 audit): previously only the local --json flag was honored;
-    // ONEMEMORY_JSON=1 (what the GUI bridge sets) still printed prose, breaking cli-api.md "equivalent" output.
+    // RSRS_JSON=1 (what the GUI bridge sets) still printed prose, breaking cli-api.md "equivalent" output.
     if json_mode() || json_flag {
         let summary = serde_json::json!({
             "total_active": active.len(),
@@ -3932,7 +3932,7 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
             serde_json::json!({"enabled":false}),
             vec![
                 OutputItem::new("version check", OutputStatus::Skip, "disabled")
-                    .action("unset ONEMEMORY_UPDATE_CHECK"),
+                    .action("unset RSRS_UPDATE_CHECK"),
             ],
         ));
     }
@@ -3984,9 +3984,19 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         items.push((name.to_owned(), ok, note));
     };
 
+    match respire::migration::pending_legacy_profiles() {
+        Ok(profiles) if !profiles.is_empty() => {
+            add(&mut items, "migration", true,
+                format!("{} legacy account(s) not migrated; use rsrs migrate or TUI Accounts > Migrate; no automatic migration", profiles.len()));
+            model_warnings.push("migration");
+        }
+        Ok(_) => {}
+        Err(error) => add(&mut items, "migration", false, format!("discovery failed: {error:#}")),
+    }
+
     // 1) data dir and store
     let dd = respire::service::data_dir();
-    let db = dd.join("onememory.db");
+    let db = respire::service::database_path(&dd)?;
     if db.exists() {
         let store = build_local();
         match store {
@@ -4221,7 +4231,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         format!("{n}/{t} - new since last tidy (TIDY when the threshold is hit; reset after tidy)"),
     );
 
-    // 9) CLI version (--check-update or ONEMEMORY_UPDATE_CHECK=1 hits the network; default reads cache, no network)
+    // 9) CLI version (--check-update or RSRS_UPDATE_CHECK=1 hits the network; default reads cache, no network)
     //    Doctor must not stall on the network, so it does not force a query - report known result, hint how to check if no cache.
     if respire::update_check::enabled() {
         progress::phase("检查 CLI 版本；等待版本源", "Checking CLI version; waiting for version registry");
@@ -4248,7 +4258,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
                 &mut items,
                 "CLI version",
                 true,
-                format!("{} (not checked - add --check-update to query, or set ONEMEMORY_UPDATE_CHECK=0 to disable)", respire::VERSION),
+                format!("{} (not checked - add --check-update to query, or set RSRS_UPDATE_CHECK=0 to disable)", respire::VERSION),
             ),
         }
     } else {
@@ -4709,8 +4719,9 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
     let is_v4 = version >= 4;
     // v4: super password = session["secret_key"] or the keyring; v3: passphrase + Secret Key two-factor
     let super_key = data["secret_key"].as_str().unwrap_or("").to_owned();
-    let legacy_super = data["super"].as_str().unwrap_or("").to_owned();
-    let super_key = if super_key.is_empty() {
+    let legacy_super = data["super"].as_str().map(ToOwned::to_owned)
+        .or_else(|| respire::keystore::load_super(&user)).unwrap_or_default();
+    let super_key = if is_v4 && super_key.is_empty() {
         respire::keystore::load_super(&user).unwrap_or_default()
     } else {
         super_key
@@ -4741,7 +4752,7 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
         format!(
             "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
              user: {user}\nserver: {addr}\n\n\
-             -- decrypt keys (v3 two-factor: passphrase + recovery code; explicit migration upgrades to v4) --\n\
+             -- original decrypt factors (migration retains the vault version and factors) --\n\
              super password (passphrase): {legacy_super}\n\
              Secret Key (recovery code): {super_key}\n\n\
              -- vault wrap material (listed for lookup) --\n\
@@ -4749,12 +4760,12 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
              kdf_salt: {kdf_salt}\n\
              wrapped_urk: {wrapped_urk}\n\
              urk_nonce: {urk_nonce}\n\n\
-             -- explicitly copy and select the old profile before upgrading its vault --\n\
+             -- explicitly migrate the full library, select it, then publish its unchanged-factor vault --\n\
              rsrs migrate --vault --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
         )
     };
     if !(is_v4 || is_v3) {
-        eprintln!("WARN this machine still has a v1/v2 key wrap - use rsrs migrate --vault on the selected old profile before exporting");
+        eprintln!("WARN this profile retains its original v1/v2 factors; migrate the complete library explicitly before cloud namespace publication");
     }
     match out {
         Some(path) => {
@@ -5263,9 +5274,9 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 fn main_body() -> i32 {
     set_json_mode(std::env::args_os().any(|arg| arg == "--json")
-        || std::env::var("ONEMEMORY_JSON").is_ok_and(|value| value == "1" || value == "true"));
+        || respire::env::var("RSRS_JSON").is_ok_and(|value| value == "1" || value == "true"));
     if std::env::args_os().any(|arg| arg == "--client-only") {
-        std::env::set_var("ONEMEMORY_CLIENT_ONLY", "1");
+        std::env::set_var("RSRS_CLIENT_ONLY", "1");
     }
     if !runtime_policy::client_only() {
         if let Err(error) = respire::migration::ensure_default_home() {
@@ -5457,7 +5468,7 @@ fn changes_profile(command: Option<&Command>) -> bool {
 fn run(args: Cli) -> Result<()> {
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
-        args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
+        args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
     let display = !json_mode() && !rpc::worker_active() && args.command.is_some()
         && !matches!(args.command, Some(Command::Mcp | Command::Login { .. } | Command::V));
@@ -5642,7 +5653,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         respire::service::ensure_runtime_profile()?;
     }
     set_json_mode(
-        args.json || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true"),
+        args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
@@ -6793,7 +6804,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     normals,
                     preview.len() - primary - normals,
                 );
-                std::env::set_var("ONEMEMORY_DEBUG_SCORE", "1");
+                std::env::set_var("RSRS_DEBUG_SCORE", "1");
             }
             let mut q = MemoryQuery::new(&query).limit(limit);
             if let Some(k) = r#type {
@@ -6803,7 +6814,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 q = q.of_project(p);
             }
             let candidates = scoped_candidates(&store)?;
-            // 3. small-to-big: hit body + ancestor bodies (budget is built-in; ONEMEMORY_ANCESTOR_BUDGET=0 turns it off)
+            // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
             let (ranked, recall_mode, selection_fallback) = match mode {
                 Some(mode) => {
                     recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &mode)?
@@ -8345,8 +8356,8 @@ mod capture_tests {
     fn residual_input_errors_use_user_envelopes() -> anyhow::Result<()> {
         let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
-        let _guard = EnvGuard { prev: std::env::var("ONEMEMORY_DATA_DIR").ok() };
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let _guard = EnvGuard { prev: respire::env::var("RSRS_DATA_DIR").ok() };
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         crate::rpc::set_worker_active(true);
         respire::service::keygen()?;
         let missing = dir.path().join("missing.json").to_string_lossy().into_owned();
@@ -8381,8 +8392,8 @@ mod capture_tests {
         fn drop(&mut self) {
             crate::rpc::set_worker_active(false);
             match &self.prev {
-                Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-                None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+                Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+                None => std::env::remove_var("RSRS_DATA_DIR"),
             }
         }
     }
@@ -8394,11 +8405,11 @@ mod capture_tests {
             .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let guard = EnvGuard {
-            prev: std::env::var("ONEMEMORY_DATA_DIR").ok(),
+            prev: respire::env::var("RSRS_DATA_DIR").ok(),
         };
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
-        let prev_bin = std::env::var("ONEMEMORY_BIN_DIR").ok();
-        std::env::set_var("ONEMEMORY_BIN_DIR", dir.path().join("bin"));
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        let prev_bin = respire::env::var("RSRS_BIN_DIR").ok();
+        std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
         respire::service::set_server_addr("https://example.invalid")
             .map_err(|err| err.to_string())?;
         crate::rpc::set_worker_active(true);
@@ -8460,8 +8471,8 @@ mod capture_tests {
         drop(operation);
         drop(guard);
         match prev_bin {
-            Some(value) => std::env::set_var("ONEMEMORY_BIN_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_BIN_DIR"),
+            Some(value) => std::env::set_var("RSRS_BIN_DIR", value),
+            None => std::env::remove_var("RSRS_BIN_DIR"),
         }
         Ok(())
     }
@@ -8508,11 +8519,11 @@ mod sync_retry_tests {
         let _lock = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let prev_dir = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let prev_off = std::env::var("ONEMEMORY_NO_AUTOSYNC").ok();
+        let prev_dir = respire::env::var("RSRS_DATA_DIR").ok();
+        let prev_off = respire::env::var("RSRS_NO_AUTOSYNC").ok();
         let dir = tempfile::tempdir()?;
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
-        std::env::remove_var("ONEMEMORY_NO_AUTOSYNC");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        std::env::remove_var("RSRS_NO_AUTOSYNC");
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
         let port = listener.local_addr()?.port();
         std::thread::spawn(move || {
@@ -8535,12 +8546,12 @@ mod sync_retry_tests {
         let elapsed = started.elapsed();
         crate::rpc::set_worker_active(false);
         match prev_dir {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         match prev_off {
-            Some(value) => std::env::set_var("ONEMEMORY_NO_AUTOSYNC", value),
-            None => std::env::remove_var("ONEMEMORY_NO_AUTOSYNC"),
+            Some(value) => std::env::set_var("RSRS_NO_AUTOSYNC", value),
+            None => std::env::remove_var("RSRS_NO_AUTOSYNC"),
         }
         assert!(
             elapsed < std::time::Duration::from_secs(2),

@@ -23,14 +23,14 @@ const run = (command, args, options = {}) => {
 const target = process.platform === 'win32' ? 'x86_64-pc-windows-msvc' : process.platform === 'linux' ? 'x86_64-unknown-linux-gnu' : null;
 if (!target) throw new Error('Crate consumer verification currently runs on Windows x64 or GNU Linux x64');
 const environment = { ...process.env, CARGO_TARGET_DIR: join(output, 'target') };
-delete environment.RESPIRE_CORE_SDK_DIR;
+for (const name of ['RSRS_CORE_SDK_DIR', 'ONEMEMORY_CORE_SDK_DIR', 'RESPIRE_CORE_SDK_DIR']) delete environment[name];
 if (selection === 'sdk') {
   const protocol = /^version\s*=\s*"([^"]+)"/m.exec(readFileSync(join(root, 'crates/protocol/Cargo.toml'), 'utf8'))?.[1];
   const response = await fetch(`https://static.crates.io/crates/respire_protocol/respire_protocol-${protocol}.crate`);
   if (!response.ok) throw new Error('Publish the matching protocol crate before verifying the SDK registry package');
   await response.body?.cancel();
   run(process.execPath, [join(source, 'prepare-sdk.mjs'), target, join(output, 'sdk')], { env: environment });
-  environment.RESPIRE_CORE_SDK_DIR = join(output, 'sdk');
+  environment.RSRS_CORE_SDK_DIR = join(output, 'sdk');
 }
 run('cargo', ['package', '--locked', '--manifest-path', join(source, 'Cargo.toml')], { env: environment });
 const archive = join(output, 'target/package', `${name}-${version}.crate`);
@@ -51,17 +51,19 @@ const collect = (directory, prefix = '') => {
 collect(directory);
 if (inventory.some(file => /\.(a|lib|dll|so|dylib|onnx|pt|safetensors|pdb|bc|ll)$/i.test(file))) throw new Error('Crate includes a native binary or model payload');
 if (selection === 'sdk') {
-  const allowed = new Set(['Cargo.toml', 'Cargo.toml.orig', 'Cargo.lock', '.cargo_vcs_info.json', 'LICENSE', 'README.md', 'build.rs', 'core-sdk.lock.json', 'prepare-sdk.mjs', 'src/lib.rs', 'src/business.rs', 'src/business/reports.rs']);
+  const allowed = new Set(['Cargo.toml', 'Cargo.toml.orig', 'Cargo.lock', '.cargo_vcs_info.json', 'LICENSE', 'README.md', 'build.rs', 'core-sdk.lock.json', 'prepare-sdk.mjs', 'src/lib.rs', 'src/env.rs', 'src/host.rs', 'src/host_winml.rs', 'host-winml-build.rs', 'notices/WinML-2.4.89-license.txt', 'src/business.rs', 'src/business/reports.rs']);
   if (inventory.some(file => !allowed.has(file))) throw new Error('Unexpected thin SDK package file');
   const before = readFileSync(join(source, 'core-sdk.lock.json'));
   if (!before.equals(readFileSync(join(directory, 'core-sdk.lock.json')))) throw new Error('Packaged SDK pins differ');
   const sdk = join(output, 'consumer-sdk');
-  run(process.execPath, [join(directory, 'prepare-sdk.mjs'), target, sdk], { env: { ...environment, RESPIRE_CORE_SDK_DIR: '' } });
+  const consumerEnvironment = { ...environment };
+  for (const name of ['RSRS_CORE_SDK_DIR', 'ONEMEMORY_CORE_SDK_DIR', 'RESPIRE_CORE_SDK_DIR']) delete consumerEnvironment[name];
+  run(process.execPath, [join(directory, 'prepare-sdk.mjs'), target, sdk], { env: consumerEnvironment });
   const consumer = join(output, 'consumer');
   mkdirSync(join(consumer, 'src'), { recursive: true });
   writeFileSync(join(consumer, 'Cargo.toml'), `[package]\nname = "respire-sdk-package-check"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n[dependencies]\nanyhow = "1.0"\nrespire_core_sdk = { path = "${directory.replaceAll('\\', '/')}" }\n[workspace]\n`);
-  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0001), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
-  run('cargo', ['run', '--manifest-path', join(consumer, 'Cargo.toml')], { env: { ...environment, RESPIRE_CORE_SDK_DIR: sdk, CARGO_TARGET_DIR: join(output, 'consumer-target') } });
+  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0002), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
+  run('cargo', ['run', '--manifest-path', join(consumer, 'Cargo.toml')], { env: { ...environment, RSRS_CORE_SDK_DIR: sdk, CARGO_TARGET_DIR: join(output, 'consumer-target') } });
   const lock = readFileSync(join(consumer, 'Cargo.lock'), 'utf8');
   if (!/name = "respire_protocol"\r?\nversion = "[^"]+"\r?\nsource = "registry\+https:\/\/github.com\/rust-lang\/crates.io-index"/.test(lock)) throw new Error('Consumer protocol did not resolve from crates.io');
 }

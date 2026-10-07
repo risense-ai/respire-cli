@@ -754,7 +754,9 @@ fn account_key(app: &mut App, code: KeyCode) {
     if app.cursor == app.live.accounts.len() {
         match respire::migration::list_legacy_profiles() {
             Ok(value) => {
-                app.migration_profiles = value["profiles"].as_array().cloned().unwrap_or_default();
+                app.migration_profiles = value["profiles"].as_array().map(|profiles|
+                    profiles.iter().filter(|profile| profile["migrated_to"].is_null()).cloned().collect()
+                ).unwrap_or_default();
                 app.cursor = 0;
                 app.page = Page::Migration;
             }
@@ -1345,7 +1347,7 @@ fn manager_name(manager: Manager) -> &'static str {
 }
 
 fn tool_on_path(name: &str) -> bool {
-    let path = match std::env::var_os("PATH") {
+    let path = match respire::env::var_os("PATH") {
         Some(path) => path,
         None => return false,
     };
@@ -1359,7 +1361,7 @@ fn tool_on_path(name: &str) -> bool {
 
 fn tools_on_path() -> Vec<Manager> {
     let mut tools = Vec::new();
-    let agent = std::env::var("npm_config_user_agent")
+    let agent = respire::env::var("npm_config_user_agent")
         .unwrap_or_default()
         .to_ascii_lowercase();
     let exe = std::env::current_exe()
@@ -2326,8 +2328,8 @@ mod model_menu_tests {
     fn mirror_cancel_restart_keys_and_live_progress_match_the_menu() -> anyhow::Result<()> {
         let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
-        let previous = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let previous = respire::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> anyhow::Result<()> {
             respire::service::write_agent_config_key("model_mirror", &serde_json::json!("http://127.0.0.1:9999"))?;
             let mut app = App::new(Arc::new(Mutex::new(Live::empty())));
@@ -2363,7 +2365,7 @@ mod model_menu_tests {
             assert!(matches!(app.page, Page::Home));
             Ok(())
         })();
-        match previous { Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value), None => std::env::remove_var("ONEMEMORY_DATA_DIR") }
+        match previous { Some(value) => std::env::set_var("RSRS_DATA_DIR", value), None => std::env::remove_var("RSRS_DATA_DIR") }
         result
     }
 }

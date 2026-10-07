@@ -150,6 +150,10 @@ def verify(args, result):
             "login_interruption_incomplete")
     cases(interruption, {"before_publish_SIGINT_retry", "after_publish_SIGINT_retry", "pre_journal_DEV4_recovery"},
           "login_interruption_cases_missing")
+    recovered = interruption["cases"]["pre_journal_DEV4_recovery"]
+    require(all(recovered.get(field) is True for field in ("public_original_profile_migration",
+            "full_library_reencrypted", "original_source_preserved", "original_factors_preserved")),
+            "DEV4_original_profile_migration_not_proven")
     result["components"]["login_interruption"] = {"passed": True, "required_observed": 3}
 
     mapping = read(Path(__file__).with_name("dev-runtime-business-coverage.json"))

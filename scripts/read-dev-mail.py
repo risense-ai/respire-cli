@@ -14,9 +14,9 @@ import time
 
 
 def read_code(request):
-    host = os.environ['RESPIRE_DEV_IMAP_HOST']
-    username = os.environ['RESPIRE_DEV_IMAP_USERNAME']
-    password = os.environ['RESPIRE_DEV_IMAP_PASSWORD']
+    host = os.environ['RSRS_DEV_IMAP_HOST']
+    username = os.environ['RSRS_DEV_IMAP_USERNAME']
+    password = os.environ['RSRS_DEV_IMAP_PASSWORD']
     since = datetime.datetime.fromisoformat(request['requestedAt'].replace('Z', '+00:00'))
     recipient = request['recipient']
     if not re.fullmatch(r'[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+', recipient):

@@ -43,12 +43,12 @@ fn start_internal_runtime() -> Result<Runtime, String> {
             "--port",
             &port.to_string(),
         ])
-        .env("ONEMEMORY_DATA_DIR", dir.path())
-        .env("ONEMEMORY_RPC_PORT", port.to_string())
-        .env("ONEMEMORY_BIN_DIR", dir.path().join("bin"))
-        .env_remove("ONEMEMORY_NO_AUTOSTART")
-        .env_remove("ONEMEMORY_CLIENT_ONLY")
-        .env_remove("ONEMEMORY_RPC_TOKEN")
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_RPC_PORT", port.to_string())
+        .env("RSRS_BIN_DIR", dir.path().join("bin"))
+        .env_remove("RSRS_NO_AUTOSTART")
+        .env_remove("RSRS_CLIENT_ONLY")
+        .env_remove("RSRS_RPC_TOKEN")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr_file))
@@ -110,11 +110,11 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests() -> Result<()
         Ok(paths)
     });
     let output = Command::new(bin()).args(["--client-only", "status", "--json"])
-        .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
-        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+        .env("RSRS_DATA_DIR", dir.path()).env("RSRS_RPC_PORT", port.to_string())
+        .env_remove("RSRS_RPC_TOKEN").output()?;
     let health = Command::new(bin()).args(["--client-only", "--runtime-internal", "--status", "--json"])
-        .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
-        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+        .env("RSRS_DATA_DIR", dir.path()).env("RSRS_RPC_PORT", port.to_string())
+        .env_remove("RSRS_RPC_TOKEN").output()?;
     done.store(true, Ordering::Release);
     let paths = worker.join().map_err(|_| "HTTP fixture panicked")??;
     assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
@@ -139,8 +139,8 @@ fn client_only_rejects_stalled_inference_before_submitting_a_write() -> Result<(
         Ok(path)
     });
     let output = Command::new(bin()).args(["--client-only","remember","synthetic pending write","--force","--json"])
-        .env("ONEMEMORY_DATA_DIR",dir.path()).env("ONEMEMORY_RPC_PORT",port.to_string())
-        .env_remove("ONEMEMORY_RPC_TOKEN").output()?;
+        .env("RSRS_DATA_DIR",dir.path()).env("RSRS_RPC_PORT",port.to_string())
+        .env_remove("RSRS_RPC_TOKEN").output()?;
     assert_eq!(worker.join().map_err(|_| "HTTP fixture panicked")??, "/api/health");
     assert!(!output.status.success());
     let message = format!("{}{}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));
@@ -234,9 +234,9 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     let output = Command::new(bin())
         .args(["--client-only", "status", "--json"])
-        .env("ONEMEMORY_DATA_DIR", rt.dir.path())
-        .env("ONEMEMORY_RPC_PORT", rt.port.to_string())
-        .env_remove("ONEMEMORY_RPC_TOKEN")
+        .env("RSRS_DATA_DIR", rt.dir.path())
+        .env("RSRS_RPC_PORT", rt.port.to_string())
+        .env_remove("RSRS_RPC_TOKEN")
         .output()
         .map_err(|err| err.to_string())?;
     if !output.status.success() {

@@ -130,11 +130,24 @@ impl Fixture {
     }
 
     fn target(&self) -> PathBuf {
-        self.home.path().join(".rsrs")
+        self.home.path().join(".rsrs/accounts/namespace-fixture")
     }
 
     fn migrate(&self) -> Result<()> {
-        migrate_home(self.home.path())
+        let names = ["HOME", "USERPROFILE", "RSRS_DATA_DIR", DEFAULT_ENV];
+        let saved = names.map(|name| (name, std::env::var_os(name)));
+        std::env::set_var("HOME", self.home.path());
+        std::env::set_var("USERPROFILE", self.home.path());
+        std::env::set_var("RSRS_DATA_DIR", self.home.path().join(".rsrs"));
+        std::env::set_var(DEFAULT_ENV, self.home.path().join(".rsrs"));
+        let result = identity(&self.source).and_then(|id| migrate_profile(&id, "namespace-fixture").map(|_| ()));
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        result
     }
 
     fn assert_rejected(&self) -> Result<()> {
@@ -146,9 +159,31 @@ impl Fixture {
         Ok(())
     }
 
+    fn assert_converted(&self, expected: &[(&str, i64)]) -> Result<()> {
+        let rows = self.copied_rows()?;
+        assert_eq!(rows.len(), expected.len());
+        let plaintext = self.keys.decrypt_content(&self.good.0, &self.good.1)?;
+        for ((id, ciphertext, nonce, deleted), (expected_id, expected_deleted)) in rows.iter().zip(expected) {
+            assert_eq!(id, expected_id);
+            assert_eq!(deleted, expected_deleted);
+            assert!(ciphertext.starts_with(crate::memory::crypto::RSRS_PREFIX));
+            assert_ne!((ciphertext, nonce), (&self.good.0, &self.good.1));
+            assert_eq!(self.keys.decrypt_content(ciphertext, nonce)?, plaintext);
+        }
+        let session: Value = serde_json::from_slice(&std::fs::read(self.target().join("session.json"))?)?;
+        let original: Value = serde_json::from_slice(&std::fs::read(self.source.join("session.json"))?)?;
+        let alias = session["keyring_account"].as_str().context("migrated alias missing")?;
+        let super_key = crate::keystore::load_super(alias).context("original super Key missing")?;
+        assert_eq!(super_key, original["secret_key"].as_str().context("source Key missing")?);
+        assert_eq!(crate::auth::unlock_session_keys(&session, "", Some(&super_key), alias)?.urk, self.keys.urk);
+        assert_eq!(session["vault_version"], original["vault_version"]);
+        assert!(session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crate::memory::crypto::RSRS_PREFIX)));
+        Ok(())
+    }
+
     fn copied_rows(&self) -> Result<Vec<(String, String, String, i64)>> {
         let database = Connection::open_with_flags(
-            self.target().join("onememory.db"),
+            self.target().join("rsrs.db"),
             OpenFlags::SQLITE_OPEN_READ_ONLY,
         )?;
         let mut statement =
@@ -195,15 +230,7 @@ fn mismatched_live_row_rejects_without_publication_and_source_repair_can_retry()
         &fixture.target(),
         &identity(&fixture.source)?
     )?);
-    assert_eq!(
-        fixture.copied_rows()?,
-        vec![(
-            "live".into(),
-            fixture.good.0.clone(),
-            fixture.good.1.clone(),
-            0
-        )]
-    );
+    fixture.assert_converted(&[("live", 0)])?;
     Ok(())
 }
 
@@ -215,29 +242,18 @@ fn every_live_row_must_decrypt_even_after_a_readable_row() -> Result<()> {
 }
 
 #[test]
-fn readable_live_rows_and_unreadable_tombstones_are_copied_unchanged() -> Result<()> {
+fn readable_rows_are_reencrypted_and_unreadable_tombstones_block_full_migration() -> Result<()> {
     let _isolate = crate::test_lock::Isolate::new()?;
     let _keyring = memory_keyring();
     let fixture = Fixture::new(&[("live", false, true), ("old-local", true, false)])?;
+    assert!(fixture.migrate().is_err());
+    assert!(!fixture.target().exists());
+    assert!(!fixture.source.join(SOURCE_RECEIPT).exists());
+    fixture.database.execute("UPDATE memories SET ciphertext=?1,nonce=?2 WHERE id='old-local'",
+        rusqlite::params![fixture.good.0, fixture.good.1])?;
     fixture.migrate()?;
-    assert_eq!(
-        fixture.copied_rows()?,
-        vec![
-            (
-                "live".into(),
-                fixture.good.0.clone(),
-                fixture.good.1.clone(),
-                0
-            ),
-            (
-                "old-local".into(),
-                fixture.bad.0.clone(),
-                fixture.bad.1.clone(),
-                1
-            ),
-        ]
-    );
-    let store = crate::transport::local::LocalStore::open(&fixture.target().join("onememory.db"))?;
+    fixture.assert_converted(&[("live", 0), ("old-local", 1)])?;
+    let store = crate::transport::local::LocalStore::open(&fixture.target().join("rsrs.db"))?;
     let embedder = crate::memory::search::HashingEmbedder::default();
     assert_eq!(store.rebuild_index(&fixture.keys, &embedder, "m3")?, 1);
     assert!(!store.index_pending("m3")?);
@@ -245,15 +261,13 @@ fn readable_live_rows_and_unreadable_tombstones_are_copied_unchanged() -> Result
 }
 
 #[test]
-fn all_deleted_rows_remain_opaque_but_existing_session_requirements_remain() -> Result<()> {
+fn all_deleted_rows_must_decrypt_and_existing_session_requirements_remain() -> Result<()> {
     let _isolate = crate::test_lock::Isolate::new()?;
     let _keyring = memory_keyring();
     let fixture = Fixture::new(&[("old-local", true, false)])?;
-    fixture.migrate()?;
-    assert_eq!(
-        fixture.copied_rows()?,
-        vec![("old-local".into(), fixture.bad.0, fixture.bad.1, 1)]
-    );
+    assert!(fixture.migrate().is_err());
+    assert!(!fixture.target().exists());
+    assert!(!fixture.source.join(SOURCE_RECEIPT).exists());
     for missing_session in [false, true] {
         let fixture = Fixture::new(&[("old-local", true, false)])?;
         let session_path = fixture.source.join("session.json");
@@ -387,7 +401,7 @@ fn existing_completed_receipts_never_recopy_or_overwrite_destination_edits() -> 
     fixture.migrate()?;
     let receipt_path = fixture.target().join(RECEIPT);
     let receipt = std::fs::read(&receipt_path)?;
-    let target = Connection::open(fixture.target().join("onememory.db"))?;
+    let target = Connection::open(fixture.target().join("rsrs.db"))?;
     target.execute("UPDATE memories SET updated_at='destination-edited'", [])?;
     fixture.database.execute(
         "UPDATE memories SET ciphertext=?1,nonce=?2",
@@ -400,15 +414,7 @@ fn existing_completed_receipts_never_recopy_or_overwrite_destination_edits() -> 
             .get::<_, String>(0))?,
         "destination-edited"
     );
-    assert_eq!(
-        fixture.copied_rows()?,
-        vec![(
-            "live".into(),
-            fixture.good.0.clone(),
-            fixture.good.1.clone(),
-            0
-        )]
-    );
+    fixture.assert_converted(&[("live", 0)])?;
     assert!(!fixture.target().join("accounts/legacy-onememory").exists());
     Ok(())
 }

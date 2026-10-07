@@ -29,7 +29,7 @@ intermediate cosine value, strategy threshold or selector plan is returned.
 The main hit IDs and scores are unchanged by associations.
 
 `--no-related` disables expansion and superseded hints for this request. The
-Core compatibility environment switch `ONEMEMORY_RELATED=0` disables expansion
+Core compatibility environment switch `RSRS_RELATED=0` disables expansion
 while retaining replacement warnings; process-environment changes require a
 runtime restart by the host owner. Association settings are Core-owned.
 

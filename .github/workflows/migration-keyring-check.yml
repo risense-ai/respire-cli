@@ -65,7 +65,7 @@ jobs:
           sudo apt-get install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
       - name: Verify private Secret Service credential roundtrips
-        run: dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/secret-service-keyring"
+        run: dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/secret-service-keyring"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -136,8 +136,8 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -146,15 +146,15 @@ jobs:
           binary="$(realpath validated-cli/rsrs)"
           root="$RUNNER_TEMP/targeted-native-migration"
           fixture_status=0
-          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
       - name: Verify native macOS encrypted profile migration
         if: runner.os == 'macOS'
         shell: bash
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
           python -m pip install --only-binary=:all: cryptography==46.0.3

@@ -11,8 +11,8 @@
 //!    Version checks must not break remember/doctor.
 //! 2. **24h throttle**: results (including failures) land in `data_dir/update_check.json`;
 //!    no second query the same day - avoid hitting the network on every write.
-//! 3. **Can be turned off**: `ONEMEMORY_UPDATE_CHECK=0` disables;
-//!    `ONEMEMORY_REGISTRY` swaps the registry (tests / mirrors).
+//! 3. **Can be turned off**: `RSRS_UPDATE_CHECK=0` disables;
+//!    `RSRS_REGISTRY` swaps the registry (tests / mirrors).
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,16 +34,16 @@ pub fn cache_path() -> PathBuf {
     data_dir().join("update_check.json")
 }
 
-/// Version-check switch: `ONEMEMORY_UPDATE_CHECK=0` turns it off.
+/// Version-check switch: `RSRS_UPDATE_CHECK=0` turns it off.
 pub fn enabled() -> bool {
     !matches!(
-        std::env::var("ONEMEMORY_UPDATE_CHECK").as_deref(),
+        respire_app::env::var("RSRS_UPDATE_CHECK").as_deref(),
         Ok("0") | Ok("false") | Ok("off")
     )
 }
 
 fn registry() -> String {
-    std::env::var("ONEMEMORY_REGISTRY")
+    respire_app::env::var("RSRS_REGISTRY")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_owned())
         .filter(|s| !s.is_empty())
@@ -223,9 +223,9 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
 }
 
 /// Convenience: one hint line when needed (Some only if outdated).
-/// `ONEMEMORY_UPDATE_HINT=0` silences it.
+/// `RSRS_UPDATE_HINT=0` silences it.
 pub fn hint(force: bool) -> Option<String> {
-    if matches!(std::env::var("ONEMEMORY_UPDATE_HINT").as_deref(), Ok("0")) {
+    if matches!(respire_app::env::var("RSRS_UPDATE_HINT").as_deref(), Ok("0")) {
         return None;
     }
     check(force).filter(|s| s.outdated).map(|s| s.message())
@@ -316,16 +316,16 @@ mod tests {
         let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var("ONEMEMORY_UPDATE_CHECK").ok();
-        std::env::remove_var("ONEMEMORY_UPDATE_CHECK");
+        let saved = std::env::var("RSRS_UPDATE_CHECK").ok();
+        std::env::remove_var("RSRS_UPDATE_CHECK");
         assert!(enabled(), "enabled by default");
-        std::env::set_var("ONEMEMORY_UPDATE_CHECK", "0");
+        std::env::set_var("RSRS_UPDATE_CHECK", "0");
         assert!(!enabled(), "=0 disables");
-        std::env::set_var("ONEMEMORY_UPDATE_CHECK", "off");
+        std::env::set_var("RSRS_UPDATE_CHECK", "off");
         assert!(!enabled(), "=off disables");
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_UPDATE_CHECK", v),
-            None => std::env::remove_var("ONEMEMORY_UPDATE_CHECK"),
+            Some(v) => std::env::set_var("RSRS_UPDATE_CHECK", v),
+            None => std::env::remove_var("RSRS_UPDATE_CHECK"),
         }
     }
 }

@@ -33,7 +33,7 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
     let expires = grant["expires_in"].as_u64().filter(|seconds| *seconds > 0 && *seconds <= 600).context("authorization response has an invalid expiry")?;
     let mut interval = grant["interval"].as_u64().filter(|seconds| *seconds > 0 && *seconds <= 30).context("authorization response has an invalid polling interval")?;
     let url = format!("{dashboard}/#/authorize?code={code}");
-    ensure!(grant["verification_uri_complete"].as_str() == Some(url.as_str()), "server dashboard differs from the expected dashboard; configure RESPIRE_DASHBOARD_URL on the server or --dashboard in the CLI");
+    ensure!(grant["verification_uri_complete"].as_str() == Some(url.as_str()), "server dashboard differs from the expected dashboard; configure RSRS_DASHBOARD_URL on the server or --dashboard in the CLI");
     eprintln!("Authorize CLI: {url}\nCheck code: {code}");
     if !no_open { crate::web::open_browser(&url)?; }
     let deadline = Instant::now() + Duration::from_secs(expires);
@@ -100,7 +100,10 @@ fn commit_verified(addr: &str, authorization: &Value, prepared: respire_app::log
         let accounts = actual["details"]["accounts"].as_array().context("runtime account list missing accounts")?;
         let current = accounts.iter().find(|account| account["current"].as_bool() == Some(true)).context("runtime did not report a selected account")?;
         let expected = prepared.borrow();
-        ensure!(current["user"].as_str() == Some(expected.user.as_str()) && current["dir"].as_str() == Some(expected.directory.to_string_lossy().as_ref()), "runtime account or directory differs from the authorized account");
+        let current_directory = current["dir"].as_str().context("runtime did not report the selected directory")?;
+        ensure!(current["user"].as_str() == Some(expected.user.as_str())
+            && std::path::Path::new(current_directory) == expected.directory.as_path(),
+            "runtime account or directory differs from the authorized account");
         expected.finish_migration(addr, authorization)?;
         expected.complete()?;
         Ok(())

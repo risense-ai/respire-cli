@@ -261,7 +261,7 @@ rsrs update <id> --content "…" --title "…"  # ①改：就地改，保父链
 rsrs remember "综合版" --merge-ids "a,b"    # ②并：先查子孙、先 export 备份
 rsrs remember "内容" --parent <节点id>      # ③挂 / ④存：必带挂点
 rsrs remember "事" --importance trivial     # 琐事直接记日记（CLI 自动并入当日轨迹，不判树不挂树）
-rsrs retitle-many ~/.respire/x.json        # 批量改题（单进程一次模型）
+rsrs retitle-many ~/.rsrs/x.json        # 批量改题（单进程一次模型）
 rsrs split <id> [--go --spec '<json>']       # 拆大杂烩：出材料→AI 拟→执行
 rsrs taxonomy --list / agent-config          # 词库 / AI 行为配置
 rsrs tree --outline --json / tree --from <id> --depth 3 --json   # 读树 / 树内深搜
@@ -275,7 +275,7 @@ rsrs bench run <评测集> [--baseline <前次>]   # 检索质量评测：跑分
 rsrs forget <id> / restore <完整id>          # 软删 / 复活
 rsrs status / sync / doctor                  # 状态 / 对账 / 体检（装机排障首选）
 rsrs update-check [--force]                  # 查 npm 有无新版 CLI（写条达阈与 doctor 亦提示）
-rsrs export ~/.respire/x.json              # 全库明文备份（合并前必备）
+rsrs export ~/.rsrs/x.json              # 全库明文备份（合并前必备）
 ```
 
 要点一行：本地库权威、云端只见密文。`remember`、`update`、`forget` 落库后返回，runtime 后台同步；主动 `sync` 才阻塞。离线不丢，下次 sync 补传。`session.json`／Account Secret 勿外传勿提交。同一 data_dir 只有一个 runtime 持有 `lock.db` 直到退出。`--direct` 在 runtime 还在时拒绝。

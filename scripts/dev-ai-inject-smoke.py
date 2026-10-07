@@ -124,7 +124,7 @@ class Smoke:
         self.model = args.model_dir or self.root / "data/models/bge-m3"
         require(self.model.is_relative_to(self.root) and not self.model.exists(), "model_directory_not_fresh")
         self.env = {k: v for k, v in os.environ.items()
-            if not k.startswith(("ONEMEMORY_", "RESPIRE_", "XDG_", "DS_", "JEV_"))
+            if not k.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_", "DS_", "JEV_"))
             and not k.endswith(("_TOKEN", "_API_KEY"))
             and "TEST_MODE" not in k
             and k not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
@@ -134,15 +134,15 @@ class Smoke:
             APPDATA=str(self.root / "config"), LOCALAPPDATA=str(self.root / "data"),
             XDG_CONFIG_HOME=str(self.root / "config"), XDG_DATA_HOME=str(self.root / "data"),
             XDG_CACHE_HOME=str(self.root / "cache"), TMPDIR=str(self.root / "tmp"),
-            ONEMEMORY_DATA_DIR=str(self.root / "library"), ONEMEMORY_BIN_DIR=str(self.root / "bin"),
-            ONEMEMORY_M3_DIR=str(self.model), ONEMEMORY_ENGINE="cpu", ONEMEMORY_NO_AUTOSYNC="1",
+            RSRS_DATA_DIR=str(self.root / "library"), RSRS_BIN_DIR=str(self.root / "bin"),
+            RSRS_M3_DIR=str(self.model), RSRS_ENGINE="cpu", RSRS_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(self.root / "tmp/missing-keyring.sock"),
             DS_API_KEY="ci-local-fixture", NO_PROXY="127.0.0.1,localhost")
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             self.env.pop(name, None)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
-            self.env['ONEMEMORY_RPC_PORT'] = str(listener.getsockname()[1])
+            self.env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
         self.report = {"binary_sha256": args.binary_sha256, "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"),
             "version": args.version, "target": "https://api.dev.rsrs.rs", "cases": {},
@@ -212,7 +212,7 @@ class Smoke:
                 code=str(error) if isinstance(error, RuntimeError) else type(error).__name__)
 
     def rows(self):
-        path = self.root / "library/onememory.db"
+        path = self.root / "library/rsrs.db"
         with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
             return {row[0]: {"title": row[1], "parent": row[2]} for row in db.execute(
                 "SELECT id,title,parent_id FROM memories WHERE deleted=0")}
@@ -383,7 +383,7 @@ class Smoke:
         self.account_token = session["token"]
         super_key = registered["summary"].get("super")
         require(isinstance(super_key, str) and bool(super_key), "registered_super_missing")
-        self.env["ONEMEMORY_SUPER"] = super_key
+        self.env["RSRS_SUPER"] = super_key
         roots = {}
         for name in ("CI causal root", "CI deepen explicit", "CI deepen automatic"):
             self.cli("root-create", name, "--content", "Disposable independent topic collection", "--yes")

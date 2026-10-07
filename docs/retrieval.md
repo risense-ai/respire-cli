@@ -27,7 +27,7 @@ rsrs agent-config --set recall_mode=fast
 ```
 
 Configure URL/model/key on the Models page. Keys use the OS keyring, not `agent.json`.
-`ONEMEMORY_RECALL_API_KEY` overrides the running process key. File settings apply on the
+`RSRS_RECALL_API_KEY` overrides the running process key. File settings apply on the
 next query; changed process environment requires runtime restart. TUI recall checks
 use the same data flow and diagnostics.
 
@@ -49,7 +49,7 @@ Rebuilding checkpoints completed entries and resumes pending work after restart.
 Encrypted memories, account keys and sync state are preserved. Explicit invalid
 model paths or failed downloads remain visible errors.
 
-`ONEMEMORY_M3_DIR` selects the model directory. Index work does not alter memory content
+`RSRS_M3_DIR` selects the model directory. Index work does not alter memory content
 or synced dirty flags. Core artifacts are opaque, versioned local derived data, not
 account keys or an encryption mechanism. Writes and changed sync inputs maintain the
 active index; deleted content is excluded from retrieval.

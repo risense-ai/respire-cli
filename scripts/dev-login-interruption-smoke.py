@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import shutil
 import signal
 import re
 import socket
@@ -40,12 +41,14 @@ def main():
     urk = secrets.token_bytes(32)
     salt, nonce = secrets.token_hex(16), secrets.token_bytes(12)
     v4 = {"version": 4, "kdf_salt": salt, "urk_nonce": nonce.hex(),
-          "wrapped_urk": AESGCM(legacy.v4_kek(code, salt)).encrypt(nonce, urk, None).hex()}
+          "wrapped_urk": legacy.PREFIX + AESGCM(legacy.v4_kek(code, salt, legacy.PREFIX)).encrypt(nonce, urk, None).hex()}
     salt, nonce = secrets.token_hex(16), secrets.token_bytes(12)
     old_super = "synthetic-legacy-super"
     v2 = {"version": 2, "kdf_salt": salt, "urk_nonce": nonce.hex(),
           "wrapped_urk": AESGCM(legacy.legacy_kek(2, old_super, "", salt)).encrypt(nonce, urk, None).hex()}
-    state = {"vault": v4, "gets": 0, "posts": 0, "barrier": None}
+    migrated_v2 = dict(v2, wrapped_urk=legacy.PREFIX + v2["wrapped_urk"])
+    old_auth_salt = legacy.hkdf(b"synthetic", None, b"onememory:auth-salt:v1", length=16).hex()
+    state = {"vault": v4, "auth_salt": old_auth_salt, "gets": 0, "posts": 0, "barrier": None}
     reached, release = threading.Event(), threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
@@ -74,10 +77,20 @@ def main():
                     reached.set()
                     release.wait(120)
                 self.reply({"ok": True})
+            elif self.path == "/api/self/password":
+                require(self.headers.get("Authorization") == "Bearer synthetic-token", "password_update_not_authorized")
+                salt_bytes = bytes.fromhex(data["salt"].removeprefix(legacy.PREFIX))
+                require(data["pass_hash"] == hashlib.pbkdf2_hmac("sha256", b"synthetic-password", salt_bytes, 100000, 32).hex(),
+                    "original_login_password_changed")
+                state["auth_salt"] = data["salt"]
+                self.reply({"updated": True})
             else:
                 self.send_error(404)
 
         def do_GET(self):
+            if self.path == "/auth/salt?user=synthetic":
+                self.reply({"salt": state["auth_salt"]})
+                return
             if self.path != "/api/self/vault":
                 self.send_error(404)
                 return
@@ -93,15 +106,15 @@ def main():
     addr = f"http://127.0.0.1:{server.server_port}"
     root = args.root / "library"
     root.mkdir(mode=0o700)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("ONEMEMORY_", "RESPIRE_", "XDG_"))}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))}
     home = args.root / "home"
     home.mkdir(mode=0o700)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
-    env.update(HOME=str(home), ONEMEMORY_DATA_DIR=str(root), ONEMEMORY_SUPER=code,
-               ONEMEMORY_RPC_PORT=str(port), ONEMEMORY_M3_DIR=str(args.model_dir),
-               ONEMEMORY_NO_AUTOSYNC="1", ONEMEMORY_UPDATE_CHECK="0", ONEMEMORY_ENGINE="cpu")
+    env.update(HOME=str(home), RSRS_DATA_DIR=str(root), RSRS_SUPER=code,
+               RSRS_RPC_PORT=str(port), RSRS_M3_DIR=str(args.model_dir),
+               RSRS_NO_AUTOSYNC="1", RSRS_UPDATE_CHECK="0", RSRS_ENGINE="cpu")
     keys = None
     if args.native_credentials:
         native_root = args.root / "native-store"
@@ -119,6 +132,8 @@ def main():
     def write_session(vault):
         value = {"user": "synthetic", "addr": addr, "token": "synthetic-token", "vault_version": vault["version"],
                  **{k: v for k, v in vault.items() if k != "version"}}
+        if vault["wrapped_urk"].startswith(legacy.PREFIX):
+            value["crypto_namespace"] = legacy.PREFIX
         session.write_text(json.dumps(value))
         session.chmod(0o600)
         return session.read_bytes()
@@ -126,20 +141,33 @@ def main():
     def cli(*flags, success=True):
         command_env = dict(env)
         if keys and "migrate" in flags:
-            command_env.pop("ONEMEMORY_SUPER")
+            command_env.pop("RSRS_SUPER")
+        elif "migrate" in flags:
+            command_env["RSRS_SUPER"] = old_super
         result = subprocess.run([str(args.binary), *flags], env=command_env, capture_output=True, timeout=180)
-        require((result.returncode == 0) == success, "CLI_failed:" + result.stderr.decode(errors="replace")[-1500:])
+        if (result.returncode == 0) != success:
+            try:
+                errors = json.loads(result.stdout).get("errors", [])
+                diagnostic = "; ".join(str(error) for error in errors)
+            except (ValueError, UnicodeError, AttributeError):
+                diagnostic = "CLI returned no structured error"
+            diagnostic = diagnostic or result.stderr.decode(errors="replace")[-1500:]
+            for secret in (code, old_super, "synthetic-password", "synthetic-token"):
+                diagnostic = diagnostic.replace(secret, "[redacted]")
+            report["failure"] = {"exit_code": result.returncode, "error": diagnostic[:1500]}
+            raise RuntimeError("CLI_failed:" + diagnostic[:1500])
         return result
 
     migration = ["--direct", "--json", "migrate", "--vault", "--addr", addr, "--user", "synthetic",
-                 "--pass=synthetic-password", "--super", old_super, "--new-super", code]
+                 "--pass=synthetic-password", "--super", old_super, "--new-super", old_super]
     child = None
+    migration_keys = None
     try:
         version = cli("--version").stdout.decode()
         require(args.version in version, "binary_version_mismatch")
         write_session(v4)
         cli("--direct", "--json", "remember", "Synthetic interruption ciphertext", "--title", "Interruption fixture", "--force", "--importance", "important")
-        database = root / "onememory.db"
+        database = root / "rsrs.db"
 
         def ciphertexts():
             with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
@@ -149,16 +177,21 @@ def main():
         require(len(original_rows) == 1, "ciphertext_fixture_missing")
         for barrier in ("before_publish", "after_publish"):
             state.update(vault=dict(v2), gets=0, posts=0, barrier=barrier)
-            legacy_bytes = write_session(v2)
+            # Transaction barriers start after full library conversion, which is
+            # exercised independently by the real profile migration fixture.
+            legacy_bytes = write_session(migrated_v2)
             config.write_bytes(config_bytes)
             reached.clear()
             release.clear()
             command_env = dict(env)
             if keys:
-                command_env.pop("ONEMEMORY_SUPER")
+                command_env.pop("RSRS_SUPER")
+            else:
+                command_env["RSRS_SUPER"] = old_super
             child = subprocess.Popen([str(args.binary), *migration], env=command_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             require(reached.wait(120), "commit_barrier_not_reached")
-            require(json.loads(session.read_bytes())["vault_version"] == 4, "session_not_committed_before_signal")
+            require(json.loads(session.read_bytes())["wrapped_urk"].startswith(legacy.PREFIX)
+                and json.loads(session.read_bytes())["vault_version"] == 2, "original_vault_factors_changed")
             require((root / ".login-recovery.json").is_file(), "durable_recovery_missing")
             alias = json.loads(session.read_bytes()).get("keyring_account")
             if keys:
@@ -166,7 +199,10 @@ def main():
                 require(json.loads(session.read_bytes()).get("keyring_backend") == "secret_service", "native_backend_not_used")
                 attributes = {"service": "rsrs", "username": "super:" + alias}
                 items = list(keys.collection.search_items(attributes))
-                require(len(items) == 1 and items[0].get_secret().decode() == code, "native_credential_not_written")
+                require(len(items) == 1 and items[0].get_secret().decode() == old_super, "native_credential_not_written")
+                password_attributes = {"service": "rsrs", "username": "pass:" + alias}
+                passwords = list(keys.collection.search_items(password_attributes))
+                require(len(passwords) == 1 and passwords[0].get_secret().decode() == "synthetic-password", "original_password_not_written")
             child.send_signal(signal.SIGINT)
             child.communicate(timeout=15)
             require(child.returncode == -signal.SIGINT, "owned_child_not_interrupted")
@@ -180,16 +216,19 @@ def main():
             require(not (root / ".login-recovery.json").exists(), "recovery_not_retired")
             if keys:
                 require(not list(keys.collection.search_items(attributes)), "interrupted_native_credential_not_deleted")
+                require(not list(keys.collection.search_items(password_attributes)), "interrupted_native_password_not_deleted")
             cli(*migration)
-            require(state["vault"]["version"] == 4 and state["posts"] == 1, "migration_retry_not_idempotent")
+            require(state["vault"]["version"] == 2 and state["posts"] == 1, "migration_retry_not_idempotent")
             vault = state["vault"]
-            require(AESGCM(legacy.v4_kek(code, vault["kdf_salt"])).decrypt(bytes.fromhex(vault["urk_nonce"]), bytes.fromhex(vault["wrapped_urk"]), None) == urk, "data_key_changed")
+            require(AESGCM(legacy.legacy_kek(2, old_super, "", vault["kdf_salt"], current=True)).decrypt(
+                bytes.fromhex(vault["urk_nonce"]), legacy.encrypted_bytes(vault["wrapped_urk"]), None) == urk, "data_key_changed")
             require(ciphertexts() == original_rows, "original_ciphertexts_changed")
             require(json.loads(config.read_bytes()) == json.loads(config_bytes), "API_config_changed")
             cli("--runtime-internal", "--stop")
             report["cases"][barrier + "_SIGINT_retry"] = {"passed": True, "ciphertext_preserved": True, "original_profile_restored": True,
                                                           "credential_mode": "secret_service" if keys else "headless"}
-        # DEV.4 has no journal: recover its already inconsistent local/cloud state.
+        # DEV.4 has no journal. Preserve its inconsistent profile and recover by
+        # importing the actual original library through the public migration API.
         state.update(vault=dict(v2), gets=0, posts=0, barrier=None)
         write_session(v4)
         before = session.read_bytes()
@@ -197,9 +236,65 @@ def main():
         wrong[-1] = "A3-000000-000000-000000-000000-000000-000000"
         cli(*wrong, success=False)
         require(session.read_bytes() == before and state["posts"] == 0, "wrong_recovery_modified_state")
+        cli(*migration, success=False)
+        require(session.read_bytes() == before and state["posts"] == 0, "inconsistent_factors_modified_state")
+        if keys is None:
+            key_spec = importlib.util.spec_from_file_location("migration_keys", Path(__file__).with_name("dev-migration-keyring.py"))
+            key_module = importlib.util.module_from_spec(key_spec)
+            key_spec.loader.exec_module(key_module)
+            migration_keys = key_module.create(args.root / "original-profile-keyring")
+            migration_keys.configure_env(env)
+            env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=" + str(args.root / "missing-secret-service.sock")
+        else:
+            migration_keys = keys
+        source = home / ".onememory"
+        source.mkdir(mode=0o700)
+        source_database = source / "onememory.db"
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as original, sqlite3.connect(source_database) as backup:
+            original.backup(backup)
+            for memory_id, ciphertext, old_nonce in original_rows:
+                plaintext = legacy.decrypt_content(urk, ciphertext, old_nonce)
+                old_nonce = secrets.token_bytes(12)
+                old_ciphertext = AESGCM(legacy.hkdf(urk, None, b"onememory:data:v1")).encrypt(old_nonce, plaintext, None).hex()
+                backup.execute("UPDATE memories SET ciphertext=?,nonce=?,embedding_enc='' WHERE id=?", (old_ciphertext, old_nonce.hex(), memory_id))
+                backup.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (old_ciphertext, memory_id))
+        backup.close()
+        original.close()
+        original_source_session = {"user": "synthetic", "addr": addr, "token": "synthetic-token", "vault_version": 2,
+                                   **{k: v for k, v in v2.items() if k != "version"},
+                                   "super": old_super, "pass": "synthetic-password"}
+        source_session = source / "session.json"
+        source_session.write_text(json.dumps(original_source_session), encoding="utf-8")
+        source_session.chmod(0o600)
+        (source / "client.json").write_text(json.dumps({"data_dir": str(source)}), encoding="utf-8")
+        if (root / "core-index").is_dir():
+            shutil.copytree(root / "core-index", source / "core-index")
+        source_before = legacy.digest(source_database), source_session.read_bytes()
+        alias = "legacy-" + hashlib.sha256(str(source.resolve()).replace("\\", "/").encode()).hexdigest()[:16]
+        for slot in ("super", "pass"):
+            migration_keys.reserve("rsrs", slot + ":" + alias)
+        discovered = json.loads(cli("--json", "migrate").stdout)["details"]["profiles"]
+        candidates = [row for row in discovered if Path(row["source"]).resolve() == source.resolve()]
+        require(len(candidates) == 1, "original_profile_not_discovered")
+        result = json.loads(cli("--json", "migrate", "--source", candidates[0]["source_id"], "--account", "recovered-original").stdout)["summary"]
+        require(result["state"] == "migrated", "original_profile_not_migrated")
+        restored_root = Path(result["dir"])
+        require((legacy.digest(source_database), source_session.read_bytes()) == source_before, "original_source_changed")
+        require(session.read_bytes() == before, "inconsistent_profile_overwritten")
+        restored_session = json.loads((restored_root / "session.json").read_text())
+        require(restored_session["vault_version"] == 2 and restored_session["wrapped_urk"].startswith(legacy.PREFIX), "original_factors_not_recovered")
+        with sqlite3.connect(restored_root / "rsrs.db") as restored:
+            restored_rows = restored.execute("SELECT id,ciphertext,nonce FROM memories ORDER BY id").fetchall()
+        require(len(restored_rows) == len(original_rows) and all(ciphertext.startswith(legacy.PREFIX) for _, ciphertext, _ in restored_rows), "full_library_namespace_not_migrated")
+        require([legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in restored_rows]
+                == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
+        env["RSRS_DATA_DIR"] = str(restored_root)
         cli(*migration)
-        require(state["vault"]["version"] == 4 and ciphertexts() == original_rows, "DEV4_recovery_failed")
-        report["cases"]["pre_journal_DEV4_recovery"] = {"passed": True, "wrong_code_rejected": True}
+        require(state["vault"]["version"] == 2 and ciphertexts() == original_rows, "DEV4_recovery_failed")
+        report["cases"]["pre_journal_DEV4_recovery"] = {"passed": True, "wrong_code_rejected": True,
+            "inconsistent_factors_rejected": True, "public_original_profile_migration": True,
+            "full_library_reencrypted": True, "original_source_preserved": True,
+            "original_factors_preserved": True, "requires_original_source": True}
         report["passed"] = True
     finally:
         release.set()
@@ -213,15 +308,17 @@ def main():
             # synthetic login aliases produced by this fixture's own children.
             for item in keys.collection.get_all_items():
                 attributes = item.get_attributes()
-                require(attributes.get("service") == "rsrs" and re.fullmatch(r"super:login-[a-f0-9]{32}", attributes.get("username", "")), "unexpected_private_credential")
+                require(attributes.get("service") == "rsrs" and re.fullmatch(r"(?:super|pass):(?:login-[a-f0-9]{32}|legacy-[a-f0-9]{16})", attributes.get("username", "")), "unexpected_private_credential")
                 item.delete()
             require(not list(keys.collection.get_all_items()), "native_fixture_cleanup_failed")
             report["native_cleanup"] = keys.cleanup()
+        elif migration_keys:
+            report["native_cleanup"] = migration_keys.cleanup()
         server.shutdown()
         server.server_close()
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
     require(report["runtime_cleanup"]["passed"], "owned_runtime_cleanup_failed")
-    if keys:
+    if migration_keys or keys:
         require(report["native_cleanup"]["passed"], "native_fixture_cleanup_failed")
     print(json.dumps(report))
 

@@ -1,7 +1,7 @@
 //! Loopback HTTP client for the local runtime (`127.0.0.1:15169`).
 //! Current loopback runtimes need no token; pre-1.0.10 runtimes require the
 //! existing host token on the initial request. Non-loopback HTTP access uses
-//! `ONEMEMORY_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
+//! `RSRS_RPC_TOKEN` then `<data_dir>/runtime/token` on the host.
 
 use std::fs;
 use std::io::Write;
@@ -43,7 +43,7 @@ impl Health {
 }
 
 pub fn rpc_port() -> u16 {
-    if let Ok(raw) = std::env::var("ONEMEMORY_RPC_PORT") {
+    if let Ok(raw) = respire::env::var("RSRS_RPC_PORT") {
         let trimmed = raw.trim();
         if let Ok(port) = trimmed.parse::<u16>() {
             if port != 0 {
@@ -72,7 +72,7 @@ fn load_token() -> Option<String> {
 }
 
 fn read_token() -> Result<Option<String>> {
-    if let Ok(raw) = std::env::var("ONEMEMORY_RPC_TOKEN") {
+    if let Ok(raw) = respire::env::var("RSRS_RPC_TOKEN") {
         let trimmed = raw.trim().to_owned();
         if !trimmed.is_empty() {
             return Ok(Some(trimmed));
@@ -187,7 +187,7 @@ pub fn pid_is_respire(pid: u32) -> bool {
 pub fn load_or_create_token() -> Result<String> {
     crate::runtime_policy::require_host("creating runtime credentials")?;
     if let Some(existing) = read_token()? {
-        if std::env::var("ONEMEMORY_RPC_TOKEN").is_ok() {
+        if respire::env::var("RSRS_RPC_TOKEN").is_ok() {
             return Ok(existing);
         }
         return Ok(existing);
@@ -527,12 +527,12 @@ mod tests {
     fn rpc_port_reads_env() -> Result<(), String> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("ONEMEMORY_RPC_PORT").ok();
-        std::env::set_var("ONEMEMORY_RPC_PORT", "26111");
+        let prev = respire::env::var("RSRS_RPC_PORT").ok();
+        std::env::set_var("RSRS_RPC_PORT", "26111");
         let got = rpc_port();
         match prev {
-            Some(v) => std::env::set_var("ONEMEMORY_RPC_PORT", v),
-            None => std::env::remove_var("ONEMEMORY_RPC_PORT"),
+            Some(v) => std::env::set_var("RSRS_RPC_PORT", v),
+            None => std::env::remove_var("RSRS_RPC_PORT"),
         }
         if got != 26111 {
             return Err(format!("got {got}"));
@@ -599,18 +599,18 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let prev_tok = std::env::var("ONEMEMORY_RPC_TOKEN").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
-        std::env::set_var("ONEMEMORY_RPC_TOKEN", "from-env");
+        let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire::env::var("RSRS_RPC_TOKEN").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        std::env::set_var("RSRS_RPC_TOKEN", "from-env");
         let got = load_token();
         match prev_data {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         match prev_tok {
-            Some(v) => std::env::set_var("ONEMEMORY_RPC_TOKEN", v),
-            None => std::env::remove_var("ONEMEMORY_RPC_TOKEN"),
+            Some(v) => std::env::set_var("RSRS_RPC_TOKEN", v),
+            None => std::env::remove_var("RSRS_RPC_TOKEN"),
         }
         if got.as_deref() != Some("from-env") {
             return Err(format!("{got:?}"));
@@ -623,19 +623,19 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let prev_tok = std::env::var("ONEMEMORY_RPC_TOKEN").ok();
-        std::env::remove_var("ONEMEMORY_RPC_TOKEN");
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire::env::var("RSRS_RPC_TOKEN").ok();
+        std::env::remove_var("RSRS_RPC_TOKEN");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         persist_token("file-token").map_err(|e| e.to_string())?;
         let got = load_token();
         match prev_data {
-            Some(v) => std::env::set_var("ONEMEMORY_DATA_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         match prev_tok {
-            Some(v) => std::env::set_var("ONEMEMORY_RPC_TOKEN", v),
-            None => std::env::remove_var("ONEMEMORY_RPC_TOKEN"),
+            Some(v) => std::env::set_var("RSRS_RPC_TOKEN", v),
+            None => std::env::remove_var("RSRS_RPC_TOKEN"),
         }
         if got.as_deref() != Some("file-token") {
             return Err(format!("{got:?}"));

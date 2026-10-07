@@ -12,7 +12,7 @@ pub enum Lang {
 }
 
 pub fn lang() -> Lang {
-    if let Ok(raw) = std::env::var("ONEMEMORY_LANG") {
+    if let Ok(raw) = respire::env::var("RSRS_LANG") {
         if let Some(lang) = parse_lang(&raw) {
             return lang;
         }
@@ -374,7 +374,7 @@ fn read_lang_file() -> Option<Lang> {
     parse_lang(data.get("lang")?.as_str()?)
 }
 
-/// Same path rule as app-core: `ONEMEMORY_DATA_DIR/client.json`, else `~/.rsrs/client.json`.
+/// Same path rule as app-core: `RSRS_DATA_DIR/client.json`, else `~/.rsrs/client.json`.
 pub fn client_config_path() -> PathBuf {
     if let Some(root) = respire::service::env_root_dir() {
         return root.join("client.json");
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn field_labels_follow_the_configured_language() -> anyhow::Result<()> {
         let _guard = lock_env();
-        let prev = std::env::var("ONEMEMORY_LANG").ok();
+        let prev = respire::env::var("RSRS_LANG").ok();
         let keys = [
             "conflict_history",
             "conflicts",
@@ -457,21 +457,21 @@ mod tests {
             "reembedded",
             "dimensions",
         ];
-        std::env::set_var("ONEMEMORY_LANG", "zh");
+        std::env::set_var("RSRS_LANG", "zh");
         for key in keys {
             let label = field_label(key);
             anyhow::ensure!(!label.is_empty() && label != key, "{key} -> {label}");
         }
         anyhow::ensure!(yes_no(true) == "是" && yes_no(false) == "否");
-        std::env::set_var("ONEMEMORY_LANG", "en");
+        std::env::set_var("RSRS_LANG", "en");
         for key in keys {
             anyhow::ensure!(!field_label(key).is_empty(), "{key}");
         }
         anyhow::ensure!(field_label("not_a_known_field") == "not a known field");
         anyhow::ensure!(yes_no(true) == "yes" && yes_no(false) == "no");
         match prev {
-            Some(value) => std::env::set_var("ONEMEMORY_LANG", value),
-            None => std::env::remove_var("ONEMEMORY_LANG"),
+            Some(value) => std::env::set_var("RSRS_LANG", value),
+            None => std::env::remove_var("RSRS_LANG"),
         }
         Ok(())
     }
@@ -488,11 +488,11 @@ mod tests {
     #[test]
     fn lang_file_and_text_follow_isolated_config() -> anyhow::Result<()> {
         let _guard = lock_env();
-        let previous_dir = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let previous_lang = std::env::var("ONEMEMORY_LANG").ok();
+        let previous_dir = respire::env::var("RSRS_DATA_DIR").ok();
+        let previous_lang = respire::env::var("RSRS_LANG").ok();
         let dir = tempfile::tempdir()?;
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
-        std::env::remove_var("ONEMEMORY_LANG");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        std::env::remove_var("RSRS_LANG");
         assert!(client_config_path().starts_with(dir.path()));
         assert_eq!(lang(), Lang::En);
         set_lang(Lang::Zh)?;
@@ -512,17 +512,17 @@ mod tests {
         assert!(text("missing").is_empty());
         std::fs::write(client_config_path(), "[]")?;
         assert!(set_lang(Lang::Zh).is_err());
-        std::env::set_var("ONEMEMORY_LANG", "zh-cn");
+        std::env::set_var("RSRS_LANG", "zh-cn");
         assert_eq!(lang(), Lang::Zh);
-        std::env::set_var("ONEMEMORY_LANG", "nope");
+        std::env::set_var("RSRS_LANG", "nope");
         assert_eq!(lang(), Lang::En);
         match previous_dir {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         match previous_lang {
-            Some(value) => std::env::set_var("ONEMEMORY_LANG", value),
-            None => std::env::remove_var("ONEMEMORY_LANG"),
+            Some(value) => std::env::set_var("RSRS_LANG", value),
+            None => std::env::remove_var("RSRS_LANG"),
         }
         Ok(())
     }

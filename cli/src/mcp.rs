@@ -23,10 +23,10 @@ pub struct HttpIn {
     pub body: String,
 }
 
-/// Native daemon directory. Default: `~/.respire/bin` (profile root, not the
-/// current account `data_dir()`). Isolation: `ONEMEMORY_DATA_DIR` / `ONEMEMORY_BIN_DIR`.
+/// Native daemon directory. Default: `~/.rsrs/bin` (profile root, not the
+/// current account `data_dir()`). Isolation: `RSRS_DATA_DIR` / `RSRS_BIN_DIR`.
 pub fn bin_dir() -> PathBuf {
-    if let Ok(raw) = std::env::var("ONEMEMORY_BIN_DIR") {
+    if let Ok(raw) = respire::env::var("RSRS_BIN_DIR") {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             return PathBuf::from(trimmed);
@@ -54,8 +54,8 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
         return Ok(dest);
     }
     // cargo test binaries live under target/*/deps. Never overwrite the user
-    // ~/.respire/bin with a test harness. Sweep and unit tests isolate data_dir.
-    if std::env::var("ONEMEMORY_BIN_DIR")
+    // ~/.rsrs/bin with a test harness. Sweep and unit tests isolate data_dir.
+    if respire::env::var("RSRS_BIN_DIR")
         .ok()
         .filter(|v| !v.trim().is_empty())
         .is_none()
@@ -979,20 +979,20 @@ mod tests {
     fn default_bin_dir_is_under_data_dir() -> Result<(), String> {
         let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
-        let prev_data = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let prev_bin = std::env::var("ONEMEMORY_BIN_DIR").ok();
-        std::env::remove_var("ONEMEMORY_BIN_DIR");
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
+        let prev_bin = respire::env::var("RSRS_BIN_DIR").ok();
+        std::env::remove_var("RSRS_BIN_DIR");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let got = bin_dir();
         let want = dir.path().join("bin");
         let restore = || {
             match prev_data {
-                Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-                None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+                Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+                None => std::env::remove_var("RSRS_DATA_DIR"),
             }
             match prev_bin {
-                Some(value) => std::env::set_var("ONEMEMORY_BIN_DIR", value),
-                None => std::env::remove_var("ONEMEMORY_BIN_DIR"),
+                Some(value) => std::env::set_var("RSRS_BIN_DIR", value),
+                None => std::env::remove_var("RSRS_BIN_DIR"),
             }
         };
         if got != want {
@@ -1007,38 +1007,38 @@ mod tests {
     fn materialize_bin_honors_override_dir() -> Result<(), String> {
         let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
-        let prev = std::env::var("ONEMEMORY_BIN_DIR").ok();
-        std::env::set_var("ONEMEMORY_BIN_DIR", dir.path());
+        let prev = respire::env::var("RSRS_BIN_DIR").ok();
+        std::env::set_var("RSRS_BIN_DIR", dir.path());
         let path = materialize_bin()?;
         if !path.starts_with(dir.path()) {
             if let Some(value) = prev {
-                std::env::set_var("ONEMEMORY_BIN_DIR", value);
+                std::env::set_var("RSRS_BIN_DIR", value);
             } else {
-                std::env::remove_var("ONEMEMORY_BIN_DIR");
+                std::env::remove_var("RSRS_BIN_DIR");
             }
             return Err(format!("bin path {} not under override", path.display()));
         }
         if !path.exists() {
             if let Some(value) = prev {
-                std::env::set_var("ONEMEMORY_BIN_DIR", value);
+                std::env::set_var("RSRS_BIN_DIR", value);
             } else {
-                std::env::remove_var("ONEMEMORY_BIN_DIR");
+                std::env::remove_var("RSRS_BIN_DIR");
             }
             return Err("materialized bin missing".to_owned());
         }
         let again = materialize_bin()?;
         if again != path {
             if let Some(value) = prev {
-                std::env::set_var("ONEMEMORY_BIN_DIR", value);
+                std::env::set_var("RSRS_BIN_DIR", value);
             } else {
-                std::env::remove_var("ONEMEMORY_BIN_DIR");
+                std::env::remove_var("RSRS_BIN_DIR");
             }
             return Err("second materialize changed path".to_owned());
         }
         if let Some(value) = prev {
-            std::env::set_var("ONEMEMORY_BIN_DIR", value);
+            std::env::set_var("RSRS_BIN_DIR", value);
         } else {
-            std::env::remove_var("ONEMEMORY_BIN_DIR");
+            std::env::remove_var("RSRS_BIN_DIR");
         }
         Ok(())
     }

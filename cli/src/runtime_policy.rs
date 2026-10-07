@@ -5,10 +5,10 @@ use std::sync::OnceLock;
 use anyhow::{bail, Result};
 
 pub fn client_only() -> bool {
-    if ["ONEMEMORY_CLIENT_ONLY", "ONEMEMORY_NO_AUTOSTART"]
+    if ["RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"]
         .iter()
         .any(|name| {
-            std::env::var(name).is_ok_and(|value| {
+            respire::env::var(name).is_ok_and(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
                     "1" | "true" | "on" | "yes"

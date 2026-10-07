@@ -26,7 +26,7 @@ pub(super) fn base() -> String {
 }
 
 fn key_for(base: &str) -> Option<String> {
-    std::env::var("ONEMEMORY_RECALL_API_KEY")
+    respire::env::var("RSRS_RECALL_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| {

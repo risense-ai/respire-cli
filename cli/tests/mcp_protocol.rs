@@ -15,9 +15,9 @@ fn stdio_initialize_lists_all_tools() -> Result<(), Box<dyn std::error::Error>> 
     std::fs::create_dir_all(&bin_dir)?;
     let mut child = Command::new(bin())
         .arg("mcp")
-        .env("ONEMEMORY_DATA_DIR", dir.path())
-        .env("ONEMEMORY_BIN_DIR", &bin_dir)
-        .env_remove("ONEMEMORY_LANG")
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_BIN_DIR", &bin_dir)
+        .env_remove("RSRS_LANG")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

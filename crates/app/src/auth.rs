@@ -118,15 +118,22 @@ pub(crate) fn wrap_with_v4(super_pass: &str, urk: &[u8; 32]) -> Result<(String, 
     Ok((kdf_salt, wrapped_urk, urk_nonce))
 }
 
+pub(crate) fn wrap_with_rsrs(super_pass: &str, urk: &[u8; 32]) -> Result<(String, String, String)> {
+    let salt = crypto::random_hex(16);
+    let kek = crypto::derive_rsrs_kek(super_pass, &salt)?;
+    let (nonce, wrapped) = crypto::wrap_key(urk, &kek)?;
+    Ok((salt, format!("{}{wrapped}", crypto::RSRS_PREFIX), nonce))
+}
+
 /// v4 key material: generate a super password (A3- recovery code) and a fresh URK.
 fn new_vault_v4() -> Result<(String, [u8; 32], String, String, String)> {
     let super_pass = crypto::generate_secret_key();
     let urk = crypto::generate_key();
-    let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_v4(&super_pass, &urk)?;
+    let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_rsrs(&super_pass, &urk)?;
     Ok((super_pass, urk, kdf_salt, wrapped_urk, urk_nonce))
 }
 
-/// Write v4 material into session: super password goes only to the OS keyring (headless warns and uses ONEMEMORY_SUPER); never plaintext on disk.
+/// Write v4 material into session: super password goes only to the OS keyring (headless warns and uses RSRS_SUPER); never plaintext on disk.
 fn apply_vault_v4(
     data: &mut serde_json::Value,
     user: &str,
@@ -150,13 +157,6 @@ fn apply_vault_v4(
         Err(e) => eprintln!("warning: {e}; this session can still pass --super <super-password>"),
     }
     Ok(())
-}
-
-/// v3→v4 rewrap: URK unchanged (data stays); super password reuses the old Secret Key value.
-fn rewrap_v4(data: &mut serde_json::Value, keys: &crate::memory::SessionKeys, super_pass: &str) -> Result<()> {
-    let user = data["user"].as_str().unwrap_or("").to_owned();
-    let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_v4(super_pass, &keys.urk)?;
-    apply_vault_v4(data, &user, super_pass, kdf_salt, wrapped_urk, urk_nonce)
 }
 
 fn put_vault(addr: &str, token: &str, data: &serde_json::Value) -> Result<()> {
@@ -212,7 +212,7 @@ pub fn keygen() -> Result<(PathBuf, String)> {
             "local keyring write failed ({e}) — offline mode stores the key only here; \
              a failed write builds a library that cannot be opened. \
              Install a keyring (gnome-keyring / KWallet) and retry, \
-             or set ONEMEMORY_SUPER on later commands as a bypass"
+             or set RSRS_SUPER on later commands as a bypass"
         )
     })?;
     if crate::keystore::load_super("local").is_none() {
@@ -236,7 +236,7 @@ pub(crate) fn unlock_session_keys(
     let wrapped = data["wrapped_urk"].as_str().ok_or_else(|| anyhow!("session missing wrapped_urk"))?;
     let nonce = data["urk_nonce"].as_str().ok_or_else(|| anyhow!("session missing urk_nonce"))?;
     let salt = data["kdf_salt"].as_str().ok_or_else(|| anyhow!("session missing kdf_salt"))?;
-    match data["vault_version"].as_i64() {
+    let keys = match data["vault_version"].as_i64() {
         // v4: super password as the single factor — source: --super > OS keyring/env > leftover session field
         Some(v) if v >= 4 => {
             let super_pass = super_arg
@@ -252,7 +252,7 @@ pub(crate) fn unlock_session_keys(
                 })?;
             crate::memory::SessionKeys::unlock_v4(&super_pass, salt, wrapped, nonce)
         }
-        // v3: super password (passphrase) + Secret Key two-factor (read-compat; login auto-upgrades to v4)
+        // v3: original super password + Secret Key, retained during normal login.
         Some(3) => {
             let stored_super = if super_arg.is_none() && data["super"].as_str().is_none() {
                 crate::keystore::load_super(user)
@@ -278,7 +278,7 @@ pub(crate) fn unlock_session_keys(
                 .ok_or_else(|| anyhow!("super password required"))?;
             crate::memory::SessionKeys::unlock_super(super_pass, salt, wrapped, nonce)
         }
-        // v1: login password + Account Secret (oldest accounts; login auto-upgrades to v4)
+        // v1: original login password + Account Secret, retained during normal login.
         _ => crate::memory::SessionKeys::unlock(
             login_pass,
             data["secret"].as_str().ok_or_else(|| anyhow!("session missing secret"))?,
@@ -286,6 +286,11 @@ pub(crate) fn unlock_session_keys(
             wrapped,
             nonce,
         ),
+    }?;
+    if data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX) {
+        crate::memory::SessionKeys::from_urk(keys.urk)
+    } else {
+        Ok(keys)
     }
 }
 
@@ -348,15 +353,15 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         // keygen (or this same profile) already wrapped the URK. Bind it to this username.
         data["user"] = serde_json::Value::String(user.to_owned());
         let super_pass = existing_super(&data, super_pass_arg, user)?;
-        let keys = unlock_session_keys(&data, data["pass"].as_str().unwrap_or(pass), Some(&super_pass), user)?;
-        rewrap_v4(&mut data, &keys, &super_pass)?;
+        unlock_session_keys(&data, data["pass"].as_str().unwrap_or(pass), Some(&super_pass), user)?;
+        crate::keystore::save_super(user, &super_pass)?;
         issued = Some(super_pass);
     } else {
         let (super_pass, _urk, kdf_salt, wrapped_urk, urk_nonce) = new_vault_v4()?;
         apply_vault_v4(&mut data, user, &super_pass, kdf_salt, wrapped_urk, urk_nonce)?;
         issued = Some(super_pass);
     }
-    let auth_salt = crypto::derive_auth_salt(user)?;
+    let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
 
     let resp = match ureq::post(&format!("{}/register", addr.trim().trim_end_matches('/')))
@@ -453,8 +458,8 @@ pub fn login(
     let vault = fetch_vault(addr, &token)?;
     match vault {
         Some(vault) if has_wrap && vault_matches(&vault, &data) => {
-            // Local material matches cloud: unlock locally with the local key (no re-unwrap); v4 upgrade follows the same path
-            let keys = unlock_session_keys(&data, pass, super_pass, user).context(
+            // Ordinary login verifies the existing key without migrating it.
+            unlock_session_keys(&data, pass, super_pass, user).context(
                 "local key unlock failed — the keyring code does not match this account: pass the correct code with --super, or export from the old machine with keys-export",
             )?;
             // On unlock success, write back to the keyring: this branch never did that before —
@@ -462,28 +467,11 @@ pub fn login(
             // (reported 2026-09-18 on fslong-hasee; doctor said "nothing in the keyring").
             if let Some(s) = super_pass.filter(|s| !s.is_empty()) {
                 if let Err(e) = crate::keystore::save_super(user, s) {
-                    eprintln!("warning: super password not stored in keyring: {e}; this session can use ONEMEMORY_SUPER");
-                }
-            }
-            let mut issued: Option<String> = None;
-            if data["vault_version"].as_i64().unwrap_or(0) < 4 {
-                // Legacy (v1/v2/v3) has no A3- super password: mint a new code and print it to copy down;
-                // if a v3 Secret Key already exists, reuse it as the super password (entropy stays; no recopy)
-                let existing = data["secret_key"].as_str().unwrap_or_default().to_owned();
-                let super_key = if existing.is_empty() {
-                    let fresh = crypto::generate_secret_key();
-                    issued = Some(fresh.clone());
-                    fresh
-                } else {
-                    existing
-                };
-                rewrap_v4(&mut data, &keys, &super_key)?;
-                if !token.is_empty() {
-                    put_vault(addr, &token, &data)?;
+                    eprintln!("warning: super password not stored in keyring: {e}; this session can use RSRS_SUPER");
                 }
             }
             write_session_json(&data)?;
-            return Ok(issued);
+            return Ok(None);
         }
         Some(vault) => {
             // Cloud vault does not match local material (rotated code / reissued / local keygen) or there is no local material:
@@ -545,18 +533,18 @@ fn obtain_super(user: &str, super_arg: Option<&str>) -> Result<String> {
     crate::keystore::load_super(user).ok_or_else(|| {
         anyhow!(
             "super password required: --super <A3-…> (system-generated recovery code; the login password only authenticates to the server and cannot unwrap memories). \
-             no super password? export from the old machine with `rsrs keys-export`; a headless server can set ONEMEMORY_SUPER"
+             no super password? export from the old machine with `rsrs keys-export`; a headless server can set RSRS_SUPER"
         )
     })
 }
 
 /// Unlock the cloud vault with the super password (v4 single factor / v3 two-factor / v2 old passphrase) and write the local session.
-/// v3/v2 auto-upgrade to v4 and write back to the cloud. Returns a newly issued super password (v2 case).
+/// Login preserves the cloud format and original user factors. Migration is explicit.
 fn unlock_cloud_vault(
     data: &mut serde_json::Value,
-    addr: &str,
+    _addr: &str,
     user: &str,
-    token: &str,
+    _token: &str,
     vault: &serde_json::Value,
     super_pass: &str,
     secret_key: Option<&str>,
@@ -584,7 +572,7 @@ fn unlock_cloud_vault(
             Err(e) => Err(anyhow!("super password cannot unwrap cloud memories ({e:#}) — verify with keys-export on the old machine and retry")),
         }
     } else if version == 3 {
-        // v3 compat: super password (passphrase) + Secret Key two-factor unlock → auto-upgrade to v4 (super password = old Secret Key)
+        // Read v3 without replacing its passphrase with its Secret Key.
         let legacy_secret = secret_key
             .filter(|s| !s.is_empty())
             .map(|s| s.to_owned())
@@ -592,26 +580,30 @@ fn unlock_cloud_vault(
             .ok_or_else(|| {
                 anyhow!(
                     "this account is still v3 two-factor: need --super <old passphrase> --secret-key <A3-…>. \
-                     export from the old machine with `rsrs keys-export`; after a successful login it upgrades to v4 and later needs only the super password"
+                     export the original material with `rsrs keys-export`; migrate explicitly to change the format"
                 )
             })?;
-        let keys = crate::memory::SessionKeys::unlock_vault(super_pass, &legacy_secret, salt, wrapped, nonce)
+        crate::memory::SessionKeys::unlock_vault(super_pass, &legacy_secret, salt, wrapped, nonce)
             .map_err(|e| anyhow!("v3 key unlock failed ({e}) — retry with material from keys-export on the old machine"))?;
-        let (kdf_salt4, wrapped4, nonce4) = wrap_with_v4(&legacy_secret, &keys.urk)?;
-        apply_vault_v4(data, user, &legacy_secret, kdf_salt4, wrapped4, nonce4)?;
-        put_vault(addr, token, data)?;
+        data["kdf_salt"] = serde_json::json!(salt);
+        data["wrapped_urk"] = serde_json::json!(wrapped);
+        data["urk_nonce"] = serde_json::json!(nonce);
+        data["vault_version"] = serde_json::json!(3);
+        data["secret_key"] = serde_json::json!(legacy_secret);
+        crate::keystore::save_super(user, super_pass)?;
         write_session_json(data)?;
-        eprintln!("upgraded to v4: later logins need only the super password (A3-…); the old passphrase left the crypto domain");
+        Ok(None)
+    } else if version == 2 {
+        crate::memory::SessionKeys::unlock_super(super_pass, salt, wrapped, nonce)?;
+        data["kdf_salt"] = serde_json::json!(salt);
+        data["wrapped_urk"] = serde_json::json!(wrapped);
+        data["urk_nonce"] = serde_json::json!(nonce);
+        data["vault_version"] = serde_json::json!(2);
+        crate::keystore::save_super(user, super_pass)?;
+        write_session_json(data)?;
         Ok(None)
     } else {
-        // v2: old passphrase only → upgrade to v4 and issue a fresh super password
-        let keys = crate::memory::SessionKeys::unlock_super(super_pass, salt, wrapped, nonce)?;
-        let new_super = crypto::generate_secret_key();
-        let (kdf_salt4, wrapped4, nonce4) = wrap_with_v4(&new_super, &keys.urk)?;
-        apply_vault_v4(data, user, &new_super, kdf_salt4, wrapped4, nonce4)?;
-        put_vault(addr, token, data)?;
-        write_session_json(data)?;
-        Ok(Some(new_super))
+        anyhow::bail!("unsupported legacy vault version; original keys were preserved")
     }
 }
 
@@ -629,7 +621,12 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
     let keys = unlock_session_keys(&data, data["pass"].as_str().unwrap_or(""), super_arg, &user)
         .context("unlock failed — current super password required (or one stored in the local keyring)")?;
     let new_super = crypto::generate_secret_key();
-    let (kdf_salt, wrapped_urk, urk_nonce) = wrap_with_v4(&new_super, &keys.urk)?;
+    let (kdf_salt, wrapped_urk, urk_nonce) = if data["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
+        || data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX) {
+        wrap_with_rsrs(&new_super, &keys.urk)?
+    } else {
+        wrap_with_v4(&new_super, &keys.urk)?
+    };
     data["secret_key"] = serde_json::Value::String(new_super.clone());
     data["kdf_salt"] = serde_json::Value::String(kdf_salt);
     data["wrapped_urk"] = serde_json::Value::String(wrapped_urk);
@@ -649,9 +646,20 @@ pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serd
     Ok(authorization)
 }
 
+fn server_authentication_salt(addr: &str, user: &str) -> Result<String> {
+    let salt_response = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
+        .get(&format!("{}/auth/salt", addr.trim().trim_end_matches('/'))).query("user", user).call();
+    let salt = match salt_response {
+        Ok(response) => response.into_json::<serde_json::Value>()?["salt"].as_str()
+            .filter(|salt| !salt.is_empty()).context("server did not return an authentication salt")?.to_owned(),
+        Err(ureq::Error::Status(404, _)) => crypto::derive_legacy_auth_salt(user)?,
+        Err(error) => return Err(anyhow!("authentication salt request failed: {error}")),
+    };
+    Ok(salt)
+}
+
 fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str) -> Result<()> {
-    // Owner check was replaced by login's auto profile switch: logging into another account switches data dir; the old profile stays.
-    let auth_salt = crypto::derive_auth_salt(user)?;
+    let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
 
     let resp = ureq::post(&format!("{}/login", addr.trim().trim_end_matches('/')))
@@ -887,8 +895,8 @@ mod tests {
     fn fivekeys_super_opens_v4_and_keeps_old_wrap() -> Result<()> {
         let _guard = lock_dir();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> Result<()> {
             let super_pass = crypto::generate_secret_key();
             let urk = crypto::generate_key();
@@ -951,8 +959,8 @@ mod tests {
             Ok(())
         })();
         match saved {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         result
     }
@@ -961,8 +969,8 @@ mod tests {
     fn register_other_user_does_not_unlock_the_open_vault() -> Result<()> {
         let _guard = lock_dir();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> Result<()> {
             let super_pass = crypto::generate_secret_key();
             let urk = crypto::generate_key();
@@ -999,8 +1007,8 @@ mod tests {
             Ok(())
         })();
         match saved {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         result
     }
@@ -1009,8 +1017,8 @@ mod tests {
     fn register_after_keygen_accepts_the_issued_super() -> Result<()> {
         let _guard = lock_dir();
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
+        let saved = crate::env::var("RSRS_DATA_DIR").ok();
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> Result<()> {
             let super_pass = crypto::generate_secret_key();
             let urk = crypto::generate_key();
@@ -1065,8 +1073,8 @@ mod tests {
             Ok(())
         })();
         match saved {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         result
     }

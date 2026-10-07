@@ -16,7 +16,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish DEV after build/package/CI gates; stable also requires full regression
+        description: Publish after build, CI, native upgrades and development regressions pass
         default: false
         type: boolean
 
@@ -119,9 +119,9 @@ jobs:
           node-version: '24'
       - name: Require the approved development server
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
         run: |
-          node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api.dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api.dev.rsrs.rs")'
+          node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api.dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api.dev.rsrs.rs")'
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
       - name: Wait for this platform's build artifact
@@ -177,10 +177,10 @@ jobs:
       - name: Sweep the approved development server
         shell: pwsh
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
-          ONEMEMORY_ENGINE: cpu
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
+          RSRS_ENGINE: cpu
+          RSRS_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
@@ -203,8 +203,8 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
@@ -217,8 +217,8 @@ jobs:
         if: ${{ !cancelled() && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: pwsh
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
@@ -246,8 +246,8 @@ jobs:
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
@@ -257,10 +257,10 @@ jobs:
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/release-supplements/outbox/models"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/native-login-interruption" --model-dir "$RUNNER_TEMP/release-supplements/outbox/models"
           root="$RUNNER_TEMP/secret-service-profile-migration"
           suite_exit=0
-          dbus-run-session -- env RESPIRE_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || suite_exit=$?
           gate_exit=0
           python3 scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --source-sha "$CLI_SHA" --version "$CLI_VERSION" --binary-sha256 "$checksum" || gate_exit=$?
           test "$suite_exit" -eq 0 && test "$gate_exit" -eq 0
@@ -308,14 +308,14 @@ jobs:
           python-version: '3.12'
       - name: Check all development API contracts
         env:
-          RESPIRE_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
-          RESPIRE_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
-          RESPIRE_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
-          RESPIRE_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
-          RESPIRE_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          RESPIRE_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
-          RESPIRE_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
-          RESPIRE_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
+          RSRS_DEV_MAIL_ADDRESS: ${{ vars.RESPIRE_DEV_MAIL_ADDRESS }}
+          RSRS_DEV_IMAP_HOST: ${{ vars.RESPIRE_DEV_IMAP_HOST }}
+          RSRS_DEV_IMAP_USERNAME: ${{ secrets.RESPIRE_DEV_IMAP_USERNAME }}
+          RSRS_DEV_IMAP_PASSWORD: ${{ secrets.RESPIRE_DEV_IMAP_PASSWORD }}
+          RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+          RSRS_DEV_API_ADMIN_APPROVED: ${{ vars.RESPIRE_DEV_API_ADMIN_APPROVED }}
+          RSRS_DEV_ADMIN_TOKEN: ${{ secrets.RESPIRE_DEV_ADMIN_TOKEN }}
+          RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           sleep 61
           python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
@@ -330,8 +330,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # DEV regression continues independently; stable still waits for every result.
-    needs: [plan, validate]
+    # Build once, share artifacts, and publish only after the same-source regressions pass.
+    needs: [plan, validate, native-regression, cloud-sweep, api-smoke]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     concurrency:

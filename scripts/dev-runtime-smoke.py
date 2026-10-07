@@ -180,10 +180,10 @@ class Smoke:
         self.env.update(HOME=str(self.root / 'home'), USERPROFILE=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'config'), XDG_DATA_HOME=str(self.root / 'data'),
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
-                        TMPDIR=str(self.root / 'tmp'), ONEMEMORY_DATA_DIR=str(self.root),
-                        ONEMEMORY_BIN_DIR=str(self.root / 'bin'), ONEMEMORY_ENGINE='cpu',
-                        ONEMEMORY_LANG='en', ONEMEMORY_NO_AUTOSYNC='1', ONEMEMORY_UPDATE_CHECK='0',
-                        ONEMEMORY_M3_DIR=str(self.root / 'models/bge-m3'),
+                        TMPDIR=str(self.root / 'tmp'), RSRS_DATA_DIR=str(self.root),
+                        RSRS_BIN_DIR=str(self.root / 'bin'), RSRS_ENGINE='cpu',
+                        RSRS_LANG='en', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0',
+                        RSRS_M3_DIR=str(self.root / 'models/bge-m3'),
                         )
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
             self.env.pop(key, None)
@@ -191,7 +191,7 @@ class Smoke:
             port.bind(('127.0.0.1', 0))
             self.port = port.getsockname()[1]
         self.url = 'http://127.0.0.1:' + str(self.port)
-        self.env['ONEMEMORY_RPC_PORT'] = str(self.port)
+        self.env['RSRS_RPC_PORT'] = str(self.port)
         value = self.direct(['-v'])
         require(value.get('summary', {}).get('version') == self.args.version, 'exact_version_mismatch')
         self.passed('artifact_identity_verified')
@@ -239,9 +239,9 @@ class Smoke:
         before = {str(path.relative_to(client_home)): hashlib.sha256(path.read_bytes()).hexdigest()
                   for path in client_home.rglob('*') if path.is_file()}
         client_env = dict(self.env, HOME=str(client_home), USERPROFILE=str(client_home),
-                          ONEMEMORY_CLIENT_ONLY='1')
-        client_env.pop('ONEMEMORY_DATA_DIR', None)
-        client_env.pop('RESPIRE_DEFAULT_DATA_DIR', None)
+                          RSRS_CLIENT_ONLY='1')
+        client_env.pop('RSRS_DATA_DIR', None)
+        client_env.pop('RSRS_DEFAULT_DATA_DIR', None)
         result = subprocess.run([str(self.args.binary), '--client-only', '--json', 'status'],
                                 env=client_env, cwd=self.root, capture_output=True, timeout=25)
         after = {str(path.relative_to(client_home)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -251,8 +251,8 @@ class Smoke:
         self.passed('client_only_no_profile_writes')
 
     def account(self):
-        expected = os.environ.get('RESPIRE_DEV_SERVER_SHA', '')
-        require(os.environ.get('RESPIRE_DEV_SERVER_ADDR') == DEV and re.fullmatch('[0-9a-f]{40}', expected),
+        expected = os.environ.get('RSRS_DEV_SERVER_SHA', '')
+        require(os.environ.get('RSRS_DEV_SERVER_ADDR') == DEV and re.fullmatch('[0-9a-f]{40}', expected),
                 'exact_development_server_required')
         code, health, _ = self.http(DEV, 'GET', '/health')
         require(code == 200 and isinstance(health, dict) and health.get('source_revision') == expected,
@@ -442,10 +442,10 @@ class Smoke:
     def doctor_model_recovery(self):
         """Exercise a real failed download and retry against the exact artifact."""
         require(self.child is None, 'doctor_fixture_requires_stopped_runtime')
-        model = Path(self.env['ONEMEMORY_M3_DIR'])
+        model = Path(self.env['RSRS_M3_DIR'])
         cache = self.root / 'doctor-model-cache'
         model.rename(cache)
-        database = self.library / 'onememory.db'
+        database = self.library / 'rsrs.db'
 
         def snapshot():
             with sqlite3.connect(database) as db:
@@ -497,8 +497,8 @@ class Smoke:
         server = ThreadingHTTPServer(('127.0.0.1', 0), ModelSource)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        previous_mirror = self.env.get('ONEMEMORY_MIRROR')
-        self.env['ONEMEMORY_MIRROR'] = 'http://127.0.0.1:' + str(server.server_port)
+        previous_mirror = self.env.get('RSRS_MIRROR')
+        self.env['RSRS_MIRROR'] = 'http://127.0.0.1:' + str(server.server_port)
 
         def doctor(fix=False):
             code, reply, _ = self.http(self.url, 'POST', '/api/rpc',
@@ -558,9 +558,9 @@ class Smoke:
                 server.server_close()
                 thread.join(timeout=5)
                 if previous_mirror is None:
-                    self.env.pop('ONEMEMORY_MIRROR', None)
+                    self.env.pop('RSRS_MIRROR', None)
                 else:
-                    self.env['ONEMEMORY_MIRROR'] = previous_mirror
+                    self.env['RSRS_MIRROR'] = previous_mirror
 
 
     def validation_errors(self):
@@ -602,8 +602,8 @@ class Smoke:
             listener.bind(('127.0.0.1', 0))
             port = listener.getsockname()[1]
         url = 'http://127.0.0.1:' + str(port)
-        env.update(HOME=str(home), USERPROFILE=str(home), ONEMEMORY_DATA_DIR=str(library),
-                   ONEMEMORY_RPC_PORT=str(port), XDG_RUNTIME_DIR=str(home / 'runtime'))
+        env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(library),
+                   RSRS_RPC_PORT=str(port), XDG_RUNTIME_DIR=str(home / 'runtime'))
         def cli(args, expected=0):
             result = subprocess.run([str(self.args.binary), '--json', *args], env=env, cwd=home,
                                     capture_output=True, text=True, timeout=90)
@@ -651,8 +651,8 @@ class Smoke:
         self.passed('host_space_lifecycle', runtime_cleanup=True, configuration_preserved=True)
 
     def update_check_comparisons(self):
-        previous = self.env.get('ONEMEMORY_UPDATE_CHECK')
-        self.env['ONEMEMORY_UPDATE_CHECK'] = '1'
+        previous = self.env.get('RSRS_UPDATE_CHECK')
+        self.env['RSRS_UPDATE_CHECK'] = '1'
         cache = self.library / 'update_check.json'
         try:
             for latest, ahead, outdated in [('0.0.1', True, False), (self.args.version, False, False),
@@ -671,9 +671,9 @@ class Smoke:
         finally:
             cache.unlink(missing_ok=True)
             if previous is None:
-                self.env.pop('ONEMEMORY_UPDATE_CHECK', None)
+                self.env.pop('RSRS_UPDATE_CHECK', None)
             else:
-                self.env['ONEMEMORY_UPDATE_CHECK'] = previous
+                self.env['RSRS_UPDATE_CHECK'] = previous
         self.passed('update_check_comparison', states=3)
 
 

@@ -707,7 +707,7 @@ pub fn call_from_argv() -> Result<()> {
         .filter(|arg| arg != "--direct" && arg != "--client-only")
         .collect();
     let json = args.iter().any(|arg| arg == "--json")
-        || std::env::var("ONEMEMORY_JSON").is_ok_and(|v| v == "1" || v == "true");
+        || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true");
     crate::set_json_mode(json);
     if let Some(id) = crate::progress::remote_id() {
         let insertion = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
@@ -985,7 +985,7 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
         return Ok(());
     }
     crate::runtime_policy::require_host("runtime startup")?;
-    std::env::set_var("ONEMEMORY_RUNTIME", "1");
+    std::env::set_var("RSRS_RUNTIME", "1");
     serve(flags, true)
 }
 
@@ -1482,13 +1482,13 @@ fn stop_process(code: i32) -> ! {
 
 const WORKER_CAP: usize = 4;
 
-/// Job slots for this process. `ONEMEMORY_RPC_PARALLELISM` wins, then
+/// Job slots for this process. `RSRS_RPC_PARALLELISM` wins, then
 /// `client.json` `rpc_parallelism`, otherwise the CPU count. Never above 4.
 /// `0` and `cpu` follow the CPU, still capped at 4.
 /// Read-only jobs may run in parallel up to this cap. Writes take the exclusive
 /// gate and queue. ONNX is a process singleton and queues separately.
 pub(crate) fn worker_limit() -> usize {
-    if let Ok(raw) = std::env::var("ONEMEMORY_RPC_PARALLELISM") {
+    if let Ok(raw) = respire::env::var("RSRS_RPC_PARALLELISM") {
         let raw = raw.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("cpu") {
             return cpu_count();
@@ -1989,7 +1989,7 @@ fn pipe_name() -> Result<Name<'static>> {
 }
 
 /// Socket path for the current data dir. Not cached: one process runs many
-/// tests, and each test points `ONEMEMORY_DATA_DIR` somewhere else.
+/// tests, and each test points `RSRS_DATA_DIR` somewhere else.
 #[cfg(unix)]
 fn socket_path() -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
@@ -2253,21 +2253,21 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let previous = std::env::var("ONEMEMORY_RPC_PARALLELISM").ok();
-        std::env::set_var("ONEMEMORY_RPC_PARALLELISM", "3");
+        let previous = respire::env::var("RSRS_RPC_PARALLELISM").ok();
+        std::env::set_var("RSRS_RPC_PARALLELISM", "3");
         assert_eq!(worker_limit(), 3);
-        std::env::set_var("ONEMEMORY_RPC_PARALLELISM", "0");
+        std::env::set_var("RSRS_RPC_PARALLELISM", "0");
         assert_eq!(worker_limit(), cpu_count());
-        std::env::set_var("ONEMEMORY_RPC_PARALLELISM", "cpu");
+        std::env::set_var("RSRS_RPC_PARALLELISM", "cpu");
         assert_eq!(worker_limit(), cpu_count());
-        std::env::set_var("ONEMEMORY_RPC_PARALLELISM", "20");
+        std::env::set_var("RSRS_RPC_PARALLELISM", "20");
         assert_eq!(worker_limit(), WORKER_CAP);
-        std::env::set_var("ONEMEMORY_RPC_PARALLELISM", "1000");
+        std::env::set_var("RSRS_RPC_PARALLELISM", "1000");
         assert_eq!(worker_limit(), WORKER_CAP);
         assert!(cpu_count() <= WORKER_CAP);
         match previous {
-            Some(value) => std::env::set_var("ONEMEMORY_RPC_PARALLELISM", value),
-            None => std::env::remove_var("ONEMEMORY_RPC_PARALLELISM"),
+            Some(value) => std::env::set_var("RSRS_RPC_PARALLELISM", value),
+            None => std::env::remove_var("RSRS_RPC_PARALLELISM"),
         }
     }
 
@@ -2395,16 +2395,16 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let previous = std::env::var("ONEMEMORY_DATA_DIR").ok();
+        let previous = respire::env::var("RSRS_DATA_DIR").ok();
         let first = tempfile::tempdir()?;
         let second = tempfile::tempdir()?;
-        std::env::set_var("ONEMEMORY_DATA_DIR", first.path());
+        std::env::set_var("RSRS_DATA_DIR", first.path());
         let first_path = socket_path();
-        std::env::set_var("ONEMEMORY_DATA_DIR", second.path());
+        std::env::set_var("RSRS_DATA_DIR", second.path());
         let second_path = socket_path();
         match previous {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         if first_path == second_path {
             anyhow::bail!(
@@ -2427,11 +2427,11 @@ mod tests {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let previous = std::env::var("ONEMEMORY_DATA_DIR").ok();
-        let previous_port = std::env::var("ONEMEMORY_RPC_PORT").ok();
+        let previous = respire::env::var("RSRS_DATA_DIR").ok();
+        let previous_port = respire::env::var("RSRS_RPC_PORT").ok();
         let dir = tempfile::tempdir()?;
-        std::env::set_var("ONEMEMORY_DATA_DIR", dir.path());
-        std::env::set_var("ONEMEMORY_RPC_PORT", "18761");
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        std::env::set_var("RSRS_RPC_PORT", "18761");
         STOPPING.store(false, Ordering::Release);
         assert!(!runtime_is_up());
         assert!(call_method("runtime.status", Vec::new(), false).is_err());
@@ -2515,12 +2515,12 @@ mod tests {
         });
         let _ = server.join();
         match previous {
-            Some(value) => std::env::set_var("ONEMEMORY_DATA_DIR", value),
-            None => std::env::remove_var("ONEMEMORY_DATA_DIR"),
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         match previous_port {
-            Some(value) => std::env::set_var("ONEMEMORY_RPC_PORT", value),
-            None => std::env::remove_var("ONEMEMORY_RPC_PORT"),
+            Some(value) => std::env::set_var("RSRS_RPC_PORT", value),
+            None => std::env::remove_var("RSRS_RPC_PORT"),
         }
         Ok(())
     }

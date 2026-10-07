@@ -52,7 +52,7 @@ class Smoke(support.Smoke):
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
 
-    def cli(self, env, *args, timeout=180, foreign_tombstones=0):
+    def cli(self, env, *args, timeout=180):
         try:
             output = subprocess.run([str(self.args.binary), "--direct", "--json", *args],
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
@@ -70,23 +70,8 @@ class Smoke(support.Smoke):
             value = json.loads(output.stdout)
         except (ValueError, UnicodeError):
             pass
-        foreign_warning = False
-        if foreign_tombstones:
-            require(args == ("sync",), "foreign_tombstone_expectation_requires_sync")
-            summary = value.get("summary", {}) if isinstance(value, dict) else {}
-            counts = ("local_total", "local_alive", "remote_total", "remote_alive",
-                "pending", "conflicts", "undecodable", "protocol")
-            foreign_warning = output.returncode == 2 and isinstance(value, dict) \
-                and value.get("status") == "warn" and not value.get("errors") \
-                and all(type(summary.get(key)) is int for key in counts) \
-                and summary["local_total"] == summary["remote_total"] + foreign_tombstones \
-                and summary["local_alive"] == summary["remote_alive"] == 2 \
-                and summary["pending"] == summary["conflicts"] == summary["undecodable"] == 0 \
-                and summary["protocol"] == 2 and summary.get("total_matched") is False \
-                and summary.get("converged") is False
-        failed = (output.returncode != 0 and not foreign_warning) or not isinstance(value, dict) \
+        failed = output.returncode != 0 or not isinstance(value, dict) \
             or value.get("errors") or value.get("status") in ("error", "failed")
-        failed = failed or (foreign_tombstones > 0 and not foreign_warning)
         if failed:
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
             categories = (
@@ -127,12 +112,6 @@ class Smoke(support.Smoke):
             reason = "cli_failed_" if output.returncode != 0 else \
                 "invalid_cli_json_" if not isinstance(value, dict) else "cli_error_"
             raise RuntimeError(reason + args[0])
-        if foreign_warning:
-            self.report.setdefault("foreign_tombstone_sync", []).append({
-                "exit_code": 2, "retained_foreign_deleted": foreign_tombstones,
-                "active_counts_equal": True, "pending": 0, "conflicts": 0, "undecodable": 0,
-                "total_mismatch_is_only_foreign_deleted": True})
-            self.save()
         return value
 
     def reserve_alias(self, source):
@@ -149,10 +128,10 @@ class Smoke(support.Smoke):
         """
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         clean_env = dict(env)
-        for key in ("ONEMEMORY_SUPER", "ONEMEMORY_PASS", "ONEMEMORY_SECRET",
-                    "ONEMEMORY_KDF_SALT", "ONEMEMORY_WRAPPED_URK", "ONEMEMORY_URK_NONCE"):
+        for key in ("RSRS_SUPER", "RSRS_PASS", "RSRS_SECRET",
+                    "RSRS_KDF_SALT", "RSRS_WRAPPED_URK", "RSRS_URK_NONCE"):
             clean_env.pop(key, None)
-        profile = Path(clean_env["ONEMEMORY_DATA_DIR"])
+        profile = Path(clean_env["RSRS_DATA_DIR"])
         keyring_backend.owned_path(profile)
         session_path = profile / "session.json"
         require(session_path.is_file() and not session_path.is_symlink(), "native_consumer_session_missing")
@@ -171,8 +150,8 @@ class Smoke(support.Smoke):
             require(note.is_file() and not note.is_symlink(), "native_consumer_export_missing")
             exported = re.findall(r"^super password: (.+)$", note.read_text(encoding="utf-8"), re.MULTILINE)
             require(exported == [fixture["code"]], "native_consumer_super_changed")
-            urk = AESGCM(support.v4_kek(fixture["code"], session["kdf_salt"])).decrypt(
-                bytes.fromhex(session["urk_nonce"]), bytes.fromhex(session["wrapped_urk"]), None)
+            urk = AESGCM(support.v4_kek(fixture["code"], session["kdf_salt"], session["wrapped_urk"])).decrypt(
+                bytes.fromhex(session["urk_nonce"]), support.encrypted_bytes(session["wrapped_urk"]), None)
             require(len(urk) == 32, "native_consumer_urk_invalid")
             salt, nonce, secret = secrets.token_bytes(16).hex(), secrets.token_bytes(12), secrets.token_hex(32)
             wrapped = AESGCM(support.legacy_kek(1, fixture["password"], secret, salt)).encrypt(nonce, urk, None)
@@ -192,9 +171,11 @@ class Smoke(support.Smoke):
             finally:
                 note.unlink(missing_ok=True)
             require(session_path.read_bytes() == original, "native_consumer_session_restore_failed")
-        with sqlite3.connect((profile / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
-            require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
-                    == fixture["cipher"], "native_consumer_ciphertext_changed")
+        database = profile / ("rsrs.db" if (profile / "rsrs.db").exists() else "onememory.db")
+        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+            row = db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
+            require(support.decrypt_content(urk, *row) == support.decrypt_content(urk, *fixture["cipher"]),
+                    "native_consumer_content_changed")
         proof = self.report.setdefault("native_credential_consumer", {
             "platform": "darwin", "super": "cli_keys_export", "password": "cli_v1_kdf_aead_show",
             "consumer_changes_product_acl": False, "automatic_server_reauthentication_tested": False,
@@ -207,14 +188,10 @@ class Smoke(support.Smoke):
         profile = fixture["destination"]
         config_path = profile / "client.json"
         original = config_path.read_bytes() if config_path.exists() else None
-        config = json.loads(original) if original is not None else {}
-        # An environment root intentionally preserves its selected child account.
-        # Select this owned fixture explicitly, then restore the original selection.
-        config["data_dir"] = str(profile)
-        config_path.write_text(json.dumps(config), encoding="utf-8")
-        config_path.chmod(0o600)
+        # Consume the migration's actual configuration. Do not repair its path
+        # spelling here: runtime verification must exercise the published result.
         try:
-            yield dict(default, ONEMEMORY_DATA_DIR=str(profile))
+            yield dict(default, RSRS_DATA_DIR=str(profile))
         finally:
             if original is None:
                 config_path.unlink()
@@ -258,20 +235,20 @@ class Smoke(support.Smoke):
 
     def default_env(self, env):
         result = dict(env)
-        result.pop("ONEMEMORY_DATA_DIR", None)
-        result.pop("ONEMEMORY_SUPER", None)
+        result.pop("RSRS_DATA_DIR", None)
+        result.pop("RSRS_SUPER", None)
         return result
 
     def seed(self, env, path, service, label):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         path.mkdir(parents=True, exist_ok=True)
-        env = dict(env, ONEMEMORY_DATA_DIR=str(path))
+        env = dict(env, RSRS_DATA_DIR=str(path))
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
         if service == "rsrs" and self.keys.name == "linux-secret-service":
             self.keys.register_current_target(user)
-        auth_salt = support.hkdf(user.encode(), None, b"onememory:auth-salt:v1", length=16)
         account = {"user": user, "token": None, "confirmed": False,
-            "pass_hash": hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()}
+            "pass_hash": None}
         self.accounts.append(account)
         self.report["cloud_cleanup"]["remaining_users"].append(user)
         self.report["fixture_operation"] = "register"
@@ -282,6 +259,8 @@ class Smoke(support.Smoke):
             and session.get("user") == user and session.get("addr") == support.UPSTREAM
             and bool(session.get("token")), "migration_registered_identity_mismatch")
         account.update(token=session["token"], confirmed=True)
+        auth_salt = bytes.fromhex(session["auth_salt"].removeprefix(support.PREFIX))
+        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")
         self.report["fixture_operation"] = "verify_registered_native_credentials"
@@ -290,34 +269,55 @@ class Smoke(support.Smoke):
             require(self.keys.read("rsrs", "super:" + user) == code
                 and self.keys.read("rsrs", "pass:" + user) == password,
                 "registered_native_credentials_not_in_owned_store")
-        env["ONEMEMORY_SUPER"] = code
+        env["RSRS_SUPER"] = code
         self.report["fixture_operation"] = "seed_local_content"
         self.save()
         self.cli(env, "config", "--addr", support.UPSTREAM, "--autosync", "false")
         text = "Synthetic unsynchronized migration content " + label
         created = self.cli(env, "remember", text, "--title", label, "--force", "--importance", "important")
         memory_id = created["summary"]["id"]
-        db = path / "onememory.db"
+        urk = AESGCM(support.v4_kek(code, session["kdf_salt"], session["wrapped_urk"])).decrypt(
+            bytes.fromhex(session["urk_nonce"]), support.encrypted_bytes(session["wrapped_urk"]), None)
+        db = path / "rsrs.db"
+        if service != "rsrs":
+            # Produce a genuine old-format fixture from this disposable account.
+            db.rename(path / "onememory.db")
+            db = path / "onememory.db"
+            wrap_nonce = secrets.token_bytes(12)
+            session["wrapped_urk"] = AESGCM(support.v4_kek(code, session["kdf_salt"])).encrypt(wrap_nonce, urk, None).hex()
+            session["urk_nonce"] = wrap_nonce.hex()
+            session.pop("crypto_namespace", None)
+            self.api(account, "POST", "/api/self/vault", {
+                "version": 4, **{key: session[key] for key in ("kdf_salt", "wrapped_urk", "urk_nonce")}})
         connection = sqlite3.connect(db)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("CREATE TABLE IF NOT EXISTS migration_wal_fixture(marker TEXT PRIMARY KEY)")
         connection.execute("INSERT INTO migration_wal_fixture VALUES(?)", (label,))
+        row = connection.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone()
+        require(row is not None, "migration_seed_memory_missing")
+        payload = support.decrypt_content(urk, *row)
+        if service != "rsrs":
+            item_nonce = secrets.token_bytes(12)
+            ciphertext = AESGCM(support.hkdf(urk, None, b"onememory:data:v1")).encrypt(item_nonce, payload, None).hex()
+            connection.execute("UPDATE memories SET ciphertext=?,nonce=? WHERE id=?", (ciphertext, item_nonce.hex(), memory_id))
+            connection.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (ciphertext, memory_id))
+            connection.execute("UPDATE sync_outbox SET ciphertext=?,nonce=? WHERE id=? AND state='pending'", (ciphertext, item_nonce.hex(), memory_id))
         tombstones = []
         if service != "rsrs":
             tombstone_time = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            # Discarded foreign-account payloads cannot be opened with this
-            # account's key; preserve their deletion state without indexing them.
+            # All deleted payloads must also decrypt and be reencrypted.
             for _ in range(5):
-                tombstone = (str(uuid.uuid4()), "local",
-                    base64.b64encode(secrets.token_bytes(32)).decode("ascii"),
-                    base64.b64encode(secrets.token_bytes(12)).decode("ascii"), 1)
+                item_nonce = secrets.token_bytes(12)
+                tombstone = (str(uuid.uuid4()), user,
+                    AESGCM(support.hkdf(urk, None, b"onememory:data:v1")).encrypt(item_nonce, payload, None).hex(),
+                    item_nonce.hex(), 1)
                 connection.execute(
                     "INSERT INTO memories (id,user,ciphertext,nonce,deleted,dirty,created_at,updated_at) "
                     "VALUES (?,?,?,?,?,0,?,?)", tombstone + (tombstone_time, tombstone_time))
                 tombstones.append(tombstone)
         connection.commit()
-        require((path / "onememory.db-wal").stat().st_size > 0, "migration_wal_fixture_empty")
+        require(Path(str(db) + "-wal").stat().st_size > 0, "migration_wal_fixture_empty")
         row = connection.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone()
         require(row and connection.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0,
             "migration_outbox_fixture_not_pending")
@@ -341,7 +341,7 @@ class Smoke(support.Smoke):
         self.save()
         self.keys.remove("rsrs", "super:" + user)
         self.keys.remove("rsrs", "pass:" + user)
-        env.pop("ONEMEMORY_SUPER", None)
+        env.pop("RSRS_SUPER", None)
         self.report["fixture_operation"] = "rewrite_legacy_endpoint"
         self.save()
         session["addr"] = {"1memory": "https://api.1memory.ai", "memocap": "https://api.memocap.ai"}.get(service,
@@ -354,7 +354,7 @@ class Smoke(support.Smoke):
         alias = self.reserve_alias(path)
         return {"account": account, "password": password, "code": code, "service": service,
             "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": alias,
-            "foreign_tombstones": tombstones}
+            "legacy_tombstones": tombstones, "urk": urk, "payload": payload}
 
     def migrated(self, home, fixtures):
         root = home / ".rsrs"
@@ -371,7 +371,9 @@ class Smoke(support.Smoke):
             session_path, value = sessions[user]
             profile = session_path.parent
             require(value.get("addr") == "https://api.rsrs.rs", "legacy_api_default_not_rewritten")
-            require((profile / ".rsrs-migration.json").is_file(), "migration_receipt_missing")
+            receipt = json.loads((profile / ".rsrs-migration.json").read_text())
+            require(receipt.get("namespace_migrated") is True, "full_migration_receipt_missing")
+            require(value["wrapped_urk"].startswith(support.PREFIX), "migration_wrap_namespace_missing")
             alias = value.get("keyring_account")
             require(isinstance(alias, str) and alias.startswith("legacy-"), "migration_key_alias_missing")
             require(alias == fixture["alias"], "migration_native_alias_identity_mismatch")
@@ -391,18 +393,22 @@ class Smoke(support.Smoke):
             with sqlite3.connect((fixture["source"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as source_db:
                 require(source_db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
                     "legacy_source_ciphertext_changed")
-                for tombstone in fixture["foreign_tombstones"]:
+                for tombstone in fixture["legacy_tombstones"]:
                     require(source_db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
                         (tombstone[0],)).fetchone() == tombstone, "legacy_source_foreign_tombstone_changed")
-            with sqlite3.connect((profile / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
+            with sqlite3.connect((profile / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
                 require(db.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "migrated_database_invalid")
-                require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone() == fixture["cipher"],
-                    "migration_changed_ciphertext")
+                converted = db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
+                require(converted != fixture["cipher"] and converted[0].startswith(support.PREFIX)
+                    and support.decrypt_content(fixture["urk"], *converted) == fixture["payload"], "migration_reencryption_failed")
                 require(db.execute("SELECT marker FROM migration_wal_fixture").fetchone()[0] == fixture["label"], "migration_lost_committed_wal")
                 require(db.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0, "migration_lost_outbox")
-                for tombstone in fixture["foreign_tombstones"]:
-                    require(db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
-                        (tombstone[0],)).fetchone() == tombstone, "migration_changed_foreign_tombstone")
+                for tombstone in fixture["legacy_tombstones"]:
+                    converted = db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?", (tombstone[0],)).fetchone()
+                    require(converted[:2] == tombstone[:2] and converted[4] == 1
+                        and converted[2].startswith(support.PREFIX)
+                        and support.decrypt_content(fixture["urk"], converted[2], converted[3]) == fixture["payload"],
+                        "migration_deleted_payload_not_reencrypted")
             fixture["destination"] = profile
         return sessions
 
@@ -429,7 +435,7 @@ class Smoke(support.Smoke):
         if target:
             current = self.seed(env, home / ".rsrs", "rsrs", name + "-existing-rsrs")
             # A current profile must keep its existing credentials and URL untouched.
-            current_env = dict(env, ONEMEMORY_DATA_DIR=str(current["source"]))
+            current_env = dict(env, RSRS_DATA_DIR=str(current["source"]))
             current_session = self.session(current_env)
         default = self.default_env(env)
         self.cli(default, "status")
@@ -482,12 +488,12 @@ class Smoke(support.Smoke):
         require(Path(selected).resolve() == Path(original_selection).resolve(), "migration_changed_selected_account")
         for fixture in fixtures:
             with self.selected_profile(default, fixture) as user_env:
-                require("ONEMEMORY_SUPER" not in user_env, "migration_super_override_present")
+                require("RSRS_SUPER" not in user_env, "migration_super_override_present")
                 if sys.platform == "darwin":
                     self.verify_mac_native_credentials(user_env, fixture)
                 self.read_entry(user_env, fixture["id"], fixture["text"])
         if target:
-            with sqlite3.connect(current["source"] / "onememory.db") as db:
+            with sqlite3.connect(current["source"] / "rsrs.db") as db:
                 require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (current["id"],)).fetchone() == current["cipher"],
                     "existing_target_data_overwritten")
             require(self.session(current_env) == current_session, "existing_target_session_overwritten")
@@ -537,7 +543,7 @@ class Smoke(support.Smoke):
             require(not (root / "accounts" / "different-name").exists(), "repeat_explicit_migration_duplicated_account")
             self.passed("migration_source_order_and_backup_only_idempotent", selected_sources=len(fixtures), new_earlier_source=True)
             self.passed("onememory_multiaccount_wal_migrated", profiles=len(fixtures),
-                foreign_deleted_ciphertexts_preserved=sum(len(f["foreign_tombstones"]) for f in fixtures))
+                deleted_payloads_reencrypted=sum(len(f["legacy_tombstones"]) for f in fixtures))
             self.passed("legacy_keys_migrated_without_super_override", old_service_unchanged=True)
             self.passed("legacy_api_defaults_rewritten", verified="old defaults to api.rsrs.rs; dev redirect only after verification")
             self.passed("migration_repeated_start_idempotent", profiles=len(fixtures))
@@ -550,17 +556,19 @@ class Smoke(support.Smoke):
                     created = self.cli(profile_env, "remember", "New-directory migration write",
                         "--title", "post-migration", "--force", "--importance", "important")
                     new_id = created["summary"]["id"]
-                    # An intentionally retained foreign tombstone is not part of
-                    # this account's remote inventory. Require that exact warning
-                    # and a fully drained, healthy sync rather than claiming convergence.
-                    self.cli(profile_env, "sync", foreign_tombstones=len(fixture["foreign_tombstones"]))
-                    with sqlite3.connect((fixture["destination"] / "onememory.db").as_uri() + "?mode=ro", uri=True) as db:
-                        for tombstone in fixture["foreign_tombstones"]:
-                            require(db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?",
-                                (tombstone[0],)).fetchone() == tombstone, "sync_changed_foreign_tombstone")
+                    self.cli(profile_env, "migrate", "--vault", "--addr", support.UPSTREAM,
+                        "--user", fixture["account"]["user"], "--pass", fixture["password"], "--super", fixture["code"])
+                    fixture["account"]["token"] = self.session(profile_env)["token"]
+                    self.cli(profile_env, "sync")
+                    with sqlite3.connect((fixture["destination"] / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+                        for tombstone in fixture["legacy_tombstones"]:
+                            row = db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?", (tombstone[0],)).fetchone()
+                            require(row[:2] == tombstone[:2] and row[4] == 1
+                                and support.decrypt_content(fixture["urk"], row[2], row[3]) == fixture["payload"],
+                                "sync_changed_deleted_payload")
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
-                remote["ONEMEMORY_SUPER"] = fixture["code"]
+                remote["RSRS_SUPER"] = fixture["code"]
                 self.cli(remote, "login", "--interactive", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
                 fixture["account"]["token"] = self.session(remote)["token"]
                 self.cli(remote, "sync")
@@ -573,11 +581,11 @@ class Smoke(support.Smoke):
             self.passed("migration_interrupted_restart_recovered", real_stage_observed=True)
         elif not target:
             self.passed("respire_compatibility_migrated", profiles=len(fixtures),
-                foreign_deleted_ciphertexts_preserved=sum(len(f["foreign_tombstones"]) for f in fixtures))
+                deleted_payloads_reencrypted=sum(len(f["legacy_tombstones"]) for f in fixtures))
 
     def run(self):
-        expected_server = os.environ.get("RESPIRE_DEV_SERVER_SHA", "")
-        require(os.environ.get("RESPIRE_DEV_SERVER_ADDR") == support.UPSTREAM
+        expected_server = os.environ.get("RSRS_DEV_SERVER_SHA", "")
+        require(os.environ.get("RSRS_DEV_SERVER_ADDR") == support.UPSTREAM
             and re.fullmatch("[0-9a-f]{40}", expected_server), "exact_development_server_required")
         with self.opener.open(support.UPSTREAM + "/health", timeout=45) as health:
             raw = health.read(1024 * 1024 + 1)
@@ -674,7 +682,7 @@ class Smoke(support.Smoke):
         # The host-side cleanup above can already create runtime bookkeeping.
         # Client-only commands must preserve that baseline as well as source data.
         destination_before = destination_snapshot()
-        for variable in ("ONEMEMORY_CLIENT_ONLY", "ONEMEMORY_NO_AUTOSTART"):
+        for variable in ("RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"):
             guarded = self.default_env(env)
             guarded[variable] = "1"
             result = subprocess.run([str(self.args.binary), "--version"], env=guarded,

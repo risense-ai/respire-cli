@@ -17,7 +17,7 @@ flowchart LR
 | NPU | Windows, Apple Silicon | Explicit selection and compatible provider/hardware/model |
 
 Choose an engine in the TUI or run `rsrs model engine cpu|gpu|npu`.
-`ONEMEMORY_ENGINE` overrides the saved selection. Automatic selection is unsupported.
+`RSRS_ENGINE` overrides the saved selection. Automatic selection is unsupported.
 Missing hardware and inference failures are reported without switching engines.
 Provider names do not prove execution of every operation on the requested device.
 
@@ -43,12 +43,12 @@ BGE-M3 is the sole embedding model (1024 dimensions, CLS pooling, L2 normalizati
 and cross-encoder rerank models cannot be installed, loaded or executed.
 The TUI download-source editor offers auto, hf-mirror.com, hf-mirror.net and the
 official Hugging Face origin, plus a custom URL. `--mirror` overrides
-`ONEMEMORY_MIRROR`, then the persisted `model_mirror` setting; default is auto.
+`RSRS_MIRROR`, then the persisted `model_mirror` setting; default is auto.
 Explicit sources fail without switching; auto tries each source once. All
 downloads retain the same pinned revision and SHA-256 checks. Files are staged
 before replacement; cancellation preserves pinned-revision partial files for resume.
-`ONEMEMORY_M3_DIR` overrides `~/.rsrs/models/bge-m3`. Old BGE directories and
-`ONEMEMORY_MODEL_DIR` are not used. Model weights and engine selection are global;
+`RSRS_M3_DIR` overrides `~/.rsrs/models/bge-m3`. Old BGE directories and
+`RSRS_MODEL_DIR` are not used. Model weights and engine selection are global;
 switching accounts does not select another engine or model directory.
 
 The runtime loads one shared native ONNX session and executes inference in process.

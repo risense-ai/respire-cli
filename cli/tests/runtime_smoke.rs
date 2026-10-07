@@ -7,6 +7,17 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
 }
 
+fn isolated_command() -> Command {
+    let mut command = Command::new(bin());
+    for (name, _) in std::env::vars_os() {
+        if name.to_str().is_some_and(|name| name.starts_with("RSRS_")
+            || name.starts_with("ONEMEMORY_") || name.starts_with("RESPIRE_")) {
+            command.env_remove(name);
+        }
+    }
+    command
+}
+
 #[test]
 fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::Error>> {
     use serde_json::{json, Value};
@@ -21,12 +32,13 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let port = listener.local_addr()?.port();
     drop(listener);
     let invoke = |args: &[&str], expected: i32| -> Result<Value, Box<dyn std::error::Error>> {
-        let output = Command::new(bin()).arg("--json").args(args)
+        let output = isolated_command().arg("--json").args(args)
             .env("HOME",home.path()).env("USERPROFILE",home.path())
-            .env("ONEMEMORY_DATA_DIR",&library).env("ONEMEMORY_RPC_PORT",port.to_string())
-            .env("ONEMEMORY_NO_AUTOSYNC","1").env("ONEMEMORY_UPDATE_CHECK","0")
-            .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
-            .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
+            .env("RSRS_DATA_DIR",&library).env("RSRS_RPC_PORT",port.to_string())
+            .env("RSRS_NO_AUTOSYNC","1").env("RSRS_UPDATE_CHECK","0")
+            .env("RSRS_CORE_TEST_MODE", "1")
+            .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
         let value:Value=serde_json::from_str(stdout.trim())?;
@@ -138,15 +150,16 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
 }
 
 fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Output> {
-    Command::new(bin())
+    isolated_command()
         .args(args)
-        .env("ONEMEMORY_DATA_DIR", dir)
+        .env("RSRS_DATA_DIR", dir)
         .env("HOME", dir).env("USERPROFILE", dir)
-        .env("ONEMEMORY_RPC_PORT", port.to_string())
-        .env("ONEMEMORY_NO_AUTOSYNC", "1").env("ONEMEMORY_UPDATE_CHECK", "0")
-        .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
-        .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
-        .env_remove("ONEMEMORY_LANG")
+        .env("RSRS_RPC_PORT", port.to_string())
+        .env("RSRS_NO_AUTOSYNC", "1").env("RSRS_UPDATE_CHECK", "0")
+        .env("RSRS_CORE_TEST_MODE", "1")
+        .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
+        .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
+        .env_remove("RSRS_LANG")
         .output()
 }
 
@@ -250,6 +263,10 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     let worker_mode = mode.clone();
     let worker_requests = requests.clone();
     let worker_addr = addr.clone();
+    let initial_auth_salt = crypto::derive_legacy_auth_salt("authorized")?;
+    let current_auth_salt = crypto::derive_auth_salt("authorized")?;
+    let authentication_salt = Arc::new(Mutex::new(initial_auth_salt));
+    let worker_authentication_salt = authentication_salt.clone();
     let worker = std::thread::spawn(move || -> Result<(), String> {
         while worker_running.load(Ordering::SeqCst) {
             let Some(mut request) = worker_server
@@ -269,6 +286,22 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                 .clone();
             let mut status = 200;
             let reply = match path.as_str() {
+                path if path.starts_with("/auth/salt?user=authorized") => {
+                    json!({"salt":worker_authentication_salt.lock().map_err(|error| error.to_string())?.clone()})
+                }
+                "/api/self/password" => {
+                    if !request.headers().iter().any(|header| header.field.equiv("Authorization")
+                        && header.value.as_str() == "Bearer synthetic-grant-token") {
+                        return Err("password namespace update missing authorization".to_owned());
+                    }
+                    let value: Value = serde_json::from_reader(request.as_reader()).map_err(|error| error.to_string())?;
+                    if value["salt"] != current_auth_salt
+                        || value["pass_hash"] != crypto::derive_pass_hash("fixture-password", &current_auth_salt).map_err(|error| error.to_string())? {
+                        return Err("migration changed the original login password".to_owned());
+                    }
+                    *worker_authentication_salt.lock().map_err(|error| error.to_string())? = current_auth_salt.clone();
+                    json!({"ok":true})
+                }
                 "/oauth/device/code" => {
                     json!({"device_code":"synthetic-device-code","user_code":"ABCDEF123456","expires_in":60,"interval":1,"verification_uri_complete":format!("{worker_addr}/#/authorize?code=ABCDEF123456")})
                 }
@@ -315,21 +348,21 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Ok(())
     });
     let execute = |args: &[&str]| -> std::io::Result<Output> {
-        Command::new(bin())
+        isolated_command()
             .args(args)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
-            .env("ONEMEMORY_DATA_DIR", &root)
-            .env("ONEMEMORY_RPC_PORT", runtime_port.to_string())
-            .env("ONEMEMORY_SUPER", &super_password)
-            .env("ONEMEMORY_NO_AUTOSYNC", "1")
-            .env("ONEMEMORY_UPDATE_CHECK", "0")
-            .env("RESPIRE_CORE_TEST_MODE", "1")
-            .env_remove("ONEMEMORY_CLIENT_ONLY")
-            .env_remove("ONEMEMORY_NO_AUTOSTART")
-            .env_remove("ONEMEMORY_RUNTIME_WORKER")
-            .env_remove("ONEMEMORY_RPC_TOKEN")
-            .env_remove("ONEMEMORY_LANG")
+            .env("RSRS_DATA_DIR", &root)
+            .env("RSRS_RPC_PORT", runtime_port.to_string())
+            .env("RSRS_SUPER", args.windows(2).find(|pair| pair[0] == "--super").map(|pair| pair[1]).unwrap_or(&super_password))
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
+            .env("RSRS_CORE_TEST_MODE", "1")
+            .env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART")
+            .env_remove("RSRS_RUNTIME_WORKER")
+            .env_remove("RSRS_RPC_TOKEN")
+            .env_remove("RSRS_LANG")
             .output()
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -460,10 +493,19 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         let salt = crypto::random_hex(16);
         let (nonce, wrapped) =
             crypto::wrap_key(&urk, &crypto::derive_super_kek(legacy_super, &salt)?)?;
-        let legacy = json!({"user":"authorized","addr":addr,"vault_version":2,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+        let mut legacy = json!({"user":"authorized","addr":addr,"vault_version":2,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
         std::fs::write(target.join("session.json"), serde_json::to_vec(&legacy)?)?;
         *cloud.lock().map_err(|error| error.to_string())? =
             json!({"version":2,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
+        let incomplete = execute(&["migrate", "--vault", "--pass=fixture-password", "--super", legacy_super])?;
+        if incomplete.status.success() || std::fs::read(target.join("session.json"))? != serde_json::to_vec(&legacy)? {
+            return Err("vault-only operation bypassed full library migration".into());
+        }
+        // The real public library conversion is covered by migration_readiness_tests.
+        // This authorization fixture begins with its verified v2 namespace wrap.
+        legacy["crypto_namespace"] = json!(crypto::RSRS_PREFIX);
+        legacy["wrapped_urk"] = json!(format!("{}{wrapped}", crypto::RSRS_PREFIX));
+        std::fs::write(target.join("session.json"), serde_json::to_vec(&legacy)?)?;
         let migrated = execute(&[
             "--json",
             "migrate",
@@ -472,7 +514,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             "--super",
             legacy_super,
             "--new-super",
-            &super_password,
+            legacy_super,
         ])?;
         if !migrated.status.success() {
             return Err(format!(
@@ -483,13 +525,13 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .into());
         }
         let current = cloud.lock().map_err(|error| error.to_string())?.clone();
-        let keys = SessionKeys::unlock_v4(
-            &super_password,
+        let keys = SessionKeys::unlock_super(
+            legacy_super,
             current["kdf_salt"].as_str().ok_or("salt missing")?,
             current["wrapped_urk"].as_str().ok_or("wrap missing")?,
             current["urk_nonce"].as_str().ok_or("nonce missing")?,
         )?;
-        if current["version"] != 4 || keys.urk != urk {
+        if current["version"] != 2 || keys.urk != urk || !current["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX)) {
             return Err("migration replaced the existing memory key".into());
         }
         let stopped = execute(&["--runtime-internal", "--stop"])?;
@@ -519,7 +561,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             "--super",
             legacy_super,
             "--new-super",
-            &super_password,
+            legacy_super,
         ])?;
         if !resumed.status.success() {
             return Err(format!(
@@ -530,7 +572,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .into());
         }
         let saved: Value = serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
-        if saved["vault_version"] != 4
+        if saved["vault_version"] != 2
             || *cloud.lock().map_err(|error| error.to_string())? != current
         {
             return Err(
@@ -592,16 +634,16 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Resu
         Ok(())
     });
     let command = |json: bool| {
-        let mut command = Command::new(bin());
+        let mut command = isolated_command();
         command.args(["doctor", "--remote"]);
         if json { command.arg("--json"); }
         command.env("HOME", dir.path()).env("USERPROFILE", dir.path())
-            .env("ONEMEMORY_DATA_DIR", dir.path()).env("ONEMEMORY_RPC_PORT", port.to_string())
-            .env("ONEMEMORY_ADDR", &addr).env("ONEMEMORY_LANG", "en")
-            .env("ONEMEMORY_TOKEN", "synthetic-probe-token")
-            .env("ONEMEMORY_NO_AUTOSYNC", "1").env("ONEMEMORY_UPDATE_CHECK", "0")
-            .env_remove("ONEMEMORY_RPC_URL").env_remove("ONEMEMORY_CLIENT_ONLY")
-            .env_remove("ONEMEMORY_NO_AUTOSTART").env_remove("ONEMEMORY_RUNTIME_WORKER")
+            .env("RSRS_DATA_DIR", dir.path()).env("RSRS_RPC_PORT", port.to_string())
+            .env("RSRS_ADDR", &addr).env("RSRS_LANG", "en")
+            .env("RSRS_TOKEN", "synthetic-probe-token")
+            .env("RSRS_NO_AUTOSYNC", "1").env("RSRS_UPDATE_CHECK", "0")
+            .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
             .stdout(Stdio::piped()).stderr(Stdio::piped());
         command
     };

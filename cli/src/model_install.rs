@@ -61,7 +61,7 @@ pub struct InstallReport {
 pub const MIRRORS: &[&str] = &["auto", "https://hf-mirror.com", "https://hf-mirror.net", "https://huggingface.co"];
 
 pub fn mirror_from_env() -> Option<String> {
-    std::env::var("ONEMEMORY_MIRROR").ok().filter(|s| !s.trim().is_empty())
+    respire_app::env::var("RSRS_MIRROR").ok().filter(|s| !s.trim().is_empty())
         .or_else(|| crate::service::read_agent_config()["model_mirror"].as_str().map(str::to_owned))
 }
 
@@ -84,7 +84,7 @@ pub fn prepare_m3_from_mirror(mirror: &str) -> Result<()> {
 /// must not try to reserve that operation a second time or acquire a library lock.
 pub fn prepare_m3_for_index() -> Result<()> {
     let user = install_target_dir(None);
-    let explicit = std::env::var("ONEMEMORY_M3_DIR").ok().is_some_and(|value| !value.trim().is_empty());
+    let explicit = respire_app::env::var("RSRS_M3_DIR").ok().is_some_and(|value| !value.trim().is_empty());
     let mut candidates = vec![user];
     if !explicit {
         if let Some(parent) = std::env::current_exe()?.parent() {
@@ -591,13 +591,13 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let explicit = install_target_dir(Some("D:/models/bge"));
         assert!(explicit.ends_with("bge") || explicit.to_string_lossy().contains("models"));
-        let saved = std::env::var("ONEMEMORY_M3_DIR").ok();
-        std::env::set_var("ONEMEMORY_M3_DIR", "/tmp/om-model-test");
+        let saved = std::env::var("RSRS_M3_DIR").ok();
+        std::env::set_var("RSRS_M3_DIR", "/tmp/om-model-test");
         let from_env = install_target_dir(None);
         assert!(from_env.to_string_lossy().contains("om-model-test"));
         match saved {
-            Some(v) => std::env::set_var("ONEMEMORY_M3_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_M3_DIR"),
+            Some(v) => std::env::set_var("RSRS_M3_DIR", v),
+            None => std::env::remove_var("RSRS_M3_DIR"),
         }
         let url = file_url("https://huggingface.co", "tokenizer.json");
         assert!(url.contains("tokenizer.json"));
@@ -723,8 +723,8 @@ mod tests {
         std::fs::create_dir_all(bge.join("onnx"))?;
         std::fs::write(bge.join("tokenizer.json"), b"{}")?;
         std::fs::write(bge.join("onnx").join("model_quantized.onnx"), b"onnx")?;
-        let saved_bge = std::env::var("ONEMEMORY_M3_DIR").ok();
-        std::env::set_var("ONEMEMORY_M3_DIR", &bge);
+        let saved_bge = std::env::var("RSRS_M3_DIR").ok();
+        std::env::set_var("RSRS_M3_DIR", &bge);
 
         let gone_bge = uninstall_m3()?;
         assert!(gone_bge.removed);
@@ -734,8 +734,8 @@ mod tests {
 
 
         match saved_bge {
-            Some(v) => std::env::set_var("ONEMEMORY_M3_DIR", v),
-            None => std::env::remove_var("ONEMEMORY_M3_DIR"),
+            Some(v) => std::env::set_var("RSRS_M3_DIR", v),
+            None => std::env::remove_var("RSRS_M3_DIR"),
         }
         Ok(())
     }

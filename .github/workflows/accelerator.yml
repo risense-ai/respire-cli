@@ -44,12 +44,12 @@ jobs:
       - name: Install model and validate actual inference
         shell: pwsh
         env:
-          ONEMEMORY_ENGINE: ${{ inputs.engine }}
-          ONEMEMORY_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
-          ONEMEMORY_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
+          RSRS_ENGINE: ${{ inputs.engine }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}
+          RSRS_M3_DIR: ${{ runner.temp }}/om-hardware-${{ github.run_id }}/m3
           PROBE_MODEL: ${{ inputs.model }}
-          ONEMEMORY_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}
-          ONEMEMORY_ORT_DEBUG: '1'
+          RSRS_ORT_PROFILE: ${{ runner.temp }}/om-hardware-profile-${{ github.run_id }}
+          RSRS_ORT_DEBUG: '1'
           INSTALL_PROVIDERS: ${{ inputs.install_providers }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -66,7 +66,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Hardware inference or CPU comparison failed' }
           $raw
           $probe = ($raw | ConvertFrom-Json).summary
-          $pattern = switch ($env:ONEMEMORY_ENGINE) {
+          $pattern = switch ($env:RSRS_ENGINE) {
             'npu' { '^(Npu:|CoreML CPUAndNeuralEngine)' }
             'gpu' { '^(Gpu:|CoreML CPUAndGPU)' }
             'cpu' { '^CPU$' }

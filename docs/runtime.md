@@ -49,9 +49,9 @@ matching active task. Cancellation must release its model slot before restart.
 
 | Setting | Purpose |
 | --- | --- |
-| `ONEMEMORY_CLIENT_ONLY=1` | Host runtime client mode |
-| `ONEMEMORY_NO_AUTOSTART=1` | Compatibility synonym |
-| `ONEMEMORY_RPC_PORT` | Override the default port `15169` |
+| `RSRS_CLIENT_ONLY=1` | Host runtime client mode |
+| `RSRS_NO_AUTOSTART=1` | Compatibility synonym |
+| `RSRS_RPC_PORT` | Override the default port `15169` |
 
 CLI / TUI / MCP stdio connect to `127.0.0.1` without reading a token file or
 requiring token injection. Loopback listeners do not create a token. The runtime
@@ -95,7 +95,7 @@ The hidden `--runtime-internal` entry is reserved for host lifecycle and automat
 
 The host command `rsrs --runtime-internal --stop` supports runtimes that still
 require a loopback token, including 1.0.9. The client sends the existing
-`ONEMEMORY_RPC_TOKEN` or runtime token file on the initial request. It does not
+`RSRS_RPC_TOKEN` or runtime token file on the initial request. It does not
 create or replace credentials, and it never replays a failed request. Current
 loopback runtimes ignore the header and also work without a token file.
 Health checks and normal RPC use the same compatibility rule, so host upgrades
@@ -110,7 +110,7 @@ unverified process. HTTP redirects are disabled for the local runtime client.
 ## Model downloads and account switches
 
 Model weights and inference engine selection are global to the installation
-root (`ONEMEMORY_DATA_DIR` for isolated installations); the selected account's
+root (`RSRS_DATA_DIR` for isolated installations); the selected account's
 library directory does not select another engine or require another model copy.
 Account switching must preserve the global configuration and reuse compatible,
 complete M3 artifacts. Only missing, changed or corrupt artifacts need indexing.
