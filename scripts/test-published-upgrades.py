@@ -31,9 +31,17 @@ if 'v1.0.6' not in sources:
     baseline=next((item for item in releases if item['tag_name']=='v1.0.6-dev.37075716045' and not item['draft']),None)
     assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
     sources[baseline['tag_name']]=baseline
+# The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
+additional_draft_baselines=[]
+if 'v1.0.10' not in sources:
+    baseline=next((item for item in releases if item['tag_name']=='v1.0.10' and item['draft']),None)
+    assert baseline is not None,'1.0.10 compatibility baseline artifact missing'
+    sources[baseline['tag_name']]=baseline
+    additional_draft_baselines.append(baseline['tag_name'])
 assert sources,'no upgrade source versions discovered'
 report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
         'published_formal_sources':formal_sources,
+        'additional_draft_baselines':additional_draft_baselines,
         'unpublished_draft_stables':sorted(item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
@@ -72,7 +80,7 @@ try:
             '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
         checks=json.loads((result/'real-account-return-verification.json').read_text())
         assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
-        report['sources'].append({'version':tag[1:],'formal':stable(tag),'passed':True,'report':str(result/'real-account-return-verification.json')})
+        report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')})
     report['passed']=True
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')
