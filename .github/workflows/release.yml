@@ -74,7 +74,10 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
 
   cloud-sweep:
-    needs: [plan, validate]
+    needs: plan
+    permissions:
+      contents: read
+      actions: read
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
@@ -102,6 +105,32 @@ jobs:
           node -e 'const value=process.env.RESPIRE_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RESPIRE_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api.dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api.dev.rsrs.rs")'
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+      - name: Wait for this platform's build artifact
+        timeout-minutes: 46
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_TARGET: ${{ matrix.target }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY,run=process.env.GITHUB_RUN_ID,target=process.env.CLI_TARGET;
+          const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
+          const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
+          async function wait(){
+            while(Date.now()<deadline){
+              if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
+                console.log(`Build artifact ready: ${name}`);return;
+              }
+              const job=read('jobs?per_page=100').jobs.find(j=>j.name.endsWith(`Release (${target})`));
+              if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
+              console.log(`Waiting for ${name}; other platform tests run independently`);
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error(`Build artifact ${name} unavailable within 45 minutes`);
+          }
+          wait().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
       - uses: actions/download-artifact@v4
         with:
           name: cli-release-${{ matrix.target }}
@@ -243,7 +272,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    needs: [plan, validate]
+    needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:

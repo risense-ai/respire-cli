@@ -107,6 +107,13 @@ jobs:
       - name: Stage Core runtime and notices
         if: ${{ !contains(matrix.target, '-musl') }}
         run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
+      - name: Prepare versioned binary and runtime artifacts
+        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
       - name: Install and probe BGE CPU inference
         shell: bash
         env:
@@ -155,8 +162,6 @@ jobs:
             ${{ runner.temp }}/published-upgrades/published-upgrades.json
             ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
           if-no-files-found: error
-      - name: Prepare versioned binary and runtime artifacts
-        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
       - name: Verify GNU login interruption recovery with this release binary
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
@@ -173,12 +178,6 @@ jobs:
           name: gnu-login-interruption
           path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
           if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cli-release-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-
   npm-dry-run:
     needs: [resolve, binaries]
     runs-on: ubuntu-latest
