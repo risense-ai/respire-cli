@@ -80,7 +80,8 @@ for binary in BINARIES:
             old_runtime=subprocess.Popen([str(pathlib.Path(args.seed_binary).resolve()),*runtime_args],env=seed_env,stdout=log,stderr=log)
             log.close()
             for attempt in range(200):
-                assert old_runtime.poll() is None,'published old runtime exited before upgrade'
+                assert old_runtime.poll() is None,('published old runtime exited before upgrade (exit '+str(old_runtime.returncode)+'): '+
+                    (root/'old-runtime.log').read_text(encoding='utf-8',errors='replace')[-4000:])
                 try:
                     headers={}
                     token=main/'runtime/token'
