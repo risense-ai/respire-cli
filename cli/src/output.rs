@@ -153,7 +153,7 @@ impl ResultEnvelope {
         Ok(text)
     }
 
-    fn human_item_value(&self, item: &Item) -> String {
+    pub(crate) fn human_item_value(&self, item: &Item) -> String {
         if self.command == "doctor" {
             let zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
             if item.name == "embedder" && (item.value.starts_with("BGE-M3 preparation/indexing ")

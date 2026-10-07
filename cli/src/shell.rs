@@ -585,15 +585,10 @@ fn refresh_details_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
         }
 
         if let Ok(envelope) = rpc(&["doctor"]) {
-            next.doctor.clear();
-            if let Some(items) = envelope["items"].as_array() {
-                for item in items {
-                    next.doctor.push((
-                        item["name"].as_str().unwrap_or("").to_owned(),
-                        item["status"].as_str().unwrap_or("").to_owned(),
-                        item["value"].as_str().unwrap_or("").to_owned(),
-                    ));
-                }
+            if let Ok(envelope) = serde_json::from_value::<crate::output::ResultEnvelope>(envelope) {
+                next.doctor = envelope.items.iter().map(|item| (
+                    item.name.clone(), item.status.as_str().to_owned(), envelope.human_item_value(item),
+                )).collect();
             }
         }
         if let Ok(envelope) = retrieval_action(&["model", "engine"]) {

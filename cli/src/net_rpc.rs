@@ -374,7 +374,7 @@ pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
             .output().context("cannot check stopped runtime process")?;
         #[cfg(unix)]
         let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .args(["-p", &pid.to_string(), "-o", "pid=", "-o", "stat="])
             .output().context("cannot check stopped runtime process")?;
         let text = String::from_utf8_lossy(&output.stdout);
         #[cfg(windows)]
@@ -384,7 +384,14 @@ pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
                 .is_some_and(|value| value.trim_matches('"') == pid.to_string()))
         };
         #[cfg(unix)]
-        let alive = text.trim() == pid.to_string();
+        let alive = {
+            anyhow::ensure!(output.status.success() || output.stderr.is_empty(), "runtime process inspection failed");
+            let mut fields = text.split_whitespace();
+            // An unreaped child still has a PID, but has exited and released its
+            // listener, native session and database locks. Do not wait for its parent.
+            fields.next() == Some(pid.to_string().as_str())
+                && fields.next().is_some_and(|state| !state.starts_with('Z'))
+        };
         Ok(alive)
 }
 
@@ -488,6 +495,15 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn exited_child_is_not_a_running_library_holder() -> Result<()> {
+        let mut child = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+        let exited = wait_until_exited(child.id());
+        child.wait()?;
+        exited
+    }
 
     #[test]
     fn port_is_open_sees_local_listener() -> Result<(), String> {
