@@ -1,13 +1,13 @@
-# 发布验证
+# Release validation
 
-DEV 门槛：同一源码的工作区单元测试及现有覆盖检查、七平台一次 Release 构建、原生可执行文件启动、macOS 真实 quantized CPU 推理、SDK 固定版本和摘要、八个 npm 包及制品一致性。
+DEV gates: exact-source workspace unit tests and existing coverage checks, one Release build for each of seven targets, native executable startup, real quantized CPU inference on macOS, pinned SDK digests, and consistent artifacts for all eight npm packages.
 
-仅版本分配和发布共用串行锁，DEV 在分配时建立私有草稿预留序号；已有脚本会统计草稿，避免并行任务混用版本。失败草稿保留供排查。完整回归不持有发布锁，下一次 DEV 不必等上一次回归结束。仅工作流或文档变更不会自动发布 DEV。
+Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 
-七平台构建只在 Release 流程执行。独立编译矩阵保留为手动检查。CLI 测试通过现有覆盖命令执行一次，其余工作区测试单独执行。musl 编译复用既有缓存；macOS 推理复用模型缓存，仍执行安装器校验和真实推理。
+Seven-target builds run in Release. The separate compile matrix is manual. CLI tests run once through the existing coverage command; other workspace tests run separately. musl builds reuse the existing cache. macOS reuses the model cache while still checking model files and performing real inference.
 
-七平台历史升级、三系统完整 CLI 回归、DEV API 回归独立运行，使用本次构建的原始制品并核验源码、版本和摘要，不重新编译。它们不阻塞 DEV 发布；失败必须报告，该 DEV 不能据此宣布全面验收通过。
+Historical upgrades on seven targets, full CLI regression on three systems, and DEV API regression run independently. They verify source, version, and digests of the original build artifacts without compiling again. They do not block DEV publication. Report failures; do not declare a DEV fully validated until these checks succeed.
 
-正式版发布必须等待七个平台的历史升级、三系统 CLI 回归及 API 回归全部成功，失败、取消或缺少结果均拒绝发布。历史升级脚本动态发现 1.0.6 之后的每个正式版；1.0.6 无正式产物，另保留实际历史基线验证。新增正式版自动进入后续升级矩阵。
+Stable publication waits for successful historical upgrades on all seven targets, all three system regressions, and API regression. Failed, cancelled, skipped, or missing results block publication. The upgrade script discovers every stable release from 1.0.6 onward. There is no stable 1.0.6 artifact, so the actual historical DEV baseline is also retained. Each new stable release automatically joins future upgrade validation.
 
-手动运行 Release validation 默认执行全部原生升级验证。DEV 发布后仍核对公共安装、平台包精确版本、运行状态和有关 Issue 的实际回归；未执行的检查不得记为通过。
+Manual Release validation runs all native upgrade checks by default. After DEV publication, verify the public install, exact platform package versions, runtime status, and actual regressions for the related issues. Never count unexecuted checks as passed.
