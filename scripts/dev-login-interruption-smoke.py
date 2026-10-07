@@ -145,7 +145,17 @@ def main():
         elif "migrate" in flags:
             command_env["RSRS_SUPER"] = old_super
         result = subprocess.run([str(args.binary), *flags], env=command_env, capture_output=True, timeout=180)
-        require((result.returncode == 0) == success, "CLI_failed:" + result.stderr.decode(errors="replace")[-1500:])
+        if (result.returncode == 0) != success:
+            try:
+                errors = json.loads(result.stdout).get("errors", [])
+                diagnostic = "; ".join(str(error) for error in errors)
+            except (ValueError, UnicodeError, AttributeError):
+                diagnostic = "CLI returned no structured error"
+            diagnostic = diagnostic or result.stderr.decode(errors="replace")[-1500:]
+            for secret in (code, old_super, "synthetic-password", "synthetic-token"):
+                diagnostic = diagnostic.replace(secret, "[redacted]")
+            report["failure"] = {"exit_code": result.returncode, "error": diagnostic[:1500]}
+            raise RuntimeError("CLI_failed:" + diagnostic[:1500])
         return result
 
     migration = ["--direct", "--json", "migrate", "--vault", "--addr", addr, "--user", "synthetic",
