@@ -475,7 +475,7 @@ class Smoke:
                     self.send_response(404)
                     self.end_headers()
                     return
-                requests.append(name)
+                requests.append((name, self.headers.get('Range')))
                 path = cache / name
                 self.send_response(200)
                 self.send_header('Content-Length', str(path.stat().st_size))
@@ -486,7 +486,7 @@ class Smoke:
                         while chunk := stream.read(256 * 1024):
                             self.wfile.write(chunk)
                             self.wfile.flush()
-                            if first and name.startswith('onnx/'):
+                            if first and name.startswith('onnx/') and self.headers.get('Range') is None:
                                 started.set()
                                 if not release.wait(45):
                                     return
@@ -534,9 +534,13 @@ class Smoke:
             require(started.wait(45), 'doctor_retry_did_not_download')
             self.passed('doctor_model_failed_download_retry')
             busy = doctor(True)
+            # This source ignores Range: one support probe precedes one full
+            # transfer. Block only the transfer, and reject additional requests.
+            model_requests = [range_header for name, range_header in requests
+                              if name == 'onnx/model_quantized.onnx']
             require(all(row['status'] == 'warn' for row in busy.values())
-                    and requests.count('onnx/model_quantized.onnx') == 1, 'doctor_competing_installer_started')
-            self.passed('doctor_model_active_download_no_duplicate', model_downloads=1)
+                    and model_requests == ['bytes=0-0', None], 'doctor_competing_installer_started')
+            self.passed('doctor_model_active_download_no_duplicate', model_downloads=1, range_probes=1)
             release.set()
             wait_index('ready', 240)
             ready = doctor()
