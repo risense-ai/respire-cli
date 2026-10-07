@@ -12,6 +12,9 @@ on:
     branches: [main]
 permissions:
   contents: read
+concurrency:
+  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}
+  cancel-in-progress: true
 jobs:
   platform-build:
     if: ${{ !inputs.native_published_only }}
