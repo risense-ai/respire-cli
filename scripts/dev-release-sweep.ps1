@@ -733,7 +733,7 @@ $configWrite = Invoke-Om -Name 'config-isolated-settings' -ArgList @('--json', '
 $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'config') -DataDir $DirA
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
 $bgeInstall = Invoke-Om -Name 'model-install' -ArgList @('--json', 'model', 'install') -DataDir $DirA -TimeoutSec 900
-Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))
+Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
@@ -1636,7 +1636,7 @@ Invoke-LocalSmoke -Name 'mcp-http-malformed-json' -Path '/mcp' -Payload '{' -Raw
 Invoke-LocalSmoke -Name 'mcp-http-foreign-origin' -Path '/mcp' -Payload @{} -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 
 $m3Install = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec 1200
-Assert-Smoke 'model-m3-installed-without-activation' ($m3Install.Ok -and $m3Install.Envelope.summary.activated -eq $false -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_fp16.onnx')))
+Assert-Smoke 'model-m3-installed-without-activation' ($m3Install.Ok -and $m3Install.Envelope.summary.activated -eq $false -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
 $m3Probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--model', 'm3', '--text', $marker) -DataDir $DirA -TimeoutSec 600
 Assert-Smoke 'model-m3-probe-success' ($m3Probe.Ok -and [string]$m3Probe.Envelope.status -eq 'ok')
 $activateM3 = Invoke-Om -Name 'model-activate-m3' -ArgList @('--json', 'model', 'activate', 'm3') -DataDir $DirA -TimeoutSec 900
