@@ -9,6 +9,9 @@ on:
       version:
         default: ''
         type: string
+      full_validation:
+        default: true
+        type: boolean
     outputs:
       sha:
         value: ${{ jobs.resolve.outputs.sha }}
@@ -21,6 +24,10 @@ on:
         required: true
         default: main
         type: string
+      full_validation:
+        description: Run historical native upgrades as well as build/package checks
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -101,20 +108,31 @@ jobs:
         run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
+      - uses: actions/cache@v4
+        if: contains(matrix.target, '-musl')
+        with:
+          path: target/musl-cache
+          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
       - name: Build and verify static musl binary
         if: contains(matrix.target, '-musl')
         run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
       - name: Stage Core runtime and notices
         if: ${{ !contains(matrix.target, '-musl') }}
         run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
-      - name: Prepare versioned binary and runtime artifacts
-        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
+      - name: Verify the native executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=target/ci/${{ matrix.target }}/release/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          "$exe" --version
+      - uses: actions/cache@v4
+        if: runner.os == 'macOS'
         with:
-          name: cli-release-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-      - name: Install and probe BGE CPU inference
+          path: ${{ runner.temp }}/release-probe/models/bge-m3
+          key: release-m3-quantized-0826f8c1-macos
+      - name: Verify real macOS CPU inference before DEV publication
+        if: runner.os == 'macOS'
         shell: bash
         env:
           ONEMEMORY_ENGINE: cpu
@@ -125,59 +143,24 @@ jobs:
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/release/rsrs
-          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          "$exe" --version
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
-      - name: Require every published stable upgrade and the 1.0.6 baseline
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/upgrade-python"
-          py="$RUNNER_TEMP/upgrade-python/bin/python"
-          exe="target/ci/${{ matrix.target }}/release/rsrs"
-          if [ "$RUNNER_OS" = Windows ]; then
-            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
-            exe="$exe.exe"
-          fi
-          "$py" -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.1.0
-          # Only the real historical baseline uses FP16; the candidate uses quantized.
-          mkdir -p native-legacy-model/onnx
-          cp "$RUNNER_TEMP/release-probe/models/bge-m3/tokenizer.json" native-legacy-model/tokenizer.json
-          cp "$RUNNER_TEMP/release-probe/models/bge-m3/onnx/model_quantized.onnx" native-legacy-model/onnx/model_quantized.onnx
-          curl --fail --location --retry 1 --connect-timeout 20 --max-time 1200 \
-            'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/onnx/model_fp16.onnx' \
-            --output native-legacy-model/onnx/model_fp16.onnx
-          "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
-            --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
-            --legacy-model-dir native-legacy-model \
-            --output-dir "$RUNNER_TEMP/published-upgrades"
+      - name: Prepare versioned binary and runtime artifacts
+        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: published-upgrades-${{ matrix.target }}
-          path: |
-            ${{ runner.temp }}/published-upgrades/published-upgrades.json
-            ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+          name: cli-release-${{ matrix.target }}
+          path: dist/*
           if-no-files-found: error
-      - name: Verify GNU login interruption recovery with this release binary
-        if: matrix.target == 'x86_64-unknown-linux-gnu'
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 -m venv "$RUNNER_TEMP/login-regression-python"
-          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
-          binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
-          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ needs.resolve.outputs.version }}' --source-sha '${{ needs.resolve.outputs.sha }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
-      - uses: actions/upload-artifact@v4
-        if: always() && matrix.target == 'x86_64-unknown-linux-gnu'
-        with:
-          name: gnu-login-interruption
-          path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
-          if-no-files-found: error
+
+  native-regression:
+    if: inputs.full_validation
+    needs: [resolve, binaries]
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+      version: ${{ needs.resolve.outputs.version }}
+
   npm-dry-run:
     needs: [resolve, binaries]
     runs-on: ubuntu-latest

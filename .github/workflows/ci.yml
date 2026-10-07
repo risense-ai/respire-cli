@@ -17,7 +17,8 @@ concurrency:
   cancel-in-progress: true
 jobs:
   platform-build:
-    if: ${{ !inputs.native_published_only }}
+    # Release builds all seven targets. Keep the separate compile matrix manual.
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.native_published_only }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -123,8 +124,8 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      - run: cargo check --workspace --locked
-      - run: cargo test --workspace --locked
+      # respire tests run once through llvm-cov below.
+      - run: cargo test --workspace --exclude respire --locked
       - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
         run: |
           cargo llvm-cov --locked -p respire --fail-under-lines 90 \
