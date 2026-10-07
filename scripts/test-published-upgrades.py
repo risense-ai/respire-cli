@@ -22,6 +22,7 @@ else: raise RuntimeError('release inventory pagination limit exceeded')
 def stable(tag):
     return bool(re.fullmatch(r'v\d+\.\d+\.\d+',tag)) and tuple(map(int,tag[1:].split('.'))) >= (1,0,6)
 sources={item['tag_name']:item for item in releases if not item['draft'] and not item['prerelease'] and stable(item['tag_name'])}
+formal_sources=sorted(sources, key=lambda tag: tuple(map(int,tag[1:].split('.'))))
 registry=json.loads(command('npm','view','@rsrsai/cli','versions','--json'))
 missing=[version for version in registry if stable('v'+version) and 'v'+version not in sources]
 assert not missing,'published npm stable has no verifiable GitHub artifact: '+str(missing)
@@ -31,7 +32,11 @@ if 'v1.0.6' not in sources:
     assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
     sources[baseline['tag_name']]=baseline
 assert sources,'no upgrade source versions discovered'
-report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),'sources':[]}
+report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
+        'published_formal_sources':formal_sources,
+        'unpublished_draft_stables':sorted(item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])),
+        'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
+        'sources':[]}
 try:
     for tag,release in sorted(sources.items()):
         folder=root/tag; folder.mkdir(exist_ok=True)

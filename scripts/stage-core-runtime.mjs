@@ -42,6 +42,15 @@ for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
   writeFileSync(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
+if (manifest.target.includes('windows')) {
+  // The public host embeds this pinned catalog; Core no longer distributes it.
+  const source = join(dirname(fileURLToPath(import.meta.url)), '..', 'crates', 'core-sdk', 'notices', 'WinML-2.4.89-license.txt');
+  const bytes = readFileSync(source);
+  const path = 'core-notices/consumer/WinML-2.4.89-license.txt';
+  mkdirSync(dirname(join(output,path)), {recursive:true});
+  writeFileSync(join(output,path), bytes);
+  files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+}
 writeFileSync(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');
 console.log(`Staged ${files.length} runtime/notice files next to the CLI`);

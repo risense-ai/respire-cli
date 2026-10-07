@@ -51,7 +51,7 @@ const collect = (directory, prefix = '') => {
 collect(directory);
 if (inventory.some(file => /\.(a|lib|dll|so|dylib|onnx|pt|safetensors|pdb|bc|ll)$/i.test(file))) throw new Error('Crate includes a native binary or model payload');
 if (selection === 'sdk') {
-  const allowed = new Set(['Cargo.toml', 'Cargo.toml.orig', 'Cargo.lock', '.cargo_vcs_info.json', 'LICENSE', 'README.md', 'build.rs', 'core-sdk.lock.json', 'prepare-sdk.mjs', 'src/lib.rs', 'src/env.rs', 'src/business.rs', 'src/business/reports.rs']);
+  const allowed = new Set(['Cargo.toml', 'Cargo.toml.orig', 'Cargo.lock', '.cargo_vcs_info.json', 'LICENSE', 'README.md', 'build.rs', 'core-sdk.lock.json', 'prepare-sdk.mjs', 'src/lib.rs', 'src/env.rs', 'src/host.rs', 'src/host_winml.rs', 'host-winml-build.rs', 'notices/WinML-2.4.89-license.txt', 'src/business.rs', 'src/business/reports.rs']);
   if (inventory.some(file => !allowed.has(file))) throw new Error('Unexpected thin SDK package file');
   const before = readFileSync(join(source, 'core-sdk.lock.json'));
   if (!before.equals(readFileSync(join(directory, 'core-sdk.lock.json')))) throw new Error('Packaged SDK pins differ');
@@ -62,7 +62,7 @@ if (selection === 'sdk') {
   const consumer = join(output, 'consumer');
   mkdirSync(join(consumer, 'src'), { recursive: true });
   writeFileSync(join(consumer, 'Cargo.toml'), `[package]\nname = "respire-sdk-package-check"\nversion = "0.0.0"\nedition = "2021"\npublish = false\n[dependencies]\nanyhow = "1.0"\nrespire_core_sdk = { path = "${directory.replaceAll('\\', '/')}" }\n[workspace]\n`);
-  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0001), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
+  writeFileSync(join(consumer, 'src/main.rs'), 'fn main() -> anyhow::Result<()> {\n    let mut core = respire_core_sdk::Core::new()?;\n    let capabilities = core.capabilities()?;\n    anyhow::ensure!(capabilities["abi_version"].as_u64() == Some(0x0001_0002), "unexpected ABI");\n    println!("Extracted SDK package linked and initialized successfully");\n    Ok(())\n}\n');
   run('cargo', ['run', '--manifest-path', join(consumer, 'Cargo.toml')], { env: { ...environment, RSRS_CORE_SDK_DIR: sdk, CARGO_TARGET_DIR: join(output, 'consumer-target') } });
   const lock = readFileSync(join(consumer, 'Cargo.lock'), 'utf8');
   if (!/name = "respire_protocol"\r?\nversion = "[^"]+"\r?\nsource = "registry\+https:\/\/github.com\/rust-lang\/crates.io-index"/.test(lock)) throw new Error('Consumer protocol did not resolve from crates.io');
