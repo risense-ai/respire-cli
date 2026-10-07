@@ -33,16 +33,17 @@ if 'v1.0.6' not in sources:
     sources[baseline['tag_name']]=baseline
 # The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
 additional_draft_baselines=[]
-if 'v1.0.10' not in sources:
-    baseline=next((item for item in releases if item['tag_name']=='v1.0.10' and item['draft']),None)
-    assert baseline is not None,'1.0.10 compatibility baseline artifact missing'
+if 'v1.0.10' not in formal_sources:
+    # Draft assets retain their release/asset IDs even when the tag endpoint omits them.
+    baseline=json.loads(command('gh','api','repos/risense-ai/respire-cli/releases/403872621'))
+    assert baseline['tag_name']=='v1.0.10' and baseline['draft'],'1.0.10 compatibility baseline identity mismatch'
     sources[baseline['tag_name']]=baseline
     additional_draft_baselines.append(baseline['tag_name'])
 assert sources,'no upgrade source versions discovered'
 report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
         'published_formal_sources':formal_sources,
         'additional_draft_baselines':additional_draft_baselines,
-        'unpublished_draft_stables':sorted(item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])),
+        'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
 try:
@@ -62,7 +63,13 @@ try:
                 with path.open('rb') as stream:
                     if hashlib.file_digest(stream,'sha256').hexdigest()!=digest[7:]: needed.append(name)
         if needed:
-            subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
+            if release['draft']:
+                for name in needed:
+                    with (folder/name).open('wb') as output:
+                        subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
+                            '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180)
+            else:
+                subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
         for name in names:
             digest=assets[name].get('digest')
             assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
