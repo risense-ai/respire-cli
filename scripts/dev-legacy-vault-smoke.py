@@ -250,24 +250,21 @@ class Smoke:
         (source / "rsrs.db").rename(source / "onememory.db")
         env["RSRS_DATA_DIR"] = str(source)
         salt, nonce = secrets.token_bytes(16).hex(), secrets.token_bytes(12)
-        original_super = code if version == 1 else secrets.token_urlsafe(32)
         secret = secrets.token_hex(32)
+        original_super = secret if version == 1 else secrets.token_urlsafe(32)
         self.diagnostic_secrets.update((original_super, secret))
         wrapped = AESGCM(legacy_kek(version, password if version == 1 else original_super, secret, salt)).encrypt(nonce, urk, None).hex()
         old_vault = {"version": version, "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex()}
-        if version == 1:
-            rejected, _ = self.request(account, "POST", "/api/self/vault", old_vault)
-            require(rejected == 400, "unsupported_cloud_v1_not_rejected")
-        else:
-            require(self.api(account, "POST", "/api/self/vault", old_vault).get("ok") is True, "legacy_vault_not_written")
-            require(all(self.api(account, "GET", "/api/self/vault").get(k) == v for k, v in old_vault.items()),
-                "legacy_vault_not_read_back")
+        require(self.api(account, "POST", "/api/self/vault", old_vault).get("ok") is True, "legacy_vault_not_written")
+        require(all(self.api(account, "GET", "/api/self/vault").get(k) == v for k, v in old_vault.items()),
+            "legacy_vault_not_read_back")
         session.update({"vault_version": version, "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex(),
             "pass": password, "super": original_super})
         session.pop("crypto_namespace", None)
         session.pop("keyring_account", None)
         if version == 1:
             session["secret"] = secret
+            session.pop("super", None)
         elif version == 3:
             session["secret_key"] = secret
         self.write_session(env, session)
@@ -281,6 +278,8 @@ class Smoke:
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + alias)
         migration_env = dict(env, RSRS_SUPER=original_super)
+        if version == 1:
+            migration_env.pop("RSRS_SUPER", None)
         migration_env.pop("RSRS_DATA_DIR")
         candidates = self.cli(migration_env, "migrate")["details"]["profiles"]
         rows = [row for row in candidates if Path(row["source"]).resolve() == source.resolve()]
@@ -289,6 +288,8 @@ class Smoke:
         require(result["summary"].get("state") == "migrated", "full_migration_not_published")
         destination = Path(result["summary"]["dir"])
         upgraded_env = dict(env, RSRS_DATA_DIR=str(destination), RSRS_SUPER=original_super)
+        if version == 1:
+            upgraded_env.pop("RSRS_SUPER", None)
         upgraded = self.session(upgraded_env)
         require(upgraded["vault_version"] == version and upgraded["wrapped_urk"].startswith(PREFIX),
             "migration_changed_original_factors")
@@ -300,40 +301,74 @@ class Smoke:
         require(self.keys.read("rsrs", "pass:" + alias) == password, "original_password_not_retained")
         if version != 1:
             require(self.keys.read("rsrs", "super:" + alias) == original_super, "original_super_not_retained")
-            result = self.cli(upgraded_env, "migrate", "--vault", "--addr", UPSTREAM, "--user", user,
-                "--pass=" + password, "--super=" + original_super)
-            require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
-            account["token"] = self.session(upgraded_env)["token"]
-            published = self.api(account, "GET", "/api/self/vault")
-            require(published["version"] == version and published["wrapped_urk"].startswith(PREFIX), "cloud_factors_changed")
-            recovered = AESGCM(legacy_kek(version, original_super, secret, published["kdf_salt"], current=True)).decrypt(
-                bytes.fromhex(published["urk_nonce"]), encrypted_bytes(published["wrapped_urk"]), None)
-            require(recovered == urk, "migration_changed_urk")
-            self.report["stage"] = f"v{version}_migrated_sync"
-            self.save()
-            self.cli(upgraded_env, "sync")
-            final_env = self.env(f"v{version}-new-device", user)
+        if version == 1:
+            require(upgraded.get("secret") == secret, "original_account_secret_not_retained")
+        factors = ["--secret-key=" + secret] if version == 1 else ["--super=" + original_super]
+        result = self.cli(upgraded_env, "migrate", "--vault", "--addr", UPSTREAM, "--user", user,
+            "--pass=" + password, *factors)
+        require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
+        committed = self.session(upgraded_env)
+        account["token"] = committed["token"]
+        if version == 1:
+            self.keys.track_created_login(committed, user, None, password)
+            require(committed.get("secret") == secret, "cloud_migration_changed_account_secret")
+        published = self.api(account, "GET", "/api/self/vault")
+        require(published["version"] == version and published["wrapped_urk"].startswith(PREFIX), "cloud_factors_changed")
+        recovered = AESGCM(legacy_kek(version, password if version == 1 else original_super, secret, published["kdf_salt"], current=True)).decrypt(
+            bytes.fromhex(published["urk_nonce"]), encrypted_bytes(published["wrapped_urk"]), None)
+        require(recovered == urk, "migration_changed_urk")
+        self.report["stage"] = f"v{version}_migrated_sync"
+        self.save()
+        self.cli(upgraded_env, "sync")
+        final_env = self.env(f"v{version}-new-device", user)
+        if version != 1:
             final_env["RSRS_SUPER"] = original_super
-            if version == 3:
-                # Explicitly restore the original second recovery factor.
-                self.write_session(final_env, {"user": user, "secret_key": secret})
-            self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
-                "--pass=" + password, "--super=" + original_super)
-            account["token"] = self.session(final_env)["token"]
-            self.report["stage"] = f"v{version}_fresh_device_sync"
+        else:
+            # Supply only the original recovery factor, never a migrated wrap.
+            self.write_session(final_env, {"user": user, "secret": secret})
+        if version == 3:
+            # Explicitly restore the original second recovery factor.
+            self.write_session(final_env, {"user": user, "secret_key": secret})
+        self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
+            "--pass=" + password, *([] if version == 1 else ["--super=" + original_super]))
+        recovered_session = self.session(final_env)
+        account["token"] = recovered_session["token"]
+        if version == 1:
+            self.keys.track_created_login(recovered_session, user, None, password)
+            require(recovered_session.get("secret") == secret, "new_device_changed_account_secret")
+        self.report["stage"] = f"v{version}_fresh_device_sync"
+        self.save()
+        self.cli(final_env, "sync")
+        self.read_entry(final_env, memory_id, plaintext)
+        with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+            require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
+                "new_device_ciphertext_differs")
+        if version == 1:
+            headless_env = dict(final_env, RSRS_PASS=password)
+            self.cli(headless_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
+                "--pass=" + password)
+            headless = self.session(headless_env)
+            account["token"] = headless["token"]
+            require("pass" not in headless and "keyring_account" not in headless,
+                "headless_v1_password_not_supplied_by_environment")
+            require(headless.get("secret") == secret and headless.get("vault_version") == 1,
+                "headless_v1_changed_original_factors")
+            headless_urk = AESGCM(legacy_kek(1, password, secret, headless["kdf_salt"], current=True)).decrypt(
+                bytes.fromhex(headless["urk_nonce"]), encrypted_bytes(headless["wrapped_urk"]), None)
+            require(headless_urk == urk, "headless_v1_changed_urk")
+            self.report["stage"] = "v1_headless_sync"
             self.save()
-            self.cli(final_env, "sync")
-            self.read_entry(final_env, memory_id, plaintext)
-            with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
-                require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
-                    "new_device_ciphertext_differs")
+            self.cli(headless_env, "sync")
+            self.read_entry(headless_env, memory_id, plaintext)
         require((source / "session.json").read_bytes() == original_session
             and digest(source / "onememory.db") == original_database, "original_source_changed")
         self.passed(REQUIRED[version], local_legacy_version=version, resulting_version=version,
-            urk_preserved=True, original_super_preserved=True, original_source_preserved=True,
-            ciphertext_reencrypted=True, old_content_decrypted=True, new_device_decrypted=version != 1,
-            secret_key_recovery=version == 3, cloud_v1_recovery_supported=False if version == 1 else None,
-            cloud_v1_write_rejected=version == 1)
+            urk_preserved=True, original_super_preserved=True if version != 1 else None, original_source_preserved=True,
+            ciphertext_reencrypted=True, old_content_decrypted=True, new_device_decrypted=True,
+            secret_key_recovery=version == 3, cloud_v1_recovery_supported=version == 1,
+            original_account_secret_preserved=version == 1,
+            headless_password_login_verified=version == 1,
+            recovery_factor="login_password_and_account_secret" if version == 1 else "original_super")
 
     def cleanup(self):
         cleanup = self.report["cloud_cleanup"]
@@ -353,6 +388,17 @@ class Smoke:
         cleanup["passed"] = not cleanup["remaining_users"]
 
     def run(self):
+        expected_server = os.environ.get("RSRS_DEV_SERVER_SHA", "")
+        require(os.environ.get("RSRS_DEV_SERVER_ADDR") == UPSTREAM
+                and re.fullmatch("[0-9a-f]{40}", expected_server), "exact_development_server_required")
+        with self.opener.open(UPSTREAM + "/health", timeout=45) as health:
+            raw = health.read(1024 * 1024 + 1)
+            require(len(raw) <= 1024 * 1024, "deployment_response_too_large")
+            value = json.loads(raw)
+            require(health.status == 200 and isinstance(value, dict)
+                    and value.get("source_revision") == expected_server,
+                    "development_server_revision_mismatch")
+        self.report["server_sha"] = expected_server
         import cryptography
         require(cryptography.__version__ == "46.0.3", "cryptography_version_not_pinned")
         spec = importlib.util.spec_from_file_location("legacy_vault_keyring", Path(__file__).with_name("dev-migration-keyring.py"))

@@ -4733,7 +4733,27 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
         );
     }
     let is_v3 = version == 3;
-    let body = if is_v4 {
+    let body = if version == 1 {
+        let account_secret = data["secret"].as_str().filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("v1 Account Secret is missing; retain the original device and library"))?;
+        format!(
+            "rsrs v1 key-recovery notes (keep private; losing the original factors makes data unreadable)\n\
+             user: {user}\nserver: {addr}\n\n\
+             -- original v1 decrypt factors (no independent super password) --\n\
+             original login password: required, not included in this export\n\
+             Account Secret: {account_secret}\n\n\
+             -- unchanged vault wrap material --\n\
+             vault_version: 1\n\
+             kdf_salt: {kdf_salt}\n\
+             wrapped_urk: {wrapped_urk}\n\
+             urk_nonce: {urk_nonce}\n\n\
+             -- new device, after explicit full-library and cloud migration --\n\
+             rsrs login --interactive --user {user} --pass <original-login-password>\n\
+             Enter the original Account Secret when prompted; do not use --super or ordinary --secret-key.\n\n\
+             -- select the explicitly migrated library and publish the same v1 factors --\n\
+             rsrs migrate --vault --user {user} --pass <original-login-password> --secret-key <original-account-secret>\n"
+        )
+    } else if is_v4 {
         format!(
             "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
              user: {user}\nserver: {addr}\n\n\

@@ -168,12 +168,15 @@ impl PreparedLogin {
         Self::prepare_with_vault(addr, authorized, super_password, vault, None)
     }
 
-    fn fetch_vault(addr: &str, authorized: &Value) -> Result<Value> {
+    pub fn fetch_vault(addr: &str, authorized: &Value) -> Result<Value> {
         let token = authorized["token"].as_str().filter(|token| !token.is_empty()).context("authorization did not return a token")?;
-        ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
+        match ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
             .get(&format!("{}/api/self/vault", addr.trim().trim_end_matches('/')))
-            .set("Authorization", &format!("Bearer {token}")).call()
-            .context("could not fetch the account vault")?.into_json().map_err(Into::into)
+            .set("Authorization", &format!("Bearer {token}")).call() {
+            Ok(response) => response.into_json().map_err(Into::into),
+            Err(ureq::Error::Status(404, _)) => Ok(Value::Null),
+            Err(error) => Err(error).context("could not fetch the account vault"),
+        }
     }
 
     /// Publish only a fully migrated library's wrap, preserving its original factors.
@@ -184,24 +187,36 @@ impl PreparedLogin {
         ensure!(local["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX),
             "run rsrs migrate --source <source> --account <new-account> first; changing only a vault wrap is not a full migration");
         let original = local.clone();
-        if let Some(secret) = secret_key { local["secret_key"] = json!(secret); }
+        let version = local["vault_version"].as_i64().context("local vault missing version")?;
+        if let Some(secret) = secret_key.filter(|value| !value.is_empty()) {
+            local[if version == 1 { "secret" } else { "secret_key" }] = json!(secret);
+        }
         let user = authorized["user"].as_str().context("authorization did not return a user")?;
         let alias = local["keyring_account"].as_str().unwrap_or(user);
-        let super_password = legacy_super.filter(|value| !value.is_empty()).map(str::to_owned)
-            .or_else(|| crate::keystore::load_super(alias))
-            .context("the original super Key is required; no replacement Key was generated")?;
+        let super_password = if version == 1 {
+            ensure!(new_super.is_none() && legacy_super.is_none(), "v1 uses the original login password and Account Secret, not a super Key");
+            String::new()
+        } else {
+            legacy_super.filter(|value| !value.is_empty()).map(str::to_owned)
+                .or_else(|| crate::keystore::load_super(alias))
+                .context("the original super Key is required; no replacement Key was generated")?
+        };
         ensure!(new_super.is_none_or(|value| value == super_password),
             "migration preserves the original super Key; --new-super cannot replace it");
         let keys = crate::auth::unlock_session_keys(&local, password, Some(&super_password), alias)?;
         let cloud = Self::fetch_vault(addr, authorized)?;
-        let mut cloud_session = local.clone();
-        cloud_session["vault_version"] = cloud["version"].clone();
-        for field in ["kdf_salt", "wrapped_urk", "urk_nonce"] { cloud_session[field] = cloud[field].clone(); }
-        let cloud_keys = crate::auth::unlock_session_keys(&cloud_session, password, Some(&super_password), alias)?;
-        ensure!(cloud_keys.urk == keys.urk, "cloud and local vault data keys differ; original data was preserved");
-        ensure!(cloud["version"] == local["vault_version"], "migration must preserve the original vault factors");
+        if !cloud.is_null() {
+            ensure!(cloud["version"] == local["vault_version"], "migration must preserve the original vault factors");
+            let mut cloud_session = local.clone();
+            for field in ["kdf_salt", "wrapped_urk", "urk_nonce"] { cloud_session[field] = cloud[field].clone(); }
+            let cloud_keys = crate::auth::unlock_session_keys(&cloud_session, password, Some(&super_password), alias)?;
+            ensure!(cloud_keys.urk == keys.urk, "cloud and local vault data keys differ; original data was preserved");
+        }
         let vault = json!({"version":local["vault_version"],"kdf_salt":local["kdf_salt"],"wrapped_urk":local["wrapped_urk"],"urk_nonce":local["urk_nonce"]});
-        let mut prepared = Self::prepare_with_vault(addr, authorized, super_password, vault.clone(), Some((original, keys.urk)))?;
+        let mut factors = authorized.clone();
+        factors["pass"] = json!(password);
+        if version == 1 { factors["secret"] = local["secret"].clone(); }
+        let mut prepared = Self::prepare_with_vault(addr, &factors, super_password, vault.clone(), Some((original, keys.urk)))?;
         if cloud != vault { prepared.migration_cloud = Some(cloud); }
         // Explicit cloud migration recalculates the authentication hash from the
         // same login password. Ordinary login never changes this stored salt.
@@ -227,9 +242,11 @@ impl PreparedLogin {
         if let Some(original) = self.migration_cloud.as_ref() {
         ensure!(Self::fetch_vault(addr, authorized)? == *original, "cloud vault changed during migration; original local session was restored");
         let vault = json!({"version":self.session["vault_version"],"kdf_salt":self.session["kdf_salt"],"wrapped_urk":self.session["wrapped_urk"],"urk_nonce":self.session["urk_nonce"]});
-        let result = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
+        let mut request = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
             .post(&format!("{}/api/self/vault", addr.trim().trim_end_matches('/')))
-            .set("Authorization", &format!("Bearer {token}")).send_json(vault.clone());
+            .set("Authorization", &format!("Bearer {token}"));
+        if original.is_null() { request = request.set("If-None-Match", "*"); }
+        let result = request.send_json(vault.clone());
         if let Err(error) = result {
             // A lost HTTP response can follow a committed write; inspect that exact wrap once.
             if !Self::fetch_vault(addr, authorized).is_ok_and(|current| current == vault) {
@@ -251,13 +268,13 @@ impl PreparedLogin {
         Ok(())
     }
 
-    fn prepare_with_vault(addr: &str, authorized: &Value, super_password: String, vault: Value, legacy: Option<(Value, [u8; 32])>) -> Result<Self> {
+    pub fn prepare_with_vault(addr: &str, authorized: &Value, super_password: String, vault: Value, legacy: Option<(Value, [u8; 32])>) -> Result<Self> {
         crate::service::require_profile_change_host()?;
         let user = authorized["user"].as_str().filter(|user| !user.is_empty()).context("authorization did not return a user")?.to_owned();
         let token = authorized["token"].as_str().filter(|token| !token.is_empty()).context("authorization did not return a token")?;
         let base = addr.trim().trim_end_matches('/');
         let version = vault["version"].as_i64().context("vault missing version")?;
-        ensure!((2..=4).contains(&version), "unsupported vault version; original factors were preserved");
+        ensure!((1..=4).contains(&version), "unsupported vault version; original factors were preserved");
         let salt = vault["kdf_salt"].as_str().context("vault missing kdf_salt")?;
         let wrapped = vault["wrapped_urk"].as_str().context("vault missing wrapped_urk")?;
         let nonce = vault["urk_nonce"].as_str().context("vault missing urk_nonce")?;
@@ -272,13 +289,23 @@ impl PreparedLogin {
             None => json!({}),
         };
         ensure!(session.is_object(), "target account session must be an object");
+        let previous_alias = session["keyring_account"].as_str().unwrap_or(&user);
+        let login_password = authorized["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
+            .or_else(|| if version == 1 { crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty()) } else { None })
+            .or_else(|| session["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
+            .or_else(|| crate::keystore::load_login_pass(previous_alias));
+        let account_secret = authorized["secret"].as_str().filter(|value| !value.is_empty())
+            .or_else(|| session["secret"].as_str().filter(|value| !value.is_empty())).map(str::to_owned);
         let verified = match version {
+            1 => crate::memory::SessionKeys::unlock(
+                login_password.as_deref().context("original v1 login password is required")?,
+                account_secret.as_deref().context("original v1 Account Secret is required")?, salt, wrapped, nonce),
             2 => crate::memory::SessionKeys::unlock_super(&super_password, salt, wrapped, nonce),
             3 => crate::memory::SessionKeys::unlock_vault(&super_password,
                 session["secret_key"].as_str().context("original Secret Key is required; select the explicitly migrated profile")?,
                 salt, wrapped, nonce),
             _ => crate::memory::SessionKeys::unlock_v4(&super_password, salt, wrapped, nonce),
-        }.context("super Key does not unlock this account; the original account was preserved")?;
+        }.context("original decryption factors do not unlock this account; the original account was preserved")?;
         ensure!(session["user"].as_str().is_none_or(|owner| owner.is_empty() || owner == user), "destination belongs to another account");
         if let Some((original, urk)) = legacy.as_ref() {
             ensure!(session == *original && verified.urk == *urk, "legacy session changed or migration would replace its data key");
@@ -311,10 +338,7 @@ impl PreparedLogin {
             }
         }
         let alias = format!("login-{}", uuid::Uuid::new_v4().simple());
-        let previous_alias = session["keyring_account"].as_str().unwrap_or(&user);
-        let login_password = authorized["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned)
-            .or_else(|| session["pass"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
-            .or_else(|| crate::keystore::load_login_pass(previous_alias));
+        if version == 1 { session["secret"] = json!(account_secret.context("original v1 Account Secret is required")?); }
         for field in ["pass", "super"] { session.as_object_mut().map(|object| object.remove(field)); }
         if version >= 4 {
             for field in ["secret", "secret_key"] { session.as_object_mut().map(|object| object.remove(field)); }
@@ -364,7 +388,18 @@ impl PreparedLogin {
         std::fs::create_dir_all(path.parent().context("recovery root is missing")?)?;
         private_write(&path, &serde_json::to_vec(&recovery)?)?;
         self.recovery_written = true;
-        if crate::env::var("RSRS_SUPER").is_ok_and(|value| value == self.super_password) {
+        if self.session["vault_version"] == 1 {
+            let password = self.login_password.as_deref().context("original v1 login password is required")?;
+            if crate::env::var("RSRS_PASS").is_ok_and(|value| !value.is_empty() && value == password) {
+                // Headless v1 retains its original password/Account Secret factors.
+                self.session.as_object_mut().map(|object| { object.remove("keyring_account"); object.remove("keyring_backend"); });
+            } else {
+                crate::keystore::import_credential_checkpoint(&self.alias, "pass", password, |backend| {
+                    recovery.pass_backends.push(backend.to_owned());
+                    private_write(&path, &serde_json::to_vec(&recovery)?)
+                })?;
+            }
+        } else if crate::env::var("RSRS_SUPER").is_ok_and(|value| value == self.super_password) {
             // Headless hosts explicitly supply the same verified key to their runtime.
             self.session.as_object_mut().map(|object| { object.remove("keyring_account"); object.remove("keyring_backend"); });
         } else {

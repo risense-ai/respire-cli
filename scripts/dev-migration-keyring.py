@@ -97,6 +97,8 @@ class TrackedKeys:
         require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "login_credential_fixture_alias_invalid")
         for prefix, expected in (("super:", super_password), ("pass:", login_password)):
+            if expected is None:
+                continue
             entry = ("rsrs", prefix + alias)
             require(entry not in self.entries and self._read(*entry) is not None,
                     "login_credential_fixture_alias_not_created")

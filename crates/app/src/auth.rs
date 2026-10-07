@@ -98,7 +98,10 @@ pub fn logout(full: bool) -> Result<()> {
 pub fn load_local_session() -> Result<SessionKeys> {
     let data = read_session_json()?;
     let user = data["user"].as_str().unwrap_or("").to_owned();
-    let pass = data["pass"].as_str().map(ToOwned::to_owned)
+    let explicit_pass = if data["vault_version"] == 1 {
+        crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
+    } else { None };
+    let pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned))
         .or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default();
     unlock_session_keys(&data, &pass, None, &user)
 }
