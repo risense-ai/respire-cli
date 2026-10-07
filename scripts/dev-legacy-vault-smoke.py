@@ -260,10 +260,6 @@ class Smoke:
         require(result["summary"].get("state") == "migrated", "full_migration_not_published")
         destination = Path(result["summary"]["dir"])
         upgraded_env = dict(env, RSRS_DATA_DIR=str(destination), RSRS_SUPER=original_super)
-        config_path = destination / "client.json"
-        config = json.loads(config_path.read_text()) if config_path.exists() else {}
-        config["data_dir"] = str(destination)
-        config_path.write_text(json.dumps(config), encoding="utf-8")
         upgraded = self.session(upgraded_env)
         require(upgraded["vault_version"] == version and upgraded["wrapped_urk"].startswith(PREFIX),
             "migration_changed_original_factors")

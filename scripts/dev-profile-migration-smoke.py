@@ -188,12 +188,8 @@ class Smoke(support.Smoke):
         profile = fixture["destination"]
         config_path = profile / "client.json"
         original = config_path.read_bytes() if config_path.exists() else None
-        config = json.loads(original) if original is not None else {}
-        # An environment root intentionally preserves its selected child account.
-        # Select this owned fixture explicitly, then restore the original selection.
-        config["data_dir"] = str(profile)
-        config_path.write_text(json.dumps(config), encoding="utf-8")
-        config_path.chmod(0o600)
+        # Consume the migration's actual configuration. Do not repair its path
+        # spelling here: runtime verification must exercise the published result.
         try:
             yield dict(default, RSRS_DATA_DIR=str(profile))
         finally:

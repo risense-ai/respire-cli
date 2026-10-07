@@ -100,7 +100,10 @@ fn commit_verified(addr: &str, authorization: &Value, prepared: respire_app::log
         let accounts = actual["details"]["accounts"].as_array().context("runtime account list missing accounts")?;
         let current = accounts.iter().find(|account| account["current"].as_bool() == Some(true)).context("runtime did not report a selected account")?;
         let expected = prepared.borrow();
-        ensure!(current["user"].as_str() == Some(expected.user.as_str()) && current["dir"].as_str() == Some(expected.directory.to_string_lossy().as_ref()), "runtime account or directory differs from the authorized account");
+        let current_directory = current["dir"].as_str().context("runtime did not report the selected directory")?;
+        ensure!(current["user"].as_str() == Some(expected.user.as_str())
+            && std::path::Path::new(current_directory) == expected.directory.as_path(),
+            "runtime account or directory differs from the authorized account");
         expected.finish_migration(addr, authorization)?;
         expected.complete()?;
         Ok(())

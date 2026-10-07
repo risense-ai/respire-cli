@@ -546,8 +546,13 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile], curre
                     .filter(|candidate| old.starts_with(&candidate.source))
                     .max_by_key(|candidate| candidate.source.components().count())
                 {
-                    config["data_dir"] =
-                        json!(found.destination.join(old.strip_prefix(&found.source)?));
+                    let suffix = old.strip_prefix(&found.source)?;
+                    let destination = if suffix.as_os_str().is_empty() {
+                        found.destination.clone()
+                    } else {
+                        found.destination.join(suffix)
+                    };
+                    config["data_dir"] = json!(destination);
                 } else {
                     bail!("legacy configuration uses an external data directory; originals were preserved; set RSRS_DATA_DIR explicitly to open it");
                 }
