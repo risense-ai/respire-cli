@@ -92,6 +92,7 @@ class Smoke:
                 "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")}
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.accounts = []
+        self.diagnostic_secrets = set()
         self.keys = None
         self.report = {"status": "running", "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"), "version": args.version,
@@ -131,7 +132,28 @@ class Smoke:
             stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
                 cwd=self.root, env=env, capture_output=True, timeout=60)
             require(stopped.returncode in (0, 2), 'owned_runtime_stop_failed')
-        require(output.returncode == 0, "cli_failed_" + args[0])
+        if output.returncode != 0:
+            try:
+                value = json.loads(output.stdout)
+                errors = value.get("errors", []) if isinstance(value, dict) else []
+                diagnostic = "; ".join(str(error) for error in errors)
+            except (ValueError, UnicodeError):
+                diagnostic = ""
+            diagnostic = diagnostic or output.stderr.decode("utf-8", errors="replace")[-1500:]
+            secrets_to_redact = set(self.diagnostic_secrets)
+            session_path = Path(env["RSRS_DATA_DIR"]) / "session.json"
+            if session_path.is_file():
+                session = json.loads(session_path.read_text())
+                secrets_to_redact.update(session.get(key) for key in
+                    ("pass", "super", "token", "secret", "secret_key", "wrapped_urk", "urk_nonce", "kdf_salt")
+                    if isinstance(session.get(key), str) and session[key])
+            for secret in sorted(secrets_to_redact, key=len, reverse=True):
+                diagnostic = diagnostic.replace(secret, "[redacted]")
+            diagnostic = re.sub(r"(?i)bearer\s+\S+", "Bearer [redacted]", diagnostic)
+            self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
+                "stage": self.report.get("stage"), "error": diagnostic[:1500] or "no structured error"}
+            self.save()
+            raise RuntimeError("cli_failed_" + args[0])
         try:
             value = json.loads(output.stdout)
         except (ValueError, UnicodeError):
@@ -181,6 +203,7 @@ class Smoke:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         env = self.env(f"v{version}-original")
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
+        self.diagnostic_secrets.add(password)
         for slot in ("super:", "pass:"):
             self.keys.reserve("rsrs", slot + user)
         account = {"user": user, "token": None, "confirmed": False}
@@ -196,6 +219,7 @@ class Smoke:
         code = registered["summary"].get("super")
         require(isinstance(code, str) and bool(code), "registered_super_missing")
         env["RSRS_SUPER"] = code
+        self.diagnostic_secrets.update((code, session["token"]))
         vault = self.api(account, "GET", "/api/self/vault")
         urk = AESGCM(v4_kek(code, vault["kdf_salt"], vault["wrapped_urk"])).decrypt(
             bytes.fromhex(vault["urk_nonce"]), encrypted_bytes(vault["wrapped_urk"]), None)
@@ -203,6 +227,8 @@ class Smoke:
         plaintext = f"Synthetic legacy version {version} preserves this original encrypted content."
         title = f"CI legacy vault {version}"
         self.cli(env, "remember", plaintext, "--title", title, "--force", "--importance", "important")
+        self.report["stage"] = f"v{version}_initial_sync"
+        self.save()
         self.cli(env, "sync", timeout=180)
         database = Path(env["RSRS_DATA_DIR"]) / "rsrs.db"
         with sqlite3.connect(database) as db:
@@ -224,6 +250,7 @@ class Smoke:
         salt, nonce = secrets.token_bytes(16).hex(), secrets.token_bytes(12)
         original_super = code if version == 1 else secrets.token_urlsafe(32)
         secret = secrets.token_hex(32)
+        self.diagnostic_secrets.update((original_super, secret))
         wrapped = AESGCM(legacy_kek(version, password if version == 1 else original_super, secret, salt)).encrypt(nonce, urk, None).hex()
         old_vault = {"version": version, "kdf_salt": salt, "wrapped_urk": wrapped, "urk_nonce": nonce.hex()}
         if version == 1:
@@ -280,6 +307,8 @@ class Smoke:
             recovered = AESGCM(legacy_kek(version, original_super, secret, published["kdf_salt"], current=True)).decrypt(
                 bytes.fromhex(published["urk_nonce"]), encrypted_bytes(published["wrapped_urk"]), None)
             require(recovered == urk, "migration_changed_urk")
+            self.report["stage"] = f"v{version}_migrated_sync"
+            self.save()
             self.cli(upgraded_env, "sync")
             final_env = self.env(f"v{version}-new-device", user)
             final_env["RSRS_SUPER"] = original_super
@@ -289,6 +318,8 @@ class Smoke:
             self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
                 "--pass=" + password, "--super=" + original_super)
             account["token"] = self.session(final_env)["token"]
+            self.report["stage"] = f"v{version}_fresh_device_sync"
+            self.save()
             self.cli(final_env, "sync")
             self.read_entry(final_env, memory_id, plaintext)
             with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:

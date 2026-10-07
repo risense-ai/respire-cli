@@ -88,6 +88,24 @@ class TrackedKeys:
         require(value is not None, "fixture_credential_missing")
         return value
 
+    def track_created_login(self, session, user, super_password, login_password):
+        # Claim only the exact alias returned by this owned fixture's successful
+        # login transaction, never enumerate credentials on the host.
+        require(re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                and session.get("user") == user, "login_credential_fixture_identity_mismatch")
+        alias = session.get("keyring_account")
+        require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
+                "login_credential_fixture_alias_invalid")
+        for prefix, expected in (("super:", super_password), ("pass:", login_password)):
+            entry = ("rsrs", prefix + alias)
+            require(entry not in self.entries and self._read(*entry) is not None,
+                    "login_credential_fixture_alias_not_created")
+            self.entries.add(entry)
+            # macOS keeps the product ACL unchanged; the CLI consumer verifies
+            # its values separately, while metadata suffices for exact cleanup.
+            if sys.platform != "darwin":
+                require(self.read(*entry) == expected, "login_credential_fixture_value_changed")
+
     def put(self, service, slot, value):
         self.reserve(service, slot)
         self._put(service, slot, value)
