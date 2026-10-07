@@ -63,6 +63,8 @@ try:
         result=folder/'results'
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
             '--binary',args.binary,'--seed-binary',str(old),'--expect-in-process','--model-dir',args.model_dir,'--output-dir',str(result)],check=True)
+        checks=json.loads((result/'real-account-return-verification.json').read_text())
+        assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
         report['sources'].append({'version':tag[1:],'formal':stable(tag),'passed':True,'report':str(result/'real-account-return-verification.json')})
     report['passed']=True
 finally:

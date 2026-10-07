@@ -1843,23 +1843,6 @@ fn endpoint_pid() -> Option<u32> {
         .and_then(|pid| u32::try_from(pid).ok())
 }
 
-/// The host-owned endpoint record must identify the actual loopback listener.
-pub(crate) fn recorded_runtime_listener(pid: u32) -> bool {
-    let Ok(text) = std::fs::read_to_string(endpoint_path()) else {
-        return false;
-    };
-    let Ok(data) = serde_json::from_str::<Value>(&text) else {
-        return false;
-    };
-    data["pid"].as_u64() == Some(u64::from(pid))
-        && data["v"].as_u64() == Some(u64::from(PROTOCOL_V))
-        && data["bin"].as_str().is_some_and(|version| !version.is_empty())
-        && data["url"].as_str().is_some_and(|url| {
-            url == crate::net_rpc::rpc_base_url()
-                || url == format!("http://localhost:{}", crate::net_rpc::rpc_port())
-        })
-}
-
 /// Recovery must not wait on RPC, model locks or a library lock.
 pub(crate) fn force_stop_for_reset() -> Result<Option<u32>> {
     let port = crate::net_rpc::rpc_port();

@@ -64,8 +64,8 @@ for binary in BINARIES:
         select(main)
         if args.seed_binary:
             log=(root/'old-runtime.log').open('wb')
-            old_version=subprocess.check_output([args.seed_binary,'--version'],text=True).strip().split()[-1]
-            runtime_args=['web','--internal','--no-open','--port',str(port)] if old_version.startswith('1.0.6') else ['--runtime-internal']
+            web_help=subprocess.check_output([args.seed_binary,'web','--help'],text=True)
+            runtime_args=['web','--internal','--no-open','--port',str(port)] if '--port' in web_help else ['--runtime-internal']
             old_runtime=subprocess.Popen([str(pathlib.Path(args.seed_binary).resolve()),*runtime_args],env=env,stdout=log,stderr=log)
             log.close()
             for attempt in range(200):
@@ -123,6 +123,15 @@ for binary in BINARIES:
             config=json.loads((main/'client.json').read_text())
             assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
             assert snapshot(profile)==original[str(profile)],'switch/probe changed source data or rebuilt existing index'
+            written=run('remember','Post-upgrade real inference '+account+' '+str(time.time_ns()),'--title','post-upgrade-'+account,'--force')
+            assert written['summary'].get('id'),'real post-upgrade remember did not commit'
+            updated=snapshot(profile)
+            assert all(row in updated[0][0] for row in original[str(profile)][0][0]),'remember changed an existing ciphertext'
+            assert all(row in updated[0][1] for row in original[str(profile)][0][1]),'remember changed existing sync work'
+            assert all(row in updated[0][2] for row in original[str(profile)][0][2]),'remember changed a compatible existing index'
+            assert updated[2]==original[str(profile)][2],'remember changed vault keys'
+            original[str(profile)]=updated
+            assert run('recall','Post-upgrade real inference','--titles').get('items'),'post-upgrade remember could not be recalled'
             statuses.append({'account':account,'model_rows':rows})
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'engine':'cpu','in_process_checked':args.expect_in_process,'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,'index_source_and_keys_unchanged':True,'fixture':str(root)})
