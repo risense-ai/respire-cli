@@ -83,14 +83,7 @@ jobs:
     with:
       ref: ${{ needs.plan.outputs.sha }}
       version: ${{ needs.plan.outputs.version }}
-      full_validation: false
-
-  native-regression:
-    needs: [plan, validate]
-    uses: ./.github/workflows/release-native-validation.yml
-    with:
-      ref: ${{ needs.plan.outputs.sha }}
-      version: ${{ needs.plan.outputs.version }}
+      full_validation: true
 
   cloud-sweep:
     needs: plan
@@ -223,10 +216,8 @@ jobs:
           CLI_SHA: ${{ needs.plan.outputs.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($IsMacOS) {
-            python -m pip install --only-binary=:all: cryptography==46.0.3
-            if ($LASTEXITCODE -ne 0) { throw 'macOS migration fixture dependencies failed' }
-          }
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+          if ($LASTEXITCODE -ne 0) { throw 'Native migration fixture dependencies failed' }
           $binary = (Resolve-Path (Join-Path cli $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }))).Path
           $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           $root = Join-Path $env:RUNNER_TEMP 'native-profile-migration'
@@ -331,7 +322,7 @@ jobs:
 
   publish:
     # Build once, share artifacts, and publish only after the same-source regressions pass.
-    needs: [plan, validate, native-regression, cloud-sweep, api-smoke]
+    needs: [plan, validate, cloud-sweep, api-smoke]
     if: needs.plan.outputs.publish == 'true'
     runs-on: ubuntu-latest
     concurrency:
@@ -366,7 +357,8 @@ jobs:
             const deadline=Date.now()+20*60*1000;
             while(Date.now()<deadline){
               const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
-              const run=result.workflow_runs.filter(run=>run.head_sha===sha).sort((a,b)=>b.id-a.id)[0];
+              // Focused artifact runs can exercise an older binary and skip source checks.
+              const run=result.workflow_runs.filter(run=>run.head_sha===sha&&run.event==='push').sort((a,b)=>b.id-a.id)[0];
               if(run?.status==='completed'){
                 if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
                 console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
@@ -394,7 +386,7 @@ jobs:
               const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
                 `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`
               ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
-              const native=jobs.filter(job=>job.name.startsWith('native-regression / Native ('));
+              const native=jobs.filter(job=>job.name.includes('native-regression / Native ('));
               const cloud=jobs.filter(job=>job.name.startsWith('cloud-sweep ('));
               const api=jobs.filter(job=>job.name==='api-smoke');
               const required=[...native,...cloud,...api];
@@ -403,7 +395,7 @@ jobs:
               if(native.length===7&&cloud.length===3&&api.length===1&&required.every(job=>job.conclusion==='success')){
                 console.log('All seven native upgrades, three system regressions and API checks passed');return;
               }
-              console.log('Waiting for full stable regression; DEV does not use this gate');
+              console.log('Waiting for native upgrades, cloud regressions and API checks');
               await new Promise(resolve=>setTimeout(resolve,30000));
             }
             throw new Error('Stable regression did not complete within 120 minutes');

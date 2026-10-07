@@ -558,7 +558,10 @@ class Smoke(support.Smoke):
                     new_id = created["summary"]["id"]
                     self.cli(profile_env, "migrate", "--vault", "--addr", support.UPSTREAM,
                         "--user", fixture["account"]["user"], "--pass", fixture["password"], "--super", fixture["code"])
-                    fixture["account"]["token"] = self.session(profile_env)["token"]
+                    committed = self.session(profile_env)
+                    fixture["account"]["token"] = committed["token"]
+                    self.keys.track_created_login(committed, fixture["account"]["user"],
+                        fixture["code"], fixture["password"])
                     self.cli(profile_env, "sync")
                     with sqlite3.connect((fixture["destination"] / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
                         for tombstone in fixture["legacy_tombstones"]:

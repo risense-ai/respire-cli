@@ -238,6 +238,8 @@ jobs:
       CLI_SHA: ${{ inputs.artifact_source }}
       CLI_VERSION: ${{ inputs.version }}
       ARTIFACT_RUN: ${{ inputs.artifact_run }}
+      RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
+      RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -279,9 +281,16 @@ jobs:
           binary="$(realpath candidate/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           "$RUNNER_TEMP/recovery-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+      - name: Diagnose existing legacy vault cloud migration
+        run: |
+          binary="$(realpath candidate/rsrs)"
+          checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          "$RUNNER_TEMP/recovery-python/bin/python" scripts/dev-legacy-vault-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-legacy-vault"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: gnu-login-interruption
-          path: ${{ runner.temp }}/gnu-login-interruption/
+          path: |
+            ${{ runner.temp }}/gnu-login-interruption/
+            ${{ runner.temp }}/gnu-legacy-vault/legacy-vault-coverage.json
           if-no-files-found: ignore
