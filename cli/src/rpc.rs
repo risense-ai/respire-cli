@@ -12,6 +12,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
+use clap::Parser;
 use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Name, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1514,6 +1515,9 @@ fn cpu_count() -> usize {
 }
 
 fn is_exclusive(args: &[String]) -> bool {
+    if is_context_query(args) {
+        return false;
+    }
     matches!(
         command_name(args),
         Some(
@@ -1683,7 +1687,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 WRITE_RUNNING.store(true, Ordering::Release);
                 let gate = shared_exclusive();
                 let _held = gate.acquire_reserved();
-                let changing_context = matches!(
+                let changing_context = !is_context_query(&job.args) && matches!(
                     command_name(&job.args),
                     Some(
                         "login"
@@ -1853,6 +1857,24 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
 
 fn is_status(args: &[String]) -> bool {
     command_name(args) == Some("status")
+}
+
+/// Viewing account/configuration state must not invalidate ongoing sync or indexing.
+fn is_context_query(args: &[String]) -> bool {
+    if !matches!(command_name(args), Some("account" | "space" | "config" | "agent-config" | "session")) {
+        return false;
+    }
+    let Ok(cli) = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned())) else {
+        return false;
+    };
+    match cli.command {
+        Some(crate::Command::Account { action, .. }) => action == "list",
+        Some(crate::Command::Space { action, .. }) => matches!(action.as_str(), "list" | "members"),
+        Some(crate::Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None })
+        | Some(crate::Command::AgentConfig { set: None })
+        | Some(crate::Command::Session { command: crate::SessionCommand::List }) => true,
+        _ => false,
+    }
 }
 
 fn command_name(args: &[String]) -> Option<&str> {
@@ -2273,6 +2295,19 @@ mod tests {
 
     #[test]
     fn writes_queue_and_reads_may_run_together() {
+        for args in [vec!["account", "list"], vec!["config"], vec!["agent-config"],
+            vec!["session", "list"], vec!["space", "list"], vec!["space", "members"]] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(is_context_query(&args));
+            assert!(!is_exclusive(&args));
+        }
+        for args in [vec!["account", "use", "main"], vec!["config", "--autosync", "false"],
+            vec!["agent-config", "--set", "model_mirror=auto"], vec!["session", "revoke", "fixture"],
+            vec!["space", "use", "fixture"]] {
+            let args = args.into_iter().map(String::from).collect::<Vec<_>>();
+            assert!(!is_context_query(&args));
+            assert!(is_exclusive(&args));
+        }
         assert!(is_exclusive(&["--json".into(), "sync".into()]));
         assert!(is_exclusive(&["reembed".into()]));
         assert!(is_exclusive(&["remember".into(), "x".into()]));
