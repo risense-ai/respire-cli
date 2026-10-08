@@ -162,6 +162,7 @@ pub(crate) struct RecallStats {
 
 impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
+        if respire::service::workspace_mode() != "normal" { return Ok(()); }
         store.write_transaction(|| {
             store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
             store.bump_recall(&self.candidates)?;
@@ -182,6 +183,7 @@ pub(crate) fn recall_stats_status() -> Value {
 
 /// Statistics are best effort; never wait for queue capacity on the recall reply path.
 pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
+    if respire::service::workspace_mode() != "normal" { return; }
     if STATS_PENDING
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
             (pending < MAX_PENDING_STATS).then_some(pending + 1)
@@ -340,6 +342,7 @@ pub(crate) fn kick_index() {
 }
 
 fn index_yield_to_foreground(generation: usize) -> Result<()> {
+    anyhow::ensure!(respire::service::workspace_mode() == "normal", "background index paused by service mode");
     let gate = shared_exclusive();
     let mut state = gate.state.lock().map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?;
     while state.held || state.foreground > 0 {
@@ -371,6 +374,13 @@ fn index_has_work() -> bool {
 fn index_loop_inner() -> Result<()> {
     let mut model_wait_started: Option<Instant> = None;
     loop {
+        if respire::service::workspace_mode() != "normal" {
+            if STOPPING.load(Ordering::Acquire) { return Ok(()); }
+            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            work.state = "paused";
+            let _paused = INDEX_CV.wait_timeout(work, Duration::from_secs(1)).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            continue;
+        }
         {
             let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             while !work.requested && !STOPPING.load(Ordering::Acquire) {
@@ -601,7 +611,10 @@ fn flight_loop() {
             let _ = job.reply.send(result.map_err(|error| format!("{error:#}")));
         } else {
             let generation = GENERATION.load(Ordering::Acquire);
-            let boundary = sync_local(generation, || crate::build_local()?.outgoing_boundary());
+            let boundary = sync_local(generation, || {
+                anyhow::ensure!(respire::service::workspace_mode() == "normal", "background sync paused by service mode");
+                crate::build_local()?.outgoing_boundary()
+            });
             let result = boundary.and_then(|boundary| {
                 SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
                 crate::background_sync_once()

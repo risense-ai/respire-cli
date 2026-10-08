@@ -168,7 +168,7 @@ impl App {
         let ranked =
             MemoryEngine::recall_local_scored(&self.keys, &self.embedder, &candidates, &q)?;
         for (score, e) in &ranked {
-            let _ = self.store.bump_recall_count(&e.id);
+            if !readonly_mode() && !off_mode() { let _ = self.store.bump_recall_count(&e.id); }
             let _ = score;
         }
         Ok(ranked
@@ -1162,6 +1162,9 @@ pub fn read_agent_config() -> serde_json::Value {
 }
 
 pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    if key == "workspace_mode" {
+        return set_workspace_mode(value.as_str().ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?);
+    }
     if key == "recall_mode" && !matches!(value.as_str(), Some("fast" | "quality")) {
         anyhow::bail!("recall_mode must be fast or quality");
     }
@@ -1218,23 +1221,17 @@ pub fn workspace_mode() -> &'static str {
 /// Set workspace three-state: normal = both flags false; readonly = read-only on, off off; off = off on.
 /// Touches local agent.json only; team read-only still has server token enforcement.
 pub fn set_workspace_mode(mode: &str) -> Result<()> {
-    match mode {
-        "normal" => {
-            write_agent_config_key("memory_off", &serde_json::json!(false))?;
-            write_agent_config_key("readonly", &serde_json::json!(false))?;
-            write_agent_config_key("readonly_team", &serde_json::json!(false))?;
-        }
-        "readonly" => {
-            write_agent_config_key("memory_off", &serde_json::json!(false))?;
-            write_agent_config_key("readonly", &serde_json::json!(true))?;
-        }
-        "off" => {
-            write_agent_config_key("memory_off", &serde_json::json!(true))?;
-        }
-        other => anyhow::bail!("unknown mode `{other}` — choose: normal | readonly | off"),
-    }
+    anyhow::ensure!(matches!(mode, "normal" | "readonly" | "off"), "unknown mode `{mode}` — choose: normal | readonly | off");
+    anyhow::ensure!(mode != "normal" || !readonly_team(), "team read-only access cannot be lifted locally");
+    let mut config = read_agent_config();
+    anyhow::ensure!(config.is_object(), "agent config must be an object");
+    config["memory_off"] = serde_json::json!(mode == "off");
+    config["readonly"] = serde_json::json!(mode == "readonly" || readonly_team());
+    if let Some(parent) = agent_config_path().parent() { std::fs::create_dir_all(parent)?; }
+    std::fs::write(agent_config_path(), serde_json::to_vec_pretty(&config)?)?;
     Ok(())
 }
+
 
 /// Read-only gate: write commands must pass this. Err aborts (message is for the user and the AI).
 pub fn ensure_writable() -> Result<()> {

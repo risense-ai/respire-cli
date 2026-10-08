@@ -1307,24 +1307,8 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
 }
 
 fn set_workspace(mode: &str) -> Result<String, String> {
-    match mode {
-        "normal" => {
-            rpc(&["agent-config", "--set", "memory_off=false"])?;
-            rpc(&["agent-config", "--set", "readonly=false"])?;
-        }
-        "readonly" => {
-            rpc(&["agent-config", "--set", "memory_off=false"])?;
-            rpc(&["agent-config", "--set", "readonly=true"])?;
-        }
-        "off" => {
-            rpc(&["agent-config", "--set", "memory_off=true"])?;
-        }
-        _ => return Err(t("未知工作区", "Unknown workspace")),
-    }
-    Ok(t(
-        "工作区已保存。提示词过期时到第 3 项更新。",
-        "Workspace saved. Refresh stale prompts from item 3.",
-    ))
+    rpc(&["agent-config", "--set", &format!("workspace_mode={mode}")])?;
+    Ok(t("工作模式已保存", "Service mode saved"))
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1726,7 +1710,7 @@ fn home_body(app: &App, inner: usize) -> Vec<Line<'static>> {
                 format!("{}  {user}", t("档案", "Account")),
                 format!(
                     "{}  {}",
-                    t("工作区", "Workspace"),
+                    t("工作模式", "Service mode"),
                     workspace_label(&live.workspace)
                 ),
             ],
@@ -1810,7 +1794,7 @@ fn home_body(app: &App, inner: usize) -> Vec<Line<'static>> {
         t("3  注入与提示词", "3  Inject and prompts"),
         t("4  同步", "4  Sync"),
         t("5  模型", "5  Models"),
-        t("6  工作区", "6  Workspace"),
+        t("6  工作模式", "6  Service mode"),
         t("7  语言", "7  Language"),
         t("8  版本", "8  Version"),
         t("9  打开 Web", "9  Open Web"),
@@ -2238,9 +2222,9 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
 
 fn workspace_body(app: &App) -> Vec<Line<'static>> {
     let labels = [
-        t("读写", "read and write"),
-        t("只读", "read only"),
-        t("暂时关闭", "off"),
+        t("正常服务", "Normal service"),
+        t("只读服务", "Read-only service"),
+        t("禁用服务", "Disabled service"),
     ];
     vec![
         line(format!(
@@ -2372,9 +2356,9 @@ mod model_menu_tests {
 
 fn workspace_label(mode: &str) -> String {
     match mode {
-        "readonly" => t("只读", "read only"),
-        "off" => t("暂时关闭", "off"),
-        _ => t("读写", "read and write"),
+        "readonly" => t("只读服务", "Read-only service"),
+        "off" => t("禁用服务", "Disabled service"),
+        _ => t("正常服务", "Normal service"),
     }
 }
 
