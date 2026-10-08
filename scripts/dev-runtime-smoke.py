@@ -328,8 +328,10 @@ class Smoke:
         require(self.rpc(['show', memory_id])['details'].get('entry', {}).get('id') == memory_id, 'readonly_read_failed')
         self.rpc(['agent-config', '--set', 'readonly=false'])
         self.rpc(['agent-config', '--set', 'memory_off=true'])
-        rejected = self.rpc(['show', memory_id], expected=1)
-        require('temporarily off' in ' '.join(rejected.get('errors', [])), 'off_read_guard_missing')
+        skipped = self.rpc(['show', memory_id])
+        require(skipped.get('summary') == {'mode': 'off', 'skipped': True, 'count': 0}
+                and skipped.get('items') == [] and skipped.get('details') is None
+                and skipped.get('errors') == [], 'off_read_empty_response_missing')
         self.rpc(['agent-config', '--set', 'memory_off=false'])
         normal = self.rpc(['agent-config'])['summary']
         require(normal.get('readonly') is False and normal.get('memory_off') is False, 'normal_mode_not_restored')
