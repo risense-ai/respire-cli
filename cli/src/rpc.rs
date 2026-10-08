@@ -1006,7 +1006,9 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
     if let Some(envelope) = response.envelope {
         crate::progress::finish();
-        println!("{}", envelope.render(json)?);
+        if json || envelope.summary["skipped"] != true || envelope.summary["mode"] != "off" {
+            println!("{}", envelope.render(json)?);
+        }
         crate::mark_emitted();
         crate::set_exit_code(response.exit);
         return Ok(());
@@ -1602,6 +1604,7 @@ impl Drop for ClassifyGuard {
 }
 
 fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
+    mark_worker();
     let _lock = match respire::lock::LibraryLock::acquire(
         &respire::service::data_dir(),
         Duration::from_secs(120),
@@ -1614,13 +1617,13 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     };
     // Keep WAL open across requests: closing the last connection can briefly lock
     // a concurrent opener during checkpoint/cleanup, even for read-only status.
-    let _store = match respire::service::open_store() {
+    let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_store() {
         Ok(store) => store,
         Err(error) => {
             eprintln!("runtime failed to initialize the library: {error:#}");
             stop_process(1);
         }
-    };
+    }) };
     respire::service::install_runtime_profile(respire::service::data_dir());
     let (classify_tx, classify_rx) = mpsc::sync_channel::<Job>(16);
     let classifier = std::thread::Builder::new()
@@ -1759,6 +1762,21 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     break;
                 }
                 idle_since = Instant::now();
+                if respire::service::off_mode() {
+                    let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()));
+                    if parsed.is_ok_and(|cli| cli.command.as_ref().is_some_and(|command| !crate::is_off_allowed(command))) {
+                        let captured = crate::capture_run(job.args);
+                        let _ = job.reply.send(Ok(captured));
+                        continue;
+                    }
+                } else if _store.is_none() {
+                    let gate = shared_exclusive();
+                    let _held = gate.acquire(true);
+                    match respire::service::open_store() {
+                        Ok(store) => _store = Some(store),
+                        Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
+                    }
+                }
                 if matches!(
                     command_name(&job.args),
                     Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")

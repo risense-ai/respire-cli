@@ -5236,12 +5236,12 @@ fn is_off_allowed(c: &Command) -> bool {
         // Status and doctor
         | Command::Status | Command::UpdateCheck { .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::Model { .. } | Command::ClassifyConfig { .. }
+        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }
         // Sync reads and writes memory, so it is paused while disabled.
         // Identity / account / credentials / space admin
         | Command::Login { .. } | Command::Logout { .. } | Command::Register { .. }
-        | Command::Account { .. } | Command::Session { .. } | Command::Keygen { .. }
+        | Command::Account { .. } | Command::Session { .. }
         | Command::KeysExport { .. } | Command::SuperReset { .. } | Command::Fivekeys { .. }
         | Command::Secret { .. } | Command::Space { .. }
     )
@@ -5251,7 +5251,7 @@ fn is_write_command_fine(c: &Command) -> bool {
     match c {
         Command::Account { action, .. } => {
             let a = action.trim().to_ascii_lowercase();
-            a != "list"
+            !matches!(a.as_str(), "list" | "use")
         }
         Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
         // share-import without --go only prints the candidate bill (read); --go writes
@@ -5643,7 +5643,7 @@ fn run(args: Cli) -> Result<()> {
 fn run_local(args: Cli) -> Result<()> {
     set_json_mode(args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
     if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
-        if !json_mode() { return Ok(()); }
+        if !json_mode() && !rpc::worker_active() { return Ok(()); }
         let command = match args.command.as_ref() { Some(Command::Recall { .. }) => "recall", Some(Command::Remember { .. }) => "remember", _ => "memory" };
         let mut result = ResultEnvelope::new(command, OutputStatus::Ok, serde_json::json!({"mode":"off", "skipped":true, "count":0}), Vec::new());
         result.details = serde_json::json!([]);
