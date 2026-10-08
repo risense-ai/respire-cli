@@ -118,6 +118,13 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     assert!(plain.stdout.is_empty(), "disabled human output must be empty");
     let restore = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
     assert_eq!(restore["ok"], true, "{restore}");
+    let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
+    assert_eq!(normal["ok"], true, "{normal}");
+    let initialized = execute(&["--json", "status"])?;
+    assert_eq!(initialized["ok"], true, "{initialized}");
+    assert!(rt.dir.path().join("rsrs.db").exists());
+    let readonly = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
+    assert_eq!(readonly["ok"], true, "{readonly}");
     for args in [vec!["--json", "remember", "synthetic memory"], vec!["--json", "sync"],
         vec!["--json", "sync-reset"], vec!["--json", "doctor", "--fix"],
         vec!["--json", "sync-conflicts", "--refresh"], vec!["--json", "sync-history", "--remote"],
@@ -128,6 +135,7 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
     assert_eq!(normal["ok"], true, "{normal}");
     let status = execute(&["--json", "status"])?;
+    assert_eq!(status["ok"], true, "{status}");
     assert_ne!(status["envelope"]["summary"]["workspace"], "off");
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(rt.dir.path().join("client.json")).map_err(|err|err.to_string())?)
         .map_err(|err|err.to_string())?["service_mode"], "normal");
