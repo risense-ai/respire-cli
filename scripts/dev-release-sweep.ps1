@@ -1123,6 +1123,11 @@ if ($inviteCode) {
     $spaceRead = Invoke-Om -Name 'space-member-readback' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $DirC
     Assert-Smoke 'space-member-can-read-owner-entry' ($spacePull.Ok -and $spaceRead.Ok -and [string]$spaceRead.Envelope.details.entry.content -eq $spaceMarker)
 }
+$readonlyTombstone = Invoke-Om -Name 'space-readonly-tombstone-create' -ArgList @('--json', 'remember', "readonly-tombstone-$stamp", '--title', 'readonly-tombstone', '--importance', 'important', '--force') -DataDir $DirA
+$readonlyTombstoneId = [string]$readonlyTombstone.Envelope.summary.id
+$readonlyDeleted = Invoke-Om -Name 'space-readonly-tombstone-delete' -ArgList @('--json', 'forget', $readonlyTombstoneId) -DataDir $DirA
+$readonlySeedSync = Invoke-Om -Name 'space-readonly-tombstone-sync' -ArgList @('--json', 'sync') -DataDir $DirA
+Assert-Smoke 'space-readonly-tombstone-ready' ($readonlyTombstone.Ok -and [bool]$readonlyTombstoneId -and $readonlyDeleted.Ok -and $readonlySeedSync.Ok)
 $readonlyInvite = Invoke-Om -Name 'space-invite-readonly' -ArgList @('--json', 'space', 'invite', '--readonly', '--note', 'readonly-smoke') -DataDir $DirA -Secret -AllowStatus @('warn')
 $readonlyCode = [string]$readonlyInvite.Envelope.details.code
 Assert-Smoke 'space-readonly-invite-present' ($readonlyInvite.Ok -and $readonlyInvite.Envelope.details.readonly -eq $true -and [bool]$readonlyCode)
@@ -1130,7 +1135,9 @@ $readonlyDir = Join-Path $Root 'readonly-member'
 Invoke-Om -Name 'space-readonly-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $readonlyDir | Out-Null
 $readonlyJoin = Invoke-Om -Name 'space-readonly-join' -ArgList @('--json', 'space', 'join', $readonlyCode) -DataDir $readonlyDir -Secret -HostProfile -AllowStatus @('warn')
 Invoke-Om -Name 'space-readonly-use' -ArgList @('--json', 'space', 'use', 'sweepspace') -DataDir $readonlyDir -HostProfile | Out-Null
+Invoke-Om -Name 'space-readonly-immediate-purge-config' -ArgList @('--json', 'agent-config', '--set', 'purge_days=0') -DataDir $readonlyDir | Out-Null
 $readonlyPull = Invoke-Om -Name 'space-readonly-sync' -ArgList @('--json', 'sync') -DataDir $readonlyDir
+Assert-Smoke 'space-readonly-no-auto-purge' ($readonlyPull.Ok -and [int]$readonlyPull.Envelope.summary.purged -eq 0 -and [int]$readonlyPull.Envelope.summary.pushed -eq 0 -and [int]$readonlyPull.Envelope.summary.pending -eq 0)
 $readonlyRead = Invoke-Om -Name 'space-readonly-show' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $readonlyDir
 Assert-Smoke 'space-readonly-can-read' ($readonlyJoin.Ok -and $readonlyPull.Ok -and $readonlyRead.Ok -and [string]$readonlyRead.Envelope.details.entry.content -eq $spaceMarker)
 $readonlyWrite = Invoke-Om -Name 'space-readonly-write-refused' -ArgList @('--json', 'remember', "forbidden-$stamp", '--title', 'must-not-write', '--force') -DataDir $readonlyDir -AllowStatus @('fail')
