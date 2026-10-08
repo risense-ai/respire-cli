@@ -8411,6 +8411,7 @@ mod capture_tests {
         crate::rpc::set_worker_active(true);
         respire::service::keygen()?;
         let missing = dir.path().join("missing.json").to_string_lossy().into_owned();
+        let missing_output = dir.path().join("absent").join("export.json").to_string_lossy().into_owned();
         for command in [
             vec!["restore", "deadbeef"],
             vec!["grant", "create", "--root", "deadbeef", "--label", "probe"],
@@ -8419,6 +8420,9 @@ mod capture_tests {
             vec!["import", &missing],
             vec!["bench", "run", &missing],
             vec!["share-import", &missing],
+            vec!["export", &missing_output],
+            vec!["backup", &missing_output],
+            vec!["agent-config", "--set", "workspace_mode=bogus"],
         ] {
             let mut args = vec!["--json".to_owned()];
             args.extend(command.iter().map(|arg| (*arg).to_owned()));
@@ -8435,6 +8439,13 @@ mod capture_tests {
         let error = respire_app::input_error::read_file(&invalid, "fixture").err()
             .ok_or_else(|| anyhow::anyhow!("invalid UTF-8 was accepted"))?;
         assert_eq!(super::command_failure(&error).1, 1);
+        let existing = dir.path().join("existing-backup.db");
+        std::fs::write(&existing, b"preserve existing backup")?;
+        let error = respire::service::backup_db(&existing).err()
+            .ok_or_else(|| anyhow::anyhow!("existing backup was overwritten"))?;
+        assert_eq!(super::command_failure(&error).1, 1);
+        assert_eq!(std::fs::read(&existing)?, b"preserve existing backup");
+        assert!(!dir.path().join("absent").exists());
         Ok(())
     }
 
