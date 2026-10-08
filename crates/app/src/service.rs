@@ -1243,7 +1243,9 @@ pub fn workspace_mode() -> &'static str {
 /// Device service mode lives beside the active-profile pointer, never in an account.
 /// Existing team permissions remain effective even when the device returns to normal.
 pub fn set_workspace_mode(mode: &str) -> Result<()> {
-    anyhow::ensure!(matches!(mode, "normal" | "readonly" | "off"), "unknown mode `{mode}` — choose: normal | readonly | off");
+    if !matches!(mode, "normal" | "readonly" | "off") {
+        return Err(crate::input_error::InputError(format!("unknown mode `{mode}` — choose: normal | readonly | off")).into());
+    }
     let mut config = read_client_config().unwrap_or_else(|| serde_json::json!({}));
     anyhow::ensure!(config.is_object(), "client config must be an object");
     config["service_mode"] = serde_json::json!(mode);
@@ -1681,6 +1683,7 @@ impl App {
 
 /// Export all plaintext memories as JSON (backup/migrate).
 pub fn export_json(path: &std::path::Path) -> Result<usize> {
+    crate::input_error::validate_output_parent(path)?;
     let keys = auth::load_local_session()?;
     let store = open_store()?;
     let blobs = store.all(false)?;
@@ -2196,6 +2199,7 @@ pub fn import_share_payload(
 
 /// SQLite consistent snapshot, including committed WAL; dest must be a new file, never overwrite existing data.
 pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
+    crate::input_error::validate_output_parent(dest)?;
     let src = database_path(&data_dir())?;
     let connection =
         rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;

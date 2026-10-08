@@ -1018,6 +1018,18 @@ if (Test-Path $shareFile) {
 }
 $exportFile = Join-Path $Work 'export.json'
 $backupFile = Join-Path $Work 'backup.sqlite'
+$missingOutput = Join-Path $Work 'missing-output/unused.json'
+$modeConfigBefore = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+foreach ($invalidOutput in @(
+    @{ Name = 'export-missing-output'; Args = @('--json', 'export', $missingOutput) },
+    @{ Name = 'backup-missing-output'; Args = @('--json', 'backup', $missingOutput) },
+    @{ Name = 'agent-config-invalid-mode'; Args = @('--json', 'agent-config', '--set', 'workspace_mode=bogus') }
+)) {
+    $rejectedOutput = Invoke-Om -Name $invalidOutput.Name -ArgList $invalidOutput.Args -DataDir $DirA -AllowStatus @('fail')
+    Assert-Smoke "$($invalidOutput.Name)-input-contract" ($rejectedOutput.Ok -and $rejectedOutput.Exit -eq 2 -and [string]$rejectedOutput.Envelope.summary.reason -eq 'invalid_input' -and [string]$rejectedOutput.Envelope.details.error_type -eq 'user')
+}
+Assert-Smoke 'invalid-output-does-not-create-directory' (-not (Test-Path -LiteralPath (Split-Path -Parent $missingOutput)))
+Assert-Smoke 'invalid-mode-preserves-config' ([Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($modeConfigBefore))
 Invoke-Om -Name 'export' -ArgList @('--json', 'export', $exportFile) -DataDir $DirA | Out-Null
 if (-not (Test-Path $exportFile) -or (Get-Item $exportFile).Length -lt 10) { throw 'export 没有写出非空文件' }
 Invoke-Om -Name 'backup' -ArgList @('--json', 'backup', $backupFile) -DataDir $DirA | Out-Null
