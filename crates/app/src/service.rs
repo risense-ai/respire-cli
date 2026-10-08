@@ -1221,6 +1221,14 @@ pub fn off_mode() -> bool {
     }
 }
 
+/// Pause device memory work without confusing a team's read-only access with a device setting.
+pub fn service_paused() -> bool {
+    off_mode() || match device_service_mode().as_deref() {
+        Some(mode) => mode == "readonly",
+        None => !readonly_team() && read_agent_config()["readonly"].as_bool().unwrap_or(false),
+    }
+}
+
 /// Workspace three-state (GUI/status): off > readonly > normal.
 pub fn workspace_mode() -> &'static str {
     if off_mode() {
@@ -2650,7 +2658,7 @@ pub fn open_store() -> Result<LocalStore> {
 /// Initialize the runtime's owned library after normal service is restored.
 /// Disabled startup deliberately leaves a new database uncreated.
 pub fn initialize_runtime_store() -> Result<LocalStore> {
-    anyhow::ensure!(workspace_mode() == "normal", "database initialization requires normal service");
+    anyhow::ensure!(!service_paused(), "database initialization requires normal service");
     let root = data_dir();
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
@@ -3350,6 +3358,7 @@ mod tests {
         write_client_config(&serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}))?;
         set_workspace_mode("readonly")?;
         assert_eq!(workspace_mode(), "readonly");
+        assert!(service_paused());
         assert!(readonly_mode());
         assert!(ensure_writable().is_err());
         account_use("work")?;
@@ -3376,7 +3385,14 @@ mod tests {
         write_agent_config_key("readonly_team", &serde_json::json!(true))?;
         set_workspace_mode("normal")?;
         assert_eq!(workspace_mode(), "readonly", "normal mode cannot lift shared-space permissions");
+        assert!(!service_paused(), "team read-only access must still pull and index shared memory");
         assert!(ensure_writable().is_err());
+        set_workspace_mode("readonly")?;
+        assert!(service_paused(), "device read-only mode must pause even a shared-space replica");
+        std::fs::write(agent_config_path(), serde_json::to_vec(&serde_json::json!({"readonly":true,"readonly_team":true}))?)?;
+        write_client_config(&serde_json::json!({"custom":"preserved"}))?;
+        assert!(!service_paused(), "legacy shared-space flags are account permissions, not device mode");
+        set_workspace_mode("normal")?;
         write_agent_config_key("readonly_team", &serde_json::json!(false))?;
         write_agent_config_key("diary_mode", &serde_json::json!("verbose"))?;
         assert_eq!(diary_mode(), "verbose");

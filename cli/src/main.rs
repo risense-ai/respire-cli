@@ -4321,7 +4321,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
 
 /// One bounded network pass on the runtime synchronization worker.
 pub(crate) fn background_sync_once() -> Result<bool> {
-    if respire::service::workspace_mode() != "normal" { return Ok(false); }
+    if respire::service::service_paused() { return Ok(false); }
     let configured = sync_phase(|| Ok(respire::service::autosync_active() && remote_configured()))?;
     if !configured {
         return Ok(false);
@@ -5196,10 +5196,7 @@ fn is_write_command(c: &Command) -> bool {
             | Command::Reembed { .. }
             | Command::Retitle { .. }
             | Command::RetitleMany { .. }
-            | Command::Sync
             | Command::SyncReset
-            | Command::SyncConflicts { .. }
-            | Command::SyncHistory { remote: true, .. }
             | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
             | Command::SyncRestore { .. }
@@ -5741,7 +5738,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 );
             }
         } else {
-            if is_write_command(cmd) || is_write_command_fine(cmd) {
+            let device_sync_write = respire::service::service_paused()
+                && matches!(cmd, Command::Sync | Command::SyncConflicts { .. } | Command::SyncHistory { remote: true, .. });
+            if is_write_command(cmd) || is_write_command_fine(cmd) || device_sync_write {
                 respire::service::ensure_writable()?;
             }
             // H2 anti-self-unlock: in read-only, do not allow readonly back to false - **team read-only only**
