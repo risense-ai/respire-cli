@@ -162,6 +162,7 @@ pub(crate) struct RecallStats {
 
 impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
+        if respire::service::workspace_mode() != "normal" { return Ok(()); }
         store.write_transaction(|| {
             store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
             store.bump_recall(&self.candidates)?;
@@ -182,6 +183,7 @@ pub(crate) fn recall_stats_status() -> Value {
 
 /// Statistics are best effort; never wait for queue capacity on the recall reply path.
 pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
+    if respire::service::workspace_mode() != "normal" { return; }
     if STATS_PENDING
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
             (pending < MAX_PENDING_STATS).then_some(pending + 1)
@@ -340,6 +342,7 @@ pub(crate) fn kick_index() {
 }
 
 fn index_yield_to_foreground(generation: usize) -> Result<()> {
+    anyhow::ensure!(respire::service::workspace_mode() == "normal", "background index paused by service mode");
     let gate = shared_exclusive();
     let mut state = gate.state.lock().map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?;
     while state.held || state.foreground > 0 {
@@ -371,6 +374,13 @@ fn index_has_work() -> bool {
 fn index_loop_inner() -> Result<()> {
     let mut model_wait_started: Option<Instant> = None;
     loop {
+        if respire::service::workspace_mode() != "normal" {
+            if STOPPING.load(Ordering::Acquire) { return Ok(()); }
+            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            work.state = "paused";
+            let _paused = INDEX_CV.wait_timeout(work, Duration::from_secs(1)).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
+            continue;
+        }
         {
             let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             while !work.requested && !STOPPING.load(Ordering::Acquire) {
@@ -601,7 +611,10 @@ fn flight_loop() {
             let _ = job.reply.send(result.map_err(|error| format!("{error:#}")));
         } else {
             let generation = GENERATION.load(Ordering::Acquire);
-            let boundary = sync_local(generation, || crate::build_local()?.outgoing_boundary());
+            let boundary = sync_local(generation, || {
+                anyhow::ensure!(respire::service::workspace_mode() == "normal", "background sync paused by service mode");
+                crate::build_local()?.outgoing_boundary()
+            });
             let result = boundary.and_then(|boundary| {
                 SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
                 crate::background_sync_once()
@@ -993,7 +1006,9 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
     if let Some(envelope) = response.envelope {
         crate::progress::finish();
-        println!("{}", envelope.render(json)?);
+        if json || envelope.summary["skipped"] != true || envelope.summary["mode"] != "off" {
+            println!("{}", envelope.render(json)?);
+        }
         crate::mark_emitted();
         crate::set_exit_code(response.exit);
         return Ok(());
@@ -1223,7 +1238,7 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         "model.prepare" => {
             let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
             match respire::model_install::validate_mirror(mirror).and_then(|_| {
-                anyhow::ensure!(!respire::service::readonly_mode(), "model preparation is not allowed in read-only mode");
+                anyhow::ensure!(respire::service::workspace_mode() == "normal", "model preparation is paused by service mode");
                 let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                 work.prepare_mirror = Some(mirror.to_owned());
                 work.requested = true;
@@ -1344,7 +1359,7 @@ fn submit(
     args: Vec<String>,
     stop: bool,
 ) -> std::result::Result<crate::Captured, String> {
-    if !stop && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
+    if !stop && !respire::service::off_mode() && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
         return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
     }
     let slots = WORKERS.load(Ordering::Acquire).max(1);
@@ -1364,7 +1379,7 @@ fn submit(
         envelope.errors.push(i18n::text("busy").to_owned());
         return Ok(crate::Captured { exit: 2, envelope });
     }
-    let sync_context = if matches!(
+    let sync_context = if !respire::service::off_mode() && matches!(
         command_name(&args),
         Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")
     ) {
@@ -1374,7 +1389,7 @@ fn submit(
             .and_then(|store| store.outgoing_boundary())
             .map_err(|error| format!("{error:#}"))?;
         Some((GENERATION.load(Ordering::Acquire), boundary))
-    } else if command_name(&args) == Some("classify") {
+    } else if !respire::service::off_mode() && command_name(&args) == Some("classify") {
         let gate = shared_exclusive();
         let _held = gate.acquire(true);
         Some((GENERATION.load(Ordering::Acquire), -1))
@@ -1589,6 +1604,7 @@ impl Drop for ClassifyGuard {
 }
 
 fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
+    mark_worker();
     let _lock = match respire::lock::LibraryLock::acquire(
         &respire::service::data_dir(),
         Duration::from_secs(120),
@@ -1601,13 +1617,13 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     };
     // Keep WAL open across requests: closing the last connection can briefly lock
     // a concurrent opener during checkpoint/cleanup, even for read-only status.
-    let _store = match respire::service::open_store() {
+    let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_store() {
         Ok(store) => store,
         Err(error) => {
             eprintln!("runtime failed to initialize the library: {error:#}");
             stop_process(1);
         }
-    };
+    }) };
     respire::service::install_runtime_profile(respire::service::data_dir());
     let (classify_tx, classify_rx) = mpsc::sync_channel::<Job>(16);
     let classifier = std::thread::Builder::new()
@@ -1746,6 +1762,24 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     break;
                 }
                 idle_since = Instant::now();
+                if respire::service::off_mode() {
+                    let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()));
+                    if parsed.is_ok_and(|cli| cli.command.as_ref().is_some_and(|command| !crate::is_off_allowed(command))) {
+                        let captured = crate::capture_run(job.args);
+                        let _ = job.reply.send(Ok(captured));
+                        continue;
+                    }
+                } else if _store.is_none() && command_name(&job.args) != Some("agent-config") {
+                    let gate = shared_exclusive();
+                    let _held = gate.acquire(true);
+                    let opened = if respire::service::workspace_mode() == "normal" {
+                        respire::service::initialize_runtime_store()
+                    } else { respire::service::open_store() };
+                    match opened {
+                        Ok(store) => _store = Some(store),
+                        Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
+                    }
+                }
                 if matches!(
                     command_name(&job.args),
                     Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")

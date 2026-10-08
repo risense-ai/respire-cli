@@ -4216,7 +4216,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
             "readonly" => (true, "read-only (writes rejected; team read-only is enforced by the server token)".to_owned()),
             _ => (
                 false,
-                "temporarily off - recall and store are stopped; `agent-config --set memory_off=false` to restore".to_owned(),
+                "temporarily off - recall and store are stopped; `agent-config --set workspace_mode=normal` to restore".to_owned(),
             ),
         };
         add(&mut items, "memory status", ok, note);
@@ -4321,6 +4321,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
 
 /// One bounded network pass on the runtime synchronization worker.
 pub(crate) fn background_sync_once() -> Result<bool> {
+    if respire::service::workspace_mode() != "normal" { return Ok(false); }
     let configured = sync_phase(|| Ok(respire::service::autosync_active() && remote_configured()))?;
     if !configured {
         return Ok(false);
@@ -5195,6 +5196,11 @@ fn is_write_command(c: &Command) -> bool {
             | Command::Reembed { .. }
             | Command::Retitle { .. }
             | Command::RetitleMany { .. }
+            | Command::Sync
+            | Command::SyncReset
+            | Command::SyncConflicts { .. }
+            | Command::SyncHistory { remote: true, .. }
+            | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
             | Command::SyncRestore { .. }
     )
@@ -5231,15 +5237,14 @@ fn is_off_allowed(c: &Command) -> bool {
         // Self-restore and inject (the only way out of off)
         Command::AgentConfig { .. } | Command::Inject { .. }
         // Status and doctor
-        | Command::Status | Command::Doctor { .. } | Command::UpdateCheck { .. }
+        | Command::Status | Command::UpdateCheck { .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::Model { .. } | Command::ClassifyConfig { .. }
+        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }
-        // Sync (infrastructure - off blocks memory r/w, not the cloud)
-        | Command::Sync { .. } | Command::SyncConflicts { .. } | Command::SyncHistory { .. }
+        // Sync reads and writes memory, so it is paused while disabled.
         // Identity / account / credentials / space admin
         | Command::Login { .. } | Command::Logout { .. } | Command::Register { .. }
-        | Command::Account { .. } | Command::Session { .. } | Command::Keygen { .. }
+        | Command::Account { .. } | Command::Session { .. }
         | Command::KeysExport { .. } | Command::SuperReset { .. } | Command::Fivekeys { .. }
         | Command::Secret { .. } | Command::Space { .. }
     )
@@ -5249,9 +5254,10 @@ fn is_write_command_fine(c: &Command) -> bool {
     match c {
         Command::Account { action, .. } => {
             let a = action.trim().to_ascii_lowercase();
-            a != "list"
+            a == "remove"
         }
         Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
+        Command::QueryLog { cmd: Some(QueryLogCmd::Mark { .. }), .. } => true,
         // share-import without --go only prints the candidate bill (read); --go writes
         Command::ShareImport { go, .. } => *go,
         _ => false,
@@ -5490,6 +5496,10 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    // Host-only migration and repair dispatch must obey the memory gate too.
+    if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
+        return run_local(args);
+    }
     let display = !json_mode() && !rpc::worker_active() && args.command.is_some()
         && !matches!(args.command, Some(Command::Mcp | Command::Login { .. } | Command::V));
     let _progress = progress::Scope::start(args.progress_id.clone(), display,
@@ -5508,6 +5518,7 @@ fn run(args: Cli) -> Result<()> {
         rpc::recover_interrupted_login()?;
     }
     if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
+        if *vault || source.is_some() { respire::service::ensure_writable()?; }
         runtime_policy::require_host("explicit legacy migration")?;
         if *vault {
             return login::migrate_vault(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), secret_key.as_deref(), new_super.as_deref());
@@ -5639,6 +5650,23 @@ fn run(args: Cli) -> Result<()> {
 }
 
 fn run_local(args: Cli) -> Result<()> {
+    set_json_mode(args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+    if respire::service::off_mode() && matches!(args.command, Some(Command::Status)) {
+        let session = respire::service::session_info();
+        return emit_result(ResultEnvelope::new("status", OutputStatus::Ok, serde_json::json!({
+            "workspace":"off", "unlocked":session.has_local_keys, "session":session,
+            "data_dir":respire::service::data_dir(), "autosync":false,
+            "sync_scheduler":{"phase":"paused"}, "retrieval_index":rpc::index_status(),
+            "local_total":null, "local_alive":null
+        }), Vec::new()));
+    }
+    if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
+        if !json_mode() && !rpc::worker_active() { return Ok(()); }
+        let command = match args.command.as_ref() { Some(Command::Recall { .. }) => "recall", Some(Command::Remember { .. }) => "remember", _ => "memory" };
+        let mut result = ResultEnvelope::new(command, OutputStatus::Ok, serde_json::json!({"mode":"off", "skipped":true, "count":0}), Vec::new());
+        result.details = serde_json::json!([]);
+        return emit_result(result);
+    }
     let command = match args.command.as_ref() {
         Some(Command::Recall { .. }) => "recall",
         Some(Command::Remember { .. }) => "remember",
@@ -5709,7 +5737,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             if !is_off_allowed(cmd) {
                 anyhow::bail!(
                     "the memory store is temporarily off - this turn provides no memory service (recall and store both stop).\n\
-                     \x20  restore: `rsrs agent-config --set memory_off=false` then `rsrs inject --all` to redistribute the prompt."
+                     \x20  restore: `rsrs agent-config --set workspace_mode=normal` then `rsrs inject --all` to redistribute the prompt."
                 );
             }
         } else {

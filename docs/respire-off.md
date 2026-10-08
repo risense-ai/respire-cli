@@ -18,15 +18,17 @@ Memory is disabled. Do not call memory commands, claim remembered facts or retry
 
 ## 硬约束（关闭态）
 
-- **禁调用一切记忆命令**：`recall`/`remember`/`update`/`forget`/`list`/`show`/`diary`/`tree`/`chain`/`search` 等一律不用——调了也会被 CLI 拒绝，白费一轮工具调用。
+- **禁调用一切记忆命令**：`recall`/`remember`/`update`/`forget`/`list`/`show`/`diary`/`tree`/`chain`/`search` 等一律不用——调用只返回空结果，不读取或写入记忆。
 - **不宣称有记忆**：回答里不得引用「我记着/此前存过」之类内容——此刻你没有任何记忆可供查阅。
-- **不补查不补救**：遇闭库报错（如「记忆库已临时关闭」）不是故障，勿重试、勿绕行。
+- **不补查不补救**：禁用状态的空结果不是故障，勿重试、勿绕行。
 - **照常干活**：读文件、写代码、跑命令、联网查证等一切非记忆工具照常使用；回答全凭当前上下文与即时查证。
 
 ## 主人如何恢复
 
+工作模式作用于整台设备，切换账号后仍保持。主人可在 TUI 中选择“正常服务”，或执行：
+
 ```bash
-rsrs agent-config --set memory_off=false   # 解除关闭
+rsrs agent-config --set workspace_mode=normal   # 解除关闭
 rsrs inject --all                          # 重新分发正常提示词
 ```
 

@@ -32,7 +32,13 @@ impl Drop for Runtime {
 }
 
 fn start_internal_runtime() -> Result<Runtime, String> {
+    start_internal_runtime_with_mode("normal")
+}
+
+fn start_internal_runtime_with_mode(mode: &str) -> Result<Runtime, String> {
     let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
+    fs::write(dir.path().join("client.json"), serde_json::json!({"service_mode":mode}).to_string())
+        .map_err(|err| err.to_string())?;
     let port = pick_port()?;
     let stderr_path = dir.path().join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
@@ -46,6 +52,8 @@ fn start_internal_runtime() -> Result<Runtime, String> {
         .env("RSRS_DATA_DIR", dir.path())
         .env("RSRS_RPC_PORT", port.to_string())
         .env("RSRS_BIN_DIR", dir.path().join("bin"))
+        .env("RSRS_CORE_TEST_MODE", "1")
+        .env("RSRS_NO_AUTOSYNC", "1")
         .env_remove("RSRS_NO_AUTOSTART")
         .env_remove("RSRS_CLIENT_ONLY")
         .env_remove("RSRS_RPC_TOKEN")
@@ -78,6 +86,60 @@ fn start_internal_runtime() -> Result<Runtime, String> {
         "health not ready: {last}; stderr={}",
         fs::read_to_string(&stderr_path).unwrap_or_default()
     ))
+}
+
+#[test]
+fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(), String> {
+    let rt = start_internal_runtime_with_mode("off")?;
+    let execute = |args: &[&str]| -> Result<serde_json::Value, String> {
+        ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
+            .timeout(Duration::from_secs(20))
+            .send_json(serde_json::json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),"method":"cli.exec","args":args}))
+            .map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())
+    };
+    for args in [vec!["--json", "recall", "synthetic query"], vec!["--json", "remember", "synthetic memory"],
+        vec!["--json", "list"], vec!["--json", "sync"], vec!["--json", "doctor", "--fix"],
+        vec!["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"]] {
+        let response = execute(&args)?;
+        assert_eq!(response["ok"], true, "{response}");
+        assert_eq!(response["envelope"]["summary"]["skipped"], true);
+        assert_eq!(response["envelope"]["items"], serde_json::json!([]));
+    }
+    let status = execute(&["--json", "status"])?;
+    assert_eq!(status["envelope"]["summary"]["workspace"], "off", "{status}");
+    assert!(status["envelope"]["summary"]["local_total"].is_null());
+    assert!(!rt.dir.path().join("rsrs.db").exists());
+    assert!(!rt.dir.path().join("onememory.db").exists());
+    let plain = Command::new(bin()).args(["--client-only", "recall", "synthetic query"])
+        .env("RSRS_DATA_DIR", rt.dir.path()).env("RSRS_RPC_PORT", rt.port.to_string())
+        .output().map_err(|err| err.to_string())?;
+    assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
+    assert!(plain.stdout.is_empty(), "disabled human output must be empty");
+    let restore = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
+    assert_eq!(restore["ok"], true, "{restore}");
+    let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
+    assert_eq!(normal["ok"], true, "{normal}");
+    let initialized = execute(&["--json", "status"])?;
+    assert_eq!(initialized["ok"], true, "{initialized}");
+    assert!(rt.dir.path().join("rsrs.db").exists());
+    let readonly = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
+    assert_eq!(readonly["ok"], true, "{readonly}");
+    for args in [vec!["--json", "remember", "synthetic memory"], vec!["--json", "sync"],
+        vec!["--json", "sync-reset"], vec!["--json", "doctor", "--fix"],
+        vec!["--json", "sync-conflicts", "--refresh"], vec!["--json", "sync-history", "--remote"],
+        vec!["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"]] {
+        let response = execute(&args)?;
+        assert_eq!(response["ok"], false, "read-only accepted {args:?}: {response}");
+    }
+    let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
+    assert_eq!(normal["ok"], true, "{normal}");
+    let status = execute(&["--json", "status"])?;
+    assert_eq!(status["ok"], true, "{status}");
+    assert_ne!(status["envelope"]["summary"]["workspace"], "off");
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(rt.dir.path().join("client.json")).map_err(|err|err.to_string())?)
+        .map_err(|err|err.to_string())?["service_mode"], "normal");
+    Ok(())
 }
 
 #[test]

@@ -168,7 +168,7 @@ impl App {
         let ranked =
             MemoryEngine::recall_local_scored(&self.keys, &self.embedder, &candidates, &q)?;
         for (score, e) in &ranked {
-            let _ = self.store.bump_recall_count(&e.id);
+            if !readonly_mode() && !off_mode() { let _ = self.store.bump_recall_count(&e.id); }
             let _ = score;
         }
         Ok(ranked
@@ -1162,6 +1162,13 @@ pub fn read_agent_config() -> serde_json::Value {
 }
 
 pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    if matches!(key, "memory_off" | "readonly") {
+        let enabled = value.as_bool().ok_or_else(|| anyhow!("{key} must be true or false"))?;
+        return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });
+    }
+    if key == "workspace_mode" {
+        return set_workspace_mode(value.as_str().ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?);
+    }
     if key == "recall_mode" && !matches!(value.as_str(), Some("fast" | "quality")) {
         anyhow::bail!("recall_mode must be fast or quality");
     }
@@ -1185,7 +1192,10 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
 /// member `space join` sets local agent.json `readonly=true`;
 /// the server also refuses writes by session token (belt and braces — the client can be bypassed).
 pub fn readonly_mode() -> bool {
-    read_agent_config()["readonly"].as_bool().unwrap_or(false)
+    readonly_team() || match device_service_mode().as_deref() {
+        Some(mode) => mode == "readonly",
+        None => read_agent_config()["readonly"].as_bool().unwrap_or(false),
+    }
 }
 
 /// Read-only **source=team**: written on space join --readonly (personal self-set read-only has no this key).
@@ -1197,11 +1207,18 @@ pub fn readonly_team() -> bool {
         .unwrap_or(false)
 }
 
-/// Personal space **temporarily off**: agent.json `memory_off=true`. Off refuses both read and write (see main's
-/// off gate); inject source becomes the off notice (the AI stops calling memory commands). Unlike team read-only (server token
-/// enforced) — off is **local self-set**; the owner restores with one agent-config.
+/// Device disable mode suppresses memory reads and writes until explicitly changed.
+/// Existing account-local flags remain compatible when no device mode has been saved.
+fn device_service_mode() -> Option<String> {
+    read_client_config().and_then(|config| config["service_mode"].as_str()
+        .filter(|mode| matches!(*mode, "normal" | "readonly" | "off")).map(str::to_owned))
+}
+
 pub fn off_mode() -> bool {
-    read_agent_config()["memory_off"].as_bool().unwrap_or(false)
+    match device_service_mode().as_deref() {
+        Some(mode) => mode == "off",
+        None => read_agent_config()["memory_off"].as_bool().unwrap_or(false),
+    }
 }
 
 /// Workspace three-state (GUI/status): off > readonly > normal.
@@ -1215,25 +1232,14 @@ pub fn workspace_mode() -> &'static str {
     }
 }
 
-/// Set workspace three-state: normal = both flags false; readonly = read-only on, off off; off = off on.
-/// Touches local agent.json only; team read-only still has server token enforcement.
+/// Device service mode lives beside the active-profile pointer, never in an account.
+/// Existing team permissions remain effective even when the device returns to normal.
 pub fn set_workspace_mode(mode: &str) -> Result<()> {
-    match mode {
-        "normal" => {
-            write_agent_config_key("memory_off", &serde_json::json!(false))?;
-            write_agent_config_key("readonly", &serde_json::json!(false))?;
-            write_agent_config_key("readonly_team", &serde_json::json!(false))?;
-        }
-        "readonly" => {
-            write_agent_config_key("memory_off", &serde_json::json!(false))?;
-            write_agent_config_key("readonly", &serde_json::json!(true))?;
-        }
-        "off" => {
-            write_agent_config_key("memory_off", &serde_json::json!(true))?;
-        }
-        other => anyhow::bail!("unknown mode `{other}` — choose: normal | readonly | off"),
-    }
-    Ok(())
+    anyhow::ensure!(matches!(mode, "normal" | "readonly" | "off"), "unknown mode `{mode}` — choose: normal | readonly | off");
+    let mut config = read_client_config().unwrap_or_else(|| serde_json::json!({}));
+    anyhow::ensure!(config.is_object(), "client config must be an object");
+    config["service_mode"] = serde_json::json!(mode);
+    write_client_config(&config)
 }
 
 /// Read-only gate: write commands must pass this. Err aborts (message is for the user and the AI).
@@ -1242,7 +1248,7 @@ pub fn ensure_writable() -> Result<()> {
         let hint = if readonly_team() {
             "read-only is enforced by the server via the session token; editing local agent.json has no effect. To write, ask the space owner for a read-write session and run rsrs space join."
         } else {
-            "this is a personal read-only flag; clear it with `agent-config --set readonly=false`."
+            "restore normal service on this device with `agent-config --set workspace_mode=normal`."
         };
         return Err(anyhow!(
             "this space is read-only — recall/list/show/diary/tree are allowed; write/edit/delete are not.\n  {hint}"
@@ -2641,6 +2647,16 @@ pub fn open_store() -> Result<LocalStore> {
     }
 }
 
+/// Initialize the runtime's owned library after normal service is restored.
+/// Disabled startup deliberately leaves a new database uncreated.
+pub fn initialize_runtime_store() -> Result<LocalStore> {
+    anyhow::ensure!(workspace_mode() == "normal", "database initialization requires normal service");
+    let root = data_dir();
+    check_runtime_profile(&root)?;
+    respire_core_sdk::set_index_root(&root)?;
+    LocalStore::open(&database_path(&root)?)
+}
+
 /// New libraries use rsrs.db; opening an existing library never renames it.
 pub fn database_path(root: &Path) -> Result<PathBuf> {
     let current = root.join("rsrs.db");
@@ -3331,16 +3347,37 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert_eq!(workspace_mode(), "normal");
         assert_eq!(diary_mode(), "concise");
+        write_client_config(&serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}))?;
         set_workspace_mode("readonly")?;
         assert_eq!(workspace_mode(), "readonly");
         assert!(readonly_mode());
         assert!(ensure_writable().is_err());
+        account_use("work")?;
+        assert_eq!(workspace_mode(), "readonly", "device mode survives account switching");
+        assert_eq!(read_client_config().ok_or_else(|| anyhow::anyhow!("missing client config"))?["custom"], "preserved");
         set_workspace_mode("off")?;
         assert_eq!(workspace_mode(), "off");
         assert!(off_mode());
+        account_use("main")?;
+        assert_eq!(workspace_mode(), "off");
+        let before = std::fs::read(client_config_path())?;
+        assert!(set_workspace_mode("nope").is_err());
+        assert_eq!(std::fs::read(client_config_path())?, before);
         set_workspace_mode("normal")?;
         assert_eq!(workspace_mode(), "normal");
         assert!(ensure_writable().is_ok());
+        write_agent_config_key("memory_off", &serde_json::json!(true))?;
+        assert_eq!(workspace_mode(), "off");
+        write_agent_config_key("memory_off", &serde_json::json!(false))?;
+        write_agent_config_key("readonly", &serde_json::json!(true))?;
+        assert_eq!(workspace_mode(), "readonly");
+        write_agent_config_key("readonly", &serde_json::json!(false))?;
+        assert_eq!(workspace_mode(), "normal");
+        write_agent_config_key("readonly_team", &serde_json::json!(true))?;
+        set_workspace_mode("normal")?;
+        assert_eq!(workspace_mode(), "readonly", "normal mode cannot lift shared-space permissions");
+        assert!(ensure_writable().is_err());
+        write_agent_config_key("readonly_team", &serde_json::json!(false))?;
         write_agent_config_key("diary_mode", &serde_json::json!("verbose"))?;
         assert_eq!(diary_mode(), "verbose");
         assert!(set_workspace_mode("nope").is_err());
