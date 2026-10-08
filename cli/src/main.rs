@@ -1384,10 +1384,13 @@ fn run_agent_config(set: Option<&str>) -> Result<()> {
             vec![OutputItem::new(k, OutputStatus::Ok, v)],
         ));
     }
-    let config = respire::service::read_agent_config();
+    let mut config = respire::service::read_agent_config();
     let object = config
-        .as_object()
+        .as_object_mut()
         .ok_or_else(|| anyhow!("agent config must be an object"))?;
+    object.insert("readonly".into(), serde_json::json!(respire::service::readonly_mode()));
+    object.insert("memory_off".into(), serde_json::json!(respire::service::off_mode()));
+    object.insert("workspace_mode".into(), serde_json::json!(respire::service::workspace_mode()));
     let rows = object
         .iter()
         .map(|(key, value)| OutputItem::new(key, OutputStatus::Ok, value.to_string()))
