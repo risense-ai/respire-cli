@@ -1359,7 +1359,7 @@ fn submit(
     args: Vec<String>,
     stop: bool,
 ) -> std::result::Result<crate::Captured, String> {
-    if !stop && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
+    if !stop && !respire::service::off_mode() && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
         return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
     }
     let slots = WORKERS.load(Ordering::Acquire).max(1);

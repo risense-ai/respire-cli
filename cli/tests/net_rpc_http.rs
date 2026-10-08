@@ -99,7 +99,8 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
             .into_json().map_err(|err| err.to_string())
     };
     for args in [vec!["--json", "recall", "synthetic query"], vec!["--json", "remember", "synthetic memory"],
-        vec!["--json", "list"], vec!["--json", "sync"], vec!["--json", "doctor", "--fix"]] {
+        vec!["--json", "list"], vec!["--json", "sync"], vec!["--json", "doctor", "--fix"],
+        vec!["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"]] {
         let response = execute(&args)?;
         assert_eq!(response["ok"], true, "{response}");
         assert_eq!(response["envelope"]["summary"]["skipped"], true);
@@ -118,7 +119,9 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     let restore = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
     assert_eq!(restore["ok"], true, "{restore}");
     for args in [vec!["--json", "remember", "synthetic memory"], vec!["--json", "sync"],
-        vec!["--json", "sync-reset"], vec!["--json", "doctor", "--fix"]] {
+        vec!["--json", "sync-reset"], vec!["--json", "doctor", "--fix"],
+        vec!["--json", "sync-conflicts", "--refresh"], vec!["--json", "sync-history", "--remote"],
+        vec!["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"]] {
         let response = execute(&args)?;
         assert_eq!(response["ok"], false, "read-only accepted {args:?}: {response}");
     }
