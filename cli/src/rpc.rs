@@ -1236,7 +1236,7 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         "model.prepare" => {
             let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
             match respire::model_install::validate_mirror(mirror).and_then(|_| {
-                anyhow::ensure!(!respire::service::readonly_mode(), "model preparation is not allowed in read-only mode");
+                anyhow::ensure!(respire::service::workspace_mode() == "normal", "model preparation is paused by service mode");
                 let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                 work.prepare_mirror = Some(mirror.to_owned());
                 work.requested = true;

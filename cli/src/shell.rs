@@ -1079,8 +1079,8 @@ fn workspace_key(app: &mut App, code: KeyCode) -> bool {
             ask(
                 app,
                 t(
-                    &format!("把工作区改成 {mode}？"),
-                    &format!("Change the workspace to {mode}?"),
+                    &format!("把整台设备的工作模式改成 {}？", workspace_label(mode)),
+                    &format!("Change service mode for this device to {}?", workspace_label(mode)),
                 ),
                 ConfirmKind::Workspace(mode.to_owned()),
             );
@@ -2238,8 +2238,8 @@ fn workspace_body(app: &App) -> Vec<Line<'static>> {
         ),
         choice(app.cursor == 1, t("0  返回", "0  Back")),
         line(t(
-            "左右键选择，回车保存。",
-            "Left and right choose. Enter saves.",
+            "左右键选择，回车保存；切换账号后保持。",
+            "Left/right chooses. Enter saves for all accounts on this device.",
         )),
     ]
 }

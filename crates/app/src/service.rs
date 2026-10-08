@@ -1188,7 +1188,10 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
 /// member `space join` sets local agent.json `readonly=true`;
 /// the server also refuses writes by session token (belt and braces — the client can be bypassed).
 pub fn readonly_mode() -> bool {
-    read_agent_config()["readonly"].as_bool().unwrap_or(false)
+    readonly_team() || match device_service_mode().as_deref() {
+        Some(mode) => mode == "readonly",
+        None => read_agent_config()["readonly"].as_bool().unwrap_or(false),
+    }
 }
 
 /// Read-only **source=team**: written on space join --readonly (personal self-set read-only has no this key).
@@ -1200,11 +1203,18 @@ pub fn readonly_team() -> bool {
         .unwrap_or(false)
 }
 
-/// Personal space **temporarily off**: agent.json `memory_off=true`. Off refuses both read and write (see main's
-/// off gate); inject source becomes the off notice (the AI stops calling memory commands). Unlike team read-only (server token
-/// enforced) — off is **local self-set**; the owner restores with one agent-config.
+/// Device disable mode suppresses memory reads and writes until explicitly changed.
+/// Existing account-local flags remain compatible when no device mode has been saved.
+fn device_service_mode() -> Option<String> {
+    read_client_config().and_then(|config| config["service_mode"].as_str()
+        .filter(|mode| matches!(*mode, "normal" | "readonly" | "off")).map(str::to_owned))
+}
+
 pub fn off_mode() -> bool {
-    read_agent_config()["memory_off"].as_bool().unwrap_or(false)
+    match device_service_mode().as_deref() {
+        Some(mode) => mode == "off",
+        None => read_agent_config()["memory_off"].as_bool().unwrap_or(false),
+    }
 }
 
 /// Workspace three-state (GUI/status): off > readonly > normal.
@@ -1218,20 +1228,15 @@ pub fn workspace_mode() -> &'static str {
     }
 }
 
-/// Set workspace three-state: normal = both flags false; readonly = read-only on, off off; off = off on.
-/// Touches local agent.json only; team read-only still has server token enforcement.
+/// Device service mode lives beside the active-profile pointer, never in an account.
+/// Existing team permissions remain effective even when the device returns to normal.
 pub fn set_workspace_mode(mode: &str) -> Result<()> {
     anyhow::ensure!(matches!(mode, "normal" | "readonly" | "off"), "unknown mode `{mode}` — choose: normal | readonly | off");
-    anyhow::ensure!(mode != "normal" || !readonly_team(), "team read-only access cannot be lifted locally");
-    let mut config = read_agent_config();
-    anyhow::ensure!(config.is_object(), "agent config must be an object");
-    config["memory_off"] = serde_json::json!(mode == "off");
-    config["readonly"] = serde_json::json!(mode == "readonly" || readonly_team());
-    if let Some(parent) = agent_config_path().parent() { std::fs::create_dir_all(parent)?; }
-    std::fs::write(agent_config_path(), serde_json::to_vec_pretty(&config)?)?;
-    Ok(())
+    let mut config = read_client_config().unwrap_or_else(|| serde_json::json!({}));
+    anyhow::ensure!(config.is_object(), "client config must be an object");
+    config["service_mode"] = serde_json::json!(mode);
+    write_client_config(&config)
 }
-
 
 /// Read-only gate: write commands must pass this. Err aborts (message is for the user and the AI).
 pub fn ensure_writable() -> Result<()> {
