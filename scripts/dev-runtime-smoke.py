@@ -330,7 +330,7 @@ class Smoke:
         self.rpc(['agent-config', '--set', 'memory_off=true'])
         skipped = self.rpc(['show', memory_id])
         require(skipped.get('summary') == {'mode': 'off', 'skipped': True, 'count': 0}
-                and skipped.get('items') == [] and skipped.get('details') is None
+                and skipped.get('items') == [] and skipped.get('details') == []
                 and skipped.get('errors') == [], 'off_read_empty_response_missing')
         self.rpc(['agent-config', '--set', 'memory_off=false'])
         normal = self.rpc(['agent-config'])['summary']
