@@ -1342,10 +1342,15 @@ Assert-Smoke 'session-revocation-preserves-local-decryption' ($revokedLocal.Ok -
 # Recover through the existing CLI setting, while team members remain unable to self-unlock.
 $revokedConfig = Invoke-Om -Name 'session-revoked-agent-config' -ArgList @('--json', 'agent-config') -DataDir $DirB
 Assert-Smoke 'session-revoked-personal-readonly-marked' ($revokedConfig.Ok -and $revokedConfig.Envelope.summary.readonly -eq $true -and $revokedConfig.Envelope.summary.readonly_team -ne $true)
+$revokedStatus = Invoke-Om -Name 'session-revoked-device-status' -ArgList @('--json', 'status') -DataDir $DirB
+$revokedWrite = Invoke-Om -Name 'session-revoked-local-write-refused' -ArgList @('--json', 'remember', "must-not-write-$marker", '--title', 'must-not-write', '--force') -DataDir $DirB -AllowStatus @('fail')
+Assert-Smoke 'session-revoked-device-readonly-enforced' ($revokedStatus.Ok -and [string]$revokedStatus.Envelope.summary.workspace -eq 'readonly' -and $revokedWrite.Ok -and $revokedWrite.Exit -eq 1 -and ($revokedWrite.Envelope.errors -join ' ') -match 'read.only')
 $ownerClear = Invoke-Om -Name 'session-owner-clear-personal-readonly' -ArgList @('--json', 'agent-config', '--set', 'readonly=false') -DataDir $DirB
 Assert-Smoke 'session-owner-personal-readonly-cleared' ($ownerClear.Ok -and [string]$ownerClear.Envelope.summary.key -eq 'readonly' -and $ownerClear.Envelope.summary.value -eq $false)
 $ownerConfig = Invoke-Om -Name 'session-owner-agent-config-readback' -ArgList @('--json', 'agent-config') -DataDir $DirB
 Assert-Smoke 'session-owner-personal-readonly-readback' ($ownerConfig.Ok -and $ownerConfig.Envelope.summary.readonly -eq $false -and $ownerConfig.Envelope.summary.readonly_team -ne $true)
+$ownerStatus = Invoke-Om -Name 'session-owner-device-mode-readback' -ArgList @('--json', 'status') -DataDir $DirB
+Assert-Smoke 'session-owner-device-normal-restored' ($ownerStatus.Ok -and [string]$ownerStatus.Envelope.summary.workspace -eq 'normal')
 Invoke-Om -Name 'logout' -ArgList @('--json', 'logout') -DataDir $DirB | Out-Null
 $loginAgain = Invoke-Om -Name 'login-b-again' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -TimeoutSec 180
 if (-not $loginAgain.Ok) { throw '重新登录失败' }

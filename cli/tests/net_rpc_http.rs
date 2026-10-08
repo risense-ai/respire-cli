@@ -111,6 +111,9 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     assert!(status["envelope"]["summary"]["local_total"].is_null());
     assert!(!rt.dir.path().join("rsrs.db").exists());
     assert!(!rt.dir.path().join("onememory.db").exists());
+    let config = execute(&["--json", "agent-config"])?;
+    assert_eq!(config["envelope"]["summary"]["memory_off"], true, "{config}");
+    assert_eq!(config["envelope"]["summary"]["workspace_mode"], "off");
     let plain = Command::new(bin()).args(["--client-only", "recall", "synthetic query"])
         .env("RSRS_DATA_DIR", rt.dir.path()).env("RSRS_RPC_PORT", rt.port.to_string())
         .output().map_err(|err| err.to_string())?;
@@ -125,6 +128,8 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     assert!(rt.dir.path().join("rsrs.db").exists());
     let readonly = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
     assert_eq!(readonly["ok"], true, "{readonly}");
+    let config = execute(&["--json", "agent-config"])?;
+    assert_eq!(config["envelope"]["summary"]["readonly"], true, "{config}");
     for args in [vec!["--json", "remember", "synthetic memory"], vec!["--json", "sync"],
         vec!["--json", "sync-reset"], vec!["--json", "doctor", "--fix"],
         vec!["--json", "sync-conflicts", "--refresh"], vec!["--json", "sync-history", "--remote"],
@@ -137,6 +142,9 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     let status = execute(&["--json", "status"])?;
     assert_eq!(status["ok"], true, "{status}");
     assert_ne!(status["envelope"]["summary"]["workspace"], "off");
+    let config = execute(&["--json", "agent-config"])?;
+    assert_eq!(config["envelope"]["summary"]["readonly"], false, "{config}");
+    assert_eq!(config["envelope"]["summary"]["memory_off"], false);
     assert_eq!(serde_json::from_slice::<serde_json::Value>(&fs::read(rt.dir.path().join("client.json")).map_err(|err|err.to_string())?)
         .map_err(|err|err.to_string())?["service_mode"], "normal");
     Ok(())

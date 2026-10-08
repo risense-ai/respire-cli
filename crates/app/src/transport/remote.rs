@@ -19,8 +19,8 @@ use crate::memory::model::StoredMemory;
 /// Idempotent and conservative: already read-only does not rewrite; a write fail only warns, does not block (401 itself is the main error).
 /// Where: a kicked member's profile had no agent.json, so the local gate did not fire (gap measured 2026-09-21).
 fn mark_session_revoked_readonly() {
-    use crate::service::{read_agent_config, write_agent_config_key};
-    if read_agent_config()["readonly"].as_bool().unwrap_or(false) {
+    use crate::service::{readonly_mode, write_agent_config_key};
+    if readonly_mode() {
         return; // Read-only members already carry the marker.
     }
     if let Err(e) = write_agent_config_key("readonly", &json!(true)) {
