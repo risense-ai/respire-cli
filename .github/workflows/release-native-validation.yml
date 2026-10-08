@@ -16,6 +16,8 @@ permissions:
 jobs:
   native:
     name: Native (${{ matrix.target }})
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
