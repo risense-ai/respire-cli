@@ -79,6 +79,8 @@ jobs:
 
   validate:
     needs: plan
+    permissions:
+      contents: write
     uses: ./.github/workflows/release-validation.yml
     with:
       ref: ${{ needs.plan.outputs.sha }}

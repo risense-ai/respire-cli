@@ -156,6 +156,8 @@ jobs:
   native-regression:
     if: inputs.full_validation
     needs: [resolve, binaries]
+    permissions:
+      contents: write
     uses: ./.github/workflows/release-native-validation.yml
     with:
       ref: ${{ needs.resolve.outputs.sha }}
