@@ -1162,6 +1162,10 @@ pub fn read_agent_config() -> serde_json::Value {
 }
 
 pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()> {
+    if matches!(key, "memory_off" | "readonly") {
+        let enabled = value.as_bool().ok_or_else(|| anyhow!("{key} must be true or false"))?;
+        return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });
+    }
     if key == "workspace_mode" {
         return set_workspace_mode(value.as_str().ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?);
     }
@@ -3352,6 +3356,13 @@ mod tests {
         set_workspace_mode("normal")?;
         assert_eq!(workspace_mode(), "normal");
         assert!(ensure_writable().is_ok());
+        write_agent_config_key("memory_off", &serde_json::json!(true))?;
+        assert_eq!(workspace_mode(), "off");
+        write_agent_config_key("memory_off", &serde_json::json!(false))?;
+        write_agent_config_key("readonly", &serde_json::json!(true))?;
+        assert_eq!(workspace_mode(), "readonly");
+        write_agent_config_key("readonly", &serde_json::json!(false))?;
+        assert_eq!(workspace_mode(), "normal");
         write_agent_config_key("readonly_team", &serde_json::json!(true))?;
         set_workspace_mode("normal")?;
         assert_eq!(workspace_mode(), "readonly", "normal mode cannot lift shared-space permissions");

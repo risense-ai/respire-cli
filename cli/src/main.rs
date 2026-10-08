@@ -5198,6 +5198,8 @@ fn is_write_command(c: &Command) -> bool {
             | Command::RetitleMany { .. }
             | Command::Sync
             | Command::SyncReset
+            | Command::SyncConflicts { .. }
+            | Command::SyncHistory { remote: true, .. }
             | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
             | Command::SyncRestore { .. }
@@ -5252,7 +5254,7 @@ fn is_write_command_fine(c: &Command) -> bool {
     match c {
         Command::Account { action, .. } => {
             let a = action.trim().to_ascii_lowercase();
-            !matches!(a.as_str(), "list" | "use")
+            a == "remove"
         }
         Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
         Command::QueryLog { cmd: Some(QueryLogCmd::Mark { .. }), .. } => true,
@@ -5494,6 +5496,10 @@ fn run(args: Cli) -> Result<()> {
     set_json_mode(
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
+    // Host-only migration and repair dispatch must obey the memory gate too.
+    if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
+        return run_local(args);
+    }
     let display = !json_mode() && !rpc::worker_active() && args.command.is_some()
         && !matches!(args.command, Some(Command::Mcp | Command::Login { .. } | Command::V));
     let _progress = progress::Scope::start(args.progress_id.clone(), display,
@@ -5512,6 +5518,7 @@ fn run(args: Cli) -> Result<()> {
         rpc::recover_interrupted_login()?;
     }
     if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
+        if *vault || source.is_some() { respire::service::ensure_writable()?; }
         runtime_policy::require_host("explicit legacy migration")?;
         if *vault {
             return login::migrate_vault(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), secret_key.as_deref(), new_super.as_deref());

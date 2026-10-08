@@ -94,7 +94,7 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     let execute = |args: &[&str]| -> Result<serde_json::Value, String> {
         ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
             .timeout(Duration::from_secs(20))
-            .send_json(serde_json::json!({"v":1,"id":"service-mode","method":"cli.exec","args":args}))
+            .send_json(serde_json::json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),"method":"cli.exec","args":args}))
             .map_err(|err| err.to_string())?
             .into_json().map_err(|err| err.to_string())
     };
@@ -106,7 +106,7 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         assert_eq!(response["envelope"]["items"], serde_json::json!([]));
     }
     let status = execute(&["--json", "status"])?;
-    assert_eq!(status["envelope"]["summary"]["workspace"], "off");
+    assert_eq!(status["envelope"]["summary"]["workspace"], "off", "{status}");
     assert!(status["envelope"]["summary"]["local_total"].is_null());
     assert!(!rt.dir.path().join("rsrs.db").exists());
     assert!(!rt.dir.path().join("onememory.db").exists());
