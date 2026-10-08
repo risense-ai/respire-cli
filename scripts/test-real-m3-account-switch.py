@@ -6,6 +6,7 @@ parser=argparse.ArgumentParser()
 parser.add_argument('--binary',action='append',required=True)
 parser.add_argument('--model-dir',required=True)
 parser.add_argument('--model-file',choices=['model_quantized.onnx','model_fp16.onnx'],default='model_quantized.onnx')
+parser.add_argument('--legacy-model-file',choices=['model_fp16.onnx','model_quantized.onnx'],default='model_fp16.onnx')
 parser.add_argument('--legacy-model-dir',help='Read-only baseline cache containing real FP16 and quantized files')
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--expect-in-process',action='store_true')
@@ -23,7 +24,7 @@ def verify_model(cache,model):
 verify_model(CACHE,args.model_file)
 LEGACY_CACHE=pathlib.Path(args.legacy_model_dir).resolve() if args.legacy_model_dir else CACHE
 if args.seed_binary:
-    verify_model(LEGACY_CACHE,'model_fp16.onnx')
+    verify_model(LEGACY_CACHE,args.legacy_model_file)
     if args.model_file=='model_quantized.onnx': verify_model(LEGACY_CACHE,'model_quantized.onnx')
 reports = []
 for binary in BINARIES:
