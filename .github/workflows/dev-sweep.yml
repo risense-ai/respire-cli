@@ -228,6 +228,7 @@ jobs:
           python3 -m pip install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
+          mkdir -p "$RUNNER_TEMP/dev-supplements"
           python3 scripts/dev-legacy-vault-smoke.py --auth-salt-only --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
       - name: Diagnose runtime contracts without a full release claim
         if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' }}
