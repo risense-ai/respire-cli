@@ -20,11 +20,17 @@ on:
         default: false
         type: boolean
 
+      repair_dev12:
+        description: Repair only missing linux-arm64-gnu DEV12 using the already validated public release
+        default: false
+        type: boolean
+
 permissions:
   contents: read
 
 jobs:
   plan:
+    if: ${{ !inputs.repair_dev12 }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -325,7 +331,12 @@ jobs:
   publish:
     # Build once, share artifacts, and publish only after the same-source regressions pass.
     needs: [plan, validate, cloud-sweep, api-smoke]
-    if: needs.plan.outputs.publish == 'true'
+    if: >-
+      ${{ always() && !cancelled() &&
+          ((github.event_name == 'workflow_dispatch' && inputs.repair_dev12 && inputs.publish) ||
+           (!inputs.repair_dev12 && needs.plan.result == 'success' &&
+            needs.validate.result == 'success' && needs.cloud-sweep.result == 'success' &&
+            needs.api-smoke.result == 'success' && needs.plan.outputs.publish == 'true')) }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
@@ -336,9 +347,26 @@ jobs:
       actions: read
       id-token: write
     steps:
+      - name: Require the exact successful DEV12 release before repair
+        if: inputs.repair_dev12
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          const repo=process.env.GITHUB_REPOSITORY;
+          if(repo!=='risense-ai/respire-cli') throw new Error('Repair repository mismatch');
+          const run=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/37716872717`],{encoding:'utf8'}));
+          if(run.status!=='completed'||run.conclusion!=='success'||run.path!=='.github/workflows/release.yml'||
+             run.head_sha!=='d8314480e10a27767544f781083e35c8e85657f0') throw new Error('DEV12 original release was not verified');
+          const release=JSON.parse(cp.execFileSync('gh',['release','view','v1.0.11-dev.12','--repo',repo,
+            '--json','isDraft,isPrerelease,assets'],{encoding:'utf8'}));
+          if(release.isDraft||!release.isPrerelease||release.assets.length!==21) throw new Error('DEV12 must be a complete public prerelease');
+          console.log('Verified successful DEV12 source run and public release; repair is limited to one package');
+          NODE
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.repair_dev12 && 'd8314480e10a27767544f781083e35c8e85657f0' || needs.plan.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -346,6 +374,7 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
       - name: Require successful CLI CI for this exact source
+        if: ${{ !inputs.repair_dev12 }}
         timeout-minutes: 21
         env:
           GH_TOKEN: ${{ github.token }}
@@ -375,7 +404,7 @@ jobs:
           NODE
       - run: npm install --global npm@11.5.1
       - name: Require all regressions before stable publication
-        if: needs.plan.outputs.channel == 'latest'
+        if: ${{ !inputs.repair_dev12 && needs.plan.outputs.channel == 'latest' }}
         timeout-minutes: 121
         env:
           GH_TOKEN: ${{ github.token }}
@@ -405,8 +434,18 @@ jobs:
           requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/set-build-version.mjs ${{ inputs.repair_dev12 && '1.0.11-dev.12' || needs.plan.outputs.version }}
+      - name: Download the immutable validated public DEV12 assets
+        if: inputs.repair_dev12
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse 'v1.0.11-dev.12^{commit}')" = d8314480e10a27767544f781083e35c8e85657f0
+          test "$(git rev-parse HEAD)" = d8314480e10a27767544f781083e35c8e85657f0
+          gh release download v1.0.11-dev.12 --repo risense-ai/respire-cli --dir release-assets
       - uses: actions/download-artifact@v4
+        if: ${{ !inputs.repair_dev12 }}
         with:
           pattern: cli-release-*
           path: release-assets
@@ -418,6 +457,7 @@ jobs:
           node npm/scripts/pack.mjs --root target/ci
           node npm/scripts/verify-packages.mjs release-assets
       - name: Generate release descriptions and the complete commit list
+        if: ${{ !inputs.repair_dev12 }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
@@ -425,6 +465,7 @@ jobs:
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/release-notes.mjs "$RUNNER_TEMP/release-notes.md"
       - name: Create a draft and upload every verified artifact
+        if: ${{ !inputs.repair_dev12 }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
@@ -449,10 +490,39 @@ jobs:
           if(expected.length!==21||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 21 verified binary/runtime/metadata assets');
           NODE
       - name: Publish npm using Trusted Publishing
+        if: ${{ !inputs.repair_dev12 }}
         env:
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/pack.mjs --root target/ci --publish --tag "$CLI_CHANNEL"
+      - name: Repair only the missing DEV12 Linux ARM64 GNU package
+        if: inputs.repair_dev12
+        run: |
+          node - <<'NODE'
+          const fs=require('fs'),cp=require('child_process');
+          const name='@rsrsai/linux-arm64-gnu',version='1.0.11-dev.12';
+          const dir='npm/dist/@rsrsai/linux-arm64-gnu';
+          const pkg=JSON.parse(fs.readFileSync(`${dir}/package.json`,'utf8'));
+          if(pkg.name!==name||pkg.version!==version||JSON.stringify(pkg.os)!=='["linux"]'||
+             JSON.stringify(pkg.cpu)!=='["arm64"]'||JSON.stringify(pkg.libc)!=='["glibc"]') throw new Error('Repair package identity mismatch');
+          async function repair(){
+            const url=`https://registry.npmjs.org/${encodeURIComponent(name)}/${version}?repair=${Date.now()}`;
+            const result=await fetch(url,{headers:{'Cache-Control':'no-cache'},signal:AbortSignal.timeout(30000)});
+            if(result.status===200){
+              const existing=await result.json();
+              if(existing.name!==name||existing.version!==version||!existing.dist?.integrity||!existing.dist?.tarball||
+                 existing.repository?.url!==pkg.repository.url||JSON.stringify(existing.os)!==JSON.stringify(pkg.os)||
+                 JSON.stringify(existing.cpu)!==JSON.stringify(pkg.cpu)||JSON.stringify(existing.libc)!==JSON.stringify(pkg.libc)) throw new Error('Existing DEV12 package metadata mismatch');
+              console.log(`${name}@${version} already exists; no publication or tag changes`);return;
+            }
+            if(result.status!==404) throw new Error(`Registry returned HTTP ${result.status}; publication refused`);
+            const publish=cp.spawnSync('npm',['publish',dir,'--access','public','--tag','dev'],{stdio:'inherit'});
+            if(publish.status!==0) throw new Error('Single-package publication failed; do not overwrite or retry other packages');
+            console.log('Single-package publication accepted; verify registry version, dev tag and tarball visibility separately');
+          }
+          repair().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
       - name: Make the complete release public
+        if: ${{ !inputs.repair_dev12 }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
