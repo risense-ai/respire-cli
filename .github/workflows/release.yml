@@ -8,6 +8,7 @@ on:
       - '.github/**'
       - 'docs/**'
       - '**/*.md'
+      - 'scripts/test-real-m3-account-switch.py'
   workflow_dispatch:
     inputs:
       ref:
