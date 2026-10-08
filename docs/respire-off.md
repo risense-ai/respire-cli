@@ -26,7 +26,7 @@ Memory is disabled. Do not call memory commands, claim remembered facts or retry
 ## 主人如何恢复
 
 ```bash
-rsrs agent-config --set memory_off=false   # 解除关闭
+rsrs agent-config --set workspace_mode=normal   # 解除关闭
 rsrs inject --all                          # 重新分发正常提示词
 ```
 

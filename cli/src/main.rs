@@ -4216,7 +4216,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
             "readonly" => (true, "read-only (writes rejected; team read-only is enforced by the server token)".to_owned()),
             _ => (
                 false,
-                "temporarily off - recall and store are stopped; `agent-config --set memory_off=false` to restore".to_owned(),
+                "temporarily off - recall and store are stopped; `agent-config --set workspace_mode=normal` to restore".to_owned(),
             ),
         };
         add(&mut items, "memory status", ok, note);
@@ -5197,6 +5197,7 @@ fn is_write_command(c: &Command) -> bool {
             | Command::Retitle { .. }
             | Command::RetitleMany { .. }
             | Command::Sync
+            | Command::SyncReset
             | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
             | Command::SyncRestore { .. }
@@ -5254,6 +5255,7 @@ fn is_write_command_fine(c: &Command) -> bool {
             !matches!(a.as_str(), "list" | "use")
         }
         Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
+        Command::QueryLog { cmd: Some(QueryLogCmd::Mark { .. }), .. } => true,
         // share-import without --go only prints the candidate bill (read); --go writes
         Command::ShareImport { go, .. } => *go,
         _ => false,
@@ -5642,6 +5644,15 @@ fn run(args: Cli) -> Result<()> {
 
 fn run_local(args: Cli) -> Result<()> {
     set_json_mode(args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+    if respire::service::off_mode() && matches!(args.command, Some(Command::Status)) {
+        let session = respire::service::session_info();
+        return emit_result(ResultEnvelope::new("status", OutputStatus::Ok, serde_json::json!({
+            "workspace":"off", "unlocked":session.has_local_keys, "session":session,
+            "data_dir":respire::service::data_dir(), "autosync":false,
+            "sync_scheduler":{"phase":"paused"}, "retrieval_index":rpc::index_status(),
+            "local_total":null, "local_alive":null
+        }), Vec::new()));
+    }
     if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
         if !json_mode() && !rpc::worker_active() { return Ok(()); }
         let command = match args.command.as_ref() { Some(Command::Recall { .. }) => "recall", Some(Command::Remember { .. }) => "remember", _ => "memory" };
@@ -5719,7 +5730,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             if !is_off_allowed(cmd) {
                 anyhow::bail!(
                     "the memory store is temporarily off - this turn provides no memory service (recall and store both stop).\n\
-                     \x20  restore: `rsrs agent-config --set memory_off=false` then `rsrs inject --all` to redistribute the prompt."
+                     \x20  restore: `rsrs agent-config --set workspace_mode=normal` then `rsrs inject --all` to redistribute the prompt."
                 );
             }
         } else {
@@ -7898,9 +7909,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         Command::Status => {
             if json_mode() {
                 // Lightweight status (no session unlock, no embedder) - the client calls this often at start; must be fast
-                let app_status = if respire::service::off_mode() {
-                    respire::service::StatusInfo { local_total: 0, local_alive: 0, remote_configured: remote_configured(), max_updated_at: None, data_dir: respire::service::data_dir().to_string_lossy().into_owned() }
-                } else { respire::service::status_light()? };
+                let app_status = respire::service::status_light()?;
                 let si = respire::service::session_info();
                 // "local store is readable" = this machine has a key wrap (wrapped_urk) and can unwrap it - unrelated to "logged into the cloud".
                 // Old code used has_token: offline local mode has no token, always showed locked, the client kept popping login

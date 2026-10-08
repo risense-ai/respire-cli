@@ -1244,7 +1244,7 @@ pub fn ensure_writable() -> Result<()> {
         let hint = if readonly_team() {
             "read-only is enforced by the server via the session token; editing local agent.json has no effect. To write, ask the space owner for a read-write session and run rsrs space join."
         } else {
-            "this is a personal read-only flag; clear it with `agent-config --set readonly=false`."
+            "restore normal service on this device with `agent-config --set workspace_mode=normal`."
         };
         return Err(anyhow!(
             "this space is read-only — recall/list/show/diary/tree are allowed; write/edit/delete are not.\n  {hint}"
