@@ -512,7 +512,12 @@ jobs:
               if(existing.name!==name||existing.version!==version||!existing.dist?.integrity||!existing.dist?.tarball||
                  existing.repository?.url!==pkg.repository.url||JSON.stringify(existing.os)!==JSON.stringify(pkg.os)||
                  JSON.stringify(existing.cpu)!==JSON.stringify(pkg.cpu)||JSON.stringify(existing.libc)!==JSON.stringify(pkg.libc)) throw new Error('Existing DEV12 package metadata mismatch');
-              console.log(`${name}@${version} already exists; no publication or tag changes`);return;
+              const packed=cp.spawnSync('npm',['pack',dir,'--json','--pack-destination',process.env.RUNNER_TEMP],{encoding:'utf8'});
+              if(packed.status!==0) throw new Error('Repair package integrity packing failed');
+              const report=JSON.parse(packed.stdout);
+              if(report.length!==1||report[0].name!==name||report[0].version!==version||!report[0].integrity||
+                 report[0].integrity!==existing.dist.integrity) throw new Error('Existing DEV12 package content integrity mismatch');
+              console.log(`${name}@${version} already exists with verified content; no publication or tag changes`);return;
             }
             if(result.status!==404) throw new Error(`Registry returned HTTP ${result.status}; publication refused`);
             const publish=cp.spawnSync('npm',['publish',dir,'--access','public','--tag','dev'],{stdio:'inherit'});
