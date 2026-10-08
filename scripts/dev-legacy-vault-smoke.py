@@ -285,7 +285,10 @@ class Smoke:
         self.write_session(old_login_env, recovery)
         self.cli(old_login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
             "--pass=" + password, *([] if version == 1 else ["--super=" + original_super]))
-        require(self.session(old_login_env).get("auth_salt") == old_auth_salt,
+        old_login = self.session(old_login_env)
+        self.diagnostic_secrets.add(old_login.get("token", ""))
+        require(old_login.get("user") == user and bool(old_login.get("token"))
+            and self.api(dict(account, token=old_login["token"]), "GET", "/api/self").get("user") == user,
             "real_legacy_auth_login_failed")
         require(self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == old_auth_salt,
             "ordinary_login_changed_auth_salt")
@@ -359,7 +362,10 @@ class Smoke:
         self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
             "--pass=" + password, *([] if version == 1 else ["--super=" + original_super]))
         recovered_session = self.session(final_env)
-        require(recovered_session.get("auth_salt") == new_auth_salt, "fresh_login_did_not_use_new_auth_salt")
+        require(recovered_session.get("user") == user and bool(recovered_session.get("token"))
+            and self.api(dict(account, token=recovered_session["token"]), "GET", "/api/self").get("user") == user
+            and self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == new_auth_salt,
+            "fresh_login_did_not_use_new_auth_salt")
         account["token"] = recovered_session["token"]
         if version == 1:
             self.keys.track_created_login(recovered_session, user, None, password)
