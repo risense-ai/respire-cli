@@ -342,7 +342,7 @@ pub(crate) fn kick_index() {
 }
 
 fn index_yield_to_foreground(generation: usize) -> Result<()> {
-    anyhow::ensure!(respire::service::workspace_mode() == "normal", "background index paused by service mode");
+    anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
     let gate = shared_exclusive();
     let mut state = gate.state.lock().map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?;
     while state.held || state.foreground > 0 {
@@ -374,7 +374,7 @@ fn index_has_work() -> bool {
 fn index_loop_inner() -> Result<()> {
     let mut model_wait_started: Option<Instant> = None;
     loop {
-        if respire::service::workspace_mode() != "normal" {
+        if respire::service::service_paused() {
             if STOPPING.load(Ordering::Acquire) { return Ok(()); }
             let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
             work.state = "paused";
@@ -612,7 +612,7 @@ fn flight_loop() {
         } else {
             let generation = GENERATION.load(Ordering::Acquire);
             let boundary = sync_local(generation, || {
-                anyhow::ensure!(respire::service::workspace_mode() == "normal", "background sync paused by service mode");
+                anyhow::ensure!(!respire::service::service_paused(), "background sync paused by service mode");
                 crate::build_local()?.outgoing_boundary()
             });
             let result = boundary.and_then(|boundary| {
@@ -1238,7 +1238,7 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         "model.prepare" => {
             let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
             match respire::model_install::validate_mirror(mirror).and_then(|_| {
-                anyhow::ensure!(respire::service::workspace_mode() == "normal", "model preparation is paused by service mode");
+                anyhow::ensure!(!respire::service::service_paused(), "model preparation is paused by service mode");
                 let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
                 work.prepare_mirror = Some(mirror.to_owned());
                 work.requested = true;
@@ -1772,7 +1772,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 } else if _store.is_none() && command_name(&job.args) != Some("agent-config") {
                     let gate = shared_exclusive();
                     let _held = gate.acquire(true);
-                    let opened = if respire::service::workspace_mode() == "normal" {
+                    let opened = if !respire::service::service_paused() {
                         respire::service::initialize_runtime_store()
                     } else { respire::service::open_store() };
                     match opened {
