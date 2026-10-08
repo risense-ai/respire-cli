@@ -97,7 +97,7 @@ class Smoke:
         self.report = {"status": "running", "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"), "version": args.version,
             "binary_sha256": args.binary_sha256, "target": UPSTREAM, "cases": {},
-            "passed": False, "required_cases": list(REQUIRED),
+            "passed": False, "required_cases": list(("model_cpu_real", REQUIRED[2]) if args.auth_salt_only else REQUIRED),
             "dependency": "cryptography==46.0.3", "cloud_cleanup": {"passed": False, "events": [], "remaining_users": []}}
 
     def env(self, name, user=None):
@@ -506,7 +506,7 @@ def main():
                 smoke.report["keyring_cleanup"] = smoke.keys.cleanup()
             except Exception as error:
                 smoke.report["keyring_cleanup"] = {"passed": False, "failure_code": type(error).__name__}
-        required = ("model_cpu_real", REQUIRED[2]) if args.auth_salt_only else REQUIRED
+        required = smoke.report["required_cases"]
         smoke.report["scope"] = "real_auth_salt_migration" if args.auth_salt_only else "legacy_vault"
         smoke.report["missing_cases"] = [case for case in required if case not in smoke.report["cases"]]
         if not smoke.report["cloud_cleanup"]["passed"]:
