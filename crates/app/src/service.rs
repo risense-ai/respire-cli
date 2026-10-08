@@ -2647,6 +2647,16 @@ pub fn open_store() -> Result<LocalStore> {
     }
 }
 
+/// Initialize the runtime's owned library after normal service is restored.
+/// Disabled startup deliberately leaves a new database uncreated.
+pub fn initialize_runtime_store() -> Result<LocalStore> {
+    anyhow::ensure!(workspace_mode() == "normal", "database initialization requires normal service");
+    let root = data_dir();
+    check_runtime_profile(&root)?;
+    respire_core_sdk::set_index_root(&root)?;
+    LocalStore::open(&database_path(&root)?)
+}
+
 /// New libraries use rsrs.db; opening an existing library never renames it.
 pub fn database_path(root: &Path) -> Result<PathBuf> {
     let current = root.join("rsrs.db");

@@ -1769,10 +1769,13 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                         let _ = job.reply.send(Ok(captured));
                         continue;
                     }
-                } else if _store.is_none() {
+                } else if _store.is_none() && command_name(&job.args) != Some("agent-config") {
                     let gate = shared_exclusive();
                     let _held = gate.acquire(true);
-                    match respire::service::open_store() {
+                    let opened = if respire::service::workspace_mode() == "normal" {
+                        respire::service::initialize_runtime_store()
+                    } else { respire::service::open_store() };
+                    match opened {
                         Ok(store) => _store = Some(store),
                         Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
                     }
