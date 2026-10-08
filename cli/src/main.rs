@@ -7785,7 +7785,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 .get("purge_days")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(30);
-            if purge_days >= 0 {
+            if purge_days >= 0 && !respire::service::readonly_mode() {
                 let n = sync_phase(|| local.auto_purge_old(purge_days))?;
                 purged = n;
                 if n > 0 {
