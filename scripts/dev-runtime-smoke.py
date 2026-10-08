@@ -515,6 +515,11 @@ class Smoke:
         def wait_index(want, seconds=90):
             deadline = time.monotonic() + seconds
             while time.monotonic() < deadline:
+                if want == 'ready':
+                    # Exercise the existing repair while TUI-style reads continue.
+                    # These reads must not restart model verification or indexing.
+                    for command in (['account', 'list'], ['config'], ['agent-config']):
+                        self.rpc(command)
                 index = self.rpc(['status'])['summary']['retrieval_index']
                 if index.get('state') == want:
                     return index
