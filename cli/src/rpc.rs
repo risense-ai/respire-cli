@@ -1379,7 +1379,7 @@ fn submit(
         envelope.errors.push(i18n::text("busy").to_owned());
         return Ok(crate::Captured { exit: 2, envelope });
     }
-    let sync_context = if matches!(
+    let sync_context = if !respire::service::off_mode() && matches!(
         command_name(&args),
         Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")
     ) {
@@ -1389,7 +1389,7 @@ fn submit(
             .and_then(|store| store.outgoing_boundary())
             .map_err(|error| format!("{error:#}"))?;
         Some((GENERATION.load(Ordering::Acquire), boundary))
-    } else if command_name(&args) == Some("classify") {
+    } else if !respire::service::off_mode() && command_name(&args) == Some("classify") {
         let gate = shared_exclusive();
         let _held = gate.acquire(true);
         Some((GENERATION.load(Ordering::Acquire), -1))
