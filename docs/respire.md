@@ -1,6 +1,6 @@
 # Respire agent workflow
 
-Recall before responding or acting, read selected records in JSON, prefer updating/merging/attaching over new roots, and archive reusable findings before finishing. Read the complete policy before storage or maintenance.
+Recall before responding or acting, read selected records in JSON, prefer updating/merging/attaching over new roots, and archive reusable findings before finishing. After the first recall, read the complete policy before other work in every round. The mandatory injected rules must remain present even when detailed maintenance guidance is loaded on demand.
 
 | Contract | Requirement |
 | --- | --- |
@@ -45,6 +45,8 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 > 本文件是记忆铁律与行为约束的唯一权威源（随 Respire CLI 仓版本化），**内嵌于二进制**（`include_str!`）。改后流程：`cargo build --release -p respire` → `rsrs inject` 分发（14 目标；`--targets` 看现状，stale 即需重分发）。
 >
 > 总纲一句话：**凡开口先查，凡动手必查，凡所得可录，凡碰壁翻忆，凡落笔先问「能否改并既有条」。**
+
+**全文读取时点（硬）**：每回合首次 recall 后，必须先读取 `rsrs prompt` 全文，再进行文件读取、分析、修改或存储；不得推迟到首次存储前。只读与暂停模式遵循对应禁令；查存失败或无权限时明确报告，不得绕过服务、权限或用户授权范围。
 
 ## 铁锚 · 三行（上下文愈长，愈须回读）
 
@@ -94,7 +96,7 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 
 ## 二、遇障先翻忆（报错/异常/修复强制）
 
-**报错的第一反应是 recall，不是读代码**——见到报错、异常、行为不符预期，先翻忆再动手：`recall "<项目名+组件+症状>" --json`、`recall "<报错原文片段>" --json`——换 2–3 组词，三组皆空方算无记忆。凡要修东西，动手前必查，禁先试错后补查。
+**报错的第一反应是 recall，不是读代码**——见到报错、异常、行为不符预期，报错后的下一次工具调用必须是 `rsrs recall ... --json`，先翻忆再动手：`recall "<项目名+组件+症状>" --json`、`recall "<报错原文片段>" --json`——换 2–3 组词，三组皆空方算无记忆。凡要修东西，动手前必查，禁先试错后补查。
 
 - 命中 → 循既证之法与既录之坑，**勿另起炉灶重复试错**；法不合须明说为何弃——**弃必陈三**：所忆何法、何据判其不合（版本/接口/现场异同）、改用何法
 - 未命中 → 先读现场（日志/状态/配置）、立假设、最小步验证；**禁无假设连试**
@@ -103,9 +105,9 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 
 ## 三、值必存（判重 → 择一有序 → 示证）
 
-存储是判断后的动作，非机械录入。**remember 必传 `--title "简短标题"`**（12–24 字概括核心；不传则自动拟题可能截断致同名）。**不看全文不算判过**。五步（琐事免①–③，直接记日记——不判树不挂树不开新节点，见三·四；他事先问「能否改并既有条」，改＞并＞挂＞存，新开节点是最后手段）：
+存储是判断后的动作，非机械录入。**remember 必传 `--title "简短标题"`**（12–24 字概括核心；不传则自动拟题可能截断致同名）。**标题必须写事件事实（主语＋动作＋关键实体或结果），禁只写主题分类名；`update --content` 必须同给 `--title`，合并亦须重拟标题。** **不看全文不算判过**。五步（琐事免①–③，直接记日记——不判树不挂树不开新节点，见三·四；他事先问「能否改并既有条」，改＞并＞挂＞存，新开节点是最后手段）：
 
-1. **判重**：`recall "<项目名+核心实体>" --limit 3 --json`（换 2–3 组词，一轮不抵两轮）——相似度以 BGE 语义为准，字面 diff/md5 只作辅证；recall 返回候选即须 `show <id> --json` 读全文，并在答中明答「为何不走改/并/挂」方许 --force 新存
+1. **判重**：`recall "<项目名+核心实体>" --limit 3 --json`（换 2–3 组词，一轮不抵两轮）——以当前检索结果和候选全文的语义为准，字面 diff/md5 只作辅证；recall 返回候选即须 `show <id> --json` 读全文，并在答中明答「为何不走改/并/挂」方许 --force 新存
 2. **读候选**：`show <id> --json` 读全文，比内容、比时点
 3. **择一有序（改 ＞ 并 ＞ 挂 ＞ 存——新存是最后手段）**，答中引候选 id/标题并说明**为何不走前一档**（禁只报「已判重」而不示证；判过即须报：查了何词、得何候选、比出何异同）：
    - ① **改**：既有某条正讲此事，本次是其更新/补全/纠错 → `update <id> --content/--title`（id、父链、命中史俱留，树不伤；长文循「改文本铁律」）
@@ -233,9 +235,9 @@ rsrs list --since 1900 --limit 5000 --json    # 全库（--since 1900 等价于�
 
 存了 → 答末注明「已存（类型）」；不存 → 不赘一言。
 
-## 四·二、回合双闸（发出前必对，逐字自答）
+## 四·二、回合三闸（发出前必对，逐字自答）
 
-> 上下文愈长，此二闸愈易漏。**漏一闸即为失职**，非「疏忽」可辩。
+> 上下文愈长，此三闸愈易漏。**漏一闸即为失职**，非「疏忽」可辩。
 
 **闸一 · 查闸**——本回合**第一次工具调用**（不限答问/读码/改文件/跑命令/搜索/建 agent，凡工具皆算）是否就是 `recall --json`？查询词含项目名否？换过 2–3 组词否？空结果实换否？答中写明所查之词与所得否？读库命令是否带了 `--json`？
 
@@ -246,6 +248,8 @@ rsrs list --since 1900 --limit 5000 --json    # 全库（--since 1900 等价于�
 3. 新条皆挂在同题条下、未留平级孤条否？
 
 三问过不了即补存，补完再答。**禁「无可存」表态**——做了事有过程，踩了坑有教训，定了向有决策。
+
+**闸三 · 障闸**——本轮报错后下一次工具调用是否 recall？两试无进展是否停手再查？无果是否报告卡点、已试方法和当前假设？未遇障则通过。只读、暂停及无写权限时遵循模式禁令并报告，禁止以存闸扩大权限。
 
 ## 命令速查
 
