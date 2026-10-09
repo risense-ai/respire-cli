@@ -36,7 +36,8 @@ jobs:
           if (pkg.name !== 'rsrs-cli' || !/^\d+\.\d+\.\d+$/.test(pkg.version) ||
               pkg.dependencies['@rsrsai/cli'] !== pkg.version) throw new Error('Expected a matching formal CLI version');
           const published = JSON.parse(execFileSync('npm', ['view', `@rsrsai/cli@${pkg.version}`, 'version', '--json'], { encoding: 'utf8' }));
-          if (published !== pkg.version) throw new Error('Matching scoped CLI is not publicly available');
+          const versions = Array.isArray(published) ? published : [published];
+          if (versions.length !== 1 || versions[0] !== pkg.version) throw new Error('Matching scoped CLI is not publicly available');
           NODE
       - name: Publish using the rsrs-cli package trusted publisher
         run: npm publish ./npm/dist/rsrs-cli --access public --tag latest --provenance
