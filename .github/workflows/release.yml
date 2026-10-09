@@ -8,6 +8,9 @@ on:
       - '.github/**'
       - 'docs/**'
       - '**/*.md'
+      # The thin npm install entry is published independently of native builds.
+      - 'npm/alias/**'
+      - 'npm/scripts/pack-alias.mjs'
       - 'scripts/test-real-m3-account-switch.py'
   workflow_dispatch:
     inputs:

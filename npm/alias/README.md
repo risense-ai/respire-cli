@@ -10,6 +10,11 @@ is publicly available. Use `dev` for a development version and `latest` for a
 formal version. Publishing this package requires its own npm authorization;
 the scoped package's trusted publisher does not automatically authorize it.
 
+After the initial publication, configure `risense-ai/respire-cli` with workflow
+`npm-alias.yml` as this package's trusted publisher. Dispatch **Publish short
+npm entry** to publish future formal versions after the scoped CLI is public.
+Alias-only changes do not trigger the seven-platform native release workflow.
+
 The user install command, once published, is `npm install -g rsrs`.
 Existing users can continue to use `npm install -g @rsrsai/cli`.
 To change the install entry, first uninstall the previously installed npm
