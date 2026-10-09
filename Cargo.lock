@@ -1427,7 +1427,7 @@ dependencies = [
 
 [[package]]
 name = "respire"
-version = "1.0.15"
+version = "1.0.12"
 dependencies = [
  "anyhow",
  "base64",
