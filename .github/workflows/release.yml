@@ -151,19 +151,19 @@ jobs:
              version!=='1.0.11-dev.13'||channel!=='dev'||sha!=='d8314480e10a27767544f781083e35c8e85657f0')) throw new Error('Approved regression reuse applies only to DEV13');
           // Drafts reserve DEV numbers; only planning/publication hold this lock.
           if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true'){
-            const releases=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`,'--paginate','--slurp'],{encoding:'utf8'})).flat();
-            const reserved=releases.find(release=>release.tag_name===`v${version}`);
+            const reservedJson=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`,'--paginate','--jq',`.[] | select(.tag_name=="v${version}") | {draft,prerelease,asset_count:(.assets|length),body}`],{encoding:'utf8'}).trim();
+            const reserved=reservedJson?JSON.parse(reservedJson):null;
             const notes=`Build and regression results pending.\nRelease workflow run: ${process.env.GITHUB_RUN_ID}`;
             if(reserved){
-              if(!process.env.RELEASE_DEV_VERSION||!reserved.draft||!reserved.prerelease||reserved.assets.length!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
+              if(!process.env.RELEASE_DEV_VERSION||!reserved.draft||!reserved.prerelease||reserved.asset_count!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
               const owner=reserved.body?.match(/Release workflow run: (\d+)/)?.[1];
               if(owner){
                 const prior=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${owner}`],{encoding:'utf8'}));
                 if(prior.status!=='completed') throw new Error('The prior release run is still active; draft resumption refused');
               }else{
                 // Legacy drafts have no owner marker; do not infer their run from a source ref.
-                const runs=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=100`,'--paginate','--slurp'],{encoding:'utf8'})).flatMap(page=>page.workflow_runs);
-                if(runs.some(run=>String(run.id)!==process.env.GITHUB_RUN_ID&&run.status!=='completed')) throw new Error('A legacy draft cannot resume while another Release run is active');
+                const activeRuns=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=100`,'--paginate','--jq',`.workflow_runs[] | select(.id!=${process.env.GITHUB_RUN_ID} and .status!="completed") | .id`],{encoding:'utf8'}).trim();
+                if(activeRuns) throw new Error('A legacy draft cannot resume while another Release run is active');
               }
               cp.execFileSync('gh',['release','edit',`v${version}`,'--target',sha,
                 '--title',`v${version}`,'--notes',notes],{stdio:'inherit'});
