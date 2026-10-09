@@ -9,7 +9,9 @@ CLI digest and public GitHub release before publishing the exact-version entry.
 DEV versions use `dev`; stable versions use `latest`. Validation-only and failed
 publication runs are skipped. Existing identical versions are not republished
 and their distribution tags are left unchanged. To recover an omitted entry,
-dispatch this same trusted-publisher workflow with `version` and `release_run`.
+dispatch this same trusted-publisher workflow with `version` and required
+`release_run`. A missing older entry is rejected if publishing it would move
+`latest` or `dev` backward; no distribution tag is silently rolled back.
 
 Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 
