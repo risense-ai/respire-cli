@@ -8,6 +8,7 @@ on:
       - '.github/**'
       - 'docs/**'
       - '**/*.md'
+      - 'npm/scripts/next-dev-version.mjs'
       # The thin npm install entry is published independently of native builds.
       - 'npm/alias/**'
       - 'npm/scripts/pack-alias.mjs'
