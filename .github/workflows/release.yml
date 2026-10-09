@@ -75,10 +75,12 @@ jobs:
           REUSE_REF: ${{ inputs.ref }}
           REUSE_PUBLISH: ${{ inputs.publish }}
           REUSE_REPAIR: ${{ inputs.repair_dev12 || inputs.repair_dev14 }}
+          REUSE_FULL: ${{ inputs.full_regression_before_publish }}
         run: |
           node - <<'NODE'
           const fs=require('fs');
           async function verifyPrior(){
+            if(process.env.REUSE_FULL==='true') throw new Error('Fresh full regression cannot be combined with old regression reuse');
             const repo=process.env.GITHUB_REPOSITORY,sha='d8314480e10a27767544f781083e35c8e85657f0';
             if(process.env.GITHUB_EVENT_NAME!=='workflow_dispatch'||process.env.REUSE_PUBLISH!=='true'||
                process.env.REUSE_REPAIR==='true'||process.env.REUSE_REF!==sha||repo!=='risense-ai/respire-cli') throw new Error('Regression reuse is approved only for the fixed DEV13 source');
