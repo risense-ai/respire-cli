@@ -17,6 +17,7 @@ on:
           - both
           - linux-secret-service
           - macos
+          - windows
 
 permissions:
   contents: read
@@ -81,7 +82,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.platform == 'linux-secret-service' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'macos' && '[{"os":"macos-latest","target":"aarch64-apple-darwin"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
+        include: ${{ fromJSON(inputs.platform == 'linux-secret-service' && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || inputs.platform == 'macos' && '[{"os":"macos-latest","target":"aarch64-apple-darwin"}]' || inputs.platform == 'windows' && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"}]') }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -149,8 +150,8 @@ jobs:
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python scripts/dev-secret-service-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
-      - name: Verify native macOS encrypted profile migration
-        if: runner.os == 'macOS'
+      - name: Verify native encrypted profile migration
+        if: runner.os != 'Linux'
         shell: bash
         env:
           RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
@@ -158,7 +159,7 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --only-binary=:all: cryptography==46.0.3
-          binary="$(python -c 'from pathlib import Path; print(Path("validated-cli/rsrs").resolve())')"
+          binary="$(python -c 'from pathlib import Path; import sys; print(Path("validated-cli/rsrs.exe" if sys.platform == "win32" else "validated-cli/rsrs").resolve())')"
           root="$RUNNER_TEMP/targeted-native-migration"
           fixture_status=0
           python scripts/dev-profile-migration-smoke.py --binary "$binary" --binary-sha256 "$CLI_BINARY_SHA256" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$root" || fixture_status=$?
@@ -170,7 +171,8 @@ jobs:
           report=json.loads((Path(os.environ['RUNNER_TEMP'])/'targeted-native-migration/migration-coverage.json').read_text())
           required=module.REQUIRED-{'secret_service_legacy_fields_and_aliases'}
           module.require(all(report.get(k)==os.environ[v] for k,v in [('source_sha','CLI_SHA'),('version','CLI_VERSION'),('binary_sha256','CLI_BINARY_SHA256')]),'migration_artifact_identity_mismatch')
-          module.require(report.get('platform')=='darwin' and report.get('keyring_backend')=='macos-keychain-synthetic-acl','migration_native_backend_mismatch')
+          platform, backend = ('win32','windows-credential-manager') if os.environ['RUNNER_OS']=='Windows' else ('darwin','macos-keychain-synthetic-acl')
+          module.require(report.get('platform')==platform and report.get('keyring_backend')==backend,'migration_native_backend_mismatch')
           module.require(set(report.get('required_cases',[]))==required and report.get('passed') is True and not report.get('missing_cases') and all(report.get('cases',{}).get(case,{}).get('passed') is True for case in required),'migration_incomplete')
           for key,remaining in [('cloud_cleanup','remaining_users'),('keyring_cleanup','remaining_entries')]:
               module.require(report.get(key,{}).get('passed') is True and not report.get(key,{}).get(remaining),'migration_cleanup_incomplete')
