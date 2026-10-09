@@ -9,6 +9,7 @@ struct RecallResult {
     items: Vec<RecalledWithContext>,
     mode: String,
     warning: Option<String>,
+    routing: respire::memory::model::RecallRouting,
 }
 
 pub fn recall<E: respire::memory::search::Embedder>(
@@ -16,7 +17,7 @@ pub fn recall<E: respire::memory::search::Embedder>(
     embedder: &E,
     candidates: &[respire::StoredMemory],
     query: &respire::MemoryQuery,
-) -> Result<(Vec<RecalledWithContext>, String, Option<String>)> {
+) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting)> {
     let mode = respire::service::read_agent_config()["recall_mode"]
         .as_str()
         .unwrap_or("fast")
@@ -30,7 +31,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
     candidates: &[respire::StoredMemory],
     query: &respire::MemoryQuery,
     mode: &str,
-) -> Result<(Vec<RecalledWithContext>, String, Option<String>)> {
+) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting)> {
     anyhow::ensure!(matches!(mode, "fast" | "quality"), "unknown recall mode");
     let provider = if mode == "quality" {
         configured_provider()
@@ -52,7 +53,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
         }),
         &mut transport,
     )?;
-    Ok((result.items, result.mode, result.warning))
+    Ok((result.items, result.mode, result.warning, result.routing))
 }
 
 fn configured_provider() -> Option<crate::classify::Backend> {

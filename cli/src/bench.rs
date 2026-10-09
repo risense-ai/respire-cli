@@ -296,6 +296,8 @@ pub struct BenchReport {
 
 /// Env vars that affect retrieval (recorded in the report).
 pub const PARAM_KEYS: &[&str] = &[
+    "RSRS_ABLATE",
+    "RSRS_ROUTE",
     "RSRS_RECALL_MIN_SCORE",
     "RSRS_MMR_LAMBDA",
     "RSRS_ANCESTOR_BUDGET",
