@@ -523,6 +523,9 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
                 next.error = error;
             }
         }
+        if !next.connected {
+            next.runtime_version.clear();
+        }
         if let Ok(mut guard) = shared.lock() {
             next.inference = guard.inference.clone();
             next.notice = guard.notice.clone();
