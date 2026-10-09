@@ -24,6 +24,10 @@ on:
         description: Publish DEV after build/package/CI gates; stable also requires full regression
         default: false
         type: boolean
+      full_regression_before_publish:
+        description: Wait for all seven upgrade, three system and API regressions before DEV publication
+        default: false
+        type: boolean
       dev_version:
         description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
         default: ''
@@ -47,7 +51,7 @@ permissions:
 
 jobs:
   plan:
-    if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+    if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -512,8 +516,8 @@ jobs:
           requireCi().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - run: npm install --global npm@11.5.1
-      - name: Require all regressions before stable publication
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.outputs.channel == 'latest' }}
+      - name: Require all regressions before gated publication
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || inputs.full_regression_before_publish) }}
         timeout-minutes: 121
         env:
           GH_TOKEN: ${{ github.token }}
@@ -531,14 +535,14 @@ jobs:
               const api=jobs.filter(job=>job.name==='api-smoke');
               const required=[...native,...cloud,...api];
               const failed=required.find(job=>job.status==='completed'&&job.conclusion!=='success');
-              if(failed) throw new Error(`Stable publication refused: ${failed.name} ${failed.conclusion}`);
+              if(failed) throw new Error(`Gated publication refused: ${failed.name} ${failed.conclusion}`);
               if(native.length===7&&cloud.length===3&&api.length===1&&required.every(job=>job.conclusion==='success')){
                 console.log('All seven native upgrades, three system regressions and API checks passed');return;
               }
               console.log('Waiting for native upgrades, cloud regressions and API checks');
               await new Promise(resolve=>setTimeout(resolve,30000));
             }
-            throw new Error('Stable regression did not complete within 120 minutes');
+            throw new Error('Required regression did not complete within 120 minutes');
           }
           requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
