@@ -24,7 +24,7 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-      - run: npm install -g npm@12
+      - run: npm install -g npm@12.2.0
       - run: node npm/scripts/test-wrapper.mjs
       - run: node npm/scripts/pack-alias.mjs
       - name: Require the matching public formal CLI dependency
