@@ -5,9 +5,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const version = readFileSync(path.join(root, 'cli/Cargo.toml'), 'utf8')
+const args = process.argv.slice(2);
+if (args.length && (args.length !== 2 || args[0] !== '--version')) {
+  throw new Error('Usage: pack-alias.mjs [--version X.Y.Z[-dev.N]]');
+}
+const version = args.length ? args[1] : readFileSync(path.join(root, 'cli/Cargo.toml'), 'utf8')
   .match(/^version\s*=\s*"([^"]+)"/m)?.[1];
-if (!version) throw new Error('Cannot read CLI version');
+if (!version || !/^\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(version)) {
+  throw new Error('Expected a stable or DEV CLI version');
+}
 const output = path.join(root, 'npm/dist/rsrs-cli');
 mkdirSync(path.join(output, 'bin'), { recursive: true });
 copyFileSync(path.join(root, 'npm/alias/bin/cli.js'), path.join(output, 'bin/cli.js'));

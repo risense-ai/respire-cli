@@ -1,13 +1,18 @@
-# @rsrsai/cli
+# rsrs-cli
 
 The launcher selects the platform binary package and forwards arguments to `rsrs`. Packages include the executable, runtime libraries and notices.
 
 ```sh
-npm i -g @rsrsai/cli
-# Or: pnpm add -g @rsrsai/cli
+npm i -g rsrs-cli
+# Or: pnpm add -g rsrs-cli
+# DEV: npm i -g rsrs-cli@dev
 rsrs doctor
 rsrs --help
 ```
+
+`rsrs-cli` is the primary install entry. It depends on the exact same version of
+`@rsrsai/cli`, which selects the native platform package. Stable releases use
+`latest`; development releases use `dev`.
 
 | Platform | Package |
 | --- | --- |
