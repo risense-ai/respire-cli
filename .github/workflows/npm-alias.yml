@@ -67,7 +67,7 @@ jobs:
             }
             const receipts = path.join(process.env.RUNNER_TEMP, 'release-npm-receipts');
             mkdirSync(receipts, { recursive: true });
-            execFileSync('gh', ['run', 'download', sourceRun, '--repo', repo, '--name', 'npm-validation', '--dir', receipts], { stdio: 'inherit' });
+            execFileSync('gh', ['run', 'download', sourceRun, '--repo', repo, '--name', 'npm-release-validation', '--dir', receipts], { stdio: 'inherit' });
             const packs = JSON.parse(readFileSync(path.join(receipts, '@rsrsai/cli/release.pack.json'), 'utf8'));
             if (packs.length !== 1 || packs[0].name !== '@rsrsai/cli') throw new Error('Invalid scoped CLI receipt');
             if (version && version !== packs[0].version) throw new Error('Requested version differs from the Release receipt');
