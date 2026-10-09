@@ -1,0 +1,42 @@
+name: Publish short npm entry
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-rsrs-cli-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@12.2.0
+      - run: node npm/scripts/test-wrapper.mjs
+      - run: node npm/scripts/pack-alias.mjs
+      - name: Require the matching public formal CLI dependency
+        run: |
+          node --input-type=module - <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { execFileSync } from 'node:child_process';
+          const pkg = JSON.parse(readFileSync('npm/dist/rsrs-cli/package.json', 'utf8'));
+          if (pkg.name !== 'rsrs-cli' || !/^\d+\.\d+\.\d+$/.test(pkg.version) ||
+              pkg.dependencies['@rsrsai/cli'] !== pkg.version) throw new Error('Expected a matching formal CLI version');
+          const published = JSON.parse(execFileSync('npm', ['view', `@rsrsai/cli@${pkg.version}`, 'version', '--json'], { encoding: 'utf8' }));
+          if (published !== pkg.version) throw new Error('Matching scoped CLI is not publicly available');
+          NODE
+      - name: Publish using the rsrs-cli package trusted publisher
+        run: npm publish ./npm/dist/rsrs-cli --access public --tag latest --provenance
