@@ -2,6 +2,15 @@
 
 DEV gates: exact-source workspace unit tests and existing coverage checks, one Release build for each of seven targets, native executable startup, real quantized CPU inference on macOS, pinned SDK digests, and consistent artifacts for all eight npm packages.
 
+`rsrs-cli` is the primary public npm install entry. After each completed Release,
+`npm-alias.yml` automatically checks successful `plan` and `publish` jobs, reads
+the version from that run's npm receipt, and verifies the matching public scoped
+CLI digest and public GitHub release before publishing the exact-version entry.
+DEV versions use `dev`; stable versions use `latest`. Validation-only and failed
+publication runs are skipped. Existing identical versions are not republished
+and their distribution tags are left unchanged. To recover an omitted entry,
+dispatch this same trusted-publisher workflow with `version` and `release_run`.
+
 Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 
 Seven-target builds run in Release. The separate compile matrix is manual. CLI tests run once through the existing coverage command; other workspace tests run separately. musl builds reuse the existing cache. macOS reuses the model cache while still checking model files and performing real inference.
