@@ -774,12 +774,13 @@ fn query_json_with_start(args: Vec<String>, auto_start: bool) -> Result<serde_js
     bail!("{err}")
 }
 
-/// Pid and web URL of the resident runtime, if it answers.
-pub fn runtime_brief() -> Option<(u32, String)> {
+/// Pid, web URL and binary version of the resident runtime, if it answers.
+pub fn runtime_brief() -> Option<(u32, String, String)> {
     let response = call_method("runtime.status", Vec::new(), false).ok()?;
     Some((
         response.pid.unwrap_or(0),
         response.web_url.unwrap_or_default(),
+        response.bin,
     ))
 }
 

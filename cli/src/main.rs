@@ -4234,6 +4234,18 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
         format!("{n}/{t} - new since last tidy (TIDY when the threshold is hit; reset after tidy)"),
     );
 
+    let runtime_version = if rpc::worker_active() {
+        Some(crate::app_version::embedded().to_owned())
+    } else {
+        rpc::runtime_brief().map(|(_, _, version)| version)
+    };
+    add(
+        &mut items,
+        "Runtime version",
+        true,
+        runtime_version.clone().unwrap_or_else(|| "not connected".to_owned()),
+    );
+
     // 9) CLI version (--check-update or RSRS_UPDATE_CHECK=1 hits the network; default reads cache, no network)
     //    Doctor must not stall on the network, so it does not force a query - report known result, hint how to check if no cache.
     if respire::update_check::enabled() {
@@ -4280,6 +4292,8 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
                 OutputStatus::Skip
             } else if name == "CLI version" && note.contains("not checked") {
                 OutputStatus::Skip
+            } else if name == "Runtime version" && runtime_version.is_none() {
+                OutputStatus::Skip
             } else if name == "tidy counter" && *ok && note.contains("threshold is hit") {
                 OutputStatus::Warn
             } else if model_warnings.contains(&name.as_str()) {
@@ -4312,7 +4326,7 @@ fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
     let mut result = ResultEnvelope::new(
         "doctor",
         status,
-        serde_json::json!({ "version": respire::VERSION, "pass": pass, "warn": warn, "fail": fail, "skip": skip, "total": rows.len() }),
+        serde_json::json!({ "version": respire::VERSION, "runtime_version": runtime_version, "pass": pass, "warn": warn, "fail": fail, "skip": skip, "total": rows.len() }),
         rows,
     );
     result.details = serde_json::json!({
@@ -8500,6 +8514,15 @@ mod capture_tests {
                 .ok_or("doctor summary is missing total")?;
             if total == 0 || captured.envelope.items.is_empty() {
                 return Err("doctor envelope has no checks".to_owned());
+            }
+            if captured.envelope.summary["runtime_version"] != crate::app_version::embedded() {
+                return Err("doctor did not report the executing runtime version".to_owned());
+            }
+            let runtime = captured.envelope.items.iter()
+                .find(|item| item.name == "Runtime version")
+                .ok_or("doctor did not include the runtime version check")?;
+            if runtime.value != crate::app_version::embedded() || !matches!(runtime.status, crate::OutputStatus::Ok) {
+                return Err("doctor runtime version check differs from the executing binary".to_owned());
             }
             let want = match captured.envelope.status {
                 crate::OutputStatus::Ok | crate::OutputStatus::Skip => 0,
