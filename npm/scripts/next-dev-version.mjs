@@ -58,9 +58,9 @@ const packages = await Promise.all([manifest.npmScope, ...manifest.targets.map(t
 }));
 const requested = process.env.RELEASE_DEV_VERSION;
 if (requested) {
-  const parts = parse(requested, true);
-  if (!new RegExp(`^${integer}\\.${integer}\\.${integer}-dev\\.${integer}$`).test(requested) || compare(parts, target) !== 0) {
-    throw new Error('Requested DEV version must match the CLI manifest base version');
+  parse(requested, true);
+  if (!new RegExp(`^${integer}\\.${integer}\\.${integer}-dev\\.${integer}$`).test(requested)) {
+    throw new Error('Requested DEV version must use X.Y.Z-dev.N format');
   }
   if (tags.includes(`v${requested}`) || packages.some(metadata => metadata && Object.hasOwn(metadata.versions, requested))) {
     throw new Error('Requested DEV version already has a tag or published npm package');

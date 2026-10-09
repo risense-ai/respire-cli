@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       publish:
-        description: Publish after build, CI, native upgrades and development regressions pass
+        description: Publish DEV after build/package/CI gates; stable also requires full regression
         default: false
         type: boolean
       dev_version:
@@ -183,7 +183,17 @@ jobs:
     with:
       ref: ${{ needs.plan.outputs.sha }}
       version: ${{ needs.plan.outputs.version }}
-      full_validation: ${{ !inputs.reuse_dev12_validation }}
+      full_validation: false
+
+  native-regression:
+    if: ${{ !inputs.reuse_dev12_validation }}
+    needs: [plan, validate]
+    permissions:
+      contents: write
+    uses: ./.github/workflows/release-native-validation.yml
+    with:
+      ref: ${{ needs.plan.outputs.sha }}
+      version: ${{ needs.plan.outputs.version }}
 
   cloud-sweep:
     if: ${{ !inputs.reuse_dev12_validation }}
@@ -423,16 +433,14 @@ jobs:
           if-no-files-found: error
 
   publish:
-    # Build once, share artifacts, and publish only after the same-source regressions pass.
-    needs: [plan, validate, cloud-sweep, api-smoke]
+    # DEV regressions reuse the original artifacts independently; stable still waits below.
+    needs: [plan, validate]
     if: >-
       ${{ always() && !cancelled() &&
           ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.publish) ||
            (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
             needs.validate.result == 'success' && needs.plan.outputs.publish == 'true' &&
-            ((!inputs.reuse_dev12_validation && needs.cloud-sweep.result == 'success' && needs.api-smoke.result == 'success') ||
-             (inputs.reuse_dev12_validation && needs.plan.outputs.reuse_validation == 'true' &&
-              needs.cloud-sweep.result == 'skipped' && needs.api-smoke.result == 'skipped')))) }}
+            (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true'))) }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
