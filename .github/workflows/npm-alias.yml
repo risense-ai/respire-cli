@@ -7,7 +7,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: npm-rsrs-ai-publication
+  group: npm-rsrs-cli-publication
   cancel-in-progress: false
 
 jobs:
@@ -32,11 +32,11 @@ jobs:
           node --input-type=module - <<'NODE'
           import { readFileSync } from 'node:fs';
           import { execFileSync } from 'node:child_process';
-          const pkg = JSON.parse(readFileSync('npm/dist/rsrs-ai/package.json', 'utf8'));
-          if (pkg.name !== 'rsrs-ai' || !/^\d+\.\d+\.\d+$/.test(pkg.version) ||
+          const pkg = JSON.parse(readFileSync('npm/dist/rsrs-cli/package.json', 'utf8'));
+          if (pkg.name !== 'rsrs-cli' || !/^\d+\.\d+\.\d+$/.test(pkg.version) ||
               pkg.dependencies['@rsrsai/cli'] !== pkg.version) throw new Error('Expected a matching formal CLI version');
           const published = JSON.parse(execFileSync('npm', ['view', `@rsrsai/cli@${pkg.version}`, 'version', '--json'], { encoding: 'utf8' }));
           if (published !== pkg.version) throw new Error('Matching scoped CLI is not publicly available');
           NODE
-      - name: Publish using the rsrs-ai package trusted publisher
-        run: npm publish ./npm/dist/rsrs-ai --access public --tag latest --provenance
+      - name: Publish using the rsrs-cli package trusted publisher
+        run: npm publish ./npm/dist/rsrs-cli --access public --tag latest --provenance
