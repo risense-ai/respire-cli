@@ -195,10 +195,8 @@ jobs:
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($IsMacOS) {
-            python -m pip install --only-binary=:all: cryptography==46.0.3
-            if ($LASTEXITCODE -ne 0) { throw 'macOS migration fixture dependencies failed' }
-          }
+          python -m pip install --only-binary=:all: cryptography==46.0.3
+          if ($LASTEXITCODE -ne 0) { throw 'Native migration fixture dependencies failed' }
           $binary = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           $checksum = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
           New-Item -ItemType Directory -Force -Path (Join-Path $env:RUNNER_TEMP 'dev-supplements') | Out-Null
