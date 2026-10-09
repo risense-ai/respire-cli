@@ -115,6 +115,7 @@ struct Live {
     pending: i64,
     pid: u32,
     url: String,
+    runtime_version: String,
     doctor: Vec<(String, String, String)>,
     inject: Vec<InjectRow>,
     accounts: Vec<AccountRow>,
@@ -310,6 +311,7 @@ impl Live {
             pending: 0,
             pid: 0,
             url: String::new(),
+            runtime_version: String::new(),
             doctor: Vec::new(),
             inject: Vec::new(),
             accounts: Vec::new(),
@@ -344,6 +346,7 @@ impl Live {
             pending: self.pending,
             pid: self.pid,
             url: self.url.clone(),
+            runtime_version: self.runtime_version.clone(),
             doctor: self.doctor.clone(),
             inject: self.inject.iter().map(InjectRow::clone_row).collect(),
             accounts: self.accounts.iter().map(AccountRow::clone_row).collect(),
@@ -486,9 +489,10 @@ fn refresh_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
     while !stop.load(Ordering::Relaxed) {
         let started = Instant::now();
         let mut next = Live::empty();
-        if let Some((pid, url)) = crate::rpc::runtime_brief() {
+        if let Some((pid, url, version)) = crate::rpc::runtime_brief() {
             next.pid = pid;
             next.url = url;
+            next.runtime_version = version;
         }
         match rpc(&["status"]) {
             Ok(envelope) if envelope["status"] == "ok" => {
@@ -1697,6 +1701,11 @@ fn home_body(app: &App, inner: usize) -> Vec<Line<'static>> {
     let mut lines = smi_table(
         &[
             [
+                format!("CLI {}", crate::app_version::embedded()),
+                runtime_version_label(live),
+                stamp.clone(),
+            ],
+            [
                 format!("rsrs  {stamp}"),
                 format!("pid {}", live.pid),
                 if live.connected {
@@ -2274,12 +2283,21 @@ fn version_body(app: &App) -> Vec<Line<'static>> {
     };
     vec![
         line(status),
+        line(runtime_version_label(&app.live)),
         line(format!("{}: {}", t("启动方式", "Started as"), manager_name(detect_preferred()))),
         choice(app.cursor == 0, t("检查最新版", "Check the newest version")),
         choice(app.cursor == 1, format!("{} {}  {spec}", t("更新", "Update"), manager_name(tool))),
         choice(app.cursor == 2, t("0  返回", "0  Back")),
         line(t("左右键选择用哪个包管理器更新。直接运行的程序不会被这次更新替换。", "Left and right choose the package manager. A direct binary is not replaced by the update.")),
     ]
+}
+
+fn runtime_version_label(live: &Live) -> String {
+    if live.runtime_version.is_empty() {
+        t("Runtime 未连接", "Runtime not connected")
+    } else {
+        format!("Runtime {}", live.runtime_version)
+    }
 }
 
 fn detect_preferred() -> Manager {
@@ -2317,6 +2335,19 @@ mod model_menu_tests {
         let result = (|| -> anyhow::Result<()> {
             respire::service::write_agent_config_key("model_mirror", &serde_json::json!("http://127.0.0.1:9999"))?;
             let mut app = App::new(Arc::new(Mutex::new(Live::empty())));
+            for width in [40, 100] {
+                let rows = home_body(&app, width).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+                assert!(rows.contains(&runtime_version_label(&app.live)));
+            }
+            let rows = version_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(rows.contains(&runtime_version_label(&app.live)));
+            app.live.runtime_version = "1.0.9".to_owned();
+            let rows = home_body(&app, 100).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(rows.contains("CLI "));
+            assert!(rows.contains(crate::app_version::embedded()));
+            assert!(rows.contains("Runtime 1.0.9"));
+            let rows = version_body(&app).iter().map(ToString::to_string).collect::<Vec<_>>().join("\n");
+            assert!(rows.contains("Runtime 1.0.9"));
             app.page = Page::Model;
             app.cursor = 2;
             model_key(&mut app, KeyCode::Enter);
