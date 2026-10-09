@@ -23,7 +23,7 @@ on:
         required: false
         type: string
   push:
-    branches: [main]
+    branches: [main, 'fix/prompt-*']
   pull_request:
     branches: [main]
 permissions:
