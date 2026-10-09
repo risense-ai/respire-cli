@@ -2333,7 +2333,7 @@ fn run_bench_run(
             }
         }
         let started = std::time::Instant::now();
-        let (ranked, _, fallback) = recall_select::recall(&session, &embedder, &candidates, &q)?;
+        let (ranked, _, fallback, _) = recall_select::recall(&session, &embedder, &candidates, &q)?;
         latency.push(started.elapsed().as_micros());
         selector_fallbacks += usize::from(fallback.is_some());
         let ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
@@ -6570,6 +6570,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     result
                         .actions
                         .push("rsrs remember \"<content>\" --force to write as new entry".into());
+                    result.actions.extend(respire::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
                     emit_result(result)?;
                     return Ok(());
                 }
@@ -6605,6 +6606,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     result
                         .actions
                         .push("rsrs remember \"<content>\" --force to write as new entry".into());
+                    result.actions.extend(respire::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
                     emit_result(result)?;
                     return Ok(());
                 }
@@ -6865,7 +6867,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             }
             let candidates = scoped_candidates(&store)?;
             // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
-            let (ranked, recall_mode, selection_fallback) = match mode {
+            let (ranked, recall_mode, selection_fallback, routing) = match mode {
                 Some(mode) => {
                     recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &mode)?
                 }
@@ -6916,7 +6918,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     "recall",
                     OutputStatus::Skip,
                     serde_json::json!({"query":query,"count":0,"recall_mode":recall_mode,
-                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?}),
+                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing}),
                     vec![OutputItem::new("results", OutputStatus::Skip, "0")],
                 ))?;
                 return Ok(());
@@ -6946,7 +6948,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 "recall",
                 OutputStatus::Ok,
                 serde_json::json!({"query":query,"count":ranked.len(),"limit":limit,"project":project,
-                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len()}),
+                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing}),
                 items,
             );
             result.related = associations.related;
@@ -8055,6 +8057,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             );
             result.details = serde_json::json!({"merge":report.merge,"parent":report.parent});
             result.actions.push("candidates <content> --json".into());
+            result.actions.extend(respire::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
             emit_result(result)?;
         }
         Command::V => unreachable!("version is printed before run_local work"),

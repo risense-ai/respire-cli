@@ -22,6 +22,18 @@ use crate::transport::MemoryTransport;
 
 mod merge;
 pub use merge::merge_entries;
+
+/// Shared candidate receipt contract for agent and client consumers.
+pub fn write_decision_actions() -> &'static [&'static str] {
+    &[
+        "① duplicate (bool)：两文同一事实且无新增细节？成立时 merge-ids 合并；先查子孙、先备份。",
+        "② contradiction (bool)：同时点上互斥？成立时合并，以新者为准并留弃因。",
+        "③ obsolete (bool)：新文明确取代旧文？成立时 update 旧条，尾注取代关系，不删旧文。",
+        "④ linkable (bool)：相连有助日后召回？成立时用 --parent 挂因果。",
+        "⑤ representation (keep_separate|merge|promote|uncertain)：该分开、合并、升格还是存疑？各留／合写综合版／重复事件升格为规律条／存疑缓办。",
+        "逐问回答后择一执行：update ＞ merge ＞ parent ＞ force；候选回执不表示已写入。",
+    ]
+}
 mod related;
 pub use related::{store_related, remap_relations};
 
