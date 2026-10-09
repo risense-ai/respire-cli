@@ -123,7 +123,7 @@ fn wb_ref_md(entity: &str) -> String {
     format!(
         r#"## Respire memory workflow
 
-首工具 recall 后、其他工作前，读取本轮完整规则：`{entity}`。摘要不替代全文；只读禁止写入，暂停模式禁止查存；查存失败明确报告，不得绕过用户授权或服务权限。
+Read the complete policy before each round: `{entity}`. 每回合首工具 recall 后、其他工作前读取该全文。摘要不替代全文；只读禁止写入，暂停模式禁止查存；查存失败明确报告，不得绕过用户授权或服务权限。
 
 **三行铁锚**（上下文愈长、工具输出愈多，愈须回读）：**答前必查 ｜ 收尾必存 ｜ 遇障先翻忆**。
 
