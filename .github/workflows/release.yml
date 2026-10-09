@@ -23,6 +23,10 @@ on:
         description: Publish after build, CI, native upgrades and development regressions pass
         default: false
         type: boolean
+      dev_version:
+        description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
+        default: ''
+        type: string
 
       reuse_dev12_validation:
         description: DEV13 only; rebuild versioned artifacts and reuse successful DEV12 regressions
@@ -119,6 +123,7 @@ jobs:
           RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
           REUSE_VALIDATION: ${{ inputs.reuse_dev12_validation }}
           PRIOR_VERIFIED: ${{ steps.prior.outputs.prior_verified }}
+          RELEASE_DEV_VERSION: ${{ inputs.dev_version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
@@ -130,6 +135,7 @@ jobs:
           const tagEvent=process.env.RELEASE_REF.startsWith('refs/tags/')||/^v\d+\./.test(ref);
           let channel,version;
           if(tagEvent){
+            if(process.env.RELEASE_DEV_VERSION) throw new Error('An exact DEV version cannot be used for a stable release');
             if(!/^v\d+\.\d+\.\d+$/.test(ref)) throw new Error('Stable publication accepts only vX.Y.Z tags, never dev tags');
             version=ref.slice(1);channel='latest';
             if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
@@ -144,8 +150,16 @@ jobs:
              version!=='1.0.11-dev.13'||channel!=='dev'||sha!=='d8314480e10a27767544f781083e35c8e85657f0')) throw new Error('Approved regression reuse applies only to DEV13');
           // Drafts reserve DEV numbers; only planning/publication hold this lock.
           if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true'){
-            cp.execFileSync('gh',['release','create',`v${version}`,'--draft','--prerelease',
-              '--target',sha,'--title',`v${version}`,'--notes','Build and regression results pending.'],{stdio:'inherit'});
+            const releases=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`,'--paginate','--slurp'],{encoding:'utf8'})).flat();
+            const reserved=releases.find(release=>release.tag_name===`v${version}`);
+            if(reserved){
+              if(!process.env.RELEASE_DEV_VERSION||!reserved.draft||!reserved.prerelease||reserved.assets.length!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
+              cp.execFileSync('gh',['release','edit',`v${version}`,'--target',sha,
+                '--title',`v${version}`,'--notes','Build and regression results pending.'],{stdio:'inherit'});
+            }else{
+              cp.execFileSync('gh',['release','create',`v${version}`,'--draft','--prerelease',
+                '--target',sha,'--title',`v${version}`,'--notes','Build and regression results pending.'],{stdio:'inherit'});
+            }
           }
           fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\nreuse_validation=${process.env.REUSE_VALIDATION==='true'&&process.env.PRIOR_VERIFIED==='true'}\n`);
           NODE

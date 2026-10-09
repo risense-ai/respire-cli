@@ -56,6 +56,20 @@ const packages = await Promise.all([manifest.npmScope, ...manifest.targets.map(t
   }
   return metadata;
 }));
+const requested = process.env.RELEASE_DEV_VERSION;
+if (requested) {
+  const parts = parse(requested, true);
+  if (!new RegExp(`^${integer}\\.${integer}\\.${integer}-dev\\.${integer}$`).test(requested) || compare(parts, target) !== 0) {
+    throw new Error('Requested DEV version must match the CLI manifest base version');
+  }
+  if (tags.includes(`v${requested}`) || packages.some(metadata => metadata && Object.hasOwn(metadata.versions, requested))) {
+    throw new Error('Requested DEV version already has a tag or published npm package');
+  }
+  const reserved = releases.find(release => release.tag_name === `v${requested}`);
+  if (reserved && (!reserved.draft || !reserved.prerelease)) throw new Error('Requested DEV version is already public or is not a DEV draft');
+  console.log(requested);
+  process.exit(0);
+}
 let next = target;
 if (stable && compare(target, stable) <= 0) {
   if (!Number.isSafeInteger(stable[2] + 1)) throw new Error('Stable patch version exhausted');
