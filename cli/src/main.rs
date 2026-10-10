@@ -2316,10 +2316,11 @@ fn run_bench_run(
 
     let session = build_session()?;
     let store = build_local()?;
-    let candidates = scoped_candidates(&store)?;
+    let (candidates, index_pending, resident) = respire::resident::recall_catalog(&session, &store)?;
+    let _resident_scope = resident.enter();
     let active_ids: std::collections::HashSet<String> =
         candidates.iter().map(|m| m.id.clone()).collect();
-    let embedder = BgeEmbedder::load_model(&build_local()?.retrieval_model()?)?;
+    let embedder = BgeEmbedder::load_model(&store.retrieval_model()?)?;
 
     // Expected-id check: warn when not in the active store (deleted/merged) - those cases fail forever
     let mut missing: Vec<String> = Vec::new();
@@ -2373,6 +2374,7 @@ fn run_bench_run(
             .into(),
     );
     params.insert("selector_fallbacks".into(), selector_fallbacks.to_string());
+    params.insert("index_pending".into(), index_pending.to_string());
     params.insert("retrieval_policy".into(), "Core-owned".into());
     if !latency.is_empty() {
         params.insert("p50_us".into(), latency[latency.len() / 2].to_string());
@@ -8490,6 +8492,46 @@ mod capture_tests {
         assert_eq!(super::command_failure(&error).1, 1);
         assert_eq!(std::fs::read(&existing)?, b"preserve existing backup");
         assert!(!dir.path().join("absent").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn bench_runs_on_pending_resident_snapshot_without_writing_index() -> anyhow::Result<()> {
+        use respire::MemoryTransport;
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let _guard = EnvGuard { prev: respire::env::var("RSRS_DATA_DIR").ok() };
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        crate::rpc::set_worker_active(true);
+        respire::service::keygen()?;
+        let keys = super::build_session()?;
+        let store = super::build_local()?;
+        let entry: respire::MemoryEntry = serde_json::from_value(serde_json::json!({
+            "id":"pending-bench","kind":"Context","tags":[],"title":"benchmark pending needle",
+            "content":"benchmark pending needle","user":"test","computer":"test","project":"",
+            "created_at":"2026-10-10T00:00:00Z","updated_at":"2026-10-10T00:00:00Z",
+            "emotion":0,"parent_id":"","importance":"important"
+        }))?;
+        let stored = {
+            let _defer = respire::core_sdk::defer_indexing();
+            respire::MemoryEngine::seal(&keys, &respire::core_sdk::search::HashingEmbedder::new(1024), &entry, "test")?
+        };
+        store.put_checked(&stored, None)?;
+        let eval = dir.path().join("eval.jsonl");
+        let output = dir.path().join("bench.json");
+        std::fs::write(&eval, r#"{"query":"benchmark pending needle","expect":["pending-bench"]}"#)?;
+        let captured = capture_run(vec!["--json".into(), "bench".into(), "run".into(),
+            eval.to_string_lossy().into_owned(), "--save".into(), output.to_string_lossy().into_owned()]);
+        assert_eq!(captured.exit, 0, "{:?}", captured.envelope);
+        let report: super::bench::BenchReport = serde_json::from_slice(&std::fs::read(output)?)?;
+        assert_eq!(report.params.get("index_pending").map(String::as_str), Some("1"));
+        assert_eq!(report.metrics.hit1, 1.0);
+        assert_eq!(report.n_entries, 1);
+        let current = store.all(false)?;
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].ciphertext, stored.ciphertext);
+        assert!(current[0].local_artifact.is_empty());
+        respire::resident::clear()?;
         Ok(())
     }
 
