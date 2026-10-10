@@ -6,6 +6,13 @@ pub fn embedded() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+pub fn clap_version() -> &'static str {
+    #[cfg(feature = "native-fault-tests")]
+    { concat!(env!("CARGO_PKG_VERSION"), " (native fault fixture; not releasable)") }
+    #[cfg(not(feature = "native-fault-tests"))]
+    { embedded() }
+}
+
 pub fn line() -> String {
     let line = format!("rsrs {}", embedded());
     #[cfg(feature = "native-fault-tests")]

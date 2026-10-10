@@ -484,7 +484,7 @@ fn candidates_count_normal(all: &[respire::StoredMemory]) -> usize {
 #[derive(Parser)]
 #[command(
     name = "rsrs",
-    version,
+    version = crate::app_version::clap_version(),
     about = "跨设备跨软件统一 AI 记忆系统（local-first）",
     after_help = "Sandbox: use --client-only or RSRS_CLIENT_ONLY=1 to connect to the host HTTP runtime without managing its lifecycle."
 )]

@@ -50,8 +50,10 @@ def main():
         for library in (target / 'release').iterdir():
             if library.is_file() and library.suffix in ('.dll', '.so', '.dylib'):
                 shutil.copy2(library, output / library.name)
-        value = json.loads(subprocess.check_output([str(output / executable), '--client-only', '--version', '--json']))
+        value = json.loads(subprocess.check_output([str(output / executable), '--client-only', '--json', 'v']))
         assert value['summary']['test_only'] == 'native-fault-tests'
+        version = subprocess.check_output([str(output / executable), '--client-only', '--version'], text=True)
+        assert 'native fault fixture; not releasable' in version
         (output / 'build-receipt.json').write_text(json.dumps({
             'test_only': 'native-fault-tests', 'sdk_source': manifest['source_revision'],
             'binary_sha256': hashlib.sha256((output / executable).read_bytes()).hexdigest(),
