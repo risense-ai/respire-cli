@@ -88,8 +88,12 @@ use the same data flow and diagnostics.
 | `reembed` | Repair missing/outdated data for the current model |
 
 When a usable account has an invalid or incomplete index, the runtime prepares M3
-and rebuilds derived data in the background. Retrieval reports `index_pending`
-until the source-checked index is ready; no manual rebuild confirmation is needed.
+and rebuilds derived data in the background. Recall continues using entries with
+current, source-checked index artifacts while newly synchronized or changed entries
+await indexing. Its JSON summary reports `index_pending` and `indexed_candidates`;
+pending entries join subsequent queries after background indexing completes.
+A nonempty library with no indexed entries still reports `index_pending` until an
+index is available; no manual rebuild confirmation is needed.
 The TUI displays progress and download errors through the model-operation channel.
 Rebuilding checkpoints completed entries and resumes pending work after restart.
 Encrypted memories, account keys and sync state are preserved. Explicit invalid
@@ -104,8 +108,8 @@ active index; deleted content is excluded from retrieval.
 memories. Binary updates do not rewrite agent files; run `rsrs inject` after prompt changes.
 
 New profiles use M3. Existing legacy metadata does not select the retired model.
-Incomplete M3 generations remain resumable; semantic retrieval requires a complete
-source-checked M3 index. The runtime continues long migrations in the background;
+Incomplete M3 generations remain resumable; semantic retrieval uses only valid,
+source-checked M3 artifacts. The runtime continues long migrations in the background;
 `rsrs reembed` remains available for an explicit repair. Existing M3
 artifacts retain their generation identity. Content, timestamps and sync flags
 are unchanged; retired weight files are not deleted automatically.

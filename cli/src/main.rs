@@ -6859,8 +6859,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let recall_generation = rpc::sync_generation();
             let session = build_session()?;
             let store = build_local()?;
+            let (candidates, index_pending) = respire::service::recall_candidates(&store)?;
             if trace {
-                let preview = candidates_preview(&store)?;
+                let preview = &candidates;
                 let primary = candidates_count_primary(&preview);
                 let normals = candidates_count_normal(&preview);
                 eprintln!(
@@ -6879,7 +6880,6 @@ fn run_local_inner(args: Cli) -> Result<()> {
             if let Some(p) = &project {
                 q = q.of_project(p);
             }
-            let candidates = scoped_candidates(&store)?;
             // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
             let (ranked, recall_mode, selection_fallback, routing) = match mode {
                 Some(mode) => {
@@ -6932,7 +6932,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     "recall",
                     OutputStatus::Skip,
                     serde_json::json!({"query":query,"count":0,"recall_mode":recall_mode,
-                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing}),
+                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing,
+                        "index_pending":index_pending,"indexed_candidates":candidates.len()}),
                     vec![OutputItem::new("results", OutputStatus::Skip, "0")],
                 ))?;
                 return Ok(());
@@ -6962,7 +6963,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 "recall",
                 OutputStatus::Ok,
                 serde_json::json!({"query":query,"count":ranked.len(),"limit":limit,"project":project,
-                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing}),
+                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing,
+                    "index_pending":index_pending,"indexed_candidates":candidates.len()}),
                 items,
             );
             result.related = associations.related;
