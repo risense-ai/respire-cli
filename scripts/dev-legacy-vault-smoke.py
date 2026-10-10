@@ -97,7 +97,7 @@ class Smoke:
         self.report = {"status": "running", "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"), "version": args.version,
             "binary_sha256": args.binary_sha256, "target": UPSTREAM, "cases": {},
-            "passed": False, "required_cases": list(REQUIRED),
+            "passed": False, "required_cases": list(("model_cpu_real", REQUIRED[2]) if args.auth_salt_only else REQUIRED),
             "dependency": "cryptography==46.0.3", "cloud_cleanup": {"passed": False, "events": [], "remaining_users": []}}
 
     def env(self, name, user=None):
@@ -268,6 +268,30 @@ class Smoke:
         elif version == 3:
             session["secret_key"] = secret
         self.write_session(env, session)
+        # Store a genuine legacy authentication hash on the real DEV server.
+        # This is independent of the encrypted-vault format and must not be
+        # inferred from a successful registration by the current CLI.
+        old_auth_salt = hkdf(user.lower().encode(), None, b"onememory:auth-salt:v1", 16).hex()
+        old_pass_hash = hashlib.pbkdf2_hmac("sha256", password.encode(), bytes.fromhex(old_auth_salt), 100000).hex()
+        self.diagnostic_secrets.add(old_pass_hash)
+        require(self.api(account, "POST", "/api/self/password", {"salt": old_auth_salt, "pass_hash": old_pass_hash}).get("updated") is True,
+            "legacy_authentication_not_stored")
+        old_login_env = self.env(f"v{version}-old-auth-login", user)
+        recovery = {"user": user}
+        if version == 1:
+            recovery["secret"] = secret
+        elif version == 3:
+            recovery["secret_key"] = secret
+        self.write_session(old_login_env, recovery)
+        self.cli(old_login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
+            "--pass=" + password, *([] if version == 1 else ["--super=" + original_super]))
+        old_login = self.session(old_login_env)
+        self.diagnostic_secrets.add(old_login.get("token", ""))
+        require(old_login.get("user") == user and bool(old_login.get("token"))
+            and self.api(dict(account, token=old_login["token"]), "GET", "/api/self").get("user") == user,
+            "real_legacy_auth_login_failed")
+        require(self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == old_auth_salt,
+            "ordinary_login_changed_auth_salt")
         source_config_path = source / "client.json"
         source_config = json.loads(source_config_path.read_text()) if source_config_path.exists() else {}
         source_config["data_dir"] = str(source)
@@ -309,6 +333,12 @@ class Smoke:
         require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
         committed = self.session(upgraded_env)
         account["token"] = committed["token"]
+        new_auth_salt = PREFIX + hkdf(user.lower().encode(), None, b"rsrs:auth-salt:v1", 16).hex()
+        require(self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == new_auth_salt
+            and committed.get("auth_salt") == new_auth_salt, "authentication_salt_not_migrated")
+        rejected, _ = self.request(account, "POST", "/login", {"user": user, "pass_hash": old_pass_hash,
+            "device_name": "legacy-auth-regression"})
+        require(rejected == 401, "old_authentication_hash_still_accepted")
         if version == 1:
             self.keys.track_created_login(committed, user, None, password)
             require(committed.get("secret") == secret, "cloud_migration_changed_account_secret")
@@ -332,6 +362,10 @@ class Smoke:
         self.cli(final_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user,
             "--pass=" + password, *([] if version == 1 else ["--super=" + original_super]))
         recovered_session = self.session(final_env)
+        require(recovered_session.get("user") == user and bool(recovered_session.get("token"))
+            and self.api(dict(account, token=recovered_session["token"]), "GET", "/api/self").get("user") == user
+            and self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == new_auth_salt,
+            "fresh_login_did_not_use_new_auth_salt")
         account["token"] = recovered_session["token"]
         if version == 1:
             self.keys.track_created_login(recovered_session, user, None, password)
@@ -340,6 +374,16 @@ class Smoke:
         self.save()
         self.cli(final_env, "sync")
         self.read_entry(final_env, memory_id, plaintext)
+        if self.args.auth_salt_only:
+            new_title = "Post authentication migration write"
+            new_plaintext = "Original credentials still permit new encrypted memory writes after authentication salt migration."
+            self.cli(final_env, "remember", new_plaintext, "--title", new_title, "--force", "--importance", "important")
+            self.cli(final_env, "sync")
+            with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+                written = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (new_title,)).fetchall()
+            require(len(written) == 1 and written[0][1].startswith(PREFIX), "post_migration_write_missing")
+            self.read_entry(final_env, written[0][0], new_plaintext)
+            require(new_plaintext.encode() in decrypt_content(urk, written[0][1], written[0][2]), "post_migration_write_wrong_key")
         with sqlite3.connect((Path(final_env["RSRS_DATA_DIR"]) / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
             require(db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone() == converted,
                 "new_device_ciphertext_differs")
@@ -374,6 +418,13 @@ class Smoke:
             headless_password_login_verified=version == 1,
             headless_password_login_scope="matching_environment_commit_and_followup_read; authorization_fallback_and_absent_native_store_not_tested" if version == 1 else None,
             recovery_factor="login_password_and_account_secret" if version == 1 else "original_super")
+        self.report["cases"][REQUIRED[version]]["authentication"] = {
+            "real_server_legacy_salt_login": True, "ordinary_login_preserved_legacy_salt": True,
+            "explicit_migration_changed_to_rsrs_salt": True, "old_hash_rejected": True,
+            "fresh_cli_login_original_password": True, "fresh_cli_login_new_salt": True}
+        if self.args.auth_salt_only:
+            self.report["cases"][REQUIRED[version]]["authentication"]["new_memory_write_sync_restart_read"] = True
+        self.save()
 
     def cleanup(self):
         cleanup = self.report["cloud_cleanup"]
@@ -420,7 +471,7 @@ class Smoke:
         require(probe.get("ready") is True and probe.get("dimensions") == 1024
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=1024, model_hashes=MODEL_HASHES)
-        for version in (1, 2, 3):
+        for version in ((2,) if self.args.auth_salt_only else (1, 2, 3)):
             self.run_version(version)
         self.report["status"] = "passed"
 
@@ -429,6 +480,7 @@ def main():
     require(os.environ.get("GITHUB_ACTIONS") == "true", "github_actions_required")
     require(os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted" and sys.platform.startswith("linux"), "disposable_linux_hosted_runner_required")
     parser = argparse.ArgumentParser()
+    parser.add_argument("--auth-salt-only", action="store_true", help="Run the focused real DEV authentication migration case")
     for name in ("binary", "root"):
         parser.add_argument("--" + name, type=Path, required=True)
     for name in ("binary-sha256", "source-sha", "version"):
@@ -454,14 +506,16 @@ def main():
                 smoke.report["keyring_cleanup"] = smoke.keys.cleanup()
             except Exception as error:
                 smoke.report["keyring_cleanup"] = {"passed": False, "failure_code": type(error).__name__}
-        smoke.report["missing_cases"] = [case for case in REQUIRED if case not in smoke.report["cases"]]
+        required = smoke.report["required_cases"]
+        smoke.report["scope"] = "real_auth_salt_migration" if args.auth_salt_only else "legacy_vault"
+        smoke.report["missing_cases"] = [case for case in required if case not in smoke.report["cases"]]
         if not smoke.report["cloud_cleanup"]["passed"]:
             smoke.report["status"] = "failed"
         smoke.report["passed"] = smoke.report["status"] == "passed" and not smoke.report["missing_cases"] \
             and smoke.report["cloud_cleanup"]["passed"] and smoke.report.get("keyring_cleanup", {}).get("passed") is True
         smoke.save()
     print(json.dumps({"status": smoke.report["status"], "passed": len(smoke.report["cases"]),
-        "required": len(REQUIRED), "report": str(smoke.root / "legacy-vault-coverage.json")}))
+        "required": len(required), "report": str(smoke.root / "legacy-vault-coverage.json")}))
     return 0 if smoke.report["passed"] else 1
 
 
