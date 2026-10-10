@@ -142,11 +142,76 @@ background embeddings. Background artifact publication also checks the source
 ciphertext, so concurrent edits cannot receive an obsolete artifact. Complex
 multi-record operations retain the existing exclusive host gate.
 
-The runtime admits up to 16 ordinary jobs and reserves two additional show/list/status
+The runtime follows the operating system's available CPU parallelism for ordinary jobs and reserves two additional show/list/status
 slots. Reads use WAL snapshots without an application writer gate. Healthy host
 clients reuse the validated runtime before taking the lifecycle gate; only startup,
 replacement and recovery serialize through that gate. SQLite still permits one writer.
 Health and CLI progress report foreground/background activity and queues separately.
+
+`RSRS_RPC_PARALLELISM` or `config --rpc-parallelism` may reduce ordinary concurrency;
+values above available CPU parallelism are clamped. `/api/health` reports both
+`rpc.available_parallelism` and `rpc.effective_parallelism`. This does not create
+additional model sessions: foreground and background inference each remain serial.
+
+Queued HTTP and pipe commands await their result in asynchronous connection
+tasks. Completion callbacks only hand off in-memory results; neither command
+workers nor the dispatcher write sockets or wait for preceding HTTP responses.
+Incomplete bodies and stalled writes have transport deadlines independent of
+command execution. Ordinary queue length does
+not reject a command. Execution slots still follow available CPUs; model sessions
+and serialized write transactions remain unchanged.
+`RSRS_RPC_QUEUE_WAIT_SECS` bounds queue waiting (default 120, range 1–3600).
+RPC callers can shorten this wait using the optional `queue_wait_ms` field.
+Expired commands that have not started are removed and cannot later commit a write.
+Once execution starts, the server keeps its actual result; a queue deadline is
+not reported as cancellation of an executing write. The HTTP client's existing
+120-second deadline can still precede that result. Such transport failures return
+`request_outcome_unknown` with the original request ID, and never replay the write.
+Inspect it with an RPC request such as
+`{"v":1,"id":"inspection-id","method":"runtime.result","args":["original-request-id"]}`.
+`pending` means the request is queued or executing; `completed` includes its
+original response. `unknown` is not proof that the write did not commit: receipts
+cover the last 64 completed requests in the current runtime and do not survive
+restart. Concurrent reuse of an in-flight request ID is rejected rather than
+executed again; this is not durable exactly-once execution.
+Health and stop HTTP endpoints remain outside ordinary command admission.
+Manual sync captures its outgoing boundary in the existing sync worker under the
+write gate, with a generation check; waiting for this snapshot never occupies the
+shared dispatcher or a network executor. An expired sync cannot execute when the
+gate later becomes available.
+The health response includes the last
+1024 queue/command timing samples in microseconds; command time ends at the
+in-memory result handoff and excludes asynchronous socket delivery. It does not
+separately measure native inference or storage.
+
+The resident host holds the LibraryLock and owns SQLite commits. It sends Core
+business requests over private inherited pipes to one shared worker process;
+the worker reuses the foreground and background native sessions. Transport
+credentials remain in host callbacks, and the child receives only OS loader
+paths and local inference settings. It opens no network listener or memory
+database. `--client-only` and `--no-autostart` do not own or recover workers.
+
+The host observes native watchdog status independently of command execution.
+If a cancelled native call remains unresponsive for five more seconds, or worker
+heartbeats stop for ten seconds, it fails pending Core calls without replay,
+terminates the owned child and confirms exit before permitting a replacement.
+Each complete Core call also has a 365-second ceiling, covering the existing
+load, native queue and execution budgets plus grace, even when an abnormal call
+never reaches Run. Running SQLite writes remain owned by the host and return
+their actual commit result.
+The next request rebuilds its authorized resident view from the host store and
+loads the model once in the replacement process. Old generation replies and
+leases cannot be used by the replacement. The native execution watchdog retains
+its SDK timeout; this is recovery after cancellation, not a faster native model.
+If termination cannot be confirmed, replacement is prohibited; health/control
+remain available and the host retains its library lock during shutdown.
+
+`native-fault-tests` is a non-default fixture feature. Its explicitly marked SDK
+can inject holds at the real Run boundary with a two-second watchdog. The fixture
+also shortens the complete Core call ceiling to ten seconds. SDK promotion,
+release staging and the exact binary version gate reject fixture
+packages. Fault injection validates containment and recovery; it does not prove
+that a real ORT call has the same defect.
 
 ```mermaid
 flowchart TD

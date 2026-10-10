@@ -6,8 +6,18 @@ pub fn embedded() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
+pub fn clap_version() -> &'static str {
+    #[cfg(feature = "native-fault-tests")]
+    { concat!(env!("CARGO_PKG_VERSION"), " (native fault fixture; not releasable)") }
+    #[cfg(not(feature = "native-fault-tests"))]
+    { embedded() }
+}
+
 pub fn line() -> String {
-    format!("rsrs {}", embedded())
+    let line = format!("rsrs {}", embedded());
+    #[cfg(feature = "native-fault-tests")]
+    let line = format!("{line} (native fault fixture; not releasable)");
+    line
 }
 
 pub fn emit(json: bool) -> anyhow::Result<()> {
@@ -23,6 +33,8 @@ pub fn emit(json: bool) -> anyhow::Result<()> {
             )],
         );
         envelope.details = serde_json::json!({"bin": embedded()});
+        #[cfg(feature = "native-fault-tests")]
+        { envelope.summary["test_only"] = serde_json::json!("native-fault-tests"); }
         println!("{}", envelope.render(true)?);
     } else {
         println!("{}", line());

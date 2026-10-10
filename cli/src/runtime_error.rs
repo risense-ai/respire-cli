@@ -8,6 +8,7 @@ pub enum RuntimeError {
     TokenUnreadable(String),
     Unauthorized,
     Transport(String),
+    OutcomeUnknown { request_id: String, detail: String },
 }
 
 impl fmt::Display for RuntimeError {
@@ -17,6 +18,7 @@ impl fmt::Display for RuntimeError {
             Self::TokenUnreadable(detail) => write!(f, "runtime_token_unreadable: {detail}; have the host provide RPC authentication"),
             Self::Unauthorized => write!(f, "runtime_unauthorized: HTTP runtime rejected authentication; legacy loopback runtimes require their existing RSRS_RPC_TOKEN or runtime token file, and non-loopback clients need a valid token"),
             Self::Transport(detail) => write!(f, "runtime_transport: {detail}; check sandbox access to the host HTTP runtime"),
+            Self::OutcomeUnknown { request_id, detail } => write!(f, "request_outcome_unknown: request_id={request_id}; {detail}; query runtime.result with this ID before any retry; the command was not replayed"),
         }
     }
 }

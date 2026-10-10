@@ -8,6 +8,9 @@ license-file = "../../LICENSE"
 repository = "https://github.com/risense-ai/respire-cli"
 publish = false
 
+[features]
+native-fault-tests = ["respire_core_sdk/native-fault-tests"]
+
 [dependencies]
 crossterm = "0.28"
 rpassword = "7"

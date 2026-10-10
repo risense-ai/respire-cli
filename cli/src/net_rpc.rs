@@ -310,6 +310,10 @@ pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
 }
 
 pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
+    rpc_method_with_timeout(method, args, None)
+}
+
+pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_timeout: Option<Duration>) -> Result<Value> {
     if method != "cli.progress" { check_connection()?; }
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
@@ -326,7 +330,9 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
         .filter(|s| !s.starts_with('-'))
         .take(2)
         .collect();
-    let timeout = if method == "cli.progress" {
+    let timeout = if let Some(timeout) = test_timeout {
+        timeout
+    } else if method == "cli.progress" {
         Duration::from_secs(1)
     } else if method == "model.control" {
         Duration::from_secs(3)
@@ -343,8 +349,22 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     };
     let resp = send_loopback(agent().post(&url).timeout(timeout), |request| {
         request.send_json(body.clone())
+    }).map_err(|error| {
+        if method == "cli.exec" && matches!(error.downcast_ref::<RuntimeError>(), Some(RuntimeError::Transport(_))) {
+            RuntimeError::OutcomeUnknown {
+                request_id: body["id"].as_str().unwrap_or_default().to_owned(),
+                detail: error.to_string(),
+            }.into()
+        } else { error }
     })?;
-    let parsed: Value = resp.into_json().context("runtime rpc is not JSON")?;
+    let parsed: Value = resp.into_json().map_err(|error| {
+        if method == "cli.exec" {
+            anyhow::Error::from(RuntimeError::OutcomeUnknown {
+                request_id: body["id"].as_str().unwrap_or_default().to_owned(),
+                detail: format!("runtime reply unavailable: {error}"),
+            })
+        } else { anyhow::anyhow!("runtime rpc is not JSON: {error}") }
+    })?;
     Ok(parsed)
 }
 
@@ -495,6 +515,52 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let directory = tempfile::tempdir()?;
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow::anyhow!("{error}"))?;
+        let port = server.server_addr().to_ip().ok_or_else(|| anyhow::anyhow!("missing test address"))?.port();
+        let previous: Vec<_> = ["RSRS_RPC_PORT", "RSRS_DATA_DIR", "RSRS_RPC_TOKEN"].into_iter().map(|key| (key, std::env::var_os(key))).collect();
+        std::env::set_var("RSRS_RPC_PORT", port.to_string());
+        std::env::set_var("RSRS_DATA_DIR", directory.path());
+        std::env::remove_var("RSRS_RPC_TOKEN");
+        let actor = std::thread::spawn(move || -> Result<String> {
+            let mut request = server.recv_timeout(Duration::from_secs(2))?.ok_or_else(|| anyhow::anyhow!("write never arrived"))?;
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body)?;
+            let write: Value = serde_json::from_str(&body)?;
+            anyhow::ensure!(write["method"] == "cli.exec", "unexpected first request");
+            let id = write["id"].as_str().ok_or_else(|| anyhow::anyhow!("missing write ID"))?.to_owned();
+            // Simulated committed write returns after the shortened client deadline.
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = request.respond(tiny_http::Response::from_string(json!({"v":1,"id":id,"ok":true}).to_string()));
+            let mut inspect = server.recv_timeout(Duration::from_secs(2))?.ok_or_else(|| anyhow::anyhow!("result inspection never arrived"))?;
+            body.clear();
+            inspect.as_reader().read_to_string(&mut body)?;
+            let query: Value = serde_json::from_str(&body)?;
+            anyhow::ensure!(query["method"] == "runtime.result" && query["args"][0] == id, "client replayed or inspected the wrong write");
+            inspect.respond(tiny_http::Response::from_string(json!({"v":1,"id":query["id"],"ok":true,"envelope":{"summary":{"state":"completed","request_id":id,"response":{"ok":true,"committed":true}}}}).to_string()))?;
+            Ok(id)
+        });
+        let result = (|| -> Result<()> {
+            let error = rpc_method_with_timeout("cli.exec", vec!["remember".into(), "synthetic write".into()], Some(Duration::from_millis(50))).err().ok_or_else(|| anyhow::anyhow!("delayed write unexpectedly completed within deadline"))?;
+            let id = match error.downcast_ref::<RuntimeError>() {
+                Some(RuntimeError::OutcomeUnknown { request_id, .. }) => request_id.clone(),
+                _ => anyhow::bail!("ambiguous transport failure was not marked outcome_unknown: {error}"),
+            };
+            let inspected = rpc_method_with_timeout("runtime.result", vec![id.clone()], Some(Duration::from_secs(2)))?;
+            anyhow::ensure!(inspected["envelope"]["summary"]["state"] == "completed", "inspection failed: {inspected}");
+            let seen = actor.join().map_err(|_| anyhow::anyhow!("test transport actor panicked"))??;
+            anyhow::ensure!(seen == id, "request ID changed");
+            Ok(())
+        })();
+        for (key, value) in previous {
+            match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+        }
+        result
+    }
 
     #[cfg(unix)]
     #[test]

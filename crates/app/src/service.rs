@@ -1501,7 +1501,7 @@ pub fn set_cure_auto(on: bool) -> Result<()> {
     write_client_config(&data)
 }
 
-/// Saved RPC compute worker cap (`client.json` `rpc_parallelism`), following CPU count up to 16.
+/// Saved RPC compute worker limit (`client.json` `rpc_parallelism`), bounded by available CPU parallelism.
 /// Two extra lightweight read slots remain available. `0` is stored as absent.
 /// The resident runtime reads this only at start.
 pub fn rpc_parallelism_setting() -> Option<usize> {

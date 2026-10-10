@@ -18,6 +18,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
+mod admission;
 mod app_version;
 mod bench;
 mod classify;
@@ -26,6 +27,7 @@ mod i18n;
 mod login;
 mod mcp;
 mod net_rpc;
+mod network;
 mod output;
 mod progress;
 mod rpc;
@@ -317,13 +319,20 @@ fn output_emitted() -> bool {
 
 fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
+    let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
+        Some(runtime_error::RuntimeError::OutcomeUnknown { request_id, .. }) => Some(request_id),
+        _ => None,
+    };
     let mut envelope = ResultEnvelope::new(
         "cli", OutputStatus::Fail,
-        serde_json::json!({"reason": if input { "invalid_input" } else { "runtime_error" }}),
+        serde_json::json!({"reason": if unknown.is_some() { "request_outcome_unknown" } else if input { "invalid_input" } else { "runtime_error" }}),
         Vec::new(),
     );
     envelope.errors.push(format!("{error:#}"));
     envelope.details = serde_json::json!({"error_type": if input { "user" } else { "runtime" }});
+    if let Some(id) = unknown {
+        envelope.details = serde_json::json!({"error_type":"outcome_unknown","request_id":id,"replayed":false,"result_method":"runtime.result"});
+    }
     (envelope, if input { 2 } else { 1 })
 }
 
@@ -475,7 +484,7 @@ fn candidates_count_normal(all: &[respire::StoredMemory]) -> usize {
 #[derive(Parser)]
 #[command(
     name = "rsrs",
-    version,
+    version = crate::app_version::clap_version(),
     about = "跨设备跨软件统一 AI 记忆系统（local-first）",
     after_help = "Sandbox: use --client-only or RSRS_CLIENT_ONLY=1 to connect to the host HTTP runtime without managing its lifecycle."
 )]
@@ -988,7 +997,7 @@ enum Command {
         /// Set periodic auto-cure
         #[arg(long)]
         cure_auto: Option<bool>,
-        /// Max concurrent runtime read jobs. 0 follows CPU count (at most 4). Writes queue. Applies after `rsrs --runtime-internal --stop`.
+        /// Max concurrent ordinary runtime jobs. 0 follows available CPU parallelism; explicit values cannot exceed it. Applies after runtime restart.
         #[arg(long)]
         rpc_parallelism: Option<u32>,
     },
@@ -5325,6 +5334,12 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
+        return match respire_app::core_sdk::worker::run() {
+            Ok(()) => 0,
+            Err(error) => { eprintln!("Core worker stopped: {error:#}"); 1 }
+        };
+    }
     set_json_mode(std::env::args_os().any(|arg| arg == "--json")
         || respire::env::var("RSRS_JSON").is_ok_and(|value| value == "1" || value == "true"));
     if std::env::args_os().any(|arg| arg == "--client-only") {

@@ -376,3 +376,64 @@ fn stop_closes_listen_port() -> Result<(), String> {
     }
     Err("port still open after stop".into())
 }
+
+#[test]
+fn incomplete_control_body_does_not_block_health_rpc_or_stop() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    let mut rt = start_internal_runtime()?;
+    let mut incomplete = std::net::TcpStream::connect(("127.0.0.1", rt.port))?;
+    write!(incomplete, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Length: 4096\r\n\r\nx", rt.port)?;
+    thread::sleep(Duration::from_millis(100));
+    let base = format!("http://127.0.0.1:{}", rt.port);
+    let health: serde_json::Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(2)).call()?.into_json()?;
+    assert_eq!(health["pid"], rt.child.id());
+    let reply: serde_json::Value = ureq::post(&format!("{base}/api/rpc")).timeout(Duration::from_secs(2))
+        .send_json(serde_json::json!({"v":1,"id":"incomplete-body-next","method":"cli.exec","args":["--json","status"]}))?.into_json()?;
+    assert_eq!(reply["ok"], true, "{reply}");
+    ureq::post(&format!("{base}/api/runtime/stop")).timeout(Duration::from_secs(2)).send_string("{}")?;
+    let until = Instant::now() + Duration::from_secs(12);
+    while rt.child.try_wait()?.is_none() {
+        assert!(Instant::now() < until, "owned runtime did not stop with incomplete peer connected");
+        thread::sleep(Duration::from_millis(50));
+    }
+    Ok(())
+}
+
+#[test]
+fn non_reading_peer_and_pipelined_responses_do_not_block_other_connections() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{Read, Write};
+    let rt = start_internal_runtime()?;
+    let mut stalled = std::net::TcpStream::connect(("127.0.0.1", rt.port))?;
+    stalled.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let body = serde_json::json!({"v":1,"id":"non-reading-peer","method":"x".repeat(8*1024*1024),"args":[]}).to_string();
+    write!(stalled, "POST /api/rpc HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", rt.port, body.len(), body)?;
+    // Queue a control request behind the large response on the same connection.
+    write!(stalled, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n", rt.port)?;
+    thread::sleep(Duration::from_millis(250));
+    let base = format!("http://127.0.0.1:{}", rt.port);
+    for _ in 0..3 {
+        let health: serde_json::Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(2)).call()?.into_json()?;
+        assert_eq!(health["pid"], rt.child.id());
+    }
+    let reply: serde_json::Value = ureq::post(&format!("{base}/api/rpc")).timeout(Duration::from_secs(2))
+        .send_json(serde_json::json!({"v":1,"id":"non-reading-next","method":"cli.exec","args":["--json","status"]}))?.into_json()?;
+    assert_eq!(reply["ok"], true, "{reply}");
+    drop(stalled);
+    let mut pipeline = std::net::TcpStream::connect(("127.0.0.1", rt.port))?;
+    pipeline.set_read_timeout(Some(Duration::from_secs(5)))?;
+    for (id, deadline) in [("pipeline-a", None), ("pipeline-b", Some(0u64))] {
+        let mut body = serde_json::json!({"v":1,"id":id,"method":"cli.exec","args":["--json","status"]});
+        if let Some(deadline) = deadline { body["queue_wait_ms"] = serde_json::json!(deadline); }
+        let body = body.to_string();
+        write!(pipeline, "POST /api/rpc HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}", rt.port, body.len(), body)?;
+    }
+    write!(pipeline, "GET /api/health HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", rt.port)?;
+    let mut wire = String::new();
+    pipeline.read_to_string(&mut wire)?;
+    let first = wire.find("\"id\":\"pipeline-a\"").ok_or("first pipeline reply missing")?;
+    let second = wire.find("\"id\":\"pipeline-b\"").ok_or("second pipeline reply missing")?;
+    assert!(first < second, "responses were reordered");
+    assert!(wire.contains("command was not started"), "zero-deadline pipeline write/read was executed: {wire}");
+    assert!(wire[second..].contains("\"server\":\"respire\""), "pipelined health reply missing");
+    Ok(())
+}
