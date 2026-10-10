@@ -3488,9 +3488,11 @@ mod tests {
         assert!(empty.is_empty());
         assert_eq!(pending, 0);
         let indexed = app.create(&important("indexed", "rust memory"))?;
-        let incoming = app.create(&important("incoming", "rust memory"))?;
-        let mut source = app.store.all(false)?.into_iter().find(|row| row.id == incoming.id)
-            .ok_or_else(|| anyhow!("missing fixture"))?;
+        let mut incoming = app.create(&important("incoming", "rust memory"))?;
+        incoming.updated_at = "2099-01-01T00:00:00Z".into();
+        incoming.content = "synchronized rust memory".into();
+        let mut source = MemoryEngine::seal(&app.keys,
+            &crate::memory::search::HashingEmbedder::default(), &incoming, "fixture")?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
         let (ready, pending) = recall_candidates(&app.store)?;
@@ -3513,9 +3515,10 @@ mod tests {
     fn recall_preserves_all_pending_and_corrupt_index_errors() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let app = test_app(dir.path())?;
-        let memory = app.create(&important("source", "rust memory"))?;
-        let mut source = app.store.all(false)?.into_iter().find(|row| row.id == memory.id)
-            .ok_or_else(|| anyhow!("missing fixture"))?;
+        let mut memory = app.create(&important("source", "rust memory"))?;
+        memory.updated_at = "2099-01-01T00:00:00Z".into();
+        let mut source = MemoryEngine::seal(&app.keys,
+            &crate::memory::search::HashingEmbedder::default(), &memory, "fixture")?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
         let error = recall_candidates(&app.store).err()
