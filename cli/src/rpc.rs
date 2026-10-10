@@ -36,6 +36,7 @@ static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: AtomicUsize = AtomicUsize::new(1);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
+const QUEUE_EXPIRED: &str = "request queue deadline exceeded; command was not started";
 static WRITE_TX: Mutex<Option<mpsc::SyncSender<WriteJob>>> = Mutex::new(None);
 static STATS_PENDING: AtomicUsize = AtomicUsize::new(0);
 static STATS_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
@@ -597,6 +598,11 @@ fn flight_loop() {
         };
         SYNC_RUNNING.store(true, Ordering::Release);
         if let Some((job, generation, boundary)) = manual {
+            if !job.deadline.start() {
+                let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                SYNC_RUNNING.store(false, Ordering::Release);
+                continue;
+            }
             SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
             let result = check_sync_context(generation).map(|_| crate::capture_run(job.args));
             if result.as_ref().is_ok_and(|captured| captured.exit == 0) {
@@ -707,8 +713,27 @@ pub(crate) struct RpcResponse {
 struct Job {
     args: Vec<String>,
     stop: bool,
-    reply: Sender<std::result::Result<crate::Captured, String>>,
+    reply: Reply,
     sync_context: Option<(usize, i64)>,
+    deadline: Arc<crate::admission::QueueDeadline>,
+}
+
+type CommandResult = std::result::Result<crate::Captured, String>;
+type ReplyAction = Box<dyn FnOnce(CommandResult) + Send>;
+
+/// A queued transport owns its reply without keeping a connection thread alive.
+#[derive(Clone)]
+struct Reply(Arc<Mutex<Option<ReplyAction>>>);
+impl Reply {
+    fn new(action: impl FnOnce(CommandResult) + Send + 'static) -> Self {
+        Self(Arc::new(Mutex::new(Some(Box::new(action)))))
+    }
+    fn send(&self, result: CommandResult) -> std::result::Result<(), String> {
+        let action = self.0.lock().map_err(|_| "reply lock poisoned".to_owned())?.take();
+        let action = action.ok_or_else(|| "reply already delivered".to_owned())?;
+        action(result);
+        Ok(())
+    }
 }
 
 pub fn call_from_argv() -> Result<()> {
@@ -1215,8 +1240,11 @@ fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Job>) 
 fn handle_connection(mut stream: Stream, tx: &Sender<Job>) -> Result<()> {
     let bytes = read_frame(&mut stream)?;
     let request: RpcRequest = serde_json::from_slice(&bytes)?;
-    let response = dispatch(request, tx);
-    write_frame(&mut stream, &serde_json::to_vec(&response)?)?;
+    dispatch_deferred(request, tx, move |response| {
+        let result = serde_json::to_vec(&response).map_err(anyhow::Error::from)
+            .and_then(|bytes| write_frame(&mut stream, &bytes));
+        if let Err(error) = result { eprintln!("runtime pipe reply failed: {error:#}"); }
+    });
     Ok(())
 }
 
@@ -1319,6 +1347,36 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     response
 }
 
+fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse {
+    match result {
+        Ok(captured) => RpcResponse {
+            v: PROTOCOL_V, id: request.id.clone(), ok: captured.exit == 0,
+            exit: captured.exit, bin: env!("CARGO_PKG_VERSION").to_owned(),
+            envelope: Some(captured.envelope), error: None, code: None,
+            web_url: Some(current_url()), pid: Some(std::process::id()),
+            data_dir: Some(respire::service::data_dir().display().to_string()),
+        },
+        Err(error) => error_response(request, "daemon_unavailable", &error),
+    }
+}
+
+fn dispatch_deferred(request: RpcRequest, tx: &Sender<Job>, action: impl FnOnce(RpcResponse) + Send + 'static) {
+    if request.method != "cli.exec" || request.v != PROTOCOL_V {
+        action(dispatch(request, tx));
+        return;
+    }
+    if let Some(response) = cached(&request.id) { action(response); return; }
+    let args = request.args.clone();
+    let reply = Reply::new(move |result| {
+        let response = command_response(&request, result);
+        remember(&request.id, &response);
+        action(response);
+    });
+    if let Err(error) = enqueue_job(tx, args, false, reply.clone()) {
+        let _ = reply.send(Err(error));
+    }
+}
+
 fn status_response(request: &RpcRequest) -> RpcResponse {
     RpcResponse {
         v: PROTOCOL_V,
@@ -1351,11 +1409,12 @@ fn error_response(request: &RpcRequest, code: &str, error: &str) -> RpcResponse 
     }
 }
 
-fn submit(
+fn enqueue_job(
     tx: &Sender<Job>,
     args: Vec<String>,
     stop: bool,
-) -> std::result::Result<crate::Captured, String> {
+    reply: Reply,
+) -> std::result::Result<Arc<crate::admission::QueueDeadline>, String> {
     if !stop && !respire::service::off_mode() && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
         return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
     }
@@ -1372,7 +1431,8 @@ fn submit(
             Vec::new(),
         );
         envelope.errors.push(i18n::text("busy").to_owned());
-        return Ok(crate::Captured { exit: 2, envelope });
+        reply.send(Ok(crate::Captured { exit: 2, envelope }))?;
+        return Ok(Arc::new(crate::admission::QueueDeadline::new(Duration::ZERO)));
     }
     let sync_context = if !respire::service::off_mode() && matches!(
         command_name(&args),
@@ -1391,17 +1451,32 @@ fn submit(
     } else {
         None
     };
-    let (reply_tx, reply_rx) = mpsc::channel();
+    let wait = queue_wait();
+    let deadline = Arc::new(crate::admission::QueueDeadline::new(wait));
     tx.send(Job {
         args,
         stop,
-        reply: reply_tx,
+        reply,
         sync_context,
+        deadline: Arc::clone(&deadline),
     })
     .map_err(|_| "runtime worker is gone".to_owned())?;
-    reply_rx
-        .recv()
-        .map_err(|_| "runtime worker dropped the reply".to_owned())?
+    Ok(deadline)
+}
+
+fn submit(tx: &Sender<Job>, args: Vec<String>, stop: bool) -> CommandResult {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let deadline = enqueue_job(tx, args, stop, Reply::new(move |result| { let _ = reply_tx.send(result); }))?;
+    let wait = queue_wait();
+    match reply_rx.recv_timeout(wait) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("runtime worker dropped the reply".to_owned()),
+        Err(mpsc::RecvTimeoutError::Timeout) if deadline.cancel() => Err(QUEUE_EXPIRED.to_owned()),
+        // Execution won admission. Especially for writes, preserve the actual
+        // commit outcome instead of returning an ambiguous client timeout.
+        Err(mpsc::RecvTimeoutError::Timeout) => reply_rx.recv()
+            .map_err(|_| "runtime worker dropped the reply".to_owned())?,
+    }
 }
 
 fn execute_json(args: Vec<String>) -> std::result::Result<Value, String> {
@@ -1450,6 +1525,14 @@ pub(crate) fn handle_http_rpc(body: &[u8]) -> Result<RpcResponse> {
     Ok(dispatch(request, &tx))
 }
 
+pub(crate) fn handle_http_rpc_deferred(body: &[u8], action: impl FnOnce(RpcResponse) + Send + 'static) -> Result<()> {
+    let request: RpcRequest = serde_json::from_slice(body).context("rpc body is not JSON")?;
+    let tx = JOB_TX.get().ok_or_else(|| anyhow::anyhow!("runtime worker is not running"))?
+        .lock().map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?.clone();
+    dispatch_deferred(request, &tx, action);
+    Ok(())
+}
+
 fn inference_health_status() -> Value {
     match respire::memory::onnx::inference_status() {
         Ok(status) => status,
@@ -1459,6 +1542,8 @@ fn inference_health_status() -> Value {
 
 pub(crate) fn health_body() -> Value {
     let inference = inference_health_status();
+    let (queue_cancelled, timings) = crate::admission::timings();
+    let (queued, executing) = crate::admission::occupancy();
     let exe = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
@@ -1474,6 +1559,19 @@ pub(crate) fn health_body() -> Value {
         "recall_statistics": recall_stats_status(),
         "retrieval_index": index_status(),
         "inference": inference,
+        "rpc": {
+            "available_parallelism": cpu_count(),
+            "effective_parallelism": WORKERS.load(Ordering::Acquire),
+            "ordinary_running": RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)),
+            "lightweight_running": LIGHT_RUNNING.load(Ordering::Acquire),
+            "lightweight_capacity": 2,
+            "queue_wait_timeout_secs": queue_wait().as_secs(),
+            "queue_cancelled": queue_cancelled,
+            "queued_or_cancelled_pending_removal": queued,
+            "executing_until_reply": executing,
+            "recent_timing_micros": timings,
+            "timing_scope": "queue admission to execution start; command execution to reply consumption",
+        },
     })
 }
 
@@ -1491,14 +1589,14 @@ fn stop_process(code: i32) -> ! {
     }
 }
 
-const WORKER_CAP: usize = 16;
-
 /// Job slots for this process. `RSRS_RPC_PARALLELISM` wins, then
-/// `client.json` `rpc_parallelism`, otherwise the CPU count, capped at 16.
+/// `client.json` `rpc_parallelism`, otherwise OS-reported available parallelism.
+/// Explicit settings cannot exceed the CPUs available to this process.
 /// Two additional lightweight slots keep show/list/status responsive.
 /// Simple writes prepare concurrently and use short source-checked commits.
 /// Foreground and background ONNX sessions have independent serial queues.
 pub(crate) fn worker_limit() -> usize {
+    let available = cpu_count();
     if let Ok(raw) = respire::env::var("RSRS_RPC_PARALLELISM") {
         let raw = raw.trim();
         if raw.is_empty() || raw.eq_ignore_ascii_case("cpu") {
@@ -1508,11 +1606,11 @@ pub(crate) fn worker_limit() -> usize {
             if parsed == 0 {
                 return cpu_count();
             }
-            return parsed.clamp(1, WORKER_CAP);
+            return parsed.clamp(1, available);
         }
     }
     if let Some(saved) = respire::service::rpc_parallelism_setting() {
-        return saved.clamp(1, WORKER_CAP);
+        return saved.clamp(1, available);
     }
     cpu_count()
 }
@@ -1521,7 +1619,12 @@ fn cpu_count() -> usize {
     std::thread::available_parallelism()
         .map(|count| count.get())
         .unwrap_or(1)
-        .clamp(1, WORKER_CAP)
+        .max(1)
+}
+
+fn queue_wait() -> Duration {
+    Duration::from_secs(respire::env::var("RSRS_RPC_QUEUE_WAIT_SECS").ok()
+        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(120).clamp(1, 3600))
 }
 
 fn is_exclusive(args: &[String]) -> bool {
@@ -1638,6 +1741,10 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     let _ = job.reply.send(Err("runtime is stopping".into()));
                     continue;
                 }
+                if !job.deadline.start() {
+                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                    continue;
+                }
                 let Some((generation, _)) = job.sync_context else {
                     let _ = job.reply.send(Err("missing classification context".into()));
                     continue;
@@ -1705,6 +1812,12 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 WRITE_RUNNING.store(true, Ordering::Release);
                 let gate = shared_exclusive();
                 let _held = gate.acquire_reserved();
+                if !job.deadline.start() {
+                    drop(_held);
+                    WRITE_RUNNING.store(false, Ordering::Release);
+                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                    continue;
+                }
                 let changing_context = !is_context_query(&job.args) && matches!(
                     command_name(&job.args),
                     Some(
@@ -1763,10 +1876,18 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 if job.stop {
                     break;
                 }
+                if job.deadline.expired() {
+                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                    continue;
+                }
                 idle_since = Instant::now();
                 if respire::service::off_mode() {
                     let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()));
                     if parsed.is_ok_and(|cli| cli.command.as_ref().is_some_and(|command| !crate::is_off_allowed(command))) {
+                        if !job.deadline.start() {
+                            let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                            continue;
+                        }
                         let captured = crate::capture_run(job.args);
                         let _ = job.reply.send(Ok(captured));
                         continue;
@@ -1813,15 +1934,19 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                         }
                         Err(_) => unreachable!("only a command was submitted"),
                     }
-                } else if pending.len() < 256 {
-                    pending.push_back(job);
                 } else {
-                    let _ = job.reply.send(Err("read request queue is full".into()));
+                    pending.push_back(job);
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        pending.retain(|job| {
+            if job.deadline.expired() {
+                let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                false
+            } else { true }
+        });
         loop {
             let ordinary_available = RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) < limit;
             let position = if LIGHT_RUNNING.load(Ordering::Acquire) < 2 {
@@ -1846,6 +1971,10 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
                     let _slot = RunningGuard { status: status_job, light: light_job };
+                    if !job.deadline.start() {
+                        let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
+                        return;
+                    }
                     mark_worker();
                     let generation = sync_generation();
                     let captured = crate::capture_run(job.args);
@@ -2331,16 +2460,16 @@ mod tests {
             .unwrap_or_else(|err| err.into_inner());
         let previous = respire::env::var("RSRS_RPC_PARALLELISM").ok();
         std::env::set_var("RSRS_RPC_PARALLELISM", "3");
-        assert_eq!(worker_limit(), 3);
+        assert_eq!(worker_limit(), 3.min(cpu_count()));
         std::env::set_var("RSRS_RPC_PARALLELISM", "0");
         assert_eq!(worker_limit(), cpu_count());
         std::env::set_var("RSRS_RPC_PARALLELISM", "cpu");
         assert_eq!(worker_limit(), cpu_count());
         std::env::set_var("RSRS_RPC_PARALLELISM", "20");
-        assert_eq!(worker_limit(), WORKER_CAP);
+        assert_eq!(worker_limit(), 20.min(cpu_count()));
         std::env::set_var("RSRS_RPC_PARALLELISM", "1000");
-        assert_eq!(worker_limit(), WORKER_CAP);
-        assert!(cpu_count() <= WORKER_CAP);
+        assert_eq!(worker_limit(), 1000.min(cpu_count()));
+        assert!(cpu_count() >= 1);
         match previous {
             Some(value) => std::env::set_var("RSRS_RPC_PARALLELISM", value),
             None => std::env::remove_var("RSRS_RPC_PARALLELISM"),
@@ -2374,7 +2503,7 @@ mod tests {
         assert!(!is_exclusive(&["show".into(), "id".into()]));
         assert!(!is_exclusive(&["sync-history".into()]));
         assert!(!is_exclusive(&["diary".into()]));
-        assert_eq!(WORKER_CAP, 16);
+        assert!(worker_limit() <= cpu_count());
     }
 
     #[test]
@@ -2457,6 +2586,53 @@ mod tests {
                 && value.summary["inference"]["background"]["capacity"] == 32));
         drop(scope);
         assert!(crate::progress::status("foreground-one").is_null());
+    }
+
+    #[test]
+    fn deferred_requests_return_before_execution_and_reply_exactly_once() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let (tx, rx) = mpsc::channel();
+        let (finished, response) = mpsc::channel();
+        let mut request = req("cli.exec", "deferred-test-write");
+        request.args = vec!["show".into(), "synthetic-id".into()];
+        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        // Dispatch did not wait for a worker or create a waiting transport thread.
+        let job = rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(response.try_recv().is_err());
+        assert!(job.deadline.start());
+        assert!(!job.deadline.cancel(), "an executing write must keep its actual result");
+        let reply = job.reply.clone();
+        reply.send(Err("synthetic native failure after execution".into())).map_err(anyhow::Error::msg)?;
+        let result = response.recv_timeout(Duration::from_secs(1))?;
+        assert!(result.error.as_deref().is_some_and(|error| error.contains("synthetic native failure")));
+        assert!(reply.send(Err("duplicate".into())).is_err());
+        assert!(response.try_recv().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cancelled_deferred_request_cannot_execute_a_write() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let (tx, rx) = mpsc::channel();
+        let (finished, response) = mpsc::channel();
+        let mut request = req("cli.exec", "deferred-test-cancelled");
+        request.args = vec!["show".into(), "synthetic-id".into()];
+        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        let job = rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(job.deadline.cancel());
+        assert!(!job.deadline.start());
+        job.reply.send(Err(QUEUE_EXPIRED.into())).map_err(anyhow::Error::msg)?;
+        assert!(response.recv_timeout(Duration::from_secs(1))?.error.as_deref().is_some_and(|error| error.contains("not started")));
+        // A subsequent accepted request has an independent deadline and succeeds.
+        let (finished, response) = mpsc::channel();
+        let mut request = req("cli.exec", "deferred-test-next");
+        request.args = vec!["show".into(), "synthetic-id".into()];
+        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        let job = rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(job.deadline.start());
+        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()) })).map_err(anyhow::Error::msg)?;
+        assert!(response.recv_timeout(Duration::from_secs(1))?.ok);
+        Ok(())
     }
 
     #[test]

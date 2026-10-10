@@ -142,11 +142,28 @@ background embeddings. Background artifact publication also checks the source
 ciphertext, so concurrent edits cannot receive an obsolete artifact. Complex
 multi-record operations retain the existing exclusive host gate.
 
-The runtime admits up to 16 ordinary jobs and reserves two additional show/list/status
+The runtime follows the operating system's available CPU parallelism for ordinary jobs and reserves two additional show/list/status
 slots. Reads use WAL snapshots without an application writer gate. Healthy host
 clients reuse the validated runtime before taking the lifecycle gate; only startup,
 replacement and recovery serialize through that gate. SQLite still permits one writer.
 Health and CLI progress report foreground/background activity and queues separately.
+
+`RSRS_RPC_PARALLELISM` or `config --rpc-parallelism` may reduce ordinary concurrency;
+values above available CPU parallelism are clamped. `/api/health` reports both
+`rpc.available_parallelism` and `rpc.effective_parallelism`. This does not create
+additional model sessions: foreground and background inference each remain serial.
+
+Queued HTTP and pipe commands retain their reply object without retaining a
+connection thread while waiting for an execution slot. Ordinary queue length does
+not reject a command. Execution slots still follow available CPUs; model sessions
+and serialized write transactions remain unchanged.
+`RSRS_RPC_QUEUE_WAIT_SECS` bounds queue waiting (default 120, range 1–3600).
+Expired commands that have not started are removed and cannot later commit a write.
+Once execution starts, the client waits for its actual result; a queue deadline is
+not reported as cancellation of an executing write. Health and stop HTTP endpoints
+remain outside ordinary command admission. The health response includes the last
+1024 queue/command timing samples in microseconds; command time includes receipt
+delivery and does not separately measure native inference or storage.
 
 ```mermaid
 flowchart TD

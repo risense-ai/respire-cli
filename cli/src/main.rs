@@ -18,6 +18,7 @@ use anyhow::{anyhow, Result};
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
+mod admission;
 mod app_version;
 mod bench;
 mod classify;
@@ -988,7 +989,7 @@ enum Command {
         /// Set periodic auto-cure
         #[arg(long)]
         cure_auto: Option<bool>,
-        /// Max concurrent runtime read jobs. 0 follows CPU count (at most 4). Writes queue. Applies after `rsrs --runtime-internal --stop`.
+        /// Max concurrent ordinary runtime jobs. 0 follows available CPU parallelism; explicit values cannot exceed it. Applies after runtime restart.
         #[arg(long)]
         rpc_parallelism: Option<u32>,
     },

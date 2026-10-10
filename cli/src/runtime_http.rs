@@ -1,8 +1,10 @@
 //! Local HTTP RPC/MCP transport: loopback peers do not require a token.
 use serde_json::json;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 static ACCESS_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+const MAX_BODY: u64 = 32 * 1024 * 1024;
 
 fn set_access_token(t: Option<String>) {
     let _ = ACCESS_TOKEN.set(t);
@@ -69,7 +71,29 @@ fn mcp_http(
     };
     let mut body = String::new();
     if *method == tiny_http::Method::Post {
-        let _ = req.as_reader().read_to_string(&mut body);
+        if req
+            .as_reader()
+            .take(MAX_BODY + 1)
+            .read_to_string(&mut body)
+            .is_err()
+        {
+            return (
+                400,
+                "application/json; charset=utf-8",
+                json!({"error":"request body unreadable"})
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        if body.len() as u64 > MAX_BODY {
+            return (
+                413,
+                "application/json; charset=utf-8",
+                json!({"error":"request body exceeds runtime frame limit"})
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
     }
     crate::mcp::http_response(crate::mcp::HttpIn {
         method: method_name.to_owned(),
@@ -141,11 +165,25 @@ fn handle_request(req: &mut tiny_http::Request, bound: SocketAddr) -> (u16, &'st
     }
     if path == "/api/rpc" && method == tiny_http::Method::Post {
         let mut body = String::new();
-        if req.as_reader().read_to_string(&mut body).is_err() {
+        if req
+            .as_reader()
+            .take(MAX_BODY + 1)
+            .read_to_string(&mut body)
+            .is_err()
+        {
             return (
                 400,
                 "application/json; charset=utf-8",
                 serde_json::json!({"error":"request body unreadable"})
+                    .to_string()
+                    .into_bytes(),
+            );
+        }
+        if body.len() as u64 > MAX_BODY {
+            return (
+                413,
+                "application/json; charset=utf-8",
+                json!({"error":"request body exceeds runtime frame limit"})
                     .to_string()
                     .into_bytes(),
             );
@@ -220,6 +258,17 @@ pub(crate) fn serve_loop(server: tiny_http::Server) -> anyhow::Result<()> {
         .to_ip()
         .ok_or_else(|| anyhow::anyhow!("runtime listener has no IP address"))?;
     for request in server.incoming_requests() {
+        // These endpoints never execute a command or consume an ordinary slot.
+        // Preserve authentication/Host/Origin checks through serve_request.
+        let path = request.url().split('?').next().unwrap_or("");
+        if (path == "/api/health" && request.method() == &tiny_http::Method::Get)
+            || (path == "/api/runtime/stop" && request.method() == &tiny_http::Method::Post)
+        {
+            if let Err(error) = serve_request(request, bound) {
+                eprintln!("runtime control request failed: {error:#}");
+            }
+            continue;
+        }
         std::thread::Builder::new()
             .name("runtime-http".into())
             .spawn(move || {
@@ -232,6 +281,61 @@ pub(crate) fn serve_loop(server: tiny_http::Server) -> anyhow::Result<()> {
 }
 
 fn serve_request(mut request: tiny_http::Request, bound: SocketAddr) -> anyhow::Result<()> {
+    if request.method() == &tiny_http::Method::Post
+        && request.url().split('?').next() == Some("/api/rpc")
+        && request_authorized(&request, bound)
+    {
+        let mut bytes = Vec::new();
+        request
+            .as_reader()
+            .take(MAX_BODY + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_BODY {
+            request.respond(
+                tiny_http::Response::from_string("request body exceeds runtime frame limit")
+                    .with_status_code(413),
+            )?;
+            return Ok(());
+        }
+        // Keep ownership until dispatch has either queued the callback or failed.
+        let owned = std::sync::Arc::new(std::sync::Mutex::new(Some(request)));
+        let deferred = std::sync::Arc::clone(&owned);
+        let result = crate::rpc::handle_http_rpc_deferred(&bytes, move |response| {
+            let request = deferred
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take();
+            if let Some(request) = request {
+                let bytes = serde_json::to_vec(&response).unwrap_or_default();
+                if let Err(error) = request.respond(
+                    tiny_http::Response::from_data(bytes).with_header(
+                        tiny_http::Header::from_bytes(
+                            "Content-Type",
+                            "application/json; charset=utf-8",
+                        )
+                        .unwrap(),
+                    ),
+                ) {
+                    eprintln!("runtime HTTP deferred reply failed: {error}");
+                }
+            }
+        });
+        if let Err(error) = result {
+            if let Some(request) = owned
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .take()
+            {
+                request.respond(
+                    tiny_http::Response::from_string(
+                        json!({"error":error.to_string()}).to_string(),
+                    )
+                    .with_status_code(400),
+                )?;
+            }
+        }
+        return Ok(());
+    }
     let (status, ctype, body) = handle_request(&mut request, bound);
     let stop = status == 200
         && request.method() == &tiny_http::Method::Post
@@ -254,4 +358,19 @@ fn serve_request(mut request: tiny_http::Request, bound: SocketAddr) -> anyhow::
     }
     result?;
     Ok(())
+}
+
+fn request_authorized(request: &tiny_http::Request, bound: SocketAddr) -> bool {
+    let host = header_value(request, "Host");
+    let authority = bound.to_string();
+    let default_port_host = bound.port() == 80
+        && (host.eq_ignore_ascii_case("localhost")
+            || authority
+                .strip_suffix(":80")
+                .is_some_and(|canonical| host.eq_ignore_ascii_case(canonical)));
+    token_ok(request)
+        && (host.eq_ignore_ascii_case(&authority)
+            || host.eq_ignore_ascii_case(&format!("localhost:{}", bound.port()))
+            || default_port_host)
+        && crate::net_rpc::origin_ok(&header_value(request, "Origin"), &format!("http://{bound}"))
 }
