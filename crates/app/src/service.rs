@@ -108,6 +108,24 @@ pub fn require_candidates_ready(store: &LocalStore, candidates: &[crate::StoredM
     Ok(())
 }
 
+/// Recall stays available while synchronized sources await background indexing.
+/// Only current, source-checked artifacts may participate in semantic retrieval.
+pub fn recall_candidates(store: &LocalStore) -> Result<(Vec<crate::StoredMemory>, usize)> {
+    let candidates = store.all(false)?;
+    let (ready, pending): (Vec<_>, Vec<_>) = candidates
+        .into_iter()
+        .partition(|memory| !memory.local_artifact.is_empty());
+    let pending_count = pending.len();
+    if pending_count > 0 {
+        notify_index();
+        if ready.is_empty() {
+            return Err(IndexPending.into());
+        }
+    }
+    require_candidates_ready(store, &ready)?;
+    Ok((ready, pending_count))
+}
+
 /// The resident runtime installs its single durable-outbox worker notifier.
 pub fn install_autosync_notifier(notify: fn()) {
     let _ = AUTO_SYNC_NOTIFY.set(notify);
@@ -175,8 +193,7 @@ impl App {
         if let Some(k) = kind {
             q = q.of_kind(k);
         }
-        let candidates = self.store.all(false)?;
-        require_candidates_ready(&self.store, &candidates)?;
+        let (candidates, _) = recall_candidates(&self.store)?;
         let ranked =
             MemoryEngine::recall_local_scored(&self.keys, &self.embedder, &candidates, &q)?;
         for (score, e) in &ranked {
@@ -3461,6 +3478,56 @@ mod tests {
             kind: "context".to_owned(),
             ..CreateReq::default()
         }
+    }
+
+    #[test]
+    fn recall_keeps_indexed_memories_available_during_sync() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = test_app(dir.path())?;
+        let (empty, pending) = recall_candidates(&app.store)?;
+        assert!(empty.is_empty());
+        assert_eq!(pending, 0);
+        let indexed = app.create(&important("indexed", "rust memory"))?;
+        let mut incoming = app.create(&important("incoming", "rust memory"))?;
+        incoming.updated_at = "2099-01-01T00:00:00Z".into();
+        incoming.content = "synchronized rust memory".into();
+        let mut source = MemoryEngine::seal(&app.keys,
+            &crate::memory::search::HashingEmbedder::default(), &incoming, "fixture")?;
+        source.local_artifact.clear();
+        app.store.put_synced(&source)?;
+        let (ready, pending) = recall_candidates(&app.store)?;
+        assert_eq!(pending, 1);
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id, indexed.id);
+        let hits = app.search("rust memory", 10, None)?;
+        assert!(hits.iter().any(|hit| hit.entry.id == indexed.id));
+        assert!(hits.iter().all(|hit| hit.entry.id != incoming.id));
+        assert_eq!(app.store.rebuild_index_with_progress(
+            &app.keys, &crate::memory::search::HashingEmbedder::default(), "m3", |_, _| Ok(())
+        )?, 1);
+        let (ready, pending) = recall_candidates(&app.store)?;
+        assert_eq!(ready.len(), 2);
+        assert_eq!(pending, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn recall_preserves_all_pending_and_corrupt_index_errors() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let app = test_app(dir.path())?;
+        let mut memory = app.create(&important("source", "rust memory"))?;
+        memory.updated_at = "2099-01-01T00:00:00Z".into();
+        let mut source = MemoryEngine::seal(&app.keys,
+            &crate::memory::search::HashingEmbedder::default(), &memory, "fixture")?;
+        source.local_artifact.clear();
+        app.store.put_synced(&source)?;
+        let error = recall_candidates(&app.store).err()
+            .ok_or_else(|| anyhow!("all-pending recall succeeded"))?;
+        assert!(error.downcast_ref::<IndexPending>().is_some());
+        source.local_artifact = b"invalid artifact".to_vec();
+        app.store.put_inner(&source, false)?;
+        assert!(recall_candidates(&app.store).is_err());
+        Ok(())
     }
 
     #[test]
