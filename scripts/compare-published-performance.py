@@ -8,6 +8,7 @@ import os
 import pathlib
 import platform
 import secrets
+import shutil
 import socket
 import subprocess
 import tarfile
@@ -131,14 +132,19 @@ def benchmark(binary, meta, number):
     result = {'version': meta['version'], 'git_sha': meta['git_sha'], 'binary_sha256': meta['binary_sha256'], 'batches': []}
     REPORT['results'].append(result)
     required(binary, env, ['model', 'engine', 'cpu'], direct=True)
-    if not (MODEL / 'model_quantized.onnx').exists():
-        required(binary, env, ['model', 'install-m3'], direct=True)
+    for asset in ('onnx/model_quantized.onnx', 'tokenizer.json'):
+        destination = MODEL / asset
+        if not destination.exists():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            url = 'https://huggingface.co/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/' + asset
+            with urllib.request.urlopen(url, timeout=60) as response, destination.open('wb') as output:
+                shutil.copyfileobj(response, output)
     for name, expected in {
-        'model_quantized.onnx': '0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
+        'onnx/model_quantized.onnx': '0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
         'tokenizer.json': '6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790'}.items():
         assert hashlib.sha256((MODEL / name).read_bytes()).hexdigest() == expected
     REPORT['model'] = {'name': 'BGE-M3 quantized', 'onnx_sha256':
-                        hashlib.sha256((MODEL / 'model_quantized.onnx').read_bytes()).hexdigest()}
+                        hashlib.sha256((MODEL / 'onnx/model_quantized.onnx').read_bytes()).hexdigest()}
     required(binary, env, ['model', 'activate', 'm3'], direct=True)
     # Force writes bypass semantic deduplication equally in both versions.
     ids = []
@@ -146,6 +152,8 @@ def benchmark(binary, meta, number):
         envelope = required(binary, env, ['remember', document, '--title', 'document-%03d' % i,
                                         '--importance', 'important', '--force'], direct=True)
         ids.append(envelope['summary']['id'])
+        if (i + 1) % 16 == 0:
+            print(meta['version'], 'seeded', i + 1, flush=True)
     log = (root / 'runtime.log').open('wb')
     worker = subprocess.Popen([str(binary), '--runtime-internal'], env=env, stdout=log, stderr=log)
     log.close()
@@ -200,6 +208,7 @@ if __name__ == '__main__':
     ROOT.mkdir(parents=True, exist_ok=True)
     try:
         for index, version in enumerate(VERSIONS):
+            print('Preparing published', version, TARGET, flush=True)
             binary, metadata = published(version)
             benchmark(binary, metadata, index)
         REPORT['complete'] = True
