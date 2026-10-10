@@ -599,6 +599,24 @@ fn flight_loop() {
         };
         SYNC_RUNNING.store(true, Ordering::Release);
         if let Some((job, generation, boundary)) = manual {
+            let boundary = if boundary < 0 {
+                let gate = shared_exclusive();
+                let held = gate.acquire(true);
+                let snapshot = if job.deadline.expired() {
+                    Err(anyhow::anyhow!(QUEUE_EXPIRED))
+                } else {
+                    check_sync_context(generation).and_then(|_| crate::build_local()).and_then(|store| store.outgoing_boundary())
+                };
+                drop(held);
+                match snapshot {
+                    Ok(boundary) => boundary,
+                    Err(error) => {
+                        let _ = job.reply.send(Err(format!("{error:#}")));
+                        SYNC_RUNNING.store(false, Ordering::Release);
+                        continue;
+                    }
+                }
+            } else { boundary };
             if !job.deadline.start() {
                 let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
                 SYNC_RUNNING.store(false, Ordering::Release);
@@ -1525,7 +1543,7 @@ fn enqueue_job(
         Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history" | "classify")
     ) {
         // Capture account generation without blocking a network executor on
-        // the write gate. The dispatcher takes the sync snapshot later.
+        // the write gate. The existing sync worker takes the snapshot later.
         Some((GENERATION.load(Ordering::Acquire), -1))
     } else {
         None
@@ -1951,7 +1969,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
             break;
         }
         match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(mut job) => {
+            Ok(job) => {
                 if job.stop {
                     break;
                 }
@@ -1986,16 +2004,6 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     command_name(&job.args),
                     Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")
                 ) {
-                    let generation = job.sync_context.map(|value| value.0).unwrap_or_else(|| GENERATION.load(Ordering::Acquire));
-                    let gate = shared_exclusive();
-                    let held = gate.acquire(true);
-                    let snapshot = check_sync_context(generation).and_then(|_| crate::build_local()).and_then(|store| store.outgoing_boundary());
-                    drop(held);
-                    if job.deadline.expired() { let _ = job.reply.send(Err(QUEUE_EXPIRED.into())); continue; }
-                    match snapshot {
-                        Ok(boundary) => job.sync_context = Some((generation, boundary)),
-                        Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
-                    }
                     enqueue_manual(job);
                 } else if command_name(&job.args) == Some("classify") {
                     match classify_tx.try_send(job) {
@@ -2844,6 +2852,57 @@ mod tests {
         anyhow::ensure!(wire.contains("command was not started"), "B did not expire before execution");
         let cancelled = rx.recv_timeout(Duration::from_secs(2))?;
         anyhow::ensure!(!cancelled.deadline.start(), "expired B executed a write");
+        Ok(())
+    }
+
+    #[test]
+    fn sync_snapshot_wait_does_not_stop_dispatching_reads_and_cancelled_sync_never_starts() -> Result<()> {
+        if std::env::var_os("RSRS_SYNC_GATE_TEST_CHILD").is_none() {
+            let profile = tempfile::tempdir()?;
+            let output = Command::new(std::env::current_exe()?)
+                .args(["--exact", "rpc::tests::sync_snapshot_wait_does_not_stop_dispatching_reads_and_cancelled_sync_never_starts", "--nocapture", "--test-threads=1"])
+                .env("RSRS_SYNC_GATE_TEST_CHILD", "1")
+                .env("RSRS_DATA_DIR", profile.path())
+                .env("RSRS_CORE_TEST_MODE", "1")
+                .env("RSRS_NO_AUTOSYNC", "1")
+                .env_remove("RSRS_RPC_TOKEN")
+                .output()?;
+            anyhow::ensure!(output.status.success(), "isolated sync gate regression failed: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel();
+        WORKERS.store(1, Ordering::Release);
+        std::thread::spawn(move || dispatch_loop(rx, 1, None));
+        let commands = [vec!["--json".into(), "show".into(), "controlled-missing-id".into()],
+            vec!["--json".into(), "recall".into(), "controlled empty-profile query".into(), "--no-related".into()]];
+        let mut original = Vec::new();
+        for args in &commands {
+            original.push(submit(&tx, args.clone(), false).map_err(anyhow::Error::msg)?);
+        }
+        // This test concerns routing, not native retrieval: preserve the exact
+        // original terminal outcomes of the isolated empty profile's reads.
+        let gate = shared_exclusive();
+        let held = gate.acquire(true);
+        let (done, result) = mpsc::channel();
+        let sync = enqueue_job(&tx, vec!["sync".into()], false,
+            Reply::new(move |response| { let _ = done.send(response); }), Duration::from_millis(60)).map_err(anyhow::Error::msg)?;
+        for (args, before) in commands.iter().zip(original.iter()) {
+            let (done, result) = mpsc::channel();
+            enqueue_job(&tx, args.clone(), false, Reply::new(move |response| { let _ = done.send(response); }), Duration::from_secs(1)).map_err(anyhow::Error::msg)?;
+            let after = result.recv_timeout(Duration::from_secs(2))?.map_err(anyhow::Error::msg)?;
+            anyhow::ensure!(after.exit == before.exit && std::mem::discriminant(&after.envelope.status) == std::mem::discriminant(&before.envelope.status) && after.envelope.errors == before.envelope.errors,
+                "read changed outcome or stopped progressing while sync snapshot awaited the write gate");
+        }
+        let expired = result.recv_timeout(Duration::from_secs(1))?;
+        anyhow::ensure!(expired.as_ref().err().is_some_and(|error| error.contains("not started")), "waiting sync did not expire");
+        anyhow::ensure!(!sync.running() && sync.expired(), "sync ran before its snapshot gate was available");
+        drop(held);
+        let until = Instant::now() + Duration::from_secs(2);
+        while SYNC_RUNNING.load(Ordering::Acquire) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        anyhow::ensure!(!sync.running(), "cancelled sync started after the gate was released");
+        anyhow::ensure!(!SYNC_RUNNING.load(Ordering::Acquire), "sync worker did not recover after cancellation");
         Ok(())
     }
 

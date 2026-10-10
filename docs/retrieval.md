@@ -174,8 +174,12 @@ original response. `unknown` is not proof that the write did not commit: receipt
 cover the last 64 completed requests in the current runtime and do not survive
 restart. Concurrent reuse of an in-flight request ID is rejected rather than
 executed again; this is not durable exactly-once execution.
-Health and stop HTTP endpoints
-remain outside ordinary command admission. The health response includes the last
+Health and stop HTTP endpoints remain outside ordinary command admission.
+Manual sync captures its outgoing boundary in the existing sync worker under the
+write gate, with a generation check; waiting for this snapshot never occupies the
+shared dispatcher or a network executor. An expired sync cannot execute when the
+gate later becomes available.
+The health response includes the last
 1024 queue/command timing samples in microseconds; command time ends at the
 in-memory result handoff and excludes asynchronous socket delivery. It does not
 separately measure native inference or storage. A native run that ignores
