@@ -1341,6 +1341,15 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
     }
     let response = match request.method.as_str() {
         #[cfg(feature = "native-fault-tests")]
+        "runtime.test_worker_lifecycle" => {
+            let action = request.args.first().map(String::as_str).unwrap_or("");
+            match respire_app::core_sdk::worker::fixture_control(action) {
+                Ok(result) => { let mut response = status_response(&request); response.envelope =
+                    Some(ResultEnvelope::new("runtime.test_worker_lifecycle", OutputStatus::Ok, result, Vec::new())); response },
+                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
+            }
+        }
+        #[cfg(feature = "native-fault-tests")]
         "runtime.test_worker_hold" => {
             match respire_app::core_sdk::execute::<Value>("test_worker_hold", json!({})) {
                 Ok(_) => status_response(&request),
@@ -1701,7 +1710,9 @@ fn stop_process(code: i32) -> ! {
             eprintln!("runtime retained its library lock because Core worker cleanup failed: {error:#}");
             // Keep control/health alive and ownership intact; never overlap a
             // new host with an unconfirmed native child.
-            loop { std::thread::park(); }
+            while respire_app::core_sdk::worker::shutdown().is_err() {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
         }
         std::process::exit(code);
     }
@@ -2138,6 +2149,9 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     }
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
         eprintln!("Core worker shutdown failed: {error:#}");
+        // This stack still owns LibraryLock. Never reach drop(_lock) while a
+        // native child has not been confirmed dead.
+        stop_process(0);
     }
     if let Ok(writer) = writer {
         let _ = writer.join();
