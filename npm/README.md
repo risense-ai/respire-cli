@@ -17,12 +17,9 @@ rsrs --help
 | Platform | Package |
 | --- | --- |
 | Linux x64, musl (default) | `@rsrsai/linux-x64` |
-| Linux arm64, musl (default) | `@rsrsai/linux-arm64` |
 | Linux x64, glibc | `@rsrsai/linux-x64-gnu` |
-| Linux arm64, glibc | `@rsrsai/linux-arm64-gnu` |
 | Apple Silicon | `@rsrsai/macos-arm64` |
 | Windows x64 | `@rsrsai/win-x64` |
-| Windows arm64 | `@rsrsai/win-arm64` |
 
 `artifact-manifest.json` defines targets and names. Intel Mac is unsupported.
 Linux keeps the static musl package as its default. On a glibc distribution,

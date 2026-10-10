@@ -25,7 +25,7 @@ on:
         default: false
         type: boolean
       full_regression_before_publish:
-        description: Wait for all seven upgrade, three system and API regressions before DEV publication
+        description: Wait for all four upgrade, three system and API regressions before DEV publication
         default: false
         type: boolean
       dev_version:
@@ -538,8 +538,8 @@ jobs:
               const required=[...native,...cloud,...api];
               const failed=required.find(job=>job.status==='completed'&&job.conclusion!=='success');
               if(failed) throw new Error(`Gated publication refused: ${failed.name} ${failed.conclusion}`);
-              if(native.length===7&&cloud.length===3&&api.length===1&&required.every(job=>job.conclusion==='success')){
-                console.log('All seven native upgrades, three system regressions and API checks passed');return;
+              if(native.length===4&&cloud.length===3&&api.length===1&&required.every(job=>job.conclusion==='success')){
+                console.log('All four native upgrades, three system regressions and API checks passed');return;
               }
               console.log('Waiting for native upgrades, cloud regressions and API checks');
               await new Promise(resolve=>setTimeout(resolve,30000));
@@ -565,7 +565,7 @@ jobs:
           pattern: cli-release-*
           path: release-assets
           merge-multiple: true
-      - name: Verify release artifacts and prepare all eight npm packages
+      - name: Verify release artifacts and prepare all five npm packages
         run: |
           node npm/scripts/verify-packages.mjs release-assets --assets-only
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
@@ -615,7 +615,7 @@ jobs:
           const fs=require('fs'),path=require('path');
           const expected=fs.readdirSync('release-assets').sort();
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
-          if(expected.length!==21||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 21 verified binary/runtime/metadata assets');
+          if(expected.length!==12||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 12 verified binary/runtime/metadata assets');
           NODE
       - name: Publish npm using Trusted Publishing
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
