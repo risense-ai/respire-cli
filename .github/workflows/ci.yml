@@ -315,7 +315,7 @@ jobs:
           script="$(realpath scripts/test-real-m3-account-switch.py)"
           cd "$RUNNER_TEMP/dev13-owned-upgrade"
           "$RUNNER_TEMP/recovery-python/bin/python" "$script" --binary "$binary" \
-            --seed-binary "$RUNNER_TEMP/dev12-seed/rsrs" --expect-in-process \
+            --seed-binary "$RUNNER_TEMP/dev12-seed/rsrs" --expect-supervised-worker \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --legacy-model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-model-file model_quantized.onnx \
             --output-dir "$RUNNER_TEMP/dev13-version-upgrade"

@@ -83,7 +83,7 @@ try:
         shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
         result=folder/'results'
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
-            '--binary',args.binary,'--seed-binary',str(old),'--expect-in-process','--model-dir',args.model_dir,
+            '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
             '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
         checks=json.loads((result/'real-account-return-verification.json').read_text())
         assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'

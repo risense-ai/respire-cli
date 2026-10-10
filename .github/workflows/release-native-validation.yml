@@ -113,7 +113,7 @@ jobs:
           fi
           "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
-            --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-in-process --resident-stress
+            --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-supervised-worker --resident-stress
       - uses: actions/upload-artifact@v4
         if: always()
         with:
