@@ -45,7 +45,7 @@ const releases = run('gh', ['api', `repos/${repository}/releases?per_page=100`, 
   .trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 const previous = releases.filter(release => !release.draft).map(release => ({release, version: parse(release.tag_name)}))
   .filter(item => item.version && compare(item.version, version) < 0
-    && (channel === 'dev' || (!item.release.prerelease && item.version[3] === null)))
+    && !item.release.prerelease && item.version[3] === null)
   .sort((left, right) => compare(right.version, left.version))[0];
 let baseline;
 if (previous) {
@@ -77,7 +77,7 @@ for (const [heading, changes] of Object.entries(groups)) lines.push(`## ${headin
 lines.push('## Commits', '', '| Commit | Change |', '| --- | --- |', ...commits.map(entry => `| [${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}) | ${text(entry.subject)} |`), '');
 if (!commits.length) lines.push('No additional commits since the previous release; this release contains the same source.', '');
 if (previous) lines.push(`[Full comparison](https://github.com/${repository}/compare/${previous.release.tag_name}...${sha})`, '');
-lines.push('## Install', '', '```sh', `npm install -g @rsrsai/cli@${tag.slice(1)}`, 'rsrs --version', '```', '', '## Source and validation', '',
+lines.push('## Install', '', '```sh', `npm install -g rsrs-cli@${tag.slice(1)} --registry=https://registry.npmjs.org`, 'rsrs --version', '```', '', '## Source and validation', '',
   `- Source: [\`${sha}\`](https://github.com/${repository}/commit/${sha}).`,
   '- Publication requires the existing platform, CLI and development API acceptance gates.');
 if (process.env.GITHUB_RUN_ID && /^\d+$/.test(process.env.GITHUB_RUN_ID)) lines.push(`- [Release workflow](https://github.com/${repository}/actions/runs/${process.env.GITHUB_RUN_ID}).`);
