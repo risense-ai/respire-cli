@@ -343,6 +343,21 @@ class Smoke:
                 and self.rpc(['show', memory_id])['details']['entry']['content'] == 'Runtime fixture persisted memory.',
                 'stored_session_not_resumed')
         self.passed('resume_session_real', method='fresh_runtime_reuses_owned_session_and_keyring_no_password_input')
+        # Remember persists before deriving its index. Exercise recall and wait
+        # for the owned worker before stopping it for strict offline diagnosis.
+        require(self.rpc(['recall', 'Runtime fixture persisted memory.', '--titles']).get('items'),
+                'resumed_pending_source_not_recalled')
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            code, health, _ = self.http(self.url, 'GET', '/api/health', token=self.token)
+            require(code == 200, 'owned_index_health_unavailable')
+            index = health.get('retrieval_index', {})
+            require(index.get('state') != 'failed', 'owned_index_preparation_failed')
+            if index.get('state') == 'ready' and not index.get('running') and not index.get('scheduled'):
+                break
+            time.sleep(.1)
+        else:
+            raise Failure('owned_index_not_ready_before_offline_doctor')
         self.stop()
         retired = subprocess.run([str(self.args.binary), '--direct', '--json', 'model', 'install-rerank'], env=self.env,
                                  cwd=self.root, capture_output=True, text=True, timeout=30)
@@ -366,7 +381,7 @@ class Smoke:
         if isinstance(diagnostic, dict) and isinstance(diagnostic.get('items'), list):
             names = {'store', 'data dir', 'mcp bin', 'mcp http', 'session', 'embedder',
                      'lock', 'remote', 'inject', 'memory status',
-                     'tidy counter', 'CLI version'}
+                     'tidy counter', 'CLI version', 'Runtime version', 'model index'}
             statuses = {'ok', 'warn', 'fail', 'skip', 'pending'}
             self.report['doctor']['items'] = [
                 {'name': item['name'], 'status': item['status']}
