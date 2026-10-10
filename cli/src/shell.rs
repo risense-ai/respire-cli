@@ -650,7 +650,7 @@ fn handle(app: &mut App, code: KeyCode) -> bool {
         Page::Model => list_key(
             app,
             code,
-            11 + model_engines().len() + usize::from(cfg!(windows)),
+            12 + model_engines().len() + usize::from(cfg!(windows)),
             |app, code| model_key(app, code),
         ),
         Page::Workspace => workspace_key(app, code),
@@ -1063,7 +1063,8 @@ fn model_key(app: &mut App, code: KeyCode) {
                         let id = app.live.model_progress["id"].as_str().unwrap_or("").to_owned();
                         ask(app, t("取消当前任务并从所选下载源重新下载未完成文件？", "Cancel the current task and redownload unfinished files from the selected source?"), ConfirmKind::RestartM3(id, selected_model_mirror()));
                     }
-                    Some(7) => app.page = Page::Home,
+                    Some(7) => app.overlay = Overlay::RecallTest(recall_test::Form::new("benchmark")),
+                    Some(8) => app.page = Page::Home,
                     _ => {}
                 }
             }
@@ -2228,7 +2229,8 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
     ));
     lines.push(choice(app.cursor == index + 6, t("取消当前模型任务", "Cancel current model task")));
     lines.push(choice(app.cursor == index + 7, t("从所选下载源重新下载", "Restart download from selected source")));
-    lines.push(choice(app.cursor == index + 8, t("0  返回", "0  Back")));
+    lines.push(choice(app.cursor == index + 8, t("推理 / Recall Benchmark", "Inference / Recall Benchmark")));
+    lines.push(choice(app.cursor == index + 9, t("0  返回", "0  Back")));
     lines
 }
 
@@ -2378,6 +2380,10 @@ mod model_menu_tests {
             app.cursor += 1;
             model_key(&mut app, KeyCode::Enter);
             assert!(matches!(&app.overlay, Overlay::Confirm { kind: ConfirmKind::RestartM3(id, mirror), .. } if id == "fixture-task" && mirror == "http://127.0.0.1:9999"));
+            app.cursor += 1;
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(&app.overlay, Overlay::RecallTest(_)));
+            app.overlay = Overlay::None;
             app.cursor += 1;
             model_key(&mut app, KeyCode::Enter);
             assert!(matches!(app.page, Page::Home));

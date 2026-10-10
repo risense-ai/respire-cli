@@ -102,9 +102,9 @@ pub(crate) fn inference_progress_text(status: &serde_json::Value) -> Option<Stri
     let queued = status["queued"].as_u64()?;
     if status["active"] == true || queued > 0 {
         let label = if status["phase"] == "loading" {
-            text("加载共享模型；排队", "Loading shared model; queued")
+            text("推理服务（全局）：加载模型；等待任务", "Inference service (global): loading; queued")
         } else {
-            text("共享推理运行中；排队", "Shared inference active; queued")
+            text("推理服务（全局）：运行中；等待任务", "Inference service (global): active; queued")
         };
         return Some(format!("{label} {queued}"));
     }

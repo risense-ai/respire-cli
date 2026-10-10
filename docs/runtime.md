@@ -34,6 +34,24 @@ and version pages show the connected runtime's version separately from the CLI
 version. A disconnected TUI shows `Runtime not connected` instead of a cached
 version. Reading this version does not start or replace a runtime.
 
+The TUI Models/inference page includes **Inference / Recall Benchmark**. Enter a
+query to measure one initial call and eight repeated rounds against the existing
+local runtime. The report separates the SDK's reported inference-probe time,
+full probe-request time, and full fast-Recall request
+time. It shows mean, P50, P95 and estimated sequential operations per second.
+Full request times include RPC and any scheduling waits; they do not isolate
+queue time. The first call is not necessarily a cold start, and repeated Recall
+can reuse query caches. Indexed-candidate ranges and pending-index counts identify
+an empty or changing library. These are current-load measurements, not retrieval
+quality scores or hardware guarantees. The benchmark never calls the quality
+selector API or changes the saved engine/mode; normal Recall logs and hit counts
+are still updated. Esc finishes the in-flight request and stops further rounds.
+
+Command progress labels inference activity and its waiting-task count as **global
+inference service** state. A zero count means no pending inference tasks, not that
+the displayed CLI command is waiting for inference. Read commands such as `show`
+do not perform inference; a multi-command script may be busy in a later write.
+
 Host `account <name>`, `account use <name>`, `space use <name>` and
 `config --data-dir <path>` coordinate shutdown, profile selection and restart.
 An invalid target keeps the original profile and restarts its service.
