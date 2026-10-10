@@ -32,6 +32,7 @@ thread_local! {
 
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
 static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
+static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: AtomicUsize = AtomicUsize::new(1);
 static STOPPING: AtomicBool = AtomicBool::new(false);
 static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
@@ -301,6 +302,7 @@ pub(crate) fn sync_scheduler_status() -> Value {
 }
 
 fn context_changed() {
+    if let Err(error) = respire::resident::clear() { eprintln!("resident catalog reset failed: {error:#}"); }
     let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
     state.blocked_generation = None;
     state.backoff = 0;
@@ -343,14 +345,8 @@ pub(crate) fn kick_index() {
 
 fn index_yield_to_foreground(generation: usize) -> Result<()> {
     anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
-    let gate = shared_exclusive();
-    let mut state = gate.state.lock().map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?;
-    while state.held || state.foreground > 0 {
-        check_sync_context(generation)?;
-        respire::model_progress::check()?;
-        state = gate.changed.wait_timeout(state, Duration::from_millis(100))
-            .map_err(|_| anyhow::anyhow!("write gate lock poisoned"))?.0;
-    }
+    // A separate background Session no longer waits for foreground inference.
+    // Context and cancellation checks still occur between every committed source.
     check_sync_context(generation)?;
     respire::model_progress::check()
 }
@@ -401,7 +397,7 @@ fn index_loop_inner() -> Result<()> {
             let store = respire::service::open_store()?;
             let model = store.retrieval_model()?;
             let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
-            let pending = store.index_pending(&model)?;
+            let pending = store.index_missing(&model)?;
             if !pending && !prepare_requested {
                 return Ok(true);
             }
@@ -1366,10 +1362,8 @@ fn submit(
     let slots = WORKERS.load(Ordering::Acquire).max(1);
     if !stop
         && is_status(&args)
-        && RUNNING
-            .load(Ordering::Acquire)
-            .saturating_sub(RUNNING_STATUS.load(Ordering::Acquire))
-            >= slots
+        && LIGHT_RUNNING.load(Ordering::Acquire) >= 2
+        && RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) >= slots
     {
         let mut envelope = ResultEnvelope::new(
             "status",
@@ -1497,13 +1491,13 @@ fn stop_process(code: i32) -> ! {
     }
 }
 
-const WORKER_CAP: usize = 4;
+const WORKER_CAP: usize = 16;
 
 /// Job slots for this process. `RSRS_RPC_PARALLELISM` wins, then
-/// `client.json` `rpc_parallelism`, otherwise the CPU count. Never above 4.
-/// `0` and `cpu` follow the CPU, still capped at 4.
-/// Read-only jobs may run in parallel up to this cap. Writes take the exclusive
-/// gate and queue. ONNX is a process singleton and queues separately.
+/// `client.json` `rpc_parallelism`, otherwise the CPU count, capped at 16.
+/// Two additional lightweight slots keep show/list/status responsive.
+/// Simple writes prepare concurrently and use short source-checked commits.
+/// Foreground and background ONNX sessions have independent serial queues.
 pub(crate) fn worker_limit() -> usize {
     if let Ok(raw) = respire::env::var("RSRS_RPC_PARALLELISM") {
         let raw = raw.trim();
@@ -1534,6 +1528,11 @@ fn is_exclusive(args: &[String]) -> bool {
     if is_context_query(args) {
         return false;
     }
+    if command_name(args) == Some("update") { return false; }
+    if command_name(args) == Some("remember") && !args.iter().any(|arg|
+        matches!(arg.as_str(), "--merge-ids" | "--supersedes" | "--see-also")
+        || arg.starts_with("--merge-ids=") || arg.starts_with("--supersedes=")
+        || arg.starts_with("--see-also=")) { return false; }
     matches!(
         command_name(args),
         Some(
@@ -1585,11 +1584,13 @@ fn is_exclusive(args: &[String]) -> bool {
 
 struct RunningGuard {
     status: bool,
+    light: bool,
 }
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
         RUNNING.fetch_sub(1, Ordering::AcqRel);
+        if self.light { LIGHT_RUNNING.fetch_sub(1, Ordering::AcqRel); }
         if self.status {
             RUNNING_STATUS.fetch_sub(1, Ordering::AcqRel);
         }
@@ -1821,10 +1822,19 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
-        while RUNNING.load(Ordering::Acquire) < limit {
-            let Some(job) = pending.pop_front() else {
-                break;
-            };
+        loop {
+            let ordinary_available = RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) < limit;
+            let position = if LIGHT_RUNNING.load(Ordering::Acquire) < 2 {
+                pending.iter().position(|job| matches!(command_name(&job.args), Some("show" | "list" | "status")))
+            } else { None };
+            let job = if let Some(position) = position { pending.remove(position) }
+                else if ordinary_available {
+                    pending.iter().position(|job| !matches!(command_name(&job.args), Some("show" | "list" | "status")))
+                        .and_then(|position| pending.remove(position))
+                } else { None };
+            let Some(job) = job else { break; };
+            let light_job = matches!(command_name(&job.args), Some("show" | "list" | "status"));
+            if light_job { LIGHT_RUNNING.fetch_add(1, Ordering::AcqRel); }
             let status_job = is_status(&job.args);
             if status_job {
                 RUNNING_STATUS.fetch_add(1, Ordering::AcqRel);
@@ -1835,12 +1845,17 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                 .name("respire-read".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
-                    let _slot = RunningGuard { status: status_job };
+                    let _slot = RunningGuard { status: status_job, light: light_job };
                     mark_worker();
-                    let _ = job.reply.send(Ok(crate::capture_run(job.args)));
+                    let generation = sync_generation();
+                    let captured = crate::capture_run(job.args);
+                    kick_index();
+                    let result = check_sync_context(generation).map(|_| captured).map_err(|error| format!("{error:#}"));
+                    let _ = job.reply.send(result);
                 });
             if spawned.is_err() {
                 RUNNING.fetch_sub(1, Ordering::AcqRel);
+                if light_job { LIGHT_RUNNING.fetch_sub(1, Ordering::AcqRel); }
                 if status_job {
                     RUNNING_STATUS.fetch_sub(1, Ordering::AcqRel);
                 }
@@ -2131,24 +2146,28 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         crate::net_rpc::health()?;
         return Ok(());
     }
-    // Hold across probe, stop, copy, spawn and readiness. Re-probe after waiting.
+    // Normal requests only inspect the resident owner. Lifecycle serialization
+    // begins when startup, replacement or recovery is actually required.
+    if let Some(health) = probe_runtime()? {
+        if runtime_matches_current(&health)? { return Ok(()); }
+    }
     let _takeover = crate::runtime_policy::takeover_lock()?;
     ensure_daemon_locked()
 }
 
-fn ensure_daemon_locked() -> Result<()> {
+fn runtime_matches_current(health: &crate::net_rpc::Health) -> Result<bool> {
     let dest = crate::mcp::stable_bin_path();
     let src = std::env::current_exe().context("failed to locate the rsrs binary")?;
+    Ok(health.data_dir == respire::service::data_dir().display().to_string()
+        && health.bin == env!("CARGO_PKG_VERSION")
+        && crate::mcp::exe_matches_dest(&health.exe, &dest)
+        && !health.inference_stalled()
+        && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?)
+}
+
+fn ensure_daemon_locked() -> Result<()> {
     if let Some(health) = probe_runtime()? {
-        let same_lib = health.data_dir == respire::service::data_dir().display().to_string();
-        let same_ver = health.bin == env!("CARGO_PKG_VERSION");
-        let same_path = crate::mcp::exe_matches_dest(&health.exe, &dest);
-        if same_lib
-            && same_ver
-            && same_path
-            && !health.inference_stalled()
-            && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?
-        {
+        if runtime_matches_current(&health)? {
             return Ok(());
         }
         if health.inference_stalled() {
@@ -2345,8 +2364,8 @@ mod tests {
         }
         assert!(is_exclusive(&["--json".into(), "sync".into()]));
         assert!(is_exclusive(&["reembed".into()]));
-        assert!(is_exclusive(&["remember".into(), "x".into()]));
-        assert!(is_exclusive(&["update".into(), "id".into()]));
+        assert!(!is_exclusive(&["remember".into(), "x".into()]));
+        assert!(!is_exclusive(&["update".into(), "id".into()]));
         assert!(is_exclusive(&["forget".into(), "id".into()]));
         assert!(is_exclusive(&["attach".into(), "id".into()]));
         assert!(!is_exclusive(&["recall".into(), "respire".into()]));
@@ -2355,7 +2374,7 @@ mod tests {
         assert!(!is_exclusive(&["show".into(), "id".into()]));
         assert!(!is_exclusive(&["sync-history".into()]));
         assert!(!is_exclusive(&["diary".into()]));
-        assert_eq!(WORKER_CAP, 4);
+        assert_eq!(WORKER_CAP, 16);
     }
 
     #[test]
@@ -2370,7 +2389,7 @@ mod tests {
         let tracked = ["--json", "--progress-id", "request-one", "--model-task-id", "task-one", "remember", "body"]
             .map(String::from);
         assert_eq!(command_name(&tracked), Some("remember"));
-        assert!(is_exclusive(&tracked));
+        assert!(!is_exclusive(&tracked));
         assert!(needs_inference(&tracked));
         assert!(!needs_inference(&["status".into()]));
     }
@@ -2433,7 +2452,9 @@ mod tests {
         request.args = vec!["foreground-other".into()];
         let unrelated = dispatch(request, &tx);
         assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_null()));
-        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["inference"]["capacity"] == 32));
+        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["inference"]["capacity"] == 64
+                && value.summary["inference"]["foreground"]["capacity"] == 32
+                && value.summary["inference"]["background"]["capacity"] == 32));
         drop(scope);
         assert!(crate::progress::status("foreground-one").is_null());
     }
@@ -2444,11 +2465,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         WORKERS.store(1, Ordering::Release);
-        RUNNING.store(1, Ordering::Release);
+        RUNNING.store(3, Ordering::Release);
+        LIGHT_RUNNING.store(2, Ordering::Release);
         let (tx, _rx) = mpsc::channel();
         let busy = submit(&tx, vec!["--json".into(), "status".into()], false)
             .map_err(|err| anyhow::anyhow!(err))?;
         assert_eq!(busy.exit, 2);
+        LIGHT_RUNNING.store(0, Ordering::Release);
         RUNNING.store(0, Ordering::Release);
         let (tx, rx) = mpsc::channel();
         drop(rx);

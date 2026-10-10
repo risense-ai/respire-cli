@@ -100,6 +100,20 @@ pub(crate) fn inference_progress_text(status: &serde_json::Value) -> Option<Stri
         return Some(text("推理无响应，需要宿主恢复", "Inference unresponsive; host recovery required"));
     }
     let queued = status["queued"].as_u64()?;
+    if status["phase"] == "loading" {
+        return Some(text("推理状态：正在加载前后台模型", "Inference status: loading foreground and background models"));
+    }
+    if status["foreground"].is_object() && status["background"].is_object()
+        && (status["active"] == true || queued > 0) {
+        let lane = |name: &str, zh: &str, en: &str| {
+            let active = status[name]["active"] == true;
+            let waiting = status[name]["queued"].as_u64().unwrap_or(0);
+            let state = if active { text("运行中", "active") } else { text("空闲", "idle") };
+            format!("{} {state}; {} {waiting}", text(zh, en), text("等待", "queued"))
+        };
+        return Some(format!("{}: {}; {}", text("推理状态", "Inference status"),
+            lane("foreground", "前台", "foreground"), lane("background", "后台", "background")));
+    }
     if status["active"] == true || queued > 0 {
         let label = if status["phase"] == "loading" {
             text("推理服务（全局）：加载模型；等待任务", "Inference service (global): loading; queued")
@@ -171,6 +185,9 @@ mod tests {
         assert!(inference_progress_text(&serde_json::json!({"active":false,"queued":0})).is_none());
         let busy = inference_progress_text(&serde_json::json!({"active":true,"queued":3}));
         assert!(busy.is_some_and(|text| text.ends_with("3") && !text.contains('{')));
+        let independent = inference_progress_text(&serde_json::json!({"active":true,"queued":2,
+            "foreground":{"active":false,"queued":0},"background":{"active":true,"queued":2}}));
+        assert!(independent.is_some_and(|text| !text.contains('{') && text.contains("0") && text.contains("2")));
         let stalled = inference_progress_text(&serde_json::json!({"host_recovery_required":true}));
         assert!(stalled.is_some_and(|text| !text.contains('{')));
     }

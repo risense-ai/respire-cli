@@ -1501,8 +1501,8 @@ pub fn set_cure_auto(on: bool) -> Result<()> {
     write_client_config(&data)
 }
 
-/// Saved RPC worker cap (`client.json` `rpc_parallelism`). `None` means follow CPU count, never above 4. Writes still queue.
-/// The runtime never runs more than 4 jobs at once. `0` is stored as absent.
+/// Saved RPC compute worker cap (`client.json` `rpc_parallelism`), following CPU count up to 16.
+/// Two extra lightweight read slots remain available. `0` is stored as absent.
 /// The resident runtime reads this only at start.
 pub fn rpc_parallelism_setting() -> Option<usize> {
     read_client_config()

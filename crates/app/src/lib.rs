@@ -17,6 +17,7 @@ pub mod inject;
 pub mod lock;
 pub mod migration;
 pub mod service;
+pub mod resident;
 pub mod sync;
 pub mod taxonomy;
 pub mod transport;

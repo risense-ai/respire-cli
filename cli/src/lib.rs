@@ -22,6 +22,7 @@ pub mod model_install;
 pub mod model_progress;
 pub use respire_app::prompt;
 pub use respire_app::service;
+pub use respire_app::resident;
 pub use respire_app::share;
 pub mod space;
 pub use respire_app::sync;
