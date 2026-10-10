@@ -88,12 +88,12 @@ use the same data flow and diagnostics.
 | `reembed` | Repair missing/outdated data for the current model |
 
 When a usable account has an invalid or incomplete index, the runtime prepares M3
-and rebuilds derived data in the background. Recall continues using entries with
-current, source-checked index artifacts while newly synchronized or changed entries
-await indexing. Its JSON summary reports `index_pending` and `indexed_candidates`;
-pending entries join subsequent queries after background indexing completes.
-A nonempty library with no indexed entries still reports `index_pending` until an
-index is available; no manual rebuild confirmation is needed.
+and rebuilds derived data in the background. Recall uses current, source-checked
+index artifacts and full-body lexical retrieval for pending entries. A library
+with no indexed entries can perform lexical retrieval without loading the model.
+Its JSON summary reports `index_pending`, `indexed_candidates` and
+`lexical_candidates`; pending entries gain semantic retrieval after background
+indexing completes. No manual rebuild confirmation is needed.
 The TUI displays progress and download errors through the model-operation channel.
 Rebuilding checkpoints completed entries and resumes pending work after restart.
 Encrypted memories, account keys and sync state are preserved. Explicit invalid
@@ -113,5 +113,54 @@ source-checked M3 artifacts. The runtime continues long migrations in the backgr
 `rsrs reembed` remains available for an explicit repair. Existing M3
 artifacts retain their generation identity. Content, timestamps and sync flags
 are unchanged; retired weight files are not deleted automatically.
+
+## Resident retrieval and concurrency
+
+The runtime keeps one foreground and one background ONNX session. Each session
+runs one inference call at a time; the two sessions have independent admission
+queues. Foreground query embedding does not wait for a background indexing batch.
+The tokenizer and immutable model input bytes are shared; native session weights
+and work buffers may be allocated separately.
+
+Explicit lexical-only requests use a per-request vector-free metadata copy,
+including mixed indexed/pending data; the resident vectors remain unchanged.
+
+Core holds an immutable parsed retrieval view. Unchanged queries retain that view;
+source/artifact revisions publish an incremental replacement. Existing readers
+retain their previous view until their query ends. An account/key change invalidates
+the host cache and old-context replies. Refreshes decrypt changed records outside
+the cache publication lock. Publication still copies unchanged Core view data once
+per refresh; it is not a zero-copy persistent tree.
+
+Normal runtime remember/update prepare outside the SQLite write transaction.
+Only the commit phase takes the host write gate to coordinate with account changes
+and complex edits. The short SQLite transaction validates the source ciphertext, commits the source and
+local artifact state, and rejects a concurrent conflicting preparation. One
+source conflict is re-evaluated from the latest record. The write receipt reports
+`index_state` as pending or ready; successful durable storage does not wait for
+background embeddings. Background artifact publication also checks the source
+ciphertext, so concurrent edits cannot receive an obsolete artifact. Complex
+multi-record operations retain the existing exclusive host gate.
+
+The runtime admits up to 16 ordinary jobs and reserves two additional show/list/status
+slots. Reads use WAL snapshots without an application writer gate. Healthy host
+clients reuse the validated runtime before taking the lifecycle gate; only startup,
+replacement and recovery serialize through that gate. SQLite still permits one writer.
+Health and CLI progress report foreground/background activity and queues separately.
+
+```mermaid
+flowchart TD
+  Client[CLI / API / MCP] --> Owner[Validate resident owner]
+  Owner --> Reads[Recall / show / list]
+  Owner --> Write[Remember / update preparation]
+  Reads --> View[Retain immutable Core view]
+  View --> FG[Foreground Session: serial Run]
+  Write --> Commit[Short SQLite source check and commit]
+  Commit --> Receipt[Durable write receipt: pending or ready]
+  Commit --> BG[Background Session: serial Run]
+  BG --> Publish[Source-checked artifact commit]
+  Publish --> Refresh[Changed records refresh Core view]
+  Refresh --> View
+```
 
 Recall associations are documented in [associations](associations.md). Use `--no-related` for a per-request original-results comparison.
