@@ -686,6 +686,8 @@ struct RpcRequest {
     method: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queue_wait_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1171,6 +1173,7 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
                 id: "bind-probe".into(),
                 method: "runtime.status".into(),
                 args: Vec::new(),
+                queue_wait_ms: None,
             })
             .is_ok()
             {
@@ -1367,12 +1370,13 @@ fn dispatch_deferred(request: RpcRequest, tx: &Sender<Job>, action: impl FnOnce(
     }
     if let Some(response) = cached(&request.id) { action(response); return; }
     let args = request.args.clone();
+    let wait = request.queue_wait_ms.map(Duration::from_millis).unwrap_or_else(queue_wait).min(queue_wait());
     let reply = Reply::new(move |result| {
         let response = command_response(&request, result);
         remember(&request.id, &response);
         action(response);
     });
-    if let Err(error) = enqueue_job(tx, args, false, reply.clone()) {
+    if let Err(error) = enqueue_job(tx, args, false, reply.clone(), wait) {
         let _ = reply.send(Err(error));
     }
 }
@@ -1414,6 +1418,7 @@ fn enqueue_job(
     args: Vec<String>,
     stop: bool,
     reply: Reply,
+    wait: Duration,
 ) -> std::result::Result<Arc<crate::admission::QueueDeadline>, String> {
     if !stop && !respire::service::off_mode() && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
         return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
@@ -1451,7 +1456,6 @@ fn enqueue_job(
     } else {
         None
     };
-    let wait = queue_wait();
     let deadline = Arc::new(crate::admission::QueueDeadline::new(wait));
     tx.send(Job {
         args,
@@ -1466,7 +1470,7 @@ fn enqueue_job(
 
 fn submit(tx: &Sender<Job>, args: Vec<String>, stop: bool) -> CommandResult {
     let (reply_tx, reply_rx) = mpsc::channel();
-    let deadline = enqueue_job(tx, args, stop, Reply::new(move |result| { let _ = reply_tx.send(result); }))?;
+    let deadline = enqueue_job(tx, args, stop, Reply::new(move |result| { let _ = reply_tx.send(result); }), queue_wait())?;
     let wait = queue_wait();
     match reply_rx.recv_timeout(wait) {
         Ok(result) => result,
@@ -2246,6 +2250,7 @@ fn clear_dead_socket() {
         id: "bind-probe".into(),
         method: "runtime.status".into(),
         args: Vec::new(),
+        queue_wait_ms: None,
     })
     .is_ok();
     if !listening {
@@ -2434,6 +2439,7 @@ mod tests {
             id: id.to_owned(),
             method: method.to_owned(),
             args: Vec::new(),
+            queue_wait_ms: None,
         }
     }
 
@@ -2617,9 +2623,10 @@ mod tests {
         let (finished, response) = mpsc::channel();
         let mut request = req("cli.exec", "deferred-test-cancelled");
         request.args = vec!["show".into(), "synthetic-id".into()];
+        request.queue_wait_ms = Some(0);
         dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
         let job = rx.recv_timeout(Duration::from_secs(1))?;
-        assert!(job.deadline.cancel());
+        assert!(job.deadline.expired());
         assert!(!job.deadline.start());
         job.reply.send(Err(QUEUE_EXPIRED.into())).map_err(anyhow::Error::msg)?;
         assert!(response.recv_timeout(Duration::from_secs(1))?.error.as_deref().is_some_and(|error| error.contains("not started")));
@@ -2781,6 +2788,7 @@ mod tests {
             id: "test-stop".into(),
             method: "runtime.status".into(),
             args: Vec::new(),
+            queue_wait_ms: None,
         });
         let _ = server.join();
         match previous {

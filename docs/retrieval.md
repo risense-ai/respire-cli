@@ -158,6 +158,7 @@ connection thread while waiting for an execution slot. Ordinary queue length doe
 not reject a command. Execution slots still follow available CPUs; model sessions
 and serialized write transactions remain unchanged.
 `RSRS_RPC_QUEUE_WAIT_SECS` bounds queue waiting (default 120, range 1–3600).
+RPC callers can shorten this wait using the optional `queue_wait_ms` field.
 Expired commands that have not started are removed and cannot later commit a write.
 Once execution starts, the client waits for its actual result; a queue deadline is
 not reported as cancellation of an executing write. Health and stop HTTP endpoints
