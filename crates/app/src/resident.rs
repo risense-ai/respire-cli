@@ -39,7 +39,7 @@ pub fn recall_catalog(keys: &SessionKeys, store: &LocalStore)
     let identity = hash.finalize().to_vec();
     let revision = store.retrieval_revision()?;
     let cached = CACHE.lock().map_err(|_| anyhow::anyhow!("resident catalog cache poisoned"))?.clone();
-    if let Some(cache) = cached.as_ref().filter(|cache| cache.identity == identity && cache.revision == revision) {
+    if let Some(cache) = cached.as_ref().filter(|cache| cache.lease.current() && cache.identity == identity && cache.revision == revision) {
         return Ok((Arc::clone(&cache.memories), cache.pending, Arc::clone(&cache.lease)));
     }
     // Serialize refreshes, keeping decryption and Core publication outside the reader lock.
@@ -47,7 +47,7 @@ pub fn recall_catalog(keys: &SessionKeys, store: &LocalStore)
     let epoch = EPOCH.load(Ordering::Acquire);
     let cached = CACHE.lock().map_err(|_| anyhow::anyhow!("resident catalog cache poisoned"))?.clone();
     let revision = store.retrieval_revision()?;
-    let matching = cached.as_ref().filter(|cache| cache.identity == identity);
+    let matching = cached.as_ref().filter(|cache| cache.lease.current() && cache.identity == identity);
     if let Some(cache) = matching.filter(|cache| cache.revision == revision) {
         return Ok((Arc::clone(&cache.memories), cache.pending, Arc::clone(&cache.lease)));
     }

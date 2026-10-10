@@ -182,9 +182,36 @@ gate later becomes available.
 The health response includes the last
 1024 queue/command timing samples in microseconds; command time ends at the
 in-memory result handoff and excludes asynchronous socket delivery. It does not
-separately measure native inference or storage. A native run that ignores
-termination still requires host recovery; this transport change does not isolate
-native inference in another process.
+separately measure native inference or storage.
+
+The resident host holds the LibraryLock and owns SQLite commits. It sends Core
+business requests over private inherited pipes to one shared worker process;
+the worker reuses the foreground and background native sessions. Transport
+credentials remain in host callbacks, and the child receives only OS loader
+paths and local inference settings. It opens no network listener or memory
+database. `--client-only` and `--no-autostart` do not own or recover workers.
+
+The host observes native watchdog status independently of command execution.
+If a cancelled native call remains unresponsive for five more seconds, or worker
+heartbeats stop for ten seconds, it fails pending Core calls without replay,
+terminates the owned child and confirms exit before permitting a replacement.
+Each complete Core call also has a 365-second ceiling, covering the existing
+load, native queue and execution budgets plus grace, even when an abnormal call
+never reaches Run. Running SQLite writes remain owned by the host and return
+their actual commit result.
+The next request rebuilds its authorized resident view from the host store and
+loads the model once in the replacement process. Old generation replies and
+leases cannot be used by the replacement. The native execution watchdog retains
+its SDK timeout; this is recovery after cancellation, not a faster native model.
+If termination cannot be confirmed, replacement is prohibited; health/control
+remain available and the host retains its library lock during shutdown.
+
+`native-fault-tests` is a non-default fixture feature. Its explicitly marked SDK
+can inject holds at the real Run boundary with a two-second watchdog. The fixture
+also shortens the complete Core call ceiling to ten seconds. SDK promotion,
+release staging and the exact binary version gate reject fixture
+packages. Fault injection validates containment and recovery; it does not prove
+that a real ORT call has the same defect.
 
 ```mermaid
 flowchart TD

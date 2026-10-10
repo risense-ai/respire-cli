@@ -7,6 +7,7 @@ const configured = process.env.RSRS_CORE_SDK_DIR ?? process.env.ONEMEMORY_CORE_S
 if (!destination || !configured) throw new Error('Set RSRS_CORE_SDK_DIR and pass the binary directory');
 const sdk = resolve(configured), output = resolve(destination);
 const manifest = JSON.parse(readFileSync(join(sdk,'manifest.json'),'utf8'));
+if (manifest.test_only) throw new Error('Test-only Core SDK cannot be staged for a CLI release');
 const files = [];
 for (const file of manifest.files) {
   let path;

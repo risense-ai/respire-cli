@@ -1340,6 +1340,21 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         if let Some(hit) = cached(&request.id) { return hit; }
     }
     let response = match request.method.as_str() {
+        #[cfg(feature = "native-fault-tests")]
+        "runtime.test_worker_hold" => {
+            match respire_app::core_sdk::execute::<Value>("test_worker_hold", json!({})) {
+                Ok(_) => status_response(&request),
+                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
+            }
+        }
+        #[cfg(feature = "native-fault-tests")]
+        "runtime.test_native_fault" => {
+            let mode = request.args.first().and_then(|mode| mode.parse::<u64>().ok()).unwrap_or(0);
+            match respire_app::core_sdk::execute::<Value>("engine_control", json!({"action":"test_native_fault","mode":mode})) {
+                Ok(result) => { let mut response = status_response(&request); response.envelope = Some(ResultEnvelope::new("runtime.test_native_fault", OutputStatus::Ok, result, Vec::new())); response },
+                Err(error) => error_response(&request, "native_fixture_failed", &format!("{error:#}")),
+            }
+        }
         "model.prepare" => {
             let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
             match respire::model_install::validate_mirror(mirror).and_then(|_| {
@@ -1682,6 +1697,12 @@ fn stop_process(code: i32) -> ! {
     }
     #[cfg(not(test))]
     {
+        if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+            eprintln!("runtime retained its library lock because Core worker cleanup failed: {error:#}");
+            // Keep control/health alive and ownership intact; never overlap a
+            // new host with an unconfirmed native child.
+            loop { std::thread::park(); }
+        }
         std::process::exit(code);
     }
 }
@@ -1817,6 +1838,8 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
             stop_process(1);
         }
     };
+    #[cfg(not(test))]
+    respire_app::core_sdk::worker::enable();
     // Keep WAL open across requests: closing the last connection can briefly lock
     // a concurrent opener during checkpoint/cleanup, even for read-only status.
     let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_store() {
@@ -2112,6 +2135,9 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
     drop(classify_tx);
     for job in pending {
         let _ = job.reply.send(Err("runtime is stopping".into()));
+    }
+    if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        eprintln!("Core worker shutdown failed: {error:#}");
     }
     if let Ok(writer) = writer {
         let _ = writer.join();

@@ -5334,6 +5334,12 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
+        return match respire_app::core_sdk::worker::run() {
+            Ok(()) => 0,
+            Err(error) => { eprintln!("Core worker stopped: {error:#}"); 1 }
+        };
+    }
     set_json_mode(std::env::args_os().any(|arg| arg == "--json")
         || respire::env::var("RSRS_JSON").is_ok_and(|value| value == "1" || value == "true"));
     if std::env::args_os().any(|arg| arg == "--client-only") {
