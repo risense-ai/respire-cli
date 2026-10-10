@@ -8,7 +8,7 @@ on:
         type: string
         default: ''
       release_run:
-        description: 'Completed Release run to recover a missing primary entry'
+        description: 'Release run whose publication job succeeded; regressions may still be running'
         type: string
         required: true
         default: ''
@@ -72,12 +72,13 @@ jobs:
           const repo = process.env.GITHUB_REPOSITORY;
           const sourceRun = process.env.SOURCE_RUN;
           let version = process.env.REQUESTED_VERSION;
-          if (!sourceRun) throw new Error('A completed Release run is required');
+          if (!sourceRun) throw new Error('A Release run with successful publication is required');
           if (sourceRun) {
             if (!/^\d+$/.test(sourceRun)) throw new Error('Invalid Release run ID');
             const run = api(`repos/${repo}/actions/runs/${sourceRun}`);
-            if (run.name !== 'Release' || run.head_repository?.full_name !== repo || run.status !== 'completed') {
-              throw new Error('Expected a completed Release run from this repository');
+            if (run.name !== 'Release' || run.head_repository?.full_name !== repo ||
+                (process.env.GITHUB_EVENT_NAME === 'workflow_run' && run.status !== 'completed')) {
+              throw new Error('Expected a Release run from this repository; automatic runs must be completed');
             }
             const jobs = api(`repos/${repo}/actions/runs/${sourceRun}/jobs?per_page=100`).jobs;
             if (!['plan', 'publish'].every(name => jobs.some(job => job.name === name && job.conclusion === 'success'))) {
