@@ -3,6 +3,32 @@ use serde_json::json;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
+struct HttpRequest {
+    method: tiny_http::Method,
+    url: String,
+    headers: Vec<tiny_http::Header>,
+    peer: SocketAddr,
+    body: std::io::Cursor<Vec<u8>>,
+}
+
+impl HttpRequest {
+    fn method(&self) -> &tiny_http::Method {
+        &self.method
+    }
+    fn url(&self) -> &str {
+        &self.url
+    }
+    fn headers(&self) -> &[tiny_http::Header] {
+        &self.headers
+    }
+    fn remote_addr(&self) -> Option<&SocketAddr> {
+        Some(&self.peer)
+    }
+    fn as_reader(&mut self) -> &mut dyn Read {
+        &mut self.body
+    }
+}
+
 static ACCESS_TOKEN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
 const MAX_BODY: u64 = 32 * 1024 * 1024;
 
@@ -11,7 +37,7 @@ fn set_access_token(t: Option<String>) {
 }
 
 /// Loopback peers need no token. Other peers must authenticate with a header.
-fn token_ok(req: &tiny_http::Request) -> bool {
+fn token_ok(req: &HttpRequest) -> bool {
     if req
         .remote_addr()
         .is_some_and(|addr| addr.ip().is_loopback())
@@ -49,7 +75,7 @@ fn token_ok(req: &tiny_http::Request) -> bool {
     false
 }
 
-fn header_value(req: &tiny_http::Request, name: &str) -> String {
+fn header_value(req: &HttpRequest, name: &str) -> String {
     for header in req.headers() {
         if header.field.as_str().as_str().eq_ignore_ascii_case(name) {
             return header.value.as_str().to_owned();
@@ -59,7 +85,7 @@ fn header_value(req: &tiny_http::Request, name: &str) -> String {
 }
 
 fn mcp_http(
-    req: &mut tiny_http::Request,
+    req: &mut HttpRequest,
     method: &tiny_http::Method,
     path: &str,
     bound: SocketAddr,
@@ -104,7 +130,7 @@ fn mcp_http(
     })
 }
 
-fn handle_request(req: &mut tiny_http::Request, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
+fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static str, Vec<u8>) {
     let url = req.url().to_owned();
     let method = req.method().to_owned();
 
@@ -217,7 +243,7 @@ fn handle_request(req: &mut tiny_http::Request, bound: SocketAddr) -> (u16, &'st
 }
 
 pub(crate) struct BoundRuntime {
-    pub server: tiny_http::Server,
+    pub server: std::net::TcpListener,
     pub url: String,
 }
 
@@ -246,121 +272,158 @@ pub(crate) fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<Boun
         SocketAddr::new(ip, actual)
     };
     set_access_token(None);
-    let server = tiny_http::Server::http(address)
+    let server = std::net::TcpListener::bind(address)
         .map_err(|error| anyhow::anyhow!("failed to bind local runtime at {address}: {error}"))?;
-    let url = format!("http://{address}");
+    server.set_nonblocking(true)?;
+    let url = format!("http://{}", server.local_addr()?);
     Ok(BoundRuntime { server, url })
 }
 
-pub(crate) fn serve_loop(server: tiny_http::Server) -> anyhow::Result<()> {
-    let bound = server
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| anyhow::anyhow!("runtime listener has no IP address"))?;
-    for request in server.incoming_requests() {
-        // These endpoints never execute a command or consume an ordinary slot.
-        // Preserve authentication/Host/Origin checks through serve_request.
-        let path = request.url().split('?').next().unwrap_or("");
-        if (path == "/api/health" && request.method() == &tiny_http::Method::Get)
-            || (path == "/api/runtime/stop" && request.method() == &tiny_http::Method::Post)
-        {
-            if let Err(error) = serve_request(request, bound) {
-                eprintln!("runtime control request failed: {error:#}");
-            }
-            continue;
-        }
-        std::thread::Builder::new()
-            .name("runtime-http".into())
-            .spawn(move || {
-                if let Err(error) = serve_request(request, bound) {
-                    eprintln!("runtime HTTP request failed: {error:#}");
-                }
-            })?;
-    }
+pub(crate) fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
+    let bound = server.local_addr()?;
+    crate::network::runtime()?.block_on(async move {
+        let listener = tokio::net::TcpListener::from_std(server)?;
+        let app = axum::Router::new()
+            .fallback(serve_request)
+            .with_state(bound);
+        axum::serve(
+            crate::network::Listener(listener),
+            app.into_make_service_with_connect_info::<crate::network::Peer>(),
+        )
+        .await
+    })?;
     Ok(())
 }
 
-fn serve_request(mut request: tiny_http::Request, bound: SocketAddr) -> anyhow::Result<()> {
-    if request.method() == &tiny_http::Method::Post
-        && request.url().split('?').next() == Some("/api/rpc")
-        && request_authorized(&request, bound)
+fn response(status: u16, content_type: &'static str, body: Vec<u8>) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let mut response = (
+        axum::http::StatusCode::from_u16(status)
+            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),
+        body,
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static(content_type),
+    );
+    if content_type.starts_with("text/event-stream") {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-cache"),
+        );
+    }
+    response
+}
+
+async fn serve_request(
+    axum::extract::State(bound): axum::extract::State<SocketAddr>,
+    axum::extract::ConnectInfo(crate::network::Peer(peer)): axum::extract::ConnectInfo<
+        crate::network::Peer,
+    >,
+    request: axum::extract::Request,
+) -> axum::response::Response {
+    let (parts, body) = request.into_parts();
+    let method = match parts.method.as_str().parse::<tiny_http::Method>() {
+        Ok(method) => method,
+        Err(_) => {
+            return response(
+                400,
+                "application/json",
+                b"{\"error\":\"invalid method\"}".to_vec(),
+            )
+        }
+    };
+    let mut local = HttpRequest {
+        method,
+        url: parts.uri.to_string(),
+        headers: parts
+            .headers
+            .iter()
+            .filter_map(|(key, value)| {
+                tiny_http::Header::from_bytes(key.as_str(), value.as_bytes()).ok()
+            })
+            .collect(),
+        peer,
+        body: std::io::Cursor::new(Vec::new()),
+    };
+    if !request_authorized(&local, bound) {
+        let (status, content_type, bytes) = handle_request(&mut local, bound);
+        return response(status, content_type, bytes);
+    }
+    // Partial bodies wait in a connection future, never the accept loop.
+    let bytes = match tokio::time::timeout(
+        crate::network::IO_WAIT,
+        axum::body::to_bytes(body, MAX_BODY as usize),
+    )
+    .await
     {
-        let mut bytes = Vec::new();
-        request
-            .as_reader()
-            .take(MAX_BODY + 1)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > MAX_BODY {
-            request.respond(
-                tiny_http::Response::from_string("request body exceeds runtime frame limit")
-                    .with_status_code(413),
-            )?;
-            return Ok(());
+        Ok(Ok(bytes)) => bytes,
+        result => {
+            let status = if result.is_err() { 408 } else { 413 };
+            let mut response = response(
+                status,
+                "application/json",
+                b"{\"error\":\"request body incomplete or exceeds frame limit\"}".to_vec(),
+            );
+            response.headers_mut().insert(
+                axum::http::header::CONNECTION,
+                axum::http::HeaderValue::from_static("close"),
+            );
+            return response;
         }
-        // Keep ownership until dispatch has either queued the callback or failed.
-        let owned = std::sync::Arc::new(std::sync::Mutex::new(Some(request)));
-        let deferred = std::sync::Arc::clone(&owned);
-        let result = crate::rpc::handle_http_rpc_deferred(&bytes, move |response| {
-            let request = deferred
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take();
-            if let Some(request) = request {
-                let bytes = serde_json::to_vec(&response).unwrap_or_default();
-                if let Err(error) = request.respond(
-                    tiny_http::Response::from_data(bytes).with_header(
-                        tiny_http::Header::from_bytes(
-                            "Content-Type",
-                            "application/json; charset=utf-8",
-                        )
-                        .unwrap(),
-                    ),
-                ) {
-                    eprintln!("runtime HTTP deferred reply failed: {error}");
-                }
-            }
-        });
-        if let Err(error) = result {
-            if let Some(request) = owned
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .take()
-            {
-                request.respond(
-                    tiny_http::Response::from_string(
-                        json!({"error":error.to_string()}).to_string(),
-                    )
-                    .with_status_code(400),
-                )?;
+    };
+    let path = local.url().split('?').next().unwrap_or("").to_owned();
+    if local.method() == &tiny_http::Method::Post && path == "/api/rpc" {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        // The completion callback only sends an in-memory result. Hyper owns
+        // response ordering and all socket backpressure in its async task.
+        if let Err(error) = crate::rpc::handle_http_rpc_deferred(&bytes, move |value| {
+            let _ = send.send(value);
+        }) {
+            return response(
+                400,
+                "application/json",
+                json!({"error": error.to_string()}).to_string().into_bytes(),
+            );
+        }
+        return match receive.await {
+            Ok(value) => response(
+                200,
+                "application/json; charset=utf-8",
+                serde_json::to_vec(&value).unwrap_or_default(),
+            ),
+            Err(_) => response(
+                503,
+                "application/json",
+                b"{\"error\":\"runtime reply unavailable\"}".to_vec(),
+            ),
+        };
+    }
+    local.body = std::io::Cursor::new(bytes.to_vec());
+    let control = path == "/api/health" || path == "/api/runtime/stop";
+    let result = if control {
+        handle_request(&mut local, bound)
+    } else {
+        // The existing synchronous MCP bridge runs outside the network executor.
+        match tokio::task::spawn_blocking(move || handle_request(&mut local, bound)).await {
+            Ok(result) => result,
+            Err(_) => {
+                return response(
+                    503,
+                    "application/json",
+                    b"{\"error\":\"runtime handler unavailable\"}".to_vec(),
+                )
             }
         }
-        return Ok(());
-    }
-    let (status, ctype, body) = handle_request(&mut request, bound);
-    let stop = status == 200
-        && request.method() == &tiny_http::Method::Post
-        && request.url().split('?').next() == Some("/api/runtime/stop");
-    let mut resp = tiny_http::Response::from_data(body)
-        .with_status_code(status)
-        .with_header(
-            tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype)
-                .map_err(|_| anyhow::anyhow!("failed to build Content-Type header"))?,
-        );
-    if ctype.starts_with("text/event-stream") {
-        resp = resp.with_header(
-            tiny_http::Header::from_bytes(&b"Cache-Control"[..], "no-cache")
-                .map_err(|_| anyhow::anyhow!("failed to build Cache-Control header"))?,
-        );
-    }
-    let result = request.respond(resp);
-    if stop {
+    };
+    if result.0 == 200 && path == "/api/runtime/stop" && parts.method == axum::http::Method::POST {
         crate::rpc::request_drain_exit();
     }
-    result?;
-    Ok(())
+    response(result.0, result.1, result.2)
 }
 
-fn request_authorized(request: &tiny_http::Request, bound: SocketAddr) -> bool {
+fn request_authorized(request: &HttpRequest, bound: SocketAddr) -> bool {
     let host = header_value(request, "Host");
     let authority = bound.to_string();
     let default_port_host = bound.port() == 80

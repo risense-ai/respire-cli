@@ -153,18 +153,34 @@ values above available CPU parallelism are clamped. `/api/health` reports both
 `rpc.available_parallelism` and `rpc.effective_parallelism`. This does not create
 additional model sessions: foreground and background inference each remain serial.
 
-Queued HTTP and pipe commands retain their reply object without retaining a
-connection thread while waiting for an execution slot. Ordinary queue length does
+Queued HTTP and pipe commands await their result in asynchronous connection
+tasks. Completion callbacks only hand off in-memory results; neither command
+workers nor the dispatcher write sockets or wait for preceding HTTP responses.
+Incomplete bodies and stalled writes have transport deadlines independent of
+command execution. Ordinary queue length does
 not reject a command. Execution slots still follow available CPUs; model sessions
 and serialized write transactions remain unchanged.
 `RSRS_RPC_QUEUE_WAIT_SECS` bounds queue waiting (default 120, range 1–3600).
 RPC callers can shorten this wait using the optional `queue_wait_ms` field.
 Expired commands that have not started are removed and cannot later commit a write.
-Once execution starts, the client waits for its actual result; a queue deadline is
-not reported as cancellation of an executing write. Health and stop HTTP endpoints
+Once execution starts, the server keeps its actual result; a queue deadline is
+not reported as cancellation of an executing write. The HTTP client's existing
+120-second deadline can still precede that result. Such transport failures return
+`request_outcome_unknown` with the original request ID, and never replay the write.
+Inspect it with an RPC request such as
+`{"v":1,"id":"inspection-id","method":"runtime.result","args":["original-request-id"]}`.
+`pending` means the request is queued or executing; `completed` includes its
+original response. `unknown` is not proof that the write did not commit: receipts
+cover the last 64 completed requests in the current runtime and do not survive
+restart. Concurrent reuse of an in-flight request ID is rejected rather than
+executed again; this is not durable exactly-once execution.
+Health and stop HTTP endpoints
 remain outside ordinary command admission. The health response includes the last
-1024 queue/command timing samples in microseconds; command time includes receipt
-delivery and does not separately measure native inference or storage.
+1024 queue/command timing samples in microseconds; command time ends at the
+in-memory result handoff and excludes asynchronous socket delivery. It does not
+separately measure native inference or storage. A native run that ignores
+termination still requires host recovery; this transport change does not isolate
+native inference in another process.
 
 ```mermaid
 flowchart TD

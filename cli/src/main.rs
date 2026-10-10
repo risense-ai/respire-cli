@@ -27,6 +27,7 @@ mod i18n;
 mod login;
 mod mcp;
 mod net_rpc;
+mod network;
 mod output;
 mod progress;
 mod rpc;
@@ -318,13 +319,20 @@ fn output_emitted() -> bool {
 
 fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
+    let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
+        Some(runtime_error::RuntimeError::OutcomeUnknown { request_id, .. }) => Some(request_id),
+        _ => None,
+    };
     let mut envelope = ResultEnvelope::new(
         "cli", OutputStatus::Fail,
-        serde_json::json!({"reason": if input { "invalid_input" } else { "runtime_error" }}),
+        serde_json::json!({"reason": if unknown.is_some() { "request_outcome_unknown" } else if input { "invalid_input" } else { "runtime_error" }}),
         Vec::new(),
     );
     envelope.errors.push(format!("{error:#}"));
     envelope.details = serde_json::json!({"error_type": if input { "user" } else { "runtime" }});
+    if let Some(id) = unknown {
+        envelope.details = serde_json::json!({"error_type":"outcome_unknown","request_id":id,"replayed":false,"result_method":"runtime.result"});
+    }
     (envelope, if input { 2 } else { 1 })
 }
 

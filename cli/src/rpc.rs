@@ -137,6 +137,7 @@ static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
 static WEB_URL: Mutex<String> = Mutex::new(String::new());
 static CACHE: Mutex<Vec<(String, RpcResponse)>> = Mutex::new(Vec::new());
+static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
 pub fn worker_active() -> bool {
     WORKER.with(|flag| flag.get())
@@ -738,6 +739,46 @@ impl Reply {
     }
 }
 
+struct QueueWatch {
+    deadline: std::sync::Weak<crate::admission::QueueDeadline>,
+    reply: std::sync::Weak<Mutex<Option<ReplyAction>>>,
+}
+
+fn watch_queue(deadline: &Arc<crate::admission::QueueDeadline>, reply: &Reply) -> Result<()> {
+    static WATCH: OnceLock<Mutex<Vec<QueueWatch>>> = OnceLock::new();
+    let entries = WATCH.get_or_init(|| {
+        Mutex::new(Vec::new())
+    });
+    static STARTED: OnceLock<()> = OnceLock::new();
+    let network = crate::network::runtime()?;
+    STARTED.get_or_init(|| {
+        network.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(20));
+            loop {
+                tick.tick().await;
+                let mut expired = Vec::new();
+                {
+                    let mut entries = entries.lock().unwrap_or_else(|error| error.into_inner());
+                    entries.retain(|entry| {
+                        let Some(deadline) = entry.deadline.upgrade() else { return false; };
+                        if deadline.expired() {
+                            if let Some(reply) = entry.reply.upgrade() { expired.push(Reply(reply)); }
+                            false
+                        } else { !deadline.running() }
+                    });
+                }
+                // Reply actions only hand off in-memory results or spawn async I/O.
+                for reply in expired { let _ = reply.send(Err(QUEUE_EXPIRED.into())); }
+            }
+        });
+    });
+    entries.lock().map_err(|_| anyhow::anyhow!("queue watch lock poisoned"))?.push(QueueWatch {
+        deadline: Arc::downgrade(deadline),
+        reply: Arc::downgrade(&reply.0),
+    });
+    Ok(())
+}
+
 pub fn call_from_argv() -> Result<()> {
     let mut args: Vec<String> = std::env::args()
         .skip(1)
@@ -1164,7 +1205,8 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
     let name = pipe_name()?;
     #[cfg(unix)]
     clear_dead_socket();
-    let listener = match ListenerOptions::new().name(name).create_sync() {
+    let entered = crate::network::runtime()?.enter();
+    let listener = match ListenerOptions::new().name(name).create_tokio() {
         Ok(listener) => listener,
         Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
             drop(boot);
@@ -1183,6 +1225,7 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
         }
         Err(error) => return Err(error).context("failed to bind the runtime pipe"),
     };
+    drop(entered);
     let Some(bound) = bind_http(&flags, _detached)? else {
         return Ok(());
     };
@@ -1208,7 +1251,7 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
             eprintln!("runtime HTTP server stopped: {error:#}");
         }
     });
-    accept_loop(listener, tx);
+    accept_loop(listener, tx)?;
     Ok(())
 }
 
@@ -1219,35 +1262,51 @@ fn bind_http(
     crate::runtime_http::bind_runtime(flags.port, &flags.host).map(Some)
 }
 
-fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Job>) {
-    for connection in listener.incoming() {
-        if STOPPING.load(Ordering::Acquire) {
-            break;
+fn accept_loop(listener: interprocess::local_socket::tokio::Listener, tx: Sender<Job>) -> Result<()> {
+    use interprocess::local_socket::tokio::prelude::*;
+    crate::network::runtime()?.block_on(async move {
+        while !STOPPING.load(Ordering::Acquire) {
+            let connection = match listener.accept().await {
+                Ok(connection) => connection,
+                Err(error) => {
+                    eprintln!("runtime accept failed: {error}");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            };
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                if let Err(error) = handle_connection(connection, &tx).await {
+                    eprintln!("runtime connection failed: {error:#}");
+                }
+            });
         }
-        let connection = match connection {
-            Ok(connection) => connection,
-            Err(error) => {
-                eprintln!("runtime accept failed: {error}");
-                continue;
-            }
-        };
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            if let Err(error) = handle_connection(connection, &tx) {
-                eprintln!("runtime connection failed: {error:#}");
-            }
-        });
-    }
+    });
+    Ok(())
 }
 
-fn handle_connection(mut stream: Stream, tx: &Sender<Job>) -> Result<()> {
-    let bytes = read_frame(&mut stream)?;
+async fn handle_connection(mut stream: interprocess::local_socket::tokio::Stream, tx: &Sender<Job>) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let bytes = tokio::time::timeout(crate::network::IO_WAIT, async {
+        let mut header = [0; 4];
+        stream.read_exact(&mut header).await?;
+        let length = u32::from_le_bytes(header) as usize;
+        anyhow::ensure!(length <= MAX_FRAME, "frame exceeds runtime limit");
+        let mut bytes = vec![0; length];
+        stream.read_exact(&mut bytes).await?;
+        Ok::<_, anyhow::Error>(bytes)
+    }).await.context("runtime pipe request body timed out")??;
     let request: RpcRequest = serde_json::from_slice(&bytes)?;
-    dispatch_deferred(request, tx, move |response| {
-        let result = serde_json::to_vec(&response).map_err(anyhow::Error::from)
-            .and_then(|bytes| write_frame(&mut stream, &bytes));
-        if let Err(error) = result { eprintln!("runtime pipe reply failed: {error:#}"); }
-    });
+    let (send, receive) = tokio::sync::oneshot::channel();
+    dispatch_deferred(request, tx, move |response| { let _ = send.send(response); });
+    let response = receive.await.context("runtime pipe result unavailable")?;
+    let bytes = serde_json::to_vec(&response)?;
+    anyhow::ensure!(bytes.len() <= MAX_FRAME, "response exceeds runtime frame limit");
+    tokio::time::timeout(crate::network::IO_WAIT, async {
+        stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
+        stream.write_all(&bytes).await?;
+        stream.flush().await
+    }).await.context("runtime pipe reply timed out; inspect result by request ID")??;
     Ok(())
 }
 
@@ -1259,8 +1318,8 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             "protocol version mismatch",
         );
     }
-    if let Some(hit) = cached(&request.id) {
-        return hit;
+    if request.method != "runtime.result" {
+        if let Some(hit) = cached(&request.id) { return hit; }
     }
     let response = match request.method.as_str() {
         "model.prepare" => {
@@ -1320,6 +1379,19 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             ));
             response
         }
+        "runtime.result" => {
+            let id = request.args.first().map(String::as_str).unwrap_or("");
+            let result = cached(id);
+            let pending = INFLIGHT.lock().unwrap_or_else(|error| error.into_inner()).contains(id);
+            let mut response = status_response(&request);
+            response.envelope = Some(ResultEnvelope::new(
+                "runtime.result", OutputStatus::Ok,
+                json!({"request_id":id,"state":if result.is_some() {"completed"} else if pending {"pending"} else {"unknown"},"response":result,
+                    "retention":"last 64 completed requests in this runtime; unknown is not proof of non-commit; never replay a write automatically"}),
+                Vec::new(),
+            ));
+            response
+        }
         "runtime.stop" => {
             request_drain_exit();
             status_response(&request)
@@ -1346,7 +1418,7 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             &format!("unknown method {other}"),
         ),
     };
-    remember(&request.id, &response);
+    if request.method != "runtime.result" { remember(&request.id, &response); }
     response
 }
 
@@ -1368,12 +1440,21 @@ fn dispatch_deferred(request: RpcRequest, tx: &Sender<Job>, action: impl FnOnce(
         action(dispatch(request, tx));
         return;
     }
-    if let Some(response) = cached(&request.id) { action(response); return; }
+    {
+        let mut inflight = INFLIGHT.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(response) = cached(&request.id) { drop(inflight); action(response); return; }
+        if !inflight.insert(request.id.clone()) {
+            drop(inflight);
+            action(error_response(&request, "request_in_progress", "request ID is already executing or queued; inspect runtime.result; command was not replayed"));
+            return;
+        }
+    }
     let args = request.args.clone();
     let wait = request.queue_wait_ms.map(Duration::from_millis).unwrap_or_else(queue_wait).min(queue_wait());
     let reply = Reply::new(move |result| {
         let response = command_response(&request, result);
         remember(&request.id, &response);
+        INFLIGHT.lock().unwrap_or_else(|error| error.into_inner()).remove(&request.id);
         action(response);
     });
     if let Err(error) = enqueue_job(tx, args, false, reply.clone(), wait) {
@@ -1441,22 +1522,16 @@ fn enqueue_job(
     }
     let sync_context = if !respire::service::off_mode() && matches!(
         command_name(&args),
-        Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")
+        Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history" | "classify")
     ) {
-        let gate = shared_exclusive();
-        let _held = gate.acquire(true);
-        let boundary = crate::build_local()
-            .and_then(|store| store.outgoing_boundary())
-            .map_err(|error| format!("{error:#}"))?;
-        Some((GENERATION.load(Ordering::Acquire), boundary))
-    } else if !respire::service::off_mode() && command_name(&args) == Some("classify") {
-        let gate = shared_exclusive();
-        let _held = gate.acquire(true);
+        // Capture account generation without blocking a network executor on
+        // the write gate. The dispatcher takes the sync snapshot later.
         Some((GENERATION.load(Ordering::Acquire), -1))
     } else {
         None
     };
     let deadline = Arc::new(crate::admission::QueueDeadline::new(wait));
+    watch_queue(&deadline, &reply).map_err(|error| error.to_string())?;
     tx.send(Job {
         args,
         stop,
@@ -1876,7 +1951,7 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
             break;
         }
         match rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(job) => {
+            Ok(mut job) => {
                 if job.stop {
                     break;
                 }
@@ -1911,6 +1986,16 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
                     command_name(&job.args),
                     Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history")
                 ) {
+                    let generation = job.sync_context.map(|value| value.0).unwrap_or_else(|| GENERATION.load(Ordering::Acquire));
+                    let gate = shared_exclusive();
+                    let held = gate.acquire(true);
+                    let snapshot = check_sync_context(generation).and_then(|_| crate::build_local()).and_then(|store| store.outgoing_boundary());
+                    drop(held);
+                    if job.deadline.expired() { let _ = job.reply.send(Err(QUEUE_EXPIRED.into())); continue; }
+                    match snapshot {
+                        Ok(boundary) => job.sync_context = Some((generation, boundary)),
+                        Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
+                    }
                     enqueue_manual(job);
                 } else if command_name(&job.args) == Some("classify") {
                     match classify_tx.try_send(job) {
@@ -2628,7 +2713,7 @@ mod tests {
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(job.deadline.expired());
         assert!(!job.deadline.start());
-        job.reply.send(Err(QUEUE_EXPIRED.into())).map_err(anyhow::Error::msg)?;
+        let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
         assert!(response.recv_timeout(Duration::from_secs(1))?.error.as_deref().is_some_and(|error| error.contains("not started")));
         // A subsequent accepted request has an independent deadline and succeeds.
         let (finished, response) = mpsc::channel();
@@ -2639,6 +2724,126 @@ mod tests {
         assert!(job.deadline.start());
         job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()) })).map_err(anyhow::Error::msg)?;
         assert!(response.recv_timeout(Duration::from_secs(1))?.ok);
+        Ok(())
+    }
+
+    #[test]
+    fn queue_expiry_does_not_require_a_responsive_worker() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let (tx, rx) = mpsc::channel();
+        let (done, receive) = mpsc::channel();
+        let mut request = req("cli.exec", "unresponsive-queue-write");
+        request.args = vec!["remember".into(), "synthetic write".into()];
+        request.queue_wait_ms = Some(30);
+        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
+        // Fault injection: no dispatcher/worker consumes this accepted job.
+        let response = receive.recv_timeout(Duration::from_secs(1))?;
+        assert!(response.error.as_deref().is_some_and(|error| error.contains("not started")));
+        let job = rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(!job.deadline.start());
+        Ok(())
+    }
+
+    #[test]
+    fn started_write_keeps_result_across_client_deadline_and_duplicate_id() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let (tx, rx) = mpsc::channel();
+        let (done, receive) = mpsc::channel();
+        let mut request = req("cli.exec", "held-started-write");
+        request.args = vec!["remember".into(), "synthetic write".into()];
+        request.queue_wait_ms = Some(50);
+        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
+        let job = rx.recv_timeout(Duration::from_secs(1))?;
+        assert!(job.deadline.start());
+        // Controlled execution ignores cancellation while it is held, then returns.
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!job.deadline.cancel());
+        assert!(receive.try_recv().is_err());
+        let (done, duplicate) = mpsc::channel();
+        let mut request = req("cli.exec", "held-started-write");
+        request.args = vec!["remember".into(), "synthetic write".into()];
+        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
+        assert_eq!(duplicate.recv_timeout(Duration::from_secs(1))?.code.as_deref(), Some("request_in_progress"));
+        assert!(rx.try_recv().is_err(), "same ID must not create another write");
+        let mut inspect = req("runtime.result", "inspect-pending-write");
+        inspect.args = vec!["held-started-write".into()];
+        assert_eq!(dispatch(inspect, &tx).envelope.as_ref().map(|value| &value.summary["state"]), Some(&json!("pending")));
+        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) })).map_err(anyhow::Error::msg)?;
+        assert!(receive.recv_timeout(Duration::from_secs(1))?.ok);
+        let mut inspect = req("runtime.result", "inspect-completed-write");
+        inspect.args = vec!["held-started-write".into()];
+        let response = dispatch(inspect, &tx);
+        assert!(response.envelope.as_ref().is_some_and(|value| value.summary["state"] == "completed" && value.summary["response"]["envelope"]["summary"]["committed"] == true));
+        Ok(())
+    }
+
+    #[test]
+    fn http_pipeline_with_held_execution_and_nonreading_peer() -> Result<()> {
+        use std::net::TcpStream;
+        // A child gives the controlled dispatcher its own process-global sender.
+        // No real account, model, or source records are modified by this test.
+        if std::env::var_os("RSRS_TRANSPORT_TEST_CHILD").is_none() {
+            let profile = tempfile::tempdir()?;
+            let output = Command::new(std::env::current_exe()?)
+                .args(["--exact", "rpc::tests::http_pipeline_with_held_execution_and_nonreading_peer", "--nocapture", "--test-threads=1"])
+                .env("RSRS_TRANSPORT_TEST_CHILD", "1")
+                .env("RSRS_DATA_DIR", profile.path())
+                .env("RSRS_CORE_TEST_MODE", "1")
+                .env_remove("RSRS_RPC_TOKEN")
+                .output()?;
+            anyhow::ensure!(output.status.success(), "isolated transport regression failed: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return Ok(());
+        }
+        let (tx, rx) = mpsc::channel();
+        anyhow::ensure!(JOB_TX.set(Mutex::new(tx.clone())).is_ok(), "child sender already initialized");
+        WORKERS.store(1, Ordering::Release);
+        let bound = crate::runtime_http::bind_runtime(Some(0), "127.0.0.1")?;
+        let address = bound.server.local_addr()?;
+        let base = bound.url;
+        std::thread::spawn(move || { let _ = crate::runtime_http::serve_loop(bound.server); });
+        let url = format!("{base}/api/rpc");
+        let blocker = std::thread::spawn(move || -> Result<serde_json::Value> {
+            Ok(ureq::post(&url).timeout(Duration::from_secs(5)).send_json(json!({"v":1,"id":"held-slot","method":"cli.exec","args":["remember","controlled blocker"]}))?.into_json()?)
+        });
+        let held = rx.recv_timeout(Duration::from_secs(2))?;
+        anyhow::ensure!(held.deadline.start(), "blocker expired before start");
+        RUNNING.store(1, Ordering::Release);
+        let mut pipeline = TcpStream::connect(address)?;
+        pipeline.set_read_timeout(Some(Duration::from_secs(5)))?;
+        for (id, wait) in [("held-pipeline-a", None), ("held-pipeline-b", Some(0u64))] {
+            let mut body = json!({"v":1,"id":id,"method":"cli.exec","args":["remember","controlled queued write"]});
+            if let Some(wait) = wait { body["queue_wait_ms"] = json!(wait); }
+            let body = body.to_string();
+            let connection = if wait.is_some() { "Connection: close\r\n" } else { "" };
+            write!(pipeline, "POST /api/rpc HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n{connection}Content-Length: {}\r\n\r\n{body}", body.len())?;
+        }
+        let queued = rx.recv_timeout(Duration::from_secs(2))?;
+        anyhow::ensure!(!queued.deadline.running(), "queued request consumed the held execution slot");
+        let health: Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(1)).call()?.into_json()?;
+        anyhow::ensure!(health["pid"] == std::process::id(), "control channel was blocked");
+        let captured = || crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) };
+        held.reply.send(Ok(captured())).map_err(anyhow::Error::msg)?;
+        RUNNING.store(0, Ordering::Release);
+        anyhow::ensure!(blocker.join().map_err(|_| anyhow::anyhow!("blocker client panicked"))??["ok"] == true, "blocker result lost");
+        anyhow::ensure!(queued.deadline.start(), "A expired before the held slot was released");
+        // Sending a large reply while the peer does not read must not hold the
+        // actor/worker. Only the async connection task may wait for socket space.
+        let mut large = captured();
+        large.envelope.details = json!({"controlled_payload":"x".repeat(8*1024*1024)});
+        let start = Instant::now();
+        queued.reply.send(Ok(large)).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(start.elapsed() < Duration::from_millis(200), "response I/O blocked the execution actor");
+        std::thread::sleep(Duration::from_millis(100));
+        let health: Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(1)).call()?.into_json()?;
+        anyhow::ensure!(health["pid"] == std::process::id(), "slow-reader blocked control");
+        let mut wire = String::new();
+        pipeline.read_to_string(&mut wire)?;
+        let first = wire.find("held-pipeline-a").ok_or_else(|| anyhow::anyhow!("pipeline A reply missing"))?;
+        let second = wire.find("held-pipeline-b").ok_or_else(|| anyhow::anyhow!("pipeline B reply missing"))?;
+        anyhow::ensure!(first < second, "pipeline replies reordered");
+        anyhow::ensure!(wire.contains("command was not started"), "B did not expire before execution");
+        let cancelled = rx.recv_timeout(Duration::from_secs(2))?;
+        anyhow::ensure!(!cancelled.deadline.start(), "expired B executed a write");
         Ok(())
     }
 

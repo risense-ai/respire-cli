@@ -84,8 +84,14 @@ impl QueueDeadline {
     }
 
     pub(crate) fn expired(&self) -> bool {
-        if Instant::now() >= self.deadline { self.cancel(); }
+        if Instant::now() >= self.deadline {
+            self.cancel();
+        }
         self.state.load(Ordering::Acquire) == CANCELLED
+    }
+
+    pub(crate) fn running(&self) -> bool {
+        self.state.load(Ordering::Acquire) == RUNNING
     }
 }
 
