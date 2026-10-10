@@ -237,6 +237,16 @@ for binary in BINARIES:
                     assert envelope['summary'].get('index_state') == 'pending', 'remember waited for derived indexing'
                     created.append(envelope['summary']['id'])
                     timings.append({'command':command,'seconds':elapsed})
+                # Retrieval quality evaluation must use the same pending-aware
+                # resident path as recall, without requiring derived artifacts.
+                eval_file = BASE / 'resident-stress-eval.jsonl'
+                bench_file = BASE / 'resident-stress-bench.json'
+                eval_file.write_text(json.dumps({'query':'resident stress query','expect':created})+'\n',encoding='utf-8')
+                run('bench','run',str(eval_file),'--save',str(bench_file))
+                bench_report = json.loads(bench_file.read_text(encoding='utf-8'))
+                assert int(bench_report['params']['index_pending']) > 0, 'fixture did not evaluate pending sources'
+                assert bench_report['metrics']['hitk'] == 1, 'pending-aware benchmark lost the expected source'
+                run('bench','run',str(eval_file),'--baseline',str(bench_file))
                 # A healthy owner must serve reads even while another process
                 # holds the lifecycle gate for startup/replacement decisions.
                 lifecycle = sqlite3.connect(main/'runtime/takeover/lock.db', timeout=2)
