@@ -8,9 +8,9 @@ import vm from 'node:vm';
 const source = readFileSync(new URL('../bin/cli.js', import.meta.url), 'utf8');
 const version = '1.0.11-dev.5';
 const targets = [
-  ['linux', 'x64', 'musl', 'linux-x64'], ['linux', 'arm64', 'musl', 'linux-arm64'],
-  ['linux', 'x64', 'glibc', 'linux-x64-gnu'], ['linux', 'arm64', 'glibc', 'linux-arm64-gnu'],
-  ['darwin', 'arm64', '', 'macos-arm64'], ['win32', 'x64', '', 'win-x64'], ['win32', 'arm64', '', 'win-arm64'],
+  ['linux', 'x64', 'musl', 'linux-x64'],
+  ['linux', 'x64', 'glibc', 'linux-x64-gnu'],
+  ['darwin', 'arm64', '', 'macos-arm64'], ['win32', 'x64', '', 'win-x64'],
 ];
 let cases = 0;
 for (const [platform, arch, libc, name] of targets) {
@@ -54,5 +54,25 @@ for (const [platform, arch, libc, name] of targets) {
       } finally { rmSync(root, { recursive: true, force: true }); }
     }
   }
+}
+for (const [platform, arch] of [['linux', 'arm64'], ['win32', 'arm64'], ['darwin', 'x64']]) {
+  let exit, stderr = '';
+  const quit = {};
+  const require = (name) => {
+    if (name === '../package.json') return { version };
+    if (name === 'fs') return fs;
+    if (name === 'path') return path;
+    if (name === 'child_process') return { spawnSync: () => { throw new Error('Unsupported platform launched a binary'); } };
+    throw new Error(name);
+  };
+  try {
+    vm.runInNewContext(source, { require, __dirname: '.',
+      console: { error: (message) => { stderr += message; } },
+      process: { platform, arch, env: {}, argv: ['node', 'cli', '--version'],
+        exit: (code) => { exit = code; throw quit; } } });
+  } catch (error) { if (error !== quit) throw error; }
+  assert.equal(exit, 1);
+  assert.ok(stderr.includes(platform === 'darwin' ? 'Intel Mac is unsupported' : `unsupported platform ${platform}-${arch}`), stderr);
+  cases++;
 }
 console.log(`Wrapper version regression: ${cases} cases passed`);

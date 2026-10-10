@@ -6,9 +6,7 @@ or ONNX Runtime sources.
 | Item | Contract |
 | --- | --- |
 | Linux x64, glibc | `x86_64-unknown-linux-gnu` |
-| Linux arm64, glibc | `aarch64-unknown-linux-gnu` |
 | Linux x64, static musl | `x86_64-unknown-linux-musl` |
-| Linux arm64, static musl | `aarch64-unknown-linux-musl` |
 | musl container | `rust:1.95.0-alpine3.23`, same CPU architecture |
 | SDK | Pinned binary SDK for the exact target |
 | Output | `target/ci/<target>/release/rsrs` and staged notices |

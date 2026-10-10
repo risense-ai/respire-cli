@@ -13,7 +13,7 @@ the scoped package's trusted publisher does not automatically authorize it.
 After the initial publication, configure `risense-ai/respire-cli` with workflow
 `npm-alias.yml` as this package's trusted publisher. Dispatch **Publish short
 npm entry** to publish future formal versions after the scoped CLI is public.
-Alias-only changes do not trigger the seven-platform native release workflow.
+Alias-only changes do not trigger the four-target native release workflow.
 
 The user install command, once published, is `npm install -g rsrs-cli`.
 Existing users can continue to use `npm install -g @rsrsai/cli`.
