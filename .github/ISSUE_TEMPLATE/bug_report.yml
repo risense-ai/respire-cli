@@ -1,0 +1,64 @@
+name: "Bug report / 缺陷报告"
+description: "CLI, runtime, installation or performance failures / 命令、运行时、安装或性能问题"
+title: "[Bug] "
+body:
+  -
+    type: "markdown"
+    attributes:
+      value: "Use English or 中文. Search existing issues first. Never post passwords, API keys/tokens, databases/backups, private memories, account identifiers or unredacted logs/screenshots. / 可用中英文；先搜索现有问题。不要提交密码、密钥/token、数据库/备份、私密记忆、账户标识或未脱敏日志/截图。\n\nSecurity vulnerabilities: do not disclose details in a public Issue or PR. Check this repository's Security tab for a private reporting option; if none is offered, ask maintainers to establish a private channel without including vulnerability details. No security email or private channel is currently documented. / 安全漏洞不要公开披露；查看本仓库 Security 页是否提供私密报告入口。若没有，只请求维护者建立私密渠道，不附漏洞细节。目前未公布安全邮箱或私密渠道。"
+  -
+    type: "textarea"
+    id: "summary"
+    attributes:
+      label: "Problem / 问题概述"
+      description: "One concrete problem and its impact. / 描述一个具体问题及影响。"
+    validations:
+      required: true
+  -
+    type: "textarea"
+    id: "versions"
+    attributes:
+      label: "CLI and runtime versions / CLI 与 Runtime 版本"
+      description: "Paste rsrs --version; include runtime version from sanitized rsrs doctor --json if available. For npm/pnpm launchers, include package, Node and package-manager versions; source builds include commit and Rust version. Unknown is OK if startup fails. / 提供版本；启动失败可写 unknown。"
+    validations:
+      required: true
+  -
+    type: "textarea"
+    id: "environment"
+    attributes:
+      label: "OS, architecture and installation / 系统、架构与安装方式"
+      description: "OS/version, CPU architecture; Linux distribution and glibc/musl if known; install entry (npm/pnpm, release binary, source), shell/container/WSL if relevant. / 系统版本、CPU 架构；Linux 发行版及 libc；安装入口及相关 shell/容器/WSL。"
+    validations:
+      required: true
+  -
+    type: "textarea"
+    id: "reproduction"
+    attributes:
+      label: "Minimal commands / 最小复现命令"
+      description: "Provide exact sanitized commands, flags and synthetic input/setup in an isolated profile; include direct/runtime/MCP/TUI mode, repeat rate and any prerequisites. Do not include real memory data. / 使用隔离测试资料与虚构输入，提供命令、参数、运行模式、前提和复现频率。"
+    validations:
+      required: true
+  -
+    type: "textarea"
+    id: "behavior"
+    attributes:
+      label: "Expected and actual results / 期望与实际结果"
+      description: "Include expected output vs actual stdout/stderr, exit code and JSON error reason if relevant; last known working version if any. / 提供预期和实际输出，相关退出码/JSON 错误原因及最后正常版本。"
+    validations:
+      required: true
+  -
+    type: "textarea"
+    id: "context"
+    attributes:
+      label: "Performance context (if relevant) / 性能上下文（适用时）"
+      description: "Memory/CPU peaks and measurement method; dataset count/size using synthetic data; model/engine/accelerator; foreground commands, background download/index state, concurrency/request rate, elapsed time, cold/warm cache. Include sanitized doctor diagnostics only if safe. / 内存/CPU 峰值与测量方法、数据规模、模型/引擎、前台命令、后台下载/索引、并发/请求率、耗时及冷/热缓存。"
+    validations:
+      required: false
+  -
+    type: "textarea"
+    id: "evidence"
+    attributes:
+      label: "Sanitized diagnostics / 脱敏诊断"
+      description: "Optional small logs, test/benchmark evidence and related issue links. Remove paths with usernames, URLs with credentials, tokens and memory contents; do not attach a database. / 可选小段日志、测试/基准证据与关联问题；移除私密路径、凭据 URL、token 和记忆内容，勿附数据库。"
+    validations:
+      required: false
