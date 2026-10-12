@@ -14,12 +14,26 @@ fn origin(value: &str) -> Result<String> {
     Ok(url.origin().ascii_serialization())
 }
 
+fn login_origin(explicit: Option<&str>, stored: Option<&str>) -> Result<String> {
+    let nonempty = |value: &str| !value.trim().is_empty();
+    let (value, source) = if let Some(value) = explicit.filter(|value| nonempty(value)) {
+        (value, "--addr")
+    } else if let Some(value) = stored.filter(|value| nonempty(value)) {
+        (value, "stored session.json addr")
+    } else {
+        (respire::service::DEFAULT_SERVER_ADDR, "default login server")
+    };
+    origin(value).with_context(|| format!(
+        "invalid login server from {source}; supply --addr <https-origin> (official service: --addr https://api.rsrs.rs); RSRS_ADDR and client.json are not consulted for login"
+    ))
+}
+
 fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>, no_open: bool) -> Result<Value> {
     let dashboard = match dashboard {
-        Some(value) => origin(value)?,
+        Some(value) => origin(value).context("invalid OAuth dashboard from --dashboard; supply an HTTPS origin")?,
         None if addr == "https://api.rsrs.rs" => "https://dash.rsrs.rs".to_owned(),
         None if addr == "https://api.dev.rsrs.rs" => "https://dash.dev.rsrs.rs".to_owned(),
-        None if respire::prompt::interactive() => origin(&respire::prompt::ask("dashboard origin: ")?)?,
+        None if respire::prompt::interactive() => origin(&respire::prompt::ask("dashboard origin: ")?).context("invalid OAuth dashboard from terminal input; supply an HTTPS origin")?,
         None => anyhow::bail!("custom login servers require --dashboard <dashboard-origin>"),
     };
     let agent = ureq::AgentBuilder::new().redirects(0).timeout(Duration::from_secs(30)).build();
@@ -63,7 +77,7 @@ pub(crate) fn run(addr: Option<&str>, user: Option<&str>, pass: Option<&str>, su
     ensure!(!crate::rpc::worker_active(), "login must run in the host terminal, not runtime RPC");
     crate::rpc::recover_interrupted_login()?;
     let last = respire::auth::read_session_json().ok().and_then(|session| session["addr"].as_str().map(ToOwned::to_owned));
-    let addr = origin(addr.or(last.as_deref()).unwrap_or(respire::service::DEFAULT_SERVER_ADDR))?;
+    let addr = login_origin(addr, last.as_deref())?;
     let password_mode = if interactive && !oauth && pass.is_none() && respire::prompt::interactive() {
         let choice = respire::prompt::ask("login method: 1 OAuth (default), 2 password/TOTP: ")?;
         ensure!(matches!(choice.trim(), "" | "1" | "2"), "select login method 1 or 2");
@@ -167,4 +181,36 @@ pub(crate) fn migrate_vault(addr: Option<&str>, user: Option<&str>, pass: Option
         eprintln!("Keep this recovery code before migration: {code}");
     }
     commit_verified(&addr, &authorization, prepared, "migrate")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_origin_preserves_precedence_and_empty_fallback() -> Result<()> {
+        for empty in [None, Some(""), Some(" \t\n")] {
+            assert_eq!(login_origin(empty, empty)?, respire::service::DEFAULT_SERVER_ADDR);
+            assert_eq!(login_origin(empty, Some("https://self-hosted.invalid"))?, "https://self-hosted.invalid");
+        }
+        assert_eq!(login_origin(Some("https://explicit.invalid"), Some("http://stored.invalid"))?, "https://explicit.invalid");
+        for local in ["http://localhost:1234", "http://127.0.0.1:1234", "http://127.2.3.4:1234", "http://[::1]:1234"] {
+            assert_eq!(login_origin(None, Some(local))?, local);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn login_origin_rejects_unsafe_addresses_without_echoing_them() -> Result<()> {
+        for unsafe_addr in ["http://remote.invalid", "http://192.168.1.1", "http://localhost.invalid", "http://[::2]", "ftp://localhost", "https://name:synthetic-secret@remote.invalid", "https://remote.invalid/path?synthetic-secret#fragment", "synthetic-secret"] {
+            for (explicit, stored, source) in [(Some(unsafe_addr), None, "--addr"), (None, Some(unsafe_addr), "stored session.json addr")] {
+                let error = match login_origin(explicit, stored) { Err(error) => format!("{error:#}"), Ok(_) => anyhow::bail!("unsafe login origin was accepted") };
+                assert!(error.contains(source), "{error}");
+                assert!(error.contains("--addr https://api.rsrs.rs"), "{error}");
+                assert!(!error.contains(unsafe_addr), "{error}");
+                assert!(!error.contains("synthetic-secret"), "{error}");
+            }
+        }
+        Ok(())
+    }
 }

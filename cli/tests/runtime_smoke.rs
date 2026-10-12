@@ -238,7 +238,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
     let session_bytes = br#"{"user":"original","addr":"https://previous.invalid"}"#;
     std::fs::write(original.join("session.json"), session_bytes)?;
     let config_bytes = serde_json::to_vec(
-        &json!({"data_dir":original,"api_base":"https://previous.invalid","custom":"preserve"}),
+        &json!({"data_dir":original,"api_base":"https://previous.invalid","addr":"http://config.invalid","custom":"preserve"}),
     )?;
     std::fs::write(root.join("client.json"), &config_bytes)?;
     let super_password = crypto::generate_secret_key();
@@ -353,6 +353,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
             .env("RSRS_DATA_DIR", &root)
+            .env("RSRS_ADDR", "http://environment.invalid")
             .env("RSRS_RPC_PORT", runtime_port.to_string())
             .env("RSRS_SUPER", args.windows(2).find(|pair| pair[0] == "--super").map(|pair| pair[1]).unwrap_or(&super_password))
             .env("RSRS_NO_AUTOSYNC", "1")
@@ -366,6 +367,60 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .output()
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
+        std::fs::write(original.join("session.json"), stale_session)?;
+        for args in [
+            vec!["--json", "login", "--oauth", "--no-open"],
+            vec!["--json", "login", "--interactive", "--user", "fixture", "--pass", "fixture-password"],
+            vec!["--json", "login", "--oauth", "--addr", "http://explicit.invalid", "--no-open"],
+            vec!["--json", "login", "--oauth", "--addr", &addr, "--dashboard", "http://name:fixture-secret@dashboard.invalid/?fixture-secret", "--no-open"],
+        ] {
+            let output = execute(&args)?;
+            assert_eq!(output.status.code(), Some(1));
+            let reply: Value = serde_json::from_slice(&output.stdout)?;
+            assert_eq!(reply["summary"]["reason"], "runtime_error");
+            let text = reply.to_string();
+            assert!(text.contains("login requires HTTPS, except loopback fixtures"), "{text}");
+            let source = if args.contains(&"--dashboard") { "OAuth dashboard from --dashboard" }
+                else if args.contains(&"--addr") { "login server from --addr" }
+                else { "stored session.json addr" };
+            assert!(text.contains(source), "{text}");
+            assert!(!text.contains("fixture-secret"), "{text}");
+            assert!(requests.lock().map_err(|error| error.to_string())?.is_empty());
+            assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+            assert_eq!(std::fs::read(original.join("session.json"))?, stale_session);
+        }
+        for stored in [json!({"user":"original"}), json!({"user":"original","addr":""}), json!({"user":"original","addr":" \t"}), json!({"user":"original","addr":"https://self-hosted.invalid"})] {
+            let bytes = serde_json::to_vec(&stored)?;
+            std::fs::write(original.join("session.json"), &bytes)?;
+            // Dashboard validation stops before networking, proving login origin
+            // resolution succeeded without contacting the official/custom server.
+            let output = execute(&["--json", "login", "--oauth", "--dashboard", "http://dashboard.invalid", "--no-open"])?;
+            assert_eq!(output.status.code(), Some(1));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("OAuth dashboard from --dashboard"));
+            assert!(requests.lock().map_err(|error| error.to_string())?.is_empty());
+            assert_eq!(std::fs::read(original.join("session.json"))?, bytes);
+            assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+        }
+        std::fs::write(original.join("session.json"), stale_session)?;
+        // An explicit loopback origin can override a stale server without changing
+        // the account when authorization is denied. Other address settings are ignored.
+        *mode.lock().map_err(|error| error.to_string())? = "access_denied".to_owned();
+        let output = execute(&["--json", "login", "--oauth", "--addr", &addr, "--dashboard", &addr, "--no-open"])?;
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied"));
+        assert_eq!(*requests.lock().map_err(|error| error.to_string())?, vec!["/oauth/device/code", "/oauth/token"]);
+        assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+        assert_eq!(std::fs::read(original.join("session.json"))?, stale_session);
+        // The stored loopback fixture also works without --addr.
+        let loopback_session = serde_json::to_vec(&json!({"user":"original", "addr":addr}))?;
+        std::fs::write(original.join("session.json"), &loopback_session)?;
+        let output = execute(&["--json", "login", "--oauth", "--dashboard", &addr, "--no-open"])?;
+        assert_eq!(output.status.code(), Some(1));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied"));
+        assert_eq!(std::fs::read(original.join("session.json"))?, loopback_session);
+        assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
+        std::fs::write(original.join("session.json"), session_bytes)?;
         for reply in [
             "access_denied",
             "expired_token",
