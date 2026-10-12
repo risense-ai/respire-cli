@@ -128,11 +128,19 @@ async function verifyPackages(packages) {
     await waitForPackage(expected, {timeoutMs: deadline - Date.now(), pollMs: 10000});
   }
 }
+/** Resolve drafts from the authenticated list, since tag lookup exposes published releases. */
+export function selectRelease(releasePages, version) {
+  if (!VERSION.test(version) || !Array.isArray(releasePages) || releasePages.some(page => !Array.isArray(page))) throw new Error('Invalid paginated release response');
+  const matches = releasePages.flat().filter(release => release?.tag_name === `v${version}`);
+  if (matches.length !== 1 || !positive(matches[0].id)) throw new Error(`Expected exactly one release for v${version}`);
+  if (matches[0].draft !== true) throw new Error('Selected release must still be a draft');
+  return matches[0];
+}
 async function scopedReady() {
   const m = manifest();
   const sha = command('git', ['rev-parse', 'HEAD']).trim();
   if (sha !== process.env.CLI_SHA || m.cliVersion !== process.env.CLI_VERSION) throw new Error('Checkout/version differs from release plan');
-  const release = api(`repos/${process.env.GITHUB_REPOSITORY}/releases/tags/v${m.cliVersion}`);
+  const release = selectRelease(pages(`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`), m.cliVersion);
   const source = validateSource({repository: process.env.GITHUB_REPOSITORY, workflow: RELEASE_WORKFLOW,
     run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
     sha, version: m.cliVersion, channel: process.env.CLI_CHANNEL, release_id: release.id});

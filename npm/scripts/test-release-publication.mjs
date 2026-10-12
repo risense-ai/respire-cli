@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, readdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
+import {selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
 
 const m = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url)));
 const integrity = 'sha512-' + createHash('sha512').update('synthetic package').digest('base64');
@@ -146,4 +146,17 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
     }
   }
   assert.equal(uploads, 27, 'preserve 25 existing uploads and both new publication receipts');
+});
+
+test('draft release is resolved from every list page with exactly one matching tag', () => {
+  const draft = {...release, draft: true};
+  assert.equal(selectRelease([[{id: 299, tag_name: 'v1.2.3-dev.3'}], [draft]], version), draft);
+  assert.throws(() => selectRelease([[{id: 299, tag_name: 'v1.2.3-dev.3'}]], version), /exactly one release/);
+  assert.throws(() => selectRelease([[draft], [draft]], version), /exactly one release/);
+  assert.throws(() => selectRelease([[{...draft, id: 0}]], version), /exactly one release/);
+  assert.throws(() => selectRelease([null], version), /Invalid paginated/);
+  assert.throws(() => selectRelease([[{...draft, draft: false}]], version), /must still be a draft/);
+  const helper = readFileSync(new URL('./release-publication.mjs', import.meta.url), 'utf8');
+  assert.doesNotMatch(helper, /releases\/tags\//);
+  assert.match(helper, /selectRelease\(pages\(`/);
 });

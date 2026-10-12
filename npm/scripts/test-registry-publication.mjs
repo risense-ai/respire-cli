@@ -29,7 +29,7 @@ function fixture(t) {
   return {root, dir};
 }
 
-function mockNpm({publishStatus = 0, packBytes = bytes, packReport = expected, onPublish} = {}) {
+function mockNpm({publishStatus = 0, packBytes = bytes, packReport = expected, packOutput = report => [report], onPublish} = {}) {
   const calls = [];
   return {calls, spawnImpl(command, args, options) {
     calls.push({command, args, options});
@@ -37,7 +37,7 @@ function mockNpm({publishStatus = 0, packBytes = bytes, packReport = expected, o
       assert(args.includes('--ignore-scripts'));
       const dest = args[args.indexOf('--pack-destination') + 1];
       writeFileSync(path.join(dest, packReport.filename), packBytes);
-      return {status: 0, stdout: JSON.stringify([packReport])};
+      return {status: 0, stdout: JSON.stringify(packOutput(packReport))};
     }
     assert.equal(args[0], 'publish');
     assert.equal(args.at(-1), 'https://registry.npmjs.org');
@@ -270,4 +270,20 @@ test('real npm dry-run receipt matches actual tarball without publishing', t => 
   const actual = packPackage(dir, path.join(root, 'packs'), {spawnImpl});
   assert.equal(actual.integrity, receipt.integrity);
   assert.equal(actual.shasum, receipt.shasum);
+});
+
+test('npm 12 object-keyed pack output preserves identity and tarball checks', async t => {
+  const f = fixture(t);
+  const mock = mockNpm({packOutput: report => ({[report.name]: report})});
+  const packed = packPackage(f.dir, f.root, mock);
+  assert.equal(packed.integrity, expected.integrity);
+  const result = await publishPackage(f.dir, expected, 'dev', {...mock, ...registry()});
+  assert.equal(result.status, 'existing');
+  assert.equal(mock.calls.filter(call => call.args[0] === 'publish').length, 0);
+});
+test('invalid npm JSON output shapes keep the identity-mismatch error', t => {
+  const f = fixture(t);
+  for (const raw of [null, true, 'bad', {}, expected, [null], {bad: null}, {wrong: expected}, {a: expected, b: expected}]) {
+    assert.throws(() => packPackage(f.dir, f.root, mockNpm({packOutput: () => raw})), /npm pack report identity mismatch/);
+  }
 });

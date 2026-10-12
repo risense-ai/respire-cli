@@ -72,8 +72,11 @@ export function packPackage(dir, dest, options = {}) {
     ['pack', '--json', '--ignore-scripts', '--pack-destination', path.resolve(dest)],
     {cwd: dir, encoding: 'utf8', shell: process.platform === 'win32'});
   if (result.error || result.status !== 0) throw new Error(`npm pack failed: ${pkg.name}\n${result.error?.message || result.stderr || ''}`);
-  const report = JSON.parse(result.stdout);
-  if (!Array.isArray(report) || report.length !== 1 || report[0].name !== pkg.name || report[0].version !== pkg.version) {
+  const raw = JSON.parse(result.stdout);
+  // npm <= 11 emits an array; npm 12 emits an object keyed by package name.
+  const report = Array.isArray(raw) ? raw : raw && typeof raw === 'object' &&
+    Object.keys(raw).length === 1 && Object.hasOwn(raw, pkg.name) ? [raw[pkg.name]] : null;
+  if (!report || report.length !== 1 || report[0]?.name !== pkg.name || report[0]?.version !== pkg.version) {
     throw new Error(`npm pack report identity mismatch: ${pkg.name}`);
   }
   const expected = {...report[0], filename: archiveName(report[0].filename), dir: path.resolve(dir)};
