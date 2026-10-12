@@ -165,7 +165,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 27, 'preserve 25 existing uploads and both new publication receipts');
+  assert.equal(uploads, 29, 'preserve existing uploads, both handshake receipts and both strict recovery evidence uploads');
 });
 
 test('draft release is resolved from every list page with exactly one matching tag', () => {

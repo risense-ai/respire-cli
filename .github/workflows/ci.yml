@@ -149,7 +149,7 @@ jobs:
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
-      - run: node --test npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs
+      - run: node --test npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-model-fixture.py

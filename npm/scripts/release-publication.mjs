@@ -7,6 +7,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './registry-publication.mjs';
+import {validateRecoverySource} from './dev6-recovery-policy.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
 const ALIAS_WORKFLOW = '.github/workflows/npm-alias.yml';
@@ -36,6 +37,8 @@ export function validateSource(source) {
       !positive(source.run_id) || !positive(source.run_attempt) || !SHA.test(source.sha) ||
       !VERSION.test(source.version) || source.channel !== (source.version.includes('-dev.') ? 'dev' : 'latest') ||
       !positive(source.release_id)) throw new Error('Invalid publication source binding');
+  if (source.recovery) validateRecoverySource(source);
+  else if (source.tooling_sha !== undefined) throw new Error('Tooling SHA requires an explicit recovery binding');
   return source;
 }
 export function assertSourceRun(run, source) {
@@ -43,7 +46,8 @@ export function assertSourceRun(run, source) {
   // head_sha describes the dispatch workflow, not necessarily the selected inputs.ref.
   if (String(run.id) !== String(source.run_id) || Number(run.run_attempt) !== Number(source.run_attempt) ||
       run.path !== RELEASE_WORKFLOW || run.head_repository?.full_name !== source.repository ||
-      !['push', 'workflow_dispatch'].includes(run.event) || run.status !== 'in_progress') {
+      !['push', 'workflow_dispatch'].includes(run.event) || run.status !== 'in_progress' ||
+      (source.recovery && (run.head_sha !== source.tooling_sha || run.event !== 'workflow_dispatch'))) {
     throw new Error('Source Release attempt is stale, inactive, or from another workflow/repository');
   }
 }
@@ -174,7 +178,8 @@ async function awaitScoped() {
       if (String(scoped.source.run_id) !== runId || Number(scoped.source.run_attempt) !== Number(attempt)) throw new Error('Receipt does not belong to source event');
       assertSourceRun(run, scoped.source);
       write('scoped-ready.json', scoped);
-      output({eligible: 'true', sha: scoped.source.sha, version: scoped.source.version});
+      output({eligible: 'true', sha: scoped.source.tooling_sha || scoped.source.sha,
+        product_sha: scoped.source.sha, version: scoped.source.version});
       return;
     }
     // Dry runs, approved historical repair, or failed/skipped plans never emit ready.
@@ -187,7 +192,10 @@ async function awaitScoped() {
 async function publishAlias() {
   const scoped = validateScoped(read('scoped-ready.json'), manifest());
   const source = scoped.source;
-  if (command('git', ['rev-parse', 'HEAD']).trim() !== source.sha || String(source.run_id) !== process.env.SOURCE_RUN || Number(source.run_attempt) !== Number(process.env.SOURCE_ATTEMPT)) throw new Error('Pinned alias checkout/source mismatch');
+  if (command('git', ['rev-parse', 'HEAD']).trim() !== (source.tooling_sha || source.sha) || String(source.run_id) !== process.env.SOURCE_RUN || Number(source.run_attempt) !== Number(process.env.SOURCE_ATTEMPT)) throw new Error('Pinned alias checkout/source mismatch');
+  if (source.recovery && command('git', ['diff', source.sha, source.tooling_sha, '--', 'npm/alias', 'npm/scripts/pack-alias.mjs', 'LICENSE', 'COMMERCIAL-LICENSE.md']).trim()) {
+    throw new Error('Recovery tooling changed immutable alias package sources');
+  }
   assertActive(source);
   // Recheck all five public tarballs before publishing their thin entry point.
   await verifyPackages(scoped.packages);
@@ -271,6 +279,7 @@ function finalize() {
   command('gh', ['release', 'edit', `v${scoped.source.version}`, '--repo', scoped.source.repository, '--draft=false'], {stdio: 'inherit'});
 }
 export async function main(action) {
+  if (action === 'recovery-ready') return (await import('./dev6-publication-recovery.mjs')).recoveryReady();
   if (action === 'protocol') { console.log(1); return; }
   if (action === 'scoped-ready') return scopedReady();
   if (action === 'await-scoped') return awaitScoped();
