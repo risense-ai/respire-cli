@@ -98,7 +98,8 @@ test('resume workflow retains trusted identity, no builds/scoped writes, and bot
   const root=new URL('../../',import.meta.url);
   const workflow=readFileSync(new URL('.github/workflows/release.yml',root),'utf8').replace(/\r\n/g,'\n');
   const resume=workflow.split('  dev6-publication-resume:')[1];
-  assert.match(resume,/name: publish/);assert.match(resume,/contents: write\n      actions: read/);
+  assert.match(resume,/name: \$\{\{ inputs.resume_dev6_publication && 'publish' \|\| 'unused-dev6-publication-resume' \}\}/);
+  assert.match(resume,/contents: write\n      actions: read/);
   assert.doesNotMatch(resume,/id-token:|cargo|--clobber|release upload|--publish|workflow_call|npm publish/);
   assert(resume.indexOf('recovery-ready')<resume.indexOf('name: scoped-ready-'));
   assert(resume.indexOf('name: scoped-ready-')<resume.indexOf('await-alias'));

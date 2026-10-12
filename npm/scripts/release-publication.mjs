@@ -164,6 +164,9 @@ async function scopedReady() {
   assertTag(source);
   write('scoped-ready.json', receipt);
 }
+export function scopedPublisherFinished(jobs) {
+  return jobs.some(j => j.name === 'publish' && j.status === 'completed');
+}
 async function awaitScoped() {
   const repo = process.env.GITHUB_REPOSITORY, runId = process.env.SOURCE_RUN, attempt = process.env.SOURCE_ATTEMPT;
   if (repo !== 'risense-ai/respire-cli' || !positive(runId) || !positive(attempt)) throw new Error('Invalid source event');
@@ -184,7 +187,7 @@ async function awaitScoped() {
     }
     // Dry runs, approved historical repair, or failed/skipped plans never emit ready.
     const jobs = pages(`repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`).flatMap(p => p.jobs);
-    if (jobs.some(j => j.name === 'publish' && j.status === 'completed')) { output({eligible: 'false'}); return; }
+    if (scopedPublisherFinished(jobs)) { output({eligible: 'false'}); return; }
     await sleep(60000);
   }
   throw new Error('Release did not reach scoped-ready within four hours');
