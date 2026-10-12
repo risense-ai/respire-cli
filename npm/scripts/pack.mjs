@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Assemble npm packages: node npm/scripts/pack.mjs --root <bin-root> [--publish]
 // --root layout: <rust-triple>/rsrs[.exe]; default scan is target/<triple>/release.
-// Writes npm/dist/<pkg>/ then publishes platform packages then the umbrella package.
+// Builds npm/dist/<pkg>/. After verify-packages.mjs writes pack receipts,
+// --publish consumes those exact packages, platform packages before the umbrella.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, cpSync, existsSync, chmodSync, rmSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { readExpectedPacks, publishPackage } from './registry-publication.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -31,6 +32,18 @@ if (manifest.cliVersion !== version) {
   console.error(`artifact-manifest cliVersion ${manifest.cliVersion} != Cargo.toml ${version}`);
   process.exit(1);
 }
+// Publication consumes the receipts written by verify-packages.mjs. Do not
+// rebuild or clear dist here: that would discard the evidence we just verified.
+if (doPublish) {
+  const expected = readExpectedPacks(outDir, manifest, version);
+  for (const receipt of expected) {
+    const result = await publishPackage(receipt.dir, receipt, npmTag);
+    console.log(`npm ${receipt.name}@${version}: ${result.status}; registry tarball integrity verified`);
+  }
+  console.log('All scoped npm packages are published and readable');
+  process.exit(0);
+}
+
 const SCOPE = manifest.npmScope;
 const TARGETS = Object.fromEntries(
   manifest.targets.map((t) => [t.triple, { pkg: t.pkg, os: t.os, cpu: t.cpu, libc: t.libc }]),
@@ -129,20 +142,3 @@ built.push({ name: SCOPE, dir: mainDir });
 
 console.log(`version ${version}: packed ${built.length} packages -> npm/dist/`);
 for (const b of built) console.log(`  ${b.name}${doPublish ? '' : ' (dry run)'}`);
-
-if (doPublish) {
-  for (const b of built) {
-    const existing = spawnSync('npm', ['view', `${b.name}@${version}`, 'version'], { encoding:'utf8' });
-    if (existing.status === 0 && existing.stdout.trim() === version) {
-      console.log(`npm ${b.name}@${version} already published; keep the immutable version`);
-      continue;
-    }
-    console.log(`\nnpm publish ${b.dir} --access public`);
-    const r = spawnSync('npm', ['publish', b.dir, '--access', 'public', '--tag', npmTag], { stdio: 'inherit' });
-    if (r.status !== 0) {
-      console.error(`publish failed: ${b.name}`);
-      process.exit(1);
-    }
-  }
-  console.log('\npublish complete');
-}

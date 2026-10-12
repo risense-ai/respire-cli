@@ -9,9 +9,13 @@ on:
       - 'docs/**'
       - '**/*.md'
       - 'npm/scripts/next-dev-version.mjs'
-      # The thin npm install entry is published independently of native builds.
+      # Packaging-only changes take effect at the next requested native release.
       - 'npm/alias/**'
       - 'npm/scripts/pack-alias.mjs'
+      - 'npm/scripts/pack.mjs'
+      - 'npm/scripts/release-publication.mjs'
+      - 'npm/scripts/registry-publication.mjs'
+      - 'npm/scripts/test-*-publication.mjs'
       - 'scripts/test-real-m3-account-switch.py'
   workflow_dispatch:
     inputs:
@@ -488,6 +492,11 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
+      - name: Require publication barrier support before any npm write
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        run: |
+          # Old refs lacking the protocol must fail before scoped publication.
+          test "$(node npm/scripts/release-publication.mjs protocol)" = 1
       - name: Require successful CLI CI for this exact source
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 21
@@ -622,6 +631,27 @@ jobs:
         env:
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/pack.mjs --root target/ci --publish --tag "$CLI_CHANNEL"
+      - name: Verify scoped registry propagation and bind the draft receipt
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 20
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
+        run: node npm/scripts/release-publication.mjs scoped-ready
+      - uses: actions/upload-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          name: scoped-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-ready.json
+          if-no-files-found: error
+      - name: Require the matching short-package publisher and public install
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 46
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs await-alias
       - name: Repair only the missing Linux ARM64 GNU package
         if: inputs.repair_dev12 || inputs.repair_dev14
         run: |
@@ -659,4 +689,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
-        run: gh release edit "$CLI_TAG" --draft=false
+        run: node npm/scripts/release-publication.mjs finalize

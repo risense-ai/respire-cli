@@ -14,17 +14,89 @@ on:
         default: ''
   workflow_run:
     workflows: [Release]
-    types: [completed]
+    types: [in_progress]
 
 permissions:
   contents: read
 
-concurrency:
-  group: npm-rsrs-cli-publication
-  cancel-in-progress: false
-
 jobs:
+  # Waiting never holds the alias lock: another Release may hold the scoped
+  # publication lock while waiting for its own alias. Locking here deadlocks A/B.
+  await-scoped:
+    if: github.event_name == 'workflow_run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 245
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      eligible: ${{ steps.ready.outputs.eligible }}
+      sha: ${{ steps.ready.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Wait for this Release attempt to verify all scoped packages
+        id: ready
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: node npm/scripts/release-publication.mjs await-scoped
+
+  publish-integrated:
+    needs: await-scoped
+    if: needs.await-scoped.outputs.eligible == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    concurrency:
+      group: npm-rsrs-cli-publication
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The release input ref may differ from workflow_run.head_sha/main.
+          ref: ${{ needs.await-scoped.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@12.2.0
+      - uses: actions/download-artifact@v4
+        with:
+          name: scoped-ready-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+      - run: node npm/scripts/test-wrapper.mjs
+      - name: Publish and clean-install the matching short entry
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+        run: node npm/scripts/release-publication.mjs publish-alias
+      - uses: actions/upload-artifact@v4
+        with:
+          name: alias-ready-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: alias-ready.json
+          if-no-files-found: error
+
+  # Explicit recovery for already-public historical releases only. Automatic
+  # releases use the draft-aware barrier above, never this completed-run path.
   publish:
+    if: github.event_name == 'workflow_dispatch'
+    concurrency:
+      group: npm-rsrs-cli-publication
+      queue: max
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     permissions:
       contents: read

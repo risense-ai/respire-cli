@@ -7,16 +7,57 @@ The paired Core SDK still validates its own seven-target compatibility contract.
 
 DEV gates: exact-source workspace unit tests and existing coverage checks, one Release build for each of four targets, native executable startup, real quantized CPU inference on macOS, pinned SDK digests, and consistent artifacts for all five scoped npm packages.
 
-`rsrs-cli` is the primary public npm install entry. After each completed Release,
-`npm-alias.yml` automatically checks successful `plan` and `publish` jobs, reads
-the version from that run's npm receipt, and verifies the matching public scoped
-CLI digest and public GitHub release before publishing the exact-version entry.
-DEV versions use `dev`; stable versions use `latest`. Validation-only and failed
-publication runs are skipped. Existing identical versions are not republished
-and their distribution tags are left unchanged. To recover an omitted entry,
-dispatch this same trusted-publisher workflow with `version` and required
-`release_run`. A missing older entry is rejected if publishing it would move
-`latest` or `dev` backward; no distribution tag is silently rolled back.
+`rsrs-cli` is the primary public npm install entry and is part of the Release
+success gate. `release.yml` publishes and verifies all five scoped packages,
+including actual public tarball SHA-512 and SHA-1 checks. It uploads a
+`scoped-ready-RUN-ATTEMPT` receipt tied to the repository, workflow, selected
+source SHA (which can differ from the dispatch workflow SHA), version, channel,
+draft release ID, package digests and all twelve validated assets.
+
+`npm-alias.yml` starts on Release `in_progress`. Its read-only waiting job holds
+no publication lock or OIDC permission. Once ready, its publisher acquires the
+existing short-package lock, checks out the selected source SHA, rechecks all
+five public packages, publishes the exact-version alias, and verifies a fresh
+public npm install on Linux x64 GNU. It checks the resolved alias, scoped CLI,
+native version, native binary hash, and the installed `rsrs --version` and
+`--help`. This install check does not claim native installation on other systems;
+the four platform tarballs are independently verified.
+
+Only after the exact alias run/attempt and publisher job succeed with a matching
+`alias-ready` receipt does the original Release publisher recheck all six
+registry versions, the draft assets, source tag and current attempt, then make
+the GitHub release public. Both publishers retain their existing workflow names,
+Trusted Publishing identities and permissions. The parent holds its existing
+publication lock while awaiting the alias; the alias publisher never waits for
+the parent to finish or for its draft to become public. The unlocked early wait
+prevents two overlapping Releases from acquiring these locks in opposite order.
+
+Visibility waits tolerate registry 404 propagation but fail closed on content
+mismatch or other registry errors. Existing matching immutable versions are
+verified and skipped without changing distribution tags; missing versions are
+published once. An uncertain npm submission is followed only by bounded public
+verification, never a blind second publish. DEV uses `dev`, stable uses `latest`,
+and neither publisher moves a tag backward. npm multi-package publication is
+not atomic: a failed alias may leave some or all scoped versions public, while
+GitHub remains draft and the Release fails honestly.
+
+To resume that same version, rerun the failed publication job with its original
+plan and build artifacts. A fresh run attempt requires fresh ready/alias receipts;
+stale attempts cannot finish publication. Do not use a full workflow rerun as
+same-version recovery: rerunning `plan` can allocate a different DEV version.
+Waits are bounded (four hours for initial scoped readiness, fifteen minutes for
+a set of public tarball checks, forty-five minutes for matching alias success).
+A failed or timed-out barrier never makes a draft public. The workflow-run event
+and OIDC handoff require a real release after deployment to validate end to end;
+local tests simulate the registry and validate workflow/receipt contracts without
+publishing test versions.
+
+Validation-only runs, failed/skipped publication and explicitly scoped historical
+ARM64 repairs do not emit ready receipts. Old source refs without the publication
+protocol are refused before any scoped npm write. To recover a missing alias for
+an already-public historical release, explicitly dispatch `npm-alias.yml` with
+`version` and `release_run`; its legacy recovery path requires successful source
+publication and a public release. It is not an automatic bypass of this barrier.
 
 Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 
