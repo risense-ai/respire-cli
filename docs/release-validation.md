@@ -36,6 +36,18 @@ A full workflow rerun can allocate a different DEV version and is not guaranteed
 to recover the same version. Diagnose the remaining draft and public package
 state before a separately authorized recovery or new release.
 
+The targeted `migration-keyring-check.yml` workflow also downloads
+`cli-release-${{ matrix.target }}` from its `release_run_id`; expiry prevents
+that diagnostic from verifying the original binary. For a new candidate,
+separately authorize a fresh, non-publishing `release-validation.yml` run. Its
+dispatch workflow ref and `ref` input must resolve to the same source commit,
+because the targeted consumer checks the producer's `head_sha`. Wait for all
+required platform builds and `npm-dry-run` to succeed, then use the new run ID
+for targeted migration before its artifacts expire. This validates a freshly
+built candidate, not the deleted original bytes. Preserve all source, version,
+and digest checks; if the original artifact identity is required, stop and
+report that evidence as unavailable rather than substituting a newer binary.
+
 Deletion or expiry also removes downloadable diagnostic reports and publication
 receipts; run status and logs are not a substitute for those files. An artifact
 cleanup is not permission to delete Release assets or npm versions.
