@@ -125,6 +125,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: resident-concurrency-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/resident-concurrency/real-account-return-verification.json
@@ -137,6 +138,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: published-upgrades-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/published-upgrades/published-upgrades.json
@@ -155,6 +157,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always() && matrix.target == 'x86_64-unknown-linux-gnu'
         with:
+          retention-days: 1
           name: gnu-login-interruption
           path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
           if-no-files-found: error

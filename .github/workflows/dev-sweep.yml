@@ -144,6 +144,7 @@ jobs:
         if: ${{ always() && !inputs.local_api_only }}
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: base-sweep-report-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/om-sweep/report.md
@@ -221,6 +222,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: sweep-report-${{ matrix.os }}
           path: |
             ${{ runner.temp }}/om-sweep/report.md
@@ -268,6 +270,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: dev-api-coverage
           path: |
             ${{ runner.temp }}/dev-api-coverage.json

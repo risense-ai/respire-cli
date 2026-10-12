@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync, readdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
 
@@ -129,4 +129,21 @@ test('missing is pending, but duplicate, expired or foreign-run artifacts are re
   assert.throws(() => validateArtifact([a, a], 100));
   assert.throws(() => validateArtifact([{...a, expired: true}], 100));
   assert.throws(() => validateArtifact([a], 101));
+});
+
+test('all Actions uploads, including both handshake receipts, retain evidence for one day', () => {
+  const root = new URL('../../.github/workflows/', import.meta.url);
+  let uploads = 0;
+  for (const file of readdirSync(root).filter(name => /\.ya?ml$/.test(name))) {
+    const workflow = readFileSync(new URL(file, root), 'utf8');
+    for (const match of workflow.matchAll(/^([ \t]*)(- )?uses: actions\/upload-artifact@[^\s]+.*$/gm)) {
+      const stepIndent = match[1].length - (match[2] ? 0 : 2);
+      const tail = workflow.slice(match.index + match[0].length);
+      const nextStep = tail.search(new RegExp(`\\n[ \t]{0,${stepIndent}}\\S`));
+      const body = nextStep < 0 ? tail : tail.slice(0, nextStep);
+      assert.match(body, /^[ \t]+retention-days: 1[ \t]*$/m, `${file}: every upload must retain exactly one day`);
+      uploads++;
+    }
+  }
+  assert.equal(uploads, 27, 'preserve 25 existing uploads and both new publication receipts');
 });

@@ -41,10 +41,13 @@ and neither publisher moves a tag backward. npm multi-package publication is
 not atomic: a failed alias may leave some or all scoped versions public, while
 GitHub remains draft and the Release fails honestly.
 
-To resume that same version, rerun the failed publication job with its original
-plan and build artifacts. A fresh run attempt requires fresh ready/alias receipts;
-stale attempts cannot finish publication. Do not use a full workflow rerun as
-same-version recovery: rerunning `plan` can allocate a different DEV version.
+To resume that same version, rerun the failed publication job only while its
+original plan, build artifacts and required receipts remain available within the
+one-day retention window. A fresh run attempt requires fresh ready/alias receipts;
+stale attempts cannot finish publication. Once the evidence expires, stop and
+diagnose the remaining draft and npm state before separately authorized recovery;
+never substitute a version string or successful run status for missing evidence.
+Do not use a full workflow rerun as same-version recovery: rerunning `plan` can allocate a different DEV version.
 Waits are bounded (four hours for initial scoped readiness, fifteen minutes for
 a set of public tarball checks, forty-five minutes for matching alias success).
 A failed or timed-out barrier never makes a draft public. The workflow-run event
@@ -58,6 +61,42 @@ protocol are refused before any scoped npm write. To recover a missing alias for
 an already-public historical release, explicitly dispatch `npm-alias.yml` with
 `version` and `release_run`; its legacy recovery path requires successful source
 publication and a public release. It is not an automatic bypass of this barrier.
+
+## Actions artifact retention and recovery
+
+All workflows explicitly retain Actions artifacts for one day after upload,
+including `scoped-ready` and `alias-ready` publication receipts.
+Build inputs, cross-job transfers, and publication receipts are still uploaded;
+consumers, validation gates, publication locks, and digest checks are unchanged.
+This policy does not change GitHub Release assets, published npm packages, or
+Actions cache and workflow-log retention.
+
+After an artifact expires or is deleted, failed-job reruns that need original
+build inputs, the integrated publication handshake that needs its matching
+`scoped-ready` / `alias-ready` receipts, and historical short-package repair that
+needs the original `npm-release-validation` receipt are not guaranteed to work.
+Supplying a version does not replace those receipts. Long publication queues can
+also outlive the one-day window. Missing or expired evidence must fail closed: never skip digest,
+source, regression, receipt, or publication checks to work around retention.
+A full workflow rerun can allocate a different DEV version and is not guaranteed
+to recover the same version. Diagnose the remaining draft and public package
+state before a separately authorized recovery or new release.
+
+The targeted `migration-keyring-check.yml` workflow also downloads
+`cli-release-${{ matrix.target }}` from its `release_run_id`; expiry prevents
+that diagnostic from verifying the original binary. For a new candidate,
+separately authorize a fresh, non-publishing `release-validation.yml` run. Its
+dispatch workflow ref and `ref` input must resolve to the same source commit,
+because the targeted consumer checks the producer's `head_sha`. Wait for all
+required platform builds and `npm-dry-run` to succeed, then use the new run ID
+for targeted migration before its artifacts expire. This validates a freshly
+built candidate, not the deleted original bytes. Preserve all source, version,
+and digest checks; if the original artifact identity is required, stop and
+report that evidence as unavailable rather than substituting a newer binary.
+
+Deletion or expiry also removes downloadable diagnostic reports and publication
+receipts; run status and logs are not a substitute for those files. An artifact
+cleanup is not permission to delete Release assets or npm versions.
 
 Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 

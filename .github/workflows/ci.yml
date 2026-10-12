@@ -152,6 +152,7 @@ jobs:
       - run: node --test npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-model-fixture.py
+      - run: python3 scripts/test-core-payload-lifetime.py
 
   native-published-m3:
     if: ${{ inputs.native_published_only && !inputs.version_upgrade_only }}
@@ -226,6 +227,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: native-published-m3-${{ matrix.target }}
           path: native-model-results/real-account-return-verification.json
           if-no-files-found: warn
@@ -337,12 +339,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ success() && inputs.version_upgrade_only }}
         with:
+          retention-days: 1
           name: dev13-version-upgrade
           path: ${{ runner.temp }}/dev13-version-upgrade/version-upgrade-coverage.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: ${{ always() && !inputs.version_upgrade_only }}
         with:
+          retention-days: 1
           name: gnu-login-interruption
           path: |
             ${{ runner.temp }}/gnu-login-interruption/

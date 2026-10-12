@@ -45,6 +45,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: native-migration-keyring-${{ runner.os }}
           path: ${{ runner.temp }}/native-migration-keyring/keyring-selftest.json
           if-no-files-found: error
@@ -70,6 +71,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: isolated-secret-service-keyring-Linux
           path: ${{ runner.temp }}/secret-service-keyring/keyring-selftest.json
           if-no-files-found: error
@@ -181,6 +183,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: targeted-native-migration-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/targeted-migration-identity.json

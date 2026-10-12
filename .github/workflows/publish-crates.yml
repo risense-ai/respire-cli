@@ -53,6 +53,7 @@ jobs:
         run: node scripts/verify-interface-crate.mjs protocol "$RUNNER_TEMP/protocol-package"
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: protocol-package-verification
           path: |
             ${{ runner.temp }}/protocol-package/PACKAGE.json
@@ -91,6 +92,7 @@ jobs:
         run: node scripts/verify-interface-crate.mjs sdk "$RUNNER_TEMP/sdk-package"
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: sdk-package-verification-${{ runner.os }}
           path: |
             ${{ runner.temp }}/sdk-package/PACKAGE.json

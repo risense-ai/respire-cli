@@ -85,6 +85,7 @@ jobs:
         run: node npm/scripts/release-publication.mjs publish-alias
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: alias-ready-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: alias-ready.json
           if-no-files-found: error
@@ -250,6 +251,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.release.outputs.eligible == 'true'
         with:
+          retention-days: 1
           name: rsrs-cli-package-receipt
           path: alias.pack.json
           if-no-files-found: error
