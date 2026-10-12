@@ -4,7 +4,8 @@
 // Builds npm/dist/<pkg>/. After verify-packages.mjs writes pack receipts,
 // --publish consumes those exact packages, platform packages before the umbrella.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, cpSync, existsSync, chmodSync, rmSync } from 'node:fs';
-import { readExpectedPacks, publishPackage } from './registry-publication.mjs';
+import { readExpectedPacks } from './registry-publication.mjs';
+import { publishScopedPackages } from './parallel-publication.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
@@ -36,9 +37,8 @@ if (manifest.cliVersion !== version) {
 // rebuild or clear dist here: that would discard the evidence we just verified.
 if (doPublish) {
   const expected = readExpectedPacks(outDir, manifest, version);
-  for (const receipt of expected) {
-    const result = await publishPackage(receipt.dir, receipt, npmTag);
-    console.log(`npm ${receipt.name}@${version}: ${result.status}; registry tarball integrity verified`);
+  for (const result of await publishScopedPackages(expected, manifest.npmScope, npmTag)) {
+    console.log(`npm ${result.name}@${version}: ${result.status}; registry tarball integrity verified`);
   }
   console.log('All scoped npm packages are published and readable');
   process.exit(0);

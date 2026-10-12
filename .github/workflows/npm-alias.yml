@@ -35,6 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # Validate recovery tooling using trusted main before the OIDC checkout.
+          ref: main
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
@@ -65,6 +67,7 @@ jobs:
         with:
           # The release input ref may differ from workflow_run.head_sha/main.
           ref: ${{ needs.await-scoped.outputs.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:

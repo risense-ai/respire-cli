@@ -142,10 +142,11 @@ export async function checkPackage(expected, options = {}) {
   if (response.status === 404) return null;
   const metadata = await response.json();
   if (metadata.name !== expected.name || metadata.version !== expected.version) throw new Error(`Registry identity mismatch: ${label}`);
-  if (expected.dependencies) {
+  for (const dependencyField of ['dependencies', 'optionalDependencies']) {
+    if (!expected[dependencyField]) continue;
     const entries = value => value && typeof value === 'object' && !Array.isArray(value)
       ? JSON.stringify(Object.entries(value).sort(([a], [b]) => a.localeCompare(b))) : null;
-    if (entries(metadata.dependencies) !== entries(expected.dependencies)) throw new Error(`Registry dependencies mismatch: ${label}`);
+    if (entries(metadata[dependencyField]) !== entries(expected[dependencyField])) throw new Error(`Registry ${dependencyField} mismatch: ${label}`);
   }
   if (!metadata.dist || typeof metadata.dist.tarball !== 'string') throw new Error(`Registry dist missing: ${label}`);
   assertPackMatches({name: metadata.name, version: metadata.version,
