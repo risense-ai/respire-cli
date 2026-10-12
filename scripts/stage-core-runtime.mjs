@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
+import {chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const [destination] = process.argv.slice(2);
@@ -51,6 +51,11 @@ if (manifest.target.includes('windows')) {
   mkdirSync(dirname(join(output,path)), {recursive:true});
   writeFileSync(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
+}
+// Copies retain private SDK modes. Container-owned redistribution notices must
+// remain readable by the host packaging step; leave SDK inputs/runtime modes alone.
+for (const file of files) {
+  if (file.path.startsWith('core-notices/')) chmodSync(join(output,file.path),0o644);
 }
 writeFileSync(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');
