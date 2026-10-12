@@ -300,6 +300,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: base-release-sweep-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/release-sweep/report.md
@@ -346,6 +347,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ always() && runner.os != 'Linux' }}
         with:
+          retention-days: 1
           name: native-profile-migration-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/native-profile-migration/migration-coverage.json
@@ -376,6 +378,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: ${{ always() && runner.os == 'Linux' }}
         with:
+          retention-days: 1
           name: secret-service-profile-migration-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
@@ -385,6 +388,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: release-sweep-${{ matrix.target }}
           path: |
             ${{ runner.temp }}/release-sweep/report.md
@@ -433,6 +437,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
+          retention-days: 1
           name: dev-api-coverage
           path: |
             ${{ runner.temp }}/dev-api-coverage.json

@@ -18,6 +18,28 @@ dispatch this same trusted-publisher workflow with `version` and required
 `release_run`. A missing older entry is rejected if publishing it would move
 `latest` or `dev` backward; no distribution tag is silently rolled back.
 
+## Actions artifact retention and recovery
+
+All workflows explicitly retain Actions artifacts for one day after upload.
+Build inputs, cross-job transfers, and publication receipts are still uploaded;
+consumers, validation gates, publication locks, and digest checks are unchanged.
+This policy does not change GitHub Release assets, published npm packages, or
+Actions cache and workflow-log retention.
+
+After an artifact expires or is deleted, failed-job reruns that need original
+build inputs and historical short-package repair that needs the original
+`npm-release-validation` receipt are not guaranteed to work. Supplying a version
+does not replace that receipt. Long publication queues can also outlive the
+one-day window. Missing or expired evidence must fail closed: never skip digest,
+source, regression, receipt, or publication checks to work around retention.
+A full workflow rerun can allocate a different DEV version and is not guaranteed
+to recover the same version. Diagnose the remaining draft and public package
+state before a separately authorized recovery or new release.
+
+Deletion or expiry also removes downloadable diagnostic reports and publication
+receipts; run status and logs are not a substitute for those files. An artifact
+cleanup is not permission to delete Release assets or npm versions.
+
 Only version allocation and publication share a serial lock. Allocation reserves the DEV number in an unpublished draft. The existing version script counts drafts to prevent collisions. Failed drafts remain available for diagnosis. Full regression does not hold this lock. Workflow or documentation changes alone do not publish a DEV.
 
 Four-target builds run in Release. The separate compile matrix is manual. CLI tests run once through the existing coverage command; other workspace tests run separately. musl builds reuse the existing cache. macOS reuses the model cache while still checking model files and performing real inference.

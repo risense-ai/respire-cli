@@ -178,6 +178,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: steps.release.outputs.eligible == 'true'
         with:
+          retention-days: 1
           name: rsrs-cli-package-receipt
           path: alias.pack.json
           if-no-files-found: error

@@ -142,6 +142,7 @@ jobs:
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: cli-release-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
@@ -186,11 +187,13 @@ jobs:
           node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: npm-release-validation
           path: npm/dist/**/*.pack.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
+          retention-days: 1
           name: npm-release-packages
           path: npm/release-packages/*
           if-no-files-found: error
