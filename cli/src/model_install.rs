@@ -2,7 +2,8 @@
 //!
 //! Does not touch the session or create a memory store. A failed download leaves
 //! partial files outside the loader's paths. A model that already
-//! verifies is not overwritten. A mirror only replaces the host.
+//! verifies is not overwritten. Hugging Face mirrors only replace the host;
+//! CPU release proxies have their own source list and retain the pinned bytes.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -105,10 +106,7 @@ pub fn prepare_m3_for_index() -> Result<()> {
 
 fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
     let dest = install_target_dir(None);
-    let setting = mirror.map(str::to_owned).or_else(mirror_from_env).unwrap_or_else(|| "auto".to_owned());
-    let origins = if setting.trim() == "auto" {
-        MIRRORS[1..].iter().map(|s| (*s).to_owned()).collect::<Vec<_>>()
-    } else { vec![origin_from_mirror(&setting)?] };
+    let origins = model_origins(mirror)?;
     let files = [("tokenizer.json", TOKENIZER_SHA256), ("onnx/model_quantized.onnx", ONNX_SHA256)];
     std::fs::create_dir_all(&dest)?;
     // A pinned revision allows cancellation, restart and mirror changes to reuse
@@ -119,27 +117,8 @@ fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
     for (name, sha) in files {
         if file_valid(&dest.join(name), sha)? { continue; }
         if file_valid(&tmp.join(name), sha)? { skipped = false; continue; }
-        let mut failures = Vec::new();
-        let mut ready = false;
-        for origin in &origins {
-            model_progress::check()?;
-            let url = file_url(origin, name);
-            let partial = tmp.join(name);
-            let result = if name.ends_with(".onnx") && !partial.exists() {
-                download_parallel(&url, &partial, sha, 16 * 1024 * 1024)
-                    .and_then(|used| if used { Ok(()) } else { download_verified(&url, &partial, sha) })
-            } else { download_verified(&url, &partial, sha) };
-            match result {
-                Ok(()) => { ready = true; break; }
-                Err(error) => {
-                    model_progress::check()?;
-                    // Disk failures must not be disguised as a mirror outage.
-                    if error.downcast_ref::<std::io::Error>().is_some() { return Err(error); }
-                    failures.push(format!("{origin}: {error:#}"));
-                }
-            }
-        }
-        anyhow::ensure!(ready, "BGE-M3 download failed: {}", failures.join("; "));
+        let sources = origins.iter().map(|origin| file_url(origin, name)).collect::<Vec<_>>();
+        download_with_fallback(&sources, &tmp.join(name), sha, name.ends_with(".onnx"), DownloadTimeouts::default())?;
         skipped = false;
     }
     // Publish only after every required replacement has passed the pinned checksum.
@@ -164,16 +143,19 @@ fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
     let parent = dest.parent().context("CPU model cache directory missing")?;
     std::fs::create_dir_all(parent)?;
     let partial = parent.join(format!(".download-{}.ort", bge::CPU_ORT_REVISION));
-    if !file_valid(&partial, bge::CPU_ORT_SHA256)? {
-        download_verified(bge::CPU_ORT_URL, &partial, bge::CPU_ORT_SHA256)?;
-    }
+    let sources = cpu_ort_sources()?;
+    let downloaded_from = if !file_valid(&partial, bge::CPU_ORT_SHA256)? {
+        Some(download_with_fallback(&sources, &partial, bge::CPU_ORT_SHA256, true, DownloadTimeouts::default())?)
+    } else { None };
     anyhow::ensure!(partial.metadata()?.len() == bge::CPU_ORT_SIZE, "CPU model size mismatch");
+    remove_download_parts(&partial)?;
     replace_file(&partial, &dest)?;
     bge::invalidate_cpu_ort_validation()?;
     std::fs::write(parent.join("CPU-MODEL-SOURCE.json"), serde_json::to_vec_pretty(&serde_json::json!({
         "container_version":bge::CPU_ORT_REVISION,"source_repository":MODEL_REPO,
         "source_revision":MODEL_REVISION,"source_onnx_sha256":ONNX_SHA256,
         "cpu_ort_sha256":bge::CPU_ORT_SHA256,"url":bge::CPU_ORT_URL,
+        "downloaded_from":downloaded_from,
         "ort_version":"1.28.0","graph_optimization":99,"weights_changed":false
     }))?)?;
     Ok(false)
@@ -261,6 +243,46 @@ fn origin_from_mirror(raw: &str) -> Result<String> {
     Ok(format!("{scheme}://{hostport}"))
 }
 
+fn model_origins(mirror: Option<&str>) -> Result<Vec<String>> {
+    let setting = mirror.map(str::to_owned).or_else(mirror_from_env).unwrap_or_else(|| "auto".to_owned());
+    if setting.trim() == "auto" {
+        Ok(MIRRORS[1..].iter().map(|origin| (*origin).to_owned()).collect())
+    } else {
+        Ok(vec![origin_from_mirror(&setting)?])
+    }
+}
+
+fn cpu_ort_sources() -> Result<Vec<String>> {
+    let setting = respire_app::env::var("RSRS_CPU_ORT_MIRROR").ok().filter(|value| !value.trim().is_empty())
+        .or_else(|| crate::service::read_agent_config()["model_cpu_ort_mirror"].as_str()
+            .filter(|value| !value.trim().is_empty()).map(str::to_owned))
+        .unwrap_or_else(|| "auto".to_owned());
+    cpu_ort_sources_from_setting(&setting)
+}
+
+fn cpu_ort_sources_from_setting(setting: &str) -> Result<Vec<String>> {
+    use crate::memory::bge::CPU_ORT_URL;
+    // Release containers and Hugging Face ONNX files use different URL layouts.
+    // Never turn a Hugging Face model into a substitute for the pinned CPU ORT.
+    match setting.trim() {
+        "auto" => Ok(vec![format!("https://gh-proxy.org/{CPU_ORT_URL}"), CPU_ORT_URL.to_owned()]),
+        "github" | "https://github.com" | "https://github.com/" => Ok(vec![CPU_ORT_URL.to_owned()]),
+        value => {
+            anyhow::ensure!(!value.is_empty() && !value.chars().any(char::is_whitespace),
+                "CPU ORT mirror must be a nonempty origin without whitespace");
+            let supplied = if value.contains("://") { value.to_owned() } else { format!("https://{value}") };
+            let origin = url::Url::parse(&supplied).context("invalid CPU ORT mirror origin")?;
+            anyhow::ensure!(matches!(origin.scheme(), "http" | "https") && origin.host_str().is_some(),
+                "CPU ORT mirror must be an http/https origin");
+            anyhow::ensure!(origin.username().is_empty() && origin.password().is_none()
+                && origin.query().is_none() && origin.fragment().is_none() && origin.path() == "/",
+                "CPU ORT mirror must be an origin without credentials, path, query or fragment");
+            // Only the public release URL goes to the proxy. No account headers.
+            Ok(vec![format!("{}/{CPU_ORT_URL}", origin.as_str().trim_end_matches('/'))])
+        }
+    }
+}
+
 fn file_url(origin: &str, rel: &str) -> String {
     format!(
         "{}/{}/resolve/{}/{}",
@@ -274,9 +296,9 @@ fn file_url(origin: &str, rel: &str) -> String {
 fn replace_file(from: &Path, to: &Path) -> Result<()> {
     if to.exists() {
         std::fs::remove_file(to)
-            .map_err(|e| anyhow!("cannot replace invalid file {}: {e}", to.display()))?;
+            .with_context(|| format!("cannot replace invalid file {}", to.display()))?;
     }
-    std::fs::rename(from, to).map_err(|e| anyhow!("failed to place {}: {e}", to.display()))
+    std::fs::rename(from, to).with_context(|| format!("failed to place {}", to.display()))
 }
 
 fn m3_model_valid(path: &Path) -> Result<bool> {
@@ -299,13 +321,13 @@ fn sha256_file(path: &Path) -> Result<String> {
     let mut checked = 0;
     model_progress::update("verify", &item, 0, Some(total))?;
     let mut file =
-        File::open(path).map_err(|e| anyhow!("failed to read {}: {e}", path.display()))?;
+        File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = file
             .read(&mut buf)
-            .map_err(|e| anyhow!("failed to read {}: {e}", path.display()))?;
+            .with_context(|| format!("failed to read {}", path.display()))?;
         if n == 0 {
             break;
         }
@@ -316,17 +338,67 @@ fn sha256_file(path: &Path) -> Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// Bound stalled network operations, not the lifetime of a progressing download.
+#[derive(Clone, Copy)]
+struct DownloadTimeouts {
+    connect: std::time::Duration,
+    read: std::time::Duration,
+    write: std::time::Duration,
+}
+
+impl Default for DownloadTimeouts {
+    fn default() -> Self {
+        use std::time::Duration;
+        Self { connect: Duration::from_secs(10), read: Duration::from_secs(30), write: Duration::from_secs(10) }
+    }
+}
+
+/// Every source must provide the same pinned artifact. Network/checksum errors
+/// advance to the next source; cancellation and local filesystem failures do not.
+/// A single explicit source therefore never silently falls back to another host.
+fn download_with_fallback(sources: &[String], dest: &Path, expected: &str, parallel: bool,
+    timeouts: DownloadTimeouts) -> Result<String> {
+    let mut failures = Vec::new();
+    for url in sources {
+        model_progress::check()?;
+        let result = if parallel && !dest.exists() {
+            download_parallel_with_timeouts(url, dest, expected, 16 * 1024 * 1024, timeouts)
+                .and_then(|used| if used { Ok(()) } else { download_verified_with_timeouts(url, dest, expected, timeouts) })
+        } else {
+            download_verified_with_timeouts(url, dest, expected, timeouts)
+        };
+        match result {
+            Ok(()) => {
+                // A no-Range fallback may have finished a prior segmented transfer.
+                remove_download_parts(dest)?;
+                return Ok(url.clone());
+            }
+            Err(error) => {
+                model_progress::check()?;
+                if error.downcast_ref::<std::io::Error>().is_some() { return Err(error); }
+                failures.push(format!("{url}: {error:#}"));
+            }
+        }
+    }
+    anyhow::bail!("BGE-M3 download failed: {}", failures.join("; "))
+}
+
+#[cfg(test)]
 fn download_verified(url: &str, dest: &Path, expected: &str) -> Result<()> {
+    download_verified_with_timeouts(url, dest, expected, DownloadTimeouts::default())
+}
+
+fn download_verified_with_timeouts(url: &str, dest: &Path, expected: &str, timeouts: DownloadTimeouts) -> Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
-            .map_err(|e| anyhow!("failed to create {}: {e}", parent.display()))?;
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let offset = if dest.is_file() { dest.metadata()?.len() } else { 0 };
-    let resp = match download_response(url, dest, offset) {
+    let resp = match download_response(url, dest, offset, timeouts) {
         Ok(response) => response,
         Err(error) if offset > 0 && error.downcast_ref::<ureq::Error>().is_some_and(|error| matches!(error, ureq::Error::Status(416, _))) => {
             std::fs::remove_file(dest)?;
-            download_response(url, dest, 0)?
+            download_response(url, dest, 0, timeouts)?
         }
         Err(error) => return Err(error),
     };
@@ -370,10 +442,10 @@ fn download_verified(url: &str, dest: &Path, expected: &str) -> Result<()> {
         // the fresh request cannot enter this branch with a nonzero offset.
         if resumed && offset > 0 {
             std::fs::remove_file(dest)?;
-            return download_verified(url, dest, expected);
+            return download_verified_with_timeouts(url, dest, expected, timeouts);
         }
         // Unknown-length EOF may be a truncated response. Preserve resumable bytes.
-        if total.is_some() { let _ = std::fs::remove_file(dest); }
+        if total.is_some() { std::fs::remove_file(dest)?; }
         anyhow::bail!(
             "checksum failed: {} SHA256={actual} (expected {expected})",
             dest.display()
@@ -393,14 +465,33 @@ fn parse_content_range(value: &str) -> Result<(u64, u64)> {
     Ok((start, total))
 }
 
+fn download_parts_path(dest: &Path) -> PathBuf {
+    // Preserve the existing partial-directory name across installer upgrades.
+    dest.with_extension("onnx.parts")
+}
+
+fn remove_download_parts(dest: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(download_parts_path(dest)) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("failed to remove completed model segments"),
+    }
+}
+
 /// Four persistent ranges. Only the coordinator updates task state; workers
 /// receive cancellation through a shared flag and retain their partial files.
+#[cfg(test)]
 fn download_parallel(url: &str, dest: &Path, expected: &str, minimum: u64) -> Result<bool> {
+    download_parallel_with_timeouts(url, dest, expected, minimum, DownloadTimeouts::default())
+}
+
+fn download_parallel_with_timeouts(url: &str, dest: &Path, expected: &str, minimum: u64,
+    timeouts: DownloadTimeouts) -> Result<bool> {
     use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, mpsc};
     use std::time::Duration;
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, 0, None)?;
-    let response = download_agent().get(url).set("Accept-Encoding", "identity").set("Range", "bytes=0-0").call()
+    let response = download_agent(timeouts).get(url).set("Accept-Encoding", "identity").set("Range", "bytes=0-0").call()
         .with_context(|| format!("download probe failed ({url})"))?;
     model_progress::check()?;
     if response.status() == 200 { return Ok(false); }
@@ -410,8 +501,18 @@ fn download_parallel(url: &str, dest: &Path, expected: &str, minimum: u64) -> Re
     anyhow::ensure!(start == 0, "range probe starts at {start}");
     drop(response);
     if total < minimum || total < 4 { return Ok(false); }
-    let parts = dest.with_extension("onnx.parts");
+    let parts = download_parts_path(dest);
     std::fs::create_dir_all(&parts)?;
+    for index in 0..4 {
+        let path = parts.join(index.to_string());
+        let length = total * (index + 1) / 4 - total * index / 4;
+        if path.is_file() && path.metadata()?.len() > length {
+            // Stale or corrupt segment lengths cannot be safely resumed.
+            std::fs::remove_dir_all(&parts)?;
+            std::fs::create_dir_all(&parts)?;
+            break;
+        }
+    }
     let counts: [AtomicU64; 4] = std::array::from_fn(|_| AtomicU64::new(0));
     let stop = AtomicBool::new(false);
     let (sender, receiver) = mpsc::channel();
@@ -423,7 +524,7 @@ fn download_parallel(url: &str, dest: &Path, expected: &str, minimum: u64) -> Re
             let sender = sender.clone();
             let stop = &stop;
             scope.spawn(move || {
-                let result = download_part(url, &path, begin, end, total, count, stop);
+                let result = download_part(url, &path, begin, end, total, count, stop, timeouts);
                 let failed = result.is_err();
                 let _ = sender.send(result);
                 if failed { stop.store(true, Ordering::Relaxed); }
@@ -441,7 +542,13 @@ fn download_parallel(url: &str, dest: &Path, expected: &str, minimum: u64) -> Re
             match receiver.recv_timeout(Duration::from_millis(100)) {
                 Ok(result) => {
                     finished += 1;
-                    if let Err(error) = result { if failure.is_none() { failure = Some(error); } }
+                    if let Err(error) = result {
+                        // A concurrent network failure must not hide a disk failure
+                        // reported by another worker and turn it into a failover.
+                        if failure.is_none() || error.downcast_ref::<std::io::Error>().is_some() {
+                            failure = Some(error);
+                        }
+                    }
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("download workers disconnected"),
@@ -461,14 +568,17 @@ fn download_parallel(url: &str, dest: &Path, expected: &str, minimum: u64) -> Re
     if !file_valid(dest, expected)? {
         std::fs::remove_file(dest)?;
         std::fs::remove_dir_all(&parts)?;
-        anyhow::bail!("parallel download checksum failed; rejected all segments");
+        // A corrupt saved prefix must not exhaust the final healthy source.
+        // Discard every segment and retry that source once from byte zero.
+        download_verified_with_timeouts(url, dest, expected, timeouts)?;
+        return Ok(true);
     }
     std::fs::remove_dir_all(parts)?;
     Ok(true)
 }
 
 fn download_part(url: &str, path: &Path, begin: u64, end: u64, total: u64,
-    count: &std::sync::atomic::AtomicU64, stop: &std::sync::atomic::AtomicBool) -> Result<()> {
+    count: &std::sync::atomic::AtomicU64, stop: &std::sync::atomic::AtomicBool, timeouts: DownloadTimeouts) -> Result<()> {
     use std::sync::atomic::Ordering;
     let length = end - begin;
     let mut offset = if path.is_file() { path.metadata()?.len() } else { 0 };
@@ -477,7 +587,7 @@ fn download_part(url: &str, path: &Path, begin: u64, end: u64, total: u64,
     if offset == length { return Ok(()); }
     anyhow::ensure!(!stop.load(Ordering::Relaxed), "download segment stopped");
     let start = begin + offset;
-    let response = download_agent().get(url).set("Accept-Encoding", "identity").set("Range", &format!("bytes={start}-{}", end - 1)).call()
+    let response = download_agent(timeouts).get(url).set("Accept-Encoding", "identity").set("Range", &format!("bytes={start}-{}", end - 1)).call()
         .with_context(|| format!("segment download failed ({url})"))?;
     anyhow::ensure!(response.status() == 206, "source did not honor the segment range");
     let expected_range = format!("bytes {start}-{}/{total}", end - 1);
@@ -498,23 +608,17 @@ fn download_part(url: &str, path: &Path, begin: u64, end: u64, total: u64,
     Ok(())
 }
 
-fn download_agent() -> ureq::Agent {
-    use std::time::Duration;
-    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(30)).timeout_write(Duration::from_secs(10)).build()
+fn download_agent(timeouts: DownloadTimeouts) -> ureq::Agent {
+    ureq::AgentBuilder::new().timeout_connect(timeouts.connect)
+        .timeout_read(timeouts.read).timeout_write(timeouts.write).build()
 }
 
-fn download_response(url: &str, dest: &Path, offset: u64) -> Result<ureq::Response> {
-    use std::time::Duration;
+fn download_response(url: &str, dest: &Path, offset: u64, timeouts: DownloadTimeouts) -> Result<ureq::Response> {
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, offset, None)?;
-    // Allow CDN body stalls while bounding cancellation latency to one 30-second read.
-    let request = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(30))
-        .timeout_write(Duration::from_secs(10))
-        .build()
-        .get(url).set("Accept-Encoding", "identity");
+    // Headers and body reads share the same bounded idle wait. No total deadline
+    // cuts off a large model while bytes are still arriving.
+    let request = download_agent(timeouts).get(url).set("Accept-Encoding", "identity");
     let request = if offset > 0 { request.set("Range", &format!("bytes={offset}-")) } else { request };
     let response = request.call();
     model_progress::check()?;
@@ -543,6 +647,233 @@ mod tests {
             "http://127.0.0.1:8080"
         );
         assert!(origin_from_mirror("").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_source_policy_preserves_exact_release_and_explicit_sources() -> Result<()> {
+        let official = crate::memory::bge::CPU_ORT_URL;
+        assert_eq!(cpu_ort_sources_from_setting("auto")?, vec![format!("https://gh-proxy.org/{official}"), official.to_owned()]);
+        assert_eq!(cpu_ort_sources_from_setting(" github ")?, vec![official.to_owned()]);
+        assert_eq!(cpu_ort_sources_from_setting("https://github.com/")?, vec![official.to_owned()]);
+        assert_eq!(cpu_ort_sources_from_setting("mirror.example")?, vec![format!("https://mirror.example/{official}")]);
+        assert_eq!(cpu_ort_sources_from_setting("http://127.0.0.1:8080/")?, vec![format!("http://127.0.0.1:8080/{official}")]);
+        for value in ["", "https://user:secret@mirror.example", "file:///tmp/model",
+            "https://mirror.example/path", "https://mirror.example/?token=secret", "https://mirror.example/#fragment"] {
+            assert!(cpu_ort_sources_from_setting(value).is_err(), "accepted unsafe mirror {value}");
+        }
+        assert_eq!(model_origins(Some("auto"))?, MIRRORS[1..].iter().map(|value| (*value).to_owned()).collect::<Vec<_>>());
+        assert_eq!(model_origins(Some("hf-mirror.com"))?, vec!["https://hf-mirror.com"]);
+        assert_eq!(crate::memory::bge::CPU_ORT_SIZE, 569654128);
+        assert_eq!(crate::memory::bge::CPU_ORT_SHA256, "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff");
+        Ok(())
+    }
+
+    fn fast_timeouts() -> DownloadTimeouts {
+        use std::time::Duration;
+        DownloadTimeouts { connect: Duration::from_millis(500), read: Duration::from_millis(200), write: Duration::from_millis(500) }
+    }
+
+    /// Hold the connection open until the test releases it, so advancing to the
+    /// next source proves the client timeout fired rather than the server's EOF.
+    fn stalled_source(body: Option<(&[u8], usize)>) -> Result<(String, std::sync::mpsc::Sender<()>, std::thread::JoinHandle<Result<()>>)> {
+        use std::time::Duration;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/model", listener.local_addr()?);
+        let body = body.map(|(prefix, total)| (prefix.to_vec(), total));
+        let (release, wait) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || -> Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            socket.set_write_timeout(Some(Duration::from_secs(5)))?;
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                anyhow::ensure!(socket.read(&mut byte)? == 1, "request closed before headers");
+                request.push(byte[0]);
+            }
+            if let Some((prefix, total)) = body {
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nConnection: close\r\n\r\n")?;
+                socket.write_all(&prefix)?;
+                socket.flush()?;
+            }
+            wait.recv_timeout(Duration::from_secs(10))?;
+            Ok(())
+        });
+        Ok((url, release, server))
+    }
+
+    fn responding_source(body: &[u8], offset: usize) -> Result<(String, std::thread::JoinHandle<Result<()>>)> {
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+        let url = format!("http://{}/model", server.server_addr());
+        let body = body.to_vec();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let request = server.recv_timeout(std::time::Duration::from_secs(5))?.ok_or_else(|| anyhow!("fallback source not requested"))?;
+            let range = request.headers().iter().find(|header| header.field.equiv("Range"));
+            let response = if offset > 0 {
+                assert_eq!(range.map(|header| header.value.as_str()), Some(format!("bytes={offset}-").as_str()));
+                tiny_http::Response::from_data(body[offset..].to_vec()).with_status_code(206)
+                    .with_header(tiny_http::Header::from_bytes("Content-Range", format!("bytes {offset}-{}/{}", body.len() - 1, body.len()))
+                        .map_err(|_| anyhow!("invalid test header"))?)
+            } else {
+                assert!(range.is_none());
+                tiny_http::Response::from_data(body)
+            };
+            request.respond(response)?;
+            Ok(())
+        });
+        Ok((url, worker))
+    }
+
+    #[test]
+    fn stalled_headers_and_body_fail_over_and_resume_without_waiting_for_eof() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let body = b"pinned artifact from healthy fallback";
+        let expected = hex::encode(Sha256::digest(body));
+        for offset in [0, 7] {
+            let dir = tempfile::tempdir()?;
+            let target = dir.path().join("model.ort");
+            let prefix = if offset == 0 { None } else { Some((&body[..offset], body.len())) };
+            let (first, release, stalled) = stalled_source(prefix)?;
+            let (second, healthy) = responding_source(body, offset)?;
+            let started = std::time::Instant::now();
+            let result = download_with_fallback(&[first, second.clone()], &target, &expected, false, fast_timeouts());
+            let elapsed = started.elapsed();
+            release.send(())?;
+            stalled.join().map_err(|_| anyhow!("stalled source panicked"))??;
+            healthy.join().map_err(|_| anyhow!("healthy source panicked"))??;
+            assert_eq!(result?, second);
+            assert!(elapsed < std::time::Duration::from_secs(5), "fallback was not bounded: {elapsed:?}");
+            assert_eq!(std::fs::read(target)?, body);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn stalled_range_probe_fails_over_without_publishing_unverified_bytes() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("model.ort");
+        let parts = download_parts_path(&target);
+        std::fs::create_dir_all(&parts)?;
+        std::fs::write(parts.join("0"), b"saved segment from an interrupted range source")?;
+        let body = b"healthy model";
+        let expected = hex::encode(Sha256::digest(body));
+        let (first, release, stalled) = stalled_source(None)?;
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+        let second = format!("http://{}/model", server.server_addr());
+        let healthy = std::thread::spawn(move || -> Result<()> {
+            let probe = server.recv_timeout(std::time::Duration::from_secs(5))?.ok_or_else(|| anyhow!("probe missing"))?;
+            assert!(probe.headers().iter().any(|header| header.field.equiv("Range") && header.value.as_str() == "bytes=0-0"));
+            probe.respond(tiny_http::Response::from_data(body.to_vec()))?;
+            let request = server.recv_timeout(std::time::Duration::from_secs(5))?.ok_or_else(|| anyhow!("full request missing"))?;
+            request.respond(tiny_http::Response::from_data(body.to_vec()))?;
+            Ok(())
+        });
+        let result = download_with_fallback(&[first, second.clone()], &target, &expected, true, fast_timeouts());
+        release.send(())?;
+        stalled.join().map_err(|_| anyhow!("stalled source panicked"))??;
+        healthy.join().map_err(|_| anyhow!("healthy source panicked"))??;
+        assert_eq!(result?, second);
+        assert_eq!(std::fs::read(target)?, body);
+        assert!(!parts.exists(), "no-Range fallback left unused CPU segments behind");
+        Ok(())
+    }
+
+    #[test]
+    fn progressing_transfer_outlives_the_per_read_timeout() -> Result<()> {
+        use std::time::Duration;
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("model.ort");
+        let body = b"abcdefgh";
+        let expected = hex::encode(Sha256::digest(body));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/model", listener.local_addr()?);
+        let worker = std::thread::spawn(move || -> Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            socket.set_nodelay(true)?;
+            socket.set_read_timeout(Some(Duration::from_secs(5)))?;
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                anyhow::ensure!(socket.read(&mut byte)? == 1, "request closed before headers");
+                request.push(byte[0]);
+            }
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
+            for byte in body {
+                socket.write_all(&[*byte])?;
+                socket.flush()?;
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Ok(())
+        });
+        let timeouts = DownloadTimeouts { read: Duration::from_millis(500), ..fast_timeouts() };
+        let started = std::time::Instant::now();
+        download_with_fallback(&[url], &target, &expected, false, timeouts)?;
+        assert!(started.elapsed() > timeouts.read);
+        worker.join().map_err(|_| anyhow!("progressing source panicked"))??;
+        assert_eq!(std::fs::read(target)?, body);
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_source_is_rejected_before_clean_fallback() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("model.ort");
+        let expected = hex::encode(Sha256::digest(b"trusted model"));
+        let (first, corrupt) = responding_source(b"corrupt model", 0)?;
+        let (second, healthy) = responding_source(b"trusted model", 0)?;
+        assert_eq!(download_with_fallback(&[first, second.clone()], &target, &expected, false, fast_timeouts())?, second);
+        corrupt.join().map_err(|_| anyhow!("corrupt source panicked"))??;
+        healthy.join().map_err(|_| anyhow!("healthy source panicked"))??;
+        assert_eq!(std::fs::read(target)?, b"trusted model");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_source_releases_operation_slot_and_can_retry() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let target = dir.path().join("model.ort");
+        let body = b"verified retry";
+        let expected = hex::encode(Sha256::digest(body));
+        let (first, release, stalled) = stalled_source(None)?;
+        let failed = {
+            let _operation = model_progress::Operation::begin_download()?;
+            let result = download_with_fallback(&[first], &target, &expected, false, fast_timeouts());
+            assert_eq!(model_progress::status()?["active"], true);
+            result
+        };
+        release.send(())?;
+        stalled.join().map_err(|_| anyhow!("stalled source panicked"))??;
+        assert!(failed.is_err());
+        assert!(!target.exists());
+        assert_eq!(model_progress::status()?["active"], false);
+        let (second, healthy) = responding_source(body, 0)?;
+        {
+            let _operation = model_progress::Operation::begin_download()?;
+            download_with_fallback(&[second], &target, &expected, false, fast_timeouts())?;
+        }
+        healthy.join().map_err(|_| anyhow!("healthy source panicked"))??;
+        assert_eq!(model_progress::status()?["active"], false);
+        assert_eq!(std::fs::read(target)?, body);
+        Ok(())
+    }
+
+    #[test]
+    fn local_disk_failure_is_not_retried_as_a_mirror_outage() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let parent = dir.path().join("not-a-directory");
+        std::fs::write(&parent, b"keep")?;
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+        let url = format!("http://{}/model", server.server_addr());
+        let error = download_with_fallback(&[url.clone(), url], &parent.join("model.ort"), "unused", false, fast_timeouts()).unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some(), "disk failure identity lost: {error:#}");
+        assert!(server.recv_timeout(std::time::Duration::from_millis(10))?.is_none());
+        assert_eq!(std::fs::read(parent)?, b"keep");
         Ok(())
     }
 
@@ -619,6 +950,54 @@ mod tests {
         worker.join().map_err(|_| anyhow!("source panicked"))??;
         assert_eq!(std::fs::read(target)?, body);
         assert!(!parts.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_or_overlong_parallel_segments_restart_cleanly_on_the_same_source() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
+        let body: Vec<u8> = (0..128 * 1024).map(|index| (index % 251) as u8).collect();
+        let expected = hex::encode(Sha256::digest(&body));
+        for overlong in [false, true] {
+            let dir = tempfile::tempdir()?;
+            let target = dir.path().join("model.ort");
+            let parts = download_parts_path(&target);
+            std::fs::create_dir(&parts)?;
+            for index in 0..4 {
+                let bad_length = if overlong { body.len() / 4 + 1 } else { 3 };
+                std::fs::write(parts.join(index.to_string()), vec![255; bad_length])?;
+            }
+            let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow!("{error}"))?;
+            let url = format!("http://{}/model", server.server_addr());
+            let source = body.clone();
+            let worker = std::thread::spawn(move || -> Result<()> {
+                let header = |value: String| tiny_http::Header::from_bytes("Content-Range", value).map_err(|_| anyhow!("invalid test header"));
+                let next = || server.recv_timeout(std::time::Duration::from_secs(5))?.ok_or_else(|| anyhow!("download request missing"));
+                next()?.respond(tiny_http::Response::from_data(vec![source[0]]).with_status_code(206)
+                    .with_header(header(format!("bytes 0-0/{}", source.len()))?))?;
+                for _ in 0..4 {
+                    let request = next()?;
+                    let range = request.headers().iter().find(|header| header.field.equiv("Range"))
+                        .ok_or_else(|| anyhow!("segment Range missing"))?.value.as_str();
+                    let (start, end) = range.strip_prefix("bytes=").and_then(|value| value.split_once('-')).ok_or_else(|| anyhow!("bad range"))?;
+                    let start = start.parse::<usize>()?;
+                    let end = end.parse::<usize>()?;
+                    assert_eq!(start % (source.len() / 4), if overlong { 0 } else { 3 });
+                    request.respond(tiny_http::Response::from_data(source[start..=end].to_vec()).with_status_code(206)
+                        .with_header(header(format!("bytes {start}-{end}/{}", source.len()))?))?;
+                }
+                if !overlong {
+                    let fresh = next()?;
+                    assert!(!fresh.headers().iter().any(|header| header.field.equiv("Range")));
+                    fresh.respond(tiny_http::Response::from_data(source))?;
+                }
+                Ok(())
+            });
+            assert!(download_parallel_with_timeouts(&url, &target, &expected, 0, fast_timeouts())?);
+            worker.join().map_err(|_| anyhow!("range source panicked"))??;
+            assert_eq!(std::fs::read(target)?, body);
+            assert!(!parts.exists());
+        }
         Ok(())
     }
 

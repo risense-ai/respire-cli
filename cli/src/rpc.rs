@@ -1,9 +1,9 @@
-//! Local authenticated runtime transport. Commands connect to its RPC pipe/HTTP
-//! endpoints and auto-start the hidden `--runtime-internal` host entry.
+//! Local authenticated runtime transport. Commands connect only to loopback HTTP
+//! over TCP and auto-start the hidden `--runtime-internal` host entry.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use interprocess::local_socket::{prelude::*, GenericNamespaced, ListenerOptions, Name, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -21,7 +20,6 @@ use crate::i18n;
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 
 pub const PROTOCOL_V: u32 = 1;
-const MAX_FRAME: usize = 32 * 1024 * 1024;
 const START_POLLS: usize = 100;
 const START_WAIT: Duration = Duration::from_millis(150);
 
@@ -1088,7 +1086,7 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
     }
     crate::runtime_policy::require_host("runtime startup")?;
     std::env::set_var("RSRS_RUNTIME", "1");
-    serve(flags, true)
+    serve(flags)
 }
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
@@ -1192,19 +1190,7 @@ fn compatible(response: &RpcResponse) -> bool {
     response.v == PROTOCOL_V && response.code.as_deref() != Some("protocol_version_mismatch")
 }
 
-fn try_exchange(request: &RpcRequest) -> Result<RpcResponse> {
-    let mut stream = Stream::connect(pipe_name()?).context("runtime server is not running")?;
-    let body = serde_json::to_vec(request)?;
-    write_frame(&mut stream, &body)?;
-    let bytes = read_frame(&mut stream)?;
-    let response: RpcResponse = serde_json::from_slice(&bytes).context("bad runtime response")?;
-    if response.id != request.id {
-        bail!("runtime response id mismatch");
-    }
-    Ok(response)
-}
-
-fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
+fn serve(flags: RuntimeFlags) -> Result<()> {
     crate::runtime_policy::require_host("runtime startup")?;
     // Ignore SIGHUP off this thread. signal_hook's handler install must not sit
     // in front of bind: under llvm-cov that call can stall the thread that has
@@ -1220,44 +1206,35 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
                 );
             });
     }
-    let boot = respire::lock::LibraryLock::acquire(&runtime_dir(), Duration::from_secs(15))?;
     // Children only bind. The host caller owns stop/copy/upgrade decisions.
     if probe_runtime()?.is_some() {
         return Ok(());
     }
-    let name = pipe_name()?;
-    #[cfg(unix)]
-    clear_dead_socket();
-    let entered = crate::network::runtime()?.enter();
-    let listener = match ListenerOptions::new().name(name).create_tokio() {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            drop(boot);
-            if try_exchange(&RpcRequest {
-                v: PROTOCOL_V,
-                id: "bind-probe".into(),
-                method: "runtime.status".into(),
-                args: Vec::new(),
-                queue_wait_ms: None,
-            })
-            .is_ok()
-            {
-                return Ok(());
-            }
-            return Err(error).context("runtime pipe is already taken");
+    // Keep installation ownership for the listener's entire lifetime. A port
+    // override must not start a second host for the same installation or replace
+    // its endpoint record, which the former local-socket name also prevented.
+    let _owner = match respire::lock::LibraryLock::acquire(&runtime_dir(), Duration::from_secs(15)) {
+        Ok(owner) => owner,
+        Err(error) => {
+            // Another host may have completed startup while this caller waited.
+            if probe_runtime()?.is_some() { return Ok(()); }
+            return Err(error).context("another runtime owns this installation");
         }
-        Err(error) => return Err(error).context("failed to bind the runtime pipe"),
     };
-    drop(entered);
-    let Some(bound) = bind_http(&flags, _detached)? else {
-        return Ok(());
-    };
+    if probe_runtime()?.is_some() { return Ok(()); }
+    // Acquire the existing library ownership before publishing readiness. This
+    // also guards an older runtime using another port, and direct-mode clients.
+    let library = respire::lock::LibraryLock::acquire(
+        &respire::service::data_dir(), Duration::from_secs(120),
+    ).context("runtime failed to lock the library")?;
+    // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
+    // pipe/socket fallback is necessary.
+    let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
     {
         let mut url = WEB_URL.lock().unwrap_or_else(|err| err.into_inner());
         *url = bound.url.clone();
     }
     write_endpoint(&bound.url)?;
-    drop(boot);
     let (tx, rx) = mpsc::channel();
     let _ = JOB_TX.set(Mutex::new(tx.clone()));
     // Sandboxed clients cannot restart an idle-exited host runtime.
@@ -1267,70 +1244,11 @@ fn serve(flags: RuntimeFlags, _detached: bool) -> Result<()> {
     RUNNING.store(0, Ordering::Release);
     std::thread::Builder::new()
         .name("respire-dispatch".into())
-        .spawn(move || dispatch_loop(rx, limit, idle))
+        .spawn(move || dispatch_loop(rx, limit, idle, library))
         .context("failed to start the runtime dispatcher")?;
-    std::thread::spawn(move || {
-        if let Err(error) = crate::runtime_http::serve_loop(bound.server) {
-            eprintln!("runtime HTTP server stopped: {error:#}");
-        }
-    });
-    accept_loop(listener, tx)?;
-    Ok(())
-}
-
-fn bind_http(
-    flags: &RuntimeFlags,
-    _detached: bool,
-) -> Result<Option<crate::runtime_http::BoundRuntime>> {
-    crate::runtime_http::bind_runtime(flags.port, &flags.host).map(Some)
-}
-
-fn accept_loop(listener: interprocess::local_socket::tokio::Listener, tx: Sender<Job>) -> Result<()> {
-    use interprocess::local_socket::tokio::prelude::*;
-    crate::network::runtime()?.block_on(async move {
-        while !STOPPING.load(Ordering::Acquire) {
-            let connection = match listener.accept().await {
-                Ok(connection) => connection,
-                Err(error) => {
-                    eprintln!("runtime accept failed: {error}");
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    continue;
-                }
-            };
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                if let Err(error) = handle_connection(connection, &tx).await {
-                    eprintln!("runtime connection failed: {error:#}");
-                }
-            });
-        }
-    });
-    Ok(())
-}
-
-async fn handle_connection(mut stream: interprocess::local_socket::tokio::Stream, tx: &Sender<Job>) -> Result<()> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let bytes = tokio::time::timeout(crate::network::IO_WAIT, async {
-        let mut header = [0; 4];
-        stream.read_exact(&mut header).await?;
-        let length = u32::from_le_bytes(header) as usize;
-        anyhow::ensure!(length <= MAX_FRAME, "frame exceeds runtime limit");
-        let mut bytes = vec![0; length];
-        stream.read_exact(&mut bytes).await?;
-        Ok::<_, anyhow::Error>(bytes)
-    }).await.context("runtime pipe request body timed out")??;
-    let request: RpcRequest = serde_json::from_slice(&bytes)?;
-    let (send, receive) = tokio::sync::oneshot::channel();
-    dispatch_deferred(request, tx, move |response| { let _ = send.send(response); });
-    let response = receive.await.context("runtime pipe result unavailable")?;
-    let bytes = serde_json::to_vec(&response)?;
-    anyhow::ensure!(bytes.len() <= MAX_FRAME, "response exceeds runtime frame limit");
-    tokio::time::timeout(crate::network::IO_WAIT, async {
-        stream.write_all(&(bytes.len() as u32).to_le_bytes()).await?;
-        stream.write_all(&bytes).await?;
-        stream.flush().await
-    }).await.context("runtime pipe reply timed out; inspect result by request ID")??;
-    Ok(())
+    // Keep the host entry alive on its actual listener. Drain/worker shutdown
+    // retains its existing ownership and process-exit path in dispatch_loop.
+    crate::runtime_http::serve_loop(bound.server)
 }
 
 fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
@@ -1842,18 +1760,8 @@ impl Drop for ClassifyGuard {
     }
 }
 
-fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>) {
+fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>, _lock: respire::lock::LibraryLock) {
     mark_worker();
-    let _lock = match respire::lock::LibraryLock::acquire(
-        &respire::service::data_dir(),
-        Duration::from_secs(120),
-    ) {
-        Ok(lock) => lock,
-        Err(error) => {
-            eprintln!("runtime failed to lock the library: {error:#}");
-            stop_process(1);
-        }
-    };
     #[cfg(not(test))]
     respire_app::core_sdk::worker::enable();
     // Keep WAL open across requests: closing the last connection can briefly lock
@@ -2225,7 +2133,7 @@ fn cached(id: &str) -> Option<RpcResponse> {
 }
 
 fn remember(id: &str, response: &RpcResponse) {
-    if id.is_empty() || id == "bind-probe" {
+    if id.is_empty() {
         return;
     }
     if let Ok(mut cache) = CACHE.lock() {
@@ -2308,92 +2216,6 @@ pub(crate) fn force_stop_for_reset() -> Result<Option<u32>> {
         std::fs::remove_file(endpoint_path())?;
     }
     Ok(Some(pid))
-}
-
-fn pipe_label() -> String {
-    use sha2::{Digest, Sha256};
-    let dir = respire::service::data_dir();
-    let mut hasher = Sha256::new();
-    hasher.update(dir.to_string_lossy().as_bytes());
-    format!("om{}", hex::encode(&hasher.finalize()[..8]))
-}
-
-fn pipe_name() -> Result<Name<'static>> {
-    #[cfg(windows)]
-    {
-        std::ffi::OsString::from(pipe_label())
-            .to_ns_name::<GenericNamespaced>()
-            .context("failed to build the runtime pipe name")
-    }
-    #[cfg(unix)]
-    {
-        unix_socket_name()
-    }
-}
-
-/// Socket path for the current data dir. Not cached: one process runs many
-/// tests, and each test points `RSRS_DATA_DIR` somewhere else.
-#[cfg(unix)]
-fn socket_path() -> PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    use sha2::{Digest, Sha256};
-    let path = runtime_dir().join("rpc.sock");
-    // macOS has 104 bytes in sun_path, including its terminating NUL.
-    if path.as_os_str().as_bytes().len() < 104 {
-        return path;
-    }
-    let identity = hex::encode(Sha256::digest(path.as_os_str().as_bytes()));
-    PathBuf::from(format!("/tmp/rsrs-runtime-{}", respire_spawn::effective_user_id()))
-        .join(format!("{}.sock", &identity[..32]))
-}
-
-/// Short library paths keep the socket beside the runtime record. Long paths
-/// use a private per-user directory; clear_dead_socket handles crash leftovers.
-#[cfg(unix)]
-fn unix_socket_name() -> Result<Name<'static>> {
-    use interprocess::local_socket::GenericFilePath;
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
-    let path = socket_path();
-    if let Some(parent) = path.parent() {
-        if path == runtime_dir().join("rpc.sock") {
-            std::fs::create_dir_all(parent)?;
-        } else {
-            match std::fs::DirBuilder::new().mode(0o700).create(parent) {
-                Ok(()) => {},
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {},
-                Err(error) => return Err(error.into()),
-            }
-            let metadata = std::fs::symlink_metadata(parent)?;
-            anyhow::ensure!(metadata.is_dir() && !metadata.file_type().is_symlink()
-                && metadata.uid() == respire_spawn::effective_user_id()
-                && metadata.mode() & 0o777 == 0o700,
-                "runtime socket directory must be owned by this user with mode 0700");
-        }
-    }
-    path.to_fs_name::<GenericFilePath>()
-        .context("failed to build the runtime socket name")
-}
-
-/// Drop a socket file left by a dead process. Connecting is the check: an
-/// endpoint pid in this data dir can still be alive while the file belongs to
-/// an older path, and unlinking from the connect path races the listener.
-#[cfg(unix)]
-fn clear_dead_socket() {
-    let path = socket_path();
-    if !path.exists() {
-        return;
-    }
-    let listening = try_exchange(&RpcRequest {
-        v: PROTOCOL_V,
-        id: "bind-probe".into(),
-        method: "runtime.status".into(),
-        args: Vec::new(),
-        queue_wait_ms: None,
-    })
-    .is_ok();
-    if !listening {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 /// Only a refused connection permits startup; authentication and access failures
@@ -2506,70 +2328,11 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
     bail!("host runtime did not become ready")
 }
 
-pub fn write_frame(mut writer: impl Write, bytes: &[u8]) -> Result<()> {
-    if bytes.len() > MAX_FRAME {
-        bail!("frame exceeds {MAX_FRAME} bytes");
-    }
-    writer.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    writer.write_all(bytes)?;
-    writer.flush()?;
-    Ok(())
-}
-
-pub fn read_frame(reader: &mut impl Read) -> Result<Vec<u8>> {
-    let mut len_buf = [0u8; 4];
-    reader
-        .read_exact(&mut len_buf)
-        .context("peer closed before a complete frame")?;
-    let len = u32::from_le_bytes(len_buf) as usize;
-    if len > MAX_FRAME {
-        bail!("frame exceeds {MAX_FRAME} bytes");
-    }
-    let mut buf = vec![0u8; len];
-    reader
-        .read_exact(&mut buf)
-        .context("peer closed in the middle of a frame")?;
-    Ok(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::io::Read;
     use std::sync::atomic::Ordering;
-
-    #[test]
-    fn frame_roundtrip() -> Result<()> {
-        let payload = b"{\"v\":1}";
-        let mut buffer = Vec::new();
-        write_frame(&mut buffer, payload)?;
-        let mut cursor = Cursor::new(buffer);
-        assert_eq!(read_frame(&mut cursor)?, payload);
-        Ok(())
-    }
-
-    #[test]
-    fn rejects_half_frame() {
-        let mut cursor = Cursor::new(vec![4, 0, 0, 0, b'{']);
-        assert!(read_frame(&mut cursor).is_err());
-    }
-
-    #[test]
-    fn rejects_huge_frame_without_allocating_it() {
-        let mut cursor = Cursor::new(u32::MAX.to_le_bytes().to_vec());
-        assert!(read_frame(&mut cursor).is_err());
-    }
-
-    #[test]
-    fn pipe_label_is_stable() {
-        let _guard = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let label = pipe_label();
-        assert_eq!(label, pipe_label());
-        assert!(label.starts_with("om"));
-        assert!(pipe_name().is_ok());
-    }
 
     fn req(method: &str, id: &str) -> RpcRequest {
         RpcRequest {
@@ -2579,22 +2342,6 @@ mod tests {
             args: Vec::new(),
             queue_wait_ms: None,
         }
-    }
-
-    #[test]
-    fn frame_rejects_oversized_payload() {
-        let mut buffer = Vec::new();
-        let payload = vec![0u8; MAX_FRAME + 1];
-        assert!(write_frame(&mut buffer, &payload).is_err());
-    }
-
-    #[test]
-    fn empty_frame_roundtrip() -> Result<()> {
-        let mut buffer = Vec::new();
-        write_frame(&mut buffer, b"")?;
-        let mut cursor = Cursor::new(buffer);
-        assert!(read_frame(&mut cursor)?.is_empty());
-        Ok(())
     }
 
     #[test]
@@ -2681,14 +2428,13 @@ mod tests {
     }
 
     #[test]
-    fn cache_ignores_probe_and_drops_oldest() {
+    fn cache_ignores_empty_ids_and_drops_oldest() {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
         let response = error_response(&req("x", "id"), "timeout", "slow");
         remember("", &response);
-        remember("bind-probe", &response);
-        assert!(cached("bind-probe").is_none());
+        assert!(cached("").is_none());
         for index in 0..70 {
             let id = format!("id-{index}");
             remember(&id, &status_response(&req("runtime.status", &id)));
@@ -2917,7 +2663,8 @@ mod tests {
         }
         let (tx, rx) = mpsc::channel();
         WORKERS.store(1, Ordering::Release);
-        std::thread::spawn(move || dispatch_loop(rx, 1, None));
+        let library = respire::lock::LibraryLock::acquire(&respire::service::data_dir(), Duration::from_secs(120))?;
+        std::thread::spawn(move || dispatch_loop(rx, 1, None, library));
         let commands = [vec!["--json".into(), "show".into(), "controlled-missing-id".into()],
             vec!["--json".into(), "recall".into(), "controlled empty-profile query".into(), "--no-related".into()]];
         let mut original = Vec::new();
@@ -2975,8 +2722,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
-    fn socket_path_follows_data_dir() -> Result<()> {
+    fn endpoint_path_follows_data_dir() -> Result<()> {
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
@@ -2984,22 +2730,22 @@ mod tests {
         let first = tempfile::tempdir()?;
         let second = tempfile::tempdir()?;
         std::env::set_var("RSRS_DATA_DIR", first.path());
-        let first_path = socket_path();
+        let first_path = endpoint_path();
         std::env::set_var("RSRS_DATA_DIR", second.path());
-        let second_path = socket_path();
+        let second_path = endpoint_path();
         match previous {
             Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
             None => std::env::remove_var("RSRS_DATA_DIR"),
         }
         if first_path == second_path {
             anyhow::bail!(
-                "socket path stayed at {} after the data dir changed",
+                "endpoint path stayed at {} after the data dir changed",
                 first_path.display()
             );
         }
         if !first_path.starts_with(first.path()) || !second_path.starts_with(second.path()) {
             anyhow::bail!(
-                "socket path left its data dir: {} / {}",
+                "endpoint path left its data dir: {} / {}",
                 first_path.display(),
                 second_path.display()
             );
@@ -3051,55 +2797,8 @@ mod tests {
             false,
         )
         .is_err());
-        let serve_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let serve_error_slot = Arc::clone(&serve_error);
-        let server = std::thread::spawn(move || {
-            let started = serve(
-                RuntimeFlags {
-                    port: Some(18761),
-                    host: "127.0.0.1".into(),
-                    status: false,
-                    stop: false,
-                },
-                true,
-            );
-            if let Err(error) = started {
-                let mut slot = serve_error_slot
-                    .lock()
-                    .unwrap_or_else(|err| err.into_inner());
-                *slot = Some(format!("{error:#}"));
-            }
-        });
-        let mut ready = false;
-        let mut last_error = String::new();
-        for _ in 0..100 {
-            match call_method("runtime.status", Vec::new(), false) {
-                Ok(_) => {
-                    ready = true;
-                    break;
-                }
-                Err(error) => last_error = format!("{error:#}"),
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        if !ready {
-            let slot = serve_error.lock().unwrap_or_else(|err| err.into_inner());
-            let serve_msg = slot
-                .clone()
-                .unwrap_or_else(|| "serve has not returned".to_owned());
-            anyhow::bail!("runtime did not become ready: {last_error}; {serve_msg}");
-        }
-        let listed = call_method("cli.exec", vec!["status".into(), "--json".into()], false)?;
-        assert!(listed.envelope.is_some());
-        STOPPING.store(true, Ordering::Release);
-        let _ = try_exchange(&RpcRequest {
-            v: PROTOCOL_V,
-            id: "test-stop".into(),
-            method: "runtime.status".into(),
-            args: Vec::new(),
-            queue_wait_ms: None,
-        });
-        let _ = server.join();
+        // Live startup, ownership and shutdown are exercised in a separate
+        // process by net_rpc_http::runtime_uses_only_tcp_and_preserves_owner.
         match previous {
             Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
             None => std::env::remove_var("RSRS_DATA_DIR"),

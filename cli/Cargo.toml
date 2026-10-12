@@ -41,7 +41,6 @@ crossterm = "0.28"
 tiny_http = "0.12"
 axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "=1.52.3", features = ["rt-multi-thread", "net", "time", "sync", "io-util"] }
-interprocess = { version = "2.4.2", features = ["tokio"] }
 # Shared subtree payloads: gzip compression and base64 for text transport
 flate2 = "1.1"
 base64 = "0.22"

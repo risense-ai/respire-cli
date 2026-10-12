@@ -36,9 +36,21 @@ fn start_internal_runtime() -> Result<Runtime, String> {
 }
 
 fn start_internal_runtime_with_mode(mode: &str) -> Result<Runtime, String> {
+    start_internal_runtime_with_legacy_path(mode, false)
+}
+
+fn start_internal_runtime_with_legacy_path(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
     let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
     fs::write(dir.path().join("client.json"), serde_json::json!({"service_mode":mode}).to_string())
         .map_err(|err| err.to_string())?;
+    if legacy_path {
+        // A directory at the former socket path cannot be unlinked as a stale
+        // socket or bound by the old listener. TCP startup must leave it alone.
+        fs::create_dir_all(dir.path().join("runtime/rpc.sock"))
+            .map_err(|err| err.to_string())?;
+        fs::write(dir.path().join("runtime/rpc.sock/owned-marker"), b"preserve")
+            .map_err(|err| err.to_string())?;
+    }
     let port = pick_port()?;
     let stderr_path = dir.path().join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
@@ -86,6 +98,99 @@ fn start_internal_runtime_with_mode(mode: &str) -> Result<Runtime, String> {
         "health not ready: {last}; stderr={}",
         fs::read_to_string(&stderr_path).unwrap_or_default()
     ))
+}
+
+#[test]
+fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
+    let mut rt = start_internal_runtime_with_legacy_path("normal", true)?;
+    let health = || -> Result<serde_json::Value, String> {
+        ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
+            .timeout(Duration::from_secs(3)).call().map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())
+    };
+    let owner = health()?["pid"].as_u64().ok_or("runtime pid missing")?;
+    assert_eq!(owner, u64::from(rt.child.id()));
+    assert_eq!(fs::read(rt.dir.path().join("runtime/rpc.sock/owned-marker"))
+        .map_err(|err| err.to_string())?, b"preserve");
+    // Starting another host for the same profile must retain the TCP owner.
+    let mut duplicate = Command::new(bin())
+        .args(["--runtime-internal", "--no-open", "--port", &rt.port.to_string()])
+        .env("RSRS_DATA_DIR", rt.dir.path()).env("RSRS_RPC_PORT", rt.port.to_string())
+        .env("RSRS_CORE_TEST_MODE", "1").env("RSRS_NO_AUTOSYNC", "1")
+        .env_remove("RSRS_CLIENT_ONLY").env_remove("RSRS_NO_AUTOSTART")
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .spawn().map_err(|err| err.to_string())?;
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = duplicate.try_wait().map_err(|err| err.to_string())? { break status; }
+        if started.elapsed() > Duration::from_secs(5) {
+            let _ = duplicate.kill(); let _ = duplicate.wait();
+            return Err("duplicate runtime did not return to its existing owner".into());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+    assert!(status.success());
+    assert_eq!(health()?["pid"].as_u64(), Some(owner));
+    // A different port must not bypass installation ownership. In particular,
+    // do not publish a healthy second host whose dispatcher is still locked.
+    let endpoint = fs::read(rt.dir.path().join("runtime/endpoint.json"))
+        .map_err(|err| err.to_string())?;
+    let original_config = fs::read(rt.dir.path().join("client.json")).map_err(|err| err.to_string())?;
+    for alternate_profile in [false, true] {
+        if alternate_profile {
+            // The endpoint belongs to the installation root, while its library
+            // lock belongs to the selected account. Both ownership scopes matter.
+            let alternate = rt.dir.path().join("accounts/other");
+            fs::create_dir_all(&alternate).map_err(|err| err.to_string())?;
+            let mut config: serde_json::Value = serde_json::from_slice(&original_config)
+                .map_err(|err| err.to_string())?;
+            config["data_dir"] = serde_json::json!(alternate);
+            fs::write(rt.dir.path().join("client.json"), config.to_string())
+                .map_err(|err| err.to_string())?;
+        }
+        let other_port = pick_port()?;
+        let mut other = Command::new(bin())
+            .args(["--runtime-internal", "--no-open", "--port", &other_port.to_string()])
+            .env("RSRS_DATA_DIR", rt.dir.path()).env("RSRS_RPC_PORT", other_port.to_string())
+            .env("RSRS_CORE_TEST_MODE", "1").env("RSRS_NO_AUTOSYNC", "1")
+            .env_remove("RSRS_CLIENT_ONLY").env_remove("RSRS_NO_AUTOSTART")
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .spawn().map_err(|err| err.to_string())?;
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = other.try_wait().map_err(|err| err.to_string())? { break status; }
+            if std::net::TcpStream::connect(("127.0.0.1", other_port)).is_ok()
+                || started.elapsed() > Duration::from_secs(20) {
+                let _ = other.kill(); let _ = other.wait();
+                return Err("another port bypassed runtime ownership or did not reject startup".into());
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        assert!(!status.success());
+        assert_eq!(fs::read(rt.dir.path().join("runtime/endpoint.json"))
+            .map_err(|err| err.to_string())?, endpoint);
+        fs::write(rt.dir.path().join("client.json"), &original_config).map_err(|err| err.to_string())?;
+        assert_eq!(health()?["pid"].as_u64(), Some(owner));
+    }
+    let response: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
+        .timeout(Duration::from_secs(10))
+        .send_json(serde_json::json!({"v":1,"id":"tcp-only-status","method":"cli.exec","args":["status","--json"]}))
+        .map_err(|err| err.to_string())?.into_json().map_err(|err| err.to_string())?;
+    assert_eq!(response["ok"], true, "{response}");
+    let stop = Command::new(bin()).args(["--runtime-internal", "--stop", "--json"])
+        .env("RSRS_DATA_DIR", rt.dir.path()).env("RSRS_RPC_PORT", rt.port.to_string())
+        .env_remove("RSRS_CLIENT_ONLY").env_remove("RSRS_NO_AUTOSTART")
+        .output().map_err(|err| err.to_string())?;
+    assert!(stop.status.success(), "{}", String::from_utf8_lossy(&stop.stderr));
+    let started = Instant::now();
+    while rt.child.try_wait().map_err(|err| err.to_string())?.is_none() {
+        if started.elapsed() > Duration::from_secs(10) { return Err("TCP runtime did not stop".into()); }
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(std::net::TcpStream::connect(("127.0.0.1", rt.port)).is_err());
+    assert_eq!(fs::read(rt.dir.path().join("runtime/rpc.sock/owned-marker"))
+        .map_err(|err| err.to_string())?, b"preserve");
+    Ok(())
 }
 
 #[test]

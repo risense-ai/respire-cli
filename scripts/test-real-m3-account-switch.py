@@ -41,8 +41,8 @@ reports = []
 for binary in BINARIES:
     root = BASE / ('account-return-real-' + str(time.time_ns()))
     if os.name == 'posix':
-        # Runtimes bind rpc.sock under the library. A nested CI report
-        # directory exceeds Unix socket path limits; keep the owned
+        # Keep fixture paths short and isolated from the CI report
+        # directory for cross-platform tools; keep the owned
         # fixture in a short workspace directory and retain reports in BASE.
         root = pathlib.Path.cwd() / ('rsrs-up-' + secrets.token_hex(6))
     main = root / '.rsrs'

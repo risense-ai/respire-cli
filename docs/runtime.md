@@ -4,7 +4,8 @@
 flowchart LR
   Host[Host terminal] -->|owns lifecycle| Runtime[Loopback HTTP runtime]
   Sandbox[Sandbox CLI / TUI / MCP] -->|client-only| Runtime
-  Runtime --> Inference[Shared ONNX session inside runtime]
+  Runtime -->|anonymous stdin/stdout| Worker[Supervised Core worker]
+  Worker --> Inference[Shared native model session]
 ```
 
 | Context | Behavior |
@@ -76,6 +77,13 @@ matching active task. Cancellation must release its model slot before restart.
 | `RSRS_CLIENT_ONLY=1` | Host runtime client mode |
 | `RSRS_NO_AUTOSTART=1` | Compatibility synonym |
 | `RSRS_RPC_PORT` | Override the default port `15169` |
+
+Runtime RPC uses HTTP over loopback TCP only. Startup does not create or probe
+Unix-domain sockets or Windows named-pipe listeners, and there is no legacy
+pipe fallback. A process-lifetime installation lock prevents a second host on
+another port; library ownership is acquired before health/endpoint readiness.
+Core worker stdin/stdout and MCP stdio are anonymous inherited
+process streams, not runtime RPC listeners; their protocols are unchanged.
 
 CLI / TUI / MCP stdio connect to `127.0.0.1` without reading a token file or
 requiring token injection. Loopback listeners do not create a token. The runtime
