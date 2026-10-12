@@ -50,13 +50,17 @@ on:
         description: Repair only missing linux-arm64-gnu DEV14 using the already validated public release
         default: false
         type: boolean
+      resume_dev6_publication:
+        description: Strict publication-only recovery of validated run 38251121403 and immutable dev.6 bytes
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 jobs:
   plan:
-    if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
+    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -450,10 +454,11 @@ jobs:
           if-no-files-found: error
 
   publish:
+    name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
     # DEV regressions reuse the original artifacts independently; stable still waits below.
     needs: [plan, validate]
     if: >-
-      ${{ always() && !cancelled() &&
+      ${{ always() && !cancelled() && !inputs.resume_dev6_publication &&
           ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.publish) ||
            (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
             needs.validate.result == 'success' && needs.plan.outputs.publish == 'true' &&
@@ -696,4 +701,59 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
+        run: node npm/scripts/release-publication.mjs finalize
+
+  dev6-publication-resume:
+    name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    concurrency:
+      group: cli-release-publication
+      queue: max
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # Tooling is real current workflow code; product remains pinned f0002c4.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Revalidate original DEV6 gates, assets and existing npm bytes without publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RECOVERY_REF: ${{ inputs.ref }}
+          RECOVERY_VERSION: ${{ inputs.dev_version }}
+          RECOVERY_PUBLISH: ${{ inputs.publish }}
+          RECOVERY_FULL: ${{ inputs.full_regression_before_publish }}
+          RECOVERY_REUSE: ${{ inputs.reuse_dev12_validation }}
+          RECOVERY_REPAIR12: ${{ inputs.repair_dev12 }}
+          RECOVERY_REPAIR14: ${{ inputs.repair_dev14 }}
+        run: node npm/scripts/release-publication.mjs recovery-ready
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: dev6-recovery-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: recovery-validation.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: scoped-ready-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-ready.json
+          if-no-files-found: error
+      - name: Require the matching short-package publisher and public install
+        timeout-minutes: 46
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs await-alias
+      - name: Make the complete original DEV6 release public
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: node npm/scripts/release-publication.mjs finalize

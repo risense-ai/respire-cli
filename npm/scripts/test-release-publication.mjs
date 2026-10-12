@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync, readdirSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
+import {execFileSync} from 'node:child_process';
+import {PUBLICATION_MAX_BUFFER, publicationCommand, scopedPublisherFinished, selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
 
 const m = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url)));
 const integrity = 'sha512-' + createHash('sha512').update('synthetic package').digest('base64');
@@ -23,6 +24,56 @@ const jobs = [{name: 'publish-integrated', conclusion: 'success'}];
 const release = {id: 300, draft: true, tag_name: `v${version}`, target_commitish: sha, prerelease: true,
   assets: scoped.assets.map(a => ({name: a.name, size: a.size, state: 'uploaded', digest: `sha256:${a.sha256}`}))};
 const copy = value => structuredClone(value);
+
+test('complete ordinary and recovery job inventories wait only for the selected publisher', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const jobSection = workflow.split('\njobs:\n')[1];
+  const definitions = [...jobSection.matchAll(/^  ([\w-]+):\n([\s\S]*?)(?=^  [\w-]+:\n|$(?![\s\S]))/gm)];
+  assert(definitions.length > 5, 'Use the complete release job inventory');
+  for (const resume of [false, true]) {
+    const inventory = definitions.map(([, id, body]) => {
+      const declared = body.match(/^    name: (.+)$/m)?.[1];
+      const conditional = declared?.match(/^\$\{\{ inputs.resume_dev6_publication && '([^']+)' \|\| '([^']+)' \}\}$/);
+      if (id === 'publish' || id === 'dev6-publication-resume') assert(conditional, 'Both publisher names must be conditional');
+      return {id, name: conditional ? conditional[resume ? 1 : 2] : declared || id, status: 'completed', conclusion: 'success'};
+    });
+    const activeId = resume ? 'dev6-publication-resume' : 'publish';
+    const active = inventory.find(j => j.id === activeId);
+    const inactive = inventory.find(j => j.id === (resume ? 'publish' : 'dev6-publication-resume'));
+    assert.equal(active.name, 'publish');
+    assert.notEqual(inactive.name, 'publish');
+    inactive.conclusion = 'skipped';
+    assert.equal(inventory.filter(j => j.name === 'publish').length, 1);
+    for (const status of ['queued', 'in_progress']) {
+      active.status = status;
+      assert.equal(scopedPublisherFinished(inventory), false, `${resume ? 'recovery' : 'ordinary'} publisher must keep waiting`);
+    }
+    active.status = 'completed';
+    for (const conclusion of ['success', 'failure', 'skipped', 'cancelled']) {
+      active.conclusion = conclusion;
+      assert.equal(scopedPublisherFinished(inventory), true, 'Terminal selected publisher without a receipt must close the wait');
+    }
+  }
+});
+
+test('large multi-page release inventory survives the real subprocess boundary without truncation', () => {
+  const pages = [Array.from({length: 50}, (_, i) => ({id: i + 1000, tag_name: `v0.0.${i}`,
+    body: 'Synthetic release notes'.repeat(2200)})), [{...release, draft: true}]];
+  const input = JSON.stringify(pages);
+  assert(Buffer.byteLength(input) > 1024 * 1024);
+  const args = ['-e', 'process.stdout.write(require("node:fs").readFileSync(0))'];
+  assert.throws(() => execFileSync(process.execPath, args, {input, encoding: 'utf8'}), error => error.code === 'ENOBUFS');
+  const result = publicationCommand(process.execPath, args, {input});
+  assert.equal(result, input);
+  const decoded = JSON.parse(result);
+  assert.equal(selectRelease(decoded, version).id, release.id);
+  assert.throws(() => selectRelease([...decoded, [{...release, draft: true}]], version), /exactly one release/);
+});
+
+test('publication command output remains bounded above the valid large-list case', () => {
+  assert.throws(() => publicationCommand(process.execPath,
+    ['-e', `process.stdout.write('x'.repeat(${PUBLICATION_MAX_BUFFER + 1}))`]), error => error.code === 'ENOBUFS');
+});
 
 test('exact scoped packages, draft and installed alias produce a complete barrier', () => {
   validateSource(source); validateScoped(scoped, m); assertSourceRun(sourceRun, source);
@@ -76,9 +127,9 @@ test('safe failed-job rerun needs fresh receipts while immutable package identit
 
 test('workflow contract keeps trust identities, unprivileged waiting and acyclic publication locks', () => {
   const root = new URL('../../', import.meta.url);
-  const child = readFileSync(new URL('.github/workflows/npm-alias.yml', root), 'utf8');
-  const parent = readFileSync(new URL('.github/workflows/release.yml', root), 'utf8');
-  const helper = readFileSync(new URL('npm/scripts/release-publication.mjs', root), 'utf8');
+  const child = readFileSync(new URL('.github/workflows/npm-alias.yml', root), 'utf8').replace(/\r\n/g, '\n');
+  const parent = readFileSync(new URL('.github/workflows/release.yml', root), 'utf8').replace(/\r\n/g, '\n');
+  const helper = readFileSync(new URL('npm/scripts/release-publication.mjs', root), 'utf8').replace(/\r\n/g, '\n');
   assert.match(child, /types: \[in_progress\]/);
   assert.doesNotMatch(child.slice(0, child.indexOf('jobs:')), /concurrency:/);
   const waiting = child.split('  await-scoped:')[1].split('  publish-integrated:')[0];
@@ -145,7 +196,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 27, 'preserve 25 existing uploads and both new publication receipts');
+  assert.equal(uploads, 29, 'preserve existing uploads, both handshake receipts and both strict recovery evidence uploads');
 });
 
 test('draft release is resolved from every list page with exactly one matching tag', () => {
