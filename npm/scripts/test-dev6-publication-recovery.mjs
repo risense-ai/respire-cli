@@ -2,12 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
-import {DEV6, TARGETS, validateRecoveryInputs, validateRecoverySource, validateOriginalValidation, validateOriginalArtifact} from './dev6-recovery-policy.mjs';
+import {DEV6, TARGETS, validateRecoveryInputs, validateRecoverySource, validateRecoveryAuthority, validateOriginalValidation, validateOriginalArtifact} from './dev6-recovery-policy.mjs';
 import {validateSource, assertSourceRun, validateScoped, assertDraft} from './release-publication.mjs';
 import {validateRecoveryBuilds, verifyRecoveryPackages, verifyRecoveryAlias} from './dev6-publication-recovery.mjs';
 const copy = structuredClone;
 const m = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url))); m.cliVersion = DEV6.version;
-const env = {GITHUB_REPOSITORY: DEV6.repository, GITHUB_EVENT_NAME: 'workflow_dispatch', RECOVERY_REF: DEV6.sha,
+const env = {GITHUB_REPOSITORY: DEV6.repository, GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_REF: 'refs/heads/main', RECOVERY_REF: DEV6.sha,
   RECOVERY_VERSION: DEV6.version, RECOVERY_PUBLISH: 'true', RECOVERY_FULL: 'true', RECOVERY_REUSE: 'false',
   RECOVERY_REPAIR12: 'false', RECOVERY_REPAIR14: 'false'};
 const source = {repository: DEV6.repository, workflow: DEV6.workflow, run_id: '999', run_attempt: '2',
@@ -45,8 +45,37 @@ function registry(mutate = () => {}, actual = bytes) {
 }
 test('recovery records actual tooling separately and preserves immutable product identity', () => {
   validateRecoveryInputs(env);validateRecoverySource(source);validateSource(source);validateScoped(scoped,m);
-  assertSourceRun({id:999,run_attempt:2,path:DEV6.workflow,event:'workflow_dispatch',head_repository:{full_name:DEV6.repository},head_sha:source.tooling_sha,status:'in_progress'},source);
+  assertSourceRun({id:999,run_attempt:2,path:DEV6.workflow,event:'workflow_dispatch',head_branch:'main',head_repository:{full_name:DEV6.repository},head_sha:source.tooling_sha,status:'in_progress'},source);
   assert.notEqual(source.tooling_sha,source.sha);
+});
+
+test('recovery tooling must independently belong to main before entering OIDC', () => {
+  const main = 'c'.repeat(40);
+  const active = {head_branch:'main',event:'workflow_dispatch',head_sha:source.tooling_sha};
+  const comparison = {status:'behind',base_commit:{sha:main},merge_base_commit:{sha:source.tooling_sha}};
+  validateRecoveryAuthority(source,active,main,comparison);
+  validateRecoveryAuthority(source,active,source.tooling_sha,{...comparison,status:'identical',base_commit:{sha:source.tooling_sha}});
+  for (const change of [{head_branch:'fix/prompt-untrusted'}, {head_branch:null}, {head_sha:'d'.repeat(40)}, {event:'push'}]) {
+    assert.throws(()=>validateRecoveryAuthority(source,{...active,...change},main,comparison));
+  }
+  for (const change of [{status:'ahead'}, {status:'diverged'}, {base_commit:{sha:'d'.repeat(40)}}, {merge_base_commit:{sha:main}}]) {
+    assert.throws(()=>validateRecoveryAuthority(source,active,main,{...comparison,...change}));
+  }
+  assert.throws(()=>validateRecoveryInputs({...env,GITHUB_REF:'refs/heads/fix/prompt-untrusted'}));
+  const helper=readFileSync(new URL('./release-publication.mjs',import.meta.url),'utf8');
+  const waiting=helper.split('async function awaitScoped()')[1].split('async function publishAlias()')[0];
+  assert(waiting.indexOf('assertRecoveryAuthority(scoped.source, run)') < waiting.indexOf("output({eligible: 'true'"));
+  const activeCheck=helper.split('function assertActive(source)')[1].split('\n}')[0];
+  assert.match(activeCheck,/assertRecoveryAuthority\(source, run\)/);
+  const root=new URL('../../',import.meta.url);
+  const aliasWorkflow=readFileSync(new URL('.github/workflows/npm-alias.yml',root),'utf8').replace(/\r\n/g,'\n');
+  const readOnlyJob=aliasWorkflow.split('  await-scoped:')[1].split('  publish-integrated:')[0];
+  assert.match(readOnlyJob,/ref: main/);
+  assert.doesNotMatch(readOnlyJob,/id-token:/);
+  const releaseWorkflow=readFileSync(new URL('.github/workflows/release.yml',root),'utf8');
+  assert.match(releaseWorkflow.split('  dev6-publication-resume:')[1],/github.ref == 'refs\/heads\/main'/);
+  const recovery=readFileSync(new URL('./dev6-publication-recovery.mjs',import.meta.url),'utf8');
+  assert.match(recovery,/r.head_branch === 'main'/);
 });
 test('wrong source/run/version/channel/tooling/input flags cannot select recovery', () => {
   for (const mutation of [{sha:'c'.repeat(40)},{version:'1.0.15-dev.7'},{channel:'latest'},{release_id:1},{run_id:DEV6.run},{tooling_sha:DEV6.sha},{recovery:{...source.recovery,validation_run:1}},{recovery:{...source.recovery,validation_attempt:2}}]) assert.throws(()=>validateSource({...source,...mutation}));

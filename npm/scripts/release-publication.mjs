@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './registry-publication.mjs';
-import {validateRecoverySource} from './dev6-recovery-policy.mjs';
+import {validateRecoverySource, validateRecoveryAuthority} from './dev6-recovery-policy.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
 const ALIAS_WORKFLOW = '.github/workflows/npm-alias.yml';
@@ -47,9 +47,15 @@ export function assertSourceRun(run, source) {
   if (String(run.id) !== String(source.run_id) || Number(run.run_attempt) !== Number(source.run_attempt) ||
       run.path !== RELEASE_WORKFLOW || run.head_repository?.full_name !== source.repository ||
       !['push', 'workflow_dispatch'].includes(run.event) || run.status !== 'in_progress' ||
-      (source.recovery && (run.head_sha !== source.tooling_sha || run.event !== 'workflow_dispatch'))) {
+      (source.recovery && (run.head_sha !== source.tooling_sha || run.event !== 'workflow_dispatch' || run.head_branch !== 'main'))) {
     throw new Error('Source Release attempt is stale, inactive, or from another workflow/repository');
   }
+}
+export function assertRecoveryAuthority(source, run) {
+  if (!source.recovery) return;
+  const mainSha = api(`repos/${source.repository}/git/ref/heads/main`).object.sha;
+  const comparison = api(`repos/${source.repository}/compare/${mainSha}...${source.tooling_sha}`);
+  validateRecoveryAuthority(source, run, mainSha, comparison);
 }
 export function validateScoped(receipt, expectedManifest) {
   if (receipt?.schema !== 1 || receipt.kind !== 'scoped-ready') throw new Error('Invalid scoped-ready receipt');
@@ -110,6 +116,7 @@ function assertTag(source) {
 function assertActive(source) {
   const run = api(`repos/${source.repository}/actions/runs/${source.run_id}`);
   assertSourceRun(run, source);
+  assertRecoveryAuthority(source, run);
   return run;
 }
 export function validateArtifact(entries, runId) {
@@ -180,6 +187,8 @@ async function awaitScoped() {
       validateScoped(scoped, manifest());
       if (String(scoped.source.run_id) !== runId || Number(scoped.source.run_attempt) !== Number(attempt)) throw new Error('Receipt does not belong to source event');
       assertSourceRun(run, scoped.source);
+      // This runs in the read-only default-main checkout before selecting OIDC job code.
+      assertRecoveryAuthority(scoped.source, run);
       write('scoped-ready.json', scoped);
       output({eligible: 'true', sha: scoped.source.tooling_sha || scoped.source.sha,
         product_sha: scoped.source.sha, version: scoped.source.version});

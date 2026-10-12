@@ -35,6 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          # Validate recovery tooling using trusted main before the OIDC checkout.
+          ref: main
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:

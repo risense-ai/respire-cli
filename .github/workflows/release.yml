@@ -704,7 +704,7 @@ jobs:
 
   dev6-publication-resume:
     name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
-    if: github.event_name == 'workflow_dispatch' && inputs.resume_dev6_publication
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication
     runs-on: ubuntu-latest
     timeout-minutes: 90
     concurrency:

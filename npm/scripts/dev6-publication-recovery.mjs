@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {mkdirSync, readFileSync, readdirSync, statSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {DEV6, TARGETS, PACKAGES, validateRecoveryInputs, validateOriginalValidation, validateOriginalArtifact} from './dev6-recovery-policy.mjs';
-import {publicationCommand, packIdentity, validateScoped, assertDraft, assertSourceRun, assertTagCommit, selectRelease} from './release-publication.mjs';
+import {publicationCommand, packIdentity, validateScoped, assertDraft, assertSourceRun, assertRecoveryAuthority, assertTagCommit, selectRelease} from './release-publication.mjs';
 import {checkPackage, packPackage} from './registry-publication.mjs';
 
 const cmd = publicationCommand;
@@ -64,7 +64,7 @@ export async function recoveryReady() {
   const ci = api(`repos/${DEV6.repository}/actions/runs/${DEV6.ci}`);
   validateOriginalValidation(original, jobs, ci);
   const toolingRuns = api(`repos/${DEV6.repository}/actions/workflows/ci.yml/runs?head_sha=${tooling}&per_page=100`).workflow_runs;
-  const toolingCi = toolingRuns.filter(r => r.event === 'push' && r.head_sha === tooling).sort((a,b) => b.id-a.id)[0];
+  const toolingCi = toolingRuns.filter(r => r.event === 'push' && r.head_branch === 'main' && r.head_sha === tooling).sort((a,b) => b.id-a.id)[0];
   if (!toolingCi || toolingCi.status !== 'completed' || toolingCi.conclusion !== 'success') throw new Error('Exact tooling main CI must succeed before recovery');
   const m = read('npm/artifact-manifest.json');
   m.cliVersion = DEV6.version; // Versioned manifest describes existing product bytes, not tooling HEAD.
@@ -92,7 +92,9 @@ export async function recoveryReady() {
   const receipt = validateScoped({schema: 1, kind: 'scoped-ready', source, packages, assets,
     binaries: builds.map(b => ({package: m.targets.find(t => t.triple === b.target).pkg, target: b.target,
       file: b.binary_file, sha256: b.binary_sha256}))}, m);
-  assertSourceRun(api(`repos/${DEV6.repository}/actions/runs/${source.run_id}`), source);
+  const activeRun = api(`repos/${DEV6.repository}/actions/runs/${source.run_id}`);
+  assertSourceRun(activeRun, source);
+  assertRecoveryAuthority(source, activeRun);
   const draft = selectRelease(pages(`repos/${DEV6.repository}/releases?per_page=100`), DEV6.version);
   assertDraft(draft, receipt);
   for (const path of ['crates/core-sdk/core-sdk.lock.json', 'sdk/core-sdk.lock.json']) {
@@ -120,7 +122,9 @@ export async function recoveryReady() {
   if (!health.ok) throw new Error('Validated DEV server health unavailable');
   const server = await health.json();
   if (server.ok !== true || server.service !== 'respire' || server.source_revision !== '63c3da9e64a4ce182bfd802518030b102dd362a3') throw new Error('Validated DEV server changed');
-  assertSourceRun(api(`repos/${DEV6.repository}/actions/runs/${source.run_id}`), source);
+  const finalRun = api(`repos/${DEV6.repository}/actions/runs/${source.run_id}`);
+  assertSourceRun(finalRun, source);
+  assertRecoveryAuthority(source, finalRun);
   assertDraft(api(`repos/${DEV6.repository}/releases/${DEV6.release}`), receipt);
   write('recovery-validation.json', {source, original_run: original.id, original_attempt: original.run_attempt,
     product_ci: ci.id, tooling_ci: toolingCi.id, artifacts: evidence, assets, packages,

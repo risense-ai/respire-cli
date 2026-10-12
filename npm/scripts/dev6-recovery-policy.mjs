@@ -18,11 +18,20 @@ export function validateRecoverySource(source) {
 }
 export function validateRecoveryInputs(env) {
   if (env.GITHUB_REPOSITORY !== DEV6.repository || env.GITHUB_EVENT_NAME !== 'workflow_dispatch' ||
+      env.GITHUB_REF !== 'refs/heads/main' ||
       env.RECOVERY_REF !== DEV6.sha || env.RECOVERY_VERSION !== DEV6.version ||
       env.RECOVERY_PUBLISH !== 'true' || env.RECOVERY_FULL !== 'true' ||
       [env.RECOVERY_REUSE, env.RECOVERY_REPAIR12, env.RECOVERY_REPAIR14].some(v => v !== 'false')) {
     throw new Error('Recovery is restricted to the approved DEV6 product and complete original validation');
   }
+}
+export function validateRecoveryAuthority(source, run, mainSha, comparison) {
+  validateRecoverySource(source);
+  // Compare main...tooling: an approved tooling commit is behind or identical to main.
+  if (run.head_branch !== 'main' || run.event !== 'workflow_dispatch' || run.head_sha !== source.tooling_sha ||
+      !shaPattern.test(mainSha || '') || comparison.base_commit?.sha !== mainSha ||
+      comparison.merge_base_commit?.sha !== source.tooling_sha ||
+      !['behind', 'identical'].includes(comparison.status)) throw new Error('Recovery tooling is not from trusted main ancestry');
 }
 export function validateOriginalValidation(run, jobs, ci) {
   if (run.id !== DEV6.run || run.run_attempt !== DEV6.attempt || run.head_sha !== DEV6.sha ||
