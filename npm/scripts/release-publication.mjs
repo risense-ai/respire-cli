@@ -19,7 +19,10 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const read = file => JSON.parse(readFileSync(file, 'utf8'));
 const write = (file, value) => writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
 const manifest = () => read('npm/artifact-manifest.json');
-const command = (name, args, options = {}) => execFileSync(name, args, {encoding: 'utf8', timeout: 30000, ...options});
+export const PUBLICATION_MAX_BUFFER = 16 * 1024 * 1024;
+export const publicationCommand = (name, args, options = {}) => execFileSync(name, args,
+  {encoding: 'utf8', timeout: 30000, maxBuffer: PUBLICATION_MAX_BUFFER, ...options});
+const command = publicationCommand;
 const api = endpoint => JSON.parse(command('gh', ['api', endpoint]));
 const pages = endpoint => JSON.parse(command('gh', ['api', '--paginate', '--slurp', endpoint]));
 const output = values => appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''));
