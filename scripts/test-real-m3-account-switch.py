@@ -1,6 +1,6 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, hmac, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
-from native_fixture_process import WorkerInspector, captured_run
+from native_fixture_process import FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 parser=argparse.ArgumentParser()
@@ -69,8 +69,8 @@ for binary in BINARIES:
     for key, value in list(seed_env.items()):
         if key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_')):
             seed_env['ONEMEMORY_' + key[5:]] = value
-    def run(*args, allow_failure=False):
-        result = captured_run([str(binary),'--json',*args],env=env,timeout=120)
+    def run(*args, allow_failure=False, timeout=120, cancel=None):
+        result = captured_run([str(binary),'--json',*args],env=env,timeout=timeout,cancel=cancel)
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
         envelope=json.loads(result.stdout)
         envelope['_fixture_timing']=result.fixture_timing
@@ -284,15 +284,24 @@ for binary in BINARIES:
             observer_errors=[]
             timings = []
             body = 'resident stress query ' + 'background indexing and foreground retrieval '.join(['sample'] * 110)
-            def timed(command):
+            def timed(command, timeout=120, cancel=None):
                 started = time.monotonic()
                 try:
-                    envelope = run(*command)
+                    envelope = run(*command, timeout=timeout,cancel=cancel)
+                except FixtureCancelled:
+                    raise
                 except Exception as error:
                     raise RuntimeError('stress '+command[0]+' failed after '+str(round(time.monotonic()-started,3))+'s: '+str(error)) from error
                 assert envelope['status'] in ['ok', 'warn'], command[0]
                 return command[0], time.monotonic() - started, envelope
+            def probe_recall(timeout, cancel):
+                command, elapsed, envelope = timed(['recall','Real account return fixture','--titles','--no-related'], timeout=timeout,cancel=cancel)
+                assert envelope.get('items'), 'foreground overlap probe lost the indexed seed'
+                return {'command':command,'seconds':elapsed,**envelope['_fixture_timing']}
+            overlap = ForegroundOverlapProbe(probe_recall)
+            fixed_workload_completed = None
             def sample_health(check_boundary=True):
+                overlap.check()
                 if check_boundary and observer_errors:
                     raise RuntimeError('continuous health observer failed: '+str(observer_errors))
                 sample_started=time.monotonic()
@@ -301,17 +310,20 @@ for binary in BINARIES:
                     current = json.load(response)
                 health_completed=time.monotonic()
                 assert current['pid'] == owned.pid, 'stress changed runtime ownership'
+                inference = current.get('inference', {})
+                overlap.observe(inference)
                 rss,private=total_memory(refresh_members=check_boundary)
                 memory_completed=time.monotonic()
                 if check_boundary and args.expect_supervised_worker: checked_worker(current)
-                inference = current.get('inference', {})
                 samples.append({'rss':rss,'private':private,
                     'started_unix':sample_unix,'started_monotonic':sample_started,
+                    'health_completed_monotonic':health_completed,
                     'health_seconds':health_completed-sample_started,
                     'memory_seconds':memory_completed-health_completed,
                     'boundary_seconds':time.monotonic()-memory_completed,
                     'membership_age_seconds':time.monotonic()-resource_members_checked,
                     'boundary_checked':check_boundary,
+                    'retrieval_index':current.get('retrieval_index',{}),'inference':inference,
                     'foreground':inference.get('foreground',{}),'background':inference.get('background',{})})
             @contextlib.contextmanager
             def observed_pool():
@@ -327,14 +339,31 @@ for binary in BINARIES:
                     except Exception as error: observer_errors.append(str(error))
                 observer=threading.Thread(target=observe,name='resident-health-observer',daemon=True)
                 observer.start()
+                # Core lane telemetry is a 250 ms heartbeat, not a fresh native
+                # sample on each HTTP poll. Model checksums/preparation can also
+                # outlast the fixed CLI burst. Keep bounded real foreground work
+                # available throughout preparation; never substitute queued work
+                # or separate foreground/background observations for overlap.
+                overlap.start()
                 try:
                     with concurrent.futures.ThreadPoolExecutor(max_workers=18) as pool:
                         yield pool
                 finally:
-                    stopped.set()
-                    observer.join(timeout=3)
-                    assert not observer.is_alive(),'continuous health observer did not stop'
-                    assert not observer_errors,'continuous health observer failed: '+str(observer_errors)
+                    try:
+                        overlap.close(cancel_pending=sys.exc_info()[0] is not None)
+                    finally:
+                        stopped.set()
+                        observer.join(timeout=3)
+                        # Persist evidence even when a deadline, client, or
+                        # boundary assertion fails before final metrics exist.
+                        (BASE/'resident-stress-metrics.json').write_text(json.dumps({
+                            'passed':False,'requests':len(timings),'timings':timings,'samples':samples,
+                            'overlap_probe':{'deadline_seconds':120,'max_in_flight':2,'timings':overlap.calls,
+                                'errors':[str(error) for error in overlap.errors]},
+                            'fixed_workload_completed_monotonic':fixed_workload_completed,
+                            'observer_errors':observer_errors},indent=2),encoding='utf-8')
+                        assert not observer.is_alive(),'continuous health observer did not stop'
+                        assert not observer_errors,'continuous health observer failed: '+str(observer_errors)
             with observed_pool() as pool:
                 print('resident phase: concurrent writes',flush=True)
                 batch_deadline=time.monotonic()+120*2+10
@@ -390,7 +419,18 @@ for binary in BINARIES:
                     if command == 'recall':
                         assert envelope.get('items'), 'pending or indexed stress data was not recalled'
                     timings.append({'command':command,'seconds':elapsed,**envelope['_fixture_timing']})
+                fixed_workload_completed = time.monotonic()
+                while not overlap.observed.is_set():
+                    sample_health()
+                    time.sleep(.02)
+            overlap_details = {'deadline_seconds':120,'max_in_flight':2,'timings':overlap.calls,
+                'started_monotonic':overlap.started,
+                'fixed_workload_completed_monotonic':fixed_workload_completed,
+                'first_background_active_monotonic':min((sample['health_completed_monotonic'] for sample in samples if sample['background'].get('active')),default=None),
+                'both_active_during_fixed_workload':any(sample['health_completed_monotonic'] <= fixed_workload_completed
+                    and sample['foreground'].get('active') and sample['background'].get('active') for sample in samples)}
             metrics = {'passed':False,'requests':len(timings),'timings':timings,
+                'overlap_probe':overlap_details,
                 'rss_before':baseline_rss,'rss_peak':max(sample['rss'] for sample in samples),
                 'resource_scope':'owned host and all descendants',
                 'private_before':baseline_private,
@@ -413,6 +453,7 @@ for binary in BINARIES:
             light = [entry['seconds'] for entry in timings if entry['command'] == 'show']
             assert max(light) < 5, 'lightweight reads were blocked by inference or background work'
             stress = {'passed':True,'requests':len(timings),'background_source_checks':True,
+                'overlap_probe':overlap_details,
                 'show_max_seconds':max(light),'timings':timings,'rss_before':baseline_rss,
                 'resource_scope':'owned host and all descendants',
                 'rss_peak':max(sample['rss'] for sample in samples),

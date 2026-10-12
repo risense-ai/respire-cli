@@ -9,11 +9,16 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
 
-def captured_run(command, *, env, timeout):
+class FixtureCancelled(Exception):
+    """An owned fixture command was explicitly stopped and reaped."""
+
+
+def captured_run(command, *, env, timeout, cancel=None):
     # Regular files avoid communicate() waiting forever for inherited pipe EOF
     # after Windows subprocess.run() kills a timed-out direct child.
     started_unix = time.time()
@@ -21,7 +26,20 @@ def captured_run(command, *, env, timeout):
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(command, env=env, stdout=stdout, stderr=stderr)
         try:
-            process.wait(timeout=timeout)
+            if cancel is None:
+                process.wait(timeout=timeout)
+            else:
+                deadline = started_monotonic + timeout
+                while process.poll() is None:
+                    if cancel.is_set():
+                        raise FixtureCancelled('owned foreground probe stopped')
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        process.wait(timeout=min(.05, remaining))
+                    except subprocess.TimeoutExpired:
+                        pass
             wait_completed_monotonic = time.monotonic()
         except BaseException:
             if process.poll() is None:
@@ -34,6 +52,71 @@ def captured_run(command, *, env, timeout):
         result.fixture_timing = {'client_pid': process.pid, 'started_unix': started_unix,
             'started_monotonic': started_monotonic, 'wait_completed_monotonic': wait_completed_monotonic}
         return result
+
+
+class ForegroundOverlapProbe:
+    """Keep at most two real foreground calls in flight during a bounded window.
+
+    The caller must supply an operation honoring its remaining timeout and the
+    cancellation event. Only an
+    actual same-snapshot pair of active inference lanes completes the challenge;
+    queued work or activity in two different snapshots is insufficient.
+    """
+    def __init__(self, invoke, timeout=120):
+        self.invoke = invoke
+        self.started = time.monotonic()
+        self.deadline = self.started + timeout
+        self.observed = threading.Event()
+        self.stopped = threading.Event()
+        self.cancelled = threading.Event()
+        self.calls = []
+        self.errors = []
+        self.threads = [threading.Thread(target=self._run, name=f'foreground-overlap-{i}', daemon=True)
+                        for i in range(2)]
+
+    def start(self):
+        for thread in self.threads:
+            thread.start()
+
+    def _run(self):
+        try:
+            while not self.stopped.is_set() and not self.observed.is_set():
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    return
+                self.calls.append(self.invoke(remaining, self.cancelled))
+        except FixtureCancelled as error:
+            if not self.cancelled.is_set():
+                self.errors.append(error)
+        except BaseException as error:
+            self.errors.append(error)
+
+    def observe(self, inference):
+        # A late first overlapping heartbeat must not turn an expired challenge
+        # into success (HTTP or boundary inspection can cross the deadline).
+        self.check()
+        if inference.get('foreground', {}).get('active') and inference.get('background', {}).get('active'):
+            self.observed.set()
+
+    def check(self):
+        if self.errors:
+            raise RuntimeError('foreground overlap probe failed: ' + str(self.errors[0])) from self.errors[0]
+        if not self.observed.is_set() and time.monotonic() >= self.deadline:
+            raise TimeoutError('concurrent foreground/background activity was not observed before the overlap deadline')
+
+    def close(self, cancel_pending=False):
+        self.stopped.set()
+        if cancel_pending:
+            self.cancelled.set()
+        # In-flight captured_run calls honor cancellation and the shared deadline,
+        # reaping their child in either case. On success, drain submitted calls
+        # so their errors and completion are checked before later index checks.
+        for thread in self.threads:
+            thread.join(timeout=max(0, self.deadline - time.monotonic()) + 6)
+        if any(thread.is_alive() for thread in self.threads):
+            raise RuntimeError('foreground overlap probe did not stop')
+        if self.errors:
+            raise RuntimeError('foreground overlap probe failed: ' + str(self.errors[0])) from self.errors[0]
 
 
 def inspect_worker(request, phase):
