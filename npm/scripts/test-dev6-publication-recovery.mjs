@@ -64,7 +64,17 @@ test('recovery tooling must independently belong to main before entering OIDC', 
   assert.throws(()=>validateRecoveryInputs({...env,GITHUB_REF:'refs/heads/fix/prompt-untrusted'}));
   const helper=readFileSync(new URL('./release-publication.mjs',import.meta.url),'utf8');
   const waiting=helper.split('async function awaitScoped()')[1].split('async function publishAlias()')[0];
-  assert(waiting.indexOf('assertRecoveryAuthority(scoped.source, run)') < waiting.indexOf("output({eligible: 'true'"));
+  const authorityCall='assertRecoveryAuthority(scoped.source, run)';
+  const outputCall="output({eligible: 'true'";
+  const assertAuthorityBeforeOutput = code => {
+    const authorityIndex=code.indexOf(authorityCall), outputIndex=code.indexOf(outputCall);
+    assert(authorityIndex >= 0, 'Authority check must exist');
+    assert(outputIndex >= 0, 'Eligible output must exist');
+    assert(authorityIndex < outputIndex, 'Authority check must precede eligible output');
+  };
+  assertAuthorityBeforeOutput(waiting);
+  assert.throws(()=>assertAuthorityBeforeOutput(waiting.replace(authorityCall,'')), /Authority check must exist/);
+  assert.throws(()=>assertAuthorityBeforeOutput(waiting.replace(outputCall,'')), /Eligible output must exist/);
   const activeCheck=helper.split('function assertActive(source)')[1].split('\n}')[0];
   assert.match(activeCheck,/assertRecoveryAuthority\(source, run\)/);
   const root=new URL('../../',import.meta.url);
