@@ -24,7 +24,7 @@ Do not fall back to sandboxed CLI.
 
 ## How to remember
 
-Prefer update/merge/attach over a new root. Body uses `【前因】` `【行为】` `【后果】`. Pass `title`. Important reusable facts use `importance=important`. Diary trivia uses `importance=trivial`. After `memory_recall`, mark useful hits with `memory_query_log_mark` (`good` or `bad`).
+Prefer update/merge/attach over a new root. Body uses `【前因】` `【行为】` `【后果】`. Pass `title`, extracted from the body facts (subject + action + key entity or result, 12–24 chars) — never a bare topic label. Important reusable facts use `importance=important`. Diary trivia uses `importance=trivial`. After `memory_recall`, mark useful hits with `memory_query_log_mark` (`good` or `bad`).
 
 ## Login
 

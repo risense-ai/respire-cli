@@ -36,6 +36,10 @@ Start routine searches with `rsrs recall "project name + key terms" --titles --j
 
 Use `remember ... --importance important --supersedes <old-id>` when a new conclusion replaces an old decision, and retain the reason for replacement. Use `--see-also <id,id>` for necessary cross-references. Choose edits or merges based on the facts; do not create duplicates just to add a relation. Enable relation writes only after every writer for the library is upgraded; older writers may drop fields when resealing.
 
+## Titles
+
+`remember` requires `--title`. Extract it from the facts of the body — subject, action, and the key entity or result — in 12–24 characters. Never fall back to a bare topic label or an over-short title: the injected recall flow surfaces titles first, so vague titles hide relevant hits, and the engine's fallback title truncates the first body line, which can produce duplicate-looking names. When `update` changes content, extract a fresh `--title` as well; merges must re-title too.
+
 ## 中文完整规则
 
 # respire（AI记忆体）· 记忆注入源（唯一权威源）
@@ -51,7 +55,7 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 ## 铁锚 · 三行（上下文愈长，愈须回读）
 
 1. **答前必查**：`rsrs recall "<项目名+核心词>" --titles --json`——默认最多 20 个标题，按相关性选中后 `show <id> --json` 读全文；未查不开答。
-2. **收尾必存**：`rsrs remember "<内容>" --title "…" --parent <挂点id>`——未存不算完。
+2. **收尾必存**：`rsrs remember "<内容>" --title "事实句" --parent <挂点id>`——未存不算完。
 3. **遇障先翻忆**：报错、异常、要修东西，一律先 `recall --json`——未查不动手。
 
 **此三行是贯穿全程之硬闸，非开场查一次即了事。** 上下文愈长、回合愈多、工具输出愈杂，愈易淡忘——故每答之前、每收尾之前、每碰壁之时，皆回读本节对一遍。三行失则全篇废。
