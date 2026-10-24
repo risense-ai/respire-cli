@@ -142,7 +142,21 @@ fn main() -> Result<(), Box<dyn Error>> {
             ));
             for destination in [profile.to_path_buf(), profile.join("deps")] {
                 fs::create_dir_all(&destination)?;
-                fs::copy(directory.join(relative), destination.join(name))?;
+                let installed = destination.join(name);
+                if fs::read(&installed).is_ok_and(|bytes| {
+                    hex::encode(Sha256::digest(bytes))
+                        == file["sha256"].as_str().unwrap_or_default()
+                }) {
+                    continue;
+                }
+                // Never truncate a library that a concurrently running test or
+                // example has mapped. Install a new inode atomically instead.
+                let temporary = destination.join(format!(".{name}.{}.tmp", std::process::id()));
+                fs::copy(directory.join(relative), &temporary)?;
+                if let Err(error) = fs::rename(&temporary, &installed) {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error.into());
+                }
             }
         }
     }
