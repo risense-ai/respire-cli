@@ -6647,7 +6647,6 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     use respire::model_progress;
                     let _operation = model_progress::Operation::try_begin_background_index()?
                         .ok_or_else(|| anyhow::anyhow!("another model operation is running"))?;
-                    model_progress::apply_index_threads();
                     let store = build_local()?;
                     let keys = build_session()?;
                     let embedder = BgeEmbedder::load_model(model)?;
@@ -8526,7 +8525,6 @@ fn run_local_inner(args: Cli) -> Result<()> {
         Command::Reembed => {
             let _operation = respire::model_progress::Operation::try_begin_background_index()?
                 .ok_or_else(|| anyhow::anyhow!("another model operation is running"))?;
-            respire::model_progress::apply_index_threads();
             let session = build_session()?;
             let store = build_local()?;
             let model = store.retrieval_model()?;

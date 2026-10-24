@@ -26,6 +26,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if manifest["association_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks association contract 1; rebuild and pin a matching SDK".into());
     }
+    if manifest["inference_thread_contract"].as_u64() != Some(1) {
+        return Err("Core SDK lacks inference thread contract 1; pin an SDK with isolated foreground/background configuration".into());
+    }
     println!("cargo:rustc-check-cfg=cfg(model_input_stream_contract)");
     if env::var_os("CARGO_FEATURE_MODEL_INPUT_STREAM_EXPERIMENT").is_some() {
         if manifest["model_input_stream_contract"].as_u64() != Some(1) {

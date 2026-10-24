@@ -34,17 +34,6 @@ struct Progress {
     cancelled: bool,
 }
 
-/// Batch indexing defaults to cores-1 threads (min 1). Interactive inference
-/// keeps the pinned single thread; an explicit RSRS_INTRA_THREADS always wins.
-pub fn apply_index_threads() {
-    if std::env::var_os("RSRS_INTRA_THREADS").is_some() {
-        return;
-    }
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    let threads = cores.saturating_sub(1).max(1);
-    std::env::set_var("RSRS_INTRA_THREADS", threads.to_string());
-}
-
 pub struct Operation;
 
 #[derive(Debug)]
@@ -203,4 +192,26 @@ pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
         "idle": p.updated.elapsed().as_secs(),
         "cancelled": p.cancelled,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn long_operation(idle_timeout: bool, idle: u64) -> Progress {
+        Progress { id: "fixture".to_owned(), phase: "index".to_owned(), item: "m3".to_owned(),
+            done: 100, total: Some(4000), started: Instant::now() - Duration::from_secs(3600),
+            updated: Instant::now() - Duration::from_secs(idle), idle_timeout, cancelled: false }
+    }
+
+    #[test]
+    fn long_rebuild_survives_progress_but_still_honors_idle_timeout_and_cancellation() {
+        assert!(check_progress(&long_operation(true, 1)).is_ok());
+        assert!(check_progress(&long_operation(false, 1)).is_err());
+        assert!(check_progress(&long_operation(true, 1801)).is_err());
+        let mut cancelled = long_operation(true, 1);
+        cancelled.cancelled = true;
+        assert!(check_progress(&cancelled).is_err());
+    }
 }

@@ -410,7 +410,6 @@ fn index_loop_inner() -> Result<()> {
             let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
                 return Ok(false);
             };
-            respire::model_progress::apply_index_threads();
             index_yield_to_foreground(generation)?;
             let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
             if let Some(mirror) = mirror {

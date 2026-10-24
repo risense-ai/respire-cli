@@ -14,6 +14,7 @@ architecture=parser.add_mutually_exclusive_group()
 architecture.add_argument('--expect-in-process',action='store_true',help='Historical binaries without an inference worker')
 architecture.add_argument('--expect-supervised-worker',action='store_true',help='Verify one owned worker and its lifetime/SQLite boundary')
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
+parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then upgrade its running runtime')
 args=parser.parse_args()
 faulthandler.enable()
@@ -193,6 +194,12 @@ for binary in BINARIES:
             assert not (alternate/'inference.json').exists()
             # A real model change may rebuild derived indexes once; never source data.
             rows = wait_index_ready()
+            if args.expect_background_threads is not None:
+                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                    thread_health=json.load(response)
+                policy=thread_health.get('inference',{}).get('intra_threads')
+                assert policy=={'foreground':1,'background':args.expect_background_threads}, 'loaded worker thread policy differs: '+str(policy)
+                (BASE/('inference-threads-'+account+'.json')).write_text(json.dumps(policy),encoding='utf-8')
             if args.seed_binary and str(profile) not in visited:
                 current=snapshot(profile)
                 baseline=original[str(profile)]

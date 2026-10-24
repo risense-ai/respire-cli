@@ -154,3 +154,21 @@ completed files are published only after their SHA256 matches the pinned model.
 Progressing downloads do not expire merely because 30 minutes elapsed. The
 existing bounded network-read timeout still applies. Parallel connections do not
 guarantee faster transfers when the server or network limits total bandwidth.
+
+## Background inference thread policy
+
+The SDK must advertise `inference_thread_contract: 1`. Foreground sessions use
+one intra-op thread. Background indexing uses the host's available CPU count
+minus one, bounded to 1–16. `RSRS_INTRA_THREADS` explicitly selects the background
+count; numeric values are clamped to 1–16 and invalid values fail clearly. It
+does not change the foreground session. Set it before starting the runtime and
+restart that owned runtime when changing it; the supervised worker receives a
+startup snapshot. Core receives explicit configuration, never environment access.
+The policy participates in model reuse identity for both ONNX and owned ORT.
+
+For an isolated synthetic measurement using verified model files, run
+`cargo run --locked -p respire_core_sdk --example index-thread-probe -- /path/to/model`.
+Add `--legacy` to exercise borrowed ONNX instead of streamed owned ORT. The probe
+reports background prepare and concurrent foreground latency for background
+counts 1 and 4; it also checks cache-policy rejection and native pool creation.
+These fixture timings are measurements, not a production speedup guarantee.

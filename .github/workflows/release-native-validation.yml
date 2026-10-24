@@ -120,9 +120,9 @@ jobs:
             exe="$exe.exe"
           fi
           "$py" scripts/test-native-fixture-process.py --output-dir "$RUNNER_TEMP/native-fixture-bounds"
-          "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
+          RSRS_INTRA_THREADS=2 "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
-            --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-supervised-worker --resident-stress
+            --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-supervised-worker --resident-stress --expect-background-threads 2
       - uses: actions/upload-artifact@v4
         if: always()
         with:
