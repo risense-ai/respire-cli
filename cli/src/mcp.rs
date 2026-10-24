@@ -63,12 +63,13 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
     {
         return Ok(src);
     }
-    if !bin_needs_refresh(&src, &dest)? {
-        return Ok(dest);
-    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
+    }
+    stage_runtime_libraries(&src, &dest)?;
+    if !bin_needs_refresh(&src, &dest)? {
+        return Ok(dest);
     }
     std::fs::copy(&src, &dest)
         .map_err(|err| format!("cannot copy {} -> {}: {err}", src.display(), dest.display()))?;
@@ -79,6 +80,39 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
             .map_err(|err| format!("cannot set execute bit on {}: {err}", dest.display()))?;
     }
     Ok(dest)
+}
+
+fn stage_runtime_libraries(src: &Path, dest: &Path) -> Result<(), String> {
+    let source_dir = src.parent().ok_or("binary has no source directory")?;
+    let destination_dir = dest.parent().ok_or("binary has no destination directory")?;
+    for &(name, expected) in respire::core_sdk::RUNTIME_FILES {
+        let source = source_dir.join(name);
+        let bytes = std::fs::read(&source)
+            .map_err(|err| format!("cannot read SDK runtime {}: {err}", source.display()))?;
+        if format!("{:x}", Sha256::digest(&bytes)) != expected {
+            return Err(format!(
+                "SDK runtime checksum mismatch: {}",
+                source.display()
+            ));
+        }
+        let destination = destination_dir.join(name);
+        if std::fs::read(&destination)
+            .is_ok_and(|existing| format!("{:x}", Sha256::digest(&existing)) == expected)
+        {
+            continue;
+        }
+        let temporary = destination_dir.join(format!(".{name}.{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temporary, &bytes)
+            .map_err(|err| format!("cannot stage SDK runtime: {err}"))?;
+        if let Err(error) = std::fs::rename(&temporary, &destination) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!(
+                "cannot install SDK runtime {}: {error}",
+                destination.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn exe_matches_dest(exe: &str, dest: &Path) -> bool {
@@ -1144,6 +1178,32 @@ mod tests {
             return Err(format!("bin_dir {} != {}", got.display(), want.display()));
         }
         restore();
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_libraries_reject_corruption_and_repair_destination() -> Result<(), String> {
+        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
+        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("destination");
+        std::fs::create_dir_all(&source).map_err(|error| error.to_string())?;
+        std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let original = executable.parent().ok_or("missing fixture directory")?;
+        for &(file, _) in respire::core_sdk::RUNTIME_FILES {
+            std::fs::copy(original.join(file), source.join(file)).map_err(|error| error.to_string())?;
+        }
+        let src = source.join("rsrs");
+        let dest = destination.join("rsrs");
+        std::fs::write(source.join(name), b"corrupt").map_err(|error| error.to_string())?;
+        assert!(stage_runtime_libraries(&src, &dest).is_err());
+        std::fs::copy(original.join(name), source.join(name)).map_err(|error| error.to_string())?;
+        stage_runtime_libraries(&src, &dest)?;
+        std::fs::write(destination.join(name), b"stale").map_err(|error| error.to_string())?;
+        stage_runtime_libraries(&src, &dest)?;
+        let installed = std::fs::read(destination.join(name)).map_err(|error| error.to_string())?;
+        assert_eq!(format!("{:x}", Sha256::digest(&installed)), expected);
         Ok(())
     }
 

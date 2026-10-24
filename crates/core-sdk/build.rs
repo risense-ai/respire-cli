@@ -20,7 +20,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_path = directory.join("manifest.json");
     let manifest_bytes = fs::read(&manifest_path)?;
     let manifest: Value = serde_json::from_slice(&manifest_bytes)?;
-    if manifest.get("test_only").is_some() && env::var_os("CARGO_FEATURE_NATIVE_FAULT_TESTS").is_none() {
+    if manifest.get("test_only").is_some()
+        && env::var_os("CARGO_FEATURE_NATIVE_FAULT_TESTS").is_none()
+    {
         return Err("Test-only SDK requires the non-default native-fault-tests feature".into());
     }
     if manifest["association_contract"].as_u64() != Some(1) {
@@ -37,8 +39,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("cargo:rustc-cfg=model_input_stream_contract");
     }
     let target = env::var("TARGET")?;
-    let lock_path =
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");
+    let lock_path = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?).join("core-sdk.lock.json");
     let lock: Value = serde_json::from_slice(&fs::read(&lock_path)?)?;
     let locked_hash = lock["targets"][&target]["manifest_sha256"]
         .as_str()
@@ -125,23 +126,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         .and_then(|path| path.parent())
         .and_then(|path| path.parent())
         .ok_or("unexpected Cargo output directory")?;
+    let mut runtime_files = Vec::new();
     for file in files {
         let relative = file["path"].as_str().ok_or("missing SDK file path")?;
         if let Some(name) = relative.strip_prefix("runtime/") {
             if name.contains('/') {
                 return Err("runtime libraries must be flat".into());
             }
+            runtime_files.push((
+                name.to_owned(),
+                file["sha256"]
+                    .as_str()
+                    .ok_or("missing runtime checksum")?
+                    .to_owned(),
+            ));
             for destination in [profile.to_path_buf(), profile.join("deps")] {
                 fs::create_dir_all(&destination)?;
                 fs::copy(directory.join(relative), destination.join(name))?;
             }
         }
     }
+    fs::write(out.join("runtime_files.rs"), format!("&{runtime_files:?}"))?;
     println!(
         "cargo:rustc-link-search=native={}",
         directory.join("lib").display()
     );
-    println!("cargo:rustc-link-search=native={}", directory.join("runtime").display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        directory.join("runtime").display()
+    );
     if target.ends_with("-linux-gnu") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
     } else if target.contains("apple-darwin") {

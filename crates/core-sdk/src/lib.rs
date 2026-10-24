@@ -24,6 +24,9 @@ pub use resident::{ResidentLease, ResidentScope, resident_scope_active, Backgrou
 
 pub const ABI_VERSION: u32 = 0x0001_0002;
 
+/// Runtime libraries from the checksum-verified, pinned SDK manifest.
+pub const RUNTIME_FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
+
 #[derive(Serialize)]
 struct CoreRequest<'a> {
     schema_version: u32,
