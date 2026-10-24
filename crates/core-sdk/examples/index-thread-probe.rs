@@ -21,7 +21,7 @@ impl Drop for StopObserver {
 fn verified(path: &Path, expected: &str) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path).with_context(|| format!("read fixture {}", path.display()))?;
     anyhow::ensure!(
-        hex::encode(Sha256::digest(&bytes)) == expected,
+        format!("{:x}", Sha256::digest(&bytes)) == expected,
         "fixture checksum mismatch"
     );
     Ok(bytes)
