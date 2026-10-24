@@ -1,6 +1,6 @@
-import {createHash} from 'node:crypto';
-import {chmodSync, copyFileSync, mkdirSync, readFileSync, readdirSync, writeFileSync} from 'node:fs';
-import {dirname, join, resolve} from 'node:path';
+import {createHash, randomUUID} from 'node:crypto';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs';
+import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const [destination] = process.argv.slice(2);
 const configured = process.env.RSRS_CORE_SDK_DIR ?? process.env.ONEMEMORY_CORE_SDK_DIR ?? process.env.RESPIRE_CORE_SDK_DIR;
@@ -8,6 +8,19 @@ if (!destination || !configured) throw new Error('Set RSRS_CORE_SDK_DIR and pass
 const sdk = resolve(configured), output = resolve(destination);
 const manifest = JSON.parse(readFileSync(join(sdk,'manifest.json'),'utf8'));
 if (manifest.test_only) throw new Error('Test-only Core SDK cannot be staged for a CLI release');
+function stage(path, bytes) {
+  const digest = value => createHash('sha256').update(value).digest('hex');
+  if (existsSync(path) && digest(readFileSync(path)) === digest(bytes)) return;
+  mkdirSync(dirname(path), {recursive:true});
+  // Preserve mappings held by concurrent native processes; never truncate them.
+  const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}`);
+  try {
+    writeFileSync(temporary, bytes);
+    renameSync(temporary, path);
+  } finally {
+    rmSync(temporary, {force:true});
+  }
+}
 const files = [];
 for (const file of manifest.files) {
   let path;
@@ -19,7 +32,7 @@ for (const file of manifest.files) {
   const bytes = readFileSync(join(sdk,file.path));
   if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`SDK checksum mismatch: ${file.path}`);
   mkdirSync(dirname(join(output,path)),{recursive:true});
-  copyFileSync(join(sdk,file.path),join(output,path));
+  stage(join(output,path),bytes);
   files.push({path,sha256:file.sha256});
 }
 if (manifest.redistribution === 'permitted-under-included-license' && !files.some(file => file.path === 'core-notices/CORE-SDK-LICENSE.txt')) {
@@ -31,7 +44,7 @@ for (const entry of readdirSync(modelNotices, {withFileTypes:true})) {
   const bytes = readFileSync(join(modelNotices, entry.name));
   const path = `core-notices/models/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  writeFileSync(join(output,path), bytes);
+  stage(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 const dependencyNotices = join(dirname(fileURLToPath(import.meta.url)), '..', 'docs', 'dependency-notices');
@@ -40,7 +53,7 @@ for (const entry of readdirSync(dependencyNotices, {withFileTypes:true})) {
   const bytes = readFileSync(join(dependencyNotices, entry.name));
   const path = `core-notices/consumer/${entry.name}`;
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  writeFileSync(join(output,path), bytes);
+  stage(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
 if (manifest.target.includes('windows')) {
@@ -49,14 +62,13 @@ if (manifest.target.includes('windows')) {
   const bytes = readFileSync(source);
   const path = 'core-notices/consumer/WinML-2.4.89-license.txt';
   mkdirSync(dirname(join(output,path)), {recursive:true});
-  writeFileSync(join(output,path), bytes);
+  stage(join(output,path), bytes);
   files.push({path,sha256:createHash('sha256').update(bytes).digest('hex')});
 }
-// Copies retain private SDK modes. Container-owned redistribution notices must
-// remain readable by the host packaging step; leave SDK inputs/runtime modes alone.
+// Redistribution notices must remain readable by the host packaging step.
 for (const file of files) {
   if (file.path.startsWith('core-notices/')) chmodSync(join(output,file.path),0o644);
 }
-writeFileSync(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
+stage(join(output,'core-runtime.json'),JSON.stringify({schema_version:1,target:manifest.target,
   sdk_version:manifest.sdk_version,redistribution:manifest.redistribution,files},null,2)+'\n');
 console.log(`Staged ${files.length} runtime/notice files next to the CLI`);
