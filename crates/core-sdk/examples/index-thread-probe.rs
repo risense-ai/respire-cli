@@ -47,9 +47,13 @@ fn main() -> Result<()> {
             core.capabilities()?["inference_thread_contract"] == 1,
             "SDK lacks thread isolation contract"
         );
-        let config = json!({"model":"m3","asset_id":hash,"engine":"cpu","execution_timeout_secs":120,
-            "session_options_id":format!("synthetic-thread-probe-{background}"),"background_intra_threads":background,
+        let mut config = json!({"model":"m3","asset_id":hash,"engine":"cpu","execution_timeout_secs":120,
+            "session_options_id":format!("synthetic-thread-probe-{background}"),
             "cpu_owned_ort_experiment":!legacy});
+        // The baseline uses the unchanged request shape from older callers.
+        if background != 1 {
+            config["background_intra_threads"] = json!(background);
+        }
         if legacy {
             core.load_model(config.clone(), &model, &tokenizer)?;
         } else {
@@ -131,7 +135,7 @@ fn main() -> Result<()> {
         reports.push(json!({"mode":if legacy { "legacy-onnx" } else { "streamed-owned-ort" },
             "foreground_threads":1,"background_threads":background,"native_process_threads":native_threads,
             "background_prepare_seconds":index_seconds,"concurrent_foreground_probe_seconds":foreground_seconds,
-            "cache_policy_mismatch_rejected":true}));
+            "cache_policy_mismatch_rejected":true,"legacy_request_defaults_checked":background == 1}));
         core.call("engine_control", json!({"action":"reset"}))?;
     }
     println!("{}", serde_json::to_string_pretty(&Value::Array(reports))?);

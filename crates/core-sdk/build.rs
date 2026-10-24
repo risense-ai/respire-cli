@@ -141,6 +141,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         "cargo:rustc-link-search=native={}",
         directory.join("lib").display()
     );
+    println!("cargo:rustc-link-search=native={}", directory.join("runtime").display());
+    if target.ends_with("-linux-gnu") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    } else if target.contains("apple-darwin") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
+    }
     println!("cargo:rustc-link-lib=static=respire_core_ffi");
     if target.contains("apple-darwin")
         && manifest["native_libraries"]
