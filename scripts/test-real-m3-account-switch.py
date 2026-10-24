@@ -14,9 +14,17 @@ architecture=parser.add_mutually_exclusive_group()
 architecture.add_argument('--expect-in-process',action='store_true',help='Historical binaries without an inference worker')
 architecture.add_argument('--expect-supervised-worker',action='store_true',help='Verify one owned worker and its lifetime/SQLite boundary')
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
+parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then upgrade its running runtime')
 args=parser.parse_args()
 faulthandler.enable()
+# A cloud container's PID 1 may not reap orphans. Adopt workers after a forced
+# host termination so this fixture can verify and reap their actual exit.
+if sys.platform.startswith('linux'):
+    import ctypes
+    libc=ctypes.CDLL(None,use_errno=True)
+    if libc.prctl(36,1,0,0,0)!=0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(),'cannot enable fixture child subreaper')
 # Asynchronous stack dumps can race live frames (CPython #116008); fixture calls retain hard deadlines.
 BASE=pathlib.Path(args.output_dir).resolve()
 BASE.mkdir(parents=True,exist_ok=True)
@@ -132,6 +140,10 @@ for binary in BINARIES:
                 try: alive=psutil.Process(pid).create_time()==created
                 except psutil.NoSuchProcess: alive=False
                 if not alive: break
+                if sys.platform.startswith('linux'):
+                    try: reaped,_=os.waitpid(pid,os.WNOHANG)
+                    except ChildProcessError: reaped=0
+                    if reaped==pid: break
                 assert time.monotonic()<deadline, 'owned Core worker survived its host: '+str(pid)
                 time.sleep(.02)
     try:
@@ -235,6 +247,17 @@ for binary in BINARIES:
                     probe_stdout.close(); probe_stderr.close()
             else:
                 run('model','probe','--model','m3')
+            if args.expect_background_threads is not None:
+                # Model/index metadata may be ready before the worker heartbeat.
+                deadline=time.monotonic()+10
+                policy=None
+                while policy is None and time.monotonic()<deadline:
+                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                        thread_health=json.load(response)
+                    policy=thread_health.get('inference',{}).get('intra_threads')
+                    if policy is None: time.sleep(.05)
+                assert policy=={'foreground':1,'background':args.expect_background_threads}, 'loaded worker thread policy differs: '+str(policy)
+                (BASE/('inference-threads-'+account+'.json')).write_text(json.dumps(policy),encoding='utf-8')
             recalled=run('recall','Real account return fixture','--titles')
             assert recalled.get('items'),'real recall returned no seeded entry'
             if args.expect_supervised_worker:

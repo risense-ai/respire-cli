@@ -539,7 +539,7 @@ jobs:
           NODE
       - run: npm install --global npm@11.5.1
       - name: Require all regressions before gated publication
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || inputs.full_regression_before_publish) }}
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish) }}
         timeout-minutes: 121
         env:
           GH_TOKEN: ${{ github.token }}
