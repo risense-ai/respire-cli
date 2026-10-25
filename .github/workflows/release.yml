@@ -6,6 +6,11 @@ on:
     tags: ['v*']
     paths-ignore:
       - "scripts/publish-interface-crate.mjs"
+      # SDK download tooling takes effect with the separately validated SDK pin change.
+      - 'crates/core-sdk/private-sdk-download.mjs'
+      - 'crates/core-sdk/prepare-sdk.mjs'
+      - 'crates/core-sdk/Cargo.toml'
+      - 'scripts/test-private-sdk-download.mjs'
       - '.github/**'
       - 'docs/**'
       - '**/*.md'
