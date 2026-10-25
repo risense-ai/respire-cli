@@ -117,3 +117,9 @@ test('a highly compressed oversized JSON receipt is stopped by the uncompressed 
   assert(bytes.length<128*1024);const io=githubAdapter(REPOSITORY,{transport:()=>bytes});
   assert.throws(()=>io.receipt({id:11,size_in_bytes:bytes.length,digest:'sha256:'+createHash('sha256').update(bytes).digest('hex')},'scoped-ready.json'),e=>e.code==='ENOBUFS');
 });
+test('consumer enumeration begins at the exact parent creation instant, without rounding past early children',async()=>{
+  const f=fixture();f.run.created_at='2026-10-25T00:00:25Z';f.consumer.created_at='2026-10-25T00:00:31Z';
+  f.io.consumers=async created=>{assert.equal(created,f.run.created_at);return clone(f.consumers.filter(r=>Date.parse(r.created_at)>=Date.parse(created)));};
+  const p=await planCleanup(f.io,100,manifest,now);assert.equal(p.skip,undefined);assert(p.artifacts.some(a=>a.id===12));
+  await executeCleanup(f.io,p,{now:()=>now});assert.deepEqual(f.deleted,[]);
+});
