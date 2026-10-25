@@ -239,6 +239,7 @@ function Invoke-McpStdioTool {
         [Parameter(Mandatory)][string]$Tool,
         [hashtable]$Arguments = @{},
         [Parameter(Mandatory)][string]$DataDir,
+        [switch]$AllowDestructiveMcpFixture,
         [int]$TimeoutSec = 90
     )
     $argJson = if ($Arguments.Count -eq 0) { '{}' } else { $Arguments | ConvertTo-Json -Compress -Depth 8 }
@@ -247,7 +248,7 @@ function Invoke-McpStdioTool {
         '{"jsonrpc":"2.0","method":"notifications/initialized"}'
         "{`"jsonrpc`":`"2.0`",`"id`":2,`"method`":`"tools/call`",`"params`":{`"name`":`"$Tool`",`"arguments`":$argJson}}"
     ) -join "`n") + "`n"
-    $run = Invoke-Om -Name $Name -ArgList @('mcp') -DataDir $DataDir -Raw -TimeoutSec $TimeoutSec -StdinText $stdin -Note $Tool
+    $run = Invoke-Om -Name $Name -ArgList @('mcp') -DataDir $DataDir -Raw -TimeoutSec $TimeoutSec -StdinText $stdin -Note $Tool -AllowDestructiveMcpFixture:$AllowDestructiveMcpFixture
     $rpc = Get-JsonRpc $run.Stdout 2
     $envlp = Get-McpToolEnvelope $rpc
     return [pscustomobject]@{ Run = $run; Rpc = $rpc; Envelope = $envlp }
@@ -332,6 +333,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [switch]$AllowDestructiveMcpFixture,
         [switch]$AllowIndexWait,
         [string]$ModelTaskId = '',
         [int]$TimeoutSec = 180,
@@ -393,6 +395,16 @@ function Invoke-Om {
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
+    # Only this disposable child may opt into the three named lifecycle tools.
+    # Parent environment and all normal/default-policy calls remain unchanged.
+    foreach ($policyPrefix in @('RSRS_', 'ONEMEMORY_', 'RESPIRE_')) {
+        foreach ($policyName in @('MCP_ALLOW','MCP_DENY','MCP_ALLOW_TOOLS','MCP_DENY_TOOLS')) {
+            [void]$psi.Environment.Remove($policyPrefix + $policyName)
+        }
+    }
+    if ($AllowDestructiveMcpFixture) {
+        $psi.Environment['RSRS_MCP_ALLOW'] = 'memory_show,memory_forget,memory_restore'
+    }
     [void]$psi.Environment.Remove('RSRS_SERVER')
     Write-Host "STEP $script:Step $Name"
     $readyTries = 0
@@ -1514,9 +1526,9 @@ $runtimeRestored = Invoke-RuntimeCli 'runtime-cli-restore-readback' @('show', $r
 Assert-Smoke 'runtime-cli-restore-preserved-content' ([string]$runtimeRestored.details.entry.content -ceq "runtime-updated-$stamp")
 Invoke-RuntimeCli 'runtime-cli-purge' @('purge', $runtimeId) | Out-Null
 $wantTools = @(
-    'memory_status','memory_remember','memory_recall','memory_list','memory_show','memory_update',
+    'memory_status','memory_extract','memory_remember','memory_recall','memory_list','memory_show','memory_update',
     'memory_attach','memory_tree','memory_history','memory_diary','memory_chain','memory_query_log_mark',
-    'memory_forget','memory_restore','memory_taxonomy'
+    'memory_taxonomy'
 )
 if ($mcpUrl) {
     try {
@@ -1544,7 +1556,8 @@ if ($mcpUrl) {
     $httpNames = @()
     if ($httpList -and $httpList.result.tools) { $httpNames = @($httpList.result.tools | ForEach-Object { [string]$_.name }) }
     $missingHttp = @($wantTools | Where-Object { $httpNames -notcontains $_ })
-    Add-SweepRow 'mcp-http-tools-complete' ($missingHttp.Count -eq 0) ("have=$($httpNames.Count) missing=$($missingHttp -join ',')")
+    $unexpectedHttp = @($httpNames | Where-Object { $wantTools -cnotcontains $_ })
+    Add-SweepRow 'mcp-http-tools-complete' ($missingHttp.Count -eq 0 -and $unexpectedHttp.Count -eq 0 -and $httpNames.Count -eq 14) ("have=$($httpNames.Count) missing=$($missingHttp -join ',')")
     Invoke-McpHttpRpc 'mcp-http-ping' @{ jsonrpc='2.0'; id=3; method='ping' } | Out-Null
 }
 
@@ -1562,7 +1575,8 @@ Add-SweepRow 'mcp-stdio-initialize-version' ($null -ne $mcpInit -and [string]$mc
 $stdioNames = @()
 if ($mcpList -and $mcpList.result.tools) { $stdioNames = @($mcpList.result.tools | ForEach-Object { [string]$_.name }) }
 $missingStdio = @($wantTools | Where-Object { $stdioNames -notcontains $_ })
-Add-SweepRow 'mcp-stdio-tools-complete' ($missingStdio.Count -eq 0) ("have=$($stdioNames.Count) missing=$($missingStdio -join ',')")
+$unexpectedStdio = @($stdioNames | Where-Object { $wantTools -cnotcontains $_ })
+Add-SweepRow 'mcp-stdio-tools-complete' ($missingStdio.Count -eq 0 -and $unexpectedStdio.Count -eq 0 -and $stdioNames.Count -eq 14) ("have=$($stdioNames.Count) missing=$($missingStdio -join ',')")
 Add-SweepRow 'mcp-stdio-ping' ($null -ne $mcpPing -and $null -ne $mcpPing.result) 'ping'
 
 $mcpMarker = "mcp-business-$stamp"
@@ -1605,9 +1619,15 @@ if ($mcpId) {
     Add-SweepRow 'mcp-stdio-chain-envelope' ($null -ne $chainTool.Envelope -and [string]$chainTool.Envelope.command -eq 'chain') ([string]$chainTool.Envelope.command)
     $markTool = Invoke-McpStdioTool -Name 'mcp-stdio-query-log-mark' -Tool 'memory_query_log_mark' -Arguments @{ ids = $mcpId; good = $true } -DataDir $DirA
     Add-SweepRow 'mcp-stdio-query-log-mark-ran' ($null -ne $markTool.Rpc) ([string]$markTool.Envelope.status)
-    $forgetTool = Invoke-McpStdioTool -Name 'mcp-stdio-forget' -Tool 'memory_forget' -Arguments @{ id = $mcpId } -DataDir $DirA
+    foreach ($deniedTool in @('memory_forget','memory_restore')) {
+        $denied = Invoke-McpStdioTool -Name "mcp-stdio-default-$deniedTool" -Tool $deniedTool -Arguments @{ id = $mcpId } -DataDir $DirA
+        Assert-Smoke "mcp-stdio-default-$deniedTool-denied" ($denied.Rpc.result.isError -eq $true -and $null -eq $denied.Envelope)
+    }
+    $defaultStdioRead = Invoke-McpStdioTool -Name 'mcp-stdio-default-denial-readback' -Tool 'memory_show' -Arguments @{ id = $mcpId } -DataDir $DirA
+    Assert-Smoke 'mcp-stdio-default-denial-preserved-content' ([string]$defaultStdioRead.Envelope.details.entry.content -like "*$mcpMarker*")
+    $forgetTool = Invoke-McpStdioTool -Name 'mcp-stdio-forget' -Tool 'memory_forget' -Arguments @{ id = $mcpId } -DataDir $DirA -AllowDestructiveMcpFixture
     Add-SweepRow 'mcp-stdio-forget-envelope' ($null -ne $forgetTool.Envelope -and [string]$forgetTool.Envelope.command -eq 'forget') ([string]$forgetTool.Envelope.command)
-    $restoreTool = Invoke-McpStdioTool -Name 'mcp-stdio-restore' -Tool 'memory_restore' -Arguments @{ id = $mcpId } -DataDir $DirA
+    $restoreTool = Invoke-McpStdioTool -Name 'mcp-stdio-restore' -Tool 'memory_restore' -Arguments @{ id = $mcpId } -DataDir $DirA -AllowDestructiveMcpFixture
     Add-SweepRow 'mcp-stdio-restore-envelope' ($null -ne $restoreTool.Envelope -and [string]$restoreTool.Envelope.command -eq 'restore') ([string]$restoreTool.Envelope.command)
 } else {
     foreach ($n in @('mcp-stdio-show-hit','mcp-stdio-update-envelope','mcp-stdio-attach-envelope','mcp-stdio-history-envelope','mcp-stdio-chain-envelope','mcp-stdio-query-log-mark-ran','mcp-stdio-forget-envelope','mcp-stdio-restore-envelope')) {
@@ -1672,10 +1692,41 @@ $httpRecall = Invoke-McpHttpTool 'mcp-http-business-recall' 'memory_recall' @{ q
 Assert-Smoke 'mcp-http-business-recall-hit' (($httpRecall | ConvertTo-Json -Depth 12) -like "*$httpMarker*")
 $httpMark = Invoke-McpHttpTool 'mcp-http-query-log-mark' 'memory_query_log_mark' @{ ids = $httpId; good = $true } 'query-log'
 Assert-Smoke 'mcp-http-query-log-marked' ([int]$httpMark.summary.marked -gt 0)
-Invoke-McpHttpTool 'mcp-http-forget' 'memory_forget' @{ id = $httpId } 'forget' | Out-Null
-Invoke-McpHttpTool 'mcp-http-restore' 'memory_restore' @{ id = $httpId } 'restore' | Out-Null
-$httpRestored = Invoke-McpHttpTool 'mcp-http-restore-readback' 'memory_show' @{ id = $httpId } 'show'
-Assert-Smoke 'mcp-http-restore-content-persisted' ([string]$httpRestored.details.entry.content -eq $httpMarker)
+foreach ($deniedTool in @('memory_forget','memory_restore')) {
+    $denied = Invoke-McpHttpRpc "mcp-http-default-$deniedTool" @{ jsonrpc='2.0'; id=$script:Step; method='tools/call'; params=@{ name=$deniedTool; arguments=@{id=$httpId} } }
+    Assert-Smoke "mcp-http-default-$deniedTool-denied" ($denied.result.isError -eq $true -and $null -eq (Get-McpToolEnvelope $denied))
+}
+$defaultHttpRead = Invoke-McpHttpTool 'mcp-http-default-denial-readback' 'memory_show' @{ id=$httpId } 'show'
+Assert-Smoke 'mcp-http-default-denial-preserved-content' ([string]$defaultHttpRead.details.entry.content -eq $httpMarker)
+function Update-McpFixtureEndpoint {
+    Get-OwnedRuntimeHealth $DirA | Out-Null
+    $endpoint = Get-Content -LiteralPath (Join-Path $DirA 'runtime/endpoint.json') -Raw | ConvertFrom-Json
+    $uri = [Uri][string]$endpoint.url
+    if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1','localhost','::1')) { throw 'MCP fixture endpoint is not loopback.' }
+    $script:origin = $uri.GetLeftPart([UriPartial]::Authority)
+    $script:mcpUrl = "$script:origin/mcp"
+    $script:mcpSse = "$script:origin/sse"
+}
+try {
+    Invoke-Om -Name 'mcp-http-stop-before-explicit-policy' -ArgList @('--runtime-internal','--stop') -DataDir $DirA -Raw | Out-Null
+    Invoke-Om -Name 'mcp-http-start-explicit-policy' -ArgList @('--json','status') -DataDir $DirA -AllowDestructiveMcpFixture | Out-Null
+    Update-McpFixtureEndpoint
+    $limited = Invoke-McpHttpRpc 'mcp-http-explicit-tools-list' @{jsonrpc='2.0';id=$script:Step;method='tools/list'}
+    $limitedNames = @($limited.result.tools | ForEach-Object { [string]$_.name })
+    $limitedWant = @('memory_show','memory_forget','memory_restore')
+    Assert-Smoke 'mcp-http-explicit-policy-limited' ($limitedNames.Count -eq 3 -and @($limitedWant | Where-Object { $limitedNames -cnotcontains $_ }).Count -eq 0 -and @($limitedNames | Where-Object { $limitedWant -cnotcontains $_ }).Count -eq 0)
+    Invoke-McpHttpTool 'mcp-http-forget' 'memory_forget' @{ id = $httpId } 'forget' | Out-Null
+    Invoke-McpHttpTool 'mcp-http-restore' 'memory_restore' @{ id = $httpId } 'restore' | Out-Null
+    $httpRestored = Invoke-McpHttpTool 'mcp-http-restore-readback' 'memory_show' @{ id = $httpId } 'show'
+    Assert-Smoke 'mcp-http-restore-content-persisted' ([string]$httpRestored.details.entry.content -eq $httpMarker)
+} finally {
+    Invoke-Om -Name 'mcp-http-stop-explicit-policy' -ArgList @('--runtime-internal','--stop') -DataDir $DirA -Raw | Out-Null
+    Invoke-Om -Name 'mcp-http-restart-default-policy' -ArgList @('--json','status') -DataDir $DirA | Out-Null
+    Update-McpFixtureEndpoint
+}
+$restoredPolicy = Invoke-McpHttpRpc 'mcp-http-restored-default-list' @{jsonrpc='2.0';id=$script:Step;method='tools/list'}
+$restoredNames = @($restoredPolicy.result.tools | ForEach-Object { [string]$_.name })
+Assert-Smoke 'mcp-http-default-policy-restored' ($restoredNames.Count -eq 14 -and @($wantTools | Where-Object {$restoredNames -cnotcontains $_}).Count -eq 0 -and @($restoredNames | Where-Object {$wantTools -cnotcontains $_}).Count -eq 0)
 $unknownHttp = Invoke-McpHttpRpc 'mcp-http-unknown-tool' @{ jsonrpc = '2.0'; id = 90; method = 'tools/call'; params = @{ name = 'memory_nope'; arguments = @{} } }
 Assert-Smoke 'mcp-http-unknown-tool-is-error' ($unknownHttp.result.isError -eq $true)
 Invoke-LocalSmoke -Name 'mcp-http-malformed-json' -Path '/mcp' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null

@@ -12,7 +12,7 @@ import re
 import secrets
 import shutil
 import sqlite3
-from dev_witness_fixture import register_witness_functions, verify_fixture_witness
+from dev_witness_fixture import register_witness_functions, verify_fixture_witness, sqlite_failure_details
 import subprocess
 import sys
 import time
@@ -733,6 +733,9 @@ def main():
         smoke.run()
     except Exception as error:
         smoke.report.update(status="failed", failure=str(error) if isinstance(error, RuntimeError) else type(error).__name__)
+        sqlite_failure = sqlite_failure_details(error)
+        if sqlite_failure is not None:
+            smoke.report["sqlite_failure"] = sqlite_failure
     finally:
         for connection in smoke.wal_connections:
             connection.close()

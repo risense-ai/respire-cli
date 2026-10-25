@@ -5,6 +5,8 @@ JSON tuples as storage/transport/local/witness.rs; no constant/no-op UDFs.
 """
 import hashlib
 import json
+import re
+import sqlite3
 
 
 def _digest(domain, fields):
@@ -31,6 +33,20 @@ def event_digest(library, seq, stamp, action, entry, previous_entry, before, aft
 def register_witness_functions(connection):
     connection.create_function("rsrs_witness_source_v1", 18, source_digest, deterministic=True)
     connection.create_function("rsrs_witness_event_v1", 9, event_digest, deterministic=True)
+
+
+def sqlite_failure_details(error):
+    """Fixed diagnostic classes only; SQL errors can contain private row text."""
+    if not isinstance(error, sqlite3.Error):
+        return None
+    code = getattr(error, "sqlite_errorcode", None)
+    name = getattr(error, "sqlite_errorname", None)
+    detail = {"code": code if type(code) is int else None,
+              "name": name if type(name) is str and re.fullmatch(r"SQLITE_[A-Z0-9_]+", name) else None}
+    known = {"no such function: rsrs_witness_source_v1": "witness_source_udf_missing",
+             "no such function: rsrs_witness_event_v1": "witness_event_udf_missing"}
+    detail["reason"] = known.get(str(error), "sqlite_error")
+    return detail
 
 
 def verify_fixture_witness(connection):

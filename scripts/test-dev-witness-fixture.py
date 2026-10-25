@@ -5,7 +5,7 @@ import sqlite3
 import unittest
 from pathlib import Path
 
-from dev_witness_fixture import event_digest, register_witness_functions, source_digest, verify_fixture_witness
+from dev_witness_fixture import event_digest, register_witness_functions, source_digest, verify_fixture_witness, sqlite_failure_details
 
 SQL = (Path(__file__).resolve().parents[1] /
        "crates/storage/src/transport/local/witness_schema.sql").read_text()
@@ -98,6 +98,13 @@ class WitnessFixtureTests(unittest.TestCase):
             register_witness_functions(old)
             self.assertIsNone(verify_fixture_witness(old))
             self.assertEqual(old.execute("SELECT count(*) FROM sqlite_master").fetchone()[0], 0)
+
+    def test_sqlite_diagnostics_never_echo_row_text(self):
+        private = "SYNTHETIC-DO-NOT-ECHO"
+        self.assertNotIn(private, str(sqlite_failure_details(sqlite3.OperationalError(private))))
+        self.assertEqual(sqlite_failure_details(sqlite3.OperationalError(
+            "no such function: rsrs_witness_source_v1"))["reason"], "witness_source_udf_missing")
+        self.assertIsNone(sqlite_failure_details(ValueError(private)))
 
 
 if __name__ == "__main__":

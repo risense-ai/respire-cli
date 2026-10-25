@@ -307,6 +307,7 @@ def main():
                 == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
         env["RSRS_DATA_DIR"] = str(restored_root)
         cli(*migration)
+        cli("--runtime-internal", "--stop")
         if fixture_witness is not None:
             chain = json.loads(cli("--direct", "--json", "witness", "--verify").stdout)
             require(chain["status"] == "ok" and chain["summary"]["intact"] is True
@@ -319,7 +320,6 @@ def main():
             "full_library_reencrypted": True, "original_source_preserved": True,
             "original_factors_preserved": True, "requires_original_source": True}
         # Transfer to a different server identity and URK without plaintext exports.
-        cli("--runtime-internal", "--stop")
         source_profile = json.loads(cli("--json", "account", "list").stdout)["details"]["accounts"]
         source_name = next(row["name"] for row in source_profile if row["current"])
         source_path = Path(env["RSRS_DATA_DIR"])

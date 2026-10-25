@@ -1096,7 +1096,15 @@
     "update-title-content-persisted",
     "web-dashboard-fixed-url",
     "web-dashboard-no-runtime",
-    "web-legacy-lifecycle-flags-rejected"
+    "web-legacy-lifecycle-flags-rejected",
+    "mcp-stdio-default-memory_forget-denied",
+    "mcp-stdio-default-memory_restore-denied",
+    "mcp-stdio-default-denial-preserved-content",
+    "mcp-http-default-memory_forget-denied",
+    "mcp-http-default-memory_restore-denied",
+    "mcp-http-default-denial-preserved-content",
+    "mcp-http-explicit-policy-limited",
+    "mcp-http-default-policy-restored"
   ],
   "required_remaining": [],
   "conditional_unverified": [

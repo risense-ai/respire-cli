@@ -201,6 +201,12 @@ jobs:
       - run: python3 scripts/test-dev-model-fixture.py
       - run: python3 scripts/test-dev-fixture-tty.py
       - run: python3 scripts/test-dev-witness-fixture.py
+      - name: Validate release sweep PowerShell syntax
+        shell: pwsh
+        run: |
+          $parseTokens = $null; $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/dev-release-sweep.ps1'), [ref]$parseTokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
       - run: python3 scripts/test-core-payload-lifetime.py
 
   native-published-m3:
