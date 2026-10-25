@@ -94,6 +94,20 @@ impl ToolPolicy {
         };
         Self::parse(allow.as_deref(), deny.as_deref())
     }
+    fn denial_reason(&self, name: &str, access: ServiceAccess) -> String {
+        if !self.catalog.contains(name) { return "Unknown MCP tool; consult tools/list for supported names".to_owned(); }
+        if access.off && name != "memory_status" {
+            return "MCP tool disabled: memory is paused; ALLOW cannot override service mode. Ask the host operator to review the intended service mode".to_owned();
+        }
+        if access.readonly && !matches!(name,"memory_status"|"memory_recall"|"memory_list"|"memory_show"|"memory_tree"|"memory_history"|"memory_diary"|"memory_chain"|"memory_taxonomy") {
+            return "MCP tool disabled: read-only service mode forbids this write; ALLOW cannot grant write access".to_owned();
+        }
+        if self.deny_all || self.deny.contains(name) {
+            return "MCP tool disabled by RSRS_MCP_DENY (DENY overrides ALLOW); ask the host operator to review that setting and restart the MCP host if authorized".to_owned();
+        }
+        format!("MCP tool disabled by default or RSRS_MCP_ALLOW; an authorized host operator must explicitly allow {name} and restart the MCP host. Service mode and account permissions still apply")
+    }
+
     fn allows(&self, name: &str, access: ServiceAccess) -> bool {
         if !self.catalog.contains(name) || self.deny_all || self.deny.contains(name) {
             return false;
@@ -706,7 +720,7 @@ fn call_tool(
         .and_then(|v| v.as_str())
         .ok_or("missing name")?;
     if !policy.allows(name, access) {
-        return Err("MCP tool disabled by permission policy or service mode".to_owned());
+        return Err(policy.denial_reason(name, access));
     }
     let arguments = params
         .get("arguments")
@@ -720,7 +734,7 @@ fn call_tool(
             .is_some_and(|ids| ids.as_str().is_none_or(|v| !v.trim().is_empty()))
         && !policy.allows("memory_forget", access)
     {
-        return Err("MCP merge requires memory_forget permission".to_owned());
+        return Err(format!("MCP merge requires memory_forget permission: {}",policy.denial_reason("memory_forget",access)));
     }
     let argv = tool_argv(name, &arguments)?;
     let mut envelope = invoke(argv)?;
@@ -1161,6 +1175,44 @@ mod tests {
         if !preview.contains(&"--dry-run".to_owned()) {
             return Err(format!("extract preview argv {preview:?}"));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn refusal_diagnostics_explain_configuration_without_overriding_modes() -> Result<(),String> {
+        let policy=ToolPolicy::parse(None,None)?;
+        assert!(policy.denial_reason("memory_forget",ServiceAccess::default()).contains("RSRS_MCP_ALLOW"));
+        assert!(policy.denial_reason("memory_forget",ServiceAccess{readonly:true,off:false}).contains("read-only"));
+        assert!(policy.denial_reason("memory_recall",ServiceAccess{readonly:false,off:true}).contains("paused"));
+        assert!(ToolPolicy::parse(Some("all"),Some("memory_recall"))?.denial_reason("memory_recall",ServiceAccess::default()).contains("RSRS_MCP_DENY"));
+        assert!(!policy.denial_reason("untrusted-secret-like-tool-name",ServiceAccess::default()).contains("untrusted-secret"));
+        Ok(())
+    }
+
+    #[test]
+    fn readonly_taxonomy_dispatch_reaches_the_real_read_only_command() -> anyhow::Result<()> {
+        let _lock=crate::TEST_ENV_LOCK.lock().map_err(|e|anyhow::anyhow!("{e}"))?;
+        let directory=tempfile::tempdir()?;
+        struct Reset { data:Option<std::ffi::OsString>,worker:bool }
+        impl Drop for Reset { fn drop(&mut self) {
+            match self.data.take(){Some(value)=>std::env::set_var("RSRS_DATA_DIR",value),None=>std::env::remove_var("RSRS_DATA_DIR")};
+            crate::rpc::set_worker_active(self.worker);
+        }}
+        let _reset=Reset{data:std::env::var_os("RSRS_DATA_DIR"),worker:crate::rpc::worker_active()};
+        std::env::set_var("RSRS_DATA_DIR",directory.path());
+        std::fs::write(directory.path().join("agent.json"),r#"{"readonly":true}"#)?;
+        crate::rpc::set_worker_active(true);
+        let policy=ToolPolicy::parse(None,None).map_err(anyhow::Error::msg)?;
+        let access=ServiceAccess::current();assert!(access.readonly);
+        assert!(policy.allows("memory_taxonomy",access));
+        let invoke=|args|serde_json::to_value(crate::capture_run(args).envelope).map_err(|e|e.to_string());
+        let text=call_tool(&serde_json::json!({"name":"memory_taxonomy"}),&invoke,&policy,access).map_err(anyhow::Error::msg)?;
+        let result:serde_json::Value=serde_json::from_str(&text)?;
+        assert_eq!(result["status"],"ok");
+        assert!(result["summary"]["count"].as_u64().is_some_and(|n|n>0));
+        let write=crate::capture_run(vec!["taxonomy".into(),"--ensure".into(),"synthetic".into()]);
+        assert_ne!(write.exit,0);
+        assert!(!directory.path().join("rsrs.db").exists());
         Ok(())
     }
 
