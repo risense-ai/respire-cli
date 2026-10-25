@@ -174,7 +174,17 @@ pub fn pid_is_respire(pid: u32) -> bool {
         let text = String::from_utf8_lossy(&out.stdout).to_ascii_lowercase();
         text.contains("rsrs.exe")
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        // Use the same procfs authority as runtime_process_identity, without
+        // assuming GNU ps options in minimal musl userspaces.
+        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+            .and_then(|name| name.to_str().map(|name|
+                name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs"))
+            .unwrap_or(false)
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let out = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
@@ -392,6 +402,21 @@ pub(crate) fn wait_until_exited(pid: u32) -> Result<()> {
 }
 
 pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        anyhow::ensure!(pid != 0, "invalid runtime process identity");
+        let own = std::fs::read_to_string("/proc/self/stat")
+            .context("runtime process inspection requires procfs")?;
+        anyhow::ensure!(linux_stat_is_running(&own, std::process::id())?,
+            "cannot verify current process namespace");
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => linux_stat_is_running(&stat, pid),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error).context("runtime process inspection failed"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
         #[cfg(windows)]
         let output = std::process::Command::new("tasklist")
             .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
@@ -417,6 +442,18 @@ pub(crate) fn process_is_running(pid: u32) -> Result<bool> {
                 && fields.next().is_some_and(|state| !state.starts_with('Z'))
         };
         Ok(alive)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_stat_is_running(stat: &str, pid: u32) -> Result<bool> {
+    anyhow::ensure!(stat.starts_with(&format!("{pid} (")), "runtime process PID mismatch");
+    let (_, fields) = stat.rsplit_once(')').context("runtime process name delimiter missing")?;
+    let state = fields.split_whitespace().next().context("runtime process state missing")?;
+    anyhow::ensure!(state.len() == 1 && "RSDZTtXxKWPI".contains(state),
+        "runtime process state is invalid");
+    // Zombies have exited and released library locks. Unknown states fail closed.
+    Ok(state != "Z")
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -564,6 +601,20 @@ mod tests {
             match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
         }
         result
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_liveness_keeps_pid_and_state_checks_strict() -> Result<()> {
+        assert!(linux_stat_is_running("123 (rsrs) S 1 2 3", 123)?);
+        assert!(linux_stat_is_running("123 (name with ) parentheses) R 1 2 3", 123)?);
+        assert!(!linux_stat_is_running("123 (rsrs) Z 1 2 3", 123)?);
+        for invalid in ["124 (rsrs) S 1", "123 rsrs S", "123 (rsrs)", "123 (rsrs) ? 1"] {
+            assert!(linux_stat_is_running(invalid, 123).is_err());
+        }
+        assert!(process_is_running(std::process::id())?);
+        assert!(process_is_running(0).is_err());
+        Ok(())
     }
 
     #[cfg(unix)]

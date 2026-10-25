@@ -125,6 +125,38 @@ fn main() -> Result<()> {
         respire::env::var_os("RSRS_CORE_TEST_MODE").is_none(),
         "real-model probe rejects the synthetic test provider"
     );
+    // Resolve the installer-owned CPU cache before isolating the library root.
+    let model_dir = std::path::PathBuf::from(
+        respire::env::var_os("RSRS_M3_DIR").context("prepared model directory")?,
+    );
+    let ort = respire::env::var_os("RSRS_CPU_OWNED_ORT_FILE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| respire::memory::bge::cpu_ort_path(&model_dir));
+    let ort = std::fs::canonicalize(ort)
+        .context("prepared CPU model is missing from the original installation profile")?;
+    anyhow::ensure!(
+        std::fs::metadata(&ort)?.len() == respire::memory::bge::CPU_ORT_SIZE,
+        "prepared CPU model size mismatch"
+    );
+    {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        let mut file = std::fs::File::open(&ort)?;
+        let mut hash = Sha256::new();
+        let mut buffer = [0u8; 65536];
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        anyhow::ensure!(
+            format!("{:x}", hash.finalize()) == respire::memory::bge::CPU_ORT_SHA256,
+            "prepared CPU model hash mismatch"
+        );
+    }
+    std::env::set_var("RSRS_CPU_OWNED_ORT_FILE", &ort);
     let root = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", root.path());
     std::env::set_var("RSRS_NO_AUTOSYNC", "1");
