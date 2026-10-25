@@ -2283,6 +2283,10 @@ pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn backup_database(src: &std::path::Path, dest: &std::path::Path) -> Result<PathBuf> {
+    backup_database_policy(src,dest,true)
+}
+
+pub(crate) fn backup_database_policy(src: &std::path::Path, dest: &std::path::Path, strip_grants: bool) -> Result<PathBuf> {
     crate::input_error::validate_output_parent(dest)?;
     let connection =
         rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -2305,7 +2309,7 @@ pub(crate) fn backup_database(src: &std::path::Path, dest: &std::path::Path) -> 
         let has_grants = backup
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='access_grants'")?
             .exists([])?;
-        if has_grants {
+        if has_grants && strip_grants {
             backup.execute_batch("PRAGMA secure_delete=ON; DELETE FROM access_grants; VACUUM;")?;
         }
         Ok(())
@@ -2731,6 +2735,7 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
 // ── small helpers ──
 
 pub fn open_store() -> Result<LocalStore> {
+    crate::snapshot::ensure_no_incomplete_restore(&data_dir())?;
     open_store_with_profile().map(|(_, store)| store)
 }
 

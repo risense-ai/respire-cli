@@ -146,7 +146,13 @@ fn public_snapshot_restore_reopens_runtime_and_keeps_sync_quarantined() -> Resul
     let id = created["details"]["id"].as_str().context("snapshot id")?;
     let (ok, listed) = fixture.run(&["--direct", "--json", "snapshot", "list"])?;
     assert!(ok);
-    assert_eq!(listed["details"].as_array().context("list")?.len(), 1);
+    assert_eq!(
+        listed["details"]["snapshots"]
+            .as_array()
+            .context("list")?
+            .len(),
+        1
+    );
     let (_, before) = fixture.run(&["--json", "status"])?;
     let (ok, _) = fixture.run(&[
         "--client-only",

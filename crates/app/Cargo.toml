@@ -14,6 +14,7 @@ native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
 
 [dependencies]
+respire_spawn = { path = "../../spawn" }
 crossterm = "0.28"
 rpassword = "7"
 keyring = { version = "3", features = ["linux-native", "sync-secret-service", "vendored", "windows-native", "apple-native"] }

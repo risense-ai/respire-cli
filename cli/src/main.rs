@@ -1418,6 +1418,8 @@ enum SnapshotCmd {
         #[arg(long)]
         confirm: bool,
     },
+    /// Recover an interrupted local snapshot transaction (host only)
+    Recover { #[arg(long)] confirm: bool },
     /// Resume sync only after reviewing local/remote differences at this exact local revision
     ResumeSync {
         #[arg(long)]
@@ -5693,7 +5695,7 @@ fn is_write_command(c: &Command) -> bool {
             | Command::Reembed { .. }
             | Command::Retitle { .. }
             | Command::RetitleMany { .. }
-            | Command::Snapshot { cmd: SnapshotCmd::Restore { .. } | SnapshotCmd::ResumeSync { .. } }
+            | Command::Snapshot { cmd: SnapshotCmd::Restore { .. } | SnapshotCmd::ResumeSync { .. } | SnapshotCmd::Recover { .. } }
             | Command::SyncReset
             | Command::Doctor { fix: true, .. }
             | Command::SyncResolve { .. }
@@ -6090,25 +6092,34 @@ fn run(args: Cli) -> Result<()> {
                         &root,
                         std::time::Duration::from_secs(15),
                     )?;
-                    respire_app::snapshot::restore_locked(
-                        &root,
-                        &account,
-                        &keys,
-                        &restored.before_restore,
-                        &ownership,
-                    )?;
+                    respire_app::snapshot::rollback_locked(&root,restored,&ownership)?;
                 }
                 Ok(())
             },
         )?;
+        let receipt=receipt.into_inner().ok_or_else(||anyhow!("snapshot restore receipt missing"))?;
+        let cleanup=respire_app::snapshot::complete_restore(&root,&receipt).err();
         let mut result = ResultEnvelope::new(
             "snapshot",
-            OutputStatus::Ok,
-            serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false}),
+            if cleanup.is_some(){OutputStatus::Warn}else{OutputStatus::Ok},
+            serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false,"runtime_verified":true}),
             Vec::new(),
         );
-        result.details = serde_json::to_value(receipt.into_inner())?;
+        result.details = serde_json::to_value(&receipt)?;
+        if let Some(error)=cleanup {result.errors.push(format!("restored runtime verified; local rollback cleanup pending: {error}"));}
         return emit_result(result);
+    }
+    if let Some(Command::Snapshot { cmd: SnapshotCmd::Recover { confirm } }) = args.command.as_ref() {
+        runtime_policy::require_host("snapshot recovery")?;
+        anyhow::ensure!(!rpc::worker_active(),"snapshot recovery must run in the host CLI");
+        anyhow::ensure!(*confirm,"snapshot recover requires --confirm");
+        respire::service::ensure_writable()?;
+        let root=respire::service::data_dir();let account=respire::service::session_user_of_dir(&root);
+        rpc::change_profile(|| {
+            let ownership=respire::lock::LibraryLock::acquire(&root,std::time::Duration::from_secs(15))?;
+            respire_app::snapshot::recover_locked(&root,&account,&ownership)
+        })?;
+        return emit_result(ResultEnvelope::new("snapshot",OutputStatus::Ok,serde_json::json!({"action":"recovered","runtime_verified":true}),Vec::new()));
     }
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
@@ -6917,22 +6928,26 @@ fn run_local_inner(args: Cli) -> Result<()> {
                         &build_session()?,
                     )?)?
                 }
-                SnapshotCmd::List => serde_json::to_value(respire_app::snapshot::list(&root)?)?,
+                SnapshotCmd::List => serde_json::to_value(respire_app::snapshot::list_report(&root)?)?,
                 SnapshotCmd::ResumeSync { reviewed_revision } => {
                     respire::service::ensure_writable()?;
                     respire_app::snapshot::resume_sync(&root, reviewed_revision)?;
                     serde_json::json!({"sync_quarantined":false,"reviewed_revision":reviewed_revision})
                 }
-                SnapshotCmd::Restore { .. } => {
-                    anyhow::bail!("snapshot restore must run in the host CLI")
+                SnapshotCmd::Restore { .. } | SnapshotCmd::Recover { .. } => {
+                    anyhow::bail!("snapshot restore/recovery must run in the host CLI")
                 }
             };
             let mut result = ResultEnvelope::new(
                 "snapshot",
                 OutputStatus::Ok,
-                serde_json::json!({"action":match cmd {SnapshotCmd::Create{..}=>"created",SnapshotCmd::List=>"list",SnapshotCmd::ResumeSync{..}=>"sync_resumed",SnapshotCmd::Restore{..}=>"restored"}}),
+                serde_json::json!({"action":match cmd {SnapshotCmd::Create{..}=>"created",SnapshotCmd::List=>"list",SnapshotCmd::ResumeSync{..}=>"sync_resumed",SnapshotCmd::Restore{..}=>"restored",SnapshotCmd::Recover{..}=>"recovered"}}),
                 Vec::new(),
             );
+            if matches!(cmd,SnapshotCmd::List) && details["problems"].as_array().is_some_and(|items|!items.is_empty()) {
+                result.status=OutputStatus::Warn;
+                result.errors.push("some snapshots failed verification; inspect details.problems; healthy snapshots remain usable".into());
+            }
             result.details = details;
             return emit_result(result);
         }

@@ -1600,6 +1600,7 @@ dependencies = [
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol",
+ "respire_spawn",
  "respire_storage",
  "rpassword",
  "rusqlite",
