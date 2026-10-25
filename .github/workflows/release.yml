@@ -5,6 +5,7 @@ on:
     branches: [main]
     tags: ['v*']
     paths-ignore:
+      - "scripts/publish-interface-crate.mjs"
       - '.github/**'
       - 'docs/**'
       - '**/*.md'

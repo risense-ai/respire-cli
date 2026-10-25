@@ -5,6 +5,7 @@ import { spawnSync } from 'node:child_process';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const selection = process.argv[2];
+if (selection === 'sdk') throw new Error('SDK crate publication moved to risense-ai/respire-core; the legacy CLI publisher is retired. No registry request or publication was attempted.');
 if (!['protocol', 'sdk'].includes(selection)) throw new Error('Select protocol or sdk');
 const path = join(root, 'crates', selection === 'sdk' ? 'core-sdk' : 'protocol', 'Cargo.toml');
 const manifest = readFileSync(path, 'utf8');
