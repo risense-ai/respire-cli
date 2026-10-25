@@ -6,6 +6,7 @@ on:
       target: {required: true, type: string}
       cache_key: {required: true, type: string}
       runner_os: {required: true, type: string}
+      feedback_probe: {required: false, type: boolean, default: false}
     # Deliberately no secret declarations or inheritance.
 permissions:
   contents: read
@@ -95,3 +96,43 @@ jobs:
           "$exe" --version
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+
+      - name: Native snapshot lifecycle and feedback probe build
+        if: ${{ inputs.feedback_probe && inputs.target != 'x86_64-unknown-linux-musl' }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire_app snapshot::tests --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
+          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire --test snapshot_lifecycle --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
+          cargo build --locked -p respire --example feedback_contract_probe --example ablation_bench --target "$SDK_TARGET" --target-dir target/ci
+          node scripts/stage-core-runtime.mjs "target/ci/$SDK_TARGET/debug/examples"
+      - name: Static musl snapshot lifecycle and feedback probe build
+        if: ${{ inputs.feedback_probe && inputs.target == 'x86_64-unknown-linux-musl' }}
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/workspace" -w /workspace -e TARGET="$SDK_TARGET" rust:1.95.0-alpine3.23 sh -ec '
+            . scripts/build-linux-musl-container.sh
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire_app snapshot::tests --target "$TARGET" --target-dir target/ci -- --test-threads=1
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire --test snapshot_lifecycle --target "$TARGET" --target-dir target/ci -- --test-threads=1
+            cargo build --locked --release -p respire --example feedback_contract_probe --example ablation_bench --target "$TARGET" --target-dir target/ci
+            node scripts/stage-core-runtime.mjs "target/ci/$TARGET/release/examples"
+          '
+      - name: Actual model feedback across Core service runtime and both benchmarks
+        if: inputs.feedback_probe
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+          RSRS_M3_DIR: ${{ runner.temp }}/private-sdk-probe/model
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"; test -z "${RSRS_CORE_TEST_MODE:-}"
+          profile=debug; suffix=''
+          if [[ "$SDK_TARGET" == *musl ]]; then profile=release; fi
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
+          "target/ci/$SDK_TARGET/$profile/examples/feedback_contract_probe$suffix"

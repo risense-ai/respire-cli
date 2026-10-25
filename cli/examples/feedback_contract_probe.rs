@@ -1,4 +1,4 @@
-//! Isolated real-model feedback contract probe. No account, keyring or network.
+//! Isolated real-model feedback contract probe. Synthetic vault only; no remote account/keyring.
 //! Requires the paired SDK and an explicitly prepared model via RSRS_M3_DIR.
 use anyhow::{Context, Result};
 use respire::memory::engine::RecalledWithContext;
@@ -28,6 +28,90 @@ fn recall(
     )?;
     serde_json::from_value(output["items"].clone()).map_err(Into::into)
 }
+struct CliProbe {
+    root: std::path::PathBuf,
+    exe: std::path::PathBuf,
+    secret: String,
+    port: u16,
+}
+impl CliProbe {
+    fn run_program(&self, exe: &std::path::Path, args: &[&str]) -> Result<Value> {
+        use std::{
+            io::{Read, Seek, SeekFrom},
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        let mut output = tempfile::tempfile()?;
+        let errors = tempfile::tempfile()?;
+        let mut child = Command::new(exe)
+            .args(args)
+            .current_dir(&self.root)
+            .env("HOME", &self.root)
+            .env("USERPROFILE", &self.root)
+            .env("RSRS_DATA_DIR", &self.root)
+            .env("RSRS_RPC_PORT", self.port.to_string())
+            .env("RSRS_SUPER", &self.secret)
+            .env("RSRS_ENGINE", "cpu")
+            .env("RSRS_FEEDBACK", "1")
+            .env("RSRS_BAD_PENALTY", "1")
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
+            .env("RSRS_LANG", "en")
+            .stdin(Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(errors)
+            .spawn()?;
+        let start = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait()? {
+                break status;
+            }
+            if start.elapsed() > Duration::from_secs(120) {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("isolated probe command timed out");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        output.seek(SeekFrom::Start(0))?;
+        let mut text = String::new();
+        output.read_to_string(&mut text)?;
+        let result: Value = serde_json::from_str(&text)
+            .context("isolated command did not emit one JSON document")?;
+        anyhow::ensure!(
+            status.success(),
+            "isolated CLI/probe failed (diagnostics retained only in the temporary fixture)"
+        );
+        Ok(result)
+    }
+    fn run(&self, args: &[&str]) -> Result<Value> {
+        self.run_program(&self.exe, args)
+    }
+}
+impl Drop for CliProbe {
+    fn drop(&mut self) {
+        if let Ok(status) = self.run(&["--json", "--runtime-internal", "--status"]) {
+            let matches = status["summary"]["data_dir"]
+                .as_str()
+                .and_then(|path| std::fs::canonicalize(path).ok())
+                == std::fs::canonicalize(&self.root).ok();
+            if matches && status["summary"]["pid"].as_u64().is_some() {
+                let _ = self.run(&["--json", "--runtime-internal", "--stop"]);
+            }
+        }
+    }
+}
+fn cli_score(result: &Value, id: &str) -> Result<f32> {
+    result["details"]
+        .as_array()
+        .context("CLI recall details")?
+        .iter()
+        .find(|item| item["entry"]["id"].as_str() == Some(id))
+        .and_then(|item| item["score"].as_f64())
+        .map(|score| score as f32)
+        .context("CLI candidate absent")
+}
+
 fn main() -> Result<()> {
     anyhow::ensure!(
         respire::core_sdk::FEEDBACK_CONTRACT == 1,
@@ -88,7 +172,7 @@ fn main() -> Result<()> {
         let memory = MemoryEngine::seal(&keys, &embedder, &entry, "synthetic-probe")?;
         anyhow::ensure!(store.put(&memory)?, "fixture insertion rejected");
     }
-    let query = MemoryQuery::new(text).of_project("probe").limit(20);
+    let query = MemoryQuery::new(text).limit(20);
     let baseline = recall(&store, &keys, &query)?;
     let target = baseline
         .first()
@@ -117,7 +201,7 @@ fn main() -> Result<()> {
         "legacy heat control did not exercise the original axis"
     );
     let request = uuid::Uuid::new_v4().to_string();
-    store.log_query_request(&request, text, "probe", "", &[target.clone()], &[neutral])?;
+    store.log_query_request(&request, text, "", "", &[target.clone()], &[neutral])?;
     store.mark_query_feedback(&request, &[target.clone()], true, "human")?;
     let disabled_after = score(&recall(&store, &keys, &query)?, &target)?;
     anyhow::ensure!(
@@ -153,10 +237,142 @@ fn main() -> Result<()> {
             .is_some_and(|map| map.is_empty()),
         "unrelated query received a penalty"
     );
+    std::env::set_var("RSRS_BAD_PENALTY", "1");
+    let app = respire::service::App {
+        keys: SessionKeys::from_urk([11; 32])?,
+        store: respire::transport::local::LocalStore::open(&root.path().join("rsrs.db"))?,
+        embedder: Box::new(embedder.clone()),
+    };
+    let service_rows = app.search(text, 20, None)?;
+    let service_score = service_rows
+        .iter()
+        .find(|row| row.entry.id == target)
+        .map(|row| row.score)
+        .context("service candidate absent")?;
+    anyhow::ensure!(
+        (service_score - bad).abs() < 1e-5,
+        "service search did not share query-conditioned feedback"
+    );
+    drop(app);
+    drop(store);
+    drop(embedder);
+    let _: Value = respire::core_sdk::execute("engine_control", json!({"action":"reset"}))?;
+    let current = std::env::current_exe()?;
+    let examples = current.parent().context("example directory")?;
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let exe = examples
+        .parent()
+        .context("native profile directory")?
+        .join(format!("rsrs{suffix}"));
+    anyhow::ensure!(
+        exe.is_file(),
+        "build the matching rsrs binary beside the example directory"
+    );
+    let secret = format!("A3-{}", "14".repeat(18));
+    let salt = "15".repeat(16);
+    let kek = respire::memory::crypto::derive_rsrs_kek(&secret, &salt)?;
+    let (nonce, wrapped) = respire::memory::crypto::wrap_key(&[11; 32], &kek)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    options.open(root.path().join("session.json"))?.write_all(&serde_json::to_vec(&json!({"user":"synthetic-probe","vault_version":4,"pass":"","kdf_salt":salt,"wrapped_urk":format!("{}{wrapped}",respire::memory::crypto::RSRS_PREFIX),"urk_nonce":nonce}))?)?;
+    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
+        .local_addr()?
+        .port();
+    let cli = CliProbe {
+        root: root.path().to_owned(),
+        exe,
+        secret,
+        port,
+    };
+    let first = cli.run(&["--json", "recall", text, "--limit", "20"])?;
+    anyhow::ensure!(
+        (cli_score(&first, &target)? - bad).abs() < 1e-5,
+        "runtime recall differs from direct Core/service score"
+    );
+    let request = first["summary"]["query_log_id"]
+        .as_str()
+        .context("real runtime query identity")?;
+    let _: Value = cli.run(&[
+        "--json",
+        "query-log",
+        "mark",
+        &target,
+        "--good",
+        "--query-log-id",
+        request,
+        "--source",
+        "human",
+    ])?;
+    let refreshed = cli.run(&["--json", "recall", text, "--limit", "20"])?;
+    anyhow::ensure!(
+        (cli_score(&refreshed, &target)? - good).abs() < 1e-5,
+        "running runtime did not refresh latest feedback"
+    );
+    let runtime = cli.run(&["--json", "--runtime-internal", "--status"])?;
+    anyhow::ensure!(
+        runtime["summary"]["pid"].as_u64().is_some(),
+        "no owned runtime was exercised"
+    );
+    let eval = root.path().join("synthetic-eval.jsonl");
+    std::fs::write(
+        &eval,
+        format!(
+            "{}\n{}\n",
+            json!({"query":text,"expect":[target]}),
+            json!({"query":"unrelated query","expect":[]})
+        ),
+    )?;
+    let saved = root.path().join("bench.json");
+    let before = cli.run(&["--json", "query-log"])?;
+    let _: Value = cli.run(&[
+        "--json",
+        "bench",
+        "run",
+        eval.to_str().context("UTF8 fixture path")?,
+        "--topk",
+        "20",
+        "--save",
+        saved.to_str().context("UTF8 report path")?,
+    ])?;
+    let report: Value = serde_json::from_slice(&std::fs::read(&saved)?)?;
+    let bench_score = report["results"][0]["top1_score"]
+        .as_f64()
+        .context("bench score")? as f32;
+    anyhow::ensure!(
+        report["results"][0]["rank"] == 0 && (bench_score - good).abs() < 1e-5,
+        "bench did not refresh the same scorer context"
+    );
+    let after = cli.run(&["--json", "query-log"])?;
+    anyhow::ensure!(
+        before["summary"] == after["summary"],
+        "benchmark wrote query logs"
+    );
+    let standalone = examples.join(format!("ablation_bench{suffix}"));
+    anyhow::ensure!(
+        standalone.is_file(),
+        "build the matching ablation_bench example"
+    );
+    let standalone = cli.run_program(
+        &standalone,
+        &[eval.to_str().context("UTF8 eval path")?, "--topk", "20"],
+    )?;
+    let standalone_score = standalone["results"][0]["top1_score"]
+        .as_f64()
+        .context("standalone bench score")? as f32;
+    anyhow::ensure!(
+        standalone["results"][0]["rank"] == 0 && (standalone_score - good).abs() < 1e-5,
+        "standalone benchmark did not refresh scorer context"
+    );
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"provider":"real-m3","feedback_contract":respire::core_sdk::FEEDBACK_CONTRACT,"synthetic_entries":3,"target":target,"neutral":neutral,"legacy_read_hot":read_hot,"good":good,"bad":bad,"bad_off":bad_off,"checks":"PASS","original_benchmark_replicated":false})
+            &json!({"provider":"real-m3","feedback_contract":respire::core_sdk::FEEDBACK_CONTRACT,"synthetic_entries":3,"target":target,"neutral":neutral,"legacy_read_hot":read_hot,"good":good,"bad":bad,"bad_off":bad_off,"service_score":service_score,"runtime_score":cli_score(&refreshed,&target)?,"runtime_pid":runtime["summary"]["pid"],"bench_score":bench_score,"standalone_bench_score":standalone_score,"checks":"PASS","original_benchmark_replicated":false})
         )?
     );
     Ok(())

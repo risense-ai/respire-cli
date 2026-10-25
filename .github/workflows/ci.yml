@@ -2,6 +2,10 @@ name: CLI CI
 on:
   workflow_dispatch:
     inputs:
+      research_feedback_only:
+        description: Token-free four-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
+        type: boolean
+        default: false
       version_upgrade_only:
         description: Verify only the approved DEV12 to DEV13 version upgrade using existing GNU artifacts
         type: boolean
@@ -31,12 +35,12 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}-${{ inputs.artifact_run || 'source' }}
+  group: cli-ci-${{ github.ref }}-${{ inputs.native_published_only || false }}-${{ inputs.artifact_run || 'source' }}-${{ inputs.research_feedback_only || false }}
   cancel-in-progress: true
 jobs:
   platform-build:
     # Release builds all four targets. Keep the separate compile matrix manual.
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -126,7 +130,7 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
   check:
-    if: ${{ !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     runs-on: ubuntu-latest
     env:
       RSRS_ENGINE: cpu
@@ -199,7 +203,7 @@ jobs:
       - run: python3 scripts/test-core-payload-lifetime.py
 
   native-published-m3:
-    if: ${{ inputs.native_published_only && !inputs.version_upgrade_only }}
+    if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}
     name: Published M3 (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -277,7 +281,7 @@ jobs:
           if-no-files-found: warn
 
   gnu-login-recovery:
-    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.artifact_run != '' || inputs.version_upgrade_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.research_feedback_only && (inputs.artifact_run != '' || inputs.version_upgrade_only) }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -396,3 +400,49 @@ jobs:
             ${{ runner.temp }}/gnu-login-interruption/
             ${{ runner.temp }}/gnu-legacy-vault/legacy-vault-coverage.json
           if-no-files-found: ignore
+
+  research-feedback-plan:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.research_feedback_only }}
+    cache-mode: none
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - id: plan
+        shell: bash
+        env:
+          OTHER_MODE: ${{ inputs.native_published_only || inputs.version_upgrade_only || inputs.artifact_run != '' }}
+        run: |
+          set -euo pipefail
+          test "$OTHER_MODE" = false
+          node scripts/sdk-ci-cache.mjs plan sdk/core-sdk.lock.json crates/core-sdk/core-sdk.lock.json > "$RUNNER_TEMP/research-sdk-plan.json"
+          node --input-type=module - <<'JS'
+          import {readFileSync,appendFileSync} from 'node:fs';
+          const plan=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/research-sdk-plan.json'));
+          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
+          const matrix={include:plan.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
+          if(matrix.include.length!==4)throw Error('Expected all four native consumers');
+          appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\n`);
+          JS
+  research-feedback-native:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.research_feedback_only }}
+    cache-mode: read
+    needs: research-feedback-plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.research-feedback-plan.outputs.matrix) }}
+    uses: ./.github/workflows/token-free-sdk-check.yml
+    with:
+      source_sha: ${{ github.sha }}
+      target: ${{ matrix.target }}
+      cache_key: ${{ matrix.key }}
+      runner_os: ${{ matrix.os }}
+      feedback_probe: true
