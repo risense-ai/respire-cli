@@ -15,6 +15,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
+mod witness;
+pub use witness::WitnessReport;
 mod conflicts;
 mod grants;
 mod retrieval;
@@ -111,6 +113,7 @@ impl LocalStore {
         .with_context(|| {
             format!("failed to open initialized local memory db: {}", path.display())
         })?;
+        witness::register(&connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
         connection
             .prepare("SELECT seq, op_id, state FROM sync_outbox LIMIT 0")
@@ -128,6 +131,7 @@ impl LocalStore {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        witness::register(&connection)?;
         Ok(Self { connection })
     }
 
@@ -755,6 +759,7 @@ pub fn validate_migration_snapshot(path: &Path) -> Result<()> {
 /// Commit schema upgrades together; any unsupported format or SQL failure leaves
 /// the original tables and rows intact.
 fn migrate(connection: &Connection) -> Result<()> {
+    witness::register(connection)?;
     let transaction = connection.unchecked_transaction()?;
     migrate_schema(&transaction)?;
     transaction.execute_batch("CREATE TABLE IF NOT EXISTS recall_pairs(a TEXT NOT NULL,b TEXT NOT NULL,n INTEGER NOT NULL,PRIMARY KEY(a,b),CHECK(a<b)); CREATE INDEX IF NOT EXISTS recall_pairs_b ON recall_pairs(b);")?;
@@ -1016,6 +1021,7 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         );",
     )?;
     connection.execute_batch(include_str!("local/revision_schema.sql"))?;
+    witness::install(connection)?;
     Ok(())
 }
 

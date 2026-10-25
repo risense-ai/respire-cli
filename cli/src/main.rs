@@ -1021,6 +1021,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Verify the local ciphertext-digest witness chain (not an external trust anchor)
+    Witness {
+        #[arg(long)]
+        verify: bool,
+    },
     /// Open the hosted user dashboard without starting the local runtime
     Web {
         /// Report https://dash.rsrs.rs without opening a browser
@@ -6740,6 +6745,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
         }) => return run_doctor(*remote, *check_update, *fix),
         Some(Command::UpdateCheck { force, clear }) => return run_update_check(*force, *clear),
         Some(Command::Audit { json }) => return run_audit(*json),
+        Some(Command::Witness { verify: _ }) => {
+            let report=build_local()?.witness_verify()?;
+            let mut result=ResultEnvelope::new("witness",if report.intact{OutputStatus::Ok}else{OutputStatus::Fail},serde_json::to_value(&report)?,Vec::new());
+            if !report.intact {result.errors.push(format!("witness verification failed at sequence {}: {}",report.broken_at.map_or_else(||"unknown".to_owned(),|seq|seq.to_string()),report.reason.as_deref().unwrap_or("invalid chain")));}
+            result.details=serde_json::to_value(report)?;
+            return emit_result(result);
+        },
         Some(Command::KeysExport { out }) => return run_keys_export(out.as_deref()),
         Some(Command::SuperReset { super_pass }) => {
             let new_super = respire::auth::super_reset(None, super_pass.as_deref())?;
@@ -9047,6 +9059,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::PortraitMaterial { .. }
         | Command::Doctor { .. }
         | Command::Audit { .. }
+        | Command::Witness { .. }
         | Command::UpdateCheck { .. }
         | Command::Model { .. }
         | Command::Share { .. }

@@ -1,0 +1,11 @@
+# Transaction witness chain
+
+`rsrs witness --verify --json` streams the local chain and checks schema/library binding, contiguous sequence, previous hash and each event hash. A damaged chain returns a failed envelope, a nonzero exit and the first broken sequence. `count` is the verified prefix length on failure. The command does not change memory data and is available in read-only mode.
+
+Accepted inserts, source updates, attachment changes, tombstones, content purges, accepted sync writes and physical row removal append through SQLite triggers in the same transaction as the source mutation. LWW rejection creates no event. Transaction/statement rollback removes its events too. Derived plaintext vectors, opaque Core artifact caches, read counters and dirty acknowledgments are not independently treated as new memory content. The encrypted legacy embedding field is covered as ciphertext metadata.
+
+Version 1 hashes a fixed-order JSON encoding with separate source/event domain prefixes. Events bind library identity, sequence, timestamp, operation, full entry ID, previous ID, before/after digests and previous event hash. Source digests include sealed fields and relevant metadata; the ledger never copies plaintext title/body or account keys. IDs/actions/timestamps and digests remain visible metadata. The log itself is not encrypted and it does not contain historical content for restoration.
+
+This is an append-only product write path, not a database permission boundary. Host connections register the versioned pure hash functions; arbitrary external SQLite writes that fire the triggers must register the same functions or fail. Existing read-only SQLite tools can still inspect the file. Backups use the existing SQLite snapshot operation; real CLI tests verify that snapshot restore preserves a coherent earlier chain.
+
+There is no MAC or independent checkpoint. A party able to rewrite a suffix/whole chain, delete its tail or roll the entire database back can evade local chain verification. Restoring a snapshot intentionally restores its earlier chain/head; an externally retained newer head is required to recognize that rollback. Successful local verification must not be presented as proof against an administrator or filesystem owner. No external checkpoint upload or new credential is introduced.

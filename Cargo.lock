@@ -1571,6 +1571,7 @@ dependencies = [
  "ratatui",
  "respire_app",
  "respire_spawn",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha1",
