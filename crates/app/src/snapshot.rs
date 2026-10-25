@@ -940,7 +940,10 @@ mod tests {
             &crate::SessionKeys::from_urk([7; 32])?,
         )?;
         assert_eq!(manifest.entries, 1);
-        assert_eq!(manifest.sdk_version, "1.0.2-dev.11");
+        let pinned:serde_json::Value=serde_json::from_str(include_str!("../../core-sdk/core-sdk.lock.json"))?;
+        let targets=pinned["targets"].as_object().context("pinned SDK targets")?;
+        assert_eq!(targets.len(),7);
+        assert!(targets.values().all(|entry|entry["sdk_version"].as_str()==Some(manifest.sdk_version.as_str())));
         assert_eq!(list(directory.path())?.len(), 1);
         let copied = directory
             .path()

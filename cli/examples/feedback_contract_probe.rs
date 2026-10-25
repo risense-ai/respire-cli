@@ -228,7 +228,7 @@ fn main() -> Result<()> {
     );
     let context = respire::feedback::query_settings(
         &store,
-        &MemoryQuery::new("unrelated query").of_project("probe"),
+        &MemoryQuery::new("unrelated query"),
         &store.all(false)?,
     )?;
     anyhow::ensure!(
@@ -236,6 +236,20 @@ fn main() -> Result<()> {
             .as_object()
             .is_some_and(|map| map.is_empty()),
         "unrelated query received a penalty"
+    );
+    let other_project = respire::feedback::query_settings(
+        &store,
+        &MemoryQuery::new(text).of_project("other-project"),
+        &store.all(false)?,
+    )?;
+    anyhow::ensure!(
+        other_project["feedback"]["good"]
+            .as_object()
+            .is_some_and(|map| map.is_empty())
+            && other_project["feedback"]["bad"]
+                .as_object()
+                .is_some_and(|map| map.is_empty()),
+        "another project received a feedback observation"
     );
     std::env::set_var("RSRS_BAD_PENALTY", "1");
     let app = respire::service::App {

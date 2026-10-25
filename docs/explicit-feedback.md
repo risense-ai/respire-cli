@@ -80,3 +80,11 @@ paired case order/identity and model/SDK/count compatibility, reports per-case
 degradation indices and paired hit@20/MRR deltas with seeded bootstrap intervals.
 These are case-bootstrap exploratory intervals, not proof of a frozen dataset,
 query-family independence, holdout generalization or a production benefit.
+
+For a running CLI daemon, environment switches are captured at startup. Apply
+changed FEEDBACK/BAD_PENALTY/MARK_SIM settings by stopping and restarting the
+owned runtime from its host terminal. Explicit grades are refreshed on the next
+request without restarting; they are not a one-time process cache. The four-platform
+manual research CI mode uses only exact dependency caches prepared by the existing
+trusted main workflow, carries no private download token and retains the ordinary
+GNU full-suite/90% coverage gate plus native lifecycle and real-model checks.
