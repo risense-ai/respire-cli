@@ -26,6 +26,12 @@ pub struct Manifest {
     pub sdk_version: String,
     pub sdk_abi: u32,
     pub model: String,
+    #[serde(default)]
+    pub witness_head: Option<String>,
+    #[serde(default)]
+    pub witness_count: Option<u64>,
+    #[serde(default)]
+    pub witness_intact: Option<bool>,
 }
 
 fn private_dir(path: &Path) -> Result<()> {
@@ -202,6 +208,7 @@ pub fn create(
                 rusqlite::params![nonce, ciphertext],
             )?;
         }
+        let witness = crate::transport::local::witness_checkpoint_file(&database)?;
         let manifest = Manifest {
             schema_version: 1,
             id,
@@ -217,6 +224,9 @@ pub fn create(
             sdk_version,
             sdk_abi: crate::core_sdk::ABI_VERSION,
             model: "m3".to_owned(),
+            witness_head: witness.as_ref().map(|report| report.head.clone()),
+            witness_count: witness.as_ref().map(|report| report.count),
+            witness_intact: witness.as_ref().map(|report| report.intact),
         };
         let mut file = private_new(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -281,6 +291,26 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
         schema_digest(&database)? == manifest.database_schema_sha256,
         "snapshot schema digest mismatch"
     );
+    match crate::transport::local::witness_checkpoint_file(&database)? {
+        None => anyhow::ensure!(
+            manifest.witness_head.is_none()
+                && manifest.witness_count.is_none()
+                && manifest.witness_intact.is_none(),
+            "snapshot witness checkpoint exists without a witness schema"
+        ),
+        Some(report) => {
+            anyhow::ensure!(
+                manifest.witness_head.as_ref() == Some(&report.head)
+                    && manifest.witness_count == Some(report.count)
+                    && manifest.witness_intact == Some(report.intact),
+                "snapshot witness checkpoint mismatch or missing checkpoint"
+            );
+            anyhow::ensure!(
+                report.intact,
+                "snapshot witness chain is invalid; preserve the copy for explicit recovery/repair"
+            );
+        }
+    }
     let (entries, version) = inventory(&database)?;
     anyhow::ensure!(
         entries == manifest.entries && version == manifest.sqlite_user_version,
@@ -1424,6 +1454,31 @@ mod tests {
         );
         assert!(root.join("rsrs.db-wal").exists(), "live WAL removed");
         reader.execute_batch("ROLLBACK")?;
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_manifest_without_witness_fields_remains_valid_for_pre_witness_database() -> Result<()>
+    {
+        let (directory, _db) = fixture()?;
+        let snapshot = create(
+            directory.path(),
+            "account",
+            "legacy",
+            &crate::SessionKeys::from_urk([7; 32])?,
+        )?;
+        assert!(snapshot.witness_head.is_none());
+        let path = directory
+            .path()
+            .join("snapshots")
+            .join(format!("{}.json", snapshot.id));
+        let mut old: serde_json::Value = serde_json::from_slice(&fs::read(&path)?)?;
+        let fields = old.as_object_mut().context("manifest object")?;
+        for name in ["witness_head", "witness_count", "witness_intact"] {
+            fields.remove(name);
+        }
+        fs::write(&path, serde_json::to_vec(&old)?)?;
+        assert_eq!(list(directory.path())?.len(), 1);
         Ok(())
     }
 

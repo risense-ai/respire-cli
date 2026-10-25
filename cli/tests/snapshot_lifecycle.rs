@@ -372,32 +372,83 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
 }
 
 #[test]
-fn public_witness_verifies_restored_chain_and_reports_tamper_without_writes()->Result<()> {
-    let fixture=Fixture::new()?;
-    let (ok,before)=fixture.run(&["--direct","--json","witness","--verify"])?;assert!(ok);
-    assert_eq!(before["summary"]["count"],1);assert_eq!(before["summary"]["intact"],true);
-    let (ok,created)=fixture.run(&["--direct","--json","snapshot","create"])?;assert!(ok);
-    let id=created["details"]["id"].as_str().context("snapshot id")?;
+fn public_witness_verifies_restored_chain_and_reports_tamper_without_writes() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (ok, before) = fixture.run(&["--direct", "--json", "witness", "--verify"])?;
+    assert!(ok);
+    assert_eq!(before["summary"]["count"], 1);
+    assert_eq!(before["summary"]["intact"], true);
+    let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
+    assert!(ok);
+    let id = created["details"]["id"].as_str().context("snapshot id")?;
+    assert_eq!(
+        created["details"]["witness_head"],
+        before["summary"]["head"]
+    );
+    assert_eq!(created["details"]["witness_count"], 1);
+    assert_eq!(created["details"]["witness_intact"], true);
     {
-        let store=LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
+        let store = LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
         assert!(store.forget("12345678-1234-4234-8234-123456789abc")?);
     }
-    let (ok,changed)=fixture.run(&["--direct","--json","witness","--verify"])?;assert!(ok);
-    assert_eq!(changed["summary"]["count"],2);
-    let (ok,restored)=fixture.run(&["--json","snapshot","restore",id,"--confirm"])?;
-    anyhow::ensure!(ok,"restore of witnessed library failed: {}",restored["errors"]);
-    let (ok,verified)=fixture.run(&["--client-only","--json","witness","--verify"])?;assert!(ok);
-    assert_eq!(verified["summary"]["head"],before["summary"]["head"]);
-    assert_eq!(verified["summary"]["count"],1);
+    let (ok, changed) = fixture.run(&["--direct", "--json", "witness", "--verify"])?;
+    assert!(ok);
+    assert_eq!(changed["summary"]["count"], 2);
+    let (ok, restored) = fixture.run(&["--json", "snapshot", "restore", id, "--confirm"])?;
+    anyhow::ensure!(
+        ok,
+        "restore of witnessed library failed: {}",
+        restored["errors"]
+    );
+    let (ok, verified) = fixture.run(&["--client-only", "--json", "witness", "--verify"])?;
+    assert!(ok);
+    assert_eq!(verified["summary"]["head"], before["summary"]["head"]);
+    assert_eq!(verified["summary"]["count"], 1);
     {
-        let injection=rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
-        injection.execute("UPDATE witness_log SET after_digest='synthetic-tamper' WHERE seq=1",[])?;
+        let injection = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+        injection.execute(
+            "UPDATE witness_log SET after_digest='synthetic-tamper' WHERE seq=1",
+            [],
+        )?;
     }
-    let (ok,broken)=fixture.run(&["--client-only","--json","witness","--verify"])?;
-    assert!(!ok);assert_eq!(broken["command"],"witness");assert_eq!(broken["status"],"fail");
-    assert_eq!(broken["summary"]["broken_at"],1);
-    assert!(!broken["errors"].as_array().context("diagnostics")?.is_empty());
-    let (ok,status)=fixture.run(&["--client-only","--json","status"])?;assert!(ok);
-    assert_eq!(status["summary"]["local_alive"],1);
+    let (ok, broken) = fixture.run(&["--client-only", "--json", "witness", "--verify"])?;
+    assert!(!ok);
+    assert_eq!(broken["command"], "witness");
+    assert_eq!(broken["status"], "fail");
+    assert_eq!(broken["summary"]["broken_at"], 1);
+    assert!(!broken["errors"]
+        .as_array()
+        .context("diagnostics")?
+        .is_empty());
+    let (ok, status) = fixture.run(&["--client-only", "--json", "status"])?;
+    assert!(ok);
+    assert_eq!(status["summary"]["local_alive"], 1);
+    // The damaged current chain is still preserved in a pre-restore copy; it
+    // must not prevent selecting a separate healthy checkpoint by exact ID.
+    let (ok, rescued) = fixture.run(&["--json", "snapshot", "restore", id, "--confirm"])?;
+    anyhow::ensure!(
+        ok,
+        "healthy witness snapshot rescue failed: {}",
+        rescued["errors"]
+    );
+    let (ok, rechecked) = fixture.run(&["--client-only", "--json", "witness", "--verify"])?;
+    assert!(ok);
+    assert_eq!(rechecked["summary"]["head"], before["summary"]["head"]);
+    // The whole database hash is unchanged: this specifically tests manifest
+    // checkpoint binding rather than merely file-byte integrity validation.
+    let manifest_path = fixture
+        .root
+        .path()
+        .join("snapshots")
+        .join(format!("{id}.json"));
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+    manifest["witness_head"] = json!("0".repeat(64));
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    let (ok, rejected) = fixture.run(&["--json", "snapshot", "restore", id, "--confirm"])?;
+    assert!(!ok);
+    assert!(rejected["errors"]
+        .to_string()
+        .contains("witness checkpoint"));
+
     Ok(())
 }

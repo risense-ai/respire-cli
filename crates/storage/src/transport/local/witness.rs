@@ -40,7 +40,7 @@ fn event_hash(
     ))
 }
 
-pub(super) fn register(connection: &Connection) -> Result<()> {
+pub fn register_witness_functions(connection: &Connection) -> Result<()> {
     let flags = FunctionFlags::SQLITE_UTF8
         | FunctionFlags::SQLITE_DETERMINISTIC
         | FunctionFlags::SQLITE_INNOCUOUS;
@@ -168,6 +168,29 @@ impl LocalStore {
         }
         Ok(report)
     }
+}
+
+/// Inspect a snapshot without migrating it or reconfiguring Core index roots.
+pub fn witness_checkpoint_file(path: &std::path::Path) -> Result<Option<WitnessReport>> {
+    let connection = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    connection.busy_timeout(std::time::Duration::from_secs(2))?;
+    let store = LocalStore { connection };
+    let transaction = store.connection.unchecked_transaction()?;
+    let present: bool = store.connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='witness_log')",
+        [],
+        |row| row.get(0),
+    )?;
+    let report = if present {
+        Some(store.witness_verify()?)
+    } else {
+        None
+    };
+    transaction.commit()?;
+    Ok(report)
 }
 
 #[cfg(test)]

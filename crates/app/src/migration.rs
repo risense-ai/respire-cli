@@ -865,6 +865,7 @@ fn rewrap_namespace(session: &Value, alias: &str, keys: &crate::memory::SessionK
 fn migrate_namespace_database(path: &Path, source: &crate::memory::SessionKeys) -> Result<()> {
     if !path.is_file() { return Ok(()); }
     let mut database = Connection::open(path)?;
+    crate::transport::local::register_witness_functions(&database)?;
     let tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
@@ -1007,6 +1008,27 @@ fn private_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn namespace_conversion_registers_witness_functions_and_preserves_original()->Result<()> {
+        use crate::transport::MemoryTransport;
+        let root=tempfile::tempdir()?;let original=root.path().join("original.db");let staged=root.path().join("staged.db");
+        let keys=crate::SessionKeys::from_legacy_urk([7;32])?;
+        let (nonce,ciphertext)=keys.encrypt_content("synthetic namespace content")?;
+        let mut memory=crate::StoredMemory::new_pending("synthetic-entry".into(),"account".into());
+        memory.ciphertext=ciphertext.clone();memory.nonce=nonce;memory.updated_at="2026-01-01T00:00:00Z".into();
+        {let store=crate::transport::local::LocalStore::open(&original)?;assert!(store.put(&memory)?);assert_eq!(store.witness_verify()?.count,1);}
+        std::fs::copy(&original,&staged)?;
+        migrate_namespace_database(&staged,&keys)?;
+        let converted=crate::transport::local::LocalStore::open_read_only(&staged)?;
+        let rows=converted.all(false)?;assert_eq!(rows.len(),1);
+        assert!(rows[0].ciphertext.starts_with(crate::memory::crypto::RSRS_PREFIX));
+        assert_eq!(crate::SessionKeys::from_urk([7;32])?.decrypt_content(&rows[0].ciphertext,&rows[0].nonce)?,"synthetic namespace content");
+        let proof=converted.witness_verify()?;assert!(proof.intact);assert_eq!(proof.count,2);
+        let retained=crate::transport::local::LocalStore::open_read_only(&original)?;
+        assert_eq!(retained.all(false)?[0].ciphertext,ciphertext);assert_eq!(retained.witness_verify()?.count,1);
+        Ok(())
+    }
 
     #[test]
     fn client_only_never_creates_a_migration_home() -> Result<()> {

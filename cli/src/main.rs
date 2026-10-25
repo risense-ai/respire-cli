@@ -6974,6 +6974,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 serde_json::json!({"action":match cmd {SnapshotCmd::Create{..}=>"created",SnapshotCmd::List=>"list",SnapshotCmd::ResumeSync{..}=>"sync_resumed",SnapshotCmd::Restore{..}=>"restored",SnapshotCmd::Recover{..}=>"recovered"}}),
                 Vec::new(),
             );
+            if matches!(cmd,SnapshotCmd::Create{..}) && details["witness_intact"]==false {
+                result.status=OutputStatus::Warn;
+                result.errors.push("snapshot file created, but its witness chain is invalid; preserved for explicit recovery/repair".into());
+            }
             if matches!(cmd,SnapshotCmd::List) && details["problems"].as_array().is_some_and(|items|!items.is_empty()) {
                 result.status=OutputStatus::Warn;
                 result.errors.push("some snapshots failed verification; inspect details.problems; healthy snapshots remain usable".into());
