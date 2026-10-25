@@ -63,29 +63,36 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
     {
         return Ok(src);
     }
+    install_binary(&src, &dest, respire::core_sdk::RUNTIME_FILES)?;
+    Ok(dest)
+}
+
+// Production receives only the SDK's compile-time verified runtime inventory.
+// An explicit list also lets filesystem failure tests cover static SDK builds.
+fn install_binary(src: &Path, dest: &Path, runtime_files: &[(&str, &str)]) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     }
-    stage_runtime_libraries(&src, &dest)?;
-    if !bin_needs_refresh(&src, &dest)? {
-        return Ok(dest);
+    stage_runtime_libraries(src, dest, runtime_files)?;
+    if !bin_needs_refresh(src, dest)? {
+        return Ok(());
     }
-    std::fs::copy(&src, &dest)
+    std::fs::copy(src, dest)
         .map_err(|err| format!("cannot copy {} -> {}: {err}", src.display(), dest.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|err| format!("cannot set execute bit on {}: {err}", dest.display()))?;
     }
-    Ok(dest)
+    Ok(())
 }
 
-fn stage_runtime_libraries(src: &Path, dest: &Path) -> Result<(), String> {
+fn stage_runtime_libraries(src: &Path, dest: &Path, runtime_files: &[(&str, &str)]) -> Result<(), String> {
     let source_dir = src.parent().ok_or("binary has no source directory")?;
     let destination_dir = dest.parent().ok_or("binary has no destination directory")?;
-    for &(name, expected) in respire::core_sdk::RUNTIME_FILES {
+    for &(name, expected) in runtime_files {
         let source = source_dir.join(name);
         let bytes = std::fs::read(&source)
             .map_err(|err| format!("cannot read SDK runtime {}: {err}", source.display()))?;
@@ -1181,31 +1188,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn runtime_libraries_reject_corruption_and_repair_destination() -> Result<(), String> {
-        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
-        let temporary = tempfile::tempdir().map_err(|error| error.to_string())?;
-        let source = temporary.path().join("source");
-        let destination = temporary.path().join("destination");
-        std::fs::create_dir_all(&source).map_err(|error| error.to_string())?;
-        std::fs::create_dir_all(&destination).map_err(|error| error.to_string())?;
-        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
-        let original = executable.parent().ok_or("missing fixture directory")?;
-        for &(file, _) in respire::core_sdk::RUNTIME_FILES {
-            std::fs::copy(original.join(file), source.join(file)).map_err(|error| error.to_string())?;
-        }
-        let src = source.join("rsrs");
-        let dest = destination.join("rsrs");
-        std::fs::write(source.join(name), b"corrupt").map_err(|error| error.to_string())?;
-        assert!(stage_runtime_libraries(&src, &dest).is_err());
-        std::fs::copy(original.join(name), source.join(name)).map_err(|error| error.to_string())?;
-        stage_runtime_libraries(&src, &dest)?;
-        std::fs::write(destination.join(name), b"stale").map_err(|error| error.to_string())?;
-        stage_runtime_libraries(&src, &dest)?;
-        let installed = std::fs::read(destination.join(name)).map_err(|error| error.to_string())?;
-        assert_eq!(format!("{:x}", Sha256::digest(&installed)), expected);
-        Ok(())
-    }
+    const RUNTIME_FIXTURE_BYTES: &[u8] = b"synthetic SDK runtime payload";
+    const RUNTIME_FIXTURE_FILES: &[(&str, &str)] = &[("runtime-fixture.bin", "6373314838dc2830c99fc325c2c956aad4630bc6e12a83b8e8f290c01701e4de")];
 
     fn runtime_library_fixture() -> anyhow::Result<(tempfile::TempDir, PathBuf, PathBuf)> {
         let temporary = tempfile::tempdir()?;
@@ -1213,65 +1197,72 @@ mod tests {
         let destination = temporary.path().join("destination");
         std::fs::create_dir(&source)?;
         std::fs::create_dir(&destination)?;
-        let executable = std::env::current_exe()?;
-        for &(name, _) in respire::core_sdk::RUNTIME_FILES {
-            std::fs::copy(executable.parent().unwrap().join(name), source.join(name))?;
-        }
+        std::fs::write(source.join(RUNTIME_FIXTURE_FILES[0].0), RUNTIME_FIXTURE_BYTES)?;
+        std::fs::write(source.join("rsrs"), b"synthetic executable payload")?;
         Ok((temporary, source.join("rsrs"), destination.join("rsrs")))
+    }
+
+    #[test]
+    fn runtime_libraries_reject_corruption_and_repair_destination() -> anyhow::Result<()> {
+        let (_temporary, source, destination) = runtime_library_fixture()?;
+        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
+        let source_file = source.parent().unwrap().join(name);
+        let installed = destination.parent().unwrap().join(name);
+        std::fs::write(&source_file, b"corrupt")?;
+        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).is_err());
+        std::fs::write(source_file, RUNTIME_FIXTURE_BYTES)?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        std::fs::write(&installed, b"stale")?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(installed)?)), expected);
+        Ok(())
     }
 
     #[test]
     fn runtime_libraries_keep_identical_readonly_files_and_native_identity() -> anyhow::Result<()> {
         let (_temporary, source, destination) = runtime_library_fixture()?;
-        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
-        let mut before = Vec::new();
-        for &(name, _) in respire::core_sdk::RUNTIME_FILES {
-            let path = destination.parent().unwrap().join(name);
-            let mut permissions = std::fs::metadata(&path)?.permissions();
-            permissions.set_readonly(true);
-            std::fs::set_permissions(&path, permissions)?;
-            before.push((path.clone(), std::fs::metadata(path)?));
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        let path = destination.parent().unwrap().join(RUNTIME_FIXTURE_FILES[0].0);
+        let original_permissions = std::fs::metadata(&path)?.permissions();
+        let mut readonly = original_permissions.clone();
+        readonly.set_readonly(true);
+        std::fs::set_permissions(&path, readonly)?;
+        let before = std::fs::metadata(&path)?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        let after = std::fs::metadata(&path)?;
+        assert!(after.permissions().readonly());
+        assert_eq!(after.modified()?, before.modified()?);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(after.ino(), before.ino(), "mapped library inode changed");
         }
-        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
-        for (path, original) in before {
-            let current = std::fs::metadata(&path)?;
-            assert!(current.permissions().readonly());
-            assert_eq!(current.modified()?, original.modified()?);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                assert_eq!(current.ino(), original.ino(), "mapped library inode changed");
-            }
-            // Restore the exact original fixture permissions for Windows cleanup.
-            let source_file = source.parent().unwrap().join(path.file_name().unwrap());
-            std::fs::set_permissions(path, std::fs::metadata(source_file)?.permissions())?;
-        }
+        std::fs::set_permissions(path, original_permissions)?;
         Ok(())
     }
 
     #[test]
     fn runtime_library_failures_preserve_inputs_and_remove_atomic_temporary_files() -> anyhow::Result<()> {
-        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
+        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
         let (_temporary, source, destination) = runtime_library_fixture()?;
         let source_file = source.parent().unwrap().join(name);
-        let bytes = std::fs::read(&source_file)?;
         std::fs::remove_file(&source_file)?;
-        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot read SDK runtime"));
-        std::fs::write(&source_file, &bytes)?;
+        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot read SDK runtime"));
+        std::fs::write(&source_file, RUNTIME_FIXTURE_BYTES)?;
         let directory = destination.parent().unwrap();
         std::fs::remove_dir(directory)?;
         std::fs::write(directory, b"unrelated blocker")?;
-        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot stage SDK runtime"));
+        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot stage SDK runtime"));
         assert_eq!(std::fs::read(directory)?, b"unrelated blocker");
         std::fs::remove_file(directory)?;
         std::fs::create_dir(directory)?;
         std::fs::create_dir(directory.join(name))?;
-        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot install SDK runtime"));
+        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot install SDK runtime"));
         assert!(directory.join(name).is_dir());
         assert_eq!(std::fs::read_dir(directory)?.count(), 1, "failed rename left a temporary file");
         assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&source_file)?)), expected);
         std::fs::remove_dir(directory.join(name))?;
-        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
         assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(directory.join(name))?)), expected);
         Ok(())
     }
@@ -1280,27 +1271,15 @@ mod tests {
     fn runtime_library_staging_rejects_missing_parent_paths() {
         let root = Path::new(std::path::MAIN_SEPARATOR_STR);
         let file = Path::new("fixture/rsrs");
-        assert_eq!(stage_runtime_libraries(root, file).unwrap_err(), "binary has no source directory");
-        assert_eq!(stage_runtime_libraries(file, root).unwrap_err(), "binary has no destination directory");
+        assert_eq!(stage_runtime_libraries(root, file, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no source directory");
+        assert_eq!(stage_runtime_libraries(file, root, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no destination directory");
     }
 
     #[test]
-    fn materialize_bin_repairs_runtime_without_replacing_a_current_executable() -> anyhow::Result<()> {
-        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
-        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
-        let temporary = tempfile::tempdir()?;
-        struct RestoreBinOverride(Option<std::ffi::OsString>);
-        impl Drop for RestoreBinOverride {
-            fn drop(&mut self) {
-                match &self.0 {
-                    Some(value) => std::env::set_var("RSRS_BIN_DIR", value),
-                    None => std::env::remove_var("RSRS_BIN_DIR"),
-                }
-            }
-        }
-        let _restore = RestoreBinOverride(std::env::var_os("RSRS_BIN_DIR"));
-        std::env::set_var("RSRS_BIN_DIR", temporary.path());
-        let executable = materialize_bin().map_err(anyhow::Error::msg)?;
+    fn binary_installation_repairs_runtime_without_replacing_a_current_executable() -> anyhow::Result<()> {
+        let (_temporary, source, executable) = runtime_library_fixture()?;
+        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
+        install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
         let before = std::fs::metadata(&executable)?;
         let library = executable.parent().unwrap().join(name);
         for corrupt in [false, true] {
@@ -1309,7 +1288,8 @@ mod tests {
             } else {
                 std::fs::remove_file(&library)?;
             }
-            assert_eq!(materialize_bin().map_err(anyhow::Error::msg)?, executable);
+            install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+            assert_eq!(std::fs::read(&executable)?, b"synthetic executable payload");
             assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&library)?)), expected);
             let after = std::fs::metadata(&executable)?;
             assert_eq!(after.modified()?, before.modified()?);
