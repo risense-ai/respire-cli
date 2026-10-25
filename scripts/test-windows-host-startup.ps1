@@ -22,6 +22,8 @@ $taskName = 'RespireStartupCI-' + [guid]::NewGuid().ToString('N')
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $registered = $false
 $runtimeOwned = $false
+$startupAttempted = $false
+$runtimeStopped = $false
 $startupAction = $null
 $utf8 = [Text.UTF8Encoding]::new($false)
 New-Item -ItemType Directory -Path $selectedProfile -Force | Out-Null
@@ -66,6 +68,14 @@ function RemoveFixtureTask {
     if ($null -eq $currentTask) { return }
     if ($currentTask.Actions.Execute -ne $powershell -or $currentTask.Actions.Arguments -ne $startupAction.Arguments -or
         $currentTask.Principal.UserId -ne $identity.User.Value) { throw 'Task ownership changed; refusing removal' }
+    if ($currentTask.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $taskName -TaskPath '\'
+        $stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
+        while ((FindFixtureTask).State -eq 'Running' -and [DateTime]::UtcNow -lt $stopDeadline) {
+            Start-Sleep -Milliseconds 100
+        }
+        if ((FindFixtureTask).State -eq 'Running') { throw 'Owned scheduled task did not stop; preserving fixture' }
+    }
     Unregister-ScheduledTask -TaskName $taskName -TaskPath '\' -Confirm:$false
     if ($null -ne (FindFixtureTask)) { throw 'Fixture task remained after removal' }
 }
@@ -85,6 +95,7 @@ try {
         $task.Principal.LogonType -ne 'Interactive' -or $task.Principal.RunLevel -ne 'Limited' -or
         $task.Actions.Execute -ne $powershell -or $task.Actions.Arguments -ne $startupAction.Arguments -or
         $task.Triggers.CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger') { throw 'Scheduled task identity/action/trigger drifted' }
+    $startupAttempted = $true
     Start-ScheduledTask -TaskName $taskName -TaskPath '\'
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
     $health = $null
@@ -110,6 +121,7 @@ try {
     $stop = InvokeFixture '--runtime-internal --stop --json'
     if ($stop.exit -ne 0) { throw 'Owned host runtime could not be stopped' }
     $runtimeOwned = $false
+    $runtimeStopped = $true
     RemoveFixtureTask
     $registered = $false
     Write-Output (@{result = 'PASS'; profile = 'isolated synthetic off-mode'; sign_in_trigger = $true;
@@ -121,10 +133,11 @@ try {
             $current = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
             if ($current.server -eq 'respire' -and [IO.Path]::GetFullPath($current.data_dir) -eq [IO.Path]::GetFullPath($selectedProfile)) {
                 $cleanupStop = InvokeFixture '--runtime-internal --stop --json'
-                if ($cleanupStop.exit -eq 0) { $runtimeOwned = $false }
+                if ($cleanupStop.exit -eq 0) { $runtimeOwned = $false; $runtimeStopped = $true }
             }
         } catch { Write-Warning 'Fixture runtime cleanup needs inspection; no unrelated process was killed' }
     }
     if ($registered -or $null -ne $startupAction) { RemoveFixtureTask }
-    if (-not $runtimeOwned) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+    if (-not $startupAttempted -or $runtimeStopped) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
+    else { Write-Warning 'Startup outcome uncertain; fixture files retained for inspection' }
 }
