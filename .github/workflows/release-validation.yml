@@ -29,6 +29,7 @@ on:
         default: true
         type: boolean
 
+cache-mode: read
 permissions:
   contents: read
 
@@ -93,6 +94,29 @@ jobs:
         run: |
           node npm/scripts/check-manifest.mjs
           node scripts/check-sdk-release.mjs
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-1-restore
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-1.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
       - name: Prepare pinned binary Core SDK
         if: ${{ !contains(matrix.target, '-musl') }}
         run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}
@@ -101,7 +125,7 @@ jobs:
         run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
         env:
           RUSTFLAGS: ${{ matrix.rustflags }}
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         if: contains(matrix.target, '-musl')
         with:
           path: target/musl-cache
@@ -119,7 +143,7 @@ jobs:
           exe=target/ci/${{ matrix.target }}/release/rsrs
           if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
           "$exe" --version
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         if: runner.os == 'macOS'
         with:
           path: ${{ runner.temp }}/release-probe/models/bge-m3

@@ -26,6 +26,7 @@ on:
     branches: [main, 'fix/prompt-*']
   pull_request:
     branches: [main]
+cache-mode: read
 permissions:
   contents: read
   actions: read
@@ -60,6 +61,29 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-1-restore
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-1.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
       - name: Prepare pinned binary Core SDK
         if: ${{ !contains(matrix.target, '-musl') }}
         shell: bash
@@ -70,7 +94,7 @@ jobs:
       - name: Build without local vendor SDKs or accelerator hardware
         if: ${{ !contains(matrix.target, '-musl') }}
         run: cargo build --workspace --locked --target ${{ matrix.target }} --target-dir target/ci
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         if: contains(matrix.target, '-musl')
         id: musl-cache
         with:
@@ -79,12 +103,6 @@ jobs:
       - name: Build static Linux binary and verify libc independence
         if: contains(matrix.target, '-musl')
         run: bash scripts/build-linux-musl.sh "${{ matrix.target }}"
-      - name: Preserve native build cache even if Rust linking fails
-        if: always() && contains(matrix.target, '-musl') && steps.musl-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: target/musl-cache
-          key: musl-${{ matrix.target }}-ort-da9b5e3-rust-1.95-v1
       - name: Verify musl CPU inference
         if: contains(matrix.target, '-musl')
         env:
@@ -127,6 +145,29 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-2
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-2-restore
+        if: steps.sdk-cache-2.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
+          key: ${{ steps.sdk-cache-2.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-2.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
       - name: Prepare pinned binary Core SDK
         shell: bash
         run: |
@@ -149,7 +190,7 @@ jobs:
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
-      - run: node --test npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs
+      - run: node --test npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
@@ -180,7 +221,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install cryptography
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: native-model
           key: pinned-m3-fp16-4de13258303883538bd53b696b452bf8099f0858
@@ -271,7 +312,7 @@ jobs:
           github-token: ${{ github.token }}
       - name: Extract the checksum-verified binary
         run: node npm/scripts/extract-artifact.mjs validated-cli candidate
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/release-probe/models/bge-m3
           key: release-m3-quantized-0826f8c1-gnu-recovery

@@ -5,6 +5,8 @@ on:
     branches: [main]
     tags: ['v*']
     paths-ignore:
+      - 'scripts/sdk-ci-cache.mjs'
+      - 'scripts/test-sdk-ci-cache.mjs'
       - "scripts/publish-interface-crate.mjs"
       # SDK download tooling takes effect with the separately validated SDK pin change.
       - 'crates/core-sdk/private-sdk-download.mjs'
