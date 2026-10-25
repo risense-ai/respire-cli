@@ -53,3 +53,24 @@ The original 200-case/250-entry/40-mark dataset has not been supplied here, so
 synthetic contract/isolation tests do **not** reproduce its reported gains.
 Holdout splits by time/query family and paired hit@20/MRR/per-case regressions,
 false penalties, latency and coverage remain required before assessing benefit.
+
+Suggested matched ablations on that same isolated dataset (all topk 20):
+
+| Variant | FEEDBACK | BAD_PENALTY | ABLATE | MARK_SIM |
+|---|---|---|---|---|
+| Current legacy | 0 | ignored | empty | ignored |
+| Remove read heat | 1 | 0 | hot | 0.5 |
+| Good heat only | 1 | 0 | empty | 0.5 |
+| Conditional bad only | 1 | 1 | hot | 0.5 |
+| Combined | 1 | 1 | empty | 0.5 |
+| Global bad negative control | 1 | 1 | empty | 0 |
+
+Names in the table omit the `RSRS_` prefix. Bad-only also removes good heat;
+the global negative control intentionally admits all query contexts and is not
+a recommended production setting. Save each report. The shared parameter
+snapshot records explicit feedback defaults, SDK lock hash and CLI version.
+`python3 scripts/compare-feedback-bench.py baseline.json variant.json` verifies
+paired case order/identity and model/SDK/count compatibility, reports per-case
+degradation indices and paired hit@20/MRR deltas with seeded bootstrap intervals.
+These are case-bootstrap exploratory intervals, not proof of a frozen dataset,
+query-family independence, holdout generalization or a production benefit.
