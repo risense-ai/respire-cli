@@ -1207,6 +1207,121 @@ mod tests {
         Ok(())
     }
 
+    fn runtime_library_fixture() -> anyhow::Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+        let temporary = tempfile::tempdir()?;
+        let source = temporary.path().join("source");
+        let destination = temporary.path().join("destination");
+        std::fs::create_dir(&source)?;
+        std::fs::create_dir(&destination)?;
+        let executable = std::env::current_exe()?;
+        for &(name, _) in respire::core_sdk::RUNTIME_FILES {
+            std::fs::copy(executable.parent().unwrap().join(name), source.join(name))?;
+        }
+        Ok((temporary, source.join("rsrs"), destination.join("rsrs")))
+    }
+
+    #[test]
+    fn runtime_libraries_keep_identical_readonly_files_and_native_identity() -> anyhow::Result<()> {
+        let (_temporary, source, destination) = runtime_library_fixture()?;
+        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
+        let mut before = Vec::new();
+        for &(name, _) in respire::core_sdk::RUNTIME_FILES {
+            let path = destination.parent().unwrap().join(name);
+            let mut permissions = std::fs::metadata(&path)?.permissions();
+            permissions.set_readonly(true);
+            std::fs::set_permissions(&path, permissions)?;
+            before.push((path.clone(), std::fs::metadata(path)?));
+        }
+        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
+        for (path, original) in before {
+            let current = std::fs::metadata(&path)?;
+            assert!(current.permissions().readonly());
+            assert_eq!(current.modified()?, original.modified()?);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(current.ino(), original.ino(), "mapped library inode changed");
+            }
+            // Restore the exact original fixture permissions for Windows cleanup.
+            let source_file = source.parent().unwrap().join(path.file_name().unwrap());
+            std::fs::set_permissions(path, std::fs::metadata(source_file)?.permissions())?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_library_failures_preserve_inputs_and_remove_atomic_temporary_files() -> anyhow::Result<()> {
+        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
+        let (_temporary, source, destination) = runtime_library_fixture()?;
+        let source_file = source.parent().unwrap().join(name);
+        let bytes = std::fs::read(&source_file)?;
+        std::fs::remove_file(&source_file)?;
+        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot read SDK runtime"));
+        std::fs::write(&source_file, &bytes)?;
+        let directory = destination.parent().unwrap();
+        std::fs::remove_dir(directory)?;
+        std::fs::write(directory, b"unrelated blocker")?;
+        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot stage SDK runtime"));
+        assert_eq!(std::fs::read(directory)?, b"unrelated blocker");
+        std::fs::remove_file(directory)?;
+        std::fs::create_dir(directory)?;
+        std::fs::create_dir(directory.join(name))?;
+        assert!(stage_runtime_libraries(&source, &destination).unwrap_err().contains("cannot install SDK runtime"));
+        assert!(directory.join(name).is_dir());
+        assert_eq!(std::fs::read_dir(directory)?.count(), 1, "failed rename left a temporary file");
+        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&source_file)?)), expected);
+        std::fs::remove_dir(directory.join(name))?;
+        stage_runtime_libraries(&source, &destination).map_err(anyhow::Error::msg)?;
+        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(directory.join(name))?)), expected);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_library_staging_rejects_missing_parent_paths() {
+        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
+        let file = Path::new("fixture/rsrs");
+        assert_eq!(stage_runtime_libraries(root, file).unwrap_err(), "binary has no source directory");
+        assert_eq!(stage_runtime_libraries(file, root).unwrap_err(), "binary has no destination directory");
+    }
+
+    #[test]
+    fn materialize_bin_repairs_runtime_without_replacing_a_current_executable() -> anyhow::Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let Some(&(name, expected)) = respire::core_sdk::RUNTIME_FILES.first() else { return Ok(()); };
+        let temporary = tempfile::tempdir()?;
+        struct RestoreBinOverride(Option<std::ffi::OsString>);
+        impl Drop for RestoreBinOverride {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("RSRS_BIN_DIR", value),
+                    None => std::env::remove_var("RSRS_BIN_DIR"),
+                }
+            }
+        }
+        let _restore = RestoreBinOverride(std::env::var_os("RSRS_BIN_DIR"));
+        std::env::set_var("RSRS_BIN_DIR", temporary.path());
+        let executable = materialize_bin().map_err(anyhow::Error::msg)?;
+        let before = std::fs::metadata(&executable)?;
+        let library = executable.parent().unwrap().join(name);
+        for corrupt in [false, true] {
+            if corrupt {
+                std::fs::write(&library, b"damaged installed runtime")?;
+            } else {
+                std::fs::remove_file(&library)?;
+            }
+            assert_eq!(materialize_bin().map_err(anyhow::Error::msg)?, executable);
+            assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&library)?)), expected);
+            let after = std::fs::metadata(&executable)?;
+            assert_eq!(after.modified()?, before.modified()?);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                assert_eq!(after.ino(), before.ino());
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn materialize_bin_honors_override_dir() -> Result<(), String> {
         let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
