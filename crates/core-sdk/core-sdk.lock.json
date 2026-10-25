@@ -1,60 +1,74 @@
 {
   "schema_version": 1,
   "targets": {
-    "x86_64-pc-windows-msvc": {
+    "aarch64-apple-darwin": {
       "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "6bb8b879c554befc2bda81b0bae178f2c20e100abab916c78b327884613aa268",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-pc-windows-msvc.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-pc-windows-msvc.tar.gz",
-      "archive_sha256": "8111fd12e9cafbffe9d5761c2ed7c1786226528de3cfa88edbcb7fd4cb0771c6",
+      "manifest_sha256": "08dd41a3a9faf14b6fba1fcecb7e03292156ec5bfd7e2904da544b634c481669",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-apple-darwin.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-apple-darwin.tar.gz",
+      "archive_sha256": "5b163d53e00797887d84ebd124e18fbb40702c6e734da1337cd8217a442e3fba",
       "redistribution": "approved"
     },
     "aarch64-pc-windows-msvc": {
       "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "969e6c943d96cbac77f54510f38e23ac52827a42e734007341f940ede7ffedad",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-pc-windows-msvc.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-pc-windows-msvc.tar.gz",
-      "archive_sha256": "5f445d73bf6c2cf00ec229f26519c78e4da7e1ec96738defb3c536e2e22c885b",
-      "redistribution": "approved"
-    },
-    "aarch64-apple-darwin": {
-      "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "7b848bfd93f16550782e210a2ccf2d3ffa68f4e1476b24cee1c32d0fe13e0c25",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-apple-darwin.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-apple-darwin.tar.gz",
-      "archive_sha256": "7747a6796914b48e8d681af13a84e9d1cd9640d3b2ebfe946f7f3754c7f52b64",
-      "redistribution": "approved"
-    },
-    "x86_64-unknown-linux-gnu": {
-      "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "aae30fa072227d69853196d25f474733089c2cbb64c93fb113c0afb2a734199a",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-gnu.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-gnu.tar.gz",
-      "archive_sha256": "9e95d9470fbca876d2161ca2d4ededa870ddfedd17e378a65576b159c2ce38b9",
+      "manifest_sha256": "2026389103af3ba0f6edd40325437eeb3055d43c4166da2dda3bcad050e69284",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-pc-windows-msvc.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-pc-windows-msvc.tar.gz",
+      "archive_sha256": "2bbfab43d381228dc57cb3419a56f238b52b2e5af2b8e5c88f0e1b56d19aaea1",
       "redistribution": "approved"
     },
     "aarch64-unknown-linux-gnu": {
       "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "6c7e56f91db55437cf9f4e33110cd91e726c7f42504be5d6d2b8b3ff97c804e9",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-gnu.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-gnu.tar.gz",
-      "archive_sha256": "4c78868b21b50a71c4bfa04b17d574a281e914769f703da87b33511f65d26bab",
-      "redistribution": "approved"
-    },
-    "x86_64-unknown-linux-musl": {
-      "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "ade0b69b5711710de306ffd457d60b8c380763c6ac763c612ab092bcb5c1b99d",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-musl.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-musl.tar.gz",
-      "archive_sha256": "4498b7cc463d9737fe1ae38a379d8a5f3af1fed963404ded0342bbb5bf7982b1",
+      "manifest_sha256": "95acddd6bca7295fe1c5042e9090bb0e3c0110a6a5332753e970fb67db4f3609",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-gnu.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-gnu.tar.gz",
+      "archive_sha256": "0e6c46cb9e8659465ec2d1397b68444b37c589c73321b57d398968ecb24d57b5",
       "redistribution": "approved"
     },
     "aarch64-unknown-linux-musl": {
       "sdk_version": "1.0.2-dev.11",
-      "manifest_sha256": "537b488335e65739a212ff6b940975d34f319cba242cea1ec402229ac2128ad7",
-      "url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-musl.manifest.json",
-      "archive_url": "https://github.com/risense-ai/respire-releases/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-musl.tar.gz",
-      "archive_sha256": "b2411b95834a0c4cdf3001c8a6a661874514d3cb585007f86feec8a87549cc89",
+      "manifest_sha256": "a4add3302d4da317f1f5553fbd16e17d27d58efeddf9442a1069b5a4db46d036",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-musl.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-aarch64-unknown-linux-musl.tar.gz",
+      "archive_sha256": "f78068d27e3c7d1e39ee9728147488d0197a052239b1756859eeefe919622577",
+      "redistribution": "approved"
+    },
+    "x86_64-pc-windows-msvc": {
+      "sdk_version": "1.0.2-dev.11",
+      "manifest_sha256": "d2be2d5c665422087b0a2e3d165cdfd599a616db2fe0cf5b1b9d24d8b653d467",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-pc-windows-msvc.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-pc-windows-msvc.tar.gz",
+      "archive_sha256": "6d724d258535f40746347365578cd24dcf0d547f1a5a5ceb24bb820332c4e946",
+      "redistribution": "approved"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "sdk_version": "1.0.2-dev.11",
+      "manifest_sha256": "0564e987ee49142391ab3fc9d55bcc536651361114f0ae4edad98bfea442ddb3",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-gnu.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-gnu.tar.gz",
+      "archive_sha256": "12792d686409b2971a045aa29f73a4e7aed99e9fdaa058f62b0c8dc46e407c0e",
+      "redistribution": "approved"
+    },
+    "x86_64-unknown-linux-musl": {
+      "sdk_version": "1.0.2-dev.11",
+      "manifest_sha256": "728cb9492a2bb9173da9bcdc93ffc373f76dd453033fd8d0ad28c13bacf78782",
+      "private_repository": "risense-ai/respire-core",
+      "release_tag": "sdk-v1.0.2-dev.11",
+      "url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-musl.manifest.json",
+      "archive_url": "https://github.com/risense-ai/respire-core/releases/download/sdk-v1.0.2-dev.11/respire-core-sdk-x86_64-unknown-linux-musl.tar.gz",
+      "archive_sha256": "cc3d09b60ef9f69dd31e23a305c1c40501123567f7f4fd04eff3cb7ceb11ac7f",
       "redistribution": "approved"
     }
   }
