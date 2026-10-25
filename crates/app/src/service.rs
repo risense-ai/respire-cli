@@ -35,7 +35,7 @@ pub fn write_decision_actions() -> &'static [&'static str] {
     ]
 }
 mod related;
-pub use related::{store_related, remap_relations};
+pub use related::{remap_relations, store_related};
 
 static RUNTIME_PROFILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -100,7 +100,10 @@ impl std::fmt::Display for IndexPending {
 impl std::error::Error for IndexPending {}
 
 /// Validate the actual snapshot sent to Core, including its opaque index artifacts.
-pub fn require_candidates_ready(store: &LocalStore, candidates: &[crate::StoredMemory]) -> Result<()> {
+pub fn require_candidates_ready(
+    store: &LocalStore,
+    candidates: &[crate::StoredMemory],
+) -> Result<()> {
     if !store.candidates_index_ready(candidates)? {
         notify_index();
         return Err(IndexPending.into());
@@ -413,7 +416,14 @@ impl App {
                 false,
             )?;
         } else if req.supersedes.is_some() || !req.see_also.is_empty() {
-            store_related(&self.keys,&self.store,&self.embedder,&mut entry,req.supersedes.as_deref(),&req.see_also)?;
+            store_related(
+                &self.keys,
+                &self.store,
+                &self.embedder,
+                &mut entry,
+                req.supersedes.as_deref(),
+                &req.see_also,
+            )?;
         } else {
             let stored = MemoryEngine::seal(&self.keys, &self.embedder, &entry, &entry.user)?;
             self.store.put(&stored)?;
@@ -499,7 +509,10 @@ impl App {
         }
         for anc in self.store.ancestor_chain(&parent_full)? {
             if anc == child {
-                return Err(crate::input_error::InputError("cycle: new parent is a descendant of this entry".into()).into());
+                return Err(crate::input_error::InputError(
+                    "cycle: new parent is a descendant of this entry".into(),
+                )
+                .into());
             }
         }
         reparent(&self.keys, &self.store, &child, &parent_full)?;
@@ -1045,7 +1058,10 @@ pub fn account_remove(name: &str) -> Result<()> {
         return Err(crate::input_error::InputError(format!("no such account profile: {}", dir.display())).into());
     }
     if data_dir() == dir {
-        return Err(crate::input_error::InputError("this profile is in use — run rsrs account use <other> before deleting".into()).into());
+        return Err(crate::input_error::InputError(
+            "this profile is in use — run rsrs account use <other> before deleting".into(),
+        )
+        .into());
     }
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -1196,7 +1212,11 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
         return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });
     }
     if key == "workspace_mode" {
-        return set_workspace_mode(value.as_str().ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?);
+        return set_workspace_mode(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?,
+        );
     }
     if key == "recall_mode" && !matches!(value.as_str(), Some("fast" | "quality")) {
         anyhow::bail!("recall_mode must be fast or quality");
@@ -1239,8 +1259,12 @@ pub fn readonly_team() -> bool {
 /// Device disable mode suppresses memory reads and writes until explicitly changed.
 /// Existing account-local flags remain compatible when no device mode has been saved.
 fn device_service_mode() -> Option<String> {
-    read_client_config().and_then(|config| config["service_mode"].as_str()
-        .filter(|mode| matches!(*mode, "normal" | "readonly" | "off")).map(str::to_owned))
+    read_client_config().and_then(|config| {
+        config["service_mode"]
+            .as_str()
+            .filter(|mode| matches!(*mode, "normal" | "readonly" | "off"))
+            .map(str::to_owned)
+    })
 }
 
 pub fn off_mode() -> bool {
@@ -1498,7 +1522,7 @@ pub fn autosync_enabled() -> bool {
 /// split_exec / deepen_apply each missed this and got one-off patches; this is the single gate:
 /// every write-path auto-sync goes through this fn; new write paths do not need a private check.
 pub fn autosync_active() -> bool {
-    !cfg!(test) && autosync_enabled()
+    !cfg!(test) && autosync_enabled() && crate::snapshot::ensure_sync_allowed(&data_dir()).is_ok()
 }
 
 pub fn set_autosync(on: bool) -> Result<()> {
@@ -1810,9 +1834,15 @@ pub fn import_json(path: &std::path::Path) -> Result<ImportReport> {
 pub fn import_json_text(text: &str) -> Result<ImportReport> {
     ensure!(!off_mode(), "memory service is disabled; restore normal service before importing");
     ensure_writable()?;
-    let items: Vec<ImportItem> = serde_json::from_str(text)
-        .map_err(|e| anyhow!("failed to parse import JSON: {e}"))?;
-    let mut report = ImportReport { imported: 0, skipped: 0, duplicates: 0, reattached: 0, orphaned: 0 };
+    let items: Vec<ImportItem> =
+        serde_json::from_str(text).map_err(|e| anyhow!("failed to parse import JSON: {e}"))?;
+    let mut report = ImportReport {
+        imported: 0,
+        skipped: 0,
+        duplicates: 0,
+        reattached: 0,
+        orphaned: 0,
+    };
     let mut entries: Vec<MemoryEntry> = Vec::new();
     let mut old_ids: HashMap<String, usize> = HashMap::new();
     for (index, item) in items.into_iter().enumerate() {
@@ -1844,12 +1874,27 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
         let created_at = item.created_at.filter(|s| !s.is_empty()).unwrap_or_else(now_stamp);
         let updated_at = item.updated_at.filter(|s| !s.is_empty()).unwrap_or_else(|| created_at.clone());
         entries.push(MemoryEntry {
-            supersedes: item.supersedes, superseded_by: item.superseded_by, see_also: item.see_also,
-            id: uuid::Uuid::new_v4().to_string(), kind: Kind::from_str(&kind),
-            tags: match item.tags { ImportTags::List(tags) => tags, ImportTags::Text(tags) => split_tags(&tags) },
-            title: item.title, content: item.content, user: item.user.unwrap_or_else(current_user),
-            computer: item.computer, project: item.project, device: device_tag(), modified_by: device_tag(),
-            created_at, updated_at, emotion, parent_id: item.parent_id.unwrap_or_default(), importance,
+            supersedes: item.supersedes,
+            superseded_by: item.superseded_by,
+            see_also: item.see_also,
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: Kind::from_str(&kind),
+            tags: match item.tags {
+                ImportTags::List(tags) => tags,
+                ImportTags::Text(tags) => split_tags(&tags),
+            },
+            title: item.title,
+            content: item.content,
+            user: item.user.unwrap_or_else(current_user),
+            computer: item.computer,
+            project: item.project,
+            device: device_tag(),
+            modified_by: device_tag(),
+            created_at,
+            updated_at,
+            emotion,
+            parent_id: item.parent_id.unwrap_or_default(),
+            importance,
         });
     }
     let mut done = HashSet::new();
@@ -2279,8 +2324,13 @@ pub fn import_share_payload(
 pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
     crate::input_error::validate_output_parent(dest)?;
     let src = database_path(&data_dir())?;
+    backup_database(&src, dest)
+}
+
+pub(crate) fn backup_database(src: &std::path::Path, dest: &std::path::Path) -> Result<PathBuf> {
+    crate::input_error::validate_output_parent(dest)?;
     let connection =
-        rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let target = dest
         .to_str()
         .ok_or_else(|| anyhow!("backup path must be valid UTF-8"))?;
@@ -2301,7 +2351,7 @@ pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
             .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='access_grants'")?
             .exists([])?;
         if has_grants {
-            backup.execute("DELETE FROM access_grants", [])?;
+            backup.execute_batch("PRAGMA secure_delete=ON; DELETE FROM access_grants; VACUUM;")?;
         }
         Ok(())
     })();
@@ -2667,8 +2717,10 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
     }
     if spec.summary.is_none() && spec.items.len() == 1 {
         return Err(crate::input_error::InputError(
-            "a single child without keeping the outline is a rewrite — edit instead of split".into()
-        ).into());
+            "a single child without keeping the outline is a rewrite — edit instead of split"
+                .into(),
+        )
+        .into());
     }
     let user = entry.user.clone();
     let all = store.all(true)?;
@@ -3443,7 +3495,9 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert_eq!(workspace_mode(), "normal");
         assert_eq!(diary_mode(), "concise");
-        write_client_config(&serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}))?;
+        write_client_config(
+            &serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}),
+        )?;
         set_workspace_mode("readonly")?;
         assert_eq!(workspace_mode(), "readonly");
         assert!(service_paused());
@@ -3478,8 +3532,14 @@ mod tests {
         assert!(!service_paused(), "team read-only access must still pull and index shared memory");
         assert!(ensure_writable().is_err());
         set_workspace_mode("readonly")?;
-        assert!(service_paused(), "device read-only mode must pause even a shared-space replica");
-        std::fs::write(agent_config_path(), serde_json::to_vec(&serde_json::json!({"readonly":true,"readonly_team":true}))?)?;
+        assert!(
+            service_paused(),
+            "device read-only mode must pause even a shared-space replica"
+        );
+        std::fs::write(
+            agent_config_path(),
+            serde_json::to_vec(&serde_json::json!({"readonly":true,"readonly_team":true}))?,
+        )?;
         write_client_config(&serde_json::json!({"custom":"preserved"}))?;
         assert!(!service_paused(), "legacy shared-space flags are account permissions, not device mode");
         set_workspace_mode("normal")?;
@@ -3548,8 +3608,12 @@ mod tests {
         let mut incoming = app.create(&important("incoming", "rust memory"))?;
         incoming.updated_at = "2099-01-01T00:00:00Z".into();
         incoming.content = "synchronized rust memory".into();
-        let mut source = MemoryEngine::seal(&app.keys,
-            &crate::memory::search::HashingEmbedder::default(), &incoming, "fixture")?;
+        let mut source = MemoryEngine::seal(
+            &app.keys,
+            &crate::memory::search::HashingEmbedder::default(),
+            &incoming,
+            "fixture",
+        )?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
         let (ready, pending) = recall_candidates(&app.store)?;
@@ -3574,8 +3638,12 @@ mod tests {
         let app = test_app(dir.path())?;
         let mut memory = app.create(&important("source", "rust memory"))?;
         memory.updated_at = "2099-01-01T00:00:00Z".into();
-        let mut source = MemoryEngine::seal(&app.keys,
-            &crate::memory::search::HashingEmbedder::default(), &memory, "fixture")?;
+        let mut source = MemoryEngine::seal(
+            &app.keys,
+            &crate::memory::search::HashingEmbedder::default(),
+            &memory,
+            "fixture",
+        )?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
         let error = recall_candidates(&app.store).err()
@@ -3642,17 +3710,38 @@ mod tests {
         let parent = app.create(&important("parent", "parent body"))?;
         let child = app.create(&CreateReq { parent: Some(parent.id.clone()), ..important("child", "child body") })?;
         let before = serde_json::to_value(app.store.all(true)?)?;
-        let supersede = app.create(&CreateReq { supersedes: Some(diary.id.clone()), ..important("replacement", "replacement body") });
-        let link = app.create(&CreateReq { see_also: vec![diary.id.clone()], ..important("linked", "linked body") });
-        for error in [supersede.err(), link.err(), app.restore("deadbeef").err(), app.attach(&child.id, &child.id).err(), app.attach(&parent.id, &child.id).err()] {
+        let supersede = app.create(&CreateReq {
+            supersedes: Some(diary.id.clone()),
+            ..important("replacement", "replacement body")
+        });
+        let link = app.create(&CreateReq {
+            see_also: vec![diary.id.clone()],
+            ..important("linked", "linked body")
+        });
+        for error in [
+            supersede.err(),
+            link.err(),
+            app.restore("deadbeef").err(),
+            app.attach(&child.id, &child.id).err(),
+            app.attach(&parent.id, &child.id).err(),
+        ] {
             let error = error.ok_or_else(|| anyhow!("invalid input was accepted"))?;
             assert!(error.downcast_ref::<crate::input_error::InputError>().is_some(), "{error:#}");
         }
         assert_eq!(serde_json::to_value(app.store.all(true)?)?, before);
         // A cryptographic failure is still a runtime error, not malformed command input.
-        let wrong = App { keys: crate::memory::SessionKeys::from_urk([9; 32])?, store: app.store, embedder: app.embedder };
-        let error = wrong.restore(&child.id).err().ok_or_else(|| anyhow!("wrong key was accepted"))?;
-        assert!(error.downcast_ref::<crate::input_error::InputError>().is_none());
+        let wrong = App {
+            keys: crate::memory::SessionKeys::from_urk([9; 32])?,
+            store: app.store,
+            embedder: app.embedder,
+        };
+        let error = wrong
+            .restore(&child.id)
+            .err()
+            .ok_or_else(|| anyhow!("wrong key was accepted"))?;
+        assert!(error
+            .downcast_ref::<crate::input_error::InputError>()
+            .is_none());
         Ok(())
     }
 

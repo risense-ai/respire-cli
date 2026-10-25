@@ -16,6 +16,15 @@ pub struct LibraryLock {
 }
 
 impl LibraryLock {
+    /// Verify that this live ownership guard belongs to the requested library.
+    pub fn protects(&self, dir: &Path) -> Result<bool> {
+        let held = self
+            ._conn
+            .path()
+            .ok_or_else(|| anyhow::anyhow!("library lock has no persistent path"))?;
+        Ok(std::fs::canonicalize(held)? == std::fs::canonicalize(dir.join("lock.db"))?)
+    }
+
     /// Take the library lock and hold it until this object (this process) ends.
     /// While occupied, print wait messages on stderr (do not pollute json stdout)
     /// and retry every 300ms. Give up after max_wait so a stuck holder cannot block forever.

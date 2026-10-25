@@ -85,7 +85,10 @@ pub fn sync_controlled(
     control: &impl SyncControl,
     boundary: Option<i64>,
 ) -> Result<SyncStats> {
-    control.local(|| local.maintain_sync_storage())?;
+    control.local(|| {
+        local.ensure_snapshot_sync_allowed()?;
+        local.maintain_sync_storage()
+    })?;
     let captured_boundary = boundary.is_some();
     let mut boundary = match boundary {
         Some(value) => value,
@@ -254,7 +257,10 @@ pub fn sync_controlled(
         }
     }
     control.progress("verify");
-    control.local(|| local.maintain_sync_storage())?;
+    control.local(|| {
+        local.ensure_snapshot_sync_allowed()?;
+        local.maintain_sync_storage()
+    })?;
     (stats.pending, stats.conflicts, stats.undecodable) = control.local(|| local.sync_counts())?;
     (
         stats.conflict_history,
@@ -619,6 +625,42 @@ mod tests {
         sync_all(&keys, &a, &cloud_transport4)?;
         let a_all = a.all(false)?;
         assert!(a_all.iter().all(|m| m.id != "a-2"));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshot_quarantine_refuses_sync_before_any_remote_callback() -> Result<()> {
+        struct UnreachableRemote;
+        impl MemoryTransport for UnreachableRemote {
+            fn capabilities(&self) -> Result<Option<crate::transport::protocol::Capabilities>> {
+                panic!("quarantined remote capabilities")
+            }
+            fn put(&self, _: &StoredMemory) -> Result<bool> {
+                panic!("quarantined push")
+            }
+            fn all(&self, _: bool) -> Result<Vec<StoredMemory>> {
+                panic!("quarantined pull")
+            }
+            fn max_updated_at(&self) -> Result<Option<String>> {
+                panic!("quarantined cursor")
+            }
+            fn forget(&self, _: &str) -> Result<bool> {
+                panic!("quarantined delete")
+            }
+            fn count(&self) -> Result<i64> {
+                panic!("quarantined count")
+            }
+        }
+        let root = tempfile::tempdir()?;
+        let local = LocalStore::open(&root.path().join("rsrs.db"))?;
+        local.meta_set("snapshot_sync_quarantine_v1", "synthetic")?;
+        let error = sync_all(&SessionKeys::from_urk([7; 32])?, &local, &UnreachableRemote)
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("quarantined sync succeeded"))?;
+        anyhow::ensure!(
+            error.to_string().contains("quarantined"),
+            "unexpected sync error: {error}"
+        );
         Ok(())
     }
 

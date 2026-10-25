@@ -17,8 +17,8 @@ use crate::memory::model::StoredMemory;
 
 mod conflicts;
 mod grants;
-mod retrieval;
 mod resident;
+mod retrieval;
 pub use resident::MemorySourceChanged;
 mod related;
 mod revision;
@@ -140,8 +140,16 @@ impl LocalStore {
     /// source/import stamp. Keep the guard and write under the same write lock.
     /// Sync and ordinary user writes retain their existing LWW policy.
     pub fn put_session_import(&self, memory: &StoredMemory) -> Result<bool> {
-        let immediate = self.connection.is_autocommit().then(||
-            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+        let immediate = self
+            .connection
+            .is_autocommit()
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    &self.connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
         let protected: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND (dirty=1 OR deleted=1))",
             params![memory.id], |row| row.get(0),
@@ -151,9 +159,22 @@ impl LocalStore {
         Ok(wrote)
     }
 
-    fn put_inner_policy(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
-        let immediate = self.connection.is_autocommit().then(||
-            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+    fn put_inner_policy(
+        &self,
+        memory: &StoredMemory,
+        dirty: bool,
+        authoritative: bool,
+    ) -> Result<bool> {
+        let immediate = self
+            .connection
+            .is_autocommit()
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    &self.connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
         self.connection
             .execute_batch("SAVEPOINT memory_with_chunks")?;
         let result = self.put_memory_and_chunks(memory, dirty, authoritative);
@@ -167,7 +188,12 @@ impl LocalStore {
         result
     }
 
-    fn put_memory_and_chunks(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
+    fn put_memory_and_chunks(
+        &self,
+        memory: &StoredMemory,
+        dirty: bool,
+        authoritative: bool,
+    ) -> Result<bool> {
         // last-write-wins: same id and existing updated_at is newer → drop this write;
         // a tie (same updated_at) and local dirty=1 → also refuse — unpushed local edits (attach/delete) must not be overwritten by a sync loop
         // (hit 2026-09-08: after batch attach, sync reconcile pulled a same-stamp remote and wiped the unpushed attach).
@@ -236,7 +262,10 @@ impl LocalStore {
 
     /// Import already-sealed new rows: the whole batch commits or rolls back, so a partial backup cannot remain.
     pub fn import_batch(&self, memories: &[StoredMemory]) -> Result<()> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         for memory in memories {
             if !self.put_inner(memory, true)? {
                 anyhow::bail!("import conflict: {}", memory.id);
@@ -248,7 +277,10 @@ impl LocalStore {
 
     /// Keep a compound local edit atomic, including any reads used to plan it.
     pub fn write_transaction<T>(&self, edit: impl FnOnce() -> Result<T>) -> Result<T> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let result = edit()?;
         transaction.commit()?;
         Ok(result)
@@ -332,7 +364,10 @@ impl LocalStore {
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by
              FROM memories WHERE deleted = 0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=memories.id AND a.source=memories.ciphertext AND a.model=?1)",
         )?;
-        let rows = statement.query_map([respire_core_sdk::generation_key(&self.retrieval_model()?)?], Self::row_to_memory)?;
+        let rows = statement.query_map(
+            [respire_core_sdk::generation_key(&self.retrieval_model()?)?],
+            Self::row_to_memory,
+        )?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
@@ -668,6 +703,18 @@ impl LocalStore {
         })
     }
 
+    /// Unlike legacy best-effort meta lookups, this safety gate propagates every
+    /// SQLite error; unavailable quarantine metadata must never enable sync.
+    pub fn ensure_snapshot_sync_allowed(&self) -> Result<()> {
+        let quarantined: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key='snapshot_sync_quarantine_v1')",
+            [],
+            |row| row.get(0),
+        )?;
+        anyhow::ensure!(!quarantined,"snapshot restore quarantined sync; compare differences before explicit snapshot resume-sync");
+        Ok(())
+    }
+
     /// meta read/write (sync cursor etc.).
     pub fn meta_get(&self, key: &str) -> Result<Option<String>> {
         Ok(self
@@ -691,12 +738,7 @@ impl LocalStore {
 
     /// Persist a Core-owned index locator only if the encrypted source is current.
     /// Index work must never create a content version or an outgoing sync operation.
-    pub fn set_artifact(
-        &self,
-        id: &str,
-        artifact: &[u8],
-        source_ciphertext: &str,
-    ) -> Result<bool> {
+    pub fn set_artifact(&self, id: &str, artifact: &[u8], source_ciphertext: &str) -> Result<bool> {
         let n = self.connection.execute(
             "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
              SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
