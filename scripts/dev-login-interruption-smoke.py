@@ -12,6 +12,7 @@ import signal
 import re
 import socket
 import sqlite3
+from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -266,12 +267,14 @@ def main():
         source_database = source / "onememory.db"
         with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as original, sqlite3.connect(source_database) as backup:
             original.backup(backup)
+            register_witness_functions(backup)
             for memory_id, ciphertext, old_nonce in original_rows:
                 plaintext = legacy.decrypt_content(urk, ciphertext, old_nonce)
                 old_nonce = secrets.token_bytes(12)
                 old_ciphertext = AESGCM(legacy.hkdf(urk, None, b"onememory:data:v1")).encrypt(old_nonce, plaintext, None).hex()
                 backup.execute("UPDATE memories SET ciphertext=?,nonce=?,embedding_enc='' WHERE id=?", (old_ciphertext, old_nonce.hex(), memory_id))
                 backup.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (old_ciphertext, memory_id))
+            fixture_witness = verify_fixture_witness(backup)
         backup.close()
         original.close()
         original_source_session = {"user": "synthetic", "addr": addr, "token": "synthetic-token", "vault_version": 2,
@@ -304,6 +307,12 @@ def main():
                 == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
         env["RSRS_DATA_DIR"] = str(restored_root)
         cli(*migration)
+        if fixture_witness is not None:
+            chain = json.loads(cli("--direct", "--json", "witness", "--verify").stdout)
+            require(chain["status"] == "ok" and chain["summary"]["intact"] is True
+                    and chain["summary"]["count"] > fixture_witness["count"], "migrated_fixture_witness_invalid")
+            report["fixture_witness"] = {"python_pre_migration": fixture_witness,
+                                         "rust_post_migration": chain["summary"]}
         require(state["vault"]["version"] == 2 and ciphertexts() == original_rows, "DEV4_recovery_failed")
         report["cases"]["pre_journal_DEV4_recovery"] = {"passed": True, "wrong_code_rejected": True,
             "inconsistent_factors_rejected": True, "public_original_profile_migration": True,

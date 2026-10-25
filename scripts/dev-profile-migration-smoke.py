@@ -12,6 +12,7 @@ import re
 import secrets
 import shutil
 import sqlite3
+from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import sys
 import time
@@ -293,6 +294,7 @@ class Smoke(support.Smoke):
             self.api(account, "POST", "/api/self/vault", {
                 "version": 4, **{key: session[key] for key in ("kdf_salt", "wrapped_urk", "urk_nonce")}})
         connection = sqlite3.connect(db)
+        register_witness_functions(connection)
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute("CREATE TABLE IF NOT EXISTS migration_wal_fixture(marker TEXT PRIMARY KEY)")
@@ -320,6 +322,7 @@ class Smoke(support.Smoke):
                     "VALUES (?,?,?,?,?,0,?,?)", tombstone + (tombstone_time, tombstone_time))
                 tombstones.append(tombstone)
         connection.commit()
+        verify_fixture_witness(connection)
         require(Path(str(db) + "-wal").stat().st_size > 0, "migration_wal_fixture_empty")
         row = connection.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (memory_id,)).fetchone()
         require(row and connection.execute("SELECT COUNT(*) FROM sync_outbox WHERE state='pending'").fetchone()[0] > 0,

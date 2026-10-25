@@ -11,6 +11,7 @@ import re
 import secrets
 import socket
 import sqlite3
+from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import sys
 import urllib.error
@@ -250,6 +251,7 @@ class Smoke:
         self.cli(env, "sync", timeout=180)
         database = Path(env["RSRS_DATA_DIR"]) / "rsrs.db"
         with sqlite3.connect(database) as db:
+            register_witness_functions(db)
             entries = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (title,)).fetchall()
             require(len(entries) == 1, "legacy_entry_not_unique")
             memory_id, ciphertext, item_nonce = entries[0]
@@ -258,6 +260,7 @@ class Smoke:
             ciphertext = AESGCM(hkdf(urk, None, b"onememory:data:v1")).encrypt(bytes.fromhex(item_nonce), payload, None).hex()
             db.execute("UPDATE memories SET ciphertext=?,nonce=? WHERE id=?", (ciphertext, item_nonce, memory_id))
             db.execute("UPDATE core_artifacts SET source=? WHERE memory_id=?", (ciphertext, memory_id))
+            verify_fixture_witness(db)
             db.execute("PRAGMA wal_checkpoint(TRUNCATE)") if not db.in_transaction else None
         # Close SQLite before relocating this owned old-format source.
         db.close()
