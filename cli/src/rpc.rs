@@ -166,13 +166,7 @@ impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
         if respire::service::workspace_mode() != "normal" { return Ok(()); }
         store.write_transaction(|| {
-            store.log_query(
-                &self.query,
-                &self.project,
-                "",
-                &self.candidates,
-                &self.scores,
-            )?;
+            store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
             store.bump_recall(&self.candidates)?;
             store.bump_recall_pairs(&self.candidates)
         })
@@ -429,16 +423,10 @@ fn index_loop_inner() -> Result<()> {
             let keys = crate::build_session()?;
             let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
             loop {
-                let rebuilt =
-                    store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
-                        index_yield_to_foreground(generation)?;
-                        respire::model_progress::update(
-                            "index",
-                            &model,
-                            done as u64,
-                            Some(total as u64),
-                        )
-                    });
+                let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
+                    index_yield_to_foreground(generation)?;
+                    respire::model_progress::update("index", &model, done as u64, Some(total as u64))
+                });
                 match rebuilt {
                     Ok(_) => break,
                     Err(error) if error.downcast_ref::<respire::transport::local::IndexSourceChanged>().is_some() => {
@@ -473,9 +461,7 @@ fn index_loop_inner() -> Result<()> {
                 if started.elapsed() >= Duration::from_secs(1800) {
                     work.state = "failed";
                     work.requested = false;
-                    work.error = Some(
-                        "background indexing timed out waiting for another model operation".into(),
-                    );
+                    work.error = Some("background indexing timed out waiting for another model operation".into());
                     model_wait_started = None;
                     continue;
                 }
@@ -782,7 +768,9 @@ struct QueueWatch {
 
 fn watch_queue(deadline: &Arc<crate::admission::QueueDeadline>, reply: &Reply) -> Result<()> {
     static WATCH: OnceLock<Mutex<Vec<QueueWatch>>> = OnceLock::new();
-    let entries = WATCH.get_or_init(|| Mutex::new(Vec::new()));
+    let entries = WATCH.get_or_init(|| {
+        Mutex::new(Vec::new())
+    });
     static STARTED: OnceLock<()> = OnceLock::new();
     let network = crate::network::runtime()?;
     STARTED.get_or_init(|| {
@@ -907,14 +895,8 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::progress::phase("检查 runtime 进程", "Checking runtime process");
     let health = match probe_runtime() {
         Ok(health) => health,
-        Err(error)
-            if matches!(
-                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                Some(crate::runtime_error::RuntimeError::Transport(_))
-            ) =>
-        {
-            None
-        }
+        Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+            Some(crate::runtime_error::RuntimeError::Transport(_))) => None,
         Err(error) => return Err(error),
     };
     let listener = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
@@ -929,22 +911,13 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         if health.is_none() {
             anyhow::ensure!(endpoint_pid() == Some(pid), "unresponsive process does not match this runtime endpoint");
         }
-        crate::progress::phase(
-            "请求优雅退出；等待进程释放",
-            "Requesting graceful shutdown; waiting for process exit",
-        );
+        crate::progress::phase("请求优雅退出；等待进程释放", "Requesting graceful shutdown; waiting for process exit");
         let deadline = Instant::now() + timeout;
         if crate::net_rpc::port_is_open() {
             match crate::net_rpc::request_stop_with_timeout(timeout.min(Duration::from_secs(2))) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                        Some(
-                            crate::runtime_error::RuntimeError::Transport(_)
-                                | crate::runtime_error::RuntimeError::Unavailable
-                        )
-                    ) => {}
+                Ok(()) => {},
+                Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+                    Some(crate::runtime_error::RuntimeError::Transport(_) | crate::runtime_error::RuntimeError::Unavailable)) => {},
                 Err(error) => return Err(error),
             }
         }
@@ -953,14 +926,8 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         }
         if crate::net_rpc::process_is_running(pid)? {
             let owner = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
-            anyhow::ensure!(
-                owner.is_none() || owner == Some(pid),
-                "runtime port owner changed before recovery"
-            );
-            crate::progress::phase(
-                "退出超时；终止 runtime 进程",
-                "Shutdown timed out; terminating runtime process",
-            );
+            anyhow::ensure!(owner.is_none() || owner == Some(pid), "runtime port owner changed before recovery");
+            crate::progress::phase("退出超时；终止 runtime 进程", "Shutdown timed out; terminating runtime process");
             crate::net_rpc::kill_runtime(pid, &identity)?;
             forced = true;
         }
@@ -977,10 +944,7 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     } else {
         anyhow::ensure!(!crate::net_rpc::port_is_open(), "cannot identify the process occupying the runtime port");
     }
-    crate::progress::phase(
-        "启动 runtime；等待就绪",
-        "Starting runtime; waiting for readiness",
-    );
+    crate::progress::phase("启动 runtime；等待就绪", "Starting runtime; waiting for readiness");
     ensure_daemon_locked()?;
     let ready = crate::net_rpc::health()?;
     Ok(json!({"state":"ready", "stopped_pid":pid, "pid":ready.pid,
@@ -1001,22 +965,12 @@ pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_rollback(change, || Ok(()))
 }
 
-pub fn change_profile_with_rollback(
-    change: impl FnOnce() -> Result<()>,
-    rollback: impl FnOnce() -> Result<()>,
-) -> Result<()> {
+pub fn change_profile_with_rollback(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_verification(change, rollback, || Ok(()))
 }
 
-pub fn change_profile_with_verification(
-    change: impl FnOnce() -> Result<()>,
-    rollback: impl FnOnce() -> Result<()>,
-    verify: impl FnOnce() -> Result<()>,
-) -> Result<()> {
-    crate::progress::phase(
-        "协调账户操作；等待当前 runtime 释放",
-        "Coordinating account operation; waiting for current runtime to release",
-    );
+pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>, verify: impl FnOnce() -> Result<()>) -> Result<()> {
+    crate::progress::phase("协调账户操作；等待当前 runtime 释放", "Coordinating account operation; waiting for current runtime to release");
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let config_path = respire::service::client_config_path();
     let original = match std::fs::read(&config_path) {
@@ -1038,15 +992,10 @@ pub fn change_profile_with_verification(
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
-    let changed = change()
-        .and_then(|_| {
-            crate::progress::phase(
-                "启动 runtime；核对账户和路径",
-                "Starting runtime; verifying account and path",
-            );
-            ensure_daemon_locked()
-        })
-        .and_then(|_| verify());
+    let changed = change().and_then(|_| {
+        crate::progress::phase("启动 runtime；核对账户和路径", "Starting runtime; verifying account and path");
+        ensure_daemon_locked()
+    }).and_then(|_| verify());
     if let Err(error) = changed {
         let cleanup = probe_runtime().and_then(|health| match health {
             Some(health) => stop_occupant(health.pid), None => Ok(()),
@@ -1070,7 +1019,7 @@ pub fn change_profile_with_verification(
                     std::fs::rename(&temporary, &config_path)?;
                     Ok(())
                 })()
-            }
+            },
             None => match std::fs::remove_file(&config_path) {
                 Ok(()) => Ok(()),
                 Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -1330,54 +1279,24 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
         "runtime.test_worker_lifecycle" => {
             let action = request.args.first().map(String::as_str).unwrap_or("");
             match respire_app::core_sdk::worker::fixture_control(action) {
-                Ok(result) => {
-                    let mut response = status_response(&request);
-                    response.envelope = Some(ResultEnvelope::new(
-                        "runtime.test_worker_lifecycle",
-                        OutputStatus::Ok,
-                        result,
-                        Vec::new(),
-                    ));
-                    response
-                }
-                Err(error) => {
-                    error_response(&request, "worker_fixture_failed", &format!("{error:#}"))
-                }
+                Ok(result) => { let mut response = status_response(&request); response.envelope =
+                    Some(ResultEnvelope::new("runtime.test_worker_lifecycle", OutputStatus::Ok, result, Vec::new())); response },
+                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
             }
         }
         #[cfg(feature = "native-fault-tests")]
         "runtime.test_worker_hold" => {
             match respire_app::core_sdk::execute::<Value>("test_worker_hold", json!({})) {
                 Ok(_) => status_response(&request),
-                Err(error) => {
-                    error_response(&request, "worker_fixture_failed", &format!("{error:#}"))
-                }
+                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
             }
         }
         #[cfg(feature = "native-fault-tests")]
         "runtime.test_native_fault" => {
-            let mode = request
-                .args
-                .first()
-                .and_then(|mode| mode.parse::<u64>().ok())
-                .unwrap_or(0);
-            match respire_app::core_sdk::execute::<Value>(
-                "engine_control",
-                json!({"action":"test_native_fault","mode":mode}),
-            ) {
-                Ok(result) => {
-                    let mut response = status_response(&request);
-                    response.envelope = Some(ResultEnvelope::new(
-                        "runtime.test_native_fault",
-                        OutputStatus::Ok,
-                        result,
-                        Vec::new(),
-                    ));
-                    response
-                }
-                Err(error) => {
-                    error_response(&request, "native_fixture_failed", &format!("{error:#}"))
-                }
+            let mode = request.args.first().and_then(|mode| mode.parse::<u64>().ok()).unwrap_or(0);
+            match respire_app::core_sdk::execute::<Value>("engine_control", json!({"action":"test_native_fault","mode":mode})) {
+                Ok(result) => { let mut response = status_response(&request); response.envelope = Some(ResultEnvelope::new("runtime.test_native_fault", OutputStatus::Ok, result, Vec::new())); response },
+                Err(error) => error_response(&request, "native_fixture_failed", &format!("{error:#}")),
             }
         }
         "model.prepare" => {
@@ -1395,12 +1314,7 @@ fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             }) {
                 Ok(()) => {
                     let mut response = status_response(&request);
-                    response.envelope = Some(ResultEnvelope::new(
-                        "model.prepare",
-                        OutputStatus::Pending,
-                        index_status(),
-                        Vec::new(),
-                    ));
+                    response.envelope = Some(ResultEnvelope::new("model.prepare", OutputStatus::Pending, index_status(), Vec::new()));
                     response
                 }
                 Err(error) => error_response(&request, "model_prepare_failed", &error.to_string()),
@@ -1498,11 +1412,7 @@ fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse 
     }
 }
 
-fn dispatch_deferred(
-    request: RpcRequest,
-    tx: &Sender<Job>,
-    action: impl FnOnce(RpcResponse) + Send + 'static,
-) {
+fn dispatch_deferred(request: RpcRequest, tx: &Sender<Job>, action: impl FnOnce(RpcResponse) + Send + 'static) {
     if request.method != "cli.exec" || request.v != PROTOCOL_V {
         action(dispatch(request, tx));
         return;
@@ -1585,9 +1495,7 @@ fn enqueue_job(
         );
         envelope.errors.push(i18n::text("busy").to_owned());
         reply.send(Ok(crate::Captured { exit: 2, envelope }))?;
-        return Ok(Arc::new(crate::admission::QueueDeadline::new(
-            Duration::ZERO,
-        )));
+        return Ok(Arc::new(crate::admission::QueueDeadline::new(Duration::ZERO)));
     }
     let sync_context = if !respire::service::off_mode() && matches!(
         command_name(&args),
@@ -1615,21 +1523,11 @@ fn enqueue_job(
 
 fn submit(tx: &Sender<Job>, args: Vec<String>, stop: bool) -> CommandResult {
     let (reply_tx, reply_rx) = mpsc::channel();
-    let deadline = enqueue_job(
-        tx,
-        args,
-        stop,
-        Reply::new(move |result| {
-            let _ = reply_tx.send(result);
-        }),
-        queue_wait(),
-    )?;
+    let deadline = enqueue_job(tx, args, stop, Reply::new(move |result| { let _ = reply_tx.send(result); }), queue_wait())?;
     let wait = queue_wait();
     match reply_rx.recv_timeout(wait) {
         Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            Err("runtime worker dropped the reply".to_owned())
-        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err("runtime worker dropped the reply".to_owned()),
         Err(mpsc::RecvTimeoutError::Timeout) if deadline.cancel() => Err(QUEUE_EXPIRED.to_owned()),
         // Execution won admission. Especially for writes, preserve the actual
         // commit outcome instead of returning an ambiguous client timeout.
@@ -1685,10 +1583,7 @@ pub(crate) fn handle_http_rpc(body: &[u8]) -> Result<RpcResponse> {
     Ok(dispatch(request, &tx))
 }
 
-pub(crate) fn handle_http_rpc_deferred(
-    body: &[u8],
-    action: impl FnOnce(RpcResponse) + Send + 'static,
-) -> Result<()> {
+pub(crate) fn handle_http_rpc_deferred(body: &[u8], action: impl FnOnce(RpcResponse) + Send + 'static) -> Result<()> {
     let request: RpcRequest = serde_json::from_slice(body).context("rpc body is not JSON")?;
     let tx = JOB_TX.get().ok_or_else(|| anyhow::anyhow!("runtime worker is not running"))?
         .lock().map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?.clone();
@@ -1794,32 +1689,19 @@ fn cpu_count() -> usize {
 }
 
 fn queue_wait() -> Duration {
-    Duration::from_secs(
-        respire::env::var("RSRS_RPC_QUEUE_WAIT_SECS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(120)
-            .clamp(1, 3600),
-    )
+    Duration::from_secs(respire::env::var("RSRS_RPC_QUEUE_WAIT_SECS").ok()
+        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(120).clamp(1, 3600))
 }
 
 fn is_exclusive(args: &[String]) -> bool {
     if is_context_query(args) {
         return false;
     }
-    if command_name(args) == Some("update") {
-        return false;
-    }
-    if command_name(args) == Some("remember")
-        && !args.iter().any(|arg| {
-            matches!(arg.as_str(), "--merge-ids" | "--supersedes" | "--see-also")
-                || arg.starts_with("--merge-ids=")
-                || arg.starts_with("--supersedes=")
-                || arg.starts_with("--see-also=")
-        })
-    {
-        return false;
-    }
+    if command_name(args) == Some("update") { return false; }
+    if command_name(args) == Some("remember") && !args.iter().any(|arg|
+        matches!(arg.as_str(), "--merge-ids" | "--supersedes" | "--see-also")
+        || arg.starts_with("--merge-ids=") || arg.starts_with("--supersedes=")
+        || arg.starts_with("--see-also=")) { return false; }
     matches!(
         command_name(args),
         Some(
@@ -1913,12 +1795,7 @@ impl Drop for ClassifyGuard {
     }
 }
 
-fn dispatch_loop(
-    rx: Receiver<Job>,
-    limit: usize,
-    idle: Option<Duration>,
-    _lock: respire::lock::LibraryLock,
-) {
+fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>, _lock: respire::lock::LibraryLock) {
     mark_worker();
     let _ = DISPATCH_THREAD.set(std::thread::current());
     #[cfg(not(test))]
@@ -2085,14 +1962,8 @@ fn dispatch_loop(
                 }
                 idle_since = Instant::now();
                 if respire::service::off_mode() {
-                    let parsed = crate::Cli::try_parse_from(
-                        std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()),
-                    );
-                    if parsed.is_ok_and(|cli| {
-                        cli.command
-                            .as_ref()
-                            .is_some_and(|command| !crate::is_off_allowed(command))
-                    }) {
+                    let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()));
+                    if parsed.is_ok_and(|cli| cli.command.as_ref().is_some_and(|command| !crate::is_off_allowed(command))) {
                         if !job.deadline.start() {
                             let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
                             continue;
@@ -2159,40 +2030,16 @@ fn dispatch_loop(
         loop {
             let ordinary_available = RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) < limit;
             let position = if LIGHT_RUNNING.load(Ordering::Acquire) < 2 {
-                pending.iter().position(|job| {
-                    matches!(
-                        command_name(&job.args),
-                        Some("show" | "list" | "status" | "memory-revision")
-                    )
-                })
-            } else {
-                None
-            };
-            let job = if let Some(position) = position {
-                pending.remove(position)
-            } else if ordinary_available {
-                pending
-                    .iter()
-                    .position(|job| {
-                        !matches!(
-                            command_name(&job.args),
-                            Some("show" | "list" | "status" | "memory-revision")
-                        )
-                    })
-                    .and_then(|position| pending.remove(position))
-            } else {
-                None
-            };
-            let Some(job) = job else {
-                break;
-            };
-            let light_job = matches!(
-                command_name(&job.args),
-                Some("show" | "list" | "status" | "memory-revision")
-            );
-            if light_job {
-                LIGHT_RUNNING.fetch_add(1, Ordering::AcqRel);
-            }
+                pending.iter().position(|job| matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision")))
+            } else { None };
+            let job = if let Some(position) = position { pending.remove(position) }
+                else if ordinary_available {
+                    pending.iter().position(|job| !matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision")))
+                        .and_then(|position| pending.remove(position))
+                } else { None };
+            let Some(job) = job else { break; };
+            let light_job = matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision"));
+            if light_job { LIGHT_RUNNING.fetch_add(1, Ordering::AcqRel); }
             let status_job = is_status(&job.args);
             if status_job {
                 RUNNING_STATUS.fetch_add(1, Ordering::AcqRel);
@@ -2203,10 +2050,7 @@ fn dispatch_loop(
                 .name("respire-read".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn(move || {
-                    let _slot = RunningGuard {
-                        status: status_job,
-                        light: light_job,
-                    };
+                    let _slot = RunningGuard { status: status_job, light: light_job };
                     if !job.deadline.start() {
                         let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
                         return;
@@ -2292,17 +2136,9 @@ fn is_context_query(args: &[String]) -> bool {
     match cli.command {
         Some(crate::Command::Account { action, .. }) => action == "list",
         Some(crate::Command::Space { action, .. }) => matches!(action.as_str(), "list" | "members"),
-        Some(crate::Command::Config {
-            data_dir: None,
-            addr: None,
-            autosync: None,
-            cure_auto: None,
-            rpc_parallelism: None,
-        })
+        Some(crate::Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None })
         | Some(crate::Command::AgentConfig { set: None })
-        | Some(crate::Command::Session {
-            command: crate::SessionCommand::List,
-        }) => true,
+        | Some(crate::Command::Session { command: crate::SessionCommand::List }) => true,
         _ => false,
     }
 }
@@ -2453,13 +2289,11 @@ pub(crate) fn ensure_daemon() -> Result<()> {
 fn runtime_matches_current(health: &crate::net_rpc::Health) -> Result<bool> {
     let dest = crate::mcp::stable_bin_path();
     let src = std::env::current_exe().context("failed to locate the rsrs binary")?;
-    Ok(
-        health.data_dir == respire::service::data_dir().display().to_string()
-            && health.bin == env!("CARGO_PKG_VERSION")
-            && crate::mcp::exe_matches_dest(&health.exe, &dest)
-            && !health.inference_stalled()
-            && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?,
-    )
+    Ok(health.data_dir == respire::service::data_dir().display().to_string()
+        && health.bin == env!("CARGO_PKG_VERSION")
+        && crate::mcp::exe_matches_dest(&health.exe, &dest)
+        && !health.inference_stalled()
+        && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?)
 }
 
 fn ensure_daemon_locked() -> Result<()> {
@@ -2468,14 +2302,8 @@ fn ensure_daemon_locked() -> Result<()> {
             return Ok(());
         }
         if health.inference_stalled() {
-            anyhow::ensure!(
-                crate::net_rpc::pid_is_respire(health.pid),
-                "cannot verify the unresponsive runtime process; no lifecycle action taken"
-            );
-            crate::progress::phase(
-                "推理无响应；宿主正在恢复 runtime",
-                "Inference unresponsive; host recovering runtime",
-            );
+            anyhow::ensure!(crate::net_rpc::pid_is_respire(health.pid), "cannot verify the unresponsive runtime process; no lifecycle action taken");
+            crate::progress::phase("推理无响应；宿主正在恢复 runtime", "Inference unresponsive; host recovering runtime");
         }
         stop_occupant(health.pid)?;
     }
@@ -2582,25 +2410,15 @@ mod tests {
 
     #[test]
     fn writes_queue_and_reads_may_run_together() {
-        for args in [
-            vec!["account", "list"],
-            vec!["config"],
-            vec!["agent-config"],
-            vec!["session", "list"],
-            vec!["space", "list"],
-            vec!["space", "members"],
-        ] {
+        for args in [vec!["account", "list"], vec!["config"], vec!["agent-config"],
+            vec!["session", "list"], vec!["space", "list"], vec!["space", "members"]] {
             let args = args.into_iter().map(String::from).collect::<Vec<_>>();
             assert!(is_context_query(&args));
             assert!(!is_exclusive(&args));
         }
-        for args in [
-            vec!["account", "use", "main"],
-            vec!["config", "--autosync", "false"],
-            vec!["agent-config", "--set", "model_mirror=auto"],
-            vec!["session", "revoke", "fixture"],
-            vec!["space", "use", "fixture"],
-        ] {
+        for args in [vec!["account", "use", "main"], vec!["config", "--autosync", "false"],
+            vec!["agent-config", "--set", "model_mirror=auto"], vec!["session", "revoke", "fixture"],
+            vec!["space", "use", "fixture"]] {
             let args = args.into_iter().map(String::from).collect::<Vec<_>>();
             assert!(!is_context_query(&args));
             assert!(is_exclusive(&args));
@@ -2630,16 +2448,8 @@ mod tests {
         );
         assert!(is_status(&["--json".into(), "status".into()]));
         assert!(!is_status(&["remember".into()]));
-        let tracked = [
-            "--json",
-            "--progress-id",
-            "request-one",
-            "--model-task-id",
-            "task-one",
-            "remember",
-            "body",
-        ]
-        .map(String::from);
+        let tracked = ["--json", "--progress-id", "request-one", "--model-task-id", "task-one", "remember", "body"]
+            .map(String::from);
         assert_eq!(command_name(&tracked), Some("remember"));
         assert!(!is_exclusive(&tracked));
         assert!(needs_inference(&tracked));
@@ -2753,12 +2563,7 @@ mod tests {
         dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(job.deadline.start());
-        job.reply
-            .send(Ok(crate::Captured {
-                exit: 0,
-                envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()),
-            }))
-            .map_err(anyhow::Error::msg)?;
+        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()) })).map_err(anyhow::Error::msg)?;
         assert!(response.recv_timeout(Duration::from_secs(1))?.ok);
         Ok(())
     }
@@ -2803,24 +2608,8 @@ mod tests {
         assert!(rx.try_recv().is_err(), "same ID must not create another write");
         let mut inspect = req("runtime.result", "inspect-pending-write");
         inspect.args = vec!["held-started-write".into()];
-        assert_eq!(
-            dispatch(inspect, &tx)
-                .envelope
-                .as_ref()
-                .map(|value| &value.summary["state"]),
-            Some(&json!("pending"))
-        );
-        job.reply
-            .send(Ok(crate::Captured {
-                exit: 0,
-                envelope: ResultEnvelope::new(
-                    "remember",
-                    OutputStatus::Ok,
-                    json!({"committed":true}),
-                    Vec::new(),
-                ),
-            }))
-            .map_err(anyhow::Error::msg)?;
+        assert_eq!(dispatch(inspect, &tx).envelope.as_ref().map(|value| &value.summary["state"]), Some(&json!("pending")));
+        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) })).map_err(anyhow::Error::msg)?;
         assert!(receive.recv_timeout(Duration::from_secs(1))?.ok);
         let mut inspect = req("runtime.result", "inspect-completed-write");
         inspect.args = vec!["held-started-write".into()];
@@ -2837,12 +2626,7 @@ mod tests {
         if std::env::var_os("RSRS_TRANSPORT_TEST_CHILD").is_none() {
             let profile = tempfile::tempdir()?;
             let output = Command::new(std::env::current_exe()?)
-                .args([
-                    "--exact",
-                    "rpc::tests::http_pipeline_with_held_execution_and_nonreading_peer",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
+                .args(["--exact", "rpc::tests::http_pipeline_with_held_execution_and_nonreading_peer", "--nocapture", "--test-threads=1"])
                 .env("RSRS_TRANSPORT_TEST_CHILD", "1")
                 .env("RSRS_DATA_DIR", profile.path())
                 .env("RSRS_CORE_TEST_MODE", "1")
@@ -2875,30 +2659,11 @@ mod tests {
             write!(pipeline, "POST /api/rpc HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n{connection}Content-Length: {}\r\n\r\n{body}", body.len())?;
         }
         let queued = rx.recv_timeout(Duration::from_secs(2))?;
-        anyhow::ensure!(
-            !queued.deadline.running(),
-            "queued request consumed the held execution slot"
-        );
-        let health: Value = ureq::get(&format!("{base}/api/health"))
-            .timeout(Duration::from_secs(1))
-            .call()?
-            .into_json()?;
-        anyhow::ensure!(
-            health["pid"] == std::process::id(),
-            "control channel was blocked"
-        );
-        let captured = || crate::Captured {
-            exit: 0,
-            envelope: ResultEnvelope::new(
-                "remember",
-                OutputStatus::Ok,
-                json!({"committed":true}),
-                Vec::new(),
-            ),
-        };
-        held.reply
-            .send(Ok(captured()))
-            .map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(!queued.deadline.running(), "queued request consumed the held execution slot");
+        let health: Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(1)).call()?.into_json()?;
+        anyhow::ensure!(health["pid"] == std::process::id(), "control channel was blocked");
+        let captured = || crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) };
+        held.reply.send(Ok(captured())).map_err(anyhow::Error::msg)?;
         RUNNING.store(0, Ordering::Release);
         anyhow::ensure!(blocker.join().map_err(|_| anyhow::anyhow!("blocker client panicked"))??["ok"] == true, "blocker result lost");
         anyhow::ensure!(queued.deadline.start(), "A expired before the held slot was released");
@@ -2940,24 +2705,10 @@ mod tests {
         }
         let (tx, rx) = mpsc::channel();
         WORKERS.store(1, Ordering::Release);
-        let library = respire::lock::LibraryLock::acquire(
-            &respire::service::data_dir(),
-            Duration::from_secs(120),
-        )?;
+        let library = respire::lock::LibraryLock::acquire(&respire::service::data_dir(), Duration::from_secs(120))?;
         std::thread::spawn(move || dispatch_loop(rx, 1, None, library));
-        let commands = [
-            vec![
-                "--json".into(),
-                "show".into(),
-                "controlled-missing-id".into(),
-            ],
-            vec![
-                "--json".into(),
-                "recall".into(),
-                "controlled empty-profile query".into(),
-                "--no-related".into(),
-            ],
-        ];
+        let commands = [vec!["--json".into(), "show".into(), "controlled-missing-id".into()],
+            vec!["--json".into(), "recall".into(), "controlled empty-profile query".into(), "--no-related".into()]];
         let mut original = Vec::new();
         for args in &commands {
             original.push(submit(&tx, args.clone(), false).map_err(anyhow::Error::msg)?);
@@ -2967,31 +2718,12 @@ mod tests {
         let gate = shared_exclusive();
         let held = gate.acquire(true);
         let (done, result) = mpsc::channel();
-        let sync = enqueue_job(
-            &tx,
-            vec!["sync".into()],
-            false,
-            Reply::new(move |response| {
-                let _ = done.send(response);
-            }),
-            Duration::from_millis(60),
-        )
-        .map_err(anyhow::Error::msg)?;
+        let sync = enqueue_job(&tx, vec!["sync".into()], false,
+            Reply::new(move |response| { let _ = done.send(response); }), Duration::from_millis(60)).map_err(anyhow::Error::msg)?;
         for (args, before) in commands.iter().zip(original.iter()) {
             let (done, result) = mpsc::channel();
-            enqueue_job(
-                &tx,
-                args.clone(),
-                false,
-                Reply::new(move |response| {
-                    let _ = done.send(response);
-                }),
-                Duration::from_secs(1),
-            )
-            .map_err(anyhow::Error::msg)?;
-            let after = result
-                .recv_timeout(Duration::from_secs(2))?
-                .map_err(anyhow::Error::msg)?;
+            enqueue_job(&tx, args.clone(), false, Reply::new(move |response| { let _ = done.send(response); }), Duration::from_secs(1)).map_err(anyhow::Error::msg)?;
+            let after = result.recv_timeout(Duration::from_secs(2))?.map_err(anyhow::Error::msg)?;
             anyhow::ensure!(after.exit == before.exit && std::mem::discriminant(&after.envelope.status) == std::mem::discriminant(&before.envelope.status) && after.envelope.errors == before.envelope.errors,
                 "read changed outcome or stopped progressing while sync snapshot awaited the write gate");
         }
