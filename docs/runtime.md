@@ -29,6 +29,52 @@ Client-only mode forbids lifecycle changes, binary copies, upgrades, CPU recover
 `--direct` execution. MCP stdio does not copy the executable. A failed request never
 triggers sandbox takeover. An idle runtime stays running until the host stops it.
 
+## Windows sign-in startup
+
+For client-only tools after a restart, configure one host-owned Windows Task
+Scheduler task. It runs after the same Windows user signs in, so the user's
+selected profile and OS keyring remain available. This is a sign-in task, not a
+SYSTEM service before login. The CLI does not install it automatically.
+
+1. In an ordinary host terminal, run `rsrs status --json`, followed by
+   `rsrs --runtime-internal --status --json`. Verify the selected account and
+   running host. The first command installs/updates the managed native executable
+   and its verified runtime files in the installation's `bin` directory.
+2. Open **Task Scheduler → Create Task**. Name it **Respire host runtime**, select
+   your current Windows user, choose **Run only when user is logged on**, and
+   leave **Run with highest privileges** unchecked. No stored password is needed.
+3. Add **At log on** for that specific user. Add **Start a program** using the
+   absolute managed executable path (normally
+   `C:\Users\<your-user>\.rsrs\bin\rsrs.exe`) and arguments `status --json`.
+   Use the actual installation `bin` path if you configured another location.
+   Use your user home as **Start in**. Do not select an account subdirectory's
+   copy, a temporary build directory or a sandbox/client-only launcher.
+4. In **Settings**, allow on-demand execution and choose **Do not start a new
+   instance**. Disable the task's maximum-running-time stop condition: the
+   resident child must remain available. Power/battery conditions can delay a
+   task; choose these according to your own power policy.
+5. Run the task once. `status` performs normal host startup and then returns;
+   the owned runtime keeps running. Check **Last Run Result** and verify
+   `rsrs --runtime-internal --status --json` again before relying on a sandbox
+   connection. Repeat this check after your next sign-in.
+
+After a CLI update, run the new host `rsrs status --json` once to update the
+managed executable used by the task. Custom `RSRS_DATA_DIR`, `RSRS_BIN_DIR` or
+port settings must also be present in the task's user environment; terminal-only
+variables are not inherited by Task Scheduler. The task uses the profile selected
+in the installation's `client.json`; it does not log in, generate keys or choose
+another account.
+
+To remove startup, disable/delete only your **Respire host runtime** task. Stop
+the existing owned runtime separately from a host terminal with
+`rsrs --runtime-internal --stop`. Client-only tools continue to leave lifecycle
+management to the host. `rsrs --runtime-internal --help` lists lifecycle flags
+without creating a profile or starting a runtime.
+
+The doctor injection count measures detected installed hosts, rather than every
+catalog target. Absent hosts are not failed injections; stale installed-host
+instructions can be refreshed with an explicitly requested `rsrs inject --all`.
+
 `rsrs doctor` includes a `Runtime version` check. Its JSON summary exposes
 `runtime_version`, which is `null` when no runtime is connected. The TUI home
 and version pages show the connected runtime's version separately from the CLI

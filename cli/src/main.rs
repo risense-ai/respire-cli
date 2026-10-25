@@ -5785,6 +5785,10 @@ fn main_body() -> i32 {
             set_json_mode(json);
             prepare_command_runtime().and_then(|()| crate::app_version::emit(json))
         }
+        Preparsed::RuntimeHelp { json } => {
+            set_json_mode(json);
+            emit_runtime_help()
+        }
         Preparsed::Runtime { flags, json } => {
             set_json_mode(json);
             prepare_command_runtime().and_then(|()| rpc::runtime_entry(flags))
@@ -5833,6 +5837,9 @@ fn prepare_command_runtime() -> Result<()> {
 }
 
 enum Preparsed {
+    RuntimeHelp {
+        json: bool,
+    },
     Version {
         json: bool,
     },
@@ -5845,6 +5852,19 @@ enum Preparsed {
         direct: bool,
         args: Vec<std::ffi::OsString>,
     },
+}
+
+/// Static lifecycle help is also available to sandbox clients without starting a host.
+fn emit_runtime_help() -> Result<()> {
+    let usage = "Usage: rsrs --runtime-internal [--no-open] [--host 127.0.0.1] [--port PORT] [--status | --stop]\n\nHost runtime: loopback HTTP only. Without --status/--stop, serve until stopped.\n  --status   Inspect the existing host without starting it\n  --stop     Ask the owned host runtime to stop\n  --no-open  Do not open a browser (accepted for compatibility)\n\nClient-only tools connect to the host; lifecycle changes require the host terminal.\nFor Windows sign-in startup, see docs/runtime.md.\n";
+    if json_mode() {
+        emit_result(ResultEnvelope::new("runtime-help", OutputStatus::Ok,
+            serde_json::json!({"usage":usage,"lifecycle":"host-managed","transport":"loopback-http"}), Vec::new()))
+    } else {
+        print!("{usage}");
+        mark_emitted();
+        Ok(())
+    }
 }
 
 fn is_short_v_version(args: &[String]) -> Option<bool> {
@@ -5876,6 +5896,13 @@ fn preprocess_args() -> Preparsed {
         .find(|arg| arg.as_str() != "--json")
         .is_some_and(|arg| arg == "--runtime-internal")
     {
+        if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            && args.iter().all(|arg| matches!(arg.as_str(), "--runtime-internal" | "--help" | "-h" | "--json"))
+        {
+            return Preparsed::RuntimeHelp {
+                json: json_mode() || args.iter().any(|arg| arg == "--json"),
+            };
+        }
         let mut flags = rpc::RuntimeFlags {
             port: None,
             host: "127.0.0.1".to_owned(),
