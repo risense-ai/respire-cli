@@ -1,5 +1,5 @@
 import {createHash, randomUUID} from 'node:crypto';
-import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs';
+import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 const [destination] = process.argv.slice(2);
@@ -8,14 +8,16 @@ if (!destination || !configured) throw new Error('Set RSRS_CORE_SDK_DIR and pass
 const sdk = resolve(configured), output = resolve(destination);
 const manifest = JSON.parse(readFileSync(join(sdk,'manifest.json'),'utf8'));
 if (manifest.test_only) throw new Error('Test-only Core SDK cannot be staged for a CLI release');
-function stage(path, bytes) {
+function stage(path, bytes, mode) {
   const digest = value => createHash('sha256').update(value).digest('hex');
   if (existsSync(path) && digest(readFileSync(path)) === digest(bytes)) return;
   mkdirSync(dirname(path), {recursive:true});
   // Preserve mappings held by concurrent native processes; never truncate them.
   const temporary = join(dirname(path), `.${basename(path)}.${randomUUID()}`);
   try {
-    writeFileSync(temporary, bytes);
+    writeFileSync(temporary, bytes, {mode: mode ?? 0o666});
+    // Atomic replacement must preserve the SDK file mode regardless of umask.
+    if (mode !== undefined) chmodSync(temporary, mode);
     renameSync(temporary, path);
   } finally {
     rmSync(temporary, {force:true});
@@ -29,10 +31,11 @@ for (const file of manifest.files) {
   else if (file.path === 'LICENSE.txt') path = 'core-notices/CORE-SDK-LICENSE.txt';
   else continue;
   if (path.includes('\\') || path.split('/').some(part => !part || part === '.' || part === '..')) throw new Error('Unsafe runtime path');
-  const bytes = readFileSync(join(sdk,file.path));
+  const source = join(sdk,file.path);
+  const bytes = readFileSync(source);
   if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`SDK checksum mismatch: ${file.path}`);
   mkdirSync(dirname(join(output,path)),{recursive:true});
-  stage(join(output,path),bytes);
+  stage(join(output,path),bytes,statSync(source).mode & 0o777);
   files.push({path,sha256:file.sha256});
 }
 if (manifest.redistribution === 'permitted-under-included-license' && !files.some(file => file.path === 'core-notices/CORE-SDK-LICENSE.txt')) {
