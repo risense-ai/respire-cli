@@ -88,7 +88,7 @@ function TaskOwnershipChecks($TaskObject) {
         limited = $TaskObject.Principal.RunLevel -eq 'Limited'
         one_action = $actions.Count -eq 1
         executable = $actionPathMatches
-        arguments = $actions.Count -eq 1 -and $actions[0].Arguments -eq $startupAction.Arguments
+        arguments = $actions.Count -eq 1 -and $actions[0].Arguments -ceq $startupAction.Arguments
         one_trigger = $triggers.Count -eq 1
         logon_trigger = $triggers.Count -eq 1 -and $triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'
         trigger_sid = $triggerSid -eq $identity.User.Value
@@ -127,6 +127,22 @@ try {
         trigger_form = $(if ($task.Triggers.UserId -match '^S-\d-') {'sid'} else {'account-name'});
         ownership_checks = $checks} | ConvertTo-Json -Depth 4 -Compress)
     if ($checks.Values -contains $false) { throw 'Scheduled task identity/action/trigger drifted' }
+    # A case change in Base64 is a different command, even though Windows paths
+    # and account names can be compared through their canonical identities.
+    $base64Offset = $startupAction.Arguments.LastIndexOf(' ') + 1
+    $changedArguments = $null
+    for ($offset = $base64Offset; $offset -lt $startupAction.Arguments.Length; $offset++) {
+        $letter = $startupAction.Arguments[$offset]
+        if ([char]::IsLetter($letter)) {
+            $replacement = if ([char]::IsUpper($letter)) { [char]::ToLowerInvariant($letter) } else { [char]::ToUpperInvariant($letter) }
+            $changedArguments = $startupAction.Arguments.Substring(0, $offset) + $replacement + $startupAction.Arguments.Substring($offset + 1)
+            break
+        }
+    }
+    if ($null -eq $changedArguments) { throw 'Encoded command has no case-sensitive test character' }
+    $changedTask = [pscustomobject]@{Principal = $task.Principal; Triggers = $task.Triggers;
+        Actions = @([pscustomobject]@{Execute = $task.Actions.Execute; Arguments = $changedArguments})}
+    if ((TaskOwnershipChecks $changedTask).arguments) { throw 'Case-changed encoded command was accepted' }
     $startupAttempted = $true
     Start-ScheduledTask -TaskName $taskName -TaskPath '\'
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -182,5 +198,6 @@ try {
 if ($validationPassed) {
     Write-Output (@{result = 'PASS'; profile = 'isolated synthetic off-mode'; sign_in_trigger = $true;
         limited_interactive_principal = $true; host_startup = $true; client_only_stop_denied = $true;
-        task_removed = $true; runtime_stopped = $true; physical_reboot_tested = $false} | ConvertTo-Json -Compress)
+        task_removed = $true; runtime_stopped = $true; encoded_command_case_guard = $true;
+        physical_reboot_tested = $false} | ConvertTo-Json -Compress)
 }
