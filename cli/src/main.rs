@@ -5698,7 +5698,8 @@ fn is_write_command(c: &Command) -> bool {
             // Fivekeys/SuperReset/KeysExport change session and credentials; Session/Logout change session;
             // Space creates/deletes profiles and issues sessions.
             | Command::Grant { .. }
-            | Command::Taxonomy { .. }
+            | Command::Taxonomy { list: false, .. }
+            | Command::Taxonomy { ensure: Some(_), .. }
             | Command::Keygen { .. }
             | Command::Model { .. }
             | Command::Login { .. }
@@ -9151,6 +9152,9 @@ mod capture_tests {
         let revision = super::Cli::try_parse_from(["rsrs", "memory-revision", "--json"])?;
         assert!(matches!(revision.command, Some(super::Command::MemoryRevision)));
         assert!(!super::is_write_command(&super::Command::MemoryRevision));
+        assert!(!super::is_write_command(&super::Command::Taxonomy {list:true,ensure:None}));
+        assert!(super::is_write_command(&super::Command::Taxonomy {list:false,ensure:None}));
+        assert!(super::is_write_command(&super::Command::Taxonomy {list:true,ensure:Some("synthetic".into())}));
         assert!(!super::is_write_command_fine(&super::Command::MemoryRevision));
         assert!(super::is_off_allowed(&super::Command::MemoryRevision));
         assert!(super::Cli::try_parse_from(["rsrs", "v"]).is_ok());
