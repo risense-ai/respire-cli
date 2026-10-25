@@ -41,6 +41,11 @@ A request still awaiting statistics persistence gives an explicit retryable
 not-found diagnostic; no different recent request is silently selected.
 
 Legacy good_ids/bad_ids remain readable for existing marks and benchmark data.
+New legacy-prefix marks assign old query rows a UUID if needed and use the same
+attributed event/mirror transaction. Turning the experiment off to regrade does
+not leave an older explicit event authoritative when it is re-enabled.
+Idempotent explicit retries also repair an inconsistent report mirror without
+creating extra heat or a new revision.
 With feedback disabled, the existing recent-candidate prefix grading command is
 retained. With feedback enabled, request identity is required. Read-only/off
 mode cannot create marks; read-only benchmark aggregation does not write marks,

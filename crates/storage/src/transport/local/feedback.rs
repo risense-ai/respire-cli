@@ -83,21 +83,19 @@ impl LocalStore {
         let mut revision = 0;
         for id in ids.iter().collect::<BTreeSet<_>>() {
             let old:Option<(bool,String,u64)>=transaction.query_row("SELECT good,source,revision FROM query_feedback WHERE query_log_id=?1 AND memory_id=?2",params![log_id,id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
-            if old
-                .as_ref()
-                .is_some_and(|(verdict, old_source, _)| *verdict == good && old_source == source)
+            let next = if let Some((_, _, existing)) =
+                old.filter(|(verdict, old_source, _)| *verdict == good && old_source == source)
             {
-                if let Some((_, _, existing)) = old {
-                    revision = revision.max(existing);
-                }
-                continue;
-            }
-            let next: u64 = transaction.query_row(
-                "SELECT COALESCE(MAX(revision),0)+1 FROM query_feedback",
-                [],
-                |row| row.get(0),
-            )?;
-            transaction.execute("INSERT INTO query_feedback(query_log_id,memory_id,good,source,marked_at,revision) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(query_log_id,memory_id) DO UPDATE SET good=excluded.good,source=excluded.source,marked_at=excluded.marked_at,revision=excluded.revision",params![log_id,id,good,source,chrono::Utc::now().timestamp(),next])?;
+                existing
+            } else {
+                let next: u64 = transaction.query_row(
+                    "SELECT COALESCE(MAX(revision),0)+1 FROM query_feedback",
+                    [],
+                    |row| row.get(0),
+                )?;
+                transaction.execute("INSERT INTO query_feedback(query_log_id,memory_id,good,source,marked_at,revision) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(query_log_id,memory_id) DO UPDATE SET good=excluded.good,source=excluded.source,marked_at=excluded.marked_at,revision=excluded.revision",params![log_id,id,good,source,chrono::Utc::now().timestamp(),next])?;
+                next
+            };
             // Keep the public query-log report and existing benchmark format compatible.
             let (good_json, bad_json): (String, String) = transaction.query_row(
                 "SELECT good_ids,bad_ids FROM query_log WHERE id=?1",
@@ -324,6 +322,65 @@ mod tests {
             .is_empty());
         Ok(())
     }
+    #[test]
+    fn legacy_regrade_and_explicit_idempotent_repair_share_one_authority() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let store = LocalStore::open(&root.path().join("db"))?;
+        let id = "synthetic-complete-id".to_owned();
+        let request = uuid::Uuid::new_v4().to_string();
+        store.log_query_request(&request, "query", "p", "s", &[id.clone()], &[1.0])?;
+        let old = store.mark_query_feedback(&request, &[id.clone()], true, "human")?;
+        // This is the legacy path still allowed with FEEDBACK=0.
+        assert!(store.mark_verdict(&[id.clone()], false)?.is_empty());
+        let allowed = BTreeSet::from([id.clone()]);
+        let counts = store.feedback_counts(
+            "query",
+            "p",
+            "s",
+            &allowed,
+            0.5,
+            chrono::Utc::now().timestamp(),
+        )?;
+        assert!(counts.good.is_empty());
+        assert_eq!(counts.bad.get(&id), Some(&1));
+        let row = store.query_log_rows(1)?.remove(0);
+        assert!(row.good.is_empty());
+        assert_eq!(row.bad, [id.clone()]);
+        let revision = store.mark_query_feedback(&request, &[id.clone()], false, "model")?;
+        assert!(revision > old);
+        // Simulate a mirror left inconsistent by an earlier implementation.
+        store.connection.execute(
+            "UPDATE query_log SET good_ids=?1,bad_ids='[]'",
+            [serde_json::to_string(&[id.clone()])?],
+        )?;
+        assert_eq!(
+            store.mark_query_feedback(&request, &[id.clone()], false, "model")?,
+            revision
+        );
+        let row = store.query_log_rows(1)?.remove(0);
+        assert!(row.good.is_empty());
+        assert_eq!(row.bad, [id.clone()]);
+        store.log_query("legacy query", "p", "s", &[id.clone()], &[1.0])?;
+        assert!(store.mark_verdict(&[id.clone()], true)?.is_empty());
+        let legacy = store.query_log_rows(1)?.remove(0);
+        assert!(legacy.request_id.is_some());
+        assert_eq!(
+            store
+                .feedback_counts(
+                    "legacy query",
+                    "p",
+                    "s",
+                    &allowed,
+                    0.5,
+                    chrono::Utc::now().timestamp()
+                )?
+                .good
+                .get(&id),
+            Some(&1)
+        );
+        Ok(())
+    }
+
     #[test]
     fn unicode_short_queries_window_and_legacy_marks_are_supported() -> Result<()> {
         assert_eq!(similarity("中文记忆", "中文记忆"), 1.0);

@@ -30,8 +30,8 @@ def main():
     if methods.count(release) != 1:
         raise RuntimeError("Expected exactly one explicit payload release in actual SDK methods")
     fixture = (ROOT / "scripts/fixtures/core-payload-lifetime.rs").read_text()
-    prefix = "use anyhow::{bail, Context, Result};\nuse serde::Serialize;\nuse serde_json::{json, Value};\n"
-    core = "struct Core { handle: ffi::Handle, next_request: u64, poisoned: bool }\n"
+    prefix = "use anyhow::{bail, Context, Result};\nuse serde::Serialize;\nuse serde_json::{json, Value};\nmod feedback_contract;\nconst FEEDBACK_CONTRACT:u64=0;\n"
+    core = "struct Core { handle: ffi::Handle, next_request: u64, poisoned: bool, native_feedback_contract: Option<u64> }\n"
     lock = (ROOT / "Cargo.lock").read_text()
     packages = tomllib.loads(lock)["package"]
     versions = {}
@@ -50,6 +50,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="core-payload-lifetime-") as directory:
         project = Path(directory)
         (project / "src").mkdir()
+        (project / "src/feedback_contract.rs").write_text((ROOT / "crates/core-sdk/src/feedback_contract.rs").read_text())
         (project / "Cargo.toml").write_text(manifest)
         # Reuse the workspace's locked transitive versions; Cargo only prunes
         # unrelated workspace packages and adds this synthetic root package.
@@ -66,9 +67,9 @@ def main():
                 if (result.returncode != 101 or "0 passed; 2 failed" not in result.stdout
                         or result.stdout.count("Error: payload still live at FFI entry") != 2):
                     raise RuntimeError("Both original-lifetime branches must fail the deallocation assertion")
-            elif result.returncode != 0 or "5 passed; 0 failed" not in result.stdout:
+            elif result.returncode != 0 or "7 passed; 0 failed" not in result.stdout:
                 raise RuntimeError("Actual SDK wrapper ownership regression failed")
-    print("PASS: both negative controls detected; all five actual-wrapper tests passed")
+    print("PASS: both negative controls detected; all five actual-wrapper and two feedback contract tests passed")
 
 
 if __name__ == "__main__":
