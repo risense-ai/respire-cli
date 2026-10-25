@@ -303,6 +303,50 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests() -> Result<()
     Ok(())
 }
 
+/// New clients normalize old hosts' display-only failures without reclassifying exits.
+#[test]
+fn client_normalizes_legacy_failure_envelopes_and_preserves_remote_semantics() -> Result<(), Box<dyn std::error::Error>> {
+    for (status, exit, reason, errors) in [
+        ("fail", 1, "legacy_missing", serde_json::json!([])),
+        ("fail", 2, "invalid_input", serde_json::json!(["original remote diagnostic"])),
+        ("pending", 2, "decision_required", serde_json::json!([])),
+    ] {
+        let dir = tempfile::tempdir()?;
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let port = server.server_addr().to_ip().ok_or("no fixture port")?.port();
+        let original_errors = errors.clone();
+        let worker = thread::spawn(move || -> Result<(), String> {
+            let mut request = server.recv_timeout(Duration::from_secs(10))
+                .map_err(|error| error.to_string())?.ok_or("legacy fixture received no request")?;
+            if request.url() != "/api/rpc" { return Err("unexpected legacy fixture request".into()); }
+            let body: serde_json::Value = serde_json::from_reader(request.as_reader())
+                .map_err(|error| error.to_string())?;
+            if body["method"] != "cli.exec" { return Err("unexpected legacy fixture method".into()); }
+            let response = serde_json::json!({"v":1,"id":body["id"],"ok":exit==0,"exit":exit,"bin":"1.0.9",
+                "envelope":{"command":"show","status":status,"summary":{"reason":reason},
+                    "items":[{"name":"entry","status":"fail","value":"not found"}],
+                    "actions":[],"errors":errors,"details":{"error_type":"legacy_fixture"},"related":[]}});
+            request.respond(tiny_http::Response::from_string(response.to_string()))
+                .map_err(|error| error.to_string())
+        });
+        let output = Command::new(bin()).args(["--client-only", "show", "synthetic-missing", "--json"])
+            .env("RSRS_DATA_DIR", dir.path()).env("RSRS_RPC_PORT", port.to_string())
+            .env_remove("RSRS_RPC_TOKEN").output()?;
+        worker.join().map_err(|_| "legacy fixture panicked")??;
+        assert_eq!(output.status.code(), Some(exit));
+        let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(envelope["status"], status);
+        assert_eq!(envelope["summary"]["reason"], reason);
+        assert_eq!(envelope["details"]["error_type"], "legacy_fixture");
+        if status == "fail" && original_errors == serde_json::json!([]) {
+            assert_eq!(envelope["errors"], serde_json::json!(["entry: not found"]));
+        } else {
+            assert_eq!(envelope["errors"], original_errors);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn client_only_rejects_stalled_inference_before_submitting_a_write() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;

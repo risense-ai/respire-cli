@@ -1101,7 +1101,8 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
 }
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
-    if let Some(envelope) = response.envelope {
+    if let Some(mut envelope) = response.envelope {
+        envelope.ensure_failure_diagnostics();
         crate::progress::finish();
         if json || envelope.summary["skipped"] != true || envelope.summary["mode"] != "off" {
             println!("{}", envelope.render(json)?);
