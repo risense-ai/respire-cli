@@ -322,6 +322,7 @@ fn progress_enabled() -> bool {
 
 fn emit_result(result: ResultEnvelope) -> Result<()> {
     let mut result = result;
+    result.ensure_failure_diagnostics();
     result.details = output::sanitize_details(&result.command, &result.details);
     let exit_code = status_exit_code(result.status);
     if rpc::worker_active() || DEFER_PROFILE_OUTPUT.get() {
@@ -385,6 +386,17 @@ fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     (envelope, if input { 2 } else { 1 })
 }
 
+/// Keep the complete parser diagnostic separately from its concise UI message.
+fn parse_failure(error: &clap::Error) -> ResultEnvelope {
+    let usage = error.to_string();
+    let mut envelope = ResultEnvelope::new("cli", OutputStatus::Fail,
+        serde_json::json!({"reason":"invalid_input"}), Vec::new());
+    envelope.errors.push(usage.lines().find(|line| !line.trim().is_empty())
+        .unwrap_or("invalid command input").to_owned());
+    envelope.details = serde_json::json!({"error_type":"user", "usage":usage});
+    envelope
+}
+
 /// Run one command on the runtime worker thread and keep the envelope instead of printing it.
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
@@ -419,9 +431,7 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
                 Vec::new(),
             );
             if code != 0 {
-                envelope.summary = serde_json::json!({"reason":"invalid_input"});
-                envelope.details = serde_json::json!({"error_type":"user"});
-                envelope.errors.push(error.to_string());
+                envelope = parse_failure(&error);
             }
             CAPTURED.with(|slot| *slot.borrow_mut() = Some(envelope));
             mark_emitted();
@@ -436,11 +446,12 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
             set_exit_code(code);
         }
     }
-    let envelope = CAPTURED
+    let mut envelope = CAPTURED
         .with(|slot| slot.borrow_mut().take())
         .unwrap_or_else(|| {
             ResultEnvelope::new("cli", OutputStatus::Ok, serde_json::json!({}), Vec::new())
         });
+    envelope.ensure_failure_diagnostics();
     Captured {
         exit: exit_code(),
         envelope,
@@ -905,6 +916,8 @@ enum Command {
     Status,
     /// Read the initialized library's opaque snapshot token without loading a model
     MemoryRevision,
+    /// Report supported CLI capabilities without a profile, runtime or model download
+    Capabilities,
     /// Recompute all embeddings (for embedder upgrades / dim changes; re-embed by semantics)
     Reembed,
     /// Stock analysis: cluster BGE vectors, flag lone leaves, suggest a tree (read-only)
@@ -1257,6 +1270,7 @@ enum Command {
     /// Log in through browser authorization, or use --interactive for password and TOTP prompts.
     /// Address defaults to the last server this machine used (kept in session.json by register/logout).
     /// Missing user/password drops into an interactive prompt (TTY only).
+    #[command(after_long_help = "Vault recovery: cloud authorization does not decrypt memories. Use the existing recovery code or a trusted device's keys-export, then retry login. Missing or incorrect recovery material must not replace the selected account. super-reset rotates an already unlocked vault; it cannot recover a lost data key. keygen --force switches to unrelated offline keys and is not cloud recovery. If all recovery material is lost, existing encrypted data cannot be recovered by resetting a password. See docs/vault-recovery.md.")]
     Login {
         #[arg(long)]
         addr: Option<String>,
@@ -5690,7 +5704,7 @@ fn is_off_allowed(c: &Command) -> bool {
         // Self-restore and inject (the only way out of off)
         Command::AgentConfig { .. } | Command::Inject { .. }
         // Status and doctor
-        | Command::Status | Command::MemoryRevision | Command::UpdateCheck { .. }
+        | Command::Status | Command::MemoryRevision | Command::Capabilities | Command::UpdateCheck { .. }
         // Infrastructure (web server, MCP shell, models, plugins, config)
         | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
         | Command::Plugin { .. } | Command::Config { .. }
@@ -5781,10 +5795,13 @@ fn main_body() -> i32 {
             match Cli::try_parse_from(
                 std::iter::once(std::ffi::OsString::from("rsrs")).chain(args),
             ) {
-                Ok(cli) if matches!(cli.command, Some(Command::MemoryRevision)) => run(cli),
+                Ok(cli) if matches!(cli.command, Some(Command::MemoryRevision | Command::Capabilities)) => run(cli),
                 Ok(cli) => prepare_command_runtime().and_then(|()| run(cli)),
                 Err(error) if error.exit_code() == 0 => error.print().map_err(Into::into),
-                Err(error) => Err(respire_app::input_error::InputError(error.to_string()).into()),
+                Err(error) => {
+                    let code = error.exit_code();
+                    emit_result(parse_failure(&error)).map(|()| set_exit_code(code))
+                }
             }
         }
     };
@@ -5954,6 +5971,18 @@ fn run_memory_revision() -> Result<()> {
     ))
 }
 
+fn run_capabilities() -> Result<()> {
+    emit_result(ResultEnvelope::new("capabilities", OutputStatus::Ok,
+        serde_json::json!({
+            "schema_version": 1,
+            "cli_version": crate::app_version::embedded(),
+            "capabilities": {
+                "rerank": false,
+                "model": {"install": true, "install_rerank": false}
+            }
+        }), Vec::new()))
+}
+
 fn changes_profile(command: Option<&Command>) -> bool {
     match command {
         Some(Command::Account { action, .. }) => !matches!(action.as_str(), "list" | "remove"),
@@ -5964,6 +5993,11 @@ fn changes_profile(command: Option<&Command>) -> bool {
 }
 
 fn run(args: Cli) -> Result<()> {
+    // Static CLI support is safe to inspect even on a fresh or inaccessible
+    // profile. It makes no statement about account rights or model readiness.
+    if matches!(args.command, Some(Command::Capabilities)) {
+        return run_capabilities();
+    }
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
@@ -6185,6 +6219,9 @@ fn commit_prepared_write<T>(simple: bool, generation: usize, action: impl FnOnce
 }
 
 fn run_local_inner(args: Cli) -> Result<()> {
+    if matches!(args.command, Some(Command::Capabilities)) {
+        return run_capabilities();
+    }
     let write_generation = rpc::sync_generation();
     let short_write = matches!(args.command.as_ref(), Some(Command::Update { .. }))
         || matches!(args.command.as_ref(), Some(Command::Remember {
@@ -6896,11 +6933,12 @@ fn run_local_inner(args: Cli) -> Result<()> {
             };
 
             // -- Trivia = diary, two modes (agent.json diary_mode; the AI reads it from the inject source):
-            //    concise (default) = one diary-track entry per day, timestamped lines appended;
+            //    concise (default) = untitled events append to one daily track;
+            //    an explicit title names an independent entry in either mode.
             //    verbose = one diary entry each (old behavior) --
             let (mut content, mut title) = (content, title);
             if importance == "trivial" {
-                if respire::service::diary_mode() != "verbose" {
+                if respire::service::diary_mode() != "verbose" && title.trim().is_empty() {
                     // Stable identity survives retitling; dated titles remain a fallback
                     // for legacy tracks created before deterministic IDs were used.
                     let now_local = chrono::Local::now();
@@ -6948,11 +6986,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                             respire::hooks::HookEvent::PostRemember,
                             respire::hooks::remember_done_payload(&stored.id, &e.title, &e.importance),
                         );
-                        // A sealed StoredMemory contains the encrypted payload and local
-                        // storage columns.  It is an internal persistence shape, not a
-                        // user-facing remember result.  Keep the public result to the
-                        // stable summary/item contract and never expose it in DETAILS.
-                        emit_result(ResultEnvelope::new(
+                        // Return the same decrypted public entry that show exposes,
+                        // never the sealed StoredMemory persistence representation.
+                        let mut result = ResultEnvelope::new(
                             "remember",
                             OutputStatus::Ok,
                             serde_json::json!({
@@ -6966,7 +7002,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
                                 OutputStatus::Ok,
                                 format!("id={}", stored.id),
                             )],
-                        ))?;
+                        );
+                        result.details = serde_json::to_value(&e)?;
+                        emit_result(result)?;
                         return Ok(());
                     }
                     // No track for today: create with a deterministic id (same id across devices that day; sync converges), then the generic create path
@@ -7155,6 +7193,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 if let Some(h) = hint {
                     result.actions.push(h);
                 }
+                result.details = serde_json::to_value(&entry)?;
                 emit_result(result)?;
                 schedule_autosync(&session, &store);
                 return Ok(());
@@ -7252,6 +7291,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 result.actions.push(h);
             }
             result.errors.extend(issues);
+            result.details = serde_json::to_value(&entry)?;
             emit_result(result)?;
             schedule_autosync(&session, &store);
         }
@@ -8799,6 +8839,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         }
         // The commands above already returned at the top of this function (no embedder needed); this arm is unreachable - only to exhaust the match.
         Command::MemoryRevision
+        | Command::Capabilities
         | Command::Keygen { .. }
         | Command::Session { .. }
         | Command::Grant { .. } => {

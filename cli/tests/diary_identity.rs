@@ -212,6 +212,107 @@ fn entry(id: &str, user: &str, title: &str, content: &str) -> MemoryEntry {
     }
 }
 
+/// Explicit titles identify independent entries instead of silently naming a daily track.
+#[test]
+fn explicit_titles_preserve_entries_and_leave_the_daily_track_unchanged() -> anyhow::Result<()> {
+    for mode in ["concise", "verbose"] {
+        let mut fixture = Fixture::new()?;
+        std::fs::write(fixture.home.path().join("data/agent.json"),
+            serde_json::to_vec(&json!({"diary_mode":mode}))?)?;
+        fixture.start()?;
+        for has_track in [false, true] {
+            let existing = if has_track {
+                let result = fixture.remember("untitled-existing-event")?;
+                let id = result["summary"]["id"].as_str().context("missing diary id")?;
+                Some((id.to_owned(), fixture.show(id)?))
+            } else { None };
+            for importance in ["trivial", "important"] {
+                let title = format!("explicit-{mode}-{has_track}-{importance}");
+                let body = format!("body-{title}");
+                let receipt = fixture.run(&["remember", &body, "--title", &title,
+                    "--importance", importance, "--force"])?;
+                let id = receipt["summary"]["id"].as_str().context("missing entry id")?;
+                let saved = fixture.show(id)?;
+                assert_eq!(receipt["details"], saved);
+                assert_eq!(saved["title"], title);
+                assert!(saved["content"].as_str().context("missing body")?.contains(&body));
+                assert!(receipt["items"].as_array().context("missing items")?.iter()
+                    .any(|item| item["value"] == format!("id={id}")));
+                if let Some((track_id, before)) = &existing {
+                    assert_ne!(id, track_id);
+                    assert_eq!(fixture.show(track_id)?, *before);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every successful write action returns a public entry, while blank titles retain aggregation.
+#[test]
+fn remember_public_payload_covers_created_appended_and_merged() -> anyhow::Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.start()?;
+    let created = fixture.remember("first public diary event")?;
+    let id = created["summary"]["id"].as_str().context("missing created id")?;
+    assert_eq!(created["summary"]["action"], "created");
+    assert_eq!(created["details"], fixture.show(id)?);
+    let appended = fixture.run(&["remember", "second public diary event", "--title", " \t "])?;
+    assert_eq!(appended["summary"]["action"], "diary_appended");
+    assert_eq!(appended["summary"]["id"], id);
+    assert_eq!(appended["details"], fixture.show(id)?);
+    let source = fixture.run(&["remember", "merge source event", "--title", "merge source",
+        "--importance", "important", "--force"])?;
+    let source_id = source["summary"]["id"].as_str().context("missing source id")?;
+    let merged = fixture.run(&["remember", "merged public event", "--title", "merged title",
+        "--importance", "important", "--merge-ids", source_id])?;
+    assert_eq!(merged["summary"]["action"], "merged");
+    let merged_id = merged["summary"]["id"].as_str().context("missing merged id")?;
+    assert_eq!(merged["details"], fixture.show(merged_id)?);
+    for result in [&created, &appended, &source, &merged] {
+        let details = result["details"].as_object().context("missing public entry")?;
+        for internal in ["ciphertext", "nonce", "wrapped_urk", "embedding", "embedding_enc",
+            "local_embedding", "local_artifact", "token", "password"] {
+            assert!(!details.contains_key(internal), "public result contains {internal}");
+        }
+        assert_eq!(result["details"]["id"], result["summary"]["id"]);
+    }
+    Ok(())
+}
+
+/// Client-only RPC failures remain one JSON document with an actionable diagnostic.
+#[test]
+fn missing_entry_and_usage_failures_have_machine_diagnostics() -> anyhow::Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.start()?;
+    for args in [vec!["--client-only", "--json", "show", "no-such-id"],
+        vec!["--client-only", "--json", "remember", "synthetic", "--unknown-option"]] {
+        let output = fixture.command(&args).output()?;
+        assert!(!output.status.success());
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["status"], "fail");
+        let errors = result["errors"].as_array().context("missing error list")?;
+        assert!(!errors.is_empty());
+        assert!(errors.iter().all(|error| error.as_str().is_some_and(|s| !s.trim().is_empty())));
+        if args.contains(&"--unknown-option") {
+            assert_eq!(output.status.code(), Some(2));
+            assert!(!errors[0].as_str().context("missing concise error")?.contains('\n'));
+            assert!(result["details"]["usage"].as_str().context("missing usage")?.contains("Usage:"));
+        } else {
+            assert_eq!(output.status.code(), Some(1));
+            assert!(errors[0].as_str().context("missing not-found diagnostic")?.contains("not found"));
+        }
+    }
+    // Direct reads require the owned runtime to release its library lock first.
+    fixture.stop();
+    let output = fixture.command(&["--direct", "--json", "show", "no-such-id"]).output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let result: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(result["status"], "fail");
+    assert!(result["errors"][0].as_str().context("missing direct diagnostic")?.contains("not found"));
+    Ok(())
+}
+
 /// Public retitling, including a blank title, must not break daily append identity.
 #[test]
 fn public_title_edit_and_blank_title_still_append_without_changing_metadata() -> anyhow::Result<()> {

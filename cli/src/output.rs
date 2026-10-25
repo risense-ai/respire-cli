@@ -64,6 +64,23 @@ pub struct ResultEnvelope {
 }
 
 impl ResultEnvelope {
+    /// Failed commands always carry machine diagnostics; warnings and pending
+    /// decisions retain their own (potentially empty) diagnostic contract.
+    pub fn ensure_failure_diagnostics(&mut self) {
+        if !matches!(self.status, Status::Fail)
+            || self.errors.iter().any(|error| !error.trim().is_empty())
+        {
+            return;
+        }
+        self.errors = self.items.iter()
+            .filter(|item| matches!(item.status, Status::Fail) && !item.value.trim().is_empty())
+            .map(|item| format!("{}: {}", item.name, item.value))
+            .collect();
+        if self.errors.is_empty() {
+            self.errors.push(format!("{} failed", self.command));
+        }
+    }
+
     pub fn new(
         command: impl Into<String>,
         status: Status,
@@ -577,6 +594,29 @@ mod tests {
             render_table(&["NAME", "STATUS"], &[vec!["store".into(), "PASS".into()]]),
             "NAME   STATUS\nstore  PASS"
         );
+    }
+
+    #[test]
+    fn failure_diagnostics_cover_display_only_failures_without_changing_other_states() {
+        let mut fail = ResultEnvelope::new("show", Status::Fail, serde_json::json!({}),
+            vec![Item::new("entry", Status::Fail, "not found")]);
+        fail.ensure_failure_diagnostics();
+        assert_eq!(fail.errors, ["entry: not found"]);
+        fail.ensure_failure_diagnostics();
+        assert_eq!(fail.errors.len(), 1);
+        fail.errors = vec![" ".into()];
+        fail.items.clear();
+        fail.ensure_failure_diagnostics();
+        assert_eq!(fail.errors, ["show failed"]);
+        fail.errors = vec!["original actionable diagnostic".into()];
+        fail.ensure_failure_diagnostics();
+        assert_eq!(fail.errors, ["original actionable diagnostic"]);
+        for status in [Status::Ok, Status::Warn, Status::Pending, Status::Skip] {
+            let mut result = ResultEnvelope::new("decision", status, serde_json::json!({}),
+                vec![Item::new("display", Status::Fail, "optional component")]);
+            result.ensure_failure_diagnostics();
+            assert!(result.errors.is_empty());
+        }
     }
 
     #[test]
