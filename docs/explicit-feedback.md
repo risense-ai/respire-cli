@@ -47,7 +47,8 @@ not leave an older explicit event authoritative when it is re-enabled.
 Idempotent explicit retries also repair an inconsistent report mirror without
 creating extra heat or a new revision.
 With feedback disabled, the existing recent-candidate prefix grading command is
-retained. With feedback enabled, request identity is required. Read-only/off
+retained with source `model` only; other sources require explicit request identity
+and are rejected instead of being mislabeled. With feedback enabled, request identity is required. Read-only/off
 mode cannot create marks; read-only benchmark aggregation does not write marks,
 query logs or read counters. Existing read counters remain diagnostic data but
 are not used as heat while the experiment is enabled.

@@ -2583,6 +2583,7 @@ fn run_query_log(
         let (unmatched,revision)=if let Some(request_id)=query_log_id {
             (Vec::new(),Some(store.mark_query_feedback(request_id,&id_list,*good,source)?))
         }else{
+            anyhow::ensure!(source=="model","legacy grading without --query-log-id supports only --source model; use an explicit query request for human/task_outcome attribution");
             anyhow::ensure!(!respire::feedback::enabled()?,"enabled feedback requires --query-log-id from the recall summary and complete memory IDs");
             (store.mark_verdict(&id_list,*good)?,None)
         };
