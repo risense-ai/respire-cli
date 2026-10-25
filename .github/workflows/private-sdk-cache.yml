@@ -11,6 +11,7 @@ permissions:
   actions: read
 jobs:
   plan:
+    cache-mode: none
     if: github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
@@ -24,6 +25,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
+          package-manager-cache: false
       - id: plan
         name: Read source-controlled lock JSON as data only
         env:
@@ -44,6 +46,7 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\nnative=${JSON.stringify(native)}\n`);
           JS
   download:
+    cache-mode: write-only
     needs: plan
     runs-on: ubuntu-latest
     strategy:
@@ -59,12 +62,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - uses: actions/cache/restore@v4
-        id: sdk
-        with:
-          path: .sdk/${{ matrix.target }}
-          key: ${{ matrix.key }}
-          enableCrossOsArchive: true
+          package-manager-cache: false
       - name: Prepare and audit exact SDK bytes using trusted main tools
         env:
           CORE_SDK_READ_TOKEN: ${{ secrets.CORE_SDK_READ_TOKEN }}
@@ -72,12 +70,12 @@ jobs:
           SDK_ENTRY_JSON: ${{ toJSON(matrix.entry) }}
         run: node scripts/sdk-ci-cache.mjs prepare "$SDK_TARGET" "$SDK_ENTRY_JSON"
       - uses: actions/cache/save@v4
-        if: steps.sdk.outputs.cache-hit != 'true'
         with:
           path: .sdk/${{ matrix.target }}
           key: ${{ matrix.key }}
           enableCrossOsArchive: true
   native:
+    cache-mode: read
     needs: [plan, download]
     strategy:
       fail-fast: false

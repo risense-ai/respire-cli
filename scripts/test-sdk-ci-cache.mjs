@@ -4,6 +4,8 @@ import {createHash} from 'node:crypto';
 import {mkdtempSync,mkdirSync,writeFileSync,rmSync,symlinkSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {TARGETS,cacheKey,planCaches,auditSdkDirectory,canonicalEntry} from './sdk-ci-cache.mjs';
 const version='1.0.2-dev.11';
 function lock(){return {schema_version:1,targets:Object.fromEntries(TARGETS.map(t=>{const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${version}/respire-core-sdk-${t}`;return [t,{sdk_version:version,private_repository:'risense-ai/respire-core',release_tag:'sdk-v'+version,url:base+'.manifest.json',archive_url:base+'.tar.gz',manifest_sha256:'a'.repeat(64),archive_sha256:'b'.repeat(64),redistribution:'approved'}];}))};}
@@ -16,3 +18,33 @@ test('credential-bearing workflow uses only main tools; native receiver has no s
 test('native consumers require exact cache keys without prefix fallback',()=>{for(const file of ['ci.yml','release-validation.yml','accelerator.yml','token-free-sdk-check.yml']){const text=readFileSync(new URL('../.github/workflows/'+file,import.meta.url),'utf8');assert(text.includes('enableCrossOsArchive: true'));assert(text.includes('fail-on-cache-miss: true'));for(const section of text.split('- uses: actions/cache/restore@v4').slice(1)){const block=section.split(/\n      - (?:name:|uses:)/)[0];if(block.includes('path: .sdk/'))assert(!block.includes('restore-keys:'));}}});
 
 test('real model probe does not inherit the unit-test Core mode',()=>{const text=readFileSync(new URL('../.github/workflows/token-free-sdk-check.yml',import.meta.url),'utf8');const global=text.split('    env:')[1].split('    steps:')[0];assert(!global.includes('RSRS_CORE_TEST_MODE'));assert(text.includes('model install-m3'));assert(text.includes('model probe'));});
+
+test('trusted producer refuses pre-existing SDK directory before any credential request',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'sdk-fresh-producer-'));
+ try{
+  mkdirSync(join(dir,'.sdk',TARGETS[0]),{recursive:true});
+  const result=spawnSync(process.execPath,[fileURLToPath(new URL('./sdk-ci-cache.mjs',import.meta.url)),'prepare',TARGETS[0],JSON.stringify(lock().targets[TARGETS[0]])],{cwd:dir,encoding:'utf8',env:{PATH:process.env.PATH,GITHUB_REPOSITORY:'risense-ai/respire-cli',GITHUB_REF:'refs/heads/main',GITHUB_EVENT_NAME:'workflow_dispatch'}});
+  assert.notEqual(result.status,0);assert.match(result.stderr,/requires a fresh SDK directory/);
+ }finally{rmSync(dir,{recursive:true});}
+});
+test('cache tokens cap selected-source jobs at read and credential producer at write-only',()=>{
+ const warm=readFileSync(new URL('../.github/workflows/private-sdk-cache.yml',import.meta.url),'utf8');
+ const plan=warm.split('\n  plan:\n')[1].split('\n  download:\n')[0],producer=warm.split('\n  download:\n')[1].split('\n  native:\n')[0],caller=warm.split('\n  native:\n')[1];
+ assert.match(plan,/cache-mode: none/);assert.match(producer,/cache-mode: write-only/);assert.match(producer,/package-manager-cache: false/);assert(!/cache\/restore|uses: actions\/cache@/.test(producer));assert.match(producer,/cache\/save@v4/);assert.match(caller,/cache-mode: read/);
+ const reusable=readFileSync(new URL('../.github/workflows/token-free-sdk-check.yml',import.meta.url),'utf8');assert.match(reusable,/native-source:\n    cache-mode: read/);
+ for(const file of ['ci.yml','release-validation.yml','accelerator.yml']){const text=readFileSync(new URL('../.github/workflows/'+file,import.meta.url),'utf8');assert.match(text,/^cache-mode: read$/m);assert(!/uses: actions\/cache(?:@|\/save)/.test(text));}
+});
+test('every SDK cache consumer rejects primary-key prefix matches before source execution',()=>{
+ for(const file of ['ci.yml','release-validation.yml','accelerator.yml','token-free-sdk-check.yml']){
+  const text=readFileSync(new URL('../.github/workflows/'+file,import.meta.url),'utf8');
+  for(const match of text.matchAll(/      - uses: actions\/cache\/restore@v4\n([\s\S]*?)(?=      - (?:name:|uses:))/g)){
+   if(!match[1].includes('path: .sdk/'))continue;
+   const id=match[1].match(/id: ([a-z0-9-]+)/)[1],following=text.slice(match.index+match[0].length).split(/\n      - (?:name:|uses:)/)[0];
+   assert(following.includes('steps.'+id+'.outputs.cache-matched-key'));
+   const run=following.match(/        run: (.+)/)[1];
+   for(const [matched,status] of [['expected',0],['expected-suffix',1],['',1]]){
+    const result=spawnSync('bash',['-c',run],{encoding:'utf8',env:{EXPECTED_KEY:'expected',MATCHED_KEY:matched}});assert.equal(result.status,status);
+   }
+  }
+ }
+});

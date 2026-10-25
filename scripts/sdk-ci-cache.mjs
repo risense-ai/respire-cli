@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {lstatSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
+import {existsSync,lstatSync,mkdtempSync,readFileSync,readdirSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -39,6 +39,7 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(resolve(process.argv[1])).hr
   required(process.env.GITHUB_REPOSITORY==='risense-ai/respire-cli'&&process.env.GITHUB_REF==='refs/heads/main'&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch','SDK cache producer is trusted main manual only');
   for(const name of ['RSRS_CORE_SDK_DIR','ONEMEMORY_CORE_SDK_DIR','RESPIRE_CORE_SDK_DIR'])delete process.env[name];
   const temp=mkdtempSync(join(tmpdir(),'sdk-cache-lock-')),path=join(temp,'lock.json'),directory=resolve('.sdk',target);
+  required(!existsSync(directory),'Credential-bearing producer requires a fresh SDK directory; cache restore/reuse is forbidden');
   try{writeFileSync(path,JSON.stringify({schema_version:1,targets:{[target]:entry}}));await prepareSdk(target,directory,path);auditSdkDirectory(directory,target,entry);}finally{rmSync(temp,{recursive:true});}
  }else throw Error('Usage: sdk-ci-cache.mjs plan <lock> <crate-lock> | key <target> | prepare <target> <entry-json>');
 }
