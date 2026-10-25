@@ -4,7 +4,7 @@ import {createHash} from 'node:crypto';
 import {chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve, sep} from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath, pathToFileURL} from 'node:url';
 import test from 'node:test';
 
 const stage = join(dirname(fileURLToPath(import.meta.url)), 'stage-core-runtime.mjs');
@@ -15,10 +15,12 @@ const cases = [
   {path: 'notices/rust/fnv-1.0.7/LICENSE-APACHE', mode: 0o640, output: 'core-notices/rust/fnv-1.0.7/LICENSE-APACHE'},
   {path: 'LICENSE.txt', mode: 0o600, output: 'core-notices/CORE-SDK-LICENSE.txt'},
   {path: 'runtime/libfixture.so', mode: 0o600, output: 'libfixture.so'},
+  {path: 'runtime/libfixture640.so', mode: 0o640, output: 'libfixture640.so'},
 ];
 
+for (const umask of [0o022, 0o077]) {
 for (const overwrite of [false, true]) {
-  test(`staged notices are readable and hash-preserving (${overwrite ? 'existing outputs' : 'fresh outputs'})`, () => {
+  test(`staged notices are readable and hash-preserving (${overwrite ? 'existing outputs' : 'fresh outputs'}, umask ${umask.toString(8)})`, () => {
     const temporary = resolve(mkdtempSync(join(tmpdir(), 'rsrs-staged-notices-')));
     const sdk = join(temporary, 'sdk'), output = join(temporary, 'output');
     try {
@@ -36,7 +38,9 @@ for (const overwrite of [false, true]) {
       });
       writeFileSync(join(sdk, 'manifest.json'), JSON.stringify({target: 'x86_64-unknown-linux-musl',
         sdk_version: 'synthetic-test', redistribution: 'permitted-under-included-license', files}));
-      const staged = spawnSync(process.execPath, [stage, output], {encoding: 'utf8',
+      // Set only the child process mask; the caller's default must not hide mode loss.
+      const run = `process.umask(${umask}); await import(${JSON.stringify(pathToFileURL(stage).href)});`;
+      const staged = spawnSync(process.execPath, ['--input-type=module', '--eval', run, stage, output], {encoding: 'utf8',
         env: {...process.env, RSRS_CORE_SDK_DIR: sdk}});
       assert.equal(staged.status, 0, staged.stderr);
       const runtime = JSON.parse(readFileSync(join(output, 'core-runtime.json'), 'utf8'));
@@ -62,4 +66,5 @@ for (const overwrite of [false, true]) {
       rmSync(temporary, {recursive: true, force: true});
     }
   });
+}
 }
