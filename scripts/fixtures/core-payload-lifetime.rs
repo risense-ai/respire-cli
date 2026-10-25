@@ -60,7 +60,7 @@ mod ffi {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn core() -> Core { Core { handle:ffi::Handle::default(), next_request:0, poisoned:false } }
+    fn core() -> Core { Core { handle:ffi::Handle::default(), next_request:0, poisoned:false, native_feedback_contract:None } }
     fn payload() -> Value {
         let blob = "A".repeat(1024 * 1024);
         FREED.store(false, Ordering::SeqCst);

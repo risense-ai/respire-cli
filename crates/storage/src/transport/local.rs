@@ -509,57 +509,29 @@ impl LocalStore {
     /// Returns ids that matched no candidate (caller warns).
     pub fn mark_verdict(&self, ids: &[String], good: bool) -> Result<Vec<String>> {
         let cutoff = chrono::Utc::now().timestamp() - 600;
-        let rows: Vec<(i64, String, String, String)> = {
-            let mut stmt = self.connection.prepare(
-                "SELECT id, candidates, good_ids, bad_ids FROM query_log WHERE ts_unix >= ?1 ORDER BY id DESC LIMIT 20",
-            )?;
-            let it = stmt.query_map(params![cutoff], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })?;
-            it.collect::<rusqlite::Result<Vec<_>>>()?
+        let rows:Vec<(i64,String)>= {
+            let mut statement=self.connection.prepare("SELECT id,candidates FROM query_log WHERE ts_unix>=?1 ORDER BY id DESC LIMIT 20")?;
+            let rows=statement.query_map([cutoff],|row|Ok((row.get(0)?,row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut unmatched: Vec<String> = ids.to_vec();
-        for (row_id, cands_json, good_json, bad_json) in rows {
-            if unmatched.is_empty() {
-                break;
-            }
-            let cands: Vec<String> = serde_json::from_str(&cands_json).unwrap_or_default();
-            let mut good_ids: Vec<String> = serde_json::from_str(&good_json).unwrap_or_default();
-            let mut bad_ids: Vec<String> = serde_json::from_str(&bad_json).unwrap_or_default();
-            let mut changed = false;
-            unmatched.retain(|short| {
-                let Some(full) = cands
-                    .iter()
-                    .find(|c| *c == short || c.starts_with(short.as_str()))
-                else {
-                    return true; // this row has no such candidate; id stays unmatched
-                };
-                // Re-grade: latest self-grade wins — write this side and remove from the other (bad then good = re-grade good)
-                let (tgt, other) = if good {
-                    (&mut good_ids, &mut bad_ids)
-                } else {
-                    (&mut bad_ids, &mut good_ids)
-                };
-                if !tgt.contains(full) {
-                    tgt.push(full.clone());
-                    changed = true;
-                }
-                if let Some(pos) = other.iter().position(|x| x == full) {
-                    other.remove(pos);
-                    changed = true;
-                }
-                false // matched; drop from unmatched
+        let mut unmatched=ids.to_vec();
+        for (row_id,encoded) in rows {
+            if unmatched.is_empty(){break;}
+            let candidates:Vec<String>=serde_json::from_str(&encoded)?;
+            let mut resolved=Vec::new();
+            unmatched.retain(|prefix|{
+                if let Some(id)=candidates.iter().find(|id|*id==prefix||id.starts_with(prefix.as_str())) {
+                    resolved.push(id.clone());false
+                }else{true}
             });
-            if changed {
-                self.connection.execute(
-                    "UPDATE query_log SET good_ids = ?2, bad_ids = ?3 WHERE id = ?1",
-                    params![
-                        row_id,
-                        serde_json::to_string(&good_ids)?,
-                        serde_json::to_string(&bad_ids)?
-                    ],
-                )?;
-            }
+            if resolved.is_empty(){continue;}
+            // Legacy selection stays compatible while disabled, but every
+            // accepted mark uses the same attributed event/mirror authority.
+            // Assign old rows an identity; concurrent assignments retain the
+            // first committed UUID rather than fabricating a second request.
+            self.connection.execute("UPDATE query_log SET request_id=COALESCE(request_id,?2) WHERE id=?1",params![row_id,uuid::Uuid::new_v4().to_string()])?;
+            let request_id:String=self.connection.query_row("SELECT request_id FROM query_log WHERE id=?1",[row_id],|row|row.get(0))?;
+            self.mark_query_feedback(&request_id,&resolved,good,"model")?;
         }
         Ok(unmatched)
     }

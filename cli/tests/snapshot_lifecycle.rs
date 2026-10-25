@@ -88,10 +88,16 @@ impl Fixture {
         command
     }
     fn run(&self, args: &[&str]) -> Result<(bool, Value)> {
+        self.run_feedback(args, None)
+    }
+    fn run_feedback(&self, args: &[&str], feedback: Option<&str>) -> Result<(bool, Value)> {
         let mut stdout = tempfile::tempfile()?;
         let mut stderr = tempfile::tempfile()?;
-        let mut child = self
-            .command(args)
+        let mut command = self.command(args);
+        if let Some(value) = feedback {
+            command.env("RSRS_FEEDBACK", value);
+        }
+        let mut child = command
             .stdin(Stdio::null())
             .stdout(stdout.try_clone()?)
             .stderr(stderr.try_clone()?)
@@ -568,6 +574,49 @@ fn public_feedback_attribution_uses_exact_request_and_refuses_readonly_writes() 
     let (ok, repeated) = fixture.run(&mark)?;
     assert!(ok);
     assert_eq!(repeated["summary"]["revision"], revision);
+    let (ok, legacy) = fixture.run_feedback(
+        &["--direct", "--json", "query-log", "mark", id, "--bad"],
+        Some("0"),
+    )?;
+    assert!(ok);
+    assert_eq!(legacy["summary"]["good"], false);
+    {
+        let store = LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
+        let allowed = std::collections::BTreeSet::from([id.to_owned()]);
+        let counts = store.feedback_counts(
+            "synthetic retrieval",
+            "fixture",
+            "",
+            &allowed,
+            0.5,
+            chrono::Utc::now().timestamp(),
+        )?;
+        assert!(counts.good.is_empty());
+        assert_eq!(counts.bad.get(id), Some(&1));
+        let row = store.query_log_rows(1)?.remove(0);
+        assert!(row.good.is_empty());
+        assert_eq!(row.bad, [id]);
+    }
+    let (ok, reenabled) = fixture.run_feedback(&mark, Some("1"))?;
+    assert!(ok);
+    let new_revision = reenabled["summary"]["revision"]
+        .as_u64()
+        .context("reenabled revision")?;
+    assert!(new_revision > revision);
+    let revision = new_revision;
+    {
+        let raw = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+        raw.execute(
+            "UPDATE query_log SET good_ids='[]',bad_ids=?1",
+            [serde_json::to_string(&[id])?],
+        )?;
+    }
+    let (ok, repaired) = fixture.run_feedback(&mark, Some("1"))?;
+    assert!(ok);
+    assert_eq!(repaired["summary"]["revision"], revision);
+    let rows = LocalStore::open(&fixture.root.path().join("rsrs.db"))?.query_log_rows(1)?;
+    assert_eq!(rows[0].good, [id]);
+    assert!(rows[0].bad.is_empty());
     let (ok, invalid) = fixture.run(&[
         "--direct",
         "--json",
@@ -598,5 +647,30 @@ fn public_feedback_attribution_uses_exact_request_and_refuses_readonly_writes() 
     let persisted: u64 =
         database.query_row("SELECT revision FROM query_feedback", [], |row| row.get(0))?;
     assert_eq!(persisted, revision);
+    Ok(())
+}
+
+#[test]
+fn public_empty_recall_returns_its_query_log_identity() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (ok, result) = fixture.run(&[
+        "--direct",
+        "--json",
+        "recall",
+        "synthetic absent query",
+        "--project",
+        "not-in-fixture",
+    ])?;
+    anyhow::ensure!(ok, "empty recall failed: {}", result["errors"]);
+    assert_eq!(result["summary"]["count"], 0);
+    let request = result["summary"]["query_log_id"]
+        .as_str()
+        .context("empty recall query identity")?;
+    assert!(uuid::Uuid::parse_str(request).is_ok());
+    let store = LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
+    assert!(store
+        .query_log_rows(20)?
+        .iter()
+        .any(|row| row.request_id.as_deref() == Some(request) && row.candidates.is_empty()));
     Ok(())
 }

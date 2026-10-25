@@ -140,6 +140,7 @@ fn explicit_setting<T: std::str::FromStr + serde::Serialize>(
 }
 
 pub(crate) fn request_settings(payload: &mut Value) -> Result<()> {
+    crate::feedback_contract::validate(payload,Some(crate::FEEDBACK_CONTRACT))?;
     if let Some(fields) = payload.as_object_mut() {
         if !fields.contains_key("query_settings") {
             let settings=query_settings_from_env()?;

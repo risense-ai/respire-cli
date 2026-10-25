@@ -7641,7 +7641,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 emit_result(ResultEnvelope::new(
                     "recall",
                     OutputStatus::Skip,
-                    serde_json::json!({"query":query,"count":0,"recall_mode":recall_mode,
+                    serde_json::json!({"query":query,"query_log_id":query_log_id,"count":0,"recall_mode":recall_mode,
                         "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing,
                         "index_pending":index_pending,"indexed_candidates":candidates.len().saturating_sub(index_pending),"lexical_candidates":index_pending}),
                     vec![OutputItem::new("results", OutputStatus::Skip, "0")],
