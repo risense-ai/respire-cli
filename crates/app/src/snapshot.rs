@@ -32,6 +32,8 @@ pub struct Manifest {
     pub witness_count: Option<u64>,
     #[serde(default)]
     pub witness_intact: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub witness_problem: Option<String>,
 }
 
 fn private_dir(path: &Path) -> Result<()> {
@@ -208,7 +210,16 @@ pub fn create(
                 rusqlite::params![nonce, ciphertext],
             )?;
         }
-        let witness = crate::transport::local::witness_checkpoint_file(&database)?;
+        // A diagnostic pre-restore backup must preserve a damaged ledger too.
+        // Restore targets remain fail-closed in read_manifest below.
+        let (witness, witness_problem) =
+            match crate::transport::local::witness_checkpoint_file(&database) {
+                Ok(report) => (report, None),
+                Err(_) => (
+                    None,
+                    Some("witness checkpoint is unverifiable; diagnostic copy only".to_owned()),
+                ),
+            };
         let manifest = Manifest {
             schema_version: 1,
             id,
@@ -226,7 +237,12 @@ pub fn create(
             model: "m3".to_owned(),
             witness_head: witness.as_ref().map(|report| report.head.clone()),
             witness_count: witness.as_ref().map(|report| report.count),
-            witness_intact: witness.as_ref().map(|report| report.intact),
+            witness_intact: if witness_problem.is_some() {
+                Some(false)
+            } else {
+                witness.as_ref().map(|report| report.intact)
+            },
+            witness_problem,
         };
         let mut file = private_new(&temporary)?;
         file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
@@ -290,6 +306,10 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
     anyhow::ensure!(
         schema_digest(&database)? == manifest.database_schema_sha256,
         "snapshot schema digest mismatch"
+    );
+    anyhow::ensure!(
+        manifest.witness_problem.is_none(),
+        "snapshot witness checkpoint is unverifiable; diagnostic copy cannot be a restore target"
     );
     match crate::transport::local::witness_checkpoint_file(&database)? {
         None => anyhow::ensure!(

@@ -452,3 +452,81 @@ fn public_witness_verifies_restored_chain_and_reports_tamper_without_writes() ->
 
     Ok(())
 }
+
+#[test]
+fn healthy_snapshot_rescue_preserves_unparseable_current_witness() -> Result<()> {
+    for malformed in [true, false] {
+        let fixture = Fixture::new()?;
+        let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
+        assert!(ok);
+        let id = created["details"]["id"]
+            .as_str()
+            .context("healthy snapshot id")?;
+        {
+            let database = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+            if malformed {
+                database.execute(
+                    "UPDATE witness_log SET after_digest=x'ff0001' WHERE seq=1",
+                    [],
+                )?;
+            } else {
+                database.execute("DELETE FROM meta WHERE key='witness_library_id_v1'", [])?;
+            }
+        }
+        let (ok, restored) = fixture.run(&["--json", "snapshot", "restore", id, "--confirm"])?;
+        anyhow::ensure!(
+            ok,
+            "unverifiable witness prevented healthy rescue: {}",
+            restored["errors"]
+        );
+        let mut diagnostic = None;
+        for entry in std::fs::read_dir(fixture.root.path().join("snapshots"))? {
+            let path = entry?.path();
+            if path.extension().and_then(|name| name.to_str()) != Some("json") {
+                continue;
+            }
+            let manifest: Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+            if manifest["witness_problem"].is_string() {
+                diagnostic = Some(manifest);
+                break;
+            }
+        }
+        let diagnostic = diagnostic
+            .context("damaged state must be retained as an explicit diagnostic snapshot")?;
+        assert_eq!(diagnostic["witness_intact"], false);
+        let bad_id = diagnostic["id"]
+            .as_str()
+            .context("diagnostic snapshot id")?;
+        let saved = rusqlite::Connection::open(
+            fixture
+                .root
+                .path()
+                .join("snapshots")
+                .join(format!("{bad_id}.db")),
+        )?;
+        if malformed {
+            let value: Vec<u8> = saved.query_row(
+                "SELECT after_digest FROM witness_log WHERE seq=1",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(value, [255, 0, 1]);
+        } else {
+            let count: i64 = saved.query_row(
+                "SELECT COUNT(*) FROM meta WHERE key='witness_library_id_v1'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, 0);
+        }
+        drop(saved);
+        let (ok, proof) = fixture.run(&["--client-only", "--json", "witness", "--verify"])?;
+        assert!(ok);
+        assert_eq!(proof["summary"]["head"], created["details"]["witness_head"]);
+        let (ok, rejected) =
+            fixture.run(&["--json", "snapshot", "restore", bad_id, "--confirm"])?;
+        assert!(!ok);
+        assert!(rejected["errors"].to_string().contains("diagnostic copy"));
+    }
+    Ok(())
+}
