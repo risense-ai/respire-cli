@@ -200,7 +200,10 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 29, 'preserve existing uploads, both handshake receipts and both strict recovery evidence uploads');
+  assert.equal(uploads, 28, 'preserve active uploads and handshake/recovery evidence; retired SDK publisher removes its verification upload');
+  const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
+  assert.match(crates, /name: protocol-package-verification/);
+  assert.doesNotMatch(crates, /name: sdk-package-verification/);
 });
 
 test('draft release is resolved from every list page with exactly one matching tag', () => {
