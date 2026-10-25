@@ -9,7 +9,7 @@ fn bin() -> &'static str {
 }
 
 #[test]
-fn stdio_initialize_lists_all_tools() -> Result<(), Box<dyn std::error::Error>> {
+fn stdio_initialize_lists_default_safe_tools() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let bin_dir = dir.path().join("bin");
     std::fs::create_dir_all(&bin_dir)?;
@@ -91,14 +91,108 @@ fn stdio_initialize_lists_all_tools() -> Result<(), Box<dyn std::error::Error>> 
         "memory_diary",
         "memory_chain",
         "memory_query_log_mark",
-        "memory_forget",
-        "memory_restore",
         "memory_taxonomy",
     ] {
         if !names.iter().any(|name| name == want) {
             return Err(format!("missing tool {want} in {names:?}").into());
         }
     }
+    assert_eq!(names.len(), 14);
+    assert!(!names
+        .iter()
+        .any(|name| matches!(name.as_str(), "memory_forget" | "memory_restore")));
     let _ = Duration::from_millis(1);
+    Ok(())
+}
+
+fn policy_child(
+    settings: &[(&str, &std::ffi::OsStr)],
+    input: &str,
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let mut command = Command::new(bin());
+    command
+        .arg("--json")
+        .arg("mcp")
+        .env("RSRS_DATA_DIR", dir.path())
+        .env("RSRS_BIN_DIR", dir.path().join("bin"));
+    for prefix in ["RSRS", "ONEMEMORY", "RESPIRE"] {
+        for suffix in ["MCP_ALLOW", "MCP_DENY", "MCP_ALLOW_TOOLS", "MCP_DENY_TOOLS"] {
+            command.env_remove(format!("{prefix}_{suffix}"));
+        }
+    }
+    for (key, value) in settings {
+        command.env(key, value);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("stdin")?
+        .write_all(input.as_bytes())?;
+    Ok(child.wait_with_output()?)
+}
+
+#[test]
+fn stdio_policy_restart_compatibility_and_forced_calls() -> Result<(), Box<dyn std::error::Error>> {
+    use std::ffi::OsStr;
+    let input=concat!("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"memory_forget\",\"arguments\":{\"id\":\"synthetic\"}}}\n");
+    for settings in [
+        vec![],
+        vec![("RSRS_MCP_DENY_TOOLS", OsStr::new("memory_forget"))],
+    ] {
+        let output = policy_child(&settings, input)?;
+        assert!(output.status.success());
+        let frames: Vec<serde_json::Value> = String::from_utf8(output.stdout)?
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        assert_eq!(frames[1]["result"]["isError"], true);
+        assert!(frames[1]["result"]["content"][0]["text"]
+            .as_str()
+            .ok_or("text")?
+            .contains("disabled"));
+    }
+    for key in [
+        "RSRS_MCP_ALLOW",
+        "ONEMEMORY_MCP_ALLOW",
+        "RESPIRE_MCP_ALLOW",
+        "RSRS_MCP_ALLOW_TOOLS",
+        "ONEMEMORY_MCP_ALLOW_TOOLS",
+        "RESPIRE_MCP_ALLOW_TOOLS",
+    ] {
+        let output = policy_child(
+            &[(key, OsStr::new("memory_restore"))],
+            &format!("{}\n", input.lines().next().ok_or("input")?),
+        )?;
+        assert!(output.status.success());
+        let frame: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(frame["result"]["tools"].as_array().ok_or("tools")?.len(), 1);
+        assert_eq!(frame["result"]["tools"][0]["name"], "memory_restore");
+    }
+    for value in ["", "unknown", "memory_status,"] {
+        let output = policy_child(
+            &[
+                ("RSRS_MCP_ALLOW_TOOLS", OsStr::new(value)),
+                ("ONEMEMORY_MCP_ALLOW_TOOLS", OsStr::new("memory_status")),
+            ],
+            input,
+        )?;
+        assert!(!output.status.success());
+        let text = String::from_utf8(output.stdout)?;
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let error: serde_json::Value = serde_json::from_str(line)?;
+            assert!(
+                error.get("jsonrpc").is_none(),
+                "invalid config served RPC: {error}"
+            );
+            assert_eq!(error["status"], "fail");
+        }
+    }
     Ok(())
 }
