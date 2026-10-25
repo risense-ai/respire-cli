@@ -25,6 +25,8 @@ $runtimeOwned = $false
 $startupAttempted = $false
 $runtimeStopped = $false
 $startupAction = $null
+$primaryFailure = $null
+$validationPassed = $false
 $utf8 = [Text.UTF8Encoding]::new($false)
 New-Item -ItemType Directory -Path $selectedProfile -Force | Out-Null
 [IO.File]::WriteAllText((Join-Path $profileRoot 'client.json'),
@@ -63,11 +65,40 @@ function FindFixtureTask {
         throw
     }
 }
+function ResolveTaskSid([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value) -or $Value.Length -gt 512) { throw 'Task identity is missing or invalid' }
+    try {
+        if ($Value -match '^S-\d-') { return [Security.Principal.SecurityIdentifier]::new($Value).Value }
+        return [Security.Principal.NTAccount]::new($Value).Translate([Security.Principal.SecurityIdentifier]).Value
+    } catch { throw 'Task identity could not be resolved to a verified Windows SID' }
+}
+function TaskOwnershipChecks($TaskObject) {
+    $actions = @($TaskObject.Actions)
+    $triggers = @($TaskObject.Triggers)
+    $principalSid = ResolveTaskSid $TaskObject.Principal.UserId
+    $triggerSid = if ($triggers.Count -eq 1) { ResolveTaskSid $triggers[0].UserId } else { '' }
+    $actionPathMatches = $false
+    if ($actions.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($actions[0].Execute)) {
+        $actionPathMatches = [StringComparer]::OrdinalIgnoreCase.Equals(
+            [IO.Path]::GetFullPath($actions[0].Execute), [IO.Path]::GetFullPath($powershell))
+    }
+    return [ordered]@{
+        principal_sid = $principalSid -eq $identity.User.Value
+        interactive = $TaskObject.Principal.LogonType -eq 'Interactive'
+        limited = $TaskObject.Principal.RunLevel -eq 'Limited'
+        one_action = $actions.Count -eq 1
+        executable = $actionPathMatches
+        arguments = $actions.Count -eq 1 -and $actions[0].Arguments -eq $startupAction.Arguments
+        one_trigger = $triggers.Count -eq 1
+        logon_trigger = $triggers.Count -eq 1 -and $triggers[0].CimClass.CimClassName -eq 'MSFT_TaskLogonTrigger'
+        trigger_sid = $triggerSid -eq $identity.User.Value
+    }
+}
 function RemoveFixtureTask {
     $currentTask = FindFixtureTask
     if ($null -eq $currentTask) { return }
-    if ($currentTask.Actions.Execute -ne $powershell -or $currentTask.Actions.Arguments -ne $startupAction.Arguments -or
-        $currentTask.Principal.UserId -ne $identity.User.Value) { throw 'Task ownership changed; refusing removal' }
+    $checks = TaskOwnershipChecks $currentTask
+    if ($checks.Values -contains $false) { throw 'Task ownership/action/trigger changed; refusing removal' }
     if ($currentTask.State -eq 'Running') {
         Stop-ScheduledTask -TaskName $taskName -TaskPath '\'
         $stopDeadline = [DateTime]::UtcNow.AddSeconds(10)
@@ -91,10 +122,11 @@ try {
     Register-ScheduledTask -TaskName $taskName -TaskPath '\' -Action $startupAction -Trigger $trigger -Principal $principal -Settings $settings | Out-Null
     $registered = $true
     $task = FindFixtureTask
-    if ($task.Principal.UserId -ne $identity.User.Value -or $task.Triggers.UserId -ne $identity.User.Value -or
-        $task.Principal.LogonType -ne 'Interactive' -or $task.Principal.RunLevel -ne 'Limited' -or
-        $task.Actions.Execute -ne $powershell -or $task.Actions.Arguments -ne $startupAction.Arguments -or
-        $task.Triggers.CimClass.CimClassName -ne 'MSFT_TaskLogonTrigger') { throw 'Scheduled task identity/action/trigger drifted' }
+    $checks = TaskOwnershipChecks $task
+    Write-Output (@{principal_form = $(if ($task.Principal.UserId -match '^S-\d-') {'sid'} else {'account-name'});
+        trigger_form = $(if ($task.Triggers.UserId -match '^S-\d-') {'sid'} else {'account-name'});
+        ownership_checks = $checks} | ConvertTo-Json -Depth 4 -Compress)
+    if ($checks.Values -contains $false) { throw 'Scheduled task identity/action/trigger drifted' }
     $startupAttempted = $true
     Start-ScheduledTask -TaskName $taskName -TaskPath '\'
     $deadline = [DateTime]::UtcNow.AddSeconds(90)
@@ -124,10 +156,12 @@ try {
     $runtimeStopped = $true
     RemoveFixtureTask
     $registered = $false
-    Write-Output (@{result = 'PASS'; profile = 'isolated synthetic off-mode'; sign_in_trigger = $true;
-        limited_interactive_principal = $true; host_startup = $true; client_only_stop_denied = $true;
-        task_removed = $true; runtime_stopped = $true; physical_reboot_tested = $false} | ConvertTo-Json -Compress)
+    $validationPassed = $true
+} catch {
+    $primaryFailure = $_
+    throw
 } finally {
+  try {
     if ($runtimeOwned) {
         try {
             $current = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
@@ -140,4 +174,13 @@ try {
     if ($registered -or $null -ne $startupAction) { RemoveFixtureTask }
     if (-not $startupAttempted -or $runtimeStopped) { Remove-Item -LiteralPath $fixtureRoot -Recurse -Force }
     else { Write-Warning 'Startup outcome uncertain; fixture files retained for inspection' }
+  } catch {
+    if ($null -eq $primaryFailure) { throw }
+    Write-Warning ('Fixture cleanup also failed; preserving the original exception: ' + $_.Exception.Message)
+  }
+}
+if ($validationPassed) {
+    Write-Output (@{result = 'PASS'; profile = 'isolated synthetic off-mode'; sign_in_trigger = $true;
+        limited_interactive_principal = $true; host_startup = $true; client_only_stop_denied = $true;
+        task_removed = $true; runtime_stopped = $true; physical_reboot_tested = $false} | ConvertTo-Json -Compress)
 }
