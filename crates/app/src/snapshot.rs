@@ -847,6 +847,7 @@ pub fn resume_sync(root: &Path, reviewed_revision: &str) -> Result<()> {
     let database = crate::service::database_path(root)?;
     let connection = Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.execute_batch("BEGIN IMMEDIATE")?;
+    ensure_no_incomplete_restore(root)?;
     let revision: String = connection.query_row(
         "SELECT value FROM meta WHERE key='memory_revision_v1'",
         [],

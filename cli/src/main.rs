@@ -6389,6 +6389,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
             std::time::Duration::from_secs(120),
         )?)
     };
+    // A direct caller can wait here while a restore installs maintenance. The
+    // pre-dispatch check cannot authorize a mutation after that ownership wait.
+    respire_app::snapshot::ensure_no_incomplete_restore(&respire::service::data_dir())?;
     progress::phase("执行本地操作", "Executing local operation");
     // -- Read-only gate (added 2026-09-20; same-day audit moved it) --
     // When this space's agent.json has readonly=true, every write command is refused.

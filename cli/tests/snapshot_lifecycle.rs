@@ -299,3 +299,74 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
     assert_eq!(status["summary"]["local_alive"], 1);
     Ok(())
 }
+
+#[test]
+fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    let fixture = Fixture::new()?;
+    let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
+    assert!(ok);
+    let id = created["details"]["id"].as_str().context("snapshot id")?;
+    let (ok, revision) = fixture.run(&["--direct", "--json", "memory-revision"])?;
+    assert!(ok);
+    let token = revision["summary"]["revision"]
+        .as_str()
+        .context("revision token")?;
+    let ownership =
+        respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1))?;
+    let mut queued = fixture
+        .command(&[
+            "--direct",
+            "--json",
+            "snapshot",
+            "resume-sync",
+            "--reviewed-revision",
+            token,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stderr = queued.stderr.take().context("queued stderr")?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || -> std::io::Result<()> {
+        for line in BufReader::new(stderr).lines() {
+            if line?.contains("memory library is locked") {
+                let _ = tx.send(());
+            }
+        }
+        Ok(())
+    });
+    if rx.recv_timeout(Duration::from_secs(5)).is_err() {
+        let _ = queued.kill();
+        let _ = queued.wait();
+        anyhow::bail!("direct command did not reach the controlled ownership wait");
+    }
+    let receipt = respire_app::snapshot::restore_locked(
+        fixture.root.path(),
+        "snapshot-fixture",
+        &SessionKeys::from_urk([9; 32])?,
+        id,
+        &ownership,
+    )?;
+    drop(ownership);
+    let rejected = wait_bounded(queued)?;
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr observer panicked"))??;
+    assert!(
+        !rejected.status.success(),
+        "queued direct command removed maintenance quarantine"
+    );
+    let error: Value = serde_json::from_slice(&rejected.stdout)?;
+    assert!(error["errors"].to_string().contains("snapshot"));
+    assert_eq!(
+        LocalStore::open(&fixture.root.path().join("rsrs.db"))?
+            .snapshot_quarantine_id()?
+            .as_deref(),
+        Some(id)
+    );
+    let ownership =
+        respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1))?;
+    respire_app::snapshot::rollback_locked(fixture.root.path(), &receipt, &ownership)?;
+    Ok(())
+}
