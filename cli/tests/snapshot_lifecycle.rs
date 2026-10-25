@@ -205,3 +205,97 @@ fn public_snapshot_restore_reopens_runtime_and_keeps_sync_quarantined() -> Resul
     assert_eq!(resumed["details"]["sync_quarantined"], false);
     Ok(())
 }
+
+fn wait_bounded(mut child: std::process::Child) -> Result<std::process::Output> {
+    let began = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok(child.wait_with_output()?);
+        }
+        if began.elapsed() > Duration::from_secs(90) {
+            let _ = child.kill();
+            let _ = child.wait();
+            anyhow::bail!("owned snapshot subprocess timed out");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn concurrent_host_recover_cannot_interleave_with_restore_commit() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
+    assert!(ok);
+    let id = created["details"]["id"].as_str().context("snapshot id")?;
+    let primary = fixture
+        .command(&["--json", "snapshot", "restore", id, "--confirm"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let competing = fixture
+        .command(&["--json", "snapshot", "recover", "--confirm"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let primary = wait_bounded(primary)?;
+    let competing = wait_bounded(competing)?;
+    anyhow::ensure!(
+        primary.status.success(),
+        "restore failed under lifecycle contention: {}",
+        String::from_utf8_lossy(&primary.stdout)
+    );
+    assert!(
+        !competing.status.success(),
+        "recover interleaved with the successful restore"
+    );
+    let (ok, status) = fixture.run(&["--client-only", "--json", "status"])?;
+    assert!(ok);
+    assert_eq!(status["summary"]["local_alive"], 1);
+    assert!(!fixture
+        .root
+        .path()
+        .join(".snapshot-maintenance.json")
+        .exists());
+    assert!(!fixture.root.path().join(".snapshot-recovery.json").exists());
+    Ok(())
+}
+
+#[test]
+fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
+    assert!(ok);
+    let id = created["details"]["id"].as_str().context("snapshot id")?;
+    {
+        let ownership =
+            respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1))?;
+        respire_app::snapshot::restore_locked(
+            fixture.root.path(),
+            "snapshot-fixture",
+            &SessionKeys::from_urk([9; 32])?,
+            id,
+            &ownership,
+        )?;
+        std::fs::write(
+            fixture.root.path().join("rsrs.db"),
+            b"controlled invalid staged database",
+        )?;
+    }
+    let failed = wait_bounded(
+        fixture
+            .command(&["--runtime-internal"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?,
+    )?;
+    assert!(
+        !failed.status.success(),
+        "runtime reported ready with a broken staged store"
+    );
+    let (ok, recovered) = fixture.run(&["--json", "snapshot", "recover", "--confirm"])?;
+    anyhow::ensure!(ok, "host recovery failed: {}", recovered["errors"]);
+    let (ok, status) = fixture.run(&["--client-only", "--json", "status"])?;
+    assert!(ok);
+    assert_eq!(status["summary"]["local_alive"], 1);
+    Ok(())
+}

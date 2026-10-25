@@ -668,6 +668,16 @@ impl LocalStore {
         })
     }
 
+    pub fn verify_sqlite_integrity(&self)->Result<()> {
+        let value:String=self.connection.query_row("PRAGMA quick_check",[],|row|row.get(0))?;
+        anyhow::ensure!(value=="ok","runtime library integrity check failed");Ok(())
+    }
+    pub fn snapshot_quarantine_id(&self)->Result<Option<String>> {
+        let value:Option<String>=self.connection.query_row("SELECT value FROM meta WHERE key='snapshot_sync_quarantine_v1'",[],|row|row.get(0)).optional()?;
+        value.map(|value|{let parsed:serde_json::Value=serde_json::from_str(&value)?;
+            parsed["snapshot"].as_str().map(str::to_owned).ok_or_else(||anyhow::anyhow!("invalid snapshot quarantine identity"))}).transpose()
+    }
+
     /// Unlike legacy best-effort meta lookups, this safety gate propagates every
     /// SQLite error; unavailable quarantine metadata must never enable sync.
     pub fn ensure_snapshot_sync_allowed(&self) -> Result<()> {

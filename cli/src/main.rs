@@ -6077,7 +6077,8 @@ fn run(args: Cli) -> Result<()> {
         let account = respire::service::session_user_of_dir(&root);
         let keys = build_session()?;
         let receipt = std::cell::RefCell::new(None::<respire_app::snapshot::RestoreReceipt>);
-        rpc::change_profile_with_rollback(
+        let cleanup_issue=std::cell::RefCell::new(None::<String>);
+        rpc::change_profile_with_verification(
             || {
                 let ownership =
                     respire::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
@@ -6096,13 +6097,23 @@ fn run(args: Cli) -> Result<()> {
                 }
                 Ok(())
             },
+            || {
+                let held=receipt.borrow();
+                let receipt=held.as_ref().ok_or_else(||anyhow!("snapshot restore receipt missing"))?;
+                rpc::verify_snapshot_store(&root,&receipt.restored)?;
+                respire_app::snapshot::commit_restore(&root,receipt)?;
+                // A durable commit is never rolled back for cleanup failure.
+                // Both the release and any recovery remain under takeover.
+                *cleanup_issue.borrow_mut()=respire_app::snapshot::release_restore(&root,receipt).err().map(|error|error.to_string());
+                Ok(())
+            },
         )?;
         let receipt=receipt.into_inner().ok_or_else(||anyhow!("snapshot restore receipt missing"))?;
-        let cleanup=respire_app::snapshot::complete_restore(&root,&receipt).err();
+        let cleanup=cleanup_issue.into_inner();
         let mut result = ResultEnvelope::new(
             "snapshot",
             if cleanup.is_some(){OutputStatus::Warn}else{OutputStatus::Ok},
-            serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false,"runtime_verified":true}),
+            serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false,"runtime_verified":true,"service_released":respire_app::snapshot::ensure_no_incomplete_restore(&root).is_ok()}),
             Vec::new(),
         );
         result.details = serde_json::to_value(&receipt)?;
@@ -6115,12 +6126,16 @@ fn run(args: Cli) -> Result<()> {
         anyhow::ensure!(*confirm,"snapshot recover requires --confirm");
         respire::service::ensure_writable()?;
         let root=respire::service::data_dir();let account=respire::service::session_user_of_dir(&root);
-        rpc::change_profile(|| {
+        rpc::change_profile_with_verification(|| {
             let ownership=respire::lock::LibraryLock::acquire(&root,std::time::Duration::from_secs(15))?;
             respire_app::snapshot::recover_locked(&root,&account,&ownership)
+        },||Ok(()),||{
+            if !respire::service::off_mode(){rpc::verify_open_store(&root)?;}
+            Ok(())
         })?;
         return emit_result(ResultEnvelope::new("snapshot",OutputStatus::Ok,serde_json::json!({"action":"recovered","runtime_verified":true}),Vec::new()));
     }
+    respire_app::snapshot::ensure_no_incomplete_restore(&respire::service::data_dir())?;
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),

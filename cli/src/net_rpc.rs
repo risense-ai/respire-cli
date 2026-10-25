@@ -34,6 +34,10 @@ pub struct Health {
     pub data_dir: String,
     #[serde(default)]
     pub inference: Value,
+    #[serde(default)]
+    pub store_ready: bool,
+    #[serde(default)]
+    pub snapshot_restore_id: Option<String>,
 }
 
 impl Health {

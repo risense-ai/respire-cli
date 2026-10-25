@@ -33,6 +33,8 @@ static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
 static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: AtomicUsize = AtomicUsize::new(1);
 static STOPPING: AtomicBool = AtomicBool::new(false);
+static STORE_READY: AtomicBool = AtomicBool::new(false);
+static SNAPSHOT_BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
 static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
 static DISPATCH_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
 const QUEUE_EXPIRED: &str = "request queue deadline exceeded; command was not started";
@@ -961,6 +963,24 @@ pub fn recover_interrupted_login() -> Result<()> {
     Ok(())
 }
 
+/// Listener readiness alone is insufficient for a snapshot commit: the actor
+/// must have opened, checked and bound the actual restored database first.
+pub fn verify_snapshot_store(root:&std::path::Path,id:&str)->Result<()> {
+    verify_runtime_store(root,Some(id))
+}
+pub fn verify_open_store(root:&std::path::Path)->Result<()> {
+    verify_runtime_store(root,None)
+}
+fn verify_runtime_store(root:&std::path::Path,id:Option<&str>)->Result<()> {
+    for _ in 0..START_POLLS {
+        let health=crate::net_rpc::health()?;
+        anyhow::ensure!(std::path::Path::new(&health.data_dir)==root,"snapshot runtime profile changed during verification");
+        if health.store_ready && id.is_none_or(|id|health.snapshot_restore_id.as_deref()==Some(id)){return Ok(());}
+        std::thread::sleep(START_WAIT);
+    }
+    bail!("restored runtime did not confirm an opened and verified snapshot store")
+}
+
 pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_rollback(change, || Ok(()))
 }
@@ -1614,6 +1634,8 @@ pub(crate) fn health_body() -> Value {
         "url": current_url(),
         "exe": exe,
         "data_dir": respire::service::data_dir().display().to_string(),
+        "store_ready": STORE_READY.load(Ordering::Acquire),
+        "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
         "recall_statistics": recall_stats_status(),
         "retrieval_index": index_status(),
         "inference": inference,
@@ -1802,8 +1824,12 @@ fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>, _lock:
     respire_app::core_sdk::worker::enable();
     // Keep WAL open across requests: closing the last connection can briefly lock
     // a concurrent opener during checkpoint/cleanup, even for read-only status.
-    let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_store() {
-        Ok(store) => store,
+    let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_runtime_store(&_lock) {
+        Ok((store,snapshot_id)) => {
+            if let Ok(mut slot)=SNAPSHOT_BOOT_ID.lock(){*slot=snapshot_id;}
+            STORE_READY.store(true,Ordering::Release);
+            store
+        },
         Err(error) => {
             eprintln!("runtime failed to initialize the library: {error:#}");
             stop_process(1);

@@ -2742,6 +2742,7 @@ pub fn open_store() -> Result<LocalStore> {
 /// Return the identity captured for this exact connection, not a later config read.
 pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
     let root = data_dir();
+    crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
     let db = database_path(&root)?;
@@ -2753,11 +2754,26 @@ pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
     Ok((root, store))
 }
 
+/// Bootstrap under actual runtime library ownership without opening business access.
+pub fn open_runtime_store(ownership:&crate::lock::LibraryLock)->Result<(LocalStore,Option<String>)> {
+    let root=data_dir();check_runtime_profile(&root)?;
+    anyhow::ensure!(ownership.protects(&root)?,"runtime bootstrap requires matching library ownership");
+    let expected=crate::snapshot::runtime_bootstrap_target(&root)?;
+    respire_core_sdk::set_index_root(&root)?;
+    let store=LocalStore::open(&database_path(&root)?)?;
+    if let Some(id)=expected.as_ref() {
+        store.verify_sqlite_integrity()?;
+        anyhow::ensure!(store.snapshot_quarantine_id()?.as_ref()==Some(id),"opened library does not match the restored snapshot transaction");
+    }
+    Ok((store,expected))
+}
+
 /// Initialize the runtime's owned library after normal service is restored.
 /// Disabled startup deliberately leaves a new database uncreated.
 pub fn initialize_runtime_store() -> Result<LocalStore> {
     anyhow::ensure!(!service_paused(), "database initialization requires normal service");
     let root = data_dir();
+    crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
     respire_core_sdk::set_index_root(&root)?;
     LocalStore::open(&database_path(&root)?)

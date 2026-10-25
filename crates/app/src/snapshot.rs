@@ -387,6 +387,7 @@ impl From<RecoveryReceipt> for RestoreReceipt {
     }
 }
 const RECOVERY_FILE: &str = ".snapshot-recovery.json";
+const MAINTENANCE_FILE: &str = ".snapshot-maintenance.json";
 
 fn reject_live_symlink(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
@@ -397,6 +398,9 @@ fn reject_live_symlink(path: &Path) -> Result<()> {
     Ok(())
 }
 fn write_journal(root: &Path, receipt: &RestoreReceipt, phase: &str) -> Result<()> {
+    write_record(root, receipt, phase, RECOVERY_FILE)
+}
+fn write_record(root: &Path, receipt: &RestoreReceipt, phase: &str, name: &str) -> Result<()> {
     let temporary = root.join(format!(
         ".snapshot-journal-{}.tmp",
         uuid::Uuid::new_v4().simple()
@@ -409,15 +413,24 @@ fn write_journal(root: &Path, receipt: &RestoreReceipt, phase: &str) -> Result<(
     })?)?;
     file.sync_all()?;
     drop(file);
-    respire_spawn::durable::replace_file(&temporary, &root.join(RECOVERY_FILE))?;
+    respire_spawn::durable::replace_file(&temporary, &root.join(name))?;
     Ok(())
 }
 fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
-    let path = root.join(RECOVERY_FILE);
-    let meta = match fs::symlink_metadata(&path) {
-        Ok(meta) => meta,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
+    let mut found = None;
+    for name in [RECOVERY_FILE, MAINTENANCE_FILE] {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                found = Some((path, metadata));
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let Some((path, meta)) = found else {
+        return Ok(None);
     };
     anyhow::ensure!(
         meta.is_file() && !meta.file_type().is_symlink() && meta.len() < 65536,
@@ -441,11 +454,36 @@ fn read_journal(root: &Path) -> Result<Option<RecoveryJournal>> {
     Ok(Some(journal))
 }
 
+fn maintenance_present(root: &Path) -> Result<bool> {
+    match fs::symlink_metadata(root.join(MAINTENANCE_FILE)) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn ensure_no_incomplete_restore(root: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !maintenance_present(root)?,
+        "snapshot maintenance blocks normal library access; host recovery/commit is required"
+    );
     if let Some(journal) = read_journal(root)? {
-        anyhow::ensure!(journal.phase!="prepared","interrupted snapshot restore; host must run snapshot recover --confirm before opening the library");
+        anyhow::ensure!(journal.phase=="verified","interrupted snapshot restore; host must run snapshot recover --confirm before opening the library");
     }
     Ok(())
+}
+
+/// Only the runtime holding library ownership can bootstrap the staged store.
+/// This does not release the maintenance gate for any business request.
+pub fn runtime_bootstrap_target(root: &Path) -> Result<Option<String>> {
+    let Some(journal) = read_journal(root)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        matches!(journal.phase.as_str(), "installed" | "verified"),
+        "snapshot restore preparation is incomplete; recover before startup"
+    );
+    Ok(Some(journal.receipt.restored))
 }
 
 fn checkpoint_closed(live: &Path) -> Result<()> {
@@ -548,6 +586,7 @@ fn restore_with_hook(
         account_fingerprint,
     };
     // Durable receipt exists before the first operation that can replace live.
+    write_record(root, &receipt, "prepared", MAINTENANCE_FILE)?;
     write_journal(root, &receipt, "prepared")?;
     let temporary = root.join(format!(
         ".snapshot-restore-{}.db",
@@ -583,6 +622,7 @@ fn restore_with_hook(
         crate::resident::clear()?;
         hook("after_cache_clear")?;
         write_journal(root, &receipt, "installed")?;
+        hook("after_installed")?;
         Ok(())
     })();
     if let Err(error) = result {
@@ -612,6 +652,10 @@ pub fn rollback_locked(
     );
     let journal = read_journal(root)?.context("snapshot recovery journal missing")?;
     anyhow::ensure!(
+        journal.phase != "verified" || maintenance_present(root)?,
+        "snapshot restore is committed; rollback would discard accepted writes"
+    );
+    anyhow::ensure!(
         journal.receipt.rollback_file == receipt.rollback_file
             && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
         "rollback receipt differs from durable journal"
@@ -622,7 +666,24 @@ pub fn rollback_locked(
         "local rollback image digest mismatch"
     );
     let live = crate::service::database_path(root)?;
-    checkpoint_closed(&live)?;
+    if let Err(error) = checkpoint_closed(&live) {
+        let corrupt = error
+            .chain()
+            .filter_map(|cause| cause.downcast_ref::<rusqlite::Error>())
+            .any(|error| {
+                matches!(
+                    error.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                )
+            });
+        let has_sidecars = ["-wal", "-shm"].iter().any(|suffix| {
+            std::path::PathBuf::from(format!("{}{suffix}", live.to_string_lossy())).exists()
+        });
+        anyhow::ensure!(
+            corrupt && !has_sidecars,
+            "rollback checkpoint failed; original recovery image retained: {error}"
+        );
+    }
     let temporary = root.join(format!(
         ".snapshot-rollback-install-{}.db",
         uuid::Uuid::new_v4().simple()
@@ -635,26 +696,75 @@ pub fn rollback_locked(
     crate::resident::clear()?;
     clear_recovery(root, receipt)
 }
+fn remove_if_present(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
 fn clear_recovery(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
-    // Remove the journal first. An orphaned private image is safer than a
-    // journal that points to an image already deleted after successful repair.
-    fs::remove_file(root.join(RECOVERY_FILE))?;
+    clear_with_hook(root, receipt, &|_| Ok(()))
+}
+fn clear_with_hook(
+    root: &Path,
+    receipt: &RestoreReceipt,
+    hook: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
+    // Once verified is durable, gate removal is a one-way commit release. Any
+    // later cleanup failure must retain the selected state, never roll it back.
+    remove_if_present(&root.join(MAINTENANCE_FILE))?;
+    hook("after_gate_removed")?;
     respire_spawn::durable::sync_directory(root)?;
-    fs::remove_file(root.join(&receipt.rollback_file))?;
+    remove_if_present(&root.join(RECOVERY_FILE))?;
+    respire_spawn::durable::sync_directory(root)?;
+    remove_if_present(&root.join(&receipt.rollback_file))?;
     respire_spawn::durable::sync_directory(root)?;
     Ok(())
 }
 
-/// Called only after the restored runtime has reopened successfully.
-pub fn complete_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
+/// Persist commit while maintenance still blocks all normal requests. Failure
+/// here is fatal and the caller must roll back before releasing its lifecycle lock.
+pub fn commit_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
+    commit_with_hook(root, receipt, &|_| Ok(()))
+}
+fn commit_with_hook(
+    root: &Path,
+    receipt: &RestoreReceipt,
+    hook: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
+    anyhow::ensure!(
+        maintenance_present(root)?,
+        "snapshot commit requires active maintenance gate"
+    );
     let journal = read_journal(root)?.context("snapshot completion journal missing")?;
     anyhow::ensure!(
         journal.receipt.rollback_file == receipt.rollback_file
             && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
         "snapshot completion receipt differs from durable journal"
     );
+    hook("before_verified_write")?;
     write_journal(root, receipt, "verified")?;
+    hook("after_verified_write")?;
+    Ok(())
+}
+
+/// Only call after commit_restore returned success. Cleanup errors are warnings
+/// about an already committed state and must never trigger original-state rollback.
+pub fn release_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
+    let journal = read_journal(root)?.context("snapshot release journal missing")?;
+    anyhow::ensure!(
+        journal.phase == "verified"
+            && journal.receipt.rollback_file == receipt.rollback_file
+            && journal.receipt.rollback_sha256 == receipt.rollback_sha256,
+        "snapshot release is not the committed operation"
+    );
     clear_recovery(root, receipt)
+}
+
+pub fn complete_restore(root: &Path, receipt: &RestoreReceipt) -> Result<()> {
+    commit_restore(root, receipt)?;
+    release_restore(root, receipt)
 }
 
 pub fn recover_locked(
@@ -760,11 +870,11 @@ mod tests {
     fn fixture() -> Result<(tempfile::TempDir, Connection)> {
         let directory = tempfile::tempdir()?;
         let db = Connection::open(directory.path().join("rsrs.db"))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE memories(id TEXT PRIMARY KEY,ciphertext TEXT,nonce TEXT); CREATE TABLE access_grants(token_hash TEXT); CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('memory_revision_v1','0123456789abcdef0123456789abcdef'); INSERT INTO access_grants VALUES('synthetic-private-grant-marker');")?;
+        db.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE memories(id TEXT PRIMARY KEY,ciphertext TEXT,nonce TEXT,user TEXT NOT NULL DEFAULT 'account',created_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z',updated_at TEXT NOT NULL DEFAULT '2026-01-01T00:00:00Z'); CREATE TABLE access_grants(id TEXT PRIMARY KEY,label TEXT,root_id TEXT,token_hash TEXT,created_at TEXT,revoked INTEGER DEFAULT 0); CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT); INSERT INTO meta VALUES('memory_revision_v1','0123456789abcdef0123456789abcdef'); INSERT INTO access_grants(id,label,root_id,token_hash,created_at) VALUES('synthetic-grant','fixture','synthetic','synthetic-private-grant-marker','2026-01-01');")?;
         let (nonce, ciphertext) =
             crate::SessionKeys::from_urk([7; 32])?.encrypt_content("encrypted-fixture")?;
         db.execute(
-            "INSERT INTO memories VALUES('synthetic',?1,?2)",
+            "INSERT INTO memories(id,ciphertext,nonce) VALUES('synthetic',?1,?2)",
             rusqlite::params![ciphertext, nonce],
         )?;
         Ok((directory, db))
@@ -815,7 +925,7 @@ mod tests {
         let (nonce, ciphertext) =
             crate::SessionKeys::from_urk([7; 32])?.encrypt_content("second")?;
         db.execute(
-            "INSERT INTO memories VALUES('second',?1,?2)",
+            "INSERT INTO memories(id,ciphertext,nonce) VALUES('second',?1,?2)",
             rusqlite::params![ciphertext, nonce],
         )?;
         let second = create(
@@ -910,12 +1020,16 @@ mod tests {
             "before_replace",
             "after_replace",
             "after_cache_clear",
+            "after_installed",
         ] {
             let (directory, db) = fixture()?;
             let root = directory.path();
             let keys = crate::SessionKeys::from_urk([7; 32])?;
             let snapshot = create(root, "account", "baseline", &keys)?;
-            db.execute("INSERT INTO memories VALUES('later','','')", [])?;
+            db.execute(
+                "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
+                [],
+            )?;
             db.execute(
                 "INSERT INTO meta VALUES('synthetic_outbox','original-pending-write')",
                 [],
@@ -972,7 +1086,10 @@ mod tests {
         let root = directory.path();
         let keys = crate::SessionKeys::from_urk([7; 32])?;
         let selected = create(root, "account", "baseline", &keys)?;
-        db.execute("INSERT INTO memories VALUES('later','','')", [])?;
+        db.execute(
+            "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
+            [],
+        )?;
         drop(db);
         let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
         let receipt = restore_locked(root, "account", &keys, &selected.id, &ownership)?;
@@ -1047,65 +1164,234 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn interrupted_restore_has_recoverable_original_image() -> Result<()> {
-        const CHILD: &str = "RSRS_SNAPSHOT_FAULT_CHILD_ROOT";
-        if let Some(root) = std::env::var_os(CHILD) {
-            let root = std::path::PathBuf::from(root);
-            let id = std::env::var("RSRS_SNAPSHOT_FAULT_ID")?;
-            let ownership =
-                crate::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(1))?;
-            restore_with_hook(
-                &root,
-                "account",
-                &crate::SessionKeys::from_urk([7; 32])?,
-                &id,
-                &ownership,
-                &|stage| {
-                    if stage == "after_replace" {
-                        std::process::exit(77);
-                    }
-                    Ok(())
-                },
-            )?;
-            anyhow::bail!("interruption hook was not reached");
-        }
-        let (directory, db) = fixture()?;
-        let root = directory.path();
-        let keys = crate::SessionKeys::from_urk([7; 32])?;
-        let snapshot = create(root, "account", "baseline", &keys)?;
-        db.execute("INSERT INTO memories VALUES('later','','')", [])?;
-        drop(db);
+    fn assert_normal_open_is_blocked_in_fresh_process(root: &Path) -> Result<()> {
         let output = std::process::Command::new(std::env::current_exe()?)
             .args([
                 "--exact",
                 "snapshot::tests::interrupted_restore_has_recoverable_original_image",
                 "--test-threads=1",
             ])
-            .env(CHILD, root)
-            .env("RSRS_SNAPSHOT_FAULT_ID", &snapshot.id)
+            .env("RSRS_SNAPSHOT_FAULT_CHILD_ROOT", root)
+            .env("RSRS_SNAPSHOT_FAULT_MODE", "probe")
             .output()?;
-        assert_eq!(
-            output.status.code(),
-            Some(77),
-            "child did not reach controlled interruption: {} {}",
+        anyhow::ensure!(
+            output.status.success(),
+            "normal entry probe failed: {} {}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        assert!(ensure_no_incomplete_restore(root).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn corrupt_staged_database_cannot_be_marked_ready_and_original_is_recoverable() -> Result<()> {
+        let (directory, db) = fixture()?;
+        let root = directory.path();
+        let keys = crate::SessionKeys::from_urk([7; 32])?;
+        let snapshot = create(root, "account", "baseline", &keys)?;
+        drop(db);
         let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
-        recover_locked(root, "account", &ownership)?;
+        let receipt = restore_locked(root, "account", &keys, &snapshot.id, &ownership)?;
+        fs::write(root.join("rsrs.db"), b"damaged database after replacement")?;
+        assert!(ensure_no_incomplete_restore(root).is_err());
+        // SQLite itself rejects the staged file; no readiness can be based on it.
+        assert!(Connection::open(root.join("rsrs.db"))?
+            .query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0))
+            .is_err());
+        rollback_locked(root, &receipt, &ownership)?;
         let original = Connection::open(root.join("rsrs.db"))?;
-        assert_eq!(
-            original.query_row("SELECT count(*) FROM memories", [], |r| r.get::<_, u64>(0))?,
-            2
-        );
         assert_eq!(
             original.query_row("SELECT count(*) FROM access_grants", [], |r| r
                 .get::<_, u64>(0))?,
             1
         );
-        assert!(ensure_no_incomplete_restore(root).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn verified_write_failure_keeps_all_normal_entries_closed_until_rollback() -> Result<()> {
+        for failure in ["before_verified_write", "after_verified_write"] {
+            let (directory, db) = fixture()?;
+            let root = directory.path();
+            let keys = crate::SessionKeys::from_urk([7; 32])?;
+            let snapshot = create(root, "account", "baseline", &keys)?;
+            db.execute(
+                "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
+                [],
+            )?;
+            drop(db);
+            let ownership =
+                crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+            let receipt = restore_locked(root, "account", &keys, &snapshot.id, &ownership)?;
+            assert!(commit_with_hook(root, &receipt, &|phase| {
+                anyhow::ensure!(
+                    phase != failure,
+                    "injected verified persistence I/O failure"
+                );
+                Ok(())
+            })
+            .is_err());
+            assert_normal_open_is_blocked_in_fresh_process(root)?;
+            rollback_locked(root, &receipt, &ownership)?;
+            let original = Connection::open(root.join("rsrs.db"))?;
+            assert_eq!(
+                original.query_row("SELECT count(*) FROM memories", [], |row| row
+                    .get::<_, u64>(0))?,
+                2
+            );
+            assert_eq!(
+                original.query_row("SELECT count(*) FROM access_grants", [], |row| row
+                    .get::<_, u64>(0))?,
+                1
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn interrupted_restore_has_recoverable_original_image() -> Result<()> {
+        const CHILD: &str = "RSRS_SNAPSHOT_FAULT_CHILD_ROOT";
+        if let Some(root) = std::env::var_os(CHILD) {
+            let root = std::path::PathBuf::from(root);
+            std::env::set_var("RSRS_DATA_DIR", &root);
+            let mode = std::env::var("RSRS_SNAPSHOT_FAULT_MODE")?;
+            if mode == "probe" {
+                for result in [
+                    crate::service::open_store().map(|_| ()),
+                    crate::service::open_store_with_profile().map(|_| ()),
+                    crate::service::initialize_runtime_store().map(|_| ()),
+                ] {
+                    let error = result
+                        .err()
+                        .context("normal library entry accepted pending restore")?;
+                    anyhow::ensure!(
+                        error.to_string().contains("snapshot"),
+                        "unexpected open failure: {error}"
+                    );
+                }
+                return Ok(());
+            }
+            if mode == "write" {
+                use crate::transport::MemoryTransport;
+                let store = crate::service::open_store()?;
+                let pending =
+                    crate::StoredMemory::new_pending("new-after-commit".into(), "account".into());
+                anyhow::ensure!(store.put(&pending)?, "post-commit write was not accepted");
+                return Ok(());
+            }
+            let id = std::env::var("RSRS_SNAPSHOT_FAULT_ID")?;
+            let ownership =
+                crate::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(1))?;
+            let receipt = restore_with_hook(
+                &root,
+                "account",
+                &crate::SessionKeys::from_urk([7; 32])?,
+                &id,
+                &ownership,
+                &|stage| {
+                    if stage == mode {
+                        std::process::exit(77);
+                    }
+                    Ok(())
+                },
+            )?;
+            commit_restore(&root, &receipt)?;
+            if mode == "after_commit" {
+                std::process::exit(77);
+            }
+            clear_with_hook(&root, &receipt, &|stage| {
+                if stage == mode {
+                    std::process::exit(77);
+                }
+                Ok(())
+            })?;
+            anyhow::bail!("interruption hook was not reached");
+        }
+        for phase in [
+            "after_replace",
+            "after_installed",
+            "after_commit",
+            "after_gate_removed",
+        ] {
+            let (directory, db) = fixture()?;
+            let root = directory.path();
+            let keys = crate::SessionKeys::from_urk([7; 32])?;
+            let snapshot = create(root, "account", "baseline", &keys)?;
+            db.execute(
+                "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
+                [],
+            )?;
+            drop(db);
+            let output = std::process::Command::new(std::env::current_exe()?)
+                .args([
+                    "--exact",
+                    "snapshot::tests::interrupted_restore_has_recoverable_original_image",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, root)
+                .env("RSRS_SNAPSHOT_FAULT_ID", &snapshot.id)
+                .env("RSRS_SNAPSHOT_FAULT_MODE", phase)
+                .output()?;
+            assert_eq!(
+                output.status.code(),
+                Some(77),
+                "child did not reach {phase}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if phase != "after_gate_removed" {
+                assert_normal_open_is_blocked_in_fresh_process(root)?;
+            } else {
+                assert!(ensure_no_incomplete_restore(root).is_ok());
+                let output = std::process::Command::new(std::env::current_exe()?)
+                    .args([
+                        "--exact",
+                        "snapshot::tests::interrupted_restore_has_recoverable_original_image",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, root)
+                    .env("RSRS_SNAPSHOT_FAULT_MODE", "write")
+                    .output()?;
+                anyhow::ensure!(
+                    output.status.success(),
+                    "normal post-commit write failed: {} {}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            let ownership =
+                crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+            recover_locked(root, "account", &ownership)?;
+            let current = Connection::open(root.join("rsrs.db"))?;
+            let rolled_back = matches!(phase, "after_replace" | "after_installed");
+            assert_eq!(
+                current.query_row("SELECT count(*) FROM access_grants", [], |row| row
+                    .get::<_, u64>(0))?,
+                if rolled_back { 1 } else { 0 },
+                "{phase}"
+            );
+            assert_eq!(
+                current.query_row(
+                    "SELECT count(*) FROM memories WHERE id='later'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )?,
+                if rolled_back { 1 } else { 0 },
+                "{phase}"
+            );
+            if phase == "after_gate_removed" {
+                assert_eq!(
+                    current.query_row(
+                        "SELECT count(*) FROM memories WHERE id='new-after-commit'",
+                        [],
+                        |row| row.get::<_, u64>(0)
+                    )?,
+                    1,
+                    "recovery discarded accepted post-commit write"
+                );
+            }
+            assert!(ensure_no_incomplete_restore(root).is_ok());
+        }
         Ok(())
     }
 
@@ -1115,10 +1401,16 @@ mod tests {
         let root = directory.path();
         let keys = crate::SessionKeys::from_urk([7; 32])?;
         let manifest = create(root, "account", "baseline", &keys)?;
-        db.execute("INSERT INTO memories VALUES('pending','','')", [])?;
+        db.execute(
+            "INSERT INTO memories(id,ciphertext,nonce) VALUES('pending','','')",
+            [],
+        )?;
         let reader = Connection::open(root.join("rsrs.db"))?;
         reader.execute_batch("BEGIN; SELECT * FROM memories;")?;
-        db.execute("INSERT INTO memories VALUES('later','','')", [])?;
+        db.execute(
+            "INSERT INTO memories(id,ciphertext,nonce) VALUES('later','','')",
+            [],
+        )?;
         let ownership = crate::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
         assert!(restore_locked(root, "account", &keys, &manifest.id, &ownership).is_err());
         assert_eq!(
