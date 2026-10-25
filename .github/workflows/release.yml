@@ -16,6 +16,8 @@ on:
       - 'npm/scripts/release-publication.mjs'
       - 'npm/scripts/registry-publication.mjs'
       - 'npm/scripts/parallel-publication.mjs'
+      - 'npm/scripts/cleanup-release-artifacts.mjs'
+      - 'npm/scripts/test-cleanup-release-artifacts.mjs'
       - 'npm/scripts/test-*-publication.mjs'
       - 'scripts/test-real-m3-account-switch.py'
   workflow_dispatch:
