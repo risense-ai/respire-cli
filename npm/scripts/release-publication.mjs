@@ -10,6 +10,8 @@ import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './
 import {validateRecoverySource, validateRecoveryAuthority} from './dev6-recovery-policy.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
+// Only new receipts opt into post-consumption temporary artifact deletion.
+export const RELEASE_ARTIFACT_CLEANUP_POLICY = Object.freeze({schema: 1, after_consumers_seconds: 3600});
 const ALIAS_WORKFLOW = '.github/workflows/npm-alias.yml';
 const VERSION = /^\d+\.\d+\.\d+(?:-dev\.\d+)?$/;
 const SHA = /^[a-f0-9]{40}$/;
@@ -166,7 +168,7 @@ async function scopedReady() {
   const binaries = m.targets.map(t => { const build = read(`release-assets/cli-build-${t.triple}.json`);
     if (build.git_sha !== sha || build.version !== m.cliVersion || build.target !== t.triple) throw new Error('Build metadata source mismatch');
     return {package: t.pkg, target: t.triple, file: build.binary_file, sha256: build.binary_sha256}; });
-  const receipt = validateScoped({schema: 1, kind: 'scoped-ready', source, packages, assets, binaries}, m);
+  const receipt = validateScoped({schema: 1, kind: 'scoped-ready', cleanup_policy: RELEASE_ARTIFACT_CLEANUP_POLICY, source, packages, assets, binaries}, m);
   assertActive(source);
   assertDraft(api(`repos/${source.repository}/releases/${source.release_id}`), receipt);
   assertTag(source);
