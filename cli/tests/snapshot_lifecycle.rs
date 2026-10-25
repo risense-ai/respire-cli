@@ -574,6 +574,23 @@ fn public_feedback_attribution_uses_exact_request_and_refuses_readonly_writes() 
     let (ok, repeated) = fixture.run(&mark)?;
     assert!(ok);
     assert_eq!(repeated["summary"]["revision"], revision);
+    let (ok, unsupported) = fixture.run(&[
+        "--direct",
+        "--json",
+        "query-log",
+        "mark",
+        id,
+        "--bad",
+        "--source",
+        "human",
+    ])?;
+    assert!(!ok);
+    assert!(unsupported["errors"]
+        .to_string()
+        .contains("supports only --source model"));
+    let persisted = LocalStore::open(&fixture.root.path().join("rsrs.db"))?.query_log_rows(1)?;
+    assert_eq!(persisted[0].good, [id]);
+    assert!(persisted[0].bad.is_empty());
     let (ok, legacy) = fixture.run_feedback(
         &["--direct", "--json", "query-log", "mark", id, "--bad"],
         Some("0"),
