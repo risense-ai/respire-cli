@@ -1,0 +1,55 @@
+# Explicit feedback experiment
+
+This implements the 2026-10-24 scientist proposal. It is **off by default**.
+`RSRS_FEEDBACK=1` opts in (the existing ONEMEMORY_/RESPIRE_ environment aliases
+remain supported); it requires the paired SDK with `feedback_contract=1`.
+Missing support fails explicitly instead of silently retaining read frequency.
+
+The existing Core heat weight remains 0.10. Its input becomes explicit good
+counts, `min(log2(n+1)/4,1)`. Bad counts multiply the real ranking score by
+`1-0.4*min(n,5)/5` before candidate filtering, pooling and selection. When this
+experiment is enabled, bad penalties default on; `RSRS_BAD_PENALTY=0` disables
+them. `RSRS_ABLATE=hot` retains the existing heat ablation. No wrapper rearranges
+a truncated top twenty list to imitate the scoring change.
+
+The host rebuilds immutable counts before CLI recall, service search, remember
+candidate selection and each benchmark case. Other SDK ranking requests receive
+neutral feedback counts when enabled, so they do not retain read-frequency heat.
+There are no process-global good/bad maps. The store, exact project/scope and
+currently authorized candidate IDs constrain aggregation. Observations come from
+the last 180 days and must pass character-bigram Jaccard similarity (default
+`RSRS_MARK_SIM=0.5`). Unicode scalar pairs are deduplicated; text is lowercased
+and trimmed, with one-character queries represented by a singleton. Empty text
+has no similarity. This is the proposed lexical filter, not semantic negation
+detection: similar opposing queries can still match and must be evaluated.
+
+A recall in normal mode returns `summary.query_log_id`, an explicit UUID. To
+attribute a verdict:
+
+```sh
+rsrs query-log mark FULL_MEMORY_ID --good --query-log-id REQUEST_UUID --source human --json
+rsrs query-log mark FULL_MEMORY_ID --bad --query-log-id REQUEST_UUID --source model --json
+```
+
+Sources are `human`, `model` (the default), or `task_outcome`. Only complete IDs
+in that exact request's candidate list are accepted. Timestamp/source/revision
+and verdict commit in one transaction. Repeating an identical verdict/source is
+idempotent. Regrading wins, including regrading an older request after a newer
+one. Repeated identical query/entry contexts contribute at most once; distinct
+similar query contexts can contribute separately. Opposite old grades are removed.
+A request still awaiting statistics persistence gives an explicit retryable
+not-found diagnostic; no different recent request is silently selected.
+
+Legacy good_ids/bad_ids remain readable for existing marks and benchmark data.
+With feedback disabled, the existing recent-candidate prefix grading command is
+retained. With feedback enabled, request identity is required. Read-only/off
+mode cannot create marks; read-only benchmark aggregation does not write marks,
+query logs or read counters. Existing read counters remain diagnostic data but
+are not used as heat while the experiment is enabled.
+
+Run the existing JSONL `bench run` or `ablation_bench` against a frozen isolated
+library/model/SDK and topk 20; retain per-case results and the parameter snapshot.
+The original 200-case/250-entry/40-mark dataset has not been supplied here, so
+synthetic contract/isolation tests do **not** reproduce its reported gains.
+Holdout splits by time/query family and paired hit@20/MRR/per-case regressions,
+false penalties, latency and coverage remain required before assessing benefit.

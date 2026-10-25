@@ -11,6 +11,7 @@
 pub use respire_app::auth;
 pub use respire_app::core_sdk;
 pub use respire_app::env;
+pub use respire_app::feedback;
 pub mod extract_tui;
 pub mod hooks;
 pub use respire_app::inject;

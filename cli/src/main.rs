@@ -1445,6 +1445,12 @@ enum QueryLogCmd {
         /// Mark as misleading (post-training rejected)
         #[arg(long)]
         bad: bool,
+        /// Explicit request identity from recall.summary.query_log_id (required with feedback enabled).
+        #[arg(long)]
+        query_log_id: Option<String>,
+        /// Origin of this explicit verdict; never inferred from a successful command.
+        #[arg(long,default_value="model",value_parser=["human","model","task_outcome"])]
+        source: String,
     },
 }
 
@@ -2563,7 +2569,7 @@ fn run_query_log(
     }
     let store = build_local()?;
     // mark: model self-grade - the main post-training signal
-    if let Some(QueryLogCmd::Mark { ids, good, bad }) = cmd {
+    if let Some(QueryLogCmd::Mark { ids, good, bad, query_log_id, source }) = cmd {
         if *good == *bad {
             anyhow::bail!("pick exactly one of --good or --bad");
         }
@@ -2574,7 +2580,12 @@ fn run_query_log(
             .map(ToOwned::to_owned)
             .collect();
         anyhow::ensure!(!id_list.is_empty(), "ids is empty");
-        let unmatched = store.mark_verdict(&id_list, *good)?;
+        let (unmatched,revision)=if let Some(request_id)=query_log_id {
+            (Vec::new(),Some(store.mark_query_feedback(request_id,&id_list,*good,source)?))
+        }else{
+            anyhow::ensure!(!respire::feedback::enabled()?,"enabled feedback requires --query-log-id from the recall summary and complete memory IDs");
+            (store.mark_verdict(&id_list,*good)?,None)
+        };
         let status = if unmatched.is_empty() {
             OutputStatus::Ok
         } else {
@@ -2583,7 +2594,7 @@ fn run_query_log(
         let mut result = ResultEnvelope::new(
             "query-log",
             status,
-            serde_json::json!({"marked":id_list.len()-unmatched.len(),"good":*good}),
+            serde_json::json!({"marked":id_list.len()-unmatched.len(),"good":*good,"query_log_id":query_log_id,"source":source,"revision":revision}),
             vec![
                 OutputItem::new(
                     "marked",
@@ -2822,7 +2833,7 @@ fn run_bench_run(
             }
         }
         let started = std::time::Instant::now();
-        let (ranked, _, fallback, _) = recall_select::recall(&session, &embedder, &candidates, &q)?;
+        let (ranked, _, fallback, _) = recall_select::recall(&session, &embedder, &candidates, &q, &store)?;
         latency.push(started.elapsed().as_micros());
         selector_fallbacks += usize::from(fallback.is_some());
         let ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
@@ -7224,8 +7235,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 let _resident = lease.enter();
                 if pending > 0 { rpc::kick_index(); }
                 let q = MemoryQuery::new(&content).limit(5);
-                let candidates =
-                    MemoryEngine::remember_candidates(&session, embedder!(), &candidates_all, &q)?;
+                let candidates:respire::core_sdk::RememberCandidates=respire::core_sdk::execute("remember_candidates",serde_json::json!({
+                    "model":embedder!().model_name(),"snapshots":respire::memory::engine::snapshots(&session,&candidates_all),
+                    "query":q,"query_settings":respire::feedback::query_settings(&store,&q,&candidates_all)?
+                }))?;
                 let merge_cand = candidates.merge;
                 let parent_cand = candidates.parent;
 
@@ -7578,9 +7591,9 @@ fn run_local_inner(args: Cli) -> Result<()> {
             // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
             let (ranked, recall_mode, selection_fallback, routing) = match mode {
                 Some(mode) => {
-                    recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &mode)?
+                    recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &store, &mode)?
                 }
-                None => recall_select::recall(&session, embedder!(), &candidates, &q)?,
+                None => recall_select::recall(&session, embedder!(), &candidates, &q, &store)?,
             };
             let hit_ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
             let associations: respire::memory::model::RelatedResult = if no_related {
@@ -7589,12 +7602,14 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 "model":embedder!().model_name(), "snapshots":respire::memory::engine::snapshots(&session,&candidates),
                 "query":q,"ids":hit_ids,"pairs":store.recall_pairs(&hit_ids)?
             }))? };
+            let query_log_id=if respire::service::workspace_mode()=="normal" {Some(uuid::Uuid::new_v4().to_string())}else{None};
             // Query log: each recall writes a candidate record (including empty - negatives are post-training material too).
             // Note: this is the candidate set, not a hit - a hit is the model query-log mark self-grade
             {
                 let candidates: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
                 let scores: Vec<f32> = ranked.iter().map(|r| r.score).collect();
                 let stats = rpc::RecallStats {
+                    request_id:query_log_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),
                     query: query.clone(),
                     project: project.clone().unwrap_or_default(),
                     candidates,
@@ -7657,7 +7672,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let mut result = ResultEnvelope::new(
                 "recall",
                 OutputStatus::Ok,
-                serde_json::json!({"query":query,"count":ranked.len(),"limit":limit,"project":project,
+                serde_json::json!({"query":query,"query_log_id":query_log_id,"count":ranked.len(),"limit":limit,"project":project,
                     "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing,
                     "index_pending":index_pending,"indexed_candidates":candidates.len().saturating_sub(index_pending),"lexical_candidates":index_pending}),
                 items,

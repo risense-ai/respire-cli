@@ -18,6 +18,7 @@ pub mod lock;
 pub mod migration;
 pub mod service;
 pub mod snapshot;
+pub mod feedback;
 pub mod session_import;
 pub mod resident;
 pub mod sync;

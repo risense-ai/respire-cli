@@ -5,6 +5,7 @@
 
 pub mod env;
 mod host;
+pub use host::{query_settings_from_env,feedback_enabled};
 mod cpu_model;
 pub mod worker;
 #[cfg(windows)]
@@ -23,6 +24,8 @@ mod resident;
 pub use resident::{ResidentLease, ResidentScope, resident_scope_active, BackgroundIndexScope, defer_indexing, indexing_deferred};
 
 pub const ABI_VERSION: u32 = 0x0001_0002;
+/// Capability read from the pinned, verified SDK manifest.
+pub const FEEDBACK_CONTRACT:u64=include!(concat!(env!("OUT_DIR"),"/feedback_contract.rs"));
 
 /// Runtime libraries from the checksum-verified, pinned SDK manifest.
 pub const RUNTIME_FILES: &[(&str, &str)] = include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));

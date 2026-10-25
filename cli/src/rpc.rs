@@ -158,6 +158,7 @@ enum WriteJob {
 }
 
 pub(crate) struct RecallStats {
+    pub request_id:String,
     pub query: String,
     pub project: String,
     pub candidates: Vec<String>,
@@ -168,7 +169,7 @@ impl RecallStats {
     pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
         if respire::service::workspace_mode() != "normal" { return Ok(()); }
         store.write_transaction(|| {
-            store.log_query(&self.query, &self.project, "", &self.candidates, &self.scores)?;
+            store.log_query_request(&self.request_id,&self.query, &self.project, "", &self.candidates, &self.scores)?;
             store.bump_recall(&self.candidates)?;
             store.bump_recall_pairs(&self.candidates)
         })

@@ -55,6 +55,7 @@ fn main() -> Result<()> {
             json!({
                 "model":model, "mode":"fast", "provider":null,
                 "query":query, "snapshots":snapshots,
+                "query_settings":respire::feedback::query_settings(&store,&query,&candidates)?,
             }),
         )?;
         let ranked: Vec<RecalledWithContext> = serde_json::from_value(output["items"].clone())?;

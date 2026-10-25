@@ -15,6 +15,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
+mod feedback;
+pub use feedback::FeedbackCounts;
 mod witness;
 pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
 mod conflicts;
@@ -34,6 +36,7 @@ pub use sync::SyncVersionNotFound;
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
 #[derive(serde::Serialize)]
 pub struct QueryLogRow {
+    pub request_id:Option<String>,
     pub id: i64,
     pub ts: String,
     pub query: String,
@@ -604,10 +607,11 @@ impl LocalStore {
     /// List recent query logs (newest first).
     pub fn query_log_rows(&self, limit: usize) -> Result<Vec<QueryLogRow>> {
         let mut stmt = self.connection.prepare(
-            "SELECT id, ts, query, project, scope, candidates, adopted, good_ids, bad_ids FROM query_log ORDER BY id DESC LIMIT ?1",
+            "SELECT id, ts, query, project, scope, candidates, adopted, good_ids, bad_ids, request_id FROM query_log ORDER BY id DESC LIMIT ?1",
         )?;
         let it = stmt.query_map(params![limit as i64], |r| {
             Ok(QueryLogRow {
+                request_id:r.get(9)?,
                 id: r.get(0)?,
                 ts: r.get(1)?,
                 query: r.get(2)?,
@@ -988,6 +992,12 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         END;
         ",
     )?;
+    if !connection.prepare("PRAGMA table_info(query_log)")?.query_map([],|row|row.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name|name=="request_id") {
+        connection.execute_batch("ALTER TABLE query_log ADD COLUMN request_id TEXT;")?;
+    }
+    connection.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_query_request ON query_log(request_id) WHERE request_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS query_feedback(query_log_id INTEGER NOT NULL REFERENCES query_log(id),memory_id TEXT NOT NULL,good INTEGER NOT NULL CHECK(good IN(0,1)),source TEXT NOT NULL CHECK(source IN('human','model','task_outcome')),marked_at INTEGER NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(query_log_id,memory_id));")?;
+
     // query_log v1→v2: hit_ids/hit_scores renamed candidates/candidate_scores (candidates are not hits —
     // a hit is a model self-grade useful, in good_ids/bad_ids); old DBs add columns, new DBs already match and skip.
     let mut qcols: Vec<String> = connection

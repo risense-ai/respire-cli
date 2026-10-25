@@ -296,6 +296,9 @@ pub struct BenchReport {
 
 /// Env vars that affect retrieval (recorded in the report).
 pub const PARAM_KEYS: &[&str] = &[
+    "RSRS_FEEDBACK",
+    "RSRS_MARK_SIM",
+    "RSRS_BAD_PENALTY",
     "RSRS_ABLATE",
     "RSRS_ROUTE",
     "RSRS_RECALL_MIN_SCORE",
@@ -316,6 +319,10 @@ pub fn snapshot_params() -> BTreeMap<String, String> {
             }
         }
     }
+    for (name,default) in [("RSRS_FEEDBACK","0"),("RSRS_MARK_SIM","0.5"),("RSRS_BAD_PENALTY","1")] {
+        m.entry(name.into()).or_insert_with(||default.into());
+    }
+    m.insert("feedback_contract".into(),respire::core_sdk::FEEDBACK_CONTRACT.to_string());
     m
 }
 
@@ -456,6 +463,7 @@ mod tests {
     fn mine_filters_inactive_and_merges() {
         use respire::transport::local::QueryLogRow;
         let row = |id: i64, q: &str, good: &[&str], adopted: &[&str]| QueryLogRow {
+            request_id:None,
             id,
             ts: "2026-09-19".to_owned(),
             query: q.to_owned(),

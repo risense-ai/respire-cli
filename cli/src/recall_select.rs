@@ -17,12 +17,13 @@ pub fn recall<E: respire::memory::search::Embedder>(
     embedder: &E,
     candidates: &[respire::StoredMemory],
     query: &respire::MemoryQuery,
+    store: &respire::transport::local::LocalStore,
 ) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting)> {
     let mode = respire::service::read_agent_config()["recall_mode"]
         .as_str()
         .unwrap_or("fast")
         .to_owned();
-    recall_with_mode(keys, embedder, candidates, query, &mode)
+    recall_with_mode(keys, embedder, candidates, query, store, &mode)
 }
 
 pub fn recall_with_mode<E: respire::memory::search::Embedder>(
@@ -30,6 +31,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
     embedder: &E,
     candidates: &[respire::StoredMemory],
     query: &respire::MemoryQuery,
+    store: &respire::transport::local::LocalStore,
     mode: &str,
 ) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting)> {
     anyhow::ensure!(matches!(mode, "fast" | "quality"), "unknown recall mode");
@@ -49,6 +51,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
             "snapshots": respire::memory::engine::snapshots(keys, candidates),
             "query": query,
             "mode": mode,
+            "query_settings":respire::feedback::query_settings(store,query,candidates)?,
             "provider": provider.as_ref().map(|backend| json!({"name":backend.name,"model":backend.model})),
         }),
         &mut transport,

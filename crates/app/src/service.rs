@@ -194,8 +194,10 @@ impl App {
             q = q.of_kind(k);
         }
         let (candidates, _) = recall_candidates(&self.store)?;
-        let ranked =
-            MemoryEngine::recall_local_scored(&self.keys, &self.embedder, &candidates, &q)?;
+        let ranked:Vec<(f32,MemoryEntry)>=crate::core_sdk::execute("query",serde_json::json!({
+            "model":self.embedder.model_name(),"snapshots":crate::memory::engine::snapshots(&self.keys,&candidates),
+            "query":q,"mode":"scored","query_settings":crate::feedback::query_settings(&self.store,&q,&candidates)?
+        }))?;
         for (score, e) in &ranked {
             if !readonly_mode() && !off_mode() { let _ = self.store.bump_recall_count(&e.id); }
             let _ = score;

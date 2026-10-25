@@ -530,3 +530,73 @@ fn healthy_snapshot_rescue_preserves_unparseable_current_witness() -> Result<()>
     }
     Ok(())
 }
+
+#[test]
+fn public_feedback_attribution_uses_exact_request_and_refuses_readonly_writes() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let id = "12345678-1234-4234-8234-123456789abc";
+    let request = uuid::Uuid::new_v4().to_string();
+    {
+        let store = LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
+        store.log_query_request(
+            &request,
+            "synthetic retrieval",
+            "fixture",
+            "",
+            &[id.into()],
+            &[0.8],
+        )?;
+    }
+    let mark = [
+        "--direct",
+        "--json",
+        "query-log",
+        "mark",
+        id,
+        "--good",
+        "--query-log-id",
+        request.as_str(),
+        "--source",
+        "human",
+    ];
+    let (ok, marked) = fixture.run(&mark)?;
+    anyhow::ensure!(ok, "explicit feedback failed: {}", marked["errors"]);
+    assert_eq!(marked["summary"]["marked"], 1);
+    assert_eq!(marked["summary"]["source"], "human");
+    assert_eq!(marked["summary"]["query_log_id"], request);
+    let revision = marked["summary"]["revision"].as_u64().context("revision")?;
+    let (ok, repeated) = fixture.run(&mark)?;
+    assert!(ok);
+    assert_eq!(repeated["summary"]["revision"], revision);
+    let (ok, invalid) = fixture.run(&[
+        "--direct",
+        "--json",
+        "query-log",
+        "mark",
+        "12345678",
+        "--bad",
+        "--query-log-id",
+        &request,
+    ])?;
+    assert!(!ok);
+    assert!(invalid["errors"].to_string().contains("complete candidate"));
+    let (ok, list) = fixture.run(&["--direct", "--json", "query-log"])?;
+    assert!(ok);
+    assert!(list.to_string().contains(&request));
+    let (ok, mode) = fixture.run(&[
+        "--direct",
+        "--json",
+        "agent-config",
+        "--set",
+        "workspace_mode=readonly",
+    ])?;
+    anyhow::ensure!(ok, "readonly configuration failed: {}", mode["errors"]);
+    let (ok, denied) = fixture.run(&mark)?;
+    assert!(!ok);
+    assert!(denied["errors"].to_string().contains("read-only"));
+    let database = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+    let persisted: u64 =
+        database.query_row("SELECT revision FROM query_feedback", [], |row| row.get(0))?;
+    assert_eq!(persisted, revision);
+    Ok(())
+}
