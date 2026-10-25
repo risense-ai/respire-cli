@@ -93,6 +93,21 @@ jobs:
         run: |
           node npm/scripts/check-manifest.mjs
           node scripts/check-sdk-release.mjs
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="${{ matrix.target }}"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - name: Prepare pinned binary Core SDK
         if: ${{ !contains(matrix.target, '-musl') }}
         run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}

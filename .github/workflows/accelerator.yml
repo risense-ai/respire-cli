@@ -34,6 +34,21 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-1
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        if: steps.sdk-cache-1.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
+          key: ${{ steps.sdk-cache-1.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
       - name: Prepare pinned binary Core SDK
         shell: bash
         run: |
