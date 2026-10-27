@@ -256,3 +256,32 @@ clock cannot stand in for its completion. Missing, malformed, impossible or
 reversed required clocks leave full-validation duration unavailable, even when
 all success conclusions are present. Source/publication bounds are checked so
 clock inconsistencies cannot become negative or shortened performance claims.
+
+## Unpublished preparation evidence
+
+A manual Release from the exact current main commit with `publish=false` and
+`full_regression_before_publish=true` can emit `release-prepared-RUN-ATTEMPT`.
+Its read-only producer waits for all existing build/package, native, sweep,
+migration, join and API jobs, then checks the latest exact-source main push CI.
+Other refs, forks, stale attempts and failed or incomplete gates cannot attest.
+
+The proof binds the source and version, committed Cargo/toolchain/SDK/workflow
+inputs, every platform SDK pin, original Actions artifact IDs/digests, actual
+binary/runtime/metadata hashes, and the exact local validated npm tarballs.
+It records full validation completion independently of publication. Required
+jobs and timestamps are rechecked when validating the proof; missing or changed
+evidence fails closed. The artifact retains the existing one-day lifetime.
+
+This is evidence from a run that did not publish. It is neither npm acceptance
+nor public installation proof, and does not promise the version is still free.
+It currently changes no publishing, alias, regression or cleanup barrier and
+does not enable artifact reuse. A separately audited consumer must validate the
+original attempt and downloaded bytes, preserve immutable-version write fences,
+and bind publication/cleanup/timing to that evidence before reuse is enabled.
+The ten-minute publication target remains unmeasured.
+
+DEV allocation reads every scoped package and `rsrs-cli`, including a version
+visible only on the short entry. Registry metadata is an observation, not proof
+that an earlier write never happened: Release reservations and the durable
+cross-run submission fence remain mandatory even when metadata returns 404.
+An accepted version is immutable, and unknown submissions are never replayed.
