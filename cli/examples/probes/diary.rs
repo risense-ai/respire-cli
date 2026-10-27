@@ -231,11 +231,28 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
     anyhow::ensure!(!store.index_missing("m3")?, "ordinary index fixture not ready");
     anyhow::ensure!(respire::diary::needs_rebuild(&store)?, "diary fixture not pending");
     drop(store);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    // The restarted debug runtime verifies both pinned ~569 MB containers before
+    // it can start diary inference. Give that distinct prerequisite a bounded
+    // budget; keep the actual diary observation window at 120 seconds.
+    let preparation_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let status = cli.run(&["--json", "status"])?;
         if status["summary"]["model_operation"]["item"] == "diary-fragments" {
             break;
+        }
+        let operation = &status["summary"]["model_operation"];
+        let preparing = operation["active"] == true
+            && matches!(operation["phase"].as_str(), Some("prepare" | "verify"));
+        if preparing {
+            anyhow::ensure!(
+                std::time::Instant::now() < preparation_deadline,
+                "background model preparation did not finish: model_operation={}, retrieval_index={}",
+                operation,
+                status["summary"]["retrieval_index"]
+            );
+            deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
         }
         anyhow::ensure!(
             std::time::Instant::now() < deadline,

@@ -52,6 +52,8 @@ RSRS_CPU_OWNED_ORT_FILE=/path/to/verified/model/onnx/model_quantized.cpu-v1.ort 
 
 新增日记 storage 回归已加入现有 token-free 四平台源码验收的 native/musl 步骤；原有真实模型和 snapshot/runtime/MCP 门禁保留。
 
+首轮四平台中，macOS 的后台 fence 探针在真正进入日记工作前，仍在对两个约 569 MB 的模型容器做校验而超时。探针将模型准备作为独立的最多 300 秒前置条件；准备后的实际日记工作观察仍限 120 秒，仍必须观察到 `diary-fragments`，并验证 readonly 回执后的两表摘要、data_version 与 drain 不再写入。没有跳过模型校验或把准备状态当作实际日记推理通过。
+
 ## 发布状态
 
 本修复尚未发布。正式 `1.0.17-dev.9` 是受影响版本。源码与隔离测试通过不能替代最终 SHA 的正常 CI、跨平台和发布门禁；插件的原生新会话跨同步持久化验收仍需在修复版部署后另外执行。
