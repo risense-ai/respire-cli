@@ -328,16 +328,7 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     rpc_method_with_timeout(method, args, None)
 }
 
-pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_timeout: Option<Duration>) -> Result<Value> {
-    if method != "cli.progress" { check_connection()?; }
-    let url = format!("{}/api/rpc", rpc_base_url());
-    let body = json!({
-        "v": crate::rpc::PROTOCOL_V,
-        "id": uuid::Uuid::new_v4().to_string(),
-        "method": method,
-        "args": args,
-        "lifecycle": if method == "runtime.stop" { Some("coordinator-v1") } else { None },
-    });
+fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) -> Duration {
     // Downloading M3 or rebuilding a library can legitimately exceed the normal RPC budget.
     // Native inference runs inside the runtime; a request is never replayed here.
     let command: Vec<&str> = args
@@ -346,7 +337,7 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
         .filter(|s| !s.starts_with('-'))
         .take(2)
         .collect();
-    let timeout = if let Some(timeout) = test_timeout {
+    if let Some(timeout) = test_timeout {
         timeout
     } else if method == "cli.progress" {
         Duration::from_secs(1)
@@ -373,7 +364,20 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
         Duration::from_secs(30 * 60)
     } else {
         HTTP_TIMEOUT
-    };
+    }
+}
+
+pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_timeout: Option<Duration>) -> Result<Value> {
+    if method != "cli.progress" { check_connection()?; }
+    let url = format!("{}/api/rpc", rpc_base_url());
+    let body = json!({
+        "v": crate::rpc::PROTOCOL_V,
+        "id": uuid::Uuid::new_v4().to_string(),
+        "method": method,
+        "args": args,
+        "lifecycle": if method == "runtime.stop" { Some("coordinator-v1") } else { None },
+    });
+    let timeout = rpc_timeout(method, &args, test_timeout);
     let resp = send_loopback(agent().post(&url).timeout(timeout), |request| {
         request.send_json(body.clone())
     }).map_err(|error| {
@@ -573,6 +577,15 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_timeout_recognizes_leading_progress_flags() {
+        use clap::Parser;
+        let args = ["--json", "--progress-id", "request-one", "sync"].map(String::from);
+        crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().map(String::as_str)))
+            .expect("the tracked command must be valid CLI syntax");
+        assert_eq!(rpc_timeout("cli.exec", &args, None), Duration::from_secs(30 * 60));
+    }
 
     #[test]
     fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay() -> Result<()> {
