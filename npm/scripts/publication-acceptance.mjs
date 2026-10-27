@@ -95,7 +95,7 @@ async function guardAccepted() {
   if(repo!=='risense-ai/respire-cli' || !id(runId) || !id(attempt)) throw Error('Invalid submission run');
   assertSubmissionActive();
   checkVersionFence(); // Includes other run IDs and survives Actions artifact expiry.
-  const expected = readExpectedPacks('npm/dist',manifest()).map(packIdentity);
+  const expected = readExpectedPacks('npm/dist',manifest(),process.env.CLI_VERSION).map(packIdentity);
   const acceptances=[];
   for(let previous=1;previous<attempt;previous++) {
     const jobs=pages(`repos/${repo}/actions/runs/${runId}/attempts/${previous}/jobs?per_page=100`).flatMap(p=>p.jobs);

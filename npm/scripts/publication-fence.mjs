@@ -25,6 +25,7 @@ export function readFence(body=''){
     !['prepared','fenced'].includes(f.phase)||typeof f.created_at!=='string'||!Number.isFinite(Date.parse(f.created_at))||
     !Array.isArray(f.package_names)||new Set(f.package_names).size!==f.package_names.length||
     (f.phase==='prepared'&&f.scoped_packages!==null)||(f.phase==='fenced'&&!Array.isArray(f.scoped_packages)))throw Error('Invalid persistent npm fence');
+  if(f.phase==='fenced')assertFencePackages(f,f.scoped_packages);
   return f;
 }
 export function fenceBody(body,fence){
@@ -50,6 +51,9 @@ export function assertFenceOwner(f,c,m){
   return f;
 }
 export function assertFencePackages(f,packages){
+  const expected=f.package_names.filter(name=>name!=='rsrs-cli').sort();
+  if(!Array.isArray(packages)||!same(packages.map(p=>p?.name).sort(),expected)||packages.some(p=>
+    p.version!==f.version||!/^sha512-[A-Za-z0-9+/]{86}==$/.test(p.integrity||'')||!/^[a-f0-9]{40}$/.test(p.shasum||'')))throw Error('Persistent npm fence package/version/digest inventory differs');
   if(f.phase==='fenced'&&!same(identities(f.scoped_packages),identities(packages)))throw Error('Previously fenced immutable package content changed');
 }
 export function assertReusableRelease(release,c,m){
@@ -79,7 +83,7 @@ export function checkReservationFence(){
 }
 export function bindFenceNotes(){
   const c=fenceContext(),m=manifest(),f=assertReusableRelease(findVersionRelease(c),c,m);
-  const packages=readExpectedPacks('npm/dist',m).map(packIdentity);
+  const packages=readExpectedPacks('npm/dist',m,c.version).map(packIdentity);
   if(f)assertFencePackages(f,packages);
   const next=f||{schema:1,kind:'npm-version-fence',...c,phase:'prepared',package_names:names(m),scoped_packages:null,created_at:new Date().toISOString()};
   const file=process.env.RELEASE_NOTES_FILE;

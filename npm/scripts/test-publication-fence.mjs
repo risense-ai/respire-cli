@@ -18,6 +18,8 @@ test('durable owner binds repository, package inventory, source and version acro
   assertFencePackages(fenced,packages);
   assert.throws(()=>assertFencePackages(fenced,[...packages.slice(1)]));
   assert.throws(()=>assertFencePackages(fenced,[{...packages[0],shasum:'c'.repeat(40)},...packages.slice(1)]));
+  assert.throws(()=>assertFencePackages(prepared,packages.map(p=>({...p,version:'1.2.4'}))));
+  assert.throws(()=>fenceBody('notes',{...fenced,scoped_packages:packages.map(p=>({...p,version:'1.2.4'}))}));
 });
 test('regenerating notes cannot erase, downgrade or replace earlier unknown-write evidence',()=>{
   const body=fenceBody('Human notes',fenced);
