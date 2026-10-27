@@ -354,7 +354,7 @@ function finalize() {
 export async function main(action) {
   if (action === 'recovery-ready') return (await import('./dev6-publication-recovery.mjs')).recoveryReady();
   if (action?.endsWith('-accepted') || action === 'verify-accepted') return (await import('./publication-acceptance.mjs')).main(action);
-  if (action === 'protocol') { console.log(1); return; }
+  if (action === 'protocol') { console.log(2); return; }
   if (action === 'scoped-ready') return scopedReady();
   if (action === 'await-scoped') return awaitScoped();
   if (action === 'publish-alias') return publishAlias();

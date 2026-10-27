@@ -520,7 +520,7 @@ jobs:
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         run: |
           # Old refs lacking the protocol must fail before scoped publication.
-          test "$(node npm/scripts/release-publication.mjs protocol)" = 1
+          test "$(node npm/scripts/release-publication.mjs protocol)" = 2
       - name: Require successful CLI CI for this exact source
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 21

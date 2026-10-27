@@ -181,3 +181,13 @@ test('scoped and alias preflight failures retain empty journals without inventin
   assert.notEqual(alias.status,0);assert.match(alias.stderr,/acceptance inventory/);
   const journal=JSON.parse(readFileSync(path.join(root,'alias-submissions.json')));assert.deepEqual(journal.submissions,[]);assert.deepEqual(journal.source,source);
 });
+
+
+test('normal publication requires protocol 2 before writing any scoped package',()=>{
+  const helper=fileURLToPath(new URL('./release-publication.mjs',import.meta.url));
+  const supported=spawnSync(process.execPath,[helper,'protocol'],{encoding:'utf8',timeout:10000});
+  assert.equal(supported.error,undefined);assert.equal(supported.status,0);assert.equal(supported.stdout.trim(),'2');
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  assert(workflow.includes('test "$(node npm/scripts/release-publication.mjs protocol)" = 2'));
+  assert(workflow.indexOf('release-publication.mjs protocol')<workflow.indexOf('--publish --accepted-only'));
+});
