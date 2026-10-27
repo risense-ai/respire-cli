@@ -143,11 +143,23 @@ jobs:
       RSRS_CORE_TEST_MODE: '1'
       RUST_TEST_THREADS: '1'
       RUST_MIN_STACK: '16777216'
+      # Keep backtrace file:line, assertions and overflow checks; omit full
+      # type/variable DWARF only. These source tests remain unoptimized.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify actual source profile safety and coverage instrumentation
+        run: python3 scripts/test-ci-source-profile.py
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -194,6 +206,16 @@ jobs:
       RSRS_CORE_TEST_MODE: '1'
       RUST_TEST_THREADS: '1'
       RUST_MIN_STACK: '16777216'
+      # Keep backtrace file:line, assertions and overflow checks; omit full
+      # type/variable DWARF only. These source tests remain unoptimized.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
     steps:
       - uses: actions/checkout@v4
         with:

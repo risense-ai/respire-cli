@@ -38,6 +38,7 @@ on:
       - 'npm/scripts/test-*-publication.mjs'
       - 'scripts/test-real-m3-account-switch.py'
       - 'scripts/test-dev-fixture-tty.py'
+      - 'scripts/test-ci-source-profile.py'
   workflow_dispatch:
     inputs:
       ref:

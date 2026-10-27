@@ -237,3 +237,14 @@ The payload-lifetime ownership fixture runs after workspace tests on that same
 runner: its offline Cargo project intentionally reuses the workspace's locked
 cached dependencies. It is not independent packaging work. Its two expected
 negative controls and seven actual-wrapper/feedback tests remain unchanged.
+
+
+Source workspace/coverage jobs use Cargo `line-tables-only` debug metadata to
+retain file/line backtraces while omitting full type/variable DWARF. They keep
+optimization at zero, debug assertions and overflow checks explicitly enabled,
+all original tests and the same coverage threshold/exclusions. This is a source
+CI setting, not a release/native profile change. See the [Cargo profile
+reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+A local instrumented three-case probe confirmed normal results, retained debug
+assertion panics and retained overflow panics under these settings; project
+coverage and any timing effect still require the hosted run.
