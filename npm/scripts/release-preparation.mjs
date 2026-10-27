@@ -6,7 +6,7 @@ import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {regressionContract,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
-import {api,pages} from './release-publication.mjs';
+import {api,pages,artifact,output as setOutput} from './release-publication.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -177,9 +177,82 @@ export function attestPreparation(assetsFolder,packsFolder,output){
   console.log(`Recorded complete unpublished validation for ${source.sha}@${source.version}; no publication acknowledgement`);
   return receipt;
 }
+
+export function preparationLink(receipt,metadata){
+  const s=validatePreparationSource(receipt.source);
+  requireValue(metadata?.name===preparationName(s)&&positive(metadata.id)&&/^sha256:[a-f0-9]{64}$/.test(metadata.digest||'')&&
+    metadata.expired===false&&String(metadata.workflow_run?.id)===String(s.run_id)&&metadata.workflow_run.head_sha===s.sha,
+    'Preparation proof artifact is expired, foreign or unbound');
+  return {source:structuredClone(s),artifact:{id:String(metadata.id),name:metadata.name,digest:metadata.digest,size:metadata.size_in_bytes},
+    receipt_sha256:digest(JSON.stringify(receipt))};
+}
+export function validatePreparationLink(link,source){
+  validatePreparationSource(link?.source);
+  requireValue(link.source.sha===source.sha&&link.source.version===source.version&&link.source.repository===source.repository&&
+    String(link.source.run_id)!==String(source.run_id)&&positive(link.artifact?.id)&&positive(link.artifact.size)&&
+    link.artifact.name===preparationName(link.source)&&/^sha256:[a-f0-9]{64}$/.test(link.artifact.digest||'')&&HASH.test(link.receipt_sha256||''),
+    'Prepared validation origin differs from this publication');
+  return link;
+}
+export function readPreparedRun(runId,sha,version){
+  requireValue(positive(runId)&&SHA.test(sha||''),'Invalid preparation lookup');
+  const initial=api(`repos/${REPO}/actions/runs/${runId}`);
+  requireValue(String(initial.id)===String(runId)&&positive(initial.run_attempt)&&initial.path===WORKFLOW&&
+    initial.event==='workflow_dispatch'&&initial.head_branch==='main'&&initial.head_sha===sha&&initial.head_repository?.full_name===REPO&&
+    initial.status==='completed'&&initial.conclusion==='success','Only a completed exact-main preparation can be consumed');
+  const name=preparationName({run_id:runId,run_attempt:initial.run_attempt});
+  const receipt=artifact(runId,name,REPO);
+  requireValue(receipt,'Preparation proof is missing or expired');
+  const source=validatePreparationSource({repository:REPO,workflow:WORKFLOW,run_id:String(runId),run_attempt:Number(initial.run_attempt),
+    sha,version:version||receipt.source?.version});
+  const context=preparationContext(source);
+  validatePreparation(receipt,context);
+  const proofs=context.artifacts.filter(a=>a.name===name);
+  requireValue(proofs.length===1,'Duplicate preparation proof artifact');
+  return {receipt,context,link:preparationLink(receipt,proofs[0])};
+}
+export function assertPreparationOrigin(link,source){
+  validatePreparationLink(link,source);
+  const result=readPreparedRun(link.source.run_id,source.sha,source.version);
+  requireValue(same(result.link,link),'Prepared origin attempt/artifact/receipt changed');
+  return result;
+}
+export function inspectPreparation(runId,sha,version){
+  const result=readPreparedRun(runId,sha,version);
+  // Only public artifact IDs and the exact version are workflow outputs.
+  setOutput({prepared_run:result.receipt.source.run_id,prepared_version:result.receipt.source.version,
+    prepared_attempt:result.receipt.source.run_attempt,prepared_artifact_id:result.link.artifact.id,
+    prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256});
+  return result;
+}
+export function assertPreparationPin(result,pin){
+  requireValue(positive(pin?.attempt)&&positive(pin.artifact_id)&&/^sha256:[a-f0-9]{64}$/.test(pin.artifact_digest||'')&&HASH.test(pin.receipt_sha256||'')&&
+    Number(pin.attempt)===Number(result.link.source.run_attempt)&&String(pin.artifact_id)===String(result.link.artifact.id)&&
+    pin.artifact_digest===result.link.artifact.digest&&pin.receipt_sha256===result.link.receipt_sha256,
+    'Prepared proof differs from the originally selected attempt/artifact/digest');
+  return result;
+}
+export const preparationPinFromEnv=()=>({attempt:process.env.PREPARED_ATTEMPT,artifact_id:process.env.PREPARED_ARTIFACT_ID,
+  artifact_digest:process.env.PREPARED_ARTIFACT_DIGEST,receipt_sha256:process.env.PREPARED_RECEIPT_SHA256});
+export function assertPreparedAssets(runId,sha,version,folder,pin){
+  const result=readPreparedRun(runId,sha,version);
+  assertPreparationPin(result,pin);
+  const actual=preparedAssets(folder,result.receipt.source,result.context.manifest);
+  requireValue(same(actual,result.receipt.assets),'Downloaded bytes differ from the original complete preparation');
+  return result;
+}
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   try{
-    requireValue(process.argv[2]==='attest'&&process.argv.length===6,'Expected attest <assets> <packs> <receipt>');
-    attestPreparation(...process.argv.slice(3));
+    const action=process.argv[2];
+    if(action==='attest'){
+      requireValue(process.argv.length===6,'Expected attest <assets> <packs> <receipt>');
+      attestPreparation(...process.argv.slice(3));
+    }else if(action==='inspect'){
+      requireValue(process.argv.length===3,'Unexpected preparation lookup arguments');
+      inspectPreparation(process.env.PREPARED_RUN,process.env.CLI_SHA,process.env.CLI_VERSION||'');
+    }else if(action==='assert-assets'){
+      requireValue(process.argv.length===4,'Expected assert-assets <assets>');
+      assertPreparedAssets(process.env.PREPARED_RUN,process.env.CLI_SHA,process.env.CLI_VERSION,process.argv[3],preparationPinFromEnv());
+    }else throw Error('Expected attest, inspect or assert-assets');
   }catch(error){console.error(error.message);process.exitCode=1;}
 }
