@@ -231,18 +231,21 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
     anyhow::ensure!(!store.index_missing("m3")?, "ordinary index fixture not ready");
     anyhow::ensure!(respire::diary::needs_rebuild(&store)?, "diary fixture not pending");
     drop(store);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    // The restarted debug runtime verifies both pinned ~569 MB containers before
+    // it can start diary inference. Give that distinct prerequisite a bounded
+    // budget; keep the actual diary observation window at 120 seconds.
+    let preparation_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let status = cli.run(&["--json", "status"])?;
         if status["summary"]["model_operation"]["item"] == "diary-fragments" {
             break;
         }
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "did not observe actual background diary work: model_operation={}, retrieval_index={}",
-            status["summary"]["model_operation"],
-            status["summary"]["retrieval_index"]
-        );
+        check_pending_work(
+            &status, preparation_deadline, &mut deadline,
+            "did not observe actual background diary work",
+        )?;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let _ = cli.run(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
@@ -334,12 +337,24 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
         "old account's lexical text crossed profile boundary"
     );
     let mut other_hybrid = cli.run(&["--json", "diary-search", "bread"])?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    // Profile changes enter the same model-preparation path as runtime restarts.
+    let preparation_deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut reported_pending = false;
     while other_hybrid["summary"]["semantic_ready"] != true {
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "other-account real semantic index never became ready"
-        );
+        let status = cli.run(&["--json", "status"])?;
+        if !reported_pending {
+            eprintln!(
+                "diary probe: other-account pending model_operation={}, retrieval_index={}",
+                status["summary"]["model_operation"], status["summary"]["retrieval_index"]
+            );
+            reported_pending = true;
+        }
+        check_pending_work(
+            &status, preparation_deadline, &mut deadline,
+            "other-account real semantic index never became ready",
+        )?;
         std::thread::sleep(std::time::Duration::from_millis(100));
         other_hybrid = cli.run(&["--json", "diary-search", "bread"])?;
     }
@@ -378,6 +393,31 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
     Ok(
         json!({"provider":"real-m3","dimensions":1024,"semantic_only":true,"runtime":true,"runtime_restart":true,"readonly_read":true,"off_mcp_denied":true,"mcp_stdio":true,"missing_index_fallback":true,"append_stale_locator":true,"delete_cleanup":true,"real_background_readonly_fence":true,"different_key_hybrid_isolation":true,"profile_round_trip":true,"source_revision_unchanged_by_indexing":true,"quality_benchmark":false,"checks":"PASS"}),
     )
+}
+
+fn check_pending_work(
+    status: &Value,
+    preparation_deadline: std::time::Instant,
+    work_deadline: &mut std::time::Instant,
+    message: &str,
+) -> Result<()> {
+    let operation = &status["summary"]["model_operation"];
+    let preparing = operation["active"] == true
+        && matches!(operation["phase"].as_str(), Some("prepare" | "verify"));
+    if preparing {
+        anyhow::ensure!(
+            std::time::Instant::now() < preparation_deadline,
+            "{message}; model preparation did not finish: model_operation={}, retrieval_index={}",
+            operation, status["summary"]["retrieval_index"]
+        );
+        *work_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    }
+    anyhow::ensure!(
+        std::time::Instant::now() < *work_deadline,
+        "{message}: model_operation={}, retrieval_index={}",
+        operation, status["summary"]["retrieval_index"]
+    );
+    Ok(())
 }
 
 fn mcp_call(cli: &CliProbe, params: Value) -> Result<Value> {
