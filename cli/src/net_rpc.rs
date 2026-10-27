@@ -329,38 +329,21 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
 }
 
 fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) -> Duration {
-    // Downloading M3 or rebuilding a library can legitimately exceed the normal RPC budget.
-    // Native inference runs inside the runtime; a request is never replayed here.
-    let command: Vec<&str> = args
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.starts_with('-'))
-        .take(2)
-        .collect();
     if let Some(timeout) = test_timeout {
-        timeout
-    } else if method == "cli.progress" {
-        Duration::from_secs(1)
-    } else if method == "model.control" {
-        Duration::from_secs(3)
-    } else if matches!(
-        command.as_slice(),
-        [
-            "model",
-            "install" | "install-m3" | "activate"
-        ]
-    ) {
-        Duration::from_secs(30 * 60)
-    } else if command
-        .first()
-        .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
+        return timeout;
+    }
+    match method {
+        "cli.progress" => return Duration::from_secs(1),
+        "model.control" => return Duration::from_secs(3),
+        "cli.exec" => {},
+        _ => return HTTP_TIMEOUT,
+    }
+    // Native inference stays inside the runtime. Tracking IDs are values, not
+    // command words, and longer write budgets never authorize a request replay.
+    let command: Vec<_> = crate::rpc::command_words(args).take(2).collect();
+    if matches!(command.as_slice(), ["model", "install" | "install-m3" | "activate"])
+        || command.first().is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
     {
-        // Full-store re-embeds, first-sync uploads and batch imports legitimately exceed the
-        // 120s default (reembed ≈10min on 2.6k entries): the client used to cut them at 120s
-        // and cascade a second timeout on the following sync (2026-10-01, after the swap).
-        // NOTE: match on the leading subcommand only — take(2) also captures the target
-        // path, so an exact ["import"] pattern silently missed real imports (bit us on a
-        // 3476-entry plaintext-embed import that ran >120s and got cut, 2026-10-16).
         Duration::from_secs(30 * 60)
     } else {
         HTTP_TIMEOUT
@@ -578,13 +561,47 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn rpc_timeout_recognizes_leading_progress_flags() {
+    fn valid_timeout_args(args: &[&str]) -> Vec<String> {
         use clap::Parser;
-        let args = ["--json", "--progress-id", "request-one", "sync"].map(String::from);
-        crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().map(String::as_str)))
-            .expect("the tracked command must be valid CLI syntax");
-        assert_eq!(rpc_timeout("cli.exec", &args, None), Duration::from_secs(30 * 60));
+        crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))
+            .expect("timeout regression must exercise valid CLI argv");
+        args.iter().map(|arg| (*arg).to_owned()).collect()
+    }
+
+    #[test]
+    fn rpc_timeout_recognizes_commands_after_global_values_and_equals_forms() {
+        for args in [
+            vec!["sync"],
+            vec!["--json", "--progress-id", "request-one", "sync"],
+            vec!["--progress-id=import", "--model-task-id=task-one", "sync"],
+            vec!["--model-task-id", "task-one", "import", "synthetic.json"],
+            vec!["import", "synthetic.json"],
+            vec!["reembed"],
+            vec!["model", "install"],
+            vec!["--json", "--progress-id", "model", "model", "install-m3"],
+            vec!["model", "--model-task-id", "install", "activate", "m3"],
+        ] {
+            let parsed = valid_timeout_args(&args);
+            assert_eq!(rpc_timeout("cli.exec", &parsed, None), Duration::from_secs(30 * 60), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn rpc_timeout_does_not_treat_tracking_values_or_other_methods_as_commands() {
+        for args in [
+            vec!["--progress-id", "sync", "list"],
+            vec!["--model-task-id", "import", "status"],
+            vec!["model", "--progress-id", "install", "engine"],
+            vec!["show", "synthetic-id"],
+        ] {
+            let parsed = valid_timeout_args(&args);
+            assert_eq!(rpc_timeout("cli.exec", &parsed, None), HTTP_TIMEOUT, "{args:?}");
+        }
+        let long = valid_timeout_args(&["--progress-id", "request-one", "sync"]);
+        assert_eq!(rpc_timeout("cli.progress", &long, None), Duration::from_secs(1));
+        assert_eq!(rpc_timeout("model.control", &long, None), Duration::from_secs(3));
+        assert_eq!(rpc_timeout("runtime.result", &["sync".into()], None), HTTP_TIMEOUT);
+        assert_eq!(rpc_timeout("model.control", &long, Some(Duration::from_millis(7))), Duration::from_millis(7));
     }
 
     #[test]

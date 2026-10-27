@@ -9519,6 +9519,22 @@ mod capture_tests {
     use clap::{CommandFactory, Parser};
 
     #[test]
+    fn injected_chain_examples_follow_the_parser_contract() -> anyhow::Result<()> {
+        for policy in [respire::inject::INSTRUCTIONS_MD, respire::inject::INSTRUCTIONS_LITE_MD] {
+            let mut checked = 0;
+            for example in policy.split('`').skip(1).step_by(2)
+                .filter(|example| example.starts_with("rsrs chain ") && !example.contains('[')) {
+                let parsed = super::Cli::try_parse_from(example.split_whitespace())?;
+                assert!(matches!(parsed.command, Some(super::Command::Chain { depth: 1..=3, .. })));
+                checked += 1;
+            }
+            assert!(checked > 0, "policy must retain an executable causal-chain example");
+        }
+        assert!(super::Cli::try_parse_from(["rsrs", "chain", "synthetic-id", "--depth", "1-3", "--json"]).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn help_matches_command_contracts() -> anyhow::Result<()> {
         let mut command = super::Cli::command();
         let split = command
