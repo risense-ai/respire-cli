@@ -8,7 +8,7 @@ import path from 'node:path';
 import {test} from 'node:test';
 import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {assertTagSafe, checkPackage, compareVersions, packPackage, publishPackage,
+import {assertTagSafe, checkPackage, compareVersions, packPackage, publishPackage, publishAcceptedPackage,
   readExpectedPacks, waitForPackage, PackageNotVisibleError} from './registry-publication.mjs';
 
 const bytes = Buffer.from('a deterministic packed package for offline tests');
@@ -395,6 +395,7 @@ test('real npm dry-run receipt matches actual tarball without publishing', t => 
   };
   const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const dry = spawnImpl(command, ['pack', '--json', '--dry-run'], {cwd: dir, encoding: 'utf8', shell: process.platform === 'win32'});
+  assert.equal(dry.error, undefined, dry.error?.message);
   assert.equal(dry.status, 0, dry.stderr);
   const receipt = JSON.parse(dry.stdout)[0];
   writeFileSync(path.join(dir, 'release.pack.json'), JSON.stringify([receipt]));
@@ -545,4 +546,49 @@ test('install-index HTTP and network errors are not treated as pending publicati
     },
   }), /install-index connection failed/);
   assert.equal(failures, 1);
+});
+
+test('explicit npm acceptance does not wait for public propagation or claim verification', async t => {
+  const {dir} = fixture(t), npm = mockNpm(), mock = registry({absent: Infinity});
+  const intents = [];
+  const result = await publishAcceptedPackage(dir, expected, 'dev', {...npm,...mock,...fastClock(),requireInstallIndex:true,
+    onSubmission:event=>intents.push(event)});
+  assert.equal(result.status,'published');
+  assert.equal(result.acceptance.state,'accepted');
+  assert.equal(result.acceptance.evidence,'npm-exit-zero');
+  assert.equal(result.acceptance.integrity,expected.integrity);
+  assert.equal(result.metadata,undefined);
+  assert.equal(result.install,undefined);
+  assert.equal(intents.length,1);
+  assert.equal(intents[0].state,'unknown','intent is durable before the irreversible submission');
+  assert.equal(mock.calls.length,2,'only preflight version and tag reads, never propagation/install reads');
+  assert.equal(npm.calls.filter(c=>c.args[0]==='publish').length,1);
+});
+
+test('failed, signalled or spawn-error npm cannot be accepted from exit status alone', async t => {
+  const {dir} = fixture(t);
+  for(const outcome of [{status:1},{status:null,signal:'SIGTERM'},{status:0,error:new Error('EPERM')},{status:0,signal:'SIGTERM'}]) {
+    const npm=mockNpm(), spawnImpl=(name,args,opts)=>args[0]==='publish'?(npm.calls.push({args}),outcome):npm.spawnImpl(name,args,opts);
+    await assert.rejects(publishAcceptedPackage(dir,expected,'dev',{spawnImpl,...registry({absent:Infinity}),...fastClock()}),/failed or was uncertain/);
+    assert.equal(npm.calls.filter(c=>c.args[0]==='publish').length,1,'uncertain submission is never repeated');
+  }
+});
+
+test('uncertain acceptance can only be recovered by matching public content', async t => {
+  const {dir}=fixture(t), npm=mockNpm({publishStatus:null});
+  const result=await publishAcceptedPackage(dir,expected,'dev',{...npm,...registry({absent:1}),...fastClock()});
+  assert.equal(result.status,'recovered');
+  assert.equal(result.acceptance.evidence,'verified-public-bytes');
+  assert.equal(result.metadata,undefined);
+  assert.equal(npm.calls.filter(c=>c.args[0]==='publish').length,1);
+});
+
+test('durable prior acceptance prevents a second submission even while all public registry reads return 404',async t=>{
+  const {dir}=fixture(t),npm=mockNpm();
+  const prior={...expected,schema:1,state:'accepted',evidence:'npm-exit-zero',exit_code:0,signal:null,accepted_at:'2026-10-27T00:00:00Z'};
+  const result=await publishAcceptedPackage(dir,expected,'dev',{...npm,knownAcceptances:[prior],fetchImpl:()=>assert.fail('prior acceptance does not wait for propagation')});
+  assert.equal(result.status,'previously-accepted');assert.equal(result.acceptance,prior);
+  assert.equal(npm.calls.filter(c=>c.args[0]==='publish').length,0);
+  const bad={...prior,integrity:digest(Buffer.from('other')).integrity};
+  await assert.rejects(publishAcceptedPackage(dir,expected,'dev',{...npm,knownAcceptances:[bad]}),/mismatch/);
 });

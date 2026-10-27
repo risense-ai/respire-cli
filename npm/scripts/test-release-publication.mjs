@@ -146,14 +146,14 @@ test('workflow contract keeps trust identities, unprivileged waiting and acyclic
   assert.doesNotMatch(publishing, /contents: write|actions: write|workflow_call/);
   assert.match(child.split('\n  publish:')[1], /if: github.event_name == 'workflow_dispatch'/);
   const final = parent.split('\n  publish:')[1];
-  const indices = ['--publish --tag', 'scoped-ready', 'name: scoped-ready-', 'await-alias', 'release-publication.mjs finalize'].map(s => final.indexOf(s));
+  const indices = ['--publish --accepted-only --tag', 'scoped-accepted', 'name: scoped-accepted-', 'await-alias-accepted', 'release-publication.mjs finalize-accepted'].map(s => final.indexOf(s));
   assert(indices.every(i => i >= 0));
   assert.deepEqual(indices, [...indices].sort((a,b) => a-b));
   assert.equal((helper.match(/'--draft=false'/g) || []).length, 1);
-  assert(final.indexOf('release-publication.mjs protocol') < final.indexOf('--publish --tag'));
+  assert(final.indexOf('release-publication.mjs protocol') < final.indexOf('--publish --accepted-only --tag'));
   assert.match(parent, /- 'npm\/scripts\/pack\.mjs'/);
   assert.match(final, /group: cli-release-publication\n      queue: max\n      cancel-in-progress: false/);
-  for (const name of ['Verify scoped registry propagation', 'Require the matching short-package', 'Make the complete release public']) {
+  for (const name of ['Bind successful scoped npm submissions', 'Require every matching npm submission', 'Make the complete release public']) {
     assert.match(final.slice(final.indexOf(`- name: ${name}`)).split('\n      - ')[0], /!\(inputs.repair_dev12 \|\| inputs.repair_dev14\)/);
   }
 });
@@ -173,6 +173,8 @@ test('two overlapping Releases progress without waiting while holding the opposi
 test('existing lightweight or resolved annotated tag must identify the release source', () => {
   assertTagCommit(null, source);
   assertTagCommit({type: 'commit', sha: source.sha}, source);
+  assert.throws(() => assertTagCommit(null, source, {allowMissing: false}));
+  assertTagCommit({type: 'commit', sha: source.sha}, source, {allowMissing: false});
   assert.throws(() => assertTagCommit({type: 'commit', sha: 'f'.repeat(40)}, source));
   assert.throws(() => assertTagCommit({type: 'tag', sha: source.sha}, source));
 });
@@ -200,7 +202,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 28, 'preserve active uploads and handshake/recovery evidence; retired SDK publisher removes its verification upload');
+  assert.equal(uploads, 32, 'preserve active uploads and handshake/recovery evidence; retired SDK publisher removes its verification upload');
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);
@@ -239,8 +241,9 @@ test('alias job and parent receipt budgets cover both propagation waits and clea
   assert(scoped >= 30);
   assert(job > scoped + alias + install, 'Job must leave room for setup and packaging');
   assert(receipt > job, 'Receipt observer must outlive the publisher');
-  const observers = [...parent.matchAll(/timeout-minutes: (\d+)\n        env:\n          GH_TOKEN: \$\{\{ github\.token \}\}\n        run: node npm\/scripts\/release-publication\.mjs await-alias/g)];
-  assert.equal(observers.length, 2);
+  const legacyParent = parent.slice(parent.indexOf('  dev6-publication-resume:'));
+  const observers = [...legacyParent.matchAll(/timeout-minutes: (\d+)\n        env:\n          GH_TOKEN: \$\{\{ github\.token \}\}\n        run: node npm\/scripts\/release-publication\.mjs await-alias/g)];
+  assert.equal(observers.length, 1);
   assert(observers.every(match => Number(match[1]) > receipt));
   const recovery = minutes(parent.split('\n  dev6-publication-resume:')[1], /timeout-minutes: (\d+)/);
   const revalidation = minutes(helper, /options\.timeoutMs \?\? (\d+) \* 60 \* 1000/);

@@ -5,10 +5,11 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
+import {validateAcceptedScoped,validateAcceptedAlias,validateVerified} from './publication-acceptance.mjs';
 
 export const REPOSITORY='risense-ai/respire-cli';
 export const CLEANUP_POLICY=RELEASE_ARTIFACT_CLEANUP_POLICY;
-const RELEASE='.github/workflows/release.yml', ALIAS='.github/workflows/npm-alias.yml';
+const RELEASE='.github/workflows/release.yml', ALIAS='.github/workflows/npm-alias.yml', VERIFY='.github/workflows/verify-publication.yml';
 const id=value=>Number.isSafeInteger(Number(value))&&Number(value)>0;
 const timestamp=value=>{const n=Date.parse(value);if(!Number.isFinite(n))throw Error('Missing terminal timestamp');return n;};
 const terminal=run=>run.status==='completed';
@@ -27,7 +28,7 @@ export function requirePublished(release,scoped,tag){
   if(release.assets.length!==scoped.assets.length||!scoped.assets.every(e=>release.assets.some(a=>a.name===e.name&&a.size===e.size&&a.state==='uploaded'&&a.digest===`sha256:${e.sha256}`)))throw Error('Public release assets differ');
 }
 export function allowedSourceArtifact(name,source,targets){
-  if(name===`scoped-ready-${source.run_id}-${source.run_attempt}`)return true;
+  if([`scoped-ready-${source.run_id}-${source.run_attempt}`,`scoped-accepted-${source.run_id}-${source.run_attempt}`,`npm-submissions-${source.run_id}-${source.run_attempt}`,`publication-accepted-${source.run_id}-${source.run_attempt}`].includes(name))return true;
   if(['npm-release-packages','npm-release-validation','dev-api-coverage','gnu-login-interruption'].includes(name))return true;
   return targets.some(t=>['cli-release-','release-sweep-','base-release-sweep-','resident-concurrency-','published-upgrades-','native-profile-migration-','secret-service-profile-migration-'].some(p=>name===p+t));
 }
@@ -39,15 +40,17 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   if(io.repository!==REPOSITORY||!id(runId))throw Error('Cleanup repository/run scope refused');
   const run=await io.run(runId);
   if(!workflow(run,RELEASE)||!['push','workflow_dispatch'].includes(run.event)||!terminal(run)||run.conclusion!=='success')return {skip:'source-not-successfully-complete'};
-  const artifacts=await io.artifacts(run.id), readyName=`scoped-ready-${run.id}-${run.run_attempt}`;
-  const ready=artifacts.filter(a=>a.name===readyName&&!a.expired);
+  const artifacts=await io.artifacts(run.id);
+  const accepted=artifacts.some(a=>a.name===`scoped-accepted-${run.id}-${run.run_attempt}`&&!a.expired);
+  const readyFile=accepted?'scoped-accepted':'scoped-ready';
+  const ready=artifacts.filter(a=>a.name===`${readyFile}-${run.id}-${run.run_attempt}`&&!a.expired);
   if(ready.length!==1)return {skip:'no-unique-scoped-receipt'};
   boundArtifact(ready[0],run);
-  const scoped=await io.receipt(ready[0],'scoped-ready.json');
+  const scoped=await io.receipt(ready[0],`${readyFile}.json`);
   // An explicit opt-in written by NEW publication code prevents retroactive
   // deletion of historical artifacts not covered by a confirmed batch.
   if(!samePolicy(scoped.cleanup_policy))return {skip:'historical-release-not-opted-in'};
-  validateScoped(scoped,manifest);
+  (accepted?validateAcceptedScoped:validateScoped)(scoped,manifest);
   const source=scoped.source;
   if(source.recovery||String(source.run_id)!==String(run.id)||Number(source.run_attempt)!==run.run_attempt)return {skip:'unsupported-or-stale-attempt'};
   const jobs=await io.jobs(run.id,run.run_attempt);requireRegressions(jobs,manifest.targets.map(t=>t.triple));
@@ -56,28 +59,50 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   // inputs are not exposed in run metadata, so this barrier is conservative.
   const consumers=await io.consumers(run.created_at);
   if(consumers.some(r=>!workflow(r,ALIAS)||!terminal(r)))return {skip:'alias-consumer-still-active'};
-  let provedAlias=false;const aliasArtifacts=[];
+  let provedAlias=false;const aliasArtifacts=[],aliasReceipts=[],consumerFinishes=[];
   for(const consumer of consumers){
     const childJobs=await io.jobs(consumer.id,consumer.run_attempt);
     if(childJobs.some(j=>j.status!=='completed'))return {skip:'alias-jobs-not-terminal'};
-    const name=`alias-ready-${run.id}-${run.run_attempt}-${consumer.id}-${consumer.run_attempt}`;
+    consumerFinishes.push(...childJobs.map(j=>timestamp(j.completed_at||consumer.updated_at)));
+    const aliasFile=accepted?'alias-accepted':'alias-ready';
+    const name=`${aliasFile}-${run.id}-${run.run_attempt}-${consumer.id}-${consumer.run_attempt}`;
     for(const a of (await io.artifacts(consumer.id)).filter(a=>a.name===name&&!a.expired)){
       boundArtifact(a,consumer);
-      const receipt=await io.receipt(a,'alias-ready.json');
-      validateAlias(receipt,scoped,consumer,childJobs);provedAlias=true;aliasArtifacts.push(a);
+      const receipt=await io.receipt(a,`${aliasFile}.json`);
+      (accepted?validateAcceptedAlias:validateAlias)(receipt,scoped,consumer,childJobs);provedAlias=true;aliasArtifacts.push(a);aliasReceipts.push(receipt);
     }
   }
   if(!provedAlias)return {skip:'no-completed-alias-install-proof'};
+  // Protocol 2 acceptance is never installation proof. Every background reader
+  // must finish, and at least one exact successful content/install report remains.
+  const verifiers=accepted?await io.verifiers(run.created_at):[],verificationArtifacts=[];
+  let verifiedAt=0,provedPublic=!accepted;
+  if(verifiers.some(r=>!workflow(r,VERIFY)||!terminal(r)))return {skip:'public-verification-still-active'};
+  for(const verifier of verifiers){
+    const verifierJobs=await io.jobs(verifier.id,verifier.run_attempt);
+    if(verifierJobs.some(j=>j.status!=='completed'))return {skip:'public-verification-jobs-not-terminal'};
+    consumerFinishes.push(...verifierJobs.map(j=>timestamp(j.completed_at||verifier.updated_at)));
+    const name=`publication-verified-${run.id}-${run.run_attempt}-${verifier.id}-${verifier.run_attempt}`;
+    for(const a of (await io.artifacts(verifier.id)).filter(a=>a.name===name&&!a.expired)){
+      boundArtifact(a,verifier);
+      if(verifier.conclusion!=='success'||!verifierJobs.some(j=>j.name==='verify-publication'&&j.conclusion==='success'))throw Error('Public verification workflow/job failed');
+      const receipt=await io.receipt(a,'publication-verified.json');
+      const alias=aliasReceipts.find(r=>JSON.stringify(r.publisher)===JSON.stringify(receipt.alias_publisher));
+      if(!alias)throw Error('Verified report has no accepted alias publisher');
+      validateVerified(receipt,scoped,alias);provedPublic=true;verifiedAt=Math.max(verifiedAt,timestamp(receipt.verified_at));verificationArtifacts.push(a);
+    }
+  }
+  if(!provedPublic)return {skip:'no-completed-public-install-proof'};
   const selected=artifacts.filter(a=>!a.expired&&allowedSourceArtifact(a.name,source,manifest.targets.map(t=>t.triple)));
   for(const a of selected)boundArtifact(a,run);
-  const all=[...selected,...aliasArtifacts];
-  const finished=Math.max(timestamp(run.updated_at),timestamp(release.published_at),...jobs.map(j=>timestamp(j.completed_at||run.updated_at)),...consumers.map(r=>timestamp(r.updated_at)),...all.map(a=>timestamp(a.created_at)));
+  const all=[...selected,...aliasArtifacts,...verificationArtifacts];
+  const finished=Math.max(timestamp(run.updated_at),timestamp(release.published_at),...jobs.map(j=>timestamp(j.completed_at||run.updated_at)),...consumers.map(r=>timestamp(r.updated_at)),...verifiers.map(r=>timestamp(r.updated_at)),...consumerFinishes,verifiedAt,...all.map(a=>timestamp(a.created_at)));
   if(now-finished<3600_000)return {skip:'one-hour-after-consumers-not-reached',eligible_at:new Date(finished+3600_000).toISOString()};
   // Keep proof until the payloads are gone. A partial failure leaves receipts
   // intact where possible; subsequent invocations inventory again, never retry
   // an uncertain DELETE blindly.
   const payload=selected.filter(a=>a.id!==ready[0].id);
-  return {run,source,scoped,release,tag,consumers,finished,artifacts:[...payload,...aliasArtifacts,ready[0]],preserved:artifacts.filter(a=>!all.some(x=>x.id===a.id)).map(a=>({id:a.id,name:a.name}))};
+  return {run,source,scoped,release,tag,consumers,verifiers,finished,artifacts:[...payload,...aliasArtifacts,...verificationArtifacts,ready[0]],preserved:artifacts.filter(a=>!all.some(x=>x.id===a.id)).map(a=>({id:a.id,name:a.name}))};
 }
 export async function executeCleanup(io,plan,{apply=false,now=()=>Date.now(),audit=()=>{}}={}){
   if(plan.skip){audit(plan);return [];}
@@ -87,6 +112,8 @@ export async function executeCleanup(io,plan,{apply=false,now=()=>Date.now(),aud
     // particular, child completion alone cannot erase a receipt awaitAlias is
     // still downloading in the live parent Release.
     const current=await io.run(plan.run.id),consumers=await io.consumers(plan.run.created_at);
+    const verifiers=plan.scoped.schema===2?await io.verifiers(plan.run.created_at):[];
+    if(verifiers.some(r=>!workflow(r,VERIFY)||!terminal(r))||JSON.stringify(verifiers.map(runStamp).sort())!==JSON.stringify(plan.verifiers.map(runStamp).sort()))throw Error('Verification consumption fence changed; cleanup stopped');
     if(!workflow(current,RELEASE)||consumers.some(r=>!workflow(r,ALIAS))||JSON.stringify(runStamp(current))!==JSON.stringify(runStamp(plan.run))||!terminal(current)||current.conclusion!=='success'||consumers.some(r=>!terminal(r))||JSON.stringify(consumers.map(runStamp).sort())!==JSON.stringify(plan.consumers.map(runStamp).sort())||now()-plan.finished<3600_000)throw Error('Consumption fence changed; cleanup stopped');
     requirePublished(await io.release(plan.source.release_id),plan.scoped,await io.tag(`v${plan.source.version}`));
     const actual=await io.artifact(expected.id);
@@ -108,6 +135,7 @@ export function githubAdapter(repository=process.env.GITHUB_REPOSITORY,{transpor
     jobs:(id,attempt)=>pages(`${base}/actions/runs/${id}/attempts/${attempt}/jobs?per_page=100`).flatMap(p=>p.jobs),
     artifacts:id=>pages(`${base}/actions/runs/${id}/artifacts?per_page=100`).flatMap(p=>p.artifacts),
     consumers:created=>pages(`${base}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs),
+    verifiers:created=>pages(`${base}/actions/workflows/verify-publication.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs),
     release:id=>api(`${base}/releases/${id}`),
     tag:name=>{let o=api(`${base}/git/ref/tags/${name}`).object;for(let i=0;o?.type==='tag'&&i<5;i++)o=api(`${base}/git/tags/${o.sha}`).object;return o;},
     artifact:id=>{try{return api(`${base}/actions/artifacts/${id}`);}catch(e){if(String(e.stderr).includes('(HTTP 404)'))return null;throw e;}},

@@ -18,18 +18,18 @@ const SHA = /^[a-f0-9]{40}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const positive = value => /^[1-9]\d*$/.test(String(value));
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-const read = file => JSON.parse(readFileSync(file, 'utf8'));
-const write = (file, value) => writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
-const manifest = () => read('npm/artifact-manifest.json');
+export const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+export const read = file => JSON.parse(readFileSync(file, 'utf8'));
+export const write = (file, value) => writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`);
+export const manifest = () => read('npm/artifact-manifest.json');
 export const PUBLICATION_MAX_BUFFER = 16 * 1024 * 1024;
 export const publicationCommand = (name, args, options = {}) => execFileSync(name, args,
   {encoding: 'utf8', timeout: 30000, maxBuffer: PUBLICATION_MAX_BUFFER, ...options});
-const command = publicationCommand;
-const api = endpoint => JSON.parse(command('gh', ['api', endpoint]));
-const pages = endpoint => JSON.parse(command('gh', ['api', '--paginate', '--slurp', endpoint]));
-const output = values => appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''));
-const digest = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+export const command = publicationCommand;
+export const api = endpoint => JSON.parse(command('gh', ['api', endpoint]));
+export const pages = endpoint => JSON.parse(command('gh', ['api', '--paginate', '--slurp', endpoint]));
+export const output = values => appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''));
+export const digest = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 export const packIdentity = pack => ({name: pack.name, version: pack.version, integrity: pack.integrity, shasum: pack.shasum});
 export const readyName = source => `scoped-ready-${source.run_id}-${source.run_attempt}`;
 export const aliasName = (source, run) => `alias-ready-${source.run_id}-${source.run_attempt}-${run.id}-${run.run_attempt}`;
@@ -61,6 +61,9 @@ export function assertRecoveryAuthority(source, run) {
 }
 export function validateScoped(receipt, expectedManifest) {
   if (receipt?.schema !== 1 || receipt.kind !== 'scoped-ready') throw new Error('Invalid scoped-ready receipt');
+  return validateScopedPayload(receipt, expectedManifest);
+}
+export function validateScopedPayload(receipt, expectedManifest) {
   const source = validateSource(receipt.source);
   const names = [...expectedManifest.targets.map(t => t.pkg), expectedManifest.npmScope].sort();
   if (!Array.isArray(receipt.packages) || !equal(receipt.packages.map(p => p.name).sort(), names) ||
@@ -101,21 +104,21 @@ export function validateAlias(receipt, scoped, run, jobs) {
     throw new Error('Alias receipt/run/install does not prove this exact publication');
   }
 }
-export function assertTagCommit(object, source) {
-  if (object !== null && (object.type !== 'commit' || object.sha !== source.sha)) throw new Error('Release tag points to a different source commit');
+export function assertTagCommit(object, source, {allowMissing = true} = {}) {
+  if ((object === null && !allowMissing) || (object !== null && (object.type !== 'commit' || object.sha !== source.sha))) throw new Error('Release tag points to a different source commit');
 }
-function assertTag(source) {
+export function assertTag(source, {requireExisting = false} = {}) {
   let ref;
   try { ref = api(`repos/${source.repository}/git/ref/tags/v${source.version}`); }
   catch (error) {
     if (!String(error.stderr || '').includes('(HTTP 404)')) throw error;
-    assertTagCommit(null, source); return; // New draft: GitHub creates this tag at publication.
+    assertTagCommit(null, source, {allowMissing: !requireExisting}); return; // New draft: GitHub creates this tag at publication.
   }
   let object = ref.object;
   for (let depth = 0; object?.type === 'tag' && depth < 5; depth++) object = api(`repos/${source.repository}/git/tags/${object.sha}`).object;
   assertTagCommit(object, source);
 }
-function assertActive(source) {
+export function assertActive(source) {
   const run = api(`repos/${source.repository}/actions/runs/${source.run_id}`);
   assertSourceRun(run, source);
   assertRecoveryAuthority(source, run);
@@ -126,18 +129,18 @@ export function validateArtifact(entries, runId) {
   if (entries.length !== 1 || entries[0].expired || String(entries[0].workflow_run?.id) !== String(runId)) throw new Error('Duplicate, expired, or unbound publication artifact');
   return entries[0];
 }
-function artifact(runId, name, repository) {
+export function artifact(runId, name, repository) {
   const entries = pages(`repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`).flatMap(p => p.artifacts).filter(a => a.name === name);
   if (!validateArtifact(entries, runId)) return null;
   const directory = mkdtempSync(path.join(tmpdir(), 'release-receipt-'));
   try {
     command('gh', ['run', 'download', String(runId), '--repo', repository, '--name', name, '--dir', directory], {timeout: 60000});
     const files = readdirSync(directory);
-    if (files.length !== 1 || !['scoped-ready.json', 'alias-ready.json'].includes(files[0]) || statSync(path.join(directory, files[0])).size > 1024 * 1024) throw new Error('Unexpected publication receipt files');
+    if (files.length !== 1 || !['scoped-ready.json', 'alias-ready.json', 'scoped-accepted.json', 'alias-accepted.json', 'scoped-submissions.json', 'alias-submissions.json'].includes(files[0]) || statSync(path.join(directory, files[0])).size > 1024 * 1024) throw new Error('Unexpected publication receipt files');
     return read(path.join(directory, files[0]));
   } finally { rmSync(directory, {recursive: true, force: true}); }
 }
-async function verifyPackages(packages, options = {}) {
+export async function verifyPackages(packages, options = {}) {
   const timeoutMs = options.timeoutMs ?? 15 * 60 * 1000;
   const deadline = Date.now() + timeoutMs;
   for (const expected of packages) {
@@ -184,7 +187,18 @@ async function awaitScoped() {
   while (Date.now() < deadline) {
     const run = api(`repos/${repo}/actions/runs/${runId}`);
     if (run.path !== RELEASE_WORKFLOW || run.head_repository?.full_name !== repo || !['push', 'workflow_dispatch'].includes(run.event)) throw new Error('Unexpected source workflow');
-    if (Number(run.run_attempt) !== Number(attempt) || run.status === 'completed') { output({eligible: 'false'}); return; }
+    if (Number(run.run_attempt) !== Number(attempt)) { output({eligible: 'false'}); return; }
+    const protocol2 = await import('./publication-acceptance.mjs');
+    const accepted = artifact(runId, protocol2.scopedAcceptedName({run_id: runId, run_attempt: attempt}), repo);
+    if (accepted) {
+      protocol2.validateAcceptedScoped(accepted, manifest());
+      // Check the durable receipt before terminal status. Publishing still
+      // requires an active exact attempt; completed attempts are read-only.
+      if (run.status === 'completed') { output({eligible: 'false'}); return; }
+      output(protocol2.acceptedScopedOutput(accepted, run, attempt));
+      return;
+    }
+    if (run.status === 'completed') { output({eligible: 'false'}); return; }
     const scoped = artifact(runId, readyName({run_id: runId, run_attempt: attempt}), repo);
     if (scoped) {
       validateScoped(scoped, manifest());
@@ -194,7 +208,8 @@ async function awaitScoped() {
       assertRecoveryAuthority(scoped.source, run);
       write('scoped-ready.json', scoped);
       output({eligible: 'true', sha: scoped.source.tooling_sha || scoped.source.sha,
-        product_sha: scoped.source.sha, version: scoped.source.version});
+        product_sha: scoped.source.sha, version: scoped.source.version, protocol: '1',
+        artifact: readyName(scoped.source), file: 'scoped-ready.json'});
       return;
     }
     // Dry runs, approved historical repair, or failed/skipped plans never emit ready.
@@ -250,6 +265,12 @@ async function publishAlias() {
   assertActive(source); // Last source-attempt check immediately before irreversible npm publication.
   const result = await publishPackage('npm/dist/rsrs-cli', {...expected, dependencies: {'@rsrsai/cli': source.version}}, source.channel, {requireInstallIndex: true, timeoutMs: 30 * 60 * 1000});
   if (result.metadata.dependencies?.['@rsrsai/cli'] !== source.version) throw new Error('Alias dependency mismatch');
+  const install = await publicInstall(scoped, expected, () => assertActive(source));
+  write('alias-ready.json', {schema: 1, kind: 'alias-ready', source, scoped_packages: scoped.packages, alias: expected,
+    publisher: {workflow: ALIAS_WORKFLOW, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT}, install});
+}
+export async function publicInstall(scoped, expected, assertCurrent) {
+  const source = scoped.source;
   // An isolated public install, without inherited npm credentials, cache, or user config.
   const directory = mkdtempSync(path.join(tmpdir(), 'rsrs-public-install-'));
   try {
@@ -261,7 +282,7 @@ async function publishAlias() {
     writeFileSync(env.NPM_CONFIG_USERCONFIG, ''); writeFileSync(env.NPM_CONFIG_GLOBALCONFIG, '');
     const installOutput = await waitForPublicInstall(remaining => {
       const installStarted = Date.now();
-      assertActive(source);
+      assertCurrent();
       // Source validation also consumes the shared install deadline.
       const timeout = remaining - (Date.now() - installStarted);
       if (timeout <= 0) throw new Error('Public install deadline expired during source validation');
@@ -280,10 +301,8 @@ async function publishAlias() {
     const version = command(bin, ['--version'], {env}).trim();
     if (!version.split(/\s+/).includes(source.version)) throw new Error(`Installed CLI version mismatch: ${version}`);
     command(bin, ['--help'], {env});
-    assertActive(source);
-    write('alias-ready.json', {schema: 1, kind: 'alias-ready', source, scoped_packages: scoped.packages, alias: expected,
-      publisher: {workflow: ALIAS_WORKFLOW, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT},
-      install: {platform: 'linux-x64-gnu', version: source.version, binary_sha256: binaryHash}});
+    assertCurrent();
+    return {platform: 'linux-x64-gnu', version: source.version, binary_sha256: binaryHash};
   } finally { rmSync(directory, {recursive: true, force: true}); }
 }
 async function awaitAlias() {
@@ -334,7 +353,8 @@ function finalize() {
 }
 export async function main(action) {
   if (action === 'recovery-ready') return (await import('./dev6-publication-recovery.mjs')).recoveryReady();
-  if (action === 'protocol') { console.log(1); return; }
+  if (action?.endsWith('-accepted') || action === 'verify-accepted') return (await import('./publication-acceptance.mjs')).main(action);
+  if (action === 'protocol') { console.log(2); return; }
   if (action === 'scoped-ready') return scopedReady();
   if (action === 'await-scoped') return awaitScoped();
   if (action === 'publish-alias') return publishAlias();
