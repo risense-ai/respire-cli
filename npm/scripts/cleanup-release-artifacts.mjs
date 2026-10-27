@@ -6,6 +6,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
 import {validateAcceptedScoped,validateAcceptedAlias,validateVerified} from './publication-acceptance.mjs';
+import {regressionStatus} from './release-regression-contract.mjs';
 
 export const REPOSITORY='risense-ai/respire-cli';
 export const CLEANUP_POLICY=RELEASE_ARTIFACT_CLEANUP_POLICY;
@@ -15,7 +16,12 @@ const timestamp=value=>{const n=Date.parse(value);if(!Number.isFinite(n))throw E
 const terminal=run=>run.status==='completed';
 const workflow=(run,file)=>run.path===file&&run.head_repository?.full_name===REPOSITORY;
 const samePolicy=p=>p?.schema===1&&p.after_consumers_seconds===3600&&Object.keys(p).length===2;
-export function requireRegressions(jobs,targets){
+export function requireRegressions(jobs,targets,inventory){
+  if(inventory){
+    if(regressionStatus(jobs,inventory)!=='success')throw Error('All declared regressions must finish successfully');
+    if(jobs.some(j=>j.status!=='completed')||!jobs.some(j=>j.name==='publish'&&j.conclusion==='success'))throw Error('Source consumers/publisher are not complete');
+    return;
+  }
   const native=jobs.filter(j=>j.name.includes('native-regression / Native ('));
   const cloud=jobs.filter(j=>j.name.startsWith('cloud-sweep ('));
   const api=jobs.filter(j=>j.name==='api-smoke');
@@ -30,7 +36,7 @@ export function requirePublished(release,scoped,tag){
 export function allowedSourceArtifact(name,source,targets){
   if([`scoped-ready-${source.run_id}-${source.run_attempt}`,`scoped-accepted-${source.run_id}-${source.run_attempt}`,`npm-submissions-${source.run_id}-${source.run_attempt}`,`publication-accepted-${source.run_id}-${source.run_attempt}`].includes(name))return true;
   if(['npm-release-packages','npm-release-validation','dev-api-coverage','gnu-login-interruption'].includes(name))return true;
-  return targets.some(t=>['cli-release-','release-sweep-','base-release-sweep-','resident-concurrency-','published-upgrades-','native-profile-migration-','secret-service-profile-migration-'].some(p=>name===p+t));
+  return targets.some(t=>['cli-release-','release-sweep-','base-release-sweep-','resident-concurrency-','published-upgrades-','native-profile-migration-','native-profile-migration-fixture-','secret-service-profile-migration-'].some(p=>name===p+t));
 }
 function boundArtifact(a,run){
   if(!id(a.id)||a.expired||a.workflow_run?.id!==run.id||a.workflow_run?.head_sha!==run.head_sha||!/^sha256:[a-f0-9]{64}$/.test(a.digest||''))throw Error('Artifact identity/digest/attempt changed');
@@ -53,7 +59,7 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   (accepted?validateAcceptedScoped:validateScoped)(scoped,manifest);
   const source=scoped.source;
   if(source.recovery||String(source.run_id)!==String(run.id)||Number(source.run_attempt)!==run.run_attempt)return {skip:'unsupported-or-stale-attempt'};
-  const jobs=await io.jobs(run.id,run.run_attempt);requireRegressions(jobs,manifest.targets.map(t=>t.triple));
+  const jobs=await io.jobs(run.id,run.run_attempt);requireRegressions(jobs,manifest.targets.map(t=>t.triple),scoped.validation_inventory);
   const release=await io.release(source.release_id),tag=await io.tag(`v${source.version}`);requirePublished(release,scoped,tag);
   // Include even unsuccessful/duplicate/manual alias consumers. Unbound manual
   // inputs are not exposed in run metadata, so this barrier is conservative.

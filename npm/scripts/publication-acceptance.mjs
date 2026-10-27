@@ -7,6 +7,8 @@ import {RELEASE_ARTIFACT_CLEANUP_POLICY, validateSource, validateScopedPayload,
   verifyPackages, publicInstall} from './release-publication.mjs';
 import {readdirSync, statSync} from 'node:fs';
 import path from 'node:path';
+import {regressionContract,validateRegressionContract,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
+
 import {checkVersionFence,checkReservationFence,bindFenceNotes,persistVersionFence} from './publication-fence.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
 export const scopedAcceptedName = s => `scoped-accepted-${s.run_id}-${s.run_attempt}`;
@@ -27,6 +29,7 @@ export function validateAcceptance(proof, expected) {
 export function validateAcceptedScoped(receipt, m) {
   if (receipt?.schema !== 2 || receipt.kind !== 'scoped-accepted' || receipt.state !== 'accepted') throw Error('Invalid accepted scoped receipt');
   validateScopedPayload(receipt, m);
+  if(receipt.validation_inventory)validateRegressionContract(receipt.validation_inventory,m);
   if(receipt.source.recovery)throw Error('Historical recovery remains on protocol 1');
   if (!Array.isArray(receipt.acceptances) || receipt.acceptances.length !== receipt.packages.length ||
       new Set(receipt.acceptances.map(p => p.name)).size !== receipt.packages.length) throw Error('Incomplete npm acceptance inventory');
@@ -127,7 +130,7 @@ async function scopedAccepted() {
     return {package:t.pkg,target:t.triple,file:b.binary_file,sha256:b.binary_sha256};
   });
   const receipt = validateAcceptedScoped({schema:2,kind:'scoped-accepted',state:'accepted',source,packages,assets,binaries,
-    cleanup_policy:RELEASE_ARTIFACT_CLEANUP_POLICY,acceptances:submissions.packages.map(p=>p.acceptance)},m);
+    cleanup_policy:RELEASE_ARTIFACT_CLEANUP_POLICY,validation_inventory:regressionContract(m),acceptances:submissions.packages.map(p=>p.acceptance)},m);
   assertActive(source); assertDraft(api(`repos/${source.repository}/releases/${source.release_id}`),receipt); assertTag(source);
   write('scoped-accepted.json',receipt);
 }
@@ -232,6 +235,21 @@ function finalizeAccepted() {
   validateAcceptedAlias(complete.alias_receipt,scoped,run,jobs);
   assertDraft(api(`repos/${s.repository}/releases/${s.release_id}`),scoped); assertTag(s);
   const sourceRun=assertActive(s);
+  const readinessJobs=pages(`repos/${s.repository}/actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const ready=readinessJobs.filter(j=>j.name==='publication-ready');
+  if(ready.length!==1 || ready[0].conclusion!=='success' || !instant(ready[0].completed_at))throw Error('Exact publication readiness time missing');
+  const readyAt=parseTimestamp(ready[0].completed_at);
+  if(readyAt===null)throw Error('Invalid publication readiness clock');
+  let fullyValidated=false,validationError='required regressions still pending';
+  try {fullyValidated=regressionStatus(readinessJobs,regressionContract(manifest()))==='success';}
+  catch(error){validationError=error.message;}
+  if(process.env.FULL_REGRESSION_REQUIRED==='true'&&!fullyValidated)throw Error(`Full regression proof missing before publication: ${validationError}`);
+  const fullAt=fullyValidated?regressionCompletedAt(readinessJobs,regressionContract(manifest()),ready[0].completed_at):null;
+  const commit=api(`repos/${s.repository}/commits/${s.sha}`);
+  if(commit.sha!==s.sha || !instant(commit.commit?.committer?.date))throw Error('Exact source commit timestamp missing');
+  const sourceAt=parseTimestamp(commit.commit.committer.date);
+  if(sourceAt===null)throw Error('Invalid source commit clock');
+  assertActive(s);
   command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--draft=false'],{stdio:'inherit'});
   // Confirm the read response after the write. A transport ambiguity never
   // becomes success and never causes another release edit here.
@@ -240,11 +258,14 @@ function finalizeAccepted() {
   assertDraft({...published,draft:true},scoped);assertTag(s,{requireExisting:true});
   const allNpmAccepted=Math.max(...scoped.acceptances.map(p=>Date.parse(p.accepted_at)),Date.parse(complete.alias_receipt.acceptance.accepted_at));
   const acceptedAt=Math.max(allNpmAccepted,Date.parse(published.published_at));
+  const measuredFullAt=fullAt!==null&&fullAt>=sourceAt&&fullAt<=acceptedAt?fullAt:null;
   write('publication-accepted.json',{...complete,accepted_at:new Date(acceptedAt).toISOString(),
     release_published_at:published.published_at,all_npm_accepted_at:new Date(allNpmAccepted).toISOString(),
-    source_run_created_at:sourceRun.created_at,trigger_to_accepted_seconds:(acceptedAt-Date.parse(sourceRun.created_at))/1000,
+    source_run_created_at:sourceRun.created_at,source_committed_at:commit.commit.committer.date,publication_ready_at:ready[0].completed_at,
+    full_validation_completed_at:measuredFullAt===null?null:new Date(measuredFullAt).toISOString(),
+    source_to_complete_validation_seconds:measuredFullAt===null?null:(measuredFullAt-sourceAt)/1000,full_validation:fullyValidated?'verified':'pending-or-failed',ready_to_accepted_seconds:(acceptedAt-readyAt)/1000,trigger_to_accepted_seconds:(acceptedAt-Date.parse(sourceRun.created_at))/1000,
     public_verification:'pending'});
-  const summary=`Release v${s.version} public; all ${complete.packages.length} npm submissions accepted. Public propagation/install verification pending. Trigger to acceptance: ${(acceptedAt-Date.parse(sourceRun.created_at))/1000}s.\n`;
+  const summary=`Release v${s.version} public; all ${complete.packages.length} npm submissions accepted. Public propagation/install verification pending. Source to full validation: ${measuredFullAt!==null?`${(measuredFullAt-sourceAt)/1000}s`:(fullyValidated?'time unavailable':'pending/unverified')}; ready to acceptance: ${(acceptedAt-readyAt)/1000}s; workflow trigger to acceptance: ${(acceptedAt-Date.parse(sourceRun.created_at))/1000}s.\n`;
   console.log(summary);
   if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,summary);
 }

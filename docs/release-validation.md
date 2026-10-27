@@ -161,6 +161,48 @@ When a DEV must pass full acceptance before publication, merge with `[manual-rel
 
 For an explicitly requested DEV number, manual Release accepts `dev_version` in `X.Y.Z-dev.N` format. Its base can differ from the source manifest, so a published `1.0.12` baseline can produce the requested `1.0.13-dev.N` artifacts. It must have no Git tag or published package on any of the five scoped npm packages. Only an empty, unpublished DEV draft can be resumed after its previous release run finishes; preserve the failed run and reports. Draft notes record their owner run, and an active owner blocks resumption. Legacy drafts without an owner marker require all other Release runs to finish first. The corrected source still passes the normal builds and regression gates. Omit the input for automatic allocation. Stable releases reject this input.
 
+## Independent source and migration checks
+
+Normal CLI CI runs other workspace tests, CLI 90% coverage and packaging/workflow/fixture
+contracts on three independent runners. `check-complete` fails unless all three lanes
+succeed, including unexpected skips. Release's exact-source push-CI check still
+requires the entire CLI CI run to succeed; adding a job does not automatically
+configure a GitHub required branch check.
+
+Windows and macOS migration fixtures run independently of base cloud sweeps,
+with separate runners, profile roots and owned random native keyring entries.
+Their join jobs wait for both successful producer groups. On each native
+platform, the existing migration gate checks both reports against the original
+verified build metadata's exact SHA/version/target/binary digest. Fixture success
+alone cannot replace the base report, and base success cannot replace migration.
+Linux supplements and their model/outbox dependencies keep their ordering.
+
+New accepted receipts declare the full regression inventory: four native
+upgrade lanes, three system sweeps, two native migration fixtures, two native
+join gates and the API check. Publication and cleanup validate every declared
+lane; failure, cancellation, skip, missing or duplicate targets cannot authorize
+success. Older receipts retain their original strict inventory rather than
+retroactively requiring jobs that did not exist. This changes overlap, not test
+coverage or the ten-minute performance claim; timings require an actual run.
+
+
+The read-only `publication-ready` job waits for exact-source push CI and the
+selected full regression contract without holding the publication transaction
+lock. The writer requires that job's success. Accepted reports distinguish
+source commit to full validation, workflow creation to acceptance, and the ready
+job's completion to acceptance (including publication-runner queue time).
+These are actual timestamps; the ready-to-acceptance interval is not relabelled
+as the complete source workflow duration. Expensive acceptance is still required
+before the write transaction; no test is shortened or omitted.
+
+
+For a dependency PR whose base is not `main`, normal PR branch filters do not
+start CLI CI. Explicit `workflow_dispatch` with `source_checks_only=true` runs
+all three source lanes and their aggregate without the separate optional native
+compile matrix. This is source CI only: it cannot substitute for Release's
+required exact-source **push** CI or any native/model/release acceptance.
+The default manual matrix remains unchanged when the input is false.
+
 ## Cross-run immutable-version fence
 
 Before npm can start, the normal publisher binds the repository, version,
@@ -189,3 +231,28 @@ marker, overwrite accepted versions, or create a replacement run to work around
 an unresolved intent. Expired or missing proofs require separately audited
 recovery or a new unused version; this change does not add automatic cross-run
 recovery. Temporary artifact cleanup never removes this Release metadata.
+
+
+The payload-lifetime ownership fixture runs after workspace tests on that same
+runner: its offline Cargo project intentionally reuses the workspace's locked
+cached dependencies. It is not independent packaging work. Its two expected
+negative controls and seven actual-wrapper/feedback tests remain unchanged.
+
+
+Source workspace/coverage jobs use Cargo `line-tables-only` debug metadata to
+retain file/line backtraces while omitting full type/variable DWARF. They keep
+optimization at zero, debug assertions and overflow checks explicitly enabled,
+all original tests and the same coverage threshold/exclusions. This is a source
+CI setting, not a release/native profile change. See the [Cargo profile
+reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+A local instrumented three-case probe confirmed normal results, retained debug
+assertion panics and retained overflow panics under these settings; project
+coverage and any timing effect still require the hosted run.
+
+Complete-validation timing uses the latest valid completion time among every
+required regression and `publication-ready`. In fast manual mode a required
+regression can finish after readiness but before finalization; the earlier ready
+clock cannot stand in for its completion. Missing, malformed, impossible or
+reversed required clocks leave full-validation duration unavailable, even when
+all success conclusions are present. Source/publication bounds are checked so
+clock inconsistencies cannot become negative or shortened performance claims.
