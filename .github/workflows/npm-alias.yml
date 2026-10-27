@@ -32,6 +32,9 @@ jobs:
     outputs:
       eligible: ${{ steps.ready.outputs.eligible }}
       sha: ${{ steps.ready.outputs.sha }}
+      protocol: ${{ steps.ready.outputs.protocol }}
+      artifact: ${{ steps.ready.outputs.artifact }}
+      file: ${{ steps.ready.outputs.file }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -41,7 +44,7 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
-      - name: Wait for this Release attempt to verify all scoped packages
+      - name: Wait for this Release attempt scoped publication receipt
         id: ready
         env:
           GH_TOKEN: ${{ github.token }}
@@ -53,7 +56,8 @@ jobs:
     needs: await-scoped
     if: needs.await-scoped.outputs.eligible == 'true'
     runs-on: ubuntu-latest
-    # 30m scoped index + 30m alias propagation + 10m clean install + setup.
+    # Legacy protocol retains its propagation/install budget. Protocol 2 only
+    # submits npm here; independent read-only verification holds no write lock.
     timeout-minutes: 75
     concurrency:
       group: npm-rsrs-cli-publication
@@ -77,21 +81,28 @@ jobs:
       - run: npm install -g npm@12.2.0
       - uses: actions/download-artifact@v4
         with:
-          name: scoped-ready-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          name: ${{ needs.await-scoped.outputs.artifact }}
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ github.token }}
       - run: node npm/scripts/test-wrapper.mjs
-      - name: Publish and clean-install the matching short entry
+      - name: Publish the matching short entry (legacy also verifies installation)
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN: ${{ github.event.workflow_run.id }}
           SOURCE_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
-        run: node npm/scripts/release-publication.mjs publish-alias
+        run: node npm/scripts/release-publication.mjs ${{ needs.await-scoped.outputs.protocol == '2' && 'publish-alias-accepted' || 'publish-alias' }}
+      - uses: actions/upload-artifact@v4
+        if: always() && needs.await-scoped.outputs.protocol == '2'
+        with:
+          retention-days: 1
+          name: alias-submissions-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: alias-submissions.json
+          if-no-files-found: ignore
       - uses: actions/upload-artifact@v4
         with:
           retention-days: 1
-          name: alias-ready-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: alias-ready.json
+          name: ${{ needs.await-scoped.outputs.protocol == '2' && 'alias-accepted' || 'alias-ready' }}-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ needs.await-scoped.outputs.protocol == '2' && 'alias-accepted.json' || 'alias-ready.json' }}
           if-no-files-found: error
 
   # Explicit recovery for already-public historical releases only. Automatic

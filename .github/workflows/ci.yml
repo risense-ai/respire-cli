@@ -2,6 +2,10 @@ name: CLI CI
 on:
   workflow_dispatch:
     inputs:
+      source_checks_only:
+        description: Run all source tests, coverage and contracts without the optional manual native compile matrix
+        type: boolean
+        default: false
       research_feedback_only:
         description: Token-free four-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
         type: boolean
@@ -40,7 +44,7 @@ concurrency:
 jobs:
   platform-build:
     # Release builds all four targets. Keep the separate compile matrix manual.
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -129,6 +133,69 @@ jobs:
           exe=target/ci/${{ matrix.target }}/debug/rsrs
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+  workspace-tests:
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    runs-on: ubuntu-latest
+    env:
+      RSRS_ENGINE: cpu
+      # Several existing tests change process-global data-dir/language variables.
+      # Their own parallel-request checks still create concurrent client threads.
+      RSRS_CORE_TEST_MODE: '1'
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+      # Keep backtrace file:line, assertions and overflow checks; omit full
+      # type/variable DWARF only. These source tests remain unoptimized.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Verify actual source profile safety and coverage instrumentation
+        run: python3 scripts/test-ci-source-profile.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-2
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-2-restore
+        if: steps.sdk-cache-2.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
+          key: ${{ steps.sdk-cache-2.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-2.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - run: cargo test --workspace --exclude respire --locked
+      # This offline ownership fixture requires the dependencies cached above.
+      - run: python3 scripts/test-core-payload-lifetime.py
+
   check:
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     runs-on: ubuntu-latest
@@ -139,6 +206,16 @@ jobs:
       RSRS_CORE_TEST_MODE: '1'
       RUST_TEST_THREADS: '1'
       RUST_MIN_STACK: '16777216'
+      # Keep backtrace file:line, assertions and overflow checks; omit full
+      # type/variable DWARF only. These source tests remain unoptimized.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_TEST_DEBUG_ASSERTIONS: 'true'
+      CARGO_PROFILE_DEV_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_TEST_OVERFLOW_CHECKS: 'true'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '0'
+      CARGO_PROFILE_TEST_OPT_LEVEL: '0'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -181,8 +258,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # respire tests run once through llvm-cov below.
-      - run: cargo test --workspace --exclude respire --locked
+      # respire tests run once through llvm-cov; other workspace tests use an independent runner.
       - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
         run: |
           result=0
@@ -195,6 +271,21 @@ jobs:
               --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || printf "%s\n" "Coverage diagnostic unavailable; original failure retained"
           fi
           exit "$result"
+
+  contract-checks:
+    # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK
+    # execution. Keep their own runner and fail the same whole CI workflow.
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -202,7 +293,7 @@ jobs:
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
-      - run: node --test npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
+      - run: node --test npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-ci-contracts.mjs npm/scripts/test-publication-fence.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
@@ -216,7 +307,19 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/dev-release-sweep.ps1'), [ref]$parseTokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
-      - run: python3 scripts/test-core-payload-lifetime.py
+
+  check-complete:
+    if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    needs: [check, workspace-tests, contract-checks]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require source coverage and all independent contracts
+        env:
+          SOURCE_RESULT: ${{ needs.check.result }}
+          WORKSPACE_RESULT: ${{ needs.workspace-tests.result }}
+          CONTRACT_RESULT: ${{ needs.contract-checks.result }}
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success
 
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}

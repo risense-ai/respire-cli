@@ -5,12 +5,19 @@
 // --publish consumes those exact packages, platform packages before the umbrella.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, cpSync, existsSync, chmodSync, rmSync } from 'node:fs';
 import { readExpectedPacks } from './registry-publication.mjs';
-import { publishScopedPackages } from './parallel-publication.mjs';
+import {assertSubmissionActive} from './publication-acceptance.mjs';
+import { publishScopedPackages, acceptScopedPackages } from './parallel-publication.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const doPublish = process.argv.includes('--publish');
+const acceptedOnly = doPublish && process.argv.includes('--accepted-only');
+// Establish no-submission evidence before configuration/pack validation can fail.
+// An unknown entry replaces this empty inventory BEFORE every actual npm write.
+if (acceptedOnly) writeFileSync('scoped-submissions.json', JSON.stringify({schema: 2,
+  run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+  state: 'partial', packages: [], submissions: []}, null, 2));
 const npmTag = arg('--tag', 'latest');
 const repoRoot = path.resolve(arg('--repo', '.'));
 const outDir = path.join(repoRoot, 'npm', 'dist');
@@ -37,10 +44,38 @@ if (manifest.cliVersion !== version) {
 // rebuild or clear dist here: that would discard the evidence we just verified.
 if (doPublish) {
   const expected = readExpectedPacks(outDir, manifest, version);
-  for (const result of await publishScopedPackages(expected, manifest.npmScope, npmTag, {timeoutMs: 30 * 60 * 1000})) {
-    console.log(`npm ${result.name}@${version}: ${result.status}; registry tarball integrity verified`);
+  const accepted = [];
+  const submissions = new Map();
+  const prior = acceptedOnly ? JSON.parse(readFileSync('prior-scoped-acceptances.json', 'utf8')) : null;
+  if (acceptedOnly && (String(prior.run_id) !== process.env.GITHUB_RUN_ID ||
+      Number(prior.run_attempt) !== Number(process.env.GITHUB_RUN_ATTEMPT) || !Array.isArray(prior.acceptances))) {
+    throw new Error('Missing current-attempt submission reconciliation');
   }
-  console.log('All scoped npm packages are published and readable');
+  const persist = () => writeFileSync('scoped-submissions.json', JSON.stringify({schema: 2,
+    run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+    state: accepted.length === expected.length ? 'accepted' : 'partial',
+    packages: accepted, submissions: [...submissions.values()]}, null, 2));
+  const publish = acceptedOnly ? acceptScopedPackages : publishScopedPackages;
+  for (const result of await publish(expected, manifest.npmScope, npmTag, {
+    timeoutMs: 30 * 60 * 1000,
+    knownAcceptances: prior?.acceptances,
+    onSubmission: acceptedOnly ? event => {
+      assertSubmissionActive();
+      const p = event.package;
+      submissions.set(p.name, {state: 'unknown', package: {name: p.name, version: p.version, integrity: p.integrity, shasum: p.shasum}});
+      persist();
+    } : undefined,
+    onResult: acceptedOnly ? result => {
+      accepted.push(result);
+      submissions.set(result.name, {state: 'accepted', package: result.acceptance});
+      // Preserve partial acceptance on a later failure. This is evidence, never
+      // permission to replay an uncertain write or proof of public installation.
+      persist();
+    } : undefined,
+  })) {
+    console.log(`npm ${result.name}@${version}: ${result.status}; ${acceptedOnly ? 'submission accepted' : 'registry tarball integrity verified'}`);
+  }
+  console.log(acceptedOnly ? 'All scoped npm submissions accepted; public verification runs separately' : 'All scoped npm packages are published and readable');
   process.exit(0);
 }
 

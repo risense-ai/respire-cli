@@ -7,39 +7,63 @@ The paired Core SDK still validates its own seven-target compatibility contract.
 
 DEV gates: exact-source workspace unit tests and existing coverage checks, one Release build for each of four targets, native executable startup, real quantized CPU inference on macOS, pinned SDK digests, and consistent artifacts for all five scoped npm packages.
 
-`rsrs-cli` is the primary public npm install entry and is part of the Release
-success gate. `release.yml` publishes and verifies all five scoped packages,
-including actual public tarball SHA-512 and SHA-1 checks. It uploads a
-`scoped-ready-RUN-ATTEMPT` receipt tied to the repository, workflow, selected
-source SHA (which can differ from the dispatch workflow SHA), version, channel,
-draft release ID, package digests and all twelve validated assets.
+`rsrs-cli` is the primary public npm install entry. Protocol 2 separates two
+states; neither state can substitute for the other:
 
-`npm-alias.yml` starts on Release `in_progress`. Its read-only waiting job holds
-no publication lock or OIDC permission. Once ready, its publisher acquires the
-existing short-package lock, checks out the selected source SHA, rechecks all
-five public packages, publishes the exact-version alias, and verifies a fresh
-public npm install on Linux x64 GNU. It checks the resolved alias, scoped CLI,
-native version, native binary hash, and the installed `rsrs --version` and
-`--help`. This install check does not claim native installation on other systems;
-the four platform tarballs are independently verified.
+- **accepted**: all four platform packages, the scoped umbrella and `rsrs-cli`
+  have explicit successful npm submission acknowledgements, or their existing
+  exact public bytes have been confirmed. Local pack SHA-512/SHA-1, package
+  versions and exact dependencies remain mandatory. The umbrella follows all
+  platform acknowledgements; alias follows the scoped receipt. The Release
+  becomes public only after the exact alias publisher job succeeds, all required
+  acknowledgements exist, and the source attempt, tag and twelve assets match.
+- **verified**: the separate `Verify public npm publication` workflow confirms
+  public metadata, install-index resolution and tarball digests, then performs
+  an isolated Linux x64 GNU public install. It checks alias/scoped/native
+  versions, the native binary hash, `--version` and `--help`. This proves the
+  GNU install only; it does not claim native installation on other systems.
 
-Only after the exact alias run/attempt and publisher job succeed with a matching
-`alias-ready` receipt does the original Release publisher recheck all six
-registry versions, the draft assets, source tag and current attempt, then make
-the GitHub release public. Both publishers retain their existing workflow names,
-Trusted Publishing identities and permissions. The parent holds its existing
-publication lock while awaiting the alias; the alias publisher never waits for
-the parent to finish or for its draft to become public. The unlocked early wait
-prevents two overlapping Releases from acquiring these locks in opposite order.
+`scoped-accepted-RUN-ATTEMPT` and `alias-accepted-RUN-ATTEMPT-CHILD-ATTEMPT`
+receipts bind the repository, workflow, selected source SHA (which may differ
+from the dispatch workflow SHA), exact attempts, version, channel, release ID,
+local package digests, assets and actual npm acknowledgements. An accepted
+receipt never contains fabricated registry metadata or installation evidence.
+The parent `publication-accepted` report explicitly leaves public verification
+pending. The independent `publication-verified` report records actual content
+and installation proof with its completion time.
 
-Visibility waits tolerate registry 404 propagation but fail closed on content
-mismatch or other registry errors. Existing matching immutable versions are
-verified and skipped without changing distribution tags; missing versions are
-published once. An uncertain npm submission is followed only by bounded public
-verification, never a blind second publish. DEV uses `dev`, stable uses `latest`,
-and neither publisher moves a tag backward. npm multi-package publication is
-not atomic: a failed alias may leave some or all scoped versions public, while
-GitHub remains draft and the Release fails honestly.
+`npm-alias.yml` retains its Trusted Publishing identity and permissions and
+starts on Release `in_progress`. Its read-only early wait holds no publication
+lock or OIDC permission. Its writer checks out the receipt's selected source,
+uses the existing alias lock and never waits for the parent to complete. The
+parent observes the exact successful publisher job and durable accepted receipt,
+not the whole child workflow or background verifier. Background verification
+starts after parent completion, including a failure after publication, has read-only permissions, holds no
+publication lock and can validate an immutable completed source attempt. All
+write operations still require the active current source attempt. A failed parent can only produce a verified report if its exact public Release, complete accepted receipts and public content/install all validate; it still cannot authorize artifact cleanup. Protocol 1
+and its integrated installation barrier remain for historical recovery.
+
+A successful npm process must have exit code zero, no spawn error and no signal.
+Only that explicit acceptance avoids propagation waiting. Failed or uncertain
+submissions are reconciled by bounded read-only content verification; they are
+never blindly repeated. Submission journals preserve intent before the write
+and each acknowledgement afterward. A rerun must reconcile interrupted earlier
+attempts; missing evidence fails closed. Public read failures cannot be reported
+as acceptance. Existing matching immutable versions are skipped without tag
+changes. DEV uses `dev`, stable uses `latest`, and tag rollback remains forbidden.
+A failed required package prevents overall publication success; partial accepted
+versions remain immutable and the Release remains draft.
+
+The publication target is ten minutes from the publication trigger to a public
+Release and all required npm acknowledgements. Registry/CDN propagation and
+public installation are measured separately and do not block that state. The
+accepted report records the actual Release run creation and acceptance times;
+this is not a claim that validation, runner queues or external npm latency fit
+ten minutes. Also report source-to-complete-validation time and, if validation
+is prepared ahead, the separate ready-artifact-to-publication interval. Only
+exact merged source/version/platform/toolchain/SDK-lock/content-bound validation
+may be reused; different or untrusted PR artifacts cannot authorize publication.
+No measured ten-minute result is claimed by this protocol change alone.
 
 To resume that same version, rerun the failed publication job only while its
 original plan, build artifacts and required receipts remain available within the
@@ -90,7 +114,7 @@ requested operation or revision through the existing remote history protocol.
 ## Actions artifact retention and recovery
 
 All workflows explicitly retain Actions artifacts for one day after upload,
-including `scoped-ready` and `alias-ready` publication receipts.
+including accepted and verified publication receipts and legacy `scoped-ready` / `alias-ready` receipts.
 Build inputs, cross-job transfers, and publication receipts are still uploaded;
 consumers, validation gates, publication locks, and digest checks are unchanged.
 This policy does not change GitHub Release assets, published npm packages, or
@@ -136,3 +160,99 @@ Manual Release validation runs all native upgrade checks by default. After DEV p
 When a DEV must pass full acceptance before publication, merge with `[manual-release]` in the commit message to suppress automatic Release allocation while keeping push CLI CI enabled. Then dispatch Release for the exact merged source with `publish=true`, `full_regression_before_publish=true` and the requested unpublished `dev_version`. Publication waits for all four native upgrades, all three system regressions and API checks from that same run; builds and regressions are not repeated. The default fast DEV order is unchanged.
 
 For an explicitly requested DEV number, manual Release accepts `dev_version` in `X.Y.Z-dev.N` format. Its base can differ from the source manifest, so a published `1.0.12` baseline can produce the requested `1.0.13-dev.N` artifacts. It must have no Git tag or published package on any of the five scoped npm packages. Only an empty, unpublished DEV draft can be resumed after its previous release run finishes; preserve the failed run and reports. Draft notes record their owner run, and an active owner blocks resumption. Legacy drafts without an owner marker require all other Release runs to finish first. The corrected source still passes the normal builds and regression gates. Omit the input for automatic allocation. Stable releases reject this input.
+
+## Independent source and migration checks
+
+Normal CLI CI runs other workspace tests, CLI 90% coverage and packaging/workflow/fixture
+contracts on three independent runners. `check-complete` fails unless all three lanes
+succeed, including unexpected skips. Release's exact-source push-CI check still
+requires the entire CLI CI run to succeed; adding a job does not automatically
+configure a GitHub required branch check.
+
+Windows and macOS migration fixtures run independently of base cloud sweeps,
+with separate runners, profile roots and owned random native keyring entries.
+Their join jobs wait for both successful producer groups. On each native
+platform, the existing migration gate checks both reports against the original
+verified build metadata's exact SHA/version/target/binary digest. Fixture success
+alone cannot replace the base report, and base success cannot replace migration.
+Linux supplements and their model/outbox dependencies keep their ordering.
+
+New accepted receipts declare the full regression inventory: four native
+upgrade lanes, three system sweeps, two native migration fixtures, two native
+join gates and the API check. Publication and cleanup validate every declared
+lane; failure, cancellation, skip, missing or duplicate targets cannot authorize
+success. Older receipts retain their original strict inventory rather than
+retroactively requiring jobs that did not exist. This changes overlap, not test
+coverage or the ten-minute performance claim; timings require an actual run.
+
+
+The read-only `publication-ready` job waits for exact-source push CI and the
+selected full regression contract without holding the publication transaction
+lock. The writer requires that job's success. Accepted reports distinguish
+source commit to full validation, workflow creation to acceptance, and the ready
+job's completion to acceptance (including publication-runner queue time).
+These are actual timestamps; the ready-to-acceptance interval is not relabelled
+as the complete source workflow duration. Expensive acceptance is still required
+before the write transaction; no test is shortened or omitted.
+
+
+For a dependency PR whose base is not `main`, normal PR branch filters do not
+start CLI CI. Explicit `workflow_dispatch` with `source_checks_only=true` runs
+all three source lanes and their aggregate without the separate optional native
+compile matrix. This is source CI only: it cannot substitute for Release's
+required exact-source **push** CI or any native/model/release acceptance.
+The default manual matrix remains unchanged when the input is false.
+
+## Cross-run immutable-version fence
+
+Before npm can start, the normal publisher binds the repository, version,
+selected source SHA, owning Release run and complete scoped/alias package names
+in an encoded `rsrs-npm-write-fence` comment in the Release notes. Immediately
+before the first possible submission it persists `phase: fenced` with every
+validated scoped package digest and confirms the write. This is durable intent,
+not an npm acceptance or installation receipt. It survives Actions artifact
+expiry and is retained when descriptions are regenerated or the Release becomes
+public. No new credential, service or permission is used.
+
+A different Release run cannot take over that version, even for stable tags or
+when every public registry read returns 404. Version allocation checks the old
+marker before changing a DEV reservation owner. The publisher checks ownership
+before npm/asset preparation and again before replacing draft notes or assets.
+An existing unbound stable draft cannot prove that no previous submission
+occurred and therefore fails closed. A freshly allocated empty DEV reservation
+owned by the current run can acquire its first marker.
+
+After an uncertain submission, inspect public content read-only and resume the
+original run's failed publisher only while its exact source/build/journal
+proofs remain available. Same-run attempts retain the original fence and
+reconcile their per-package unknown outcomes. Matching previous acceptances are
+carried forward without another npm submission. Do not remove/downgrade the
+marker, overwrite accepted versions, or create a replacement run to work around
+an unresolved intent. Expired or missing proofs require separately audited
+recovery or a new unused version; this change does not add automatic cross-run
+recovery. Temporary artifact cleanup never removes this Release metadata.
+
+
+The payload-lifetime ownership fixture runs after workspace tests on that same
+runner: its offline Cargo project intentionally reuses the workspace's locked
+cached dependencies. It is not independent packaging work. Its two expected
+negative controls and seven actual-wrapper/feedback tests remain unchanged.
+
+
+Source workspace/coverage jobs use Cargo `line-tables-only` debug metadata to
+retain file/line backtraces while omitting full type/variable DWARF. They keep
+optimization at zero, debug assertions and overflow checks explicitly enabled,
+all original tests and the same coverage threshold/exclusions. This is a source
+CI setting, not a release/native profile change. See the [Cargo profile
+reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
+A local instrumented three-case probe confirmed normal results, retained debug
+assertion panics and retained overflow panics under these settings; project
+coverage and any timing effect still require the hosted run.
+
+Complete-validation timing uses the latest valid completion time among every
+required regression and `publication-ready`. In fast manual mode a required
+regression can finish after readiness but before finalization; the earlier ready
+clock cannot stand in for its completion. Missing, malformed, impossible or
+reversed required clocks leave full-validation duration unavailable, even when
+all success conclusions are present. Source/publication bounds are checked so
+clock inconsistencies cannot become negative or shortened performance claims.
