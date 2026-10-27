@@ -129,6 +129,11 @@ test('real coordinator processes finish acceptance while child workflow runs, an
   writeFileSync(path.join(root,'npm/artifact-manifest.json'),JSON.stringify(m));
   const f=fixture();f.run.status='in_progress';f.run.conclusion=null;f.child.status='in_progress';f.child.conclusion=null;
   const release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
+  const successful=name=>({name,status:'completed',conclusion:'success'});
+  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple.includes('apple-darwin'));
+  f.full_jobs=[...m.targets.map(t=>successful(`native-regression / Native (${t.triple})`)),
+    ...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>successful(`cloud-sweep (runner, ${t.triple})`)),
+    ...migration.map(t=>successful(`Native migration (${t.triple})`)),...migration.map(t=>successful(`Migration gate (${t.triple})`)),successful('api-smoke')];
   const save=()=>writeFileSync(path.join(root,'fixture.json'),JSON.stringify({...f,release}));save();
   writeFileSync(path.join(root,'scoped-accepted.json'),JSON.stringify(f.scoped));
   const gh=path.join(root,'bin/gh');
@@ -140,6 +145,8 @@ if(args[0]==='api'){
  const endpoint=args.at(-1),paginated=args.includes('--slurp');
  let value;
  if(endpoint.endsWith('/actions/runs/100'))value=f.run;
+ else if(endpoint.includes('/actions/runs/100/attempts/1/jobs?'))value={jobs:[...f.full_jobs,{name:'publication-ready',status:'completed',conclusion:'success',completed_at:'2026-10-27T00:05:00Z'}]};
+ else if(endpoint.endsWith('/commits/'+f.scoped.source.sha))value={sha:f.scoped.source.sha,commit:{committer:{date:'2026-10-26T23:59:00Z'}}};
  else if(endpoint.endsWith('/actions/runs/200/attempts/1'))value=f.child;
  else if(endpoint.includes('/workflows/npm-alias.yml/runs?'))value={workflow_runs:[f.child]};
  else if(endpoint.includes('/actions/runs/200/attempts/1/jobs?'))value={jobs:f.jobs};
@@ -158,13 +165,14 @@ if(args[0]==='api'){
   const bootstrap=path.join(root,'run.mjs');writeFileSync(bootstrap,`globalThis.fetch=()=>{throw Error('Accepted barrier must not wait on public registry');};
 const {main}=await import('./npm/scripts/release-publication.mjs');
 main(process.argv[2]).catch(e=>{console.error(e.message);process.exitCode=1;});`);
-  const env={...process.env,PATH:path.join(root,'bin')+path.delimiter+process.env.PATH,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'100',GITHUB_RUN_ATTEMPT:'1'};
+  const env={...process.env,PATH:path.join(root,'bin')+path.delimiter+process.env.PATH,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'100',GITHUB_RUN_ATTEMPT:'1',FULL_REGRESSION_REQUIRED:'true'};
   const run=action=>spawnSync(process.execPath,[bootstrap,action],{cwd:root,env,encoding:'utf8',timeout:15000});
   const awaited=run('await-alias-accepted');assert.equal(awaited.error,undefined);assert.equal(awaited.status,0,awaited.stderr);
   const complete=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(complete.state,'accepted');assert.equal(complete.alias_run,200);assert.equal(complete.alias_receipt.install,undefined);
   f.run.status='completed';save();const stale=run('finalize-accepted');assert.notEqual(stale.status,0);assert.match(stale.stderr,/stale|inactive/);assert.equal(existsSync(path.join(root,'edited-release')),false);
-  f.run.status='in_progress';save();const finalized=run('finalize-accepted');assert.equal(finalized.status,0,finalized.stderr);assert.equal(existsSync(path.join(root,'edited-release')),true);
-  const summary=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(summary.public_verification,'pending');assert.equal(summary.trigger_to_accepted_seconds,600);
+  f.run.status='in_progress';const missing=f.full_jobs.pop();save();const incomplete=run('finalize-accepted');assert.notEqual(incomplete.status,0);assert.match(incomplete.stderr,/Full regression proof missing/);assert.equal(existsSync(path.join(root,'edited-release')),false);
+  f.full_jobs.push(missing);save();const finalized=run('finalize-accepted');assert.equal(finalized.status,0,finalized.stderr);assert.equal(existsSync(path.join(root,'edited-release')),true);
+  const summary=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(summary.public_verification,'pending');assert.equal(summary.trigger_to_accepted_seconds,600);assert.equal(summary.source_to_complete_validation_seconds,360);assert.equal(summary.ready_to_accepted_seconds,300);
 });
 
 test('scoped and alias preflight failures retain empty journals without inventing a submission',t=>{

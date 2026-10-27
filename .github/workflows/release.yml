@@ -590,15 +590,88 @@ jobs:
             ${{ runner.temp }}/dev-github-api-coverage.json
           if-no-files-found: error
 
+  publication-ready:
+    # Long read-only gates never hold the publication transaction lock.
+    if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) && needs.plan.outputs.publish == 'true' }}
+    needs: [plan, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 145
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Require successful CLI CI for this exact source
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        timeout-minutes: 21
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireCi(){
+            const sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
+            if(!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid release source SHA');
+            const deadline=Date.now()+20*60*1000;
+            while(Date.now()<deadline){
+              const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
+              // Focused artifact runs can exercise an older binary and skip source checks.
+              const run=result.workflow_runs.filter(run=>run.head_sha===sha&&run.event==='push').sort((a,b)=>b.id-a.id)[0];
+              if(run?.status==='completed'){
+                if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
+                console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
+                return;
+              }
+              console.log(`Waiting for latest CLI CI for ${sha}: ${run?`${run.id} ${run.status}`:'not yet available'}`);
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            throw new Error(`No successful latest CLI CI for ${sha} within 20 minutes; publication refused`);
+          }
+          requireCi().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+      - name: Require all regressions before gated publication
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish) }}
+        timeout-minutes: 121
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node - <<'NODE'
+          const cp=require('child_process');
+          async function requireRegression(){
+            const deadline=Date.now()+120*60*1000;
+            while(Date.now()<deadline){
+              const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
+                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`
+              ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
+              const {regressionContract,regressionStatus}=await import('./npm/scripts/release-regression-contract.mjs');
+              const contract=regressionContract(require('./npm/artifact-manifest.json'));
+              if(regressionStatus(jobs,contract)==='success'){
+                console.log('All native, system, independent migration, join and API regressions passed');return;
+              }
+              console.log('Waiting for native upgrades, cloud regressions and API checks');
+              await new Promise(resolve=>setTimeout(resolve,30000));
+            }
+            throw new Error('Required regression did not complete within 120 minutes');
+          }
+          requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
+          NODE
+
   publish:
     name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
     # DEV regressions reuse the original artifacts independently; stable still waits below.
-    needs: [plan, validate]
+    needs: [plan, validate, publication-ready]
     if: >-
       ${{ always() && !cancelled() && !inputs.resume_dev6_publication &&
           ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.publish) ||
            (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
-            needs.validate.result == 'success' && needs.plan.outputs.publish == 'true' &&
+            needs.validate.result == 'success' && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' &&
             (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true'))) }}
     runs-on: ubuntu-latest
     concurrency:
@@ -645,62 +718,7 @@ jobs:
         run: |
           # Old refs lacking the protocol must fail before scoped publication.
           test "$(node npm/scripts/release-publication.mjs protocol)" = 2
-      - name: Require successful CLI CI for this exact source
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
-        timeout-minutes: 21
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
-        run: |
-          node - <<'NODE'
-          const cp=require('child_process');
-          async function requireCi(){
-            const sha=process.env.CLI_SHA,repo=process.env.GITHUB_REPOSITORY;
-            if(!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid release source SHA');
-            const deadline=Date.now()+20*60*1000;
-            while(Date.now()<deadline){
-              const result=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/workflows/ci.yml/runs?head_sha=${sha}&per_page=100`],{encoding:'utf8'}));
-              // Focused artifact runs can exercise an older binary and skip source checks.
-              const run=result.workflow_runs.filter(run=>run.head_sha===sha&&run.event==='push').sort((a,b)=>b.id-a.id)[0];
-              if(run?.status==='completed'){
-                if(run.conclusion!=='success') throw new Error(`Latest CLI CI ${run.id} for ${sha} concluded ${run.conclusion}; publication refused`);
-                console.log(`Verified successful CLI CI ${run.id} for exact source ${sha}`);
-                return;
-              }
-              console.log(`Waiting for latest CLI CI for ${sha}: ${run?`${run.id} ${run.status}`:'not yet available'}`);
-              await new Promise(resolve=>setTimeout(resolve,15000));
-            }
-            throw new Error(`No successful latest CLI CI for ${sha} within 20 minutes; publication refused`);
-          }
-          requireCi().catch(error=>{console.error(error.message);process.exit(1)});
-          NODE
       - run: npm install --global npm@11.5.1
-      - name: Require all regressions before gated publication
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish) }}
-        timeout-minutes: 121
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node - <<'NODE'
-          const cp=require('child_process');
-          async function requireRegression(){
-            const deadline=Date.now()+120*60*1000;
-            while(Date.now()<deadline){
-              const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
-                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`
-              ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
-              const {regressionContract,regressionStatus}=await import('./npm/scripts/release-regression-contract.mjs');
-              const contract=regressionContract(require('./npm/artifact-manifest.json'));
-              if(regressionStatus(jobs,contract)==='success'){
-                console.log('All native, system, independent migration, join and API regressions passed');return;
-              }
-              console.log('Waiting for native upgrades, cloud regressions and API checks');
-              await new Promise(resolve=>setTimeout(resolve,30000));
-            }
-            throw new Error('Required regression did not complete within 120 minutes');
-          }
-          requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
-          NODE
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_VERSION || needs.plan.outputs.version }}
       - name: Download the immutable validated public repair assets
@@ -847,6 +865,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
+          FULL_REGRESSION_REQUIRED: ${{ needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish }}
         run: node npm/scripts/release-publication.mjs finalize-accepted
       - uses: actions/upload-artifact@v4
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

@@ -7,7 +7,7 @@ import {RELEASE_ARTIFACT_CLEANUP_POLICY, validateSource, validateScopedPayload,
   verifyPackages, publicInstall} from './release-publication.mjs';
 import {readdirSync, statSync} from 'node:fs';
 import path from 'node:path';
-import {regressionContract,validateRegressionContract} from './release-regression-contract.mjs';
+import {regressionContract,validateRegressionContract,regressionStatus} from './release-regression-contract.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
 export const scopedAcceptedName = s => `scoped-accepted-${s.run_id}-${s.run_attempt}`;
 export const aliasAcceptedName = (s, r) => `alias-accepted-${s.run_id}-${s.run_attempt}-${r.id}-${r.run_attempt}`;
@@ -231,6 +231,18 @@ function finalizeAccepted() {
   validateAcceptedAlias(complete.alias_receipt,scoped,run,jobs);
   assertDraft(api(`repos/${s.repository}/releases/${s.release_id}`),scoped); assertTag(s);
   const sourceRun=assertActive(s);
+  const readinessJobs=pages(`repos/${s.repository}/actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const ready=readinessJobs.filter(j=>j.name==='publication-ready');
+  if(ready.length!==1 || ready[0].conclusion!=='success' || !instant(ready[0].completed_at))throw Error('Exact publication readiness time missing');
+  const readyAt=Date.parse(ready[0].completed_at);
+  let fullyValidated=false,validationError='required regressions still pending';
+  try {fullyValidated=regressionStatus(readinessJobs,regressionContract(manifest()))==='success';}
+  catch(error){validationError=error.message;}
+  if(process.env.FULL_REGRESSION_REQUIRED==='true'&&!fullyValidated)throw Error(`Full regression proof missing before publication: ${validationError}`);
+  const commit=api(`repos/${s.repository}/commits/${s.sha}`);
+  if(commit.sha!==s.sha || !instant(commit.commit?.committer?.date))throw Error('Exact source commit timestamp missing');
+  const sourceAt=Date.parse(commit.commit.committer.date);
+  assertActive(s);
   command('gh',['release','edit',`v${s.version}`,'--repo',s.repository,'--draft=false'],{stdio:'inherit'});
   // Confirm the read response after the write. A transport ambiguity never
   // becomes success and never causes another release edit here.
@@ -241,9 +253,10 @@ function finalizeAccepted() {
   const acceptedAt=Math.max(allNpmAccepted,Date.parse(published.published_at));
   write('publication-accepted.json',{...complete,accepted_at:new Date(acceptedAt).toISOString(),
     release_published_at:published.published_at,all_npm_accepted_at:new Date(allNpmAccepted).toISOString(),
-    source_run_created_at:sourceRun.created_at,trigger_to_accepted_seconds:(acceptedAt-Date.parse(sourceRun.created_at))/1000,
+    source_run_created_at:sourceRun.created_at,source_committed_at:commit.commit.committer.date,publication_ready_at:ready[0].completed_at,
+    source_to_complete_validation_seconds:fullyValidated?(readyAt-sourceAt)/1000:null,full_validation:fullyValidated?'verified':'pending-or-failed',ready_to_accepted_seconds:(acceptedAt-readyAt)/1000,trigger_to_accepted_seconds:(acceptedAt-Date.parse(sourceRun.created_at))/1000,
     public_verification:'pending'});
-  const summary=`Release v${s.version} public; all ${complete.packages.length} npm submissions accepted. Public propagation/install verification pending. Trigger to acceptance: ${(acceptedAt-Date.parse(sourceRun.created_at))/1000}s.\n`;
+  const summary=`Release v${s.version} public; all ${complete.packages.length} npm submissions accepted. Public propagation/install verification pending. Source to full validation: ${fullyValidated?`${(readyAt-sourceAt)/1000}s`:'pending/unverified'}; ready to acceptance: ${(acceptedAt-readyAt)/1000}s; workflow trigger to acceptance: ${(acceptedAt-Date.parse(sourceRun.created_at))/1000}s.\n`;
   console.log(summary);
   if(process.env.GITHUB_STEP_SUMMARY)appendFileSync(process.env.GITHUB_STEP_SUMMARY,summary);
 }

@@ -184,3 +184,13 @@ lane; failure, cancellation, skip, missing or duplicate targets cannot authorize
 success. Older receipts retain their original strict inventory rather than
 retroactively requiring jobs that did not exist. This changes overlap, not test
 coverage or the ten-minute performance claim; timings require an actual run.
+
+
+The read-only `publication-ready` job waits for exact-source push CI and the
+selected full regression contract without holding the publication transaction
+lock. The writer requires that job's success. Accepted reports distinguish
+source commit to full validation, workflow creation to acceptance, and the ready
+job's completion to acceptance (including publication-runner queue time).
+These are actual timestamps; the ready-to-acceptance interval is not relabelled
+as the complete source workflow duration. Expensive acceptance is still required
+before the write transaction; no test is shortened or omitted.
