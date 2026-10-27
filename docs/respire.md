@@ -46,7 +46,7 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 
 ## Causal chain
 
-`--titles` returns titles only and `show` exposes one level (ancestor titles plus child summaries); neither reaches distant causes or effects. When a hit concerns a decision, error, lesson, or agreement, run `rsrs chain <short-id> --depth 1-3 --json` before answering or acting: `details.ancestors` is the root-first cause chain, `details.entry` the record, `details.descendants` the downstream effects. Follow what matters up to the root and down the effects — a title or a one-level `show` is not the whole story. Plain factual hits may skip the walk.
+`--titles` returns titles only and `show` exposes one level (ancestor titles plus child summaries); neither reaches distant causes or effects. When a hit concerns a decision, error, lesson, or agreement, run `rsrs chain <short-id> --depth 3 --json` (choose one integer from 1 to 3 for `--depth`) before answering or acting: `details.ancestors` is the root-first cause chain, `details.entry` the record, `details.descendants` the downstream effects. Follow what matters up to the root and down the effects — a title or a one-level `show` is not the whole story. Plain factual hits may skip the walk.
 
 ## Titles
 
@@ -72,7 +72,7 @@ Use `remember ... --importance important --supersedes <old-id>` when a new concl
 
 **此三行是贯穿全程之硬闸，非开场查一次即了事。** 上下文愈长、回合愈多、工具输出愈杂，愈易淡忘——故每答之前、每收尾之前、每碰壁之时，皆回读本节对一遍。三行失则全篇废。
 
-**查因及果（硬）**：`--titles` 只给标题，`show` 只给一层（祖辈标题＋子辈摘要），深因远果只在 `rsrs chain <短id> --depth 1-3 --json`——`details.ancestors` 为根向因链、`details.entry` 为本条、`details.descendants` 为下游果链（BFS）。凡命中条目涉决策、报错、教训、约定，作答或动手前必跑 chain，沿因链读到根、顺果链下探再判；禁以一条标题或一层 show 当全貌。日常事实类命中可免。
+**查因及果（硬）**：`--titles` 只给标题，`show` 只给一层（祖辈标题＋子辈摘要），深因远果只在 `rsrs chain <短id> --depth 3 --json`（`--depth` 填 1 到 3 中的单个整数）——`details.ancestors` 为根向因链、`details.entry` 为本条、`details.descendants` 为下游果链（BFS）。凡命中条目涉决策、报错、教训、约定，作答或动手前必跑 chain，沿因链读到根、顺果链下探再判；禁以一条标题或一层 show 当全貌。日常事实类命中可免。
 
 **开场第一动作（机械硬闸，列于一切规则之前）**：本回合**第一次调用任何工具，只能是 `rsrs recall … --json`**——读文件、grep/glob、跑命令、改码、开网页、联网搜、建 agent，凡工具皆同罪；未 recall 而先动任何一件，即为失职，事后补查不赦。「我只是先看看现场」「先读码摸情况」皆不豁免——看码亦是动手，看码前更须翻忆。**recall 不跨回合继承**：上一回合查过不抵本回合，每条用户新消息即重置闸门。CLI 故障不能免查——recall 失败须在答中首行写明「recall 失败：<因>」，禁静默跳过。
 

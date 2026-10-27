@@ -178,6 +178,25 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("status envelope command was {}", value["command"]).into());
     }
 
+    // Exercise the actual packaged policy through this test's owned runtime.
+    // The preview must preserve an existing user file and must not write it.
+    let prompt = run(dir.path(), port, &["--client-only", "prompt", "--json"])?;
+    assert!(prompt.status.success(), "{}", String::from_utf8_lossy(&prompt.stdout));
+    let prompt: serde_json::Value = serde_json::from_slice(&prompt.stdout)?;
+    assert_eq!(prompt["summary"]["instructions"], respire_app::inject::INSTRUCTIONS_MD);
+    let codex = dir.path().join(".codex/AGENTS.md");
+    std::fs::create_dir_all(codex.parent().unwrap())?;
+    let owned = "Synthetic owned Codex instructions\n";
+    std::fs::write(&codex, owned)?;
+    let preview = run(dir.path(), port, &["--client-only", "inject", "--id", "codex", "--preview", "--json"])?;
+    assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stdout));
+    let preview: serde_json::Value = serde_json::from_slice(&preview.stdout)?;
+    let preview_text = preview.to_string();
+    assert!(preview_text.contains("Synthetic owned Codex instructions"));
+    assert!(preview_text.contains("--depth 3"));
+    assert!(!preview_text.contains("--depth 1-3"));
+    assert_eq!(std::fs::read_to_string(&codex)?, owned);
+
     let again = run(dir.path(), port, &["--runtime-internal", "--status"])?;
     let text = String::from_utf8(again.stdout)?;
     if !text.contains("runtime=up") {
