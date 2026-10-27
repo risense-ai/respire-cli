@@ -231,3 +231,9 @@ marker, overwrite accepted versions, or create a replacement run to work around
 an unresolved intent. Expired or missing proofs require separately audited
 recovery or a new unused version; this change does not add automatic cross-run
 recovery. Temporary artifact cleanup never removes this Release metadata.
+
+
+The payload-lifetime ownership fixture runs after workspace tests on that same
+runner: its offline Cargo project intentionally reuses the workspace's locked
+cached dependencies. It is not independent packaging work. Its two expected
+negative controls and seven actual-wrapper/feedback tests remain unchanged.

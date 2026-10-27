@@ -181,6 +181,8 @@ jobs:
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-core-sdk.mjs "$target"
       - run: cargo test --workspace --exclude respire --locked
+      # This offline ownership fixture requires the dependencies cached above.
+      - run: python3 scripts/test-core-payload-lifetime.py
 
   check:
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
@@ -283,7 +285,6 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/dev-release-sweep.ps1'), [ref]$parseTokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
-      - run: python3 scripts/test-core-payload-lifetime.py
 
   check-complete:
     if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
