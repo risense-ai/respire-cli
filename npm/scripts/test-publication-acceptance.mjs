@@ -53,7 +53,7 @@ test('completed exact attempts are allowed only in the read-only verifier, never
   assert.throws(()=>acceptedScopedOutput(f.scoped,f.run,1));
   f.run.status='in_progress';assertSourceRun(f.run,source);assert.throws(()=>assertCompletedSource(f.run,source));
   const output=acceptedScopedOutput(f.scoped,f.run,1);assert.equal(output.protocol,'2');assert.equal(output.artifact,'scoped-accepted-100-1');
-  for(const mutate of [r=>r.run_attempt=2,r=>r.id=101,r=>r.conclusion='failure',r=>r.path='.github/workflows/ci.yml',r=>r.head_repository.full_name='other/repo']){
+  for(const mutate of [r=>r.run_attempt=2,r=>r.id=101,r=>r.conclusion=null,r=>r.path='.github/workflows/ci.yml',r=>r.head_repository.full_name='other/repo']){
     const r=copy(fixture().run);mutate(r);assert.throws(()=>assertCompletedSource(r,source));
   }
 });
@@ -110,7 +110,7 @@ test('active/new background consumers, failed verification and digest drift stop
 test('new background workflow is read-only, outside publication locks and behind Release completion',()=>{
   const root=new URL('../../',import.meta.url),text=p=>readFileSync(new URL(p,root),'utf8');
   const background=text('.github/workflows/verify-publication.yml'),parent=text('.github/workflows/release.yml').split('  dev6-publication-resume:')[0];
-  assert.match(background,/types: \[completed\]/);assert.match(background,/workflow_run.conclusion == 'success'/);
+  assert.match(background,/types: \[completed\]/);assert.doesNotMatch(background,/workflow_run.conclusion == 'success'/);
   assert.doesNotMatch(background,/id-token:|contents: write|actions: write|concurrency:|npm publish/);
   assert.match(background,/persist-credentials: false/);assert.match(background,/verify-accepted/);
   assert.match(parent,/--publish --accepted-only --tag/);assert.match(parent,/await-alias-accepted/);assert.match(parent,/finalize-accepted/);
@@ -190,4 +190,15 @@ test('normal publication requires protocol 2 before writing any scoped package',
   const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
   assert(workflow.includes('test "$(node npm/scripts/release-publication.mjs protocol)" = 2'));
   assert(workflow.indexOf('release-publication.mjs protocol')<workflow.indexOf('--publish --accepted-only'));
+});
+
+
+test('post-publication workflow failure does not suppress read-only verification or authorize cleanup',async()=>{
+  const f=fixture();
+  for(const conclusion of ['failure','cancelled','timed_out']){
+    f.run.conclusion=conclusion;assertCompletedSource(f.run,source);assert.throws(()=>assertSourceRun(f.run,source));
+  }
+  const c=cleanupFixture();c.run.conclusion='failure';
+  assert.equal((await planCleanup(c.io,100,m,Date.parse('2026-10-27T02:00:00Z'))).skip,'source-not-successfully-complete');
+  assert.deepEqual(c.deleted,[]);
 });

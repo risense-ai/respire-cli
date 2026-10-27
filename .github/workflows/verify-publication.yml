@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       release_run:
-        description: Exact successfully completed Release run (read-only verification)
+        description: Exact completed Release run (read-only verification of accepted publication)
         required: true
         type: string
       release_attempt:
-        description: Exact successfully completed Release attempt
+        description: Exact completed Release attempt
         required: true
         type: string
 
@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   verify-publication:
-    if: github.repository == 'risense-ai/respire-cli' && (github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success')
+    if: github.repository == 'risense-ai/respire-cli'
     runs-on: ubuntu-latest
     timeout-minutes: 80
     # No publication lock, OIDC, SDK credential or npm write permission. A

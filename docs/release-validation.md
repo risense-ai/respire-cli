@@ -38,9 +38,9 @@ lock or OIDC permission. Its writer checks out the receipt's selected source,
 uses the existing alias lock and never waits for the parent to complete. The
 parent observes the exact successful publisher job and durable accepted receipt,
 not the whole child workflow or background verifier. Background verification
-starts after successful parent completion, has read-only permissions, holds no
+starts after parent completion, including a failure after publication, has read-only permissions, holds no
 publication lock and can validate an immutable completed source attempt. All
-write operations still require the active current source attempt. Protocol 1
+write operations still require the active current source attempt. A failed parent can only produce a verified report if its exact public Release, complete accepted receipts and public content/install all validate; it still cannot authorize artifact cleanup. Protocol 1
 and its integrated installation barrier remain for historical recovery.
 
 A successful npm process must have exit code zero, no spawn error and no signal.

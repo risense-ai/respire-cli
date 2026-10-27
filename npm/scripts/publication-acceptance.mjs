@@ -52,8 +52,8 @@ export function assertCompletedSource(run, source) {
   validateSource(source);
   if (String(run.id) !== String(source.run_id) || Number(run.run_attempt) !== Number(source.run_attempt) ||
       run.path !== source.workflow || run.head_repository?.full_name !== source.repository ||
-      !['push','workflow_dispatch'].includes(run.event) || run.status !== 'completed' || run.conclusion !== 'success' || source.recovery) {
-    throw Error('Background verification requires the exact successful Release attempt');
+      !['push','workflow_dispatch'].includes(run.event) || run.status !== 'completed' || !run.conclusion || source.recovery) {
+    throw Error('Background verification requires the exact terminal Release attempt');
   }
 }
 export function validateVerified(receipt, scoped, alias) {
