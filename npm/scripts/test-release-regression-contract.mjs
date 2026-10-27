@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {regressionContract,validateRegressionContract,regressionStatus} from './release-regression-contract.mjs';
+import {regressionContract,validateRegressionContract,regressionStatus,regressionCompletedAt} from './release-regression-contract.mjs';
 import {requireRegressions} from './cleanup-release-artifacts.mjs';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
@@ -33,4 +33,21 @@ test('workflow runs independent fixture work before the join, and keeps Linux su
   assert.match(join,/--migration-only/);assert.match(join,/--binary-sha256 \$build.binary_sha256/);assert.match(join,/\$build.git_sha -ne \$env:CLI_SHA/);assert.match(join,/\$build.target -ne \$env:CLI_TARGET/);
   assert.doesNotMatch(base,/dev-profile-migration-smoke.py/);assert.match(base,/dev-smoke-supplements.py/);assert(base.indexOf('dev-smoke-supplements.py')<base.indexOf('dev-login-interruption-smoke.py'));
   assert.match(ready,/regressionStatus\(jobs,contract\)==='success'/);assert.doesNotMatch(ready,/native.length===4&&cloud.length===3/);assert.doesNotMatch(ready,/concurrency:|id-token:|contents: write/);assert.match(publish,/needs.publication-ready.result == 'success'/);assert.doesNotMatch(publish,/async function requireCi|async function requireRegression/);
+});
+
+
+test('full-validation clock includes required regressions that finish after fast-manual readiness',()=>{
+  const jobs=inventory().map(j=>({...j,completed_at:'2026-10-27T00:03:00Z'}));
+  jobs[0].completed_at='2026-10-27T00:08:00Z';
+  jobs.find(j=>j.name==='publish').completed_at='2030-01-01T00:00:00Z';
+  assert.equal(regressionCompletedAt(jobs,contract,'2026-10-27T00:05:00Z'),Date.parse('2026-10-27T00:08:00Z'));
+  assert.equal(regressionCompletedAt(jobs,contract,'2026-10-27T00:09:00Z'),Date.parse('2026-10-27T00:09:00Z'));
+});
+test('missing, malformed, impossible or reversed required clocks never produce a full-validation duration',()=>{
+  const jobs=inventory().map(j=>({...j,completed_at:'2026-10-27T00:03:00Z'}));
+  for(const value of [undefined,null,'not-a-time','2026-02-31T00:00:00Z','2026-10-27T00:03:00']){
+    const changed=copy(jobs);changed[0].completed_at=value;assert.equal(regressionCompletedAt(changed,contract,'2026-10-27T00:05:00Z'),null);
+  }
+  const reversed=copy(jobs);reversed[0].started_at='2026-10-27T00:04:00Z';assert.equal(regressionCompletedAt(reversed,contract,'2026-10-27T00:05:00Z'),null);
+  assert.equal(regressionCompletedAt(jobs,contract,'not-a-time'),null);
 });

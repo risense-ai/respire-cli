@@ -129,11 +129,12 @@ test('real coordinator processes finish acceptance while child workflow runs, an
   writeFileSync(path.join(root,'npm/artifact-manifest.json'),JSON.stringify(m));
   const f=fixture();f.run.status='in_progress';f.run.conclusion=null;f.child.status='in_progress';f.child.conclusion=null;
   const release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
-  const successful=name=>({name,status:'completed',conclusion:'success'});
+  const successful=name=>({name,status:'completed',conclusion:'success',completed_at:'2026-10-27T00:04:00Z'});
   const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple.includes('apple-darwin'));
   f.full_jobs=[...m.targets.map(t=>successful(`native-regression / Native (${t.triple})`)),
     ...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>successful(`cloud-sweep (runner, ${t.triple})`)),
     ...migration.map(t=>successful(`Native migration (${t.triple})`)),...migration.map(t=>successful(`Migration gate (${t.triple})`)),successful('api-smoke')];
+  f.full_jobs[0].completed_at='2026-10-27T00:08:00Z'; // Later than fast-manual readiness at 00:05.
   const save=()=>writeFileSync(path.join(root,'fixture.json'),JSON.stringify({...f,release}));save();
   writeFileSync(path.join(root,'scoped-accepted.json'),JSON.stringify(f.scoped));
   const gh=path.join(root,'bin/gh');
@@ -171,8 +172,8 @@ main(process.argv[2]).catch(e=>{console.error(e.message);process.exitCode=1;});`
   const complete=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(complete.state,'accepted');assert.equal(complete.alias_run,200);assert.equal(complete.alias_receipt.install,undefined);
   f.run.status='completed';save();const stale=run('finalize-accepted');assert.notEqual(stale.status,0);assert.match(stale.stderr,/stale|inactive/);assert.equal(existsSync(path.join(root,'edited-release')),false);
   f.run.status='in_progress';const missing=f.full_jobs.pop();save();const incomplete=run('finalize-accepted');assert.notEqual(incomplete.status,0);assert.match(incomplete.stderr,/Full regression proof missing/);assert.equal(existsSync(path.join(root,'edited-release')),false);
-  f.full_jobs.push(missing);save();const finalized=run('finalize-accepted');assert.equal(finalized.status,0,finalized.stderr);assert.equal(existsSync(path.join(root,'edited-release')),true);
-  const summary=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(summary.public_verification,'pending');assert.equal(summary.trigger_to_accepted_seconds,600);assert.equal(summary.source_to_complete_validation_seconds,360);assert.equal(summary.ready_to_accepted_seconds,300);
+  f.full_jobs.push(missing);env.FULL_REGRESSION_REQUIRED='false';save();const finalized=run('finalize-accepted');assert.equal(finalized.status,0,finalized.stderr);assert.equal(existsSync(path.join(root,'edited-release')),true);
+  const summary=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(summary.public_verification,'pending');assert.equal(summary.trigger_to_accepted_seconds,600);assert.equal(summary.source_to_complete_validation_seconds,540);assert.equal(summary.full_validation_completed_at,'2026-10-27T00:08:00.000Z');assert.equal(summary.ready_to_accepted_seconds,300);
 });
 
 test('scoped and alias preflight failures retain empty journals without inventing a submission',t=>{

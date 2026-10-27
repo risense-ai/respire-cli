@@ -248,3 +248,11 @@ reference](https://doc.rust-lang.org/cargo/reference/profiles.html#debug).
 A local instrumented three-case probe confirmed normal results, retained debug
 assertion panics and retained overflow panics under these settings; project
 coverage and any timing effect still require the hosted run.
+
+Complete-validation timing uses the latest valid completion time among every
+required regression and `publication-ready`. In fast manual mode a required
+regression can finish after readiness but before finalization; the earlier ready
+clock cannot stand in for its completion. Missing, malformed, impossible or
+reversed required clocks leave full-validation duration unavailable, even when
+all success conclusions are present. Source/publication bounds are checked so
+clock inconsistencies cannot become negative or shortened performance claims.
