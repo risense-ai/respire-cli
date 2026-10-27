@@ -25,7 +25,7 @@ Start routine searches with `rsrs recall "project name + key terms" --titles --j
 
 Use `remember ... --importance important --supersedes <old-id>` when a new conclusion replaces an old decision, and retain the reason for replacement. Use `--see-also <id,id>` for necessary cross-references. Choose edits or merges based on the facts; do not create duplicates just to add a relation. Enable relation writes only after every writer for the library is upgraded; older writers may drop fields when resealing.
 
-Titles and one-level `show` never reach distant causes or effects. When a hit concerns a decision, error, lesson, or agreement, run `rsrs chain <short-id> --depth 1-3 --json` first and follow `details.ancestors` / `details.descendants`.
+Titles and one-level `show` never reach distant causes or effects. When a hit concerns a decision, error, lesson, or agreement, run `rsrs chain <short-id> --depth 3 --json` first (choose one integer from 1 to 3 for `--depth`) and follow `details.ancestors` / `details.descendants`.
 
 ## 中文常驻强约束
 
@@ -45,7 +45,7 @@ Titles and one-level `show` never reach distant causes or effects. When a hit co
 
 **开场第一动作（机械硬闸，列于一切规则之前）**：本回合**第一次调用任何工具，只能是 `rsrs recall … --json`**——读文件、grep/glob、跑命令、改码、开网页、联网搜、建 agent，凡工具皆同罪；未 recall 而先动任何一件即失职，事后补查不赦。「先看看现场」「先读码摸情况」皆不豁免。**recall 不跨回合继承**：每条用户新消息即重置闸门。recall 失败须在答中首行写明「recall 失败：<因>」，禁静默跳过。
 
-**查因及果（硬）**：`--titles` 只给标题，`show` 只给一层（祖辈标题＋子辈摘要）。凡命中条涉决策、报错、教训、约定，作答或动手前必跑 `rsrs chain <短id> --depth 1-3 --json`——`details.ancestors` 为根向因链、`details.entry` 为本条、`details.descendants` 为下游果链——沿链读全再判，禁以一条标题当全貌。日常事实类命中可免。
+**查因及果（硬）**：`--titles` 只给标题，`show` 只给一层（祖辈标题＋子辈摘要）。凡命中条涉决策、报错、教训、约定，作答或动手前必跑 `rsrs chain <短id> --depth 3 --json`（`--depth` 填 1 到 3 中的单个整数）——`details.ancestors` 为根向因链、`details.entry` 为本条、`details.descendants` 为下游果链——沿链读全再判，禁以一条标题当全貌。日常事实类命中可免。
 
 ## 流程 · 六步
 

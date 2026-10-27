@@ -2256,16 +2256,26 @@ fn is_context_query(args: &[String]) -> bool {
     }
 }
 
-fn command_name(args: &[String]) -> Option<&str> {
+const GLOBAL_VALUE_FLAGS: [&str; 2] = ["--progress-id", "--model-task-id"];
+
+// Keep client timeout classification and server routing on the same argv rules.
+// A tracked request ID is a value even when it spells a command such as sync.
+pub(crate) fn command_words(args: &[String]) -> impl Iterator<Item = &str> + '_ {
     let mut values = args.iter();
-    while let Some(arg) = values.next() {
-        if matches!(arg.as_str(), "--progress-id" | "--model-task-id") {
-            let _ = values.next();
-        } else if !arg.starts_with('-') {
-            return Some(arg);
+    std::iter::from_fn(move || {
+        while let Some(arg) = values.next() {
+            if GLOBAL_VALUE_FLAGS.contains(&arg.as_str()) {
+                let _ = values.next();
+            } else if !arg.starts_with('-') {
+                return Some(arg.as_str());
+            }
         }
-    }
-    None
+        None
+    })
+}
+
+fn command_name(args: &[String]) -> Option<&str> {
+    command_words(args).next()
 }
 
 fn diary_lexical_mode(args: &[String]) -> bool {
@@ -2652,6 +2662,19 @@ mod tests {
         assert!(!is_exclusive(&["sync-history".into()]));
         assert!(!is_exclusive(&["diary".into()]));
         assert!(worker_limit() <= cpu_count());
+    }
+
+    #[test]
+    fn routing_value_flags_match_the_actual_cli_contract() {
+        use clap::CommandFactory;
+        let mut command = crate::Cli::command();
+        command.build();
+        let actual: std::collections::BTreeSet<_> = command.get_arguments()
+            .filter(|arg| arg.is_global_set() && arg.get_action().takes_values())
+            .filter_map(|arg| arg.get_long().map(|name| format!("--{name}")))
+            .collect();
+        let expected = GLOBAL_VALUE_FLAGS.iter().map(|flag| (*flag).to_owned()).collect();
+        assert_eq!(actual, expected, "new valued globals must update the shared argv classifier");
     }
 
     #[test]
