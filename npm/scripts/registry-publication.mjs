@@ -283,7 +283,25 @@ export async function assertTagSafe(expected, tag, options = {}) {
   }
 }
 
+function acceptance(expected, evidence, now = Date.now) {
+  return {schema: 1, state: 'accepted', evidence,
+    name: expected.name, version: expected.version, integrity: expected.integrity,
+    shasum: expected.shasum, accepted_at: new Date(now()).toISOString()};
+}
+
+// Existing callers retain the complete public-read verification contract.
 export async function publishPackage(dir, expected, tag, options = {}) {
+  return submitPackage(dir, expected, tag, options, false);
+}
+
+// An exit-zero submission is acceptance, not a public visibility/install proof.
+// Nonzero/interrupted submissions still reconcile matching registry bytes once;
+// this function never repeats npm publish.
+export async function publishAcceptedPackage(dir, expected, tag, options = {}) {
+  return submitPackage(dir, expected, tag, {...options, requireInstallIndex: false}, true);
+}
+
+async function submitPackage(dir, expected, tag, options, acceptedOnly) {
   identity(expected);
   if (!/^[a-z][a-z0-9._-]*$/i.test(tag || '')) throw new Error('Invalid npm distribution tag');
   if (expected.version.includes('-dev') && tag === 'latest') throw new Error('Refusing to publish a dev version under latest');
@@ -292,6 +310,22 @@ export async function publishPackage(dir, expected, tag, options = {}) {
   try {
     const packed = packPackage(dir, temp, options);
     assertPackMatches(packed, expected);
+    if (acceptedOnly && options.knownAcceptances) {
+      if (!Array.isArray(options.knownAcceptances)) throw new Error('Invalid prior npm acceptance list');
+      const previous = options.knownAcceptances.filter(p => p.name === expected.name && p.version === expected.version);
+      for (const proof of previous) {
+        assertPackMatches(proof, expected);
+        if (proof.schema !== 1 || proof.state !== 'accepted' || typeof proof.accepted_at !== 'string' ||
+            !Number.isFinite(Date.parse(proof.accepted_at)) ||
+            !['npm-exit-zero', 'verified-public-bytes'].includes(proof.evidence) ||
+            (proof.evidence === 'npm-exit-zero' && (proof.exit_code !== 0 || proof.signal !== null))) {
+          throw new Error('Invalid prior npm acceptance');
+        }
+      }
+      // A trusted durable acknowledgement is sufficient even while registry
+      // visibility lags. Never send an already accepted immutable version again.
+      if (previous.length) return {status: 'previously-accepted', acceptance: previous[0]};
+    }
     // Preflight, tag checks and post-submission confirmation share one budget;
     // adding a read retry must not multiply the publication wait by stages.
     const readOptions = {...options, deadline: Math.min(options.deadline ?? Infinity,
@@ -302,20 +336,32 @@ export async function publishPackage(dir, expected, tag, options = {}) {
       if (!metadata && versionSeen) throw new PackageNotVisibleError(`Previously visible registry version is pending: ${identity(expected)}`);
       return metadata;
     });
-    if (existing) return {status: 'existing', metadata: existing};
+    if (existing) return acceptedOnly
+      ? {status: 'existing', acceptance: acceptance(expected, 'verified-public-bytes', options.now)}
+      : {status: 'existing', metadata: existing};
     await pollRegistryRead(expected, readOptions, bounded => assertTagSafe(expected, tag, bounded));
     // Publish the checked bytes, never repack a mutable directory inside npm publish.
     // A failed/uncertain submission is never repeated here: only visibility is retried.
     let result;
+    // Persist intent before crossing the irreversible boundary. A rerun must
+    // reconcile an interrupted submission rather than treating 404 as consent.
+    options.onSubmission?.({state: 'unknown', package: expected});
     try {
       result = (options.spawnImpl || spawnSync)(npm,
         ['publish', packed.tarballPath, '--access', 'public', '--tag', tag, '--ignore-scripts', '--registry', REGISTRY],
         {stdio: 'inherit', shell: process.platform === 'win32'});
     } catch (error) { result = {status: null, error}; }
-    const accepted = result.status === 0 && !result.error;
+    const accepted = result.status === 0 && !result.error && !result.signal;
+    if (accepted && acceptedOnly) {
+      return {status: 'published', acceptance: {
+        ...acceptance(expected, 'npm-exit-zero', options.now), exit_code: 0, signal: null,
+      }};
+    }
     try {
       const metadata = await waitForPackage(expected, readOptions);
-      return {status: accepted ? 'published' : 'recovered', metadata};
+      return acceptedOnly
+        ? {status: 'recovered', acceptance: acceptance(expected, 'verified-public-bytes', options.now)}
+        : {status: accepted ? 'published' : 'recovered', metadata};
     } catch (error) {
       if (!accepted) throw new Error(`npm publish failed or was uncertain for ${identity(expected)}; registry did not confirm matching bytes: ${error.message}`, {cause: error});
       throw error;

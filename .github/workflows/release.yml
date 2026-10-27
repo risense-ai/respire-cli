@@ -22,6 +22,8 @@ on:
       - 'npm/scripts/pack-alias.mjs'
       - 'npm/scripts/pack.mjs'
       - 'npm/scripts/release-publication.mjs'
+      - 'npm/scripts/publication-acceptance.mjs'
+      - 'npm/scripts/test-publication-acceptance.mjs'
       - 'npm/scripts/registry-publication.mjs'
       - 'npm/scripts/parallel-publication.mjs'
       - 'npm/scripts/cleanup-release-artifacts.mjs'
@@ -648,12 +650,25 @@ jobs:
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
           if(expected.length!==12||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 12 verified binary/runtime/metadata assets');
           NODE
+      - name: Reconcile any interrupted previous-attempt npm submission
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/release-publication.mjs guard-accepted
       - name: Publish npm using Trusted Publishing
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
+          GH_TOKEN: ${{ github.token }}
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
-        run: node npm/scripts/pack.mjs --root target/ci --publish --tag "$CLI_CHANNEL"
-      - name: Verify scoped registry propagation and bind the draft receipt
+        run: node npm/scripts/pack.mjs --root target/ci --publish --accepted-only --tag "$CLI_CHANNEL"
+      - uses: actions/upload-artifact@v4
+        if: ${{ always() && !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: npm-submissions-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-submissions.json
+          if-no-files-found: ignore
+      - name: Bind successful scoped npm submissions to the draft
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 20
         env:
@@ -661,20 +676,20 @@ jobs:
           CLI_SHA: ${{ needs.plan.outputs.sha }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
-        run: node npm/scripts/release-publication.mjs scoped-ready
+        run: node npm/scripts/release-publication.mjs scoped-accepted
       - uses: actions/upload-artifact@v4
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         with:
           retention-days: 1
-          name: scoped-ready-${{ github.run_id }}-${{ github.run_attempt }}
-          path: scoped-ready.json
+          name: scoped-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: scoped-accepted.json
           if-no-files-found: error
-      - name: Require the matching short-package publisher and public install
+      - name: Require every matching npm submission acceptance
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
-        timeout-minutes: 81
+        timeout-minutes: 21
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node npm/scripts/release-publication.mjs await-alias
+        run: node npm/scripts/release-publication.mjs await-alias-accepted
       - name: Repair only the missing Linux ARM64 GNU package
         if: inputs.repair_dev12 || inputs.repair_dev14
         run: |
@@ -712,7 +727,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
-        run: node npm/scripts/release-publication.mjs finalize
+        run: node npm/scripts/release-publication.mjs finalize-accepted
+      - uses: actions/upload-artifact@v4
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        with:
+          retention-days: 1
+          name: publication-accepted-${{ github.run_id }}-${{ github.run_attempt }}
+          path: publication-accepted.json
+          if-no-files-found: error
 
   dev6-publication-resume:
     name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
