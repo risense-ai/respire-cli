@@ -26,6 +26,10 @@ on:
       - 'npm/scripts/release-regression-contract.mjs'
       - 'npm/scripts/test-release-regression-contract.mjs'
       - 'npm/scripts/test-parallel-ci-contracts.mjs'
+
+      - 'npm/scripts/publication-fence.mjs'
+      - 'npm/scripts/fixtures/publication-crossrun.mjs'
+      - 'npm/scripts/test-publication-fence.mjs'
       - 'npm/scripts/test-publication-acceptance.mjs'
       - 'npm/scripts/registry-publication.mjs'
       - 'npm/scripts/parallel-publication.mjs'
@@ -187,6 +191,7 @@ jobs:
             const reserved=reservedJson?JSON.parse(reservedJson):null;
             const notes=`Build and regression results pending.\nRelease workflow run: ${process.env.GITHUB_RUN_ID}`;
             if(reserved){
+              cp.execFileSync('node',['npm/scripts/release-publication.mjs','guard-reservation-accepted'],{stdio:'inherit',env:{...process.env,CLI_VERSION:version,CLI_SHA:sha}});
               if(!process.env.RELEASE_DEV_VERSION||!reserved.draft||!reserved.prerelease||reserved.asset_count!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
               const owner=reserved.body?.match(/Release workflow run: (\d+)/)?.[1];
               if(owner){
@@ -718,6 +723,13 @@ jobs:
         run: |
           # Old refs lacking the protocol must fail before scoped publication.
           test "$(node npm/scripts/release-publication.mjs protocol)" = 2
+      - name: Reject previously fenced version owners before npm or asset mutation
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/release-publication.mjs check-fence-accepted
       - run: npm install --global npm@11.5.1
       - name: Prepare ephemeral build version
         run: node npm/scripts/set-build-version.mjs ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_VERSION || needs.plan.outputs.version }}
@@ -763,6 +775,14 @@ jobs:
             'All seven platform binaries are newly built and checked for DEV13. The macOS CPU inference probe and npm package checks are executed separately for these new artifacts.', ''
           ].join('\n'));
           NODE
+      - name: Preserve durable version ownership in the generated Release notes
+        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
+        run: node npm/scripts/release-publication.mjs bind-fence-notes-accepted
       - name: Create a draft and upload every verified artifact
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
@@ -774,6 +794,7 @@ jobs:
           set -euo pipefail
           if gh release view "$CLI_TAG" --json isDraft >/dev/null 2>&1; then
             test "$(gh release view "$CLI_TAG" --json isDraft --jq .isDraft)" = true || { echo 'Release is already public; use a new version'; exit 1; }
+            CLI_SHA="${{ needs.plan.outputs.sha }}" CLI_VERSION="${{ needs.plan.outputs.version }}" node npm/scripts/release-publication.mjs check-fence-accepted
             gh release edit "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           elif [ "$CLI_CHANNEL" = dev ]; then
             gh release create "$CLI_TAG" --draft --prerelease --target "$CLI_SHA" --title "$CLI_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
@@ -792,6 +813,8 @@ jobs:
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
         run: node npm/scripts/release-publication.mjs guard-accepted
       - name: Publish npm using Trusted Publishing
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

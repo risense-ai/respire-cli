@@ -202,3 +202,32 @@ all three source lanes and their aggregate without the separate optional native
 compile matrix. This is source CI only: it cannot substitute for Release's
 required exact-source **push** CI or any native/model/release acceptance.
 The default manual matrix remains unchanged when the input is false.
+
+## Cross-run immutable-version fence
+
+Before npm can start, the normal publisher binds the repository, version,
+selected source SHA, owning Release run and complete scoped/alias package names
+in an encoded `rsrs-npm-write-fence` comment in the Release notes. Immediately
+before the first possible submission it persists `phase: fenced` with every
+validated scoped package digest and confirms the write. This is durable intent,
+not an npm acceptance or installation receipt. It survives Actions artifact
+expiry and is retained when descriptions are regenerated or the Release becomes
+public. No new credential, service or permission is used.
+
+A different Release run cannot take over that version, even for stable tags or
+when every public registry read returns 404. Version allocation checks the old
+marker before changing a DEV reservation owner. The publisher checks ownership
+before npm/asset preparation and again before replacing draft notes or assets.
+An existing unbound stable draft cannot prove that no previous submission
+occurred and therefore fails closed. A freshly allocated empty DEV reservation
+owned by the current run can acquire its first marker.
+
+After an uncertain submission, inspect public content read-only and resume the
+original run's failed publisher only while its exact source/build/journal
+proofs remain available. Same-run attempts retain the original fence and
+reconcile their per-package unknown outcomes. Matching previous acceptances are
+carried forward without another npm submission. Do not remove/downgrade the
+marker, overwrite accepted versions, or create a replacement run to work around
+an unresolved intent. Expired or missing proofs require separately audited
+recovery or a new unused version; this change does not add automatic cross-run
+recovery. Temporary artifact cleanup never removes this Release metadata.
