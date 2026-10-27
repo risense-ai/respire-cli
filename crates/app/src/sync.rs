@@ -207,6 +207,13 @@ pub fn sync_controlled(
             if sent {
                 pull_resolution_pages(local, remote, control, &cap.epoch)?;
             }
+            // A processed explicit decision can release a protected diary
+            // working branch. Apply that decision in this sync, not a later one.
+            let mut after = String::new();
+            control.progress("materialize");
+            while let Some(next) = control.local(|| local.materialize_received_batch(keys, &after))? {
+                after = next;
+            }
         }
     } else {
         if control.local(|| local.meta_get("sync_v2_epoch"))?.is_some() {
