@@ -52,7 +52,7 @@ RSRS_CPU_OWNED_ORT_FILE=/path/to/verified/model/onnx/model_quantized.cpu-v1.ort 
 
 新增日记 storage 回归已加入现有 token-free 四平台源码验收的 native/musl 步骤；原有真实模型和 snapshot/runtime/MCP 门禁保留。
 
-首轮四平台中，macOS 的后台 fence 探针在真正进入日记工作前，仍在对两个约 569 MB 的模型容器做校验而超时。探针将模型准备作为独立的最多 300 秒前置条件；准备后的实际日记工作观察仍限 120 秒，仍必须观察到 `diary-fragments`，并验证 readonly 回执后的两表摘要、data_version 与 drain 不再写入。没有跳过模型校验或把准备状态当作实际日记推理通过。
+首轮四平台中，macOS 的后台 fence 探针在真正进入日记工作前，仍在对两个约 569 MB 的模型容器做校验而超时。探针将模型准备作为独立的最多 300 秒前置条件；准备后的实际日记工作观察仍限 120 秒，仍必须观察到 `diary-fragments`，并验证 readonly 回执后的两表摘要、data_version 与 drain 不再写入。随后一轮 macOS 已通过该 fence，但切换另一密钥账号后的 semantic_ready 等待超时；账号切换使用同一模型准备路径，因此两处等待共用同一有界准备规则，并在未就绪时保留 model_operation/retrieval_index 诊断。另一账号仍必须真实语义就绪、返回自身正文且排除旧账号正文。没有跳过模型校验或把准备状态当作实际日记推理通过。
 
 ## 发布状态
 
