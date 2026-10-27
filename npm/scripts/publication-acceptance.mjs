@@ -7,6 +7,7 @@ import {RELEASE_ARTIFACT_CLEANUP_POLICY, validateSource, validateScopedPayload,
   verifyPackages, publicInstall} from './release-publication.mjs';
 import {readdirSync, statSync} from 'node:fs';
 import path from 'node:path';
+import {checkVersionFence,checkReservationFence,bindFenceNotes,persistVersionFence} from './publication-fence.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
 export const scopedAcceptedName = s => `scoped-accepted-${s.run_id}-${s.run_attempt}`;
 export const aliasAcceptedName = (s, r) => `alias-accepted-${s.run_id}-${s.run_attempt}-${r.id}-${r.run_attempt}`;
@@ -93,6 +94,7 @@ async function guardAccepted() {
   const repo = process.env.GITHUB_REPOSITORY, runId = process.env.GITHUB_RUN_ID, attempt = Number(process.env.GITHUB_RUN_ATTEMPT);
   if(repo!=='risense-ai/respire-cli' || !id(runId) || !id(attempt)) throw Error('Invalid submission run');
   assertSubmissionActive();
+  checkVersionFence(); // Includes other run IDs and survives Actions artifact expiry.
   const expected = readExpectedPacks('npm/dist',manifest()).map(packIdentity);
   const acceptances=[];
   for(let previous=1;previous<attempt;previous++) {
@@ -103,6 +105,7 @@ async function guardAccepted() {
     if(!journal || String(journal.run_id)!==runId || Number(journal.run_attempt)!==previous) throw Error('Prior submission journal unavailable; inspect before retrying publication');
     acceptances.push(...await reconcilePriorSubmissions(journal,expected));
   }
+  persistVersionFence(expected); // Durable intent precedes every possible scoped/alias npm write.
   write('prior-scoped-acceptances.json',{run_id:runId,run_attempt:attempt,acceptances});
 }
 async function scopedAccepted() {
@@ -273,6 +276,9 @@ async function verifyAccepted() {
   write('publication-verified.json',verified); output({eligible:'true'});
 }
 export async function main(action) {
+  if(action==='check-fence-accepted')return checkVersionFence();
+  if(action==='guard-reservation-accepted')return checkReservationFence();
+  if(action==='bind-fence-notes-accepted')return bindFenceNotes();
   if(action==='guard-accepted') return guardAccepted();
   if(action==='scoped-accepted') return scopedAccepted();
   if(action==='publish-alias-accepted') return publishAliasAccepted();

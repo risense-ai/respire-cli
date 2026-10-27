@@ -1,0 +1,59 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {readFileSync,rmSync} from 'node:fs';
+import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
+import {readFence,fenceBody,assertFenceOwner,assertFencePackages,assertReusableRelease} from './publication-fence.mjs';
+const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
+const c={repository:'risense-ai/respire-cli',version:'1.2.3',source_sha:'a'.repeat(40),run_id:'700',first_attempt:'1'};
+const packages=[...m.targets.map(t=>t.pkg),m.npmScope].map(name=>({name,version:c.version,integrity:'sha512-'+'a'.repeat(86)+'==',shasum:'b'.repeat(40)}));
+const prepared={schema:1,kind:'npm-version-fence',...c,phase:'prepared',package_names:[...packages.map(p=>p.name),'rsrs-cli'].sort(),scoped_packages:null,created_at:'2026-10-27T00:00:00Z'};
+const fenced={...prepared,phase:'fenced',scoped_packages:packages};
+const release=f=>({draft:true,tag_name:'v'+c.version,target_commitish:c.source_sha,prerelease:false,assets:[],body:fenceBody('Synthetic release notes',f)});
+
+test('durable owner binds repository, package inventory, source and version across all attempts',()=>{
+  const body=fenceBody('Synthetic release notes',fenced);assert.deepEqual(readFence(body),fenced);
+  assert.equal(assertFenceOwner(fenced,c,m),fenced);assert.equal(assertFenceOwner(fenced,{...c,first_attempt:'2'},m),fenced);
+  for(const change of [{run_id:'701'},{repository:'other/repo'},{version:'1.2.4'},{source_sha:'f'.repeat(40)}])assert.throws(()=>assertFenceOwner(fenced,{...c,...change},m));
+  assertFencePackages(fenced,packages);
+  assert.throws(()=>assertFencePackages(fenced,[...packages.slice(1)]));
+  assert.throws(()=>assertFencePackages(fenced,[{...packages[0],shasum:'c'.repeat(40)},...packages.slice(1)]));
+});
+test('regenerating notes cannot erase, downgrade or replace earlier unknown-write evidence',()=>{
+  const body=fenceBody('Human notes',fenced);
+  assert.throws(()=>fenceBody(body,prepared));
+  assert.throws(()=>fenceBody(body,{...fenced,run_id:'701'}));
+  assert.throws(()=>fenceBody(body,{...fenced,scoped_packages:[]}));
+  assert.deepEqual(readFence(fenceBody(body,fenced)),fenced);
+  assert.throws(()=>readFence(body+'\n'+body));
+  assert.throws(()=>readFence('<!-- rsrs-npm-write-fence:truncated'));
+});
+test('unbound existing stable drafts and public versions cannot be inferred safe from registry absence',()=>{
+  const r=release(fenced);assert.equal(assertReusableRelease(r,c,m).run_id,'700');
+  assert.throws(()=>assertReusableRelease({...r,body:'legacy stable draft'},c,m),/no bound npm intent/);
+  assert.throws(()=>assertReusableRelease({...r,draft:false},c,m));
+  const dev={...c,version:'1.2.3-dev.1'};
+  const reservation={...r,tag_name:'v'+dev.version,prerelease:true,body:'Release workflow run: 700'};
+  assert.equal(assertReusableRelease(reservation,dev,m),null);
+  assert.throws(()=>assertReusableRelease({...reservation,body:'Release workflow run: 699'},dev,m));
+  assert.throws(()=>assertReusableRelease({...reservation,assets:[{id:1}]},dev,m));
+});
+test('two real Release-run processes: old unknown + continuous registry 404 never causes another npm publish',t=>{
+  const script=fileURLToPath(new URL('./fixtures/publication-crossrun.mjs',import.meta.url));
+  const root=fileURLToPath(new URL('../../',import.meta.url));
+  const result=spawnSync(process.execPath,[script,root],{encoding:'utf8',timeout:20000});
+  assert.equal(result.error,undefined);assert.equal(result.status,0,result.stderr);
+  const report=JSON.parse(result.stdout);t.after(()=>rmSync(report.root,{recursive:true,force:true}));
+  assert.equal(report.runs[0].status,1);assert.match(report.runs[0].stderr,/uncertain/);
+  assert.equal(report.runs[1].status,1);assert.match(report.runs[1].stderr,/fenced by previous Release run 700/);
+  assert.equal(report.publish_calls,1);assert.deepEqual(report.write_runs,['700']);
+  assert.deepEqual(report.all_npm_calls,['700 pack','700 publish']);assert.equal(report.fence_phase,'fenced');assert.equal(report.fence_owner,'700');
+});
+test('workflow guards a previous owner before replacing draft notes or clobbering assets',()=>{
+  const w=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  assert(w.indexOf('guard-reservation-accepted')<w.indexOf("gh',['release','edit',`v${version}`"));
+  const publisher=w.split('\n  publish:\n')[1].split('\n  dev6-publication-resume:')[0];
+  assert(publisher.indexOf('check-fence-accepted')<publisher.indexOf('npm install --global'));
+  assert(publisher.indexOf('bind-fence-notes-accepted')<publisher.indexOf('gh release upload'));
+  assert(publisher.indexOf('guard-accepted')<publisher.indexOf('--publish --accepted-only'));
+});

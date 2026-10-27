@@ -160,3 +160,32 @@ Manual Release validation runs all native upgrade checks by default. After DEV p
 When a DEV must pass full acceptance before publication, merge with `[manual-release]` in the commit message to suppress automatic Release allocation while keeping push CLI CI enabled. Then dispatch Release for the exact merged source with `publish=true`, `full_regression_before_publish=true` and the requested unpublished `dev_version`. Publication waits for all four native upgrades, all three system regressions and API checks from that same run; builds and regressions are not repeated. The default fast DEV order is unchanged.
 
 For an explicitly requested DEV number, manual Release accepts `dev_version` in `X.Y.Z-dev.N` format. Its base can differ from the source manifest, so a published `1.0.12` baseline can produce the requested `1.0.13-dev.N` artifacts. It must have no Git tag or published package on any of the five scoped npm packages. Only an empty, unpublished DEV draft can be resumed after its previous release run finishes; preserve the failed run and reports. Draft notes record their owner run, and an active owner blocks resumption. Legacy drafts without an owner marker require all other Release runs to finish first. The corrected source still passes the normal builds and regression gates. Omit the input for automatic allocation. Stable releases reject this input.
+
+## Cross-run immutable-version fence
+
+Before npm can start, the normal publisher binds the repository, version,
+selected source SHA, owning Release run and complete scoped/alias package names
+in an encoded `rsrs-npm-write-fence` comment in the Release notes. Immediately
+before the first possible submission it persists `phase: fenced` with every
+validated scoped package digest and confirms the write. This is durable intent,
+not an npm acceptance or installation receipt. It survives Actions artifact
+expiry and is retained when descriptions are regenerated or the Release becomes
+public. No new credential, service or permission is used.
+
+A different Release run cannot take over that version, even for stable tags or
+when every public registry read returns 404. Version allocation checks the old
+marker before changing a DEV reservation owner. The publisher checks ownership
+before npm/asset preparation and again before replacing draft notes or assets.
+An existing unbound stable draft cannot prove that no previous submission
+occurred and therefore fails closed. A freshly allocated empty DEV reservation
+owned by the current run can acquire its first marker.
+
+After an uncertain submission, inspect public content read-only and resume the
+original run's failed publisher only while its exact source/build/journal
+proofs remain available. Same-run attempts retain the original fence and
+reconcile their per-package unknown outcomes. Matching previous acceptances are
+carried forward without another npm submission. Do not remove/downgrade the
+marker, overwrite accepted versions, or create a replacement run to work around
+an unresolved intent. Expired or missing proofs require separately audited
+recovery or a new unused version; this change does not add automatic cross-run
+recovery. Temporary artifact cleanup never removes this Release metadata.
