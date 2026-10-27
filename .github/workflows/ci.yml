@@ -195,6 +195,21 @@ jobs:
               --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || printf "%s\n" "Coverage diagnostic unavailable; original failure retained"
           fi
           exit "$result"
+
+  contract-checks:
+    # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK
+    # execution. Keep their own runner and fail the same whole CI workflow.
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -202,7 +217,7 @@ jobs:
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
-      - run: node --test npm/scripts/test-publication-acceptance.mjs npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
+      - run: node --test npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-ci-contracts.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
@@ -217,6 +232,18 @@ jobs:
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
       - run: python3 scripts/test-core-payload-lifetime.py
+
+  check-complete:
+    if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    needs: [check, contract-checks]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Require source coverage and all independent contracts
+        env:
+          SOURCE_RESULT: ${{ needs.check.result }}
+          CONTRACT_RESULT: ${{ needs.contract-checks.result }}
+        run: test "$SOURCE_RESULT" = success && test "$CONTRACT_RESULT" = success
 
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}

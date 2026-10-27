@@ -7,6 +7,7 @@ import {RELEASE_ARTIFACT_CLEANUP_POLICY, validateSource, validateScopedPayload,
   verifyPackages, publicInstall} from './release-publication.mjs';
 import {readdirSync, statSync} from 'node:fs';
 import path from 'node:path';
+import {regressionContract,validateRegressionContract} from './release-regression-contract.mjs';
 const ALIAS = '.github/workflows/npm-alias.yml';
 export const scopedAcceptedName = s => `scoped-accepted-${s.run_id}-${s.run_attempt}`;
 export const aliasAcceptedName = (s, r) => `alias-accepted-${s.run_id}-${s.run_attempt}-${r.id}-${r.run_attempt}`;
@@ -26,6 +27,7 @@ export function validateAcceptance(proof, expected) {
 export function validateAcceptedScoped(receipt, m) {
   if (receipt?.schema !== 2 || receipt.kind !== 'scoped-accepted' || receipt.state !== 'accepted') throw Error('Invalid accepted scoped receipt');
   validateScopedPayload(receipt, m);
+  if(receipt.validation_inventory)validateRegressionContract(receipt.validation_inventory,m);
   if(receipt.source.recovery)throw Error('Historical recovery remains on protocol 1');
   if (!Array.isArray(receipt.acceptances) || receipt.acceptances.length !== receipt.packages.length ||
       new Set(receipt.acceptances.map(p => p.name)).size !== receipt.packages.length) throw Error('Incomplete npm acceptance inventory');
@@ -124,7 +126,7 @@ async function scopedAccepted() {
     return {package:t.pkg,target:t.triple,file:b.binary_file,sha256:b.binary_sha256};
   });
   const receipt = validateAcceptedScoped({schema:2,kind:'scoped-accepted',state:'accepted',source,packages,assets,binaries,
-    cleanup_policy:RELEASE_ARTIFACT_CLEANUP_POLICY,acceptances:submissions.packages.map(p=>p.acceptance)},m);
+    cleanup_policy:RELEASE_ARTIFACT_CLEANUP_POLICY,validation_inventory:regressionContract(m),acceptances:submissions.packages.map(p=>p.acceptance)},m);
   assertActive(source); assertDraft(api(`repos/${source.repository}/releases/${source.release_id}`),receipt); assertTag(source);
   write('scoped-accepted.json',receipt);
 }

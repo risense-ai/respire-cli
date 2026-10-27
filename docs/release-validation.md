@@ -160,3 +160,27 @@ Manual Release validation runs all native upgrade checks by default. After DEV p
 When a DEV must pass full acceptance before publication, merge with `[manual-release]` in the commit message to suppress automatic Release allocation while keeping push CLI CI enabled. Then dispatch Release for the exact merged source with `publish=true`, `full_regression_before_publish=true` and the requested unpublished `dev_version`. Publication waits for all four native upgrades, all three system regressions and API checks from that same run; builds and regressions are not repeated. The default fast DEV order is unchanged.
 
 For an explicitly requested DEV number, manual Release accepts `dev_version` in `X.Y.Z-dev.N` format. Its base can differ from the source manifest, so a published `1.0.12` baseline can produce the requested `1.0.13-dev.N` artifacts. It must have no Git tag or published package on any of the five scoped npm packages. Only an empty, unpublished DEV draft can be resumed after its previous release run finishes; preserve the failed run and reports. Draft notes record their owner run, and an active owner blocks resumption. Legacy drafts without an owner marker require all other Release runs to finish first. The corrected source still passes the normal builds and regression gates. Omit the input for automatic allocation. Stable releases reject this input.
+
+## Independent source and migration checks
+
+Normal CLI CI runs Rust workspace/90% coverage and packaging/workflow/fixture
+contracts on independent runners. `check-complete` fails unless both lanes
+succeed, including unexpected skips. Release's exact-source push-CI check still
+requires the entire CLI CI run to succeed; adding a job does not automatically
+configure a GitHub required branch check.
+
+Windows and macOS migration fixtures run independently of base cloud sweeps,
+with separate runners, profile roots and owned random native keyring entries.
+Their join jobs wait for both successful producer groups. On each native
+platform, the existing migration gate checks both reports against the original
+verified build metadata's exact SHA/version/target/binary digest. Fixture success
+alone cannot replace the base report, and base success cannot replace migration.
+Linux supplements and their model/outbox dependencies keep their ordering.
+
+New accepted receipts declare the full regression inventory: four native
+upgrade lanes, three system sweeps, two native migration fixtures, two native
+join gates and the API check. Publication and cleanup validate every declared
+lane; failure, cancellation, skip, missing or duplicate targets cannot authorize
+success. Older receipts retain their original strict inventory rather than
+retroactively requiring jobs that did not exist. This changes overlap, not test
+coverage or the ten-minute performance claim; timings require an actual run.
