@@ -360,6 +360,17 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
         ]
     ) {
         Duration::from_secs(30 * 60)
+    } else if command
+        .first()
+        .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
+    {
+        // Full-store re-embeds, first-sync uploads and batch imports legitimately exceed the
+        // 120s default (reembed ≈10min on 2.6k entries): the client used to cut them at 120s
+        // and cascade a second timeout on the following sync (2026-10-01, after the swap).
+        // NOTE: match on the leading subcommand only — take(2) also captures the target
+        // path, so an exact ["import"] pattern silently missed real imports (bit us on a
+        // 3476-entry plaintext-embed import that ran >120s and got cut, 2026-10-16).
+        Duration::from_secs(30 * 60)
     } else {
         HTTP_TIMEOUT
     };
