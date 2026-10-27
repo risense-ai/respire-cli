@@ -12,6 +12,12 @@ import { createHash } from 'node:crypto';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const doPublish = process.argv.includes('--publish');
+const acceptedOnly = doPublish && process.argv.includes('--accepted-only');
+// Establish no-submission evidence before configuration/pack validation can fail.
+// An unknown entry replaces this empty inventory BEFORE every actual npm write.
+if (acceptedOnly) writeFileSync('scoped-submissions.json', JSON.stringify({schema: 2,
+  run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+  state: 'partial', packages: [], submissions: []}, null, 2));
 const npmTag = arg('--tag', 'latest');
 const repoRoot = path.resolve(arg('--repo', '.'));
 const outDir = path.join(repoRoot, 'npm', 'dist');
@@ -38,7 +44,6 @@ if (manifest.cliVersion !== version) {
 // rebuild or clear dist here: that would discard the evidence we just verified.
 if (doPublish) {
   const expected = readExpectedPacks(outDir, manifest, version);
-  const acceptedOnly = process.argv.includes('--accepted-only');
   const accepted = [];
   const submissions = new Map();
   const prior = acceptedOnly ? JSON.parse(readFileSync('prior-scoped-acceptances.json', 'utf8')) : null;

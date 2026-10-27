@@ -135,7 +135,12 @@ export function acceptedScopedOutput(receipt, run, attempt) {
     protocol:'2',artifact:scopedAcceptedName(receipt.source),file:'scoped-accepted.json'};
 }
 async function publishAliasAccepted() {
-  const scoped = validateAcceptedScoped(read('scoped-accepted.json'),manifest()), source = scoped.source;
+  const raw = read('scoped-accepted.json');
+  const source = raw.source;
+  const journal = state => write('alias-submissions.json',{schema:2,source,run_id:process.env.GITHUB_RUN_ID,
+    run_attempt:process.env.GITHUB_RUN_ATTEMPT,submissions:state?[state]:[]});
+  journal(); // No write has occurred; preflight failures must remain recoverable.
+  const scoped = validateAcceptedScoped(raw,manifest());
   if (command('git',['rev-parse','HEAD']).trim() !== source.sha || String(source.run_id) !== process.env.SOURCE_RUN ||
       Number(source.run_attempt) !== Number(process.env.SOURCE_ATTEMPT)) throw Error('Pinned alias checkout/source mismatch');
   assertActive(source);
@@ -175,8 +180,6 @@ async function publishAliasAccepted() {
     }
   }
   assertActive(source); // No public propagation wait and no replay around this write.
-  const journal = state => write('alias-submissions.json',{schema:2,source,run_id:process.env.GITHUB_RUN_ID,
-    run_attempt:process.env.GITHUB_RUN_ATTEMPT,submissions:[state]});
   const result = await publishAcceptedPackage('npm/dist/rsrs-cli',{...expected,dependencies:pkg.dependencies},source.channel,
     {knownAcceptances,onSubmission:()=>{assertActive(source);journal({state:'unknown',package:expected});}});
   journal({state:'accepted',package:result.acceptance});

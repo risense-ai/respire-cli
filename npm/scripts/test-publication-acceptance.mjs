@@ -166,3 +166,18 @@ main(process.argv[2]).catch(e=>{console.error(e.message);process.exitCode=1;});`
   f.run.status='in_progress';save();const finalized=run('finalize-accepted');assert.equal(finalized.status,0,finalized.stderr);assert.equal(existsSync(path.join(root,'edited-release')),true);
   const summary=JSON.parse(readFileSync(path.join(root,'publication-accepted.json')));assert.equal(summary.public_verification,'pending');assert.equal(summary.trigger_to_accepted_seconds,600);
 });
+
+test('scoped and alias preflight failures retain empty journals without inventing a submission',t=>{
+  const root=mkdtempSync(path.join(tmpdir(),'rsrs-preflight-journal-'));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  const env={...process.env,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'200',GITHUB_RUN_ATTEMPT:'1'};
+  const pack=fileURLToPath(new URL('./pack.mjs',import.meta.url));
+  const failed=spawnSync(process.execPath,[pack,'--repo',root,'--publish','--accepted-only'],{cwd:root,env,encoding:'utf8',timeout:10000});
+  assert.notEqual(failed.status,0);assert.equal(failed.error,undefined);
+  const scoped=JSON.parse(readFileSync(path.join(root,'scoped-submissions.json')));assert.deepEqual(scoped.submissions,[]);assert.deepEqual(scoped.packages,[]);assert.equal(scoped.run_id,'200');
+  mkdirSync(path.join(root,'npm'));writeFileSync(path.join(root,'npm/artifact-manifest.json'),JSON.stringify(m));
+  const f=fixture();f.scoped.acceptances.pop();writeFileSync(path.join(root,'scoped-accepted.json'),JSON.stringify(f.scoped));
+  const helper=fileURLToPath(new URL('./release-publication.mjs',import.meta.url));
+  const alias=spawnSync(process.execPath,[helper,'publish-alias-accepted'],{cwd:root,env,encoding:'utf8',timeout:10000});
+  assert.notEqual(alias.status,0);assert.match(alias.stderr,/acceptance inventory/);
+  const journal=JSON.parse(readFileSync(path.join(root,'alias-submissions.json')));assert.deepEqual(journal.submissions,[]);assert.deepEqual(journal.source,source);
+});
