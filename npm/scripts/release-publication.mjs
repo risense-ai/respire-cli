@@ -136,7 +136,7 @@ export function artifact(runId, name, repository) {
   try {
     command('gh', ['run', 'download', String(runId), '--repo', repository, '--name', name, '--dir', directory], {timeout: 60000});
     const files = readdirSync(directory);
-    if (files.length !== 1 || !['scoped-ready.json', 'alias-ready.json', 'scoped-accepted.json', 'alias-accepted.json', 'scoped-submissions.json', 'alias-submissions.json', 'release-prepared.json'].includes(files[0]) || statSync(path.join(directory, files[0])).size > 1024 * 1024) throw new Error('Unexpected publication receipt files');
+    if (files.length !== 1 || !['scoped-ready.json', 'alias-ready.json', 'scoped-accepted.json', 'alias-accepted.json', 'scoped-submissions.json', 'alias-submissions.json'].includes(files[0]) || statSync(path.join(directory, files[0])).size > 1024 * 1024) throw new Error('Unexpected publication receipt files');
     return read(path.join(directory, files[0]));
   } finally { rmSync(directory, {recursive: true, force: true}); }
 }

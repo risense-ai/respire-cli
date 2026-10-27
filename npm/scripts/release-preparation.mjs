@@ -6,7 +6,8 @@ import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {regressionContract,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
-import {api,pages,artifact,output as setOutput} from './release-publication.mjs';
+import {api,pages,output as setOutput} from './release-publication.mjs';
+import {readVerifiedReceipt} from './verified-receipt.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -136,18 +137,24 @@ export function validatePreparedBytes(assets,packs,source,manifest){
   requireValue(Array.isArray(packs)&&same(packs.map(p=>p.name).sort(),packages)&&new Set(packs.map(p=>p.file)).size===packs.length&&
     packs.every(p=>p.version===source.version&&/^[A-Za-z0-9_.-]+\.tgz$/.test(p.file||'')&&positive(p.size)&&HASH.test(p.sha256||'')), 'Prepared npm inventory/digests are incomplete');
 }
-export function validatePreparation(receipt,context){
-  const {source,identity,manifest,run,jobs,ci,artifacts}=context;
+// Historical evidence alone is never publication authorization. Only a trusted
+// import plus mandatory checks of every copied asset and npm tarball can reuse it.
+export function validatePreparationHistory(receipt,context){
+  const {source,identity,manifest,run,jobs,ci}=context;
   validatePreparationRun(run,source);
   requireValue(receipt?.schema===1&&receipt.kind==='release-prepared'&&receipt.state==='validated-unpublished'&&
     same(receipt.source,source)&&same(receipt.identity,identity),'Prepared receipt source, SDK, toolchain or layout differs');
   requireValue(same(receipt.validation,preparationValidation(jobs,ci,source,manifest)), 'Prepared CI/regression proof changed or is stale');
-  requireValue(same(receipt.origin_artifacts,preparationArtifacts(artifacts,source,manifest)), 'Prepared artifact IDs/digests changed');
   const prepared=parseTimestamp(receipt.prepared_at),finished=parseTimestamp(run.updated_at);
   requireValue(prepared!==null&&finished!==null&&prepared>=parseTimestamp(receipt.validation.completed_at)&&prepared<=finished,'Prepared receipt clock is invalid');
   validatePreparedBytes(receipt.assets,receipt.packs,source,manifest);
   if(context.assets)requireValue(same(receipt.assets,context.assets),'Downloaded prepared asset bytes differ');
   if(context.packs)requireValue(same(receipt.packs,context.packs),'Downloaded prepared npm bytes differ');
+  return receipt;
+}
+export function validatePreparation(receipt,context){
+  validatePreparationHistory(receipt,context);
+  requireValue(same(receipt.origin_artifacts,preparationArtifacts(context.artifacts,context.source,context.manifest)), 'Prepared artifact IDs/digests changed');
   return receipt;
 }
 
@@ -201,14 +208,17 @@ export function readPreparedRun(runId,sha,version){
     initial.event==='workflow_dispatch'&&initial.head_branch==='main'&&initial.head_sha===sha&&initial.head_repository?.full_name===REPO&&
     initial.status==='completed'&&initial.conclusion==='success','Only a completed exact-main preparation can be consumed');
   const name=preparationName({run_id:runId,run_attempt:initial.run_attempt});
-  const receipt=artifact(runId,name,REPO);
-  requireValue(receipt,'Preparation proof is missing or expired');
+  const initialArtifacts=pages(`repos/${REPO}/actions/runs/${runId}/artifacts?per_page=100`).flatMap(p=>p.artifacts).filter(a=>a.name===name);
+  requireValue(initialArtifacts.length===1,'Preparation proof is missing or duplicated');
+  const receipt=readVerifiedReceipt(initialArtifacts[0],'release-prepared.json',{runId,headSha:initial.head_sha});
   const source=validatePreparationSource({repository:REPO,workflow:WORKFLOW,run_id:String(runId),run_attempt:Number(initial.run_attempt),
     sha,version:version||receipt.source?.version});
   const context=preparationContext(source);
   validatePreparation(receipt,context);
   const proofs=context.artifacts.filter(a=>a.name===name);
   requireValue(proofs.length===1,'Duplicate preparation proof artifact');
+  requireValue(String(proofs[0].id)===String(initialArtifacts[0].id)&&proofs[0].digest===initialArtifacts[0].digest&&
+    proofs[0].size_in_bytes===initialArtifacts[0].size_in_bytes,'Preparation proof changed during selection');
   return {receipt,context,link:preparationLink(receipt,proofs[0])};
 }
 export function assertPreparationOrigin(link,source){
@@ -217,12 +227,38 @@ export function assertPreparationOrigin(link,source){
   requireValue(same(result.link,link),'Prepared origin attempt/artifact/receipt changed');
   return result;
 }
+export function currentPublicationOwner(sha,version){
+  requireValue(process.env.GITHUB_REPOSITORY===REPO&&process.env.GITHUB_EVENT_NAME==='workflow_dispatch'&&
+    process.env.GITHUB_REF==='refs/heads/main'&&positive(process.env.GITHUB_RUN_ID)&&positive(process.env.GITHUB_RUN_ATTEMPT)&&
+    SHA.test(sha||'')&&SHA.test(process.env.GITHUB_SHA||'')&&/^\d+\.\d+\.\d+-dev\.[1-9]\d*$/.test(version||''),
+    'Prepared publication requires a trusted main dispatch');
+  const owner={repository:REPO,workflow:WORKFLOW,run_id:String(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),
+    sha,version,workflow_head_sha:process.env.GITHUB_SHA};
+  const run=api(`repos/${REPO}/actions/runs/${owner.run_id}`);
+  requireValue(String(run.id)===owner.run_id&&Number(run.run_attempt)===owner.run_attempt&&run.path===WORKFLOW&&
+    run.head_repository?.full_name===REPO&&run.head_branch==='main'&&run.head_sha===owner.workflow_head_sha&&run.event==='workflow_dispatch'&&
+    run.status==='in_progress','Prepared publication owner is foreign, inactive or stale');
+  requireValue(execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim()===sha,'Prepared publication checkout differs');
+  execFileSync('git',['merge-base','--is-ancestor',sha,'origin/main']);
+  return {owner,run};
+}
+export function requirePreparationBeforeTrigger(result,run){
+  const prepared=parseTimestamp(result.receipt.prepared_at),complete=parseTimestamp(result.context.run.updated_at),trigger=parseTimestamp(run.created_at);
+  requireValue(prepared!==null&&complete!==null&&trigger!==null&&prepared<=complete&&complete<=trigger,
+    'Complete preparation must precede this publication trigger');
+}
 export function inspectPreparation(runId,sha,version){
   const result=readPreparedRun(runId,sha,version);
+  const {owner,run}=currentPublicationOwner(sha,result.receipt.source.version);
+  validatePreparationLink(result.link,owner);
+  requirePreparationBeforeTrigger(result,run);
+  writeFileSync('prepared-consumer.json',JSON.stringify({schema:1,kind:'prepared-consumer',state:'reading',owner,
+    origin:result.link,created_at:new Date().toISOString()},null,2)+'\n');
   // Only public artifact IDs and the exact version are workflow outputs.
   setOutput({prepared_run:result.receipt.source.run_id,prepared_version:result.receipt.source.version,
     prepared_attempt:result.receipt.source.run_attempt,prepared_artifact_id:result.link.artifact.id,
-    prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256});
+    prepared_artifact_digest:result.link.artifact.digest,prepared_receipt_sha256:result.link.receipt_sha256,
+    prepared_binary_artifact_ids:result.receipt.origin_artifacts.filter(a=>a.name.startsWith('cli-release-')).map(a=>a.id).join(',')});
   return result;
 }
 export function assertPreparationPin(result,pin){
