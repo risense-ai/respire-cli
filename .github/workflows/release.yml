@@ -596,6 +596,50 @@ jobs:
             ${{ runner.temp }}/dev-github-api-coverage.json
           if-no-files-found: error
 
+  preparation-receipt:
+    # This read-only proof is deliberately not a publication fast path. A later
+    # consumer must independently validate its source/attempt, jobs and bytes.
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+          needs.plan.outputs.sha == github.sha && needs.plan.outputs.publish == 'false' &&
+          inputs.full_regression_before_publish && !inputs.reuse_dev12_validation &&
+          !inputs.resume_dev6_publication && !inputs.repair_dev12 && !inputs.repair_dev14 }}
+    needs: [plan, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cli-release-*
+          path: prepared-assets
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-release-packages
+          path: prepared-packs
+      - name: Bind every successful gate and exact prepared asset/package digest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+        run: node npm/scripts/release-preparation.mjs attest prepared-assets prepared-packs release-prepared.json
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: release-prepared-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-prepared.json
+          if-no-files-found: error
+
   publication-ready:
     # Long read-only gates never hold the publication transaction lock.
     if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) && needs.plan.outputs.publish == 'true' }}

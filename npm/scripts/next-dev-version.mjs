@@ -37,8 +37,8 @@ for (const release of releases) {
   if (!release.draft && !release.prerelease) observeStable(release.tag_name.replace(/^v/, ''));
 }
 
-// Inspect all eight packages so a partially published release cannot reuse its version.
-const packages = await Promise.all([manifest.npmScope, ...manifest.targets.map(target => target.pkg)].map(async name => {
+// Every scoped package and the short entry reserve an immutable version.
+const packages = await Promise.all([manifest.npmScope, ...manifest.targets.map(target => target.pkg), 'rsrs-cli'].map(async name => {
   const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}?sequence=${Date.now()}`, {
     headers: {'Cache-Control': 'no-cache'}, signal: AbortSignal.timeout(15000),
   });
