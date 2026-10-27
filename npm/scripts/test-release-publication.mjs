@@ -173,6 +173,8 @@ test('two overlapping Releases progress without waiting while holding the opposi
 test('existing lightweight or resolved annotated tag must identify the release source', () => {
   assertTagCommit(null, source);
   assertTagCommit({type: 'commit', sha: source.sha}, source);
+  assert.throws(() => assertTagCommit(null, source, {allowMissing: false}));
+  assertTagCommit({type: 'commit', sha: source.sha}, source, {allowMissing: false});
   assert.throws(() => assertTagCommit({type: 'commit', sha: 'f'.repeat(40)}, source));
   assert.throws(() => assertTagCommit({type: 'tag', sha: source.sha}, source));
 });

@@ -234,7 +234,7 @@ function finalizeAccepted() {
   // becomes success and never causes another release edit here.
   const published=api(`repos/${s.repository}/releases/${s.release_id}`);
   if(published.draft!==false || !published.published_at)throw Error('Release publication result not confirmed; inspect without replaying');
-  assertDraft({...published,draft:true},scoped);assertTag(s);
+  assertDraft({...published,draft:true},scoped);assertTag(s,{requireExisting:true});
   const allNpmAccepted=Math.max(...scoped.acceptances.map(p=>Date.parse(p.accepted_at)),Date.parse(complete.alias_receipt.acceptance.accepted_at));
   const acceptedAt=Math.max(allNpmAccepted,Date.parse(published.published_at));
   write('publication-accepted.json',{...complete,accepted_at:new Date(acceptedAt).toISOString(),
@@ -259,7 +259,7 @@ async function verifyAccepted() {
     const release = api(`repos/${repo}/releases/${s.release_id}`);
     if(release.draft!==false || !release.published_at || release.tag_name!==`v${s.version}` || release.target_commitish!==s.sha ||
       release.prerelease!==(s.channel==='dev')) throw Error('Exact public Release required');
-    assertDraft({...release,draft:true},scoped); assertTag(s);
+    assertDraft({...release,draft:true},scoped); assertTag(s,{requireExisting:true});
     return run;
   };
   const run = assertCurrent(), found = await findAcceptedAlias(scoped,run.created_at);

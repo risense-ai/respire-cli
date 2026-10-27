@@ -104,15 +104,15 @@ export function validateAlias(receipt, scoped, run, jobs) {
     throw new Error('Alias receipt/run/install does not prove this exact publication');
   }
 }
-export function assertTagCommit(object, source) {
-  if (object !== null && (object.type !== 'commit' || object.sha !== source.sha)) throw new Error('Release tag points to a different source commit');
+export function assertTagCommit(object, source, {allowMissing = true} = {}) {
+  if ((object === null && !allowMissing) || (object !== null && (object.type !== 'commit' || object.sha !== source.sha))) throw new Error('Release tag points to a different source commit');
 }
-export function assertTag(source) {
+export function assertTag(source, {requireExisting = false} = {}) {
   let ref;
   try { ref = api(`repos/${source.repository}/git/ref/tags/v${source.version}`); }
   catch (error) {
     if (!String(error.stderr || '').includes('(HTTP 404)')) throw error;
-    assertTagCommit(null, source); return; // New draft: GitHub creates this tag at publication.
+    assertTagCommit(null, source, {allowMissing: !requireExisting}); return; // New draft: GitHub creates this tag at publication.
   }
   let object = ref.object;
   for (let depth = 0; object?.type === 'tag' && depth < 5; depth++) object = api(`repos/${source.repository}/git/tags/${object.sha}`).object;
