@@ -462,3 +462,15 @@ jobs:
       cache_key: ${{ matrix.key }}
       runner_os: ${{ matrix.os }}
       feedback_probe: true
+
+  research-feedback-complete:
+    if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.research_feedback_only }}
+    cache-mode: none
+    needs: [research-feedback-plan, research-feedback-native]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all source coverage and native model jobs
+        env:
+          PLAN_RESULT: ${{ needs.research-feedback-plan.result }}
+          VALIDATION_RESULT: ${{ needs.research-feedback-native.result }}
+        run: test "$PLAN_RESULT" = success && test "$VALIDATION_RESULT" = success
