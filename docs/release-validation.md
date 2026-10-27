@@ -163,8 +163,8 @@ For an explicitly requested DEV number, manual Release accepts `dev_version` in 
 
 ## Independent source and migration checks
 
-Normal CLI CI runs Rust workspace/90% coverage and packaging/workflow/fixture
-contracts on independent runners. `check-complete` fails unless both lanes
+Normal CLI CI runs other workspace tests, CLI 90% coverage and packaging/workflow/fixture
+contracts on three independent runners. `check-complete` fails unless all three lanes
 succeed, including unexpected skips. Release's exact-source push-CI check still
 requires the entire CLI CI run to succeed; adding a job does not automatically
 configure a GitHub required branch check.

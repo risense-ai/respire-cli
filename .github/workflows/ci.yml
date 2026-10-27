@@ -129,6 +129,55 @@ jobs:
           exe=target/ci/${{ matrix.target }}/debug/rsrs
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+  workspace-tests:
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    runs-on: ubuntu-latest
+    env:
+      RSRS_ENGINE: cpu
+      # Several existing tests change process-global data-dir/language variables.
+      # Their own parallel-request checks still create concurrent client threads.
+      RSRS_CORE_TEST_MODE: '1'
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve the pinned SDK dependency cache
+        id: sdk-cache-2
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: sdk-cache-2-restore
+        if: steps.sdk-cache-2.outputs.key != ''
+        with:
+          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
+          key: ${{ steps.sdk-cache-2.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require the exact SDK cache match
+        if: steps.sdk-cache-2.outputs.key != ''
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
+          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
+        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+      - name: Prepare pinned binary Core SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-core-sdk.mjs "$target"
+      - run: cargo test --workspace --exclude respire --locked
+
   check:
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     runs-on: ubuntu-latest
@@ -181,8 +230,7 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # respire tests run once through llvm-cov below.
-      - run: cargo test --workspace --exclude respire --locked
+      # respire tests run once through llvm-cov; other workspace tests use an independent runner.
       - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
         run: |
           result=0
@@ -235,15 +283,16 @@ jobs:
 
   check-complete:
     if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
-    needs: [check, contract-checks]
+    needs: [check, workspace-tests, contract-checks]
     runs-on: ubuntu-latest
     permissions: {}
     steps:
       - name: Require source coverage and all independent contracts
         env:
           SOURCE_RESULT: ${{ needs.check.result }}
+          WORKSPACE_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
-        run: test "$SOURCE_RESULT" = success && test "$CONTRACT_RESULT" = success
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success
 
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}
