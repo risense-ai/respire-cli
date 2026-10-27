@@ -17,6 +17,7 @@ pub mod inject;
 pub mod lock;
 pub mod migration;
 pub mod service;
+pub mod diary;
 pub mod snapshot;
 pub mod feedback;
 pub mod session_import;

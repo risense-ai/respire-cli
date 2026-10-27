@@ -1528,7 +1528,7 @@ Invoke-RuntimeCli 'runtime-cli-purge' @('purge', $runtimeId) | Out-Null
 $wantTools = @(
     'memory_status','memory_extract','memory_remember','memory_recall','memory_list','memory_show','memory_update',
     'memory_attach','memory_tree','memory_history','memory_diary','memory_chain','memory_query_log_mark',
-    'memory_taxonomy'
+    'memory_taxonomy','memory_diary_search','memory_diary_fragment'
 )
 if ($mcpUrl) {
     try {
@@ -1557,7 +1557,7 @@ if ($mcpUrl) {
     if ($httpList -and $httpList.result.tools) { $httpNames = @($httpList.result.tools | ForEach-Object { [string]$_.name }) }
     $missingHttp = @($wantTools | Where-Object { $httpNames -notcontains $_ })
     $unexpectedHttp = @($httpNames | Where-Object { $wantTools -cnotcontains $_ })
-    Add-SweepRow 'mcp-http-tools-complete' ($missingHttp.Count -eq 0 -and $unexpectedHttp.Count -eq 0 -and $httpNames.Count -eq 14) ("have=$($httpNames.Count) missing=$($missingHttp -join ',')")
+    Add-SweepRow 'mcp-http-tools-complete' ($missingHttp.Count -eq 0 -and $unexpectedHttp.Count -eq 0 -and $httpNames.Count -eq 16) ("have=$($httpNames.Count) missing=$($missingHttp -join ',')")
     Invoke-McpHttpRpc 'mcp-http-ping' @{ jsonrpc='2.0'; id=3; method='ping' } | Out-Null
 }
 
@@ -1576,7 +1576,7 @@ $stdioNames = @()
 if ($mcpList -and $mcpList.result.tools) { $stdioNames = @($mcpList.result.tools | ForEach-Object { [string]$_.name }) }
 $missingStdio = @($wantTools | Where-Object { $stdioNames -notcontains $_ })
 $unexpectedStdio = @($stdioNames | Where-Object { $wantTools -cnotcontains $_ })
-Add-SweepRow 'mcp-stdio-tools-complete' ($missingStdio.Count -eq 0 -and $unexpectedStdio.Count -eq 0 -and $stdioNames.Count -eq 14) ("have=$($stdioNames.Count) missing=$($missingStdio -join ',')")
+Add-SweepRow 'mcp-stdio-tools-complete' ($missingStdio.Count -eq 0 -and $unexpectedStdio.Count -eq 0 -and $stdioNames.Count -eq 16) ("have=$($stdioNames.Count) missing=$($missingStdio -join ',')")
 Add-SweepRow 'mcp-stdio-ping' ($null -ne $mcpPing -and $null -ne $mcpPing.result) 'ping'
 
 $mcpMarker = "mcp-business-$stamp"
@@ -1726,7 +1726,7 @@ try {
 }
 $restoredPolicy = Invoke-McpHttpRpc 'mcp-http-restored-default-list' @{jsonrpc='2.0';id=$script:Step;method='tools/list'}
 $restoredNames = @($restoredPolicy.result.tools | ForEach-Object { [string]$_.name })
-Assert-Smoke 'mcp-http-default-policy-restored' ($restoredNames.Count -eq 14 -and @($wantTools | Where-Object {$restoredNames -cnotcontains $_}).Count -eq 0 -and @($restoredNames | Where-Object {$wantTools -cnotcontains $_}).Count -eq 0)
+Assert-Smoke 'mcp-http-default-policy-restored' ($restoredNames.Count -eq 16 -and @($wantTools | Where-Object {$restoredNames -cnotcontains $_}).Count -eq 0 -and @($restoredNames | Where-Object {$wantTools -cnotcontains $_}).Count -eq 0)
 $unknownHttp = Invoke-McpHttpRpc 'mcp-http-unknown-tool' @{ jsonrpc = '2.0'; id = 90; method = 'tools/call'; params = @{ name = 'memory_nope'; arguments = @{} } }
 Assert-Smoke 'mcp-http-unknown-tool-is-error' ($unknownHttp.result.isError -eq $true)
 Invoke-LocalSmoke -Name 'mcp-http-malformed-json' -Path '/mcp' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null

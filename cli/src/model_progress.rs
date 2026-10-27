@@ -168,6 +168,16 @@ pub fn check() -> Result<()> {
     Ok(())
 }
 
+/// Linearize a short durable commit with cancellation acknowledgement. The
+/// expensive model call runs before this guard, never while CURRENT is held.
+#[doc(hidden)]
+pub fn commit<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
+    let slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
+    anyhow::ensure!(TRACKED.get(), "diary commit requires an active model operation");
+    check_progress(slot.as_ref().ok_or_else(|| anyhow!("model operation already ended"))?)?;
+    action()
+}
+
 pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
     let mut slot = CURRENT
         .lock()
@@ -198,6 +208,34 @@ pub fn control(task_id: &str, cancel: bool) -> Result<Value> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn cancellation_acknowledgement_is_serialized_with_durable_commit() -> Result<()> {
+        let _serial=crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+        let _scope=TaskScope::new(Some("synthetic-commit-cancel".into()));
+        let _operation=Operation::begin("index")?;
+        let (attempt_tx,attempt_rx)=std::sync::mpsc::channel();
+        let (ack_tx,ack_rx)=std::sync::mpsc::channel();
+        let mut worker=None;
+        commit(||{
+            worker=Some(std::thread::spawn(move || {
+                assert!(CURRENT.try_lock().is_err(),"commit must hold the cancellation lock");
+                attempt_tx.send(()).unwrap();
+                let reply=control("synthetic-commit-cancel",true);
+                ack_tx.send(reply).unwrap();
+            }));
+            attempt_rx.recv_timeout(Duration::from_secs(2))?;
+            assert!(ack_rx.recv_timeout(Duration::from_millis(20)).is_err(),"cancellation acknowledged before the protected commit ended");
+            Ok(())
+        })?;
+        assert_eq!(ack_rx.recv_timeout(Duration::from_secs(2))??["cancelled"],true);
+        worker.unwrap().join().unwrap();
+        assert!(check().is_err());
+        let mut wrote=false;
+        assert!(commit(||{wrote=true;Ok(())}).is_err());
+        assert!(!wrote,"an acknowledged cancellation must reject later durable writes");
+        Ok(())
+    }
 
     fn long_operation(idle_timeout: bool, idle: u64) -> Progress {
         Progress { id: "fixture".to_owned(), phase: "index".to_owned(), item: "m3".to_owned(),

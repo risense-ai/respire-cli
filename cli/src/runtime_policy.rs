@@ -42,3 +42,13 @@ pub fn takeover_lock() -> Result<respire::lock::LibraryLock> {
         std::time::Duration::from_secs(60),
     )
 }
+
+/// Background commits must yield to a lifecycle owner that is draining them,
+/// rather than wait for that owner's lock and deadlock the drain.
+pub(crate) fn try_takeover_lock() -> Result<respire::lock::LibraryLock> {
+    require_host("background diary cache commit")?;
+    respire::lock::LibraryLock::acquire(
+        &crate::rpc::runtime_dir_path().join("takeover"),
+        std::time::Duration::ZERO,
+    )
+}

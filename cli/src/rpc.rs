@@ -356,6 +356,19 @@ fn index_yield_to_foreground(generation: usize) -> Result<()> {
     respire::model_progress::check()
 }
 
+fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -> Result<()> {
+    let gate = shared_exclusive();
+    let _write = gate.acquire(false);
+    // Account/mode transitions use the write gate; lifecycle transitions use
+    // takeover. Never block on takeover while its owner waits for INDEX_RUNNING.
+    let _lifecycle = crate::runtime_policy::try_takeover_lock()?;
+    respire::model_progress::commit(|| {
+        check_sync_context(generation)?;
+        anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
+        action()
+    })
+}
+
 /// The database's source-checked missing artifacts are the resumable work queue.
 /// Model preparation runs on this thread without taking the foreground write gate.
 fn index_loop() {
@@ -407,18 +420,23 @@ fn index_loop_inner() -> Result<()> {
             let model = store.retrieval_model()?;
             let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
             let pending = store.index_missing(&model)?;
+            let diary_pending = respire::diary::needs_rebuild(&store)?;
             // An indexed library still needs the CPU container for its next query.
             // Empty libraries wait for a write or explicit preparation instead of
             // starting an unsolicited model download during status/restart.
             let cpu_upgrade = model == "m3" && respire::MemoryTransport::count(&store)? > 0
                 && respire::model_install::cpu_model_preparation_needed()?;
-            if !pending && !prepare_requested && !cpu_upgrade {
+            if !pending && !diary_pending && !prepare_requested && !cpu_upgrade {
                 return Ok(true);
             }
             let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
                 return Ok(false);
             };
             index_yield_to_foreground(generation)?;
+            if diary_pending && !pending && !prepare_requested && !cpu_upgrade
+                && respire::diary::clear_if_empty(&store, |action| diary_commit(generation,action))? {
+                return Ok(true);
+            }
             let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
             if let Some(mirror) = mirror {
                 respire::model_install::prepare_m3_from_mirror(&mirror)?;
@@ -427,10 +445,10 @@ fn index_loop_inner() -> Result<()> {
                 respire::model_install::prepare_m3_for_index()?;
                 check_sync_context(generation)?;
             }
-            if !pending { return Ok(true); }
+            if !pending && !diary_pending { return Ok(true); }
             let keys = crate::build_session()?;
             let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
-            loop {
+            while pending {
                 let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
                     index_yield_to_foreground(generation)?;
                     respire::model_progress::update("index", &model, done as u64, Some(total as u64))
@@ -453,6 +471,12 @@ fn index_loop_inner() -> Result<()> {
                     Err(error) => return Err(error),
                 }
             }
+            respire::diary::rebuild_with_progress(&store, &keys, &embedder, || {
+                index_yield_to_foreground(generation)?;
+                respire::model_progress::check()
+            }, |action| diary_commit(generation, action), |done| {
+                respire::model_progress::update("index", "diary-fragments", done as u64, None)
+            })?;
             check_sync_context(generation)?;
             Ok(true)
         })();
@@ -2244,8 +2268,19 @@ fn command_name(args: &[String]) -> Option<&str> {
     None
 }
 
+fn diary_lexical_mode(args: &[String]) -> bool {
+    // Values after -- are literal queries, never runtime routing flags.
+    let options=&args[..args.iter().position(|arg|arg=="--").unwrap_or(args.len())];
+    let modes:Vec<&str>=options.iter().enumerate().filter_map(|(index,arg)| {
+        if arg=="--mode" {Some(options.get(index+1).map(String::as_str).unwrap_or(""))}
+        else {arg.strip_prefix("--mode=")}
+    }).collect();
+    modes==["lexical"]
+}
+
 fn needs_inference(args: &[String]) -> bool {
     matches!(command_name(args), Some("remember" | "recall" | "related" | "reembed" | "classify" | "update"))
+        || (command_name(args) == Some("diary-search") && !diary_lexical_mode(args))
         || (command_name(args) == Some("model") && args.iter().any(|arg| arg == "probe"))
 }
 
@@ -2493,6 +2528,28 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::sync::atomic::Ordering;
+
+    #[test]
+    fn diary_inference_routing_honours_modes_and_literal_query_arguments() {
+        use clap::Parser;
+        for (args,inference) in [
+            (vec!["diary-search","q"],true),
+            (vec!["diary-search","q","--mode","lexical"],false),
+            (vec!["diary-search","--mode=lexical","q"],false),
+            (vec!["diary-search","--mode","hybrid","--","--mode=lexical"],true),
+            (vec!["diary-search","--","--mode=lexical"],true),
+            (vec!["diary-search","--mode","lexical","--","--mode=hybrid"],false),
+            (vec!["diary-fragment","--neighbors","1","--","s","f"],false),
+        ] {
+            let arguments:Vec<String>=args.iter().map(|s|(*s).to_owned()).collect();
+            assert_eq!(needs_inference(&arguments),inference,"{arguments:?}");
+            let parsed=crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args)).unwrap();
+            if let Some(crate::Command::DiarySearch{query,mode,..})=parsed.command {
+                if query=="--mode=lexical" {assert_eq!(mode,"hybrid");}
+                if query=="--mode=hybrid" {assert_eq!(mode,"lexical");}
+            }
+        }
+    }
 
     #[test]
     fn shutdown_transport_requires_confirmed_exit_without_replay() {
@@ -3009,4 +3066,41 @@ mod tests {
         }
         Ok(())
     }
+    #[test]
+    fn diary_commit_rechecks_mode_generation_shutdown_and_lifecycle_ownership() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir()?;
+        let previous = std::env::var_os("RSRS_DATA_DIR");
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        let generation = GENERATION.load(Ordering::Acquire);
+        let previous_stopping = STOPPING.swap(false, Ordering::AcqRel);
+        let result = (|| -> Result<()> {
+            let _operation = respire::model_progress::Operation::begin("index")?;
+            let mut writes = 0;
+            respire::service::set_workspace_mode("normal")?;
+            diary_commit(generation, &mut || { writes += 1; Ok(()) })?;
+            assert_eq!(writes, 1);
+            for mode in ["readonly", "off"] {
+                respire::service::set_workspace_mode(mode)?;
+                assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+                assert_eq!(writes, 1);
+            }
+            respire::service::set_workspace_mode("normal")?;
+            assert!(diary_commit(generation.wrapping_add(1), &mut || { writes += 1; Ok(()) }).is_err());
+            STOPPING.store(true, Ordering::Release);
+            assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+            STOPPING.store(false, Ordering::Release);
+            let lifecycle = crate::runtime_policy::takeover_lock()?;
+            assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+            assert_eq!(writes, 1);
+            drop(lifecycle);
+            diary_commit(generation, &mut || { writes += 1; Ok(()) })?;
+            assert_eq!(writes, 2);
+            Ok(())
+        })();
+        STOPPING.store(previous_stopping, Ordering::Release);
+        match previous { Some(value) => std::env::set_var("RSRS_DATA_DIR", value), None => std::env::remove_var("RSRS_DATA_DIR") }
+        result
+    }
+
 }

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
@@ -1133,9 +1133,29 @@ enum Command {
         /// Range end (YYYY-MM-DD, inclusive; mutually exclusive with --date; --to without --from means "up to that day")
         #[arg(long)]
         to: Option<String>,
-        /// Keyword filter (literal match on plaintext index: title + body head <=500 chars, case-insensitive)
+        /// Full-text keyword filter (title and decrypted full body); returns a bounded matching excerpt
         #[arg(long)]
         contains: Option<String>,
+    },
+    /// Explicit cross-date diary fragment retrieval; never changes normal recall.
+    DiarySearch {
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+        /// Budget for fragment result JSON, in Unicode characters (not tokens)
+        #[arg(long, default_value_t = 4000)]
+        max_chars: usize,
+        #[arg(long, default_value = "hybrid", value_parser = ["lexical", "hybrid"])]
+        mode: String,
+    },
+    /// Read one immutable diary fragment locator and optional immediate neighbors.
+    DiaryFragment {
+        source_id: String,
+        fragment_id: String,
+        #[arg(long, default_value_t = 0)]
+        neighbors: usize,
+        #[arg(long, default_value_t = 4000)]
+        max_chars: usize,
     },
     /// Built-in top-level catalog (20 human-domain + 3 AI-domain = 23, embedded at compile): --list prints it; --ensure <root,...> creates roots; no args shows current state
     Taxonomy {
@@ -3887,6 +3907,19 @@ fn local_day_of(s: &str) -> String {
         .unwrap_or_else(|_| s.chars().take(10).collect())
 }
 
+fn emit_diary_fragments(command: &str, fragments: respire::diary::FragmentResult) -> Result<()> {
+    if !json_mode() {
+        println!("{}", serde_json::to_string(&fragments)?);
+        return Ok(());
+    }
+    let mut result = ResultEnvelope::new(command, OutputStatus::Ok,
+        serde_json::json!({"count":fragments.items.len(), "semantic_ready":fragments.semantic_ready,
+            "pending_fragments":fragments.pending_fragments,"truncated":fragments.truncated,
+            "max_chars":fragments.max_chars,"offset_unit":fragments.offset_unit}), Vec::new());
+    result.details = serde_json::to_value(fragments)?;
+    emit_result(result)
+}
+
 /// Diary = whole-store time chain (trivia is merged in; not filtered by importance):
 fn run_diary(
     limit: usize,
@@ -3942,14 +3975,32 @@ fn run_diary(
             }
             true
         })
-        .filter(|m| match &needle {
-            Some(n) => {
-                m.local_title.to_lowercase().contains(n)
-                    || m.local_content_head.to_lowercase().contains(n)
-            }
-            None => true,
-        })
         .collect();
+    if let Some(needle) = &needle {
+        let keys = build_session()?;
+        let mut matched = Vec::new();
+        for mut memory in all {
+            let entry = MemoryEngine::open(&keys, &memory)
+                .with_context(|| format!("cannot decode diary entry {}", memory.id))?;
+            let lowered = entry.content.to_lowercase();
+            let position = lowered.find(needle);
+            if position.is_some() || entry.title.to_lowercase().contains(needle) {
+                // Map the lowercased byte match back to original Unicode scalars.
+                let offset = position.map(|byte| {
+                    let mut folded_bytes = 0;
+                    entry.content.chars().take_while(|ch| {
+                        let before = folded_bytes;
+                        folded_bytes += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+                        before < byte
+                    }).count()
+                }).unwrap_or(0);
+                let start = offset.saturating_sub(100);
+                memory.local_content_head = entry.content.chars().skip(start).take(500).collect();
+                matched.push(memory);
+            }
+        }
+        all = matched;
+    }
     let ranged = date_s.is_some() || from_s.is_some() || to_s.is_some();
     if ranged {
         all.sort_by(|a, b| a.local_created_at.cmp(&b.local_created_at));
@@ -6811,6 +6862,17 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 expected.as_deref(),
             );
         }
+        Some(Command::DiarySearch { query, limit, max_chars, mode }) => {
+            let store = build_local()?;
+            let keys = build_session()?;
+            let result = respire::diary::search(&store, &keys, query, *limit, *max_chars, mode == "hybrid")?;
+            if result.pending_fragments > 0 { respire::service::notify_index(); }
+            return emit_diary_fragments("diary-search", result);
+        }
+        Some(Command::DiaryFragment { source_id, fragment_id, neighbors, max_chars }) => {
+            let result = respire::diary::read_fragment(&build_local()?, &build_session()?, source_id, fragment_id, *neighbors, *max_chars)?;
+            return emit_diary_fragments("diary-fragment", result);
+        }
         Some(Command::Diary {
             limit,
             date,
@@ -9427,6 +9489,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Model { .. }
         | Command::Share { .. }
         | Command::Diary { .. }
+        | Command::DiarySearch { .. }
+        | Command::DiaryFragment { .. }
         | Command::Taxonomy { .. }
         | Command::RootCreate { .. }
         | Command::Repack

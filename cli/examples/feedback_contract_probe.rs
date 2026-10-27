@@ -112,6 +112,9 @@ fn cli_score(result: &Value, id: &str) -> Result<f32> {
         .context("CLI candidate absent")
 }
 
+#[path = "probes/diary.rs"]
+mod diary_probe;
+
 fn main() -> Result<()> {
     anyhow::ensure!(
         respire::core_sdk::FEEDBACK_CONTRACT == 1,
@@ -157,6 +160,14 @@ fn main() -> Result<()> {
         );
     }
     std::env::set_var("RSRS_CPU_OWNED_ORT_FILE", &ort);
+    if std::env::args().any(|arg| arg == "--diary-only") {
+        let current = std::env::current_exe()?;
+        let exe = current.parent().and_then(std::path::Path::parent).context("native profile")?
+            .join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
+        println!("{}", diary_probe::run(&exe)?);
+        return Ok(());
+    }
+
     let root = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", root.path());
     std::env::set_var("RSRS_NO_AUTOSYNC", "1");
@@ -415,10 +426,11 @@ fn main() -> Result<()> {
         standalone["results"][0]["rank"] == 0 && (standalone_score - good).abs() < 1e-5,
         "standalone benchmark did not refresh scorer context"
     );
+    let diary = diary_probe::run(&cli.exe)?;
     println!(
         "{}",
         serde_json::to_string_pretty(
-            &json!({"provider":"real-m3","feedback_contract":respire::core_sdk::FEEDBACK_CONTRACT,"synthetic_entries":3,"target":target,"neutral":neutral,"legacy_read_hot":read_hot,"good":good,"bad":bad,"bad_off":bad_off,"service_score":service_score,"runtime_score":cli_score(&refreshed,&target)?,"runtime_pid":runtime["summary"]["pid"],"bench_score":bench_score,"standalone_bench_score":standalone_score,"checks":"PASS","original_benchmark_replicated":false})
+            &json!({"diary":diary,"provider":"real-m3","feedback_contract":respire::core_sdk::FEEDBACK_CONTRACT,"synthetic_entries":3,"target":target,"neutral":neutral,"legacy_read_hot":read_hot,"good":good,"bad":bad,"bad_off":bad_off,"service_score":service_score,"runtime_score":cli_score(&refreshed,&target)?,"runtime_pid":runtime["summary"]["pid"],"bench_score":bench_score,"standalone_bench_score":standalone_score,"checks":"PASS","original_benchmark_replicated":false})
         )?
     );
     Ok(())

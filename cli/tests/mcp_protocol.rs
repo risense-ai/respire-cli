@@ -89,6 +89,8 @@ fn stdio_initialize_lists_default_safe_tools() -> Result<(), Box<dyn std::error:
         "memory_tree",
         "memory_history",
         "memory_diary",
+        "memory_diary_search",
+        "memory_diary_fragment",
         "memory_chain",
         "memory_query_log_mark",
         "memory_taxonomy",
@@ -97,7 +99,7 @@ fn stdio_initialize_lists_default_safe_tools() -> Result<(), Box<dyn std::error:
             return Err(format!("missing tool {want} in {names:?}").into());
         }
     }
-    assert_eq!(names.len(), 14);
+    assert_eq!(names.len(), 16);
     assert!(!names
         .iter()
         .any(|name| matches!(name.as_str(), "memory_forget" | "memory_restore")));
