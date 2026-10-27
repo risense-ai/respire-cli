@@ -194,3 +194,11 @@ job's completion to acceptance (including publication-runner queue time).
 These are actual timestamps; the ready-to-acceptance interval is not relabelled
 as the complete source workflow duration. Expensive acceptance is still required
 before the write transaction; no test is shortened or omitted.
+
+
+For a dependency PR whose base is not `main`, normal PR branch filters do not
+start CLI CI. Explicit `workflow_dispatch` with `source_checks_only=true` runs
+all three source lanes and their aggregate without the separate optional native
+compile matrix. This is source CI only: it cannot substitute for Release's
+required exact-source **push** CI or any native/model/release acceptance.
+The default manual matrix remains unchanged when the input is false.

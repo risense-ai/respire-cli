@@ -21,3 +21,12 @@ test('fail-closed aggregate requires both successful lanes, including failure an
   assert.match(complete,/permissions: \{\}/);
   for(const name of ['check','workspace-tests','contract-checks'])assert.match(section(name),/!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only/);
 });
+
+
+test('explicit manual source checks omit only the optional compile matrix and cannot replace Release push-CI proof',()=>{
+  assert.match(ci,/source_checks_only:\n        description: Run all source tests, coverage and contracts/);
+  assert.match(section('platform-build'),/!inputs.source_checks_only/);
+  for(const name of ['workspace-tests','check','contract-checks','check-complete'])assert.doesNotMatch(section(name),/!inputs.source_checks_only/);
+  const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  assert.match(release,/run.head_sha===sha&&run.event==='push'/);
+});

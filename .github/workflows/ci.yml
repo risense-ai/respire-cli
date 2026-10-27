@@ -2,6 +2,10 @@ name: CLI CI
 on:
   workflow_dispatch:
     inputs:
+      source_checks_only:
+        description: Run all source tests, coverage and contracts without the optional manual native compile matrix
+        type: boolean
+        default: false
       research_feedback_only:
         description: Token-free four-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
         type: boolean
@@ -40,7 +44,7 @@ concurrency:
 jobs:
   platform-build:
     # Release builds all four targets. Keep the separate compile matrix manual.
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
       fail-fast: false
