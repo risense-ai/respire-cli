@@ -1,6 +1,6 @@
 // Real Node helper processes and real ZIP bytes; all GitHub responses and
 // payloads are synthetic. No npm submission, profile, model or remote API.
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,existsSync,cpSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
@@ -153,6 +153,23 @@ else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r))
     state.allowFinalization=true;state.acceptedAt=new Date(Date.now()+10000).toISOString();
     state.release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
     state.currentJobs.push({name:'publication-ready',status:'completed',conclusion:'success',completed_at:new Date().toISOString()});
+    // Exercise the actual current workflow snippets against both older four-
+    // platform sources and the new six-platform manifest, not current-main assumptions.
+    const workflow=readFileSync(new URL('../../../.github/workflows/release.yml',import.meta.url),'utf8');
+    const selector=workflow.split('id: platforms\n')[1].match(/node --input-type=module - <<'NODE'\n([\s\S]*?)          NODE/)[1].replace(/^          /gm,'');
+    const select=()=>spawnSync(process.execPath,['--input-type=module','-e',selector],{cwd:root,env,encoding:'utf8',timeout:5000});
+    success(select());requireValue(readFileSync(env.GITHUB_OUTPUT,'utf8').includes(`arm64=${arm64}\n`),'Copied platforms came from the workflow head rather than selected source');
+    const validManifest=readFileSync(join(root,'npm/artifact-manifest.json'));
+    const partial=JSON.parse(validManifest);partial.targets=partial.targets.filter(t=>t.triple!=='aarch64-unknown-linux-musl');
+    if(!arm64)partial.targets.push({triple:'aarch64-unknown-linux-gnu'});
+    writeFileSync(join(root,'npm/artifact-manifest.json'),JSON.stringify(partial));requireValue(select().status!==0,'Partial ARM platform inventory accepted');
+    writeFileSync(join(root,'npm/artifact-manifest.json'),validManifest);
+    cpSync(assets,join(root,'release-assets'),{recursive:true});
+    const assetList=join(root,'release-assets.json');writeFileSync(assetList,JSON.stringify({assets:scoped.assets}));
+    const assetCode="const fs=require('fs'),path=require('path');\n"+workflow.match(/const expected=fs.readdirSync\('release-assets'\)\.sort\(\);([\s\S]*?)          NODE/)[0].replace(/          NODE$/,'').replace(/^          /gm,'');
+    const assetGate=()=>spawnSync(process.execPath,['-e',assetCode],{cwd:root,env:{...env,RUNNER_TEMP:root},encoding:'utf8',timeout:5000});
+    success(assetGate());writeFileSync(assetList,JSON.stringify({assets:scoped.assets.slice(1)}));
+    requireValue(assetGate().status!==0,'Missing public asset accepted by actual workflow gate');
     writeFileSync(join(root,'scoped-accepted.json'),JSON.stringify(scoped));writeFileSync(join(root,'publication-accepted.json'),JSON.stringify(complete));
     env.FULL_REGRESSION_REQUIRED='true';
     const originalGate=state.originalJobs[0].conclusion;state.originalJobs[0].conclusion='failure';
