@@ -55,7 +55,7 @@ jobs:
   verify-publication-arm64:
     if: github.repository == 'risense-ai/respire-cli'
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 80
+    timeout-minutes: 90
     # No publication lock, OIDC, SDK credential or npm write permission. A
     # completed immutable source attempt is valid only for these read operations.
     permissions:

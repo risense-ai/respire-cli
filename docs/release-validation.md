@@ -274,11 +274,35 @@ evidence fails closed. The artifact retains the existing one-day lifetime.
 
 This is evidence from a run that did not publish. It is neither npm acceptance
 nor public installation proof, and does not promise the version is still free.
-It currently changes no publishing, alias, regression or cleanup barrier and
-does not enable artifact reuse. A separately audited consumer must validate the
-original attempt and downloaded bytes, preserve immutable-version write fences,
-and bind publication/cleanup/timing to that evidence before reuse is enabled.
-The ten-minute publication target remains unmeasured.
+
+For prepared DEV publication, dispatch Release from main with `ref` set to that
+same exact source SHA, `dev_version` set to the prepared version, `prepared_run`
+set to the completed preparation run ID, and both `publish=true` and
+`full_regression_before_publish=true`. The preparation must have completed
+before this new publication trigger. Historical repair/recovery inputs cannot
+be combined with prepared mode. Normal publication retains its existing gates.
+
+The plan pins the original receipt artifact ID, ZIP digest, canonical JSON
+digest and source attempt, then registers a consumer before reading any binary
+artifact. A read-only import job checks the original main run, complete gates,
+source inputs and actual binary/runtime/metadata bytes. It independently packs
+with the same pinned npm tool and requires equality with every prepared npm
+tarball. It uploads verified platform copies and an import receipt into the new
+run. Failed or skipped import jobs cannot authorize publication. Readiness pins
+this new receipt, and the actual publisher checks both local byte inventories
+and original/current proof pins before npm submissions. Existing immutable
+version fences and active-attempt write checks remain in effect.
+
+The accepted report records preparation run/attempt/duration and import time
+separately from source-to-complete-validation and publication-trigger-to-acceptance.
+Original preparation archives retain their one-day fallback. Once imported,
+verified current copies can outlive those original archives, but their exact
+source/gate history and current receipts remain mandatory. Cleanup deletes only
+the current publication's copies after all parent, alias, background public
+verification and potential manual artifact readers are terminal, installation
+is verified, and an hour has passed since the last consumer/report. It never
+deletes the original preparation's archives as current-run artifacts.
+The ten-minute publication target still requires a real measured publication.
 
 DEV allocation reads every scoped package and `rsrs-cli`, including a version
 visible only on the short entry. Registry metadata is an observation, not proof

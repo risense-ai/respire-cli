@@ -38,6 +38,7 @@ jobs:
           # or a workflow_run's potentially different selected release ref.
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: '24'

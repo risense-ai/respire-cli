@@ -4,13 +4,15 @@ import {mkdtempSync,readFileSync,writeFileSync,rmSync,appendFileSync} from 'node
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
+import {validateSource,validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
 import {validateAcceptedScoped,validateAcceptedAlias,validateVerified,validateArmVerified} from './publication-acceptance.mjs';
 import {regressionStatus} from './release-regression-contract.mjs';
+import {validatePreparationHistory,validatePreparationSource,preparationInputs} from './release-preparation.mjs';
+import {validateImportedShape,validateImportedEvidence,importedAnchor,validateConsumerIntent,importName,consumerName} from './prepared-import.mjs';
 
 export const REPOSITORY='risense-ai/respire-cli';
 export const CLEANUP_POLICY=RELEASE_ARTIFACT_CLEANUP_POLICY;
-const RELEASE='.github/workflows/release.yml', ALIAS='.github/workflows/npm-alias.yml', VERIFY='.github/workflows/verify-publication.yml';
+const RELEASE='.github/workflows/release.yml', ALIAS='.github/workflows/npm-alias.yml', VERIFY='.github/workflows/verify-publication.yml', CI='.github/workflows/ci.yml';
 const id=value=>Number.isSafeInteger(Number(value))&&Number(value)>0;
 const timestamp=value=>{const n=Date.parse(value);if(!Number.isFinite(n))throw Error('Missing terminal timestamp');return n;};
 const terminal=run=>run.status==='completed';
@@ -33,7 +35,8 @@ export function requirePublished(release,scoped,tag){
   if(release.id!==Number(s.release_id)||release.draft!==false||!release.published_at||release.tag_name!==`v${s.version}`||release.target_commitish!==s.sha||release.prerelease!==(s.channel==='dev')||tag?.type!=='commit'||tag.sha!==s.sha)throw Error('Exact public release/tag required');
   if(release.assets.length!==scoped.assets.length||!scoped.assets.every(e=>release.assets.some(a=>a.name===e.name&&a.size===e.size&&a.state==='uploaded'&&a.digest===`sha256:${e.sha256}`)))throw Error('Public release assets differ');
 }
-export function allowedSourceArtifact(name,source,targets){
+export function allowedSourceArtifact(name,source,targets,preparedOrigin){
+  if(preparedOrigin&&[importName(source),consumerName(source)].includes(name))return true;
   if([`scoped-ready-${source.run_id}-${source.run_attempt}`,`scoped-accepted-${source.run_id}-${source.run_attempt}`,`npm-submissions-${source.run_id}-${source.run_attempt}`,`publication-accepted-${source.run_id}-${source.run_attempt}`].includes(name))return true;
   if(['npm-release-packages','npm-release-validation','dev-api-coverage','gnu-login-interruption'].includes(name))return true;
   return targets.some(t=>['cli-release-','release-sweep-','base-release-sweep-','resident-concurrency-','published-upgrades-','native-profile-migration-','native-profile-migration-fixture-','secret-service-profile-migration-'].some(p=>name===p+t));
@@ -42,6 +45,24 @@ function boundArtifact(a,run){
   if(!id(a.id)||a.expired||a.workflow_run?.id!==run.id||a.workflow_run?.head_sha!==run.head_sha||!/^sha256:[a-f0-9]{64}$/.test(a.digest||''))throw Error('Artifact identity/digest/attempt changed');
 }
 function runStamp(r){return [r.id,r.run_attempt,r.status,r.conclusion,r.updated_at,r.head_sha,r.path];}
+async function preparedCleanupEvidence(io,scoped,manifest,run,jobs,artifacts){
+  if(typeof io.preparedHistory!=='function')throw Error('Prepared source history reader unavailable; cleanup refused');
+  const source=scoped.source,imports=artifacts.filter(a=>a.name===importName(source)&&!a.expired),intents=artifacts.filter(a=>a.name===consumerName(source)&&!a.expired);
+  if(imports.length!==1||intents.length!==1)throw Error('Prepared import/consumer proof missing or duplicated');
+  for(const a of [...imports,...intents])boundArtifact(a,run);
+  const receipt=await io.receipt(imports[0],'prepared-import.json');
+  validateImportedShape(receipt,source,manifest);
+  const history=await io.preparedHistory(receipt.preparation.source);
+  validateImportedEvidence(receipt,source,manifest,{ownerRun:run,ownerJobs:jobs,history});
+  const actual=scoped.assets.map(a=>({file:a.name,size:a.size,sha256:a.sha256})).sort((a,b)=>a.file.localeCompare(b.file));
+  const original=[...receipt.preparation.assets].sort((a,b)=>a.file.localeCompare(b.file));
+  if(JSON.stringify(actual)!==JSON.stringify(original))throw Error('Public assets differ from original prepared bytes');
+  if(JSON.stringify(importedAnchor(receipt,imports[0],run))!==JSON.stringify(scoped.validation_origin))throw Error('Prepared cleanup origin changed after acceptance');
+  const intent=await io.receipt(intents[0],'prepared-consumer.json');
+  validateConsumerIntent(intent,source,receipt.origin,run,jobs.find(j=>j.name==='prepared-import'));
+  if(jobs.some(j=>j.status!=='completed')||!jobs.some(j=>j.name==='publish'&&j.conclusion==='success'))throw Error('Source consumers/publisher are not complete');
+  return {receipt,manifest};
+}
 export async function planCleanup(io,runId,manifest,now=Date.now()){
   if(io.repository!==REPOSITORY||!id(runId))throw Error('Cleanup repository/run scope refused');
   const run=await io.run(runId);
@@ -56,15 +77,27 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   // An explicit opt-in written by NEW publication code prevents retroactive
   // deletion of historical artifacts not covered by a confirmed batch.
   if(!samePolicy(scoped.cleanup_policy))return {skip:'historical-release-not-opted-in'};
-  (accepted?validateAcceptedScoped:validateScoped)(scoped,manifest);
-  const source=scoped.source;
+  const source=validateSource(scoped.source);
   if(source.recovery||String(source.run_id)!==String(run.id)||Number(source.run_attempt)!==run.run_attempt)return {skip:'unsupported-or-stale-attempt'};
-  const jobs=await io.jobs(run.id,run.run_attempt);requireRegressions(jobs,manifest.targets.map(t=>t.triple),scoped.validation_inventory);
+  if(io.manifestForSource)manifest=await io.manifestForSource(source);
+  (accepted?validateAcceptedScoped:validateScoped)(scoped,manifest);
+  const jobs=await io.jobs(run.id,run.run_attempt);
+  const prepared=scoped.validation_origin?await preparedCleanupEvidence(io,scoped,manifest,run,jobs,artifacts):null;
+  if(!prepared)requireRegressions(jobs,manifest.targets.map(t=>t.triple),scoped.validation_inventory);
   const release=await io.release(source.release_id),tag=await io.tag(`v${source.version}`);requirePublished(release,scoped,tag);
   // Include even unsuccessful/duplicate/manual alias consumers. Unbound manual
   // inputs are not exposed in run metadata, so this barrier is conservative.
   const consumers=await io.consumers(run.created_at);
   if(consumers.some(r=>!workflow(r,ALIAS)||!terminal(r)))return {skip:'alias-consumer-still-active'};
+  if(typeof io.otherReaders!=='function')throw Error('Artifact reader enumeration unavailable; cleanup refused');
+  const readers=await io.otherReaders(run.created_at);
+  if(readers.some(r=>!workflow(r,CI)||r.event!=='workflow_dispatch'||!terminal(r)))return {skip:'artifact-reader-still-active'};
+  const readerFinishes=[];
+  for(const reader of readers){
+    const readerJobs=await io.jobs(reader.id,reader.run_attempt);
+    if(readerJobs.some(j=>j.status!=='completed'))return {skip:'artifact-reader-jobs-not-terminal'};
+    readerFinishes.push(timestamp(reader.updated_at),...readerJobs.map(j=>timestamp(j.completed_at||reader.updated_at)));
+  }
   let provedAlias=false;const aliasArtifacts=[],aliasReceipts=[],consumerFinishes=[];
   for(const consumer of consumers){
     const childJobs=await io.jobs(consumer.id,consumer.run_attempt);
@@ -111,16 +144,16 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   }
   if(!provedPublic)return {skip:'no-completed-public-install-proof'};
   if(!provedArm)return {skip:'no-native-arm64-public-install-proof'};
-  const selected=artifacts.filter(a=>!a.expired&&allowedSourceArtifact(a.name,source,manifest.targets.map(t=>t.triple)));
+  const selected=artifacts.filter(a=>!a.expired&&allowedSourceArtifact(a.name,source,manifest.targets.map(t=>t.triple),scoped.validation_origin));
   for(const a of selected)boundArtifact(a,run);
   const all=[...selected,...aliasArtifacts,...verificationArtifacts];
-  const finished=Math.max(timestamp(run.updated_at),timestamp(release.published_at),...jobs.map(j=>timestamp(j.completed_at||run.updated_at)),...consumers.map(r=>timestamp(r.updated_at)),...verifiers.map(r=>timestamp(r.updated_at)),...consumerFinishes,verifiedAt,...all.map(a=>timestamp(a.created_at)));
+  const finished=Math.max(timestamp(run.updated_at),timestamp(release.published_at),...jobs.map(j=>timestamp(j.completed_at||run.updated_at)),...consumers.map(r=>timestamp(r.updated_at)),...verifiers.map(r=>timestamp(r.updated_at)),...consumerFinishes,...readerFinishes,verifiedAt,...all.map(a=>timestamp(a.created_at)));
   if(now-finished<3600_000)return {skip:'one-hour-after-consumers-not-reached',eligible_at:new Date(finished+3600_000).toISOString()};
   // Keep proof until the payloads are gone. A partial failure leaves receipts
   // intact where possible; subsequent invocations inventory again, never retry
   // an uncertain DELETE blindly.
   const payload=selected.filter(a=>a.id!==ready[0].id);
-  return {run,source,scoped,release,tag,consumers,verifiers,finished,artifacts:[...payload,...aliasArtifacts,...verificationArtifacts,ready[0]],preserved:artifacts.filter(a=>!all.some(x=>x.id===a.id)).map(a=>({id:a.id,name:a.name}))};
+  return {run,source,scoped,release,tag,consumers,verifiers,readers,prepared,finished,artifacts:[...payload,...aliasArtifacts,...verificationArtifacts,ready[0]],preserved:artifacts.filter(a=>!all.some(x=>x.id===a.id)).map(a=>({id:a.id,name:a.name}))};
 }
 export async function executeCleanup(io,plan,{apply=false,now=()=>Date.now(),audit=()=>{}}={}){
   if(plan.skip){audit(plan);return [];}
@@ -130,6 +163,15 @@ export async function executeCleanup(io,plan,{apply=false,now=()=>Date.now(),aud
     // particular, child completion alone cannot erase a receipt awaitAlias is
     // still downloading in the live parent Release.
     const current=await io.run(plan.run.id),consumers=await io.consumers(plan.run.created_at);
+    const readers=await io.otherReaders(plan.run.created_at);
+    if(readers.some(r=>!workflow(r,CI)||r.event!=='workflow_dispatch'||!terminal(r))||JSON.stringify(readers.map(runStamp).sort())!==JSON.stringify(plan.readers.map(runStamp).sort()))throw Error('Artifact reader consumption fence changed; cleanup stopped');
+    for(const reader of readers){
+      const jobs=await io.jobs(reader.id,reader.run_attempt);
+      if(jobs.some(j=>j.status!=='completed'||timestamp(j.completed_at||reader.updated_at)>plan.finished))throw Error('Artifact reader jobs consumption fence changed; cleanup stopped');
+    }
+    if(plan.prepared){
+      validatePreparationHistory(plan.prepared.receipt.preparation,await io.preparedHistory(plan.prepared.receipt.preparation.source));
+    }
     const verifiers=plan.scoped.schema===2?await io.verifiers(plan.run.created_at):[];
     if(verifiers.some(r=>!workflow(r,VERIFY)||!terminal(r))||JSON.stringify(verifiers.map(runStamp).sort())!==JSON.stringify(plan.verifiers.map(runStamp).sort()))throw Error('Verification consumption fence changed; cleanup stopped');
     if(!workflow(current,RELEASE)||consumers.some(r=>!workflow(r,ALIAS))||JSON.stringify(runStamp(current))!==JSON.stringify(runStamp(plan.run))||!terminal(current)||current.conclusion!=='success'||consumers.some(r=>!terminal(r))||JSON.stringify(consumers.map(runStamp).sort())!==JSON.stringify(plan.consumers.map(runStamp).sort())||now()-plan.finished<3600_000)throw Error('Consumption fence changed; cleanup stopped');
@@ -154,6 +196,20 @@ export function githubAdapter(repository=process.env.GITHUB_REPOSITORY,{transpor
     artifacts:id=>pages(`${base}/actions/runs/${id}/artifacts?per_page=100`).flatMap(p=>p.artifacts),
     consumers:created=>pages(`${base}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs),
     verifiers:created=>pages(`${base}/actions/workflows/verify-publication.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs),
+    otherReaders:created=>pages(`${base}/actions/workflows/ci.yml/runs?event=workflow_dispatch&per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs),
+    manifestForSource:source=>{
+      validateSource(source);
+      const m=JSON.parse(execFileSync('git',['show',`${source.sha}:npm/artifact-manifest.json`],{encoding:'utf8',maxBuffer:65536}));
+      m.cliVersion=source.version;return m;
+    },
+    preparedHistory:source=>{
+      validatePreparationSource(source);
+      const selected=pages(`${base}/actions/workflows/ci.yml/runs?head_sha=${source.sha}&per_page=100`).flatMap(p=>p.workflow_runs)
+        .filter(r=>r.head_sha===source.sha&&r.event==='push'&&r.head_branch==='main').sort((a,b)=>b.id-a.id)[0];
+      if(!selected)throw Error('Exact main push CI history unavailable');
+      return {source,...preparationInputs(source.sha,source.version),run:adapter.run(source.run_id),
+        jobs:adapter.jobs(source.run_id,source.run_attempt),ci:adapter.run(selected.id)};
+    },
     release:id=>api(`${base}/releases/${id}`),
     tag:name=>{let o=api(`${base}/git/ref/tags/${name}`).object;for(let i=0;o?.type==='tag'&&i<5;i++)o=api(`${base}/git/tags/${o.sha}`).object;return o;},
     artifact:id=>{try{return api(`${base}/actions/artifacts/${id}`);}catch(e){if(String(e.stderr).includes('(HTTP 404)'))return null;throw e;}},

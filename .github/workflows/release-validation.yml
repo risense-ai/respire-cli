@@ -207,6 +207,8 @@ jobs:
           pattern: cli-release-*
           path: release-assets
           merge-multiple: true
+      - name: Pin the publication npm pack tool
+        run: npm install --global npm@11.5.1
       - name: Assemble all four native packages
         shell: bash
         run: |
