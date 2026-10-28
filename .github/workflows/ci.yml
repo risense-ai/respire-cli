@@ -130,6 +130,7 @@ jobs:
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
       - name: Verify glibc CPU inference
         if: contains(matrix.target, '-gnu')
         env:

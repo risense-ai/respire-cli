@@ -85,6 +85,7 @@ jobs:
           bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+          bash scripts/probe-native-arm64-alpine.sh "$SDK_TARGET" "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
 
       - name: Native snapshot lifecycle and feedback probe build
         if: ${{ inputs.feedback_probe && !contains(inputs.target, '-musl') }}

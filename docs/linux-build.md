@@ -45,6 +45,9 @@ runner. No QEMU or cross build substitutes for model/runtime acceptance. GNU
 artifacts require an AArch64 ELF with its interpreter and resolved dynamic
 runtime dependencies. Musl artifacts require no ELF interpreter or shared
 library imports and also run in native ARM Alpine.
+The Alpine inference probe uses the already prepared model files, a separate
+owned profile and no container network or forwarded credentials. It executes
+actual CPU model inference as well as the native executable startup check.
 
 Historical upgrades keep every actual ARM source. Only `v1.0.15`, `v1.0.16` and
 `v1.0.17-dev.12` have an explicit ARM distribution gap. Their complete absence

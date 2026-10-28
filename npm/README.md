@@ -23,6 +23,11 @@ rsrs --help
 | Apple Silicon | `@rsrsai/macos-arm64` |
 | Windows x64 | `@rsrsai/win-x64` |
 
+Linux ARM64 returns in the DEV channel first. Use `rsrs-cli@dev` for a release
+whose manifest includes ARM64; stable versions 1.0.15 and 1.0.16 have no ARM64
+packages. A newer stable install becomes applicable only when its release
+actually includes those platform packages.
+
 `artifact-manifest.json` defines targets and names. Intel Mac is unsupported.
 Linux keeps the static musl package as its default. On a glibc distribution,
 select the GNU build explicitly; the same choice applies to npm and pnpm:
