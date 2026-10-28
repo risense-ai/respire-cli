@@ -6,10 +6,11 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
-import {validateAcceptedScoped,validateAcceptedAlias,validateAcceptance,validateVerified,
+import {validateAcceptedScoped,validateAcceptedAlias,validateAcceptance,validateVerified,validateArmVerified,
   assertCompletedSource,acceptedScopedOutput,reconcilePriorSubmissions} from './publication-acceptance.mjs';
 import {assertSourceRun,validateScoped} from './release-publication.mjs';
 import {planCleanup,executeCleanup,CLEANUP_POLICY} from './cleanup-release-artifacts.mjs';
+import {regressionContract} from './release-regression-contract.mjs';
 import {createPreparation,preparationLink} from './release-preparation.mjs';
 import {importedAnchor} from './prepared-import.mjs';
 const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
@@ -68,6 +69,19 @@ test('accepted ACKs cannot replace public digest and isolated installation proof
   }
 });
 
+test('ARM64 installation proof requires both native libc routes, exact versions and binary hashes',()=>{
+  const f=fixture(),receipt={...copy(f.verified),kind:'publication-arm64-verified',installs:['linux-arm64-gnu','linux-arm64'].map(platform=>({platform,version,binary_sha256:hash}))};
+  delete receipt.install;validateArmVerified(receipt,f.scoped,f.alias);
+  for(const mutate of [r=>r.installs.pop(),r=>r.installs[0].platform='linux-x64-gnu',r=>r.installs[0].binary_sha256='f'.repeat(64),r=>r.installs[0].version='0.0.0',r=>r.source.sha='f'.repeat(40),r=>r.alias_publisher.run_attempt=2]){
+    const bad=copy(receipt);mutate(bad);assert.throws(()=>validateArmVerified(bad,f.scoped,f.alias));
+  }
+});
+
+test('GNU installation proof alone cannot authorize cleanup of a six-platform release',async()=>{
+  const f=cleanupFixture(),at=Date.parse('2026-10-27T02:00:00Z');f.artifacts.delete(16);
+  assert.equal((await planCleanup(f.io,100,m,at)).skip,'no-native-arm64-public-install-proof');assert.deepEqual(f.deleted,[]);
+});
+
 test('an interrupted prior submission requires read-only content reconciliation and is never replayed',async()=>{
   const p=identity('rsrs-cli'),journal={schema:2,submissions:[{state:'unknown',package:p}]};
   let reads=0;const recovered=await reconcilePriorSubmissions(journal,[p],async items=>{reads++;assert.deepEqual(items,[p]);});assert.equal(reads,1);assert.equal(recovered[0].evidence,'verified-public-bytes');
@@ -82,11 +96,14 @@ function cleanupFixture(){
   const verifier={...f.run,id:400,path:'.github/workflows/verify-publication.yml',event:'workflow_run',updated_at:last};
   const a=(id,name,run)=>({id,name,expired:false,digest:'sha256:'+hash,size_in_bytes:100,created_at:'2026-10-27T00:10:00Z',workflow_run:{id:run.id,head_sha:run.head_sha}});
   f.verifiers=[verifier];f.consumers=[f.child];f.deleted=[];
+  f.scoped.validation_inventory=regressionContract(m);
+  f.armVerified={...copy(f.verified),kind:'publication-arm64-verified',installs:['linux-arm64-gnu','linux-arm64'].map(platform=>({platform,version,binary_sha256:hash}))};delete f.armVerified.install;
   f.artifacts=new Map([[10,a(10,'cli-release-'+m.targets[0].triple,f.run)],[11,a(11,'scoped-accepted-100-1',f.run)],[12,a(12,'alias-accepted-100-1-200-1',f.child)],[13,a(13,'publication-verified-100-1-400-1',verifier)]]);
+  f.artifacts.set(16,a(16,'publication-arm64-verified-100-1-400-1',verifier));
   const job=name=>({name,status:'completed',conclusion:'success',completed_at:f.run.updated_at});
-  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),job('api-smoke'),job('publish')];
+  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),...m.targets.filter(t=>t.triple.includes('windows')||t.triple.includes('apple-darwin')).flatMap(t=>[job(`Native migration (${t.triple})`),job(`Migration gate (${t.triple})`)]),job('api-smoke'),job('publish')];
   f.io={repository:source.repository,run:async()=>copy(f.run),artifacts:async id=>copy([...f.artifacts.values()].filter(a=>a.workflow_run.id===id)),
-    receipt:async a=>copy(a.id===11?f.scoped:a.id===12?f.alias:f.verified),jobs:async id=>copy(id===100?f.parentJobs:id===200?f.jobs:[job('verify-publication')]),
+    receipt:async a=>copy(a.id===11?f.scoped:a.id===12?f.alias:a.id===16?f.armVerified:f.verified),jobs:async id=>copy(id===100?f.parentJobs:id===200?f.jobs:[job('verify-publication'),job('verify-publication-arm64')]),
     release:async()=>({id:300,draft:false,published_at:f.run.updated_at,tag_name:'v'+version,target_commitish:sha,prerelease:true,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))}),tag:async()=>({type:'commit',sha}),
     consumers:async()=>copy(f.consumers),verifiers:async()=>copy(f.verifiers),otherReaders:async()=>[],artifact:async id=>copy(f.artifacts.get(id)??null),deleteArtifact:async id=>{f.deleted.push(id);f.artifacts.delete(id);}};
   return f;
@@ -171,8 +188,8 @@ test('cleanup waits for verified proof and the last background consumer/report p
   const f=cleanupFixture(),at=Date.parse('2026-10-27T01:20:00Z');
   f.artifacts.delete(13);assert.equal((await planCleanup(f.io,100,m,at)).skip,'no-completed-public-install-proof');assert.deepEqual(f.deleted,[]);
   const complete=cleanupFixture();assert.equal((await planCleanup(complete.io,100,m,at-1)).skip,'one-hour-after-consumers-not-reached');
-  const plan=await planCleanup(complete.io,100,m,at);assert.equal(plan.skip,undefined);assert.deepEqual(plan.artifacts.map(a=>a.id),[10,12,13,11]);
-  await executeCleanup(complete.io,plan,{apply:true,now:()=>at});assert.deepEqual(complete.deleted,[10,12,13,11]);
+  const plan=await planCleanup(complete.io,100,m,at);assert.equal(plan.skip,undefined);assert.deepEqual(plan.artifacts.map(a=>a.id),[10,12,13,16,11]);
+  await executeCleanup(complete.io,plan,{apply:true,now:()=>at});assert.deepEqual(complete.deleted,[10,12,13,16,11]);
 });
 
 test('active/new background consumers, failed verification and digest drift stop cleanup',async()=>{

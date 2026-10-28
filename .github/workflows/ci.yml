@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
       research_feedback_only:
-        description: Token-free four-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
+        description: Token-free six-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
         type: boolean
         default: false
       version_upgrade_only:
@@ -43,7 +43,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   platform-build:
-    # Release builds all four targets. Keep the separate compile matrix manual.
+    # Release builds all six targets. Keep the separate compile matrix manual.
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
@@ -54,6 +54,10 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -63,6 +67,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -120,8 +127,10 @@ jobs:
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/release/rsrs
+          bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
       - name: Verify glibc CPU inference
         if: contains(matrix.target, '-gnu')
         env:
@@ -131,6 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           exe=target/ci/${{ matrix.target }}/debug/rsrs
+          bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
   workspace-tests:
@@ -293,6 +303,7 @@ jobs:
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs
       - run: node npm/scripts/test-wrapper.mjs
+      - run: python3 scripts/test_published_upgrade_policy.py
       - run: node --test npm/scripts/test-prepared-import.mjs npm/scripts/test-verified-receipt.mjs npm/scripts/test-next-dev-version.mjs npm/scripts/test-release-preparation.mjs npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-ci-contracts.mjs npm/scripts/test-publication-fence.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-cleanup-release-artifacts.mjs npm/scripts/test-registry-publication.mjs npm/scripts/test-release-publication.mjs npm/scripts/test-dev6-publication-recovery.mjs npm/scripts/test-parallel-publication.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
@@ -546,9 +557,9 @@ jobs:
           node --input-type=module - <<'JS'
           import {readFileSync,appendFileSync} from 'node:fs';
           const plan=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/research-sdk-plan.json'));
-          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
+          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
           const matrix={include:plan.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
-          if(matrix.include.length!==4)throw Error('Expected all four native consumers');
+          if(matrix.include.length!==6)throw Error('Expected all six native consumers');
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\n`);
           JS
   research-feedback-native:

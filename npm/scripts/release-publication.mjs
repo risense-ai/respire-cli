@@ -269,8 +269,17 @@ async function publishAlias() {
   write('alias-ready.json', {schema: 1, kind: 'alias-ready', source, scoped_packages: scoped.packages, alias: expected,
     publisher: {workflow: ALIAS_WORKFLOW, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT}, install});
 }
-export async function publicInstall(scoped, expected, assertCurrent) {
+export function publicInstallPlatform(platform='linux-x64-gnu',host={platform:process.platform,arch:process.arch}) {
+  const options={'linux-x64-gnu':{arch:'x64',libc:'glibc',pkg:'@rsrsai/linux-x64-gnu'},
+    'linux-arm64-gnu':{arch:'arm64',libc:'glibc',pkg:'@rsrsai/linux-arm64-gnu'},
+    'linux-arm64':{arch:'arm64',libc:'musl',pkg:'@rsrsai/linux-arm64'}};
+  const option=options[platform];
+  if(!option||host.platform!=='linux'||host.arch!==option.arch)throw Error('Public installation requires the native selected Linux architecture');
+  return {...option,platform};
+}
+export async function publicInstall(scoped, expected, assertCurrent, platform='linux-x64-gnu') {
   const source = scoped.source;
+  const selected=publicInstallPlatform(platform);
   // An isolated public install, without inherited npm credentials, cache, or user config.
   const directory = mkdtempSync(path.join(tmpdir(), 'rsrs-public-install-'));
   try {
@@ -278,7 +287,7 @@ export async function publicInstall(scoped, expected, assertCurrent) {
     for (const key of Object.keys(env)) if (/^(?:npm_config_|NODE_AUTH_TOKEN$|NPM_TOKEN$|GH_TOKEN$|GITHUB_TOKEN$|ACTIONS_ID_TOKEN_REQUEST_)/i.test(key)) delete env[key];
     Object.assign(env, {HOME: directory, USERPROFILE: directory,
       NPM_CONFIG_USERCONFIG: path.join(directory, 'empty.npmrc'), NPM_CONFIG_GLOBALCONFIG: path.join(directory, 'global.npmrc'),
-      NPM_CONFIG_CACHE: path.join(directory, 'cache'), RSRS_DATA_DIR: path.join(directory, 'profile')});
+      NPM_CONFIG_CACHE: path.join(directory, 'cache'), RSRS_DATA_DIR: path.join(directory, 'profile'),RSRS_LIBC:selected.libc});
     writeFileSync(env.NPM_CONFIG_USERCONFIG, ''); writeFileSync(env.NPM_CONFIG_GLOBALCONFIG, '');
     const installOutput = await waitForPublicInstall(remaining => {
       const installStarted = Date.now();
@@ -293,16 +302,16 @@ export async function publicInstall(scoped, expected, assertCurrent) {
     process.stdout.write(installOutput);
     const alias = read(path.join(directory, 'node_modules/rsrs-cli/package.json'));
     const cli = read(path.join(directory, 'node_modules/@rsrsai/cli/package.json'));
-    const native = read(path.join(directory, 'node_modules/@rsrsai/linux-x64-gnu/package.json'));
-    if ([alias, cli, native].some(p => p.version !== source.version) || alias.dependencies?.['@rsrsai/cli'] !== source.version) throw new Error('Clean install resolved a different version');
-    const binaryHash = digest(path.join(directory, 'node_modules/@rsrsai/linux-x64-gnu/bin/rsrs'));
+    const native = read(path.join(directory, 'node_modules',selected.pkg,'package.json'));
+    if (native.name!==selected.pkg||[alias, cli, native].some(p => p.version !== source.version) || alias.dependencies?.['@rsrsai/cli'] !== source.version) throw new Error('Clean install resolved a different version/platform');
+    const binaryHash = digest(path.join(directory, 'node_modules',selected.pkg,'bin/rsrs'));
     if (!scoped.binaries.some(b => b.package === native.name && b.sha256 === binaryHash)) throw new Error('Installed native binary differs from validated build');
     const bin = path.join(directory, 'node_modules/.bin/rsrs');
     const version = command(bin, ['--version'], {env}).trim();
     if (!version.split(/\s+/).includes(source.version)) throw new Error(`Installed CLI version mismatch: ${version}`);
     command(bin, ['--help'], {env});
     assertCurrent();
-    return {platform: 'linux-x64-gnu', version: source.version, binary_sha256: binaryHash};
+    return {platform:selected.platform, version: source.version, binary_sha256: binaryHash};
   } finally { rmSync(directory, {recursive: true, force: true}); }
 }
 async function awaitAlias() {

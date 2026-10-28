@@ -41,8 +41,9 @@ jobs:
           node --input-type=module - <<'JS'
           import {readFileSync,appendFileSync} from 'node:fs';
           const matrix=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/sdk-locks/plan.json'));
-          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
+          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
           const native={include:matrix.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
+          if(native.include.length!==6)throw Error('Expected all six native SDK consumers');
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\nnative=${JSON.stringify(native)}\n`);
           JS
   download:

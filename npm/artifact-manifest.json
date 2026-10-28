@@ -9,27 +9,68 @@
     {
       "triple": "x86_64-unknown-linux-gnu",
       "pkg": "@rsrsai/linux-x64-gnu",
-      "os": ["linux"],
-      "cpu": ["x64"],
-      "libc": ["glibc"]
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "x64"
+      ],
+      "libc": [
+        "glibc"
+      ]
     },
     {
       "triple": "x86_64-unknown-linux-musl",
       "pkg": "@rsrsai/linux-x64",
-      "os": ["linux"],
-      "cpu": ["x64"]
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "x64"
+      ]
+    },
+    {
+      "triple": "aarch64-unknown-linux-gnu",
+      "pkg": "@rsrsai/linux-arm64-gnu",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm64"
+      ],
+      "libc": [
+        "glibc"
+      ]
+    },
+    {
+      "triple": "aarch64-unknown-linux-musl",
+      "pkg": "@rsrsai/linux-arm64",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm64"
+      ]
     },
     {
       "triple": "aarch64-apple-darwin",
       "pkg": "@rsrsai/macos-arm64",
-      "os": ["darwin"],
-      "cpu": ["arm64"]
+      "os": [
+        "darwin"
+      ],
+      "cpu": [
+        "arm64"
+      ]
     },
     {
       "triple": "x86_64-pc-windows-msvc",
       "pkg": "@rsrsai/win-x64",
-      "os": ["win32"],
-      "cpu": ["x64"]
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "x64"
+      ]
     }
   ],
   "sidecar": {

@@ -1,4 +1,4 @@
-// Exact required consumers for newly prepared/published four-platform releases.
+// Exact required consumers for newly prepared/published platform releases.
 export function regressionContract(manifest) {
   const native=manifest.targets.map(t=>t.triple);
   const migration=native.filter(t=>t.includes('windows')||t.includes('apple-darwin'));

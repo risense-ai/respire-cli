@@ -18,8 +18,15 @@ rsrs --help
 | --- | --- |
 | Linux x64, musl (default) | `@rsrsai/linux-x64` |
 | Linux x64, glibc | `@rsrsai/linux-x64-gnu` |
+| Linux ARM64, musl (default) | `@rsrsai/linux-arm64` |
+| Linux ARM64, glibc | `@rsrsai/linux-arm64-gnu` |
 | Apple Silicon | `@rsrsai/macos-arm64` |
 | Windows x64 | `@rsrsai/win-x64` |
+
+Linux ARM64 returns in the DEV channel first. Use `rsrs-cli@dev` for a release
+whose manifest includes ARM64; stable versions 1.0.15 and 1.0.16 have no ARM64
+packages. A newer stable install becomes applicable only when its release
+actually includes those platform packages.
 
 `artifact-manifest.json` defines targets and names. Intel Mac is unsupported.
 Linux keeps the static musl package as its default. On a glibc distribution,

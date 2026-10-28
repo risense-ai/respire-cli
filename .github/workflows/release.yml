@@ -296,6 +296,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -305,6 +309,9 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -717,6 +724,17 @@ jobs:
       - name: Pin the same pack tool used during complete preparation
         run: npm install --global npm@11.5.1
       - run: node npm/scripts/set-build-version.mjs '${{ needs.plan.outputs.version }}'
+      - name: Select copies from the exact prepared source platform inventory
+        id: platforms
+        run: |
+          node --input-type=module - <<'NODE'
+          import {readFileSync,appendFileSync} from 'node:fs';
+          const m=JSON.parse(readFileSync('npm/artifact-manifest.json'));
+          const targets=m.targets.map(t=>t.triple);
+          const gnu=targets.includes('aarch64-unknown-linux-gnu'),musl=targets.includes('aarch64-unknown-linux-musl');
+          if(gnu!==musl)throw Error('Prepared Linux ARM64 inventory must include both libc routes');
+          appendFileSync(process.env.GITHUB_OUTPUT,`arm64=${gnu}\n`);
+          NODE
       - name: Require registration before reading cross-run binary artifacts
         env:
           GH_TOKEN: ${{ github.token }}
@@ -774,6 +792,26 @@ jobs:
             imported-assets/rsrs-x86_64-pc-windows-msvc.exe
             imported-assets/rsrs-x86_64-pc-windows-msvc-runtime.tar.gz
             imported-assets/cli-build-x86_64-pc-windows-msvc.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-unknown-linux-gnu
+          path: |
+            imported-assets/rsrs-aarch64-unknown-linux-gnu
+            imported-assets/rsrs-aarch64-unknown-linux-gnu-runtime.tar.gz
+            imported-assets/cli-build-aarch64-unknown-linux-gnu.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-unknown-linux-musl
+          path: |
+            imported-assets/rsrs-aarch64-unknown-linux-musl
+            imported-assets/rsrs-aarch64-unknown-linux-musl-runtime.tar.gz
+            imported-assets/cli-build-aarch64-unknown-linux-musl.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
@@ -973,7 +1011,7 @@ jobs:
           pattern: cli-release-*
           path: release-assets
           merge-multiple: true
-      - name: Verify release artifacts and prepare all five npm packages
+      - name: Verify release artifacts and prepare every scoped npm package
         run: |
           node npm/scripts/verify-packages.mjs release-assets --assets-only
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
@@ -1035,7 +1073,8 @@ jobs:
           const fs=require('fs'),path=require('path');
           const expected=fs.readdirSync('release-assets').sort();
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
-          if(expected.length!==12||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 12 verified binary/runtime/metadata assets');
+          const m=JSON.parse(fs.readFileSync('npm/artifact-manifest.json','utf8'));
+          if(expected.length!==m.targets.length*3||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain every exact-source binary/runtime/metadata asset (18 for six platforms)');
           NODE
       - name: Reconcile any interrupted previous-attempt npm submission
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

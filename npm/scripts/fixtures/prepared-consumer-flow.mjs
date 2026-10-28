@@ -1,6 +1,6 @@
 // Real Node helper processes and real ZIP bytes; all GitHub responses and
 // payloads are synthetic. No npm submission, profile, model or remote API.
-import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,existsSync} from 'node:fs';
+import {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync,existsSync,cpSync} from 'node:fs';
 import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {spawnSync} from 'node:child_process';
@@ -12,12 +12,14 @@ const sha='a'.repeat(40),workflowSha='c'.repeat(40),hash='b'.repeat(64),version=
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const script=name=>fileURLToPath(new URL('../'+name,import.meta.url));
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
-export function preparedConsumerFlow(){
+export function preparedConsumerFlow({arm64=false}={}){
   const root=mkdtempSync(join(tmpdir(),'prepared-consumer-flow-'));
   try{
     const bin=join(root,'bin'),assets=join(root,'assets'),packs=join(root,'packs'),stateFile=join(root,'state.json');
     for(const folder of [bin,assets,packs])mkdirSync(folder);
     const triples=['x86_64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc'];
+    if(arm64)triples.push('aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl');
+    const migration=triples.filter(t=>t.includes('windows')||t.includes('apple-darwin'));
     const manifest={cliVersion:'1.0.16',npmScope:'@rsrsai/cli',targets:triples.map((triple,i)=>({triple,pkg:`@rsrsai/platform-${i}`}))};
     for(const t of manifest.targets){
       const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`;
@@ -46,7 +48,7 @@ export function preparedConsumerFlow(){
       ci:{...base,id:600,run_attempt:1,path:'.github/workflows/ci.yml',event:'push',head_sha:sha,status:'completed',conclusion:'success',run_started_at:old(7),updated_at:old(4)},
       originalJobs:[...triples.map(t=>job(`validate / Release (${t})`)),job('validate / npm-dry-run'),
         ...triples.map(t=>job(`native-regression / Native (${t})`)),...triples.slice(1).map(t=>job(`cloud-sweep (runner, ${t})`)),
-        ...triples.slice(2).flatMap(t=>[job(`Native migration (${t})`),job(`Migration gate (${t})`)]),job('api-smoke')],
+        ...migration.flatMap(t=>[job(`Native migration (${t})`),job(`Migration gate (${t})`)]),job('api-smoke')],
       originalArtifacts:[...triples.map(t=>`cli-release-${t}`),'npm-release-validation','npm-release-packages'].map((name,i)=>({id:i+1,name,
         expired:false,size_in_bytes:100,digest:'sha256:'+hash,workflow_run:{id:700,head_sha:sha}})),currentArtifacts:[],currentJobs:[]};
     const env={PATH:bin+':'+process.env.PATH,HOME:root,TMPDIR:root,MOCK_STATE:stateFile,
@@ -151,6 +153,23 @@ else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r))
     state.allowFinalization=true;state.acceptedAt=new Date(Date.now()+10000).toISOString();
     state.release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
     state.currentJobs.push({name:'publication-ready',status:'completed',conclusion:'success',completed_at:new Date().toISOString()});
+    // Exercise the actual current workflow snippets against both older four-
+    // platform sources and the new six-platform manifest, not current-main assumptions.
+    const workflow=readFileSync(new URL('../../../.github/workflows/release.yml',import.meta.url),'utf8');
+    const selector=workflow.split('id: platforms\n')[1].match(/node --input-type=module - <<'NODE'\n([\s\S]*?)          NODE/)[1].replace(/^          /gm,'');
+    const select=()=>spawnSync(process.execPath,['--input-type=module','-e',selector],{cwd:root,env,encoding:'utf8',timeout:5000});
+    success(select());requireValue(readFileSync(env.GITHUB_OUTPUT,'utf8').includes(`arm64=${arm64}\n`),'Copied platforms came from the workflow head rather than selected source');
+    const validManifest=readFileSync(join(root,'npm/artifact-manifest.json'));
+    const partial=JSON.parse(validManifest);partial.targets=partial.targets.filter(t=>t.triple!=='aarch64-unknown-linux-musl');
+    if(!arm64)partial.targets.push({triple:'aarch64-unknown-linux-gnu'});
+    writeFileSync(join(root,'npm/artifact-manifest.json'),JSON.stringify(partial));requireValue(select().status!==0,'Partial ARM platform inventory accepted');
+    writeFileSync(join(root,'npm/artifact-manifest.json'),validManifest);
+    cpSync(assets,join(root,'release-assets'),{recursive:true});
+    const assetList=join(root,'release-assets.json');writeFileSync(assetList,JSON.stringify({assets:scoped.assets}));
+    const assetCode="const fs=require('fs'),path=require('path');\n"+workflow.match(/const expected=fs.readdirSync\('release-assets'\)\.sort\(\);([\s\S]*?)          NODE/)[0].replace(/          NODE$/,'').replace(/^          /gm,'');
+    const assetGate=()=>spawnSync(process.execPath,['-e',assetCode],{cwd:root,env:{...env,RUNNER_TEMP:root},encoding:'utf8',timeout:5000});
+    success(assetGate());writeFileSync(assetList,JSON.stringify({assets:scoped.assets.slice(1)}));
+    requireValue(assetGate().status!==0,'Missing public asset accepted by actual workflow gate');
     writeFileSync(join(root,'scoped-accepted.json'),JSON.stringify(scoped));writeFileSync(join(root,'publication-accepted.json'),JSON.stringify(complete));
     env.FULL_REGRESSION_REQUIRED='true';
     const originalGate=state.originalJobs[0].conclusion;state.originalJobs[0].conclusion='failure';
@@ -166,6 +185,6 @@ else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r))
       'Preparation/publication timing conflated or fabricated public verification');
     return {positive:['original-attest','selected-proof','registered-consumer','verified-import','completed-import-readiness','mandatory-write-byte-check'],
       rejected:[...negative,'tampered-current-binary','tampered-current-tarball'],source_sha:sha,workflow_sha:workflowSha,
-      finalized:true,scope:'synthetic GitHub/git and local Release edit; actual Node/ZIP/file checks; no remote writes, npm writes or real native acceptance'};
+      finalized:true,platform_count:triples.length,scope:'synthetic GitHub/git and local Release edit; actual Node/ZIP/file checks; no remote writes, npm writes or real native acceptance'};
   }finally{rmSync(root,{recursive:true,force:true});}
 }

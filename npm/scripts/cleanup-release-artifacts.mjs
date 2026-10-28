@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {validateSource,validateScoped,validateAlias,RELEASE_ARTIFACT_CLEANUP_POLICY} from './release-publication.mjs';
-import {validateAcceptedScoped,validateAcceptedAlias,validateVerified} from './publication-acceptance.mjs';
+import {validateAcceptedScoped,validateAcceptedAlias,validateVerified,validateArmVerified} from './publication-acceptance.mjs';
 import {regressionStatus} from './release-regression-contract.mjs';
 import {validatePreparationHistory,validatePreparationSource,preparationInputs} from './release-preparation.mjs';
 import {validateImportedShape,validateImportedEvidence,importedAnchor,validateConsumerIntent,importName,consumerName} from './prepared-import.mjs';
@@ -116,6 +116,8 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
   // must finish, and at least one exact successful content/install report remains.
   const verifiers=accepted?await io.verifiers(run.created_at):[],verificationArtifacts=[];
   let verifiedAt=0,provedPublic=!accepted;
+  const needsArm=accepted&&manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-gnu');
+  let provedArm=!needsArm;
   if(verifiers.some(r=>!workflow(r,VERIFY)||!terminal(r)))return {skip:'public-verification-still-active'};
   for(const verifier of verifiers){
     const verifierJobs=await io.jobs(verifier.id,verifier.run_attempt);
@@ -130,8 +132,18 @@ export async function planCleanup(io,runId,manifest,now=Date.now()){
       if(!alias)throw Error('Verified report has no accepted alias publisher');
       validateVerified(receipt,scoped,alias);provedPublic=true;verifiedAt=Math.max(verifiedAt,timestamp(receipt.verified_at));verificationArtifacts.push(a);
     }
+    const armName=`publication-arm64-verified-${run.id}-${run.run_attempt}-${verifier.id}-${verifier.run_attempt}`;
+    for(const a of (await io.artifacts(verifier.id)).filter(a=>a.name===armName&&!a.expired)){
+      boundArtifact(a,verifier);
+      if(!needsArm||verifier.conclusion!=='success'||!verifierJobs.some(j=>j.name==='verify-publication-arm64'&&j.conclusion==='success'))throw Error('Native ARM64 public verification job failed or is unexpected');
+      const receipt=await io.receipt(a,'publication-arm64-verified.json');
+      const alias=aliasReceipts.find(r=>JSON.stringify(r.publisher)===JSON.stringify(receipt.alias_publisher));
+      if(!alias)throw Error('ARM64 verified report has no accepted alias publisher');
+      validateArmVerified(receipt,scoped,alias);provedArm=true;verifiedAt=Math.max(verifiedAt,timestamp(receipt.verified_at));verificationArtifacts.push(a);
+    }
   }
   if(!provedPublic)return {skip:'no-completed-public-install-proof'};
+  if(!provedArm)return {skip:'no-native-arm64-public-install-proof'};
   const selected=artifacts.filter(a=>!a.expired&&allowedSourceArtifact(a.name,source,manifest.targets.map(t=>t.triple),scoped.validation_origin));
   for(const a of selected)boundArtifact(a,run);
   const all=[...selected,...aliasArtifacts,...verificationArtifacts];

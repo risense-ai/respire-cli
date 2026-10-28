@@ -15,7 +15,7 @@ test('Release wires registered read-only import and explicit fail-closed publica
   assert(importer.indexOf('--pack imported-packs')<importer.indexOf('prepared-import.mjs record'));
   assert.match(importer,/run-id: \$\{\{ needs.plan.outputs.prepared_run \}\}/);
   assert.match(importer,/npm@11\.5\.1/);
-  for(const triple of ['x86_64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc'])assert(importer.includes('name: cli-release-'+triple));
+  for(const triple of ['x86_64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc'])assert(importer.includes('name: cli-release-'+triple));
   assert(plan.indexOf('release-preparation.mjs inspect')<plan.indexOf('gh\',\[\'release\',\'create'));
   for(const joined of [ready,publish]){
     assert.match(joined,/inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped'/);
@@ -36,6 +36,10 @@ test('actual helper processes bind preparation, registered import, readiness and
   assert.equal(result.rejected.length,9);
   assert.equal(result.finalized,true);
   assert.notEqual(result.source_sha,result.workflow_sha);
+});
+test('six-platform prepared publication checks both ARM copies and every original gate through finalization',()=>{
+  const result=preparedConsumerFlow({arm64:true});
+  assert.equal(result.platform_count,6);assert.equal(result.finalized,true);assert.equal(result.rejected.length,9);
 });
 
 const sha='a'.repeat(40),workflowSha='c'.repeat(40),hash='b'.repeat(64),version='1.2.3-dev.4';
