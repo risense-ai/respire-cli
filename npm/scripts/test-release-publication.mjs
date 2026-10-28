@@ -7,7 +7,7 @@ import path from 'node:path';
 import {promisify} from 'node:util';
 import {createHash} from 'node:crypto';
 import {execFile, execFileSync} from 'node:child_process';
-import {waitForPublicInstall, publicInstallArgs, PUBLICATION_MAX_BUFFER, publicationCommand, scopedPublisherFinished, selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
+import {waitForPublicInstall, publicInstallArgs, publicInstallPlatform, PUBLICATION_MAX_BUFFER, publicationCommand, scopedPublisherFinished, selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
 
 const m = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url)));
 const integrity = 'sha512-' + createHash('sha512').update('synthetic package').digest('base64');
@@ -202,7 +202,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 34, 'preserve active uploads, handshake/recovery evidence and the new unpublished preparation proof');
+  assert.equal(uploads, 35, 'preserve active uploads, handshake/recovery evidence and the new unpublished preparation proof');
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);
@@ -362,4 +362,15 @@ test('actual npm resolver recovers from an offline registry index delay with a f
   assert.equal(attempts, 2);
   assert(indexRequests >= 2, 'The retry must fetch the registry again rather than reuse stale cache');
   assert.equal(JSON.parse(readFileSync(path.join(root, 'install/node_modules/rsrs-cli/package.json'))).version, version);
+});
+
+
+test('public installation selects explicit libc and requires actual matching host architecture',()=>{
+  assert.equal(publicInstallPlatform('linux-x64-gnu',{platform:'linux',arch:'x64'}).libc,'glibc');
+  for(const [platform,libc] of [['linux-arm64','musl'],['linux-arm64-gnu','glibc']]){
+    assert.deepEqual(publicInstallPlatform(platform,{platform:'linux',arch:'arm64'}),{arch:'arm64',libc,pkg:'@rsrsai/'+platform,platform});
+    assert.throws(()=>publicInstallPlatform(platform,{platform:'linux',arch:'x64'}));
+    assert.throws(()=>publicInstallPlatform(platform,{platform:'darwin',arch:'arm64'}));
+  }
+  assert.throws(()=>publicInstallPlatform('foreign',{platform:'linux',arch:'arm64'}));
 });

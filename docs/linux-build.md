@@ -7,6 +7,8 @@ or ONNX Runtime sources.
 | --- | --- |
 | Linux x64, glibc | `x86_64-unknown-linux-gnu` |
 | Linux x64, static musl | `x86_64-unknown-linux-musl` |
+| Linux ARM64, glibc | `aarch64-unknown-linux-gnu`, native `ubuntu-24.04-arm` |
+| Linux ARM64, static musl | `aarch64-unknown-linux-musl`, native `ubuntu-24.04-arm` |
 | musl container | `rust:1.95.0-alpine3.23`, same CPU architecture |
 | SDK | Pinned binary SDK for the exact target |
 | Output | `target/ci/<target>/release/rsrs` and staged notices |
@@ -37,3 +39,15 @@ The container fetches the SDK, compiles CLI/application crates and stages runtim
 notices. Configure the SDK URL first. Caches stay in `target/musl-cache/<target>`.
 Static libc does not establish support for every kernel, CPU or sandbox. Host
 permissions still govern Linux keyring access.
+
+Linux ARM64 builds and acceptance require `uname -m=aarch64` on a native Linux
+runner. No QEMU or cross build substitutes for model/runtime acceptance. GNU
+artifacts require an AArch64 ELF with its interpreter and resolved dynamic
+runtime dependencies. Musl artifacts require no ELF interpreter or shared
+library imports and also run in native ARM Alpine.
+
+Historical upgrades keep every actual ARM source. Only `v1.0.15`, `v1.0.16` and
+`v1.0.17-dev.12` have an explicit ARM distribution gap. Their complete absence
+is reported as not applicable; partial assets or any other missing version
+still fail. Existing ARM releases, including the 1.0.6 DEV baseline and 1.0.10
+compatibility draft, remain strict upgrade sources.

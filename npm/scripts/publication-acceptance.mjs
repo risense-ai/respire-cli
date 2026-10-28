@@ -70,6 +70,18 @@ export function validateVerified(receipt, scoped, alias) {
   }
   return receipt;
 }
+export function validateArmVerified(receipt,scoped,alias){
+  if(receipt?.schema!==2||receipt.kind!=='publication-arm64-verified'||receipt.state!=='verified'||
+    !same(receipt.source,scoped.source)||!same(receipt.packages,[...scoped.packages,alias.alias])||
+    !same(receipt.alias_publisher,alias.publisher)||!instant(receipt.verified_at)||
+    !Array.isArray(receipt.installs)||receipt.installs.length!==2)throw Error('Missing native ARM64 public installation proof');
+  for(const platform of ['linux-arm64-gnu','linux-arm64']){
+    const matches=receipt.installs.filter(i=>i.platform===platform);
+    if(matches.length!==1||matches[0].version!==scoped.source.version||
+      !scoped.binaries.some(b=>b.package==='@rsrsai/'+platform&&b.sha256===matches[0].binary_sha256))throw Error('ARM64 install differs from exact accepted binary');
+  }
+  return receipt;
+}
 export async function reconcilePriorSubmissions(journal, expected, verify = verifyPackages) {
   if (journal?.schema !== 2 || !Array.isArray(journal.submissions)) throw Error('Invalid prior submission journal');
   const acceptances=[];
@@ -274,7 +286,14 @@ async function verifyAccepted() {
   if(repo!=='risense-ai/respire-cli' || !id(runId) || !id(attempt)) throw Error('Invalid verification source event');
   const scoped = artifact(runId,scopedAcceptedName({run_id:runId,run_attempt:attempt}),repo);
   if(!scoped) { output({eligible:'false'}); return; } // Legacy workflow has its existing synchronous proof.
-  validateAcceptedScoped(scoped,manifest());
+  validateSource(scoped.source);
+  // Current main can support more platforms than this historical publication.
+  // Only the exact source's manifest is data; never execute artifact scripts.
+  const sourceManifest=JSON.parse(command('git',['show',`${scoped.source.sha}:npm/artifact-manifest.json`],{maxBuffer:65536}));
+  sourceManifest.cliVersion=scoped.source.version;
+  validateAcceptedScoped(scoped,sourceManifest);
+  const arm=process.env.VERIFY_ARM64==='true';
+  if(arm&&!sourceManifest.targets.some(t=>t.triple==='aarch64-unknown-linux-gnu')){output({eligible:'false'});return;}
   if(String(scoped.source.run_id)!==runId || Number(scoped.source.run_attempt)!==Number(attempt)) throw Error('Wrong verification source');
   const s = scoped.source;
   const assertCurrent = () => {
@@ -290,6 +309,14 @@ async function verifyAccepted() {
   if(!found) throw Error('Accepted alias publisher proof missing');
   const packages = [...scoped.packages,found.receipt.alias];
   await verifyPackages(packages.map(p=>p.name==='rsrs-cli'?{...p,dependencies:found.receipt.dependencies}:p),{requireInstallIndex:true,timeoutMs:60*60*1000});
+  if(arm){
+    const installs=[];
+    for(const platform of ['linux-arm64-gnu','linux-arm64'])installs.push(await publicInstall(scoped,found.receipt.alias,assertCurrent,platform));
+    assertCurrent();
+    const verified=validateArmVerified({schema:2,kind:'publication-arm64-verified',state:'verified',source:s,packages,
+      alias_publisher:found.receipt.publisher,verified_at:new Date().toISOString(),installs},scoped,found.receipt);
+    write('publication-arm64-verified.json',verified);output({eligible:'true'});return;
+  }
   const install = await publicInstall(scoped,found.receipt.alias,assertCurrent);
   assertCurrent();
   const verified = validateVerified({schema:2,kind:'publication-verified',state:'verified',source:s,packages,

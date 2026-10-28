@@ -6,6 +6,7 @@ import {execFileSync} from 'node:child_process';
 import {CLEANUP_POLICY,REPOSITORY,planCleanup,executeCleanup,allowedSourceArtifact,requireRegressions,githubAdapter} from './cleanup-release-artifacts.mjs';
 
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
+manifest.targets=manifest.targets.filter(t=>!t.triple.startsWith('aarch64-unknown-linux-')); // frozen historical protocol-1 inventory
 const sha='b'.repeat(40),digest='a'.repeat(64),zipDigest=`sha256:${'d'.repeat(64)}`;
 const integrity='sha512-'+createHash('sha512').update('synthetic package').digest('base64');
 const at='2026-10-25T00:20:00Z',now=Date.parse('2026-10-25T02:00:00Z');

@@ -247,6 +247,10 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -256,6 +260,9 @@ jobs:
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      - name: Require real native Linux ARM64 hardware
+        shell: bash
+        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -852,7 +859,7 @@ jobs:
           const fs=require('fs'),path=require('path');
           const expected=fs.readdirSync('release-assets').sort();
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
-          if(expected.length!==12||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 12 verified binary/runtime/metadata assets');
+          if(expected.length!==18||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain exactly all 18 verified binary/runtime/metadata assets');
           NODE
       - name: Reconcile any interrupted previous-attempt npm submission
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

@@ -18,6 +18,8 @@ rsrs --help
 | --- | --- |
 | Linux x64, musl (default) | `@rsrsai/linux-x64` |
 | Linux x64, glibc | `@rsrsai/linux-x64-gnu` |
+| Linux ARM64, musl (default) | `@rsrsai/linux-arm64` |
+| Linux ARM64, glibc | `@rsrsai/linux-arm64-gnu` |
 | Apple Silicon | `@rsrsai/macos-arm64` |
 | Windows x64 | `@rsrsai/win-x64` |
 

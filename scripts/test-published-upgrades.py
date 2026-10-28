@@ -1,5 +1,6 @@
 """Every published stable >=1.0.6 is a mandatory actual-artifact upgrade source."""
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
+from published_upgrade_policy import platform_applicability
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',required=True)
@@ -52,7 +53,10 @@ try:
         extension='.exe' if 'windows' in args.target else ''
         names=[f'rsrs-{args.target}{extension}',f'rsrs-{args.target}-runtime.tar.gz',f'cli-build-{args.target}.json']
         assets={asset['name']:asset for asset in release['assets']}
-        assert all(name in assets for name in names),'missing platform artifact: '+tag+' '+args.target
+        not_applicable=platform_applicability(tag,args.target,assets)
+        if not_applicable:
+            report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'status':'not-applicable','reason':not_applicable})
+            continue
         needed=[]
         for name in names:
             digest=assets[name].get('digest')
@@ -88,6 +92,7 @@ try:
         checks=json.loads((result/'real-account-return-verification.json').read_text())
         assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
         report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')})
+    assert any(item.get('passed') is True for item in report['sources']),'no actual applicable upgrade was exercised'
     report['passed']=True
 finally:
     (root/'published-upgrades.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf-8')

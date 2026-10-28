@@ -7,8 +7,23 @@ const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',impor
 const contract=regressionContract(manifest),copy=structuredClone;
 const job=name=>({name,status:'completed',conclusion:'success'});
 const inventory=()=>[...contract.native.map(t=>job(`native-regression / Native (${t})`)),...contract.cloud.map(t=>job(`cloud-sweep (runner, ${t})`)),...contract.migration.map(t=>job(`Native migration (${t})`)),...contract.migration_gate.map(t=>job(`Migration gate (${t})`)),job('api-smoke'),job('publish')];
+test('both Linux ARM targets require native runners, every source feedback phase and background install proof',()=>{
+  const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
+  for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
+    const workflow=text(file);
+    for(const triple of ['aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl'])assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
+    assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
+  }
+  const source=text('token-free-sdk-check.yml');assert.match(source,/if: \$\{\{ !contains\(inputs.target, '-musl'\) \}\}/);
+  assert.match(source,/run: bash scripts\/build-linux-musl.sh \$\{\{ inputs.target \}\}/);
+  assert.match(source,/inputs.feedback_probe && contains\(inputs.target, '-musl'\)/);
+  assert.match(source,/scripts\/verify-linux-arm64-elf.sh/);assert.match(source,/diary_tests/);assert.match(source,/feedback_contract_probe/);
+  const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
+  assert.match(background,/runs-on: ubuntu-24.04-arm/);assert.match(background,/VERIFY_ARM64: 'true'/);
+  assert.match(background,/publication-arm64-verified-/);assert.doesNotMatch(background,/id-token:|contents: write|actions: write|npm publish|concurrency:/);
+});
 test('new full gate requires every native, cloud, migration fixture, join and API success',()=>{
-  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,4);assert.equal(contract.cloud.length,3);assert.equal(contract.migration.length,2);assert.equal(contract.migration_gate.length,2);
+  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,6);assert.equal(contract.cloud.length,5);assert.equal(contract.migration.length,2);assert.equal(contract.migration_gate.length,2);
   assert.equal(regressionStatus(inventory(),contract),'success');requireRegressions(inventory(),contract.native,contract);
   for(let index=0;index<inventory().length-1;index++){
     for(const conclusion of ['failure','cancelled','skipped',null]){
