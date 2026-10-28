@@ -10,6 +10,8 @@ import {validateAcceptedScoped,validateAcceptedAlias,validateAcceptance,validate
   assertCompletedSource,acceptedScopedOutput,reconcilePriorSubmissions} from './publication-acceptance.mjs';
 import {assertSourceRun,validateScoped} from './release-publication.mjs';
 import {planCleanup,executeCleanup,CLEANUP_POLICY} from './cleanup-release-artifacts.mjs';
+import {createPreparation,preparationLink} from './release-preparation.mjs';
+import {importedAnchor} from './prepared-import.mjs';
 const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const copy=structuredClone;
 const hash='a'.repeat(64), sha='b'.repeat(40), version='1.2.3-dev.4';
@@ -86,9 +88,84 @@ function cleanupFixture(){
   f.io={repository:source.repository,run:async()=>copy(f.run),artifacts:async id=>copy([...f.artifacts.values()].filter(a=>a.workflow_run.id===id)),
     receipt:async a=>copy(a.id===11?f.scoped:a.id===12?f.alias:f.verified),jobs:async id=>copy(id===100?f.parentJobs:id===200?f.jobs:[job('verify-publication')]),
     release:async()=>({id:300,draft:false,published_at:f.run.updated_at,tag_name:'v'+version,target_commitish:sha,prerelease:true,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))}),tag:async()=>({type:'commit',sha}),
-    consumers:async()=>copy(f.consumers),verifiers:async()=>copy(f.verifiers),artifact:async id=>copy(f.artifacts.get(id)??null),deleteArtifact:async id=>{f.deleted.push(id);f.artifacts.delete(id);}};
+    consumers:async()=>copy(f.consumers),verifiers:async()=>copy(f.verifiers),otherReaders:async()=>[],artifact:async id=>copy(f.artifacts.get(id)??null),deleteArtifact:async id=>{f.deleted.push(id);f.artifacts.delete(id);}};
   return f;
 }
+
+function preparedCleanupFixture(){
+  const f=cleanupFixture(),previous=n=>`2026-10-26T23:${n}:00Z`;
+  const original={repository:source.repository,workflow:source.workflow,run_id:'50',run_attempt:1,sha,version};
+  const manifest={...m,cliVersion:version},identity={hashes:{'Cargo.lock':hash},sdk:[]};
+  const job=name=>({name,status:'completed',conclusion:'success',started_at:previous('20'),completed_at:previous('30')});
+  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple.includes('apple-darwin'));
+  const originalJobs=[...m.targets.map(t=>job(`validate / Release (${t.triple})`)),job('validate / npm-dry-run'),
+    ...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (runner, ${t.triple})`)),
+    ...migration.map(t=>job(`Native migration (${t.triple})`)),...migration.map(t=>job(`Migration gate (${t.triple})`)),job('api-smoke')];
+  const originalRun={...copy(f.run),id:50,run_attempt:1,head_sha:sha,head_branch:'main',status:'in_progress',updated_at:previous('40'),created_at:previous('10')};
+  const ci={...originalRun,id:60,path:'.github/workflows/ci.yml',event:'push',status:'completed',conclusion:'success',run_started_at:previous('10'),updated_at:previous('25')};
+  const artifacts=[...m.targets.map(t=>`cli-release-${t.triple}`),'npm-release-validation','npm-release-packages'].map((name,i)=>({id:50+i,name,size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:50,head_sha:sha}}));
+  const assets=f.scoped.assets.map(a=>({file:a.name,size:a.size,sha256:a.sha256}));
+  const packs=f.scoped.packages.map((p,i)=>({name:p.name,version,file:`pack-${i}.tgz`,size:10,sha256:hash}));
+  f.history={source:original,identity,manifest,run:originalRun,jobs:originalJobs,ci,artifacts};
+  const proof=createPreparation({...f.history,assets,packs,now:previous('35')});
+  f.history.run={...originalRun,status:'completed',conclusion:'success'};
+  const origin=preparationLink(proof,{id:80,name:'release-prepared-50-1',size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:50,head_sha:sha}});
+  f.run.head_branch='main';
+  const owner={repository:source.repository,workflow:source.workflow,run_id:'100',run_attempt:1,sha,version,workflow_head_sha:f.run.head_sha};
+  f.imported={schema:1,kind:'prepared-import',state:'verified-copy',owner:{...owner,import_job_id:'1000'},origin:copy(origin),preparation:proof,
+    validated_assets:copy(assets),validated_packs:copy(packs),imported_at:'2026-10-27T00:05:00Z'};
+  f.intent={schema:1,kind:'prepared-consumer',state:'reading',owner,origin:copy(origin),created_at:'2026-10-27T00:00:30Z'};
+  const artifact=(id,name)=>({id,name,expired:false,digest:'sha256:'+hash,size_in_bytes:100,created_at:'2026-10-27T00:06:00Z',workflow_run:{id:100,head_sha:f.run.head_sha}});
+  f.artifacts.set(14,artifact(14,'prepared-import-100-1'));f.artifacts.set(15,artifact(15,'prepared-consumer-100-1'));
+  f.scoped.validation_origin=importedAnchor(f.imported,f.artifacts.get(14),f.run);
+  f.scoped.validation_inventory=proof.validation.inventory;
+  f.parentJobs=[{id:1000,name:'prepared-import',status:'completed',conclusion:'success',started_at:'2026-10-27T00:01:00Z',completed_at:'2026-10-27T00:06:00Z'},
+    {name:'publish',status:'completed',conclusion:'success',completed_at:f.run.updated_at}];
+  const read=f.io.receipt;f.io.receipt=async a=>a.id===14?copy(f.imported):a.id===15?copy(f.intent):read(a);
+  f.io.preparedHistory=async()=>copy(f.history);
+  return f;
+}
+
+test('prepared cleanup requires original full gates, current completed import and matching public bytes',async()=>{
+  const at=Date.parse('2026-10-27T01:20:00Z'),f=preparedCleanupFixture();
+  const plan=await planCleanup(f.io,100,m,at);assert.equal(plan.skip,undefined);
+  assert(plan.prepared);assert(plan.artifacts.some(a=>a.id===14)&&plan.artifacts.some(a=>a.id===15));
+  assert(!plan.artifacts.some(a=>a.workflow_run.id===50),'original preparation archives must never be deleted as current copies');
+  await executeCleanup(f.io,plan,{apply:true,now:()=>at});assert(f.deleted.includes(14)&&f.deleted.includes(15));
+  for(const mutate of [x=>x.history.jobs[0].conclusion='skipped',x=>delete x.io.preparedHistory,
+    x=>x.imported.validated_packs.pop(),x=>x.intent.owner.sha='f'.repeat(40),x=>x.parentJobs[0].conclusion='failure']){
+    const bad=preparedCleanupFixture();mutate(bad);await assert.rejects(planCleanup(bad.io,100,m,at));assert.deepEqual(bad.deleted,[]);
+  }
+});
+test('original source gate changes during cleanup stop before deleting any copied proof or payload',async()=>{
+  const at=Date.parse('2026-10-27T01:20:00Z'),f=preparedCleanupFixture(),plan=await planCleanup(f.io,100,m,at);
+  f.history.ci.run_attempt=2;await assert.rejects(executeCleanup(f.io,plan,{apply:true,now:()=>at}),/proof changed|stale/);assert.deepEqual(f.deleted,[]);
+});
+
+test('prepared cleanup rejects wrong origin, import, consumer, history and public bytes before selecting any deletion',async()=>{
+  const at=Date.parse('2026-10-27T02:00:00Z');
+  const cases=[
+    ['scoped origin',f=>f.scoped.validation_origin.artifact.id='999',/origin changed/],
+    ['original origin',f=>f.imported.origin.artifact.id='999',/origin changed/],
+    ['import owner',f=>f.imported.owner.import_job_id='999',/import job/],
+    ['consumer origin',f=>f.intent.origin.artifact.id='999',/registration differs/],
+    ['consumer missing',f=>f.artifacts.delete(15),/proof missing/],
+    ['history lock',f=>f.history.identity.hashes['Cargo.lock']='f'.repeat(64),/SDK, toolchain or layout differs/],
+    ['history attempt',f=>f.history.run.run_attempt=2,/stale/],
+    ['public asset',f=>f.scoped.assets[0].sha256='f'.repeat(64),/Public assets differ/],
+  ];
+  for(const [name,mutate,expected] of cases){
+    const f=preparedCleanupFixture();mutate(f);
+    await assert.rejects(planCleanup(f.io,100,m,at),expected,name);assert.deepEqual(f.deleted,[],name);
+  }
+});
+
+test('prepared cleanup rechecks a changed public hash before the first copied artifact deletion',async()=>{
+  const at=Date.parse('2026-10-27T02:00:00Z'),f=preparedCleanupFixture(),plan=await planCleanup(f.io,100,m,at);
+  assert.equal(plan.skip,undefined);f.scoped.assets[0].sha256='f'.repeat(64);
+  await assert.rejects(executeCleanup(f.io,plan,{apply:true,now:()=>at}),/Public release assets differ/);
+  assert.deepEqual(f.deleted,[]);
+});
 
 test('cleanup waits for verified proof and the last background consumer/report plus an hour',async()=>{
   const f=cleanupFixture(),at=Date.parse('2026-10-27T01:20:00Z');

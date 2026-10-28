@@ -26,6 +26,14 @@ on:
       - 'npm/scripts/release-regression-contract.mjs'
       - 'npm/scripts/test-release-regression-contract.mjs'
       - 'npm/scripts/test-parallel-ci-contracts.mjs'
+      - 'npm/scripts/release-preparation.mjs'
+      - 'npm/scripts/prepared-import.mjs'
+      - 'npm/scripts/verified-receipt.mjs'
+      - 'npm/scripts/test-verified-receipt.mjs'
+      - 'npm/scripts/fixtures/prepared-consumer-flow.mjs'
+      - 'npm/scripts/test-release-preparation.mjs'
+      - 'npm/scripts/test-prepared-import.mjs'
+      - 'npm/scripts/test-next-dev-version.mjs'
 
       - 'npm/scripts/publication-fence.mjs'
       - 'npm/scripts/fixtures/publication-crossrun.mjs'
@@ -58,6 +66,10 @@ on:
         description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
         default: ''
         type: string
+      prepared_run:
+        description: Completed exact-source main preparation run; DEV publication requires publish and full regression flags
+        default: ''
+        type: string
 
       reuse_dev12_validation:
         description: DEV13 only; rebuild versioned artifacts and reuse successful DEV12 regressions
@@ -80,8 +92,17 @@ permissions:
   contents: read
 
 jobs:
+  reject-prepared-recovery:
+    if: ${{ inputs.prepared_run != '' && (inputs.reuse_dev12_validation || inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - run: |
+          echo 'Prepared publication cannot be combined with historical recovery or repair modes.'
+          exit 1
+
   plan:
-    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
+    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -97,6 +118,12 @@ jobs:
       channel: ${{ steps.plan.outputs.channel }}
       publish: ${{ steps.plan.outputs.publish }}
       reuse_validation: ${{ steps.plan.outputs.reuse_validation }}
+      prepared_run: ${{ steps.prepared.outputs.prepared_run }}
+      prepared_attempt: ${{ steps.prepared.outputs.prepared_attempt }}
+      prepared_artifact_id: ${{ steps.prepared.outputs.prepared_artifact_id }}
+      prepared_artifact_digest: ${{ steps.prepared.outputs.prepared_artifact_digest }}
+      prepared_receipt_sha256: ${{ steps.prepared.outputs.prepared_receipt_sha256 }}
+      prepared_binary_artifact_ids: ${{ steps.prepared.outputs.prepared_binary_artifact_ids }}
     steps:
       - name: Verify the explicitly approved DEV12 regression reuse
         id: prior
@@ -155,13 +182,34 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           persist-credentials: false
           fetch-depth: 0
+      - name: Select an exact completed preparation before any draft/version mutation
+        id: prepared
+        if: inputs.prepared_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREPARED_RUN: ${{ inputs.prepared_run }}
+          CLI_VERSION: ${{ inputs.dev_version }}
+          PREPARED_REQUEST_PUBLISH: ${{ inputs.publish }}
+          PREPARED_REQUEST_FULL: ${{ inputs.full_regression_before_publish }}
+        run: |
+          set -euo pipefail
+          test "$PREPARED_REQUEST_PUBLISH" = true
+          test "$PREPARED_REQUEST_FULL" = true
+          CLI_SHA="$(git rev-parse HEAD)" node npm/scripts/release-preparation.mjs inspect
+      - uses: actions/upload-artifact@v4
+        if: inputs.prepared_run != ''
+        with:
+          retention-days: 1
+          name: prepared-consumer-${{ github.run_id }}-${{ github.run_attempt }}
+          path: prepared-consumer.json
+          if-no-files-found: error
       - id: plan
         env:
           RELEASE_REF: ${{ inputs.ref || github.ref }}
           RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
           REUSE_VALIDATION: ${{ inputs.reuse_dev12_validation }}
           PRIOR_VERIFIED: ${{ steps.prior.outputs.prior_verified }}
-          RELEASE_DEV_VERSION: ${{ inputs.dev_version }}
+          RELEASE_DEV_VERSION: ${{ inputs.dev_version || steps.prepared.outputs.prepared_version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
@@ -214,6 +262,7 @@ jobs:
           NODE
 
   validate:
+    if: ${{ inputs.prepared_run == '' }}
     needs: plan
     permissions:
       contents: write
@@ -224,7 +273,7 @@ jobs:
       full_validation: false
 
   native-regression:
-    if: ${{ !inputs.reuse_dev12_validation }}
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
     needs: [plan, validate]
     permissions:
       contents: write
@@ -234,7 +283,7 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
 
   cloud-sweep:
-    if: ${{ !inputs.reuse_dev12_validation }}
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
     needs: plan
     permissions:
       contents: read
@@ -408,7 +457,7 @@ jobs:
 
   native-migration:
     name: Native migration (${{ matrix.target }})
-    if: ${{ !inputs.reuse_dev12_validation }}
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
     needs: plan
     permissions:
       contents: read
@@ -504,7 +553,7 @@ jobs:
 
   migration-gate:
     name: Migration gate (${{ matrix.target }})
-    if: ${{ !inputs.reuse_dev12_validation }}
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
     needs: [plan, cloud-sweep, native-migration]
     permissions:
       contents: read
@@ -556,7 +605,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.reuse_dev12_validation }}
+    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -640,20 +689,128 @@ jobs:
           path: release-prepared.json
           if-no-files-found: error
 
-  publication-ready:
-    # Long read-only gates never hold the publication transaction lock.
-    if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) && needs.plan.outputs.publish == 'true' }}
-    needs: [plan, validate]
+  prepared-import:
+    if: ${{ inputs.prepared_run != '' && needs.plan.outputs.prepared_run == inputs.prepared_run }}
+    needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 145
+    timeout-minutes: 20
     permissions:
       contents: read
       actions: read
+    env:
+      CLI_SHA: ${{ needs.plan.outputs.sha }}
+      CLI_VERSION: ${{ needs.plan.outputs.version }}
+      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+      - name: Pin the same pack tool used during complete preparation
+        run: npm install --global npm@11.5.1
+      - run: node npm/scripts/set-build-version.mjs '${{ needs.plan.outputs.version }}'
+      - name: Require registration before reading cross-run binary artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/prepared-import.mjs consumer
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: ${{ needs.plan.outputs.prepared_binary_artifact_ids }}
+          run-id: ${{ needs.plan.outputs.prepared_run }}
+          github-token: ${{ github.token }}
+          path: imported-assets
+          merge-multiple: true
+      - name: Verify original bytes and independently preflight every local npm tarball
+        run: |
+          set -euo pipefail
+          node npm/scripts/verify-packages.mjs imported-assets --assets-only
+          node npm/scripts/assemble-artifacts.mjs imported-assets target/ci
+          node npm/scripts/pack.mjs --root target/ci
+          node npm/scripts/verify-packages.mjs imported-assets --pack imported-packs
+      - name: Record the verified current-run import and original full validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node npm/scripts/prepared-import.mjs record imported-assets imported-packs prepared-import.json
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-unknown-linux-gnu
+          path: |
+            imported-assets/rsrs-x86_64-unknown-linux-gnu
+            imported-assets/rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz
+            imported-assets/cli-build-x86_64-unknown-linux-gnu.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-unknown-linux-musl
+          path: |
+            imported-assets/rsrs-x86_64-unknown-linux-musl
+            imported-assets/rsrs-x86_64-unknown-linux-musl-runtime.tar.gz
+            imported-assets/cli-build-x86_64-unknown-linux-musl.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-apple-darwin
+          path: |
+            imported-assets/rsrs-aarch64-apple-darwin
+            imported-assets/rsrs-aarch64-apple-darwin-runtime.tar.gz
+            imported-assets/cli-build-aarch64-apple-darwin.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-pc-windows-msvc
+          path: |
+            imported-assets/rsrs-x86_64-pc-windows-msvc.exe
+            imported-assets/rsrs-x86_64-pc-windows-msvc-runtime.tar.gz
+            imported-assets/cli-build-x86_64-pc-windows-msvc.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: npm-release-packages
+          path: imported-packs/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: prepared-import-${{ github.run_id }}-${{ github.run_attempt }}
+          path: prepared-import.json
+          if-no-files-found: error
+
+  publication-ready:
+    # Long read-only gates never hold the publication transaction lock.
+    if: >-
+      ${{ !cancelled() && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) &&
+          needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' &&
+          ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
+           (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success')) }}
+    needs: [plan, validate, prepared-import]
+    runs-on: ubuntu-latest
+    timeout-minutes: 145
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      imported_artifact_id: ${{ steps.imported.outputs.imported_artifact_id }}
+      imported_artifact_digest: ${{ steps.imported.outputs.imported_artifact_digest }}
+      imported_receipt_sha256: ${{ steps.imported.outputs.imported_receipt_sha256 }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
@@ -687,7 +844,7 @@ jobs:
           requireCi().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - name: Require all regressions before gated publication
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish) }}
+        if: ${{ inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14) && (needs.plan.outputs.channel == 'latest' || github.event_name == 'push' || inputs.full_regression_before_publish) }}
         timeout-minutes: 121
         env:
           GH_TOKEN: ${{ github.token }}
@@ -712,16 +869,31 @@ jobs:
           }
           requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
+      - name: Require the completed trusted import and original complete source validation
+        id: imported
+        if: inputs.prepared_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+          PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+          PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+          PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+          PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
+        run: node npm/scripts/prepared-import.mjs readiness
 
   publish:
     name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
     # DEV regressions reuse the original artifacts independently; stable still waits below.
-    needs: [plan, validate, publication-ready]
+    needs: [plan, validate, prepared-import, publication-ready]
     if: >-
       ${{ always() && !cancelled() && !inputs.resume_dev6_publication &&
-          ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.publish) ||
+          ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.prepared_run == '' && inputs.publish) ||
            (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
-            needs.validate.result == 'success' && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' &&
+            ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
+             (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success' && needs.plan.outputs.prepared_run == inputs.prepared_run)) &&
+            needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' &&
             (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true'))) }}
     runs-on: ubuntu-latest
     concurrency:
@@ -729,6 +901,14 @@ jobs:
       queue: max
       cancel-in-progress: false
     env:
+      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
+      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
+      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
+      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
+      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
+      IMPORTED_ARTIFACT_ID: ${{ needs.publication-ready.outputs.imported_artifact_id }}
+      IMPORTED_ARTIFACT_DIGEST: ${{ needs.publication-ready.outputs.imported_artifact_digest }}
+      IMPORTED_RECEIPT_SHA256: ${{ needs.publication-ready.outputs.imported_receipt_sha256 }}
       REPAIR_VERSION: ${{ inputs.repair_dev14 && '1.0.11-dev.14' || '1.0.11-dev.12' }}
       REPAIR_SHA: ${{ inputs.repair_dev14 && 'fd0e5463f8c59f304ff17d622efb1f6221f9b04c' || 'd8314480e10a27767544f781083e35c8e85657f0' }}
       REPAIR_RUN: ${{ inputs.repair_dev14 && '37728949557' || '37716872717' }}
@@ -799,6 +979,9 @@ jobs:
           node npm/scripts/assemble-artifacts.mjs release-assets target/ci
           node npm/scripts/pack.mjs --root target/ci
           node npm/scripts/verify-packages.mjs release-assets
+      - name: Materialize the actual local tarballs for prepared-byte equality checks
+        if: inputs.prepared_run != ''
+        run: node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
       - name: Generate release descriptions and the complete commit list
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
@@ -860,6 +1043,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
           CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/release-publication.mjs guard-accepted
       - name: Publish npm using Trusted Publishing
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
@@ -945,7 +1129,7 @@ jobs:
 
   dev6-publication-resume:
     name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication && inputs.prepared_run == ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:

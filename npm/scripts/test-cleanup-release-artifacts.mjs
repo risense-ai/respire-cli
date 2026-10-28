@@ -24,8 +24,8 @@ function fixture(){
   const jobs=[...manifest.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...manifest.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),job('api-smoke'),job('publish'),{...job('unused-repair'),conclusion:'skipped',completed_at:null}];
   const artifact=(id,name,owner)=>({id,name,size_in_bytes:100,digest:zipDigest,expired:false,created_at:'2026-10-25T00:10:00Z',workflow_run:{id:owner.id,head_sha:owner.head_sha}});
   const artifacts=new Map([[10,artifact(10,'cli-release-x86_64-unknown-linux-gnu',run)],[11,artifact(11,'scoped-ready-100-1',run)],[12,artifact(12,'alias-ready-100-1-200-1',consumer)],[13,artifact(13,'unrelated-ci-report',run)]]);
-  const state={run,consumer,release,scoped,alias,jobs,artifacts,deleted:[],tag:{type:'commit',sha},consumers:[consumer]};
-  state.io={repository:REPOSITORY,run:async()=>clone(state.run),artifacts:async id=>clone([...artifacts.values()].filter(a=>a.workflow_run.id===id)),receipt:async a=>clone(a.id===11?state.scoped:state.alias),jobs:async id=>clone(id===100?state.jobs:[job('publish-integrated')]),release:async()=>clone(state.release),tag:async()=>clone(state.tag),consumers:async()=>clone(state.consumers),artifact:async id=>clone(artifacts.get(id)??null),deleteArtifact:async id=>{state.deleted.push(id);artifacts.delete(id);}};
+  const state={run,consumer,release,scoped,alias,jobs,artifacts,deleted:[],tag:{type:'commit',sha},consumers:[consumer],readers:[]};
+  state.io={repository:REPOSITORY,run:async()=>clone(state.run),artifacts:async id=>clone([...artifacts.values()].filter(a=>a.workflow_run.id===id)),receipt:async a=>clone(a.id===11?state.scoped:state.alias),jobs:async id=>clone(id===100?state.jobs:[job('publish-integrated')]),release:async()=>clone(state.release),tag:async()=>clone(state.tag),consumers:async()=>clone(state.consumers),otherReaders:async()=>clone(state.readers),artifact:async id=>clone(artifacts.get(id)??null),deleteArtifact:async id=>{state.deleted.push(id);artifacts.delete(id);}};
   return state;
 }
 
@@ -122,4 +122,26 @@ test('consumer enumeration begins at the exact parent creation instant, without 
   f.io.consumers=async created=>{assert.equal(created,f.run.created_at);return clone(f.consumers.filter(r=>Date.parse(r.created_at)>=Date.parse(created)));};
   const p=await planCleanup(f.io,100,manifest,now);assert.equal(p.skip,undefined);assert(p.artifacts.some(a=>a.id===12));
   await executeCleanup(f.io,p,{now:()=>now});assert.deepEqual(f.deleted,[]);
+});
+
+test('manual CLI artifact readers must be terminal and receive their own full consumption grace',async()=>{
+  const f=fixture();f.readers.push({...clone(f.run),id:400,path:'.github/workflows/ci.yml',event:'workflow_dispatch',status:'in_progress'});
+  assert.equal((await planCleanup(f.io,100,manifest,now)).skip,'artifact-reader-still-active');
+  f.readers[0].status='completed';f.readers[0].updated_at='2026-10-25T01:30:00Z';
+  assert.equal((await planCleanup(f.io,100,manifest,now)).skip,'one-hour-after-consumers-not-reached');
+  const p=await planCleanup(f.io,100,manifest,Date.parse('2026-10-25T02:30:00Z'));assert.equal(p.skip,undefined);
+  assert.deepEqual(f.deleted,[]);
+});
+test('new, restarted or changed manual artifact readers stop deletion before any write',async()=>{
+  for(const mutate of [f=>f.readers.push({...clone(f.run),id:400,path:'.github/workflows/ci.yml',event:'workflow_dispatch',status:'queued'}),
+    f=>f.io.otherReaders=async()=>{throw Error('reader enumeration failed');}]){
+    const f=fixture(),p=await planCleanup(f.io,100,manifest,now);mutate(f);
+    await assert.rejects(executeCleanup(f.io,p,{apply:true,now:()=>now}),/reader|enumeration/);assert.deepEqual(f.deleted,[]);
+  }
+  const f=fixture();delete f.io.otherReaders;await assert.rejects(planCleanup(f.io,100,manifest,now),/enumeration unavailable/);
+});
+test('cleanup uses the publication source manifest rather than a later main platform inventory',async()=>{
+  const f=fixture();let lookups=0;f.io.manifestForSource=async source=>{assert.equal(source.sha,f.scoped.source.sha);lookups++;return clone(manifest);};
+  const different={...manifest,targets:[...manifest.targets,{triple:'aarch64-unknown-linux-gnu',pkg:'@rsrsai/linux-arm64-gnu'}]};
+  const p=await planCleanup(f.io,100,different,now);assert.equal(p.skip,undefined);assert.equal(lookups,1);
 });

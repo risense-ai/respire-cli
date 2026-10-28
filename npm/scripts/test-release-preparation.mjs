@@ -110,9 +110,9 @@ test('actual synthetic npm packs must match the full exact-version local pack in
   }finally{rmSync(folder,{recursive:true,force:true});}
 });
 
-test('unpublished preparation proof is read-only, waits for every producer and changes no publication gate',()=>{
+test('unpublished preparation proof remains read-only and waits for every original producer',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
-  const job=release.split('\n  preparation-receipt:\n')[1].split('\n  publication-ready:\n')[0];
+  const job=release.split('\n  preparation-receipt:\n')[1].split(/\n  [a-z][\w-]*:\n/)[0];
   assert.match(job,/needs: \[plan, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke\]/);
   assert.match(job,/needs.plan.outputs.publish == 'false'/);assert.match(job,/inputs.full_regression_before_publish/);
   assert.match(job,/github.ref == 'refs\/heads\/main'/);assert.match(job,/needs.plan.outputs.sha == github.sha/);
@@ -122,7 +122,9 @@ test('unpublished preparation proof is read-only, waits for every producer and c
   const publisher=release.split('\n  publish:\n')[1].split(/\n  [a-z][\w-]*:\n/)[0];
   assert.match(publisher,/needs.validate.result == 'success'/);
   assert.match(publisher,/needs.publication-ready.result == 'success'/);
-  assert.doesNotMatch(publisher,/preparation-receipt|prepared_run|release-prepared/);
+  assert.doesNotMatch(publisher,/needs.preparation-receipt.result/);
+  assert.match(publisher,/needs.prepared-import.result == 'success'/);
+  assert.match(publisher,/needs.validate.result == 'skipped'/);
 });
 
 test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',()=>{
