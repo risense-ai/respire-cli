@@ -232,6 +232,16 @@ an unresolved intent. Expired or missing proofs require separately audited
 recovery or a new unused version; this change does not add automatic cross-run
 recovery. Temporary artifact cleanup never removes this Release metadata.
 
+Draft body updates explicitly preserve the canonical tag and then re-read the
+Release identity and fence. Discovery and DEV allocation also reserve versions
+claimed by a draft title or a durable fence when its tag is unexpectedly
+`untagged-*`; these claims never authorize publication with a mismatched tag.
+The first prepared DEV13 attempt persisted its fence and then failed the tag
+read-back before npm ran. The observed object shape is covered by PATCH/GET
+regression tests; the available logs do not establish why GitHub changed it.
+That draft and its original owner remain reserved, including when npm returns
+404 or another canonical-tag draft exists.
+
 
 The payload-lifetime ownership fixture runs after workspace tests on that same
 runner: its offline Cargo project intentionally reuses the workspace's locked

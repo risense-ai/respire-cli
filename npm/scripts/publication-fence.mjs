@@ -58,17 +58,27 @@ export function assertFencePackages(f,packages){
 }
 export function assertReusableRelease(release,c,m){
   if(!release)return null;
-  if(release.draft!==true||release.tag_name!==`v${c.version}`||release.target_commitish!==c.source_sha||release.prerelease!==c.version.includes('-dev.'))throw Error('Existing Release source/version/draft differs');
   const f=readFence(release.body||'');
-  if(f)return assertFenceOwner(f,c,m);
+  if(f)assertFenceOwner(f,c,m); // A changed tag must never hide an earlier owner.
+  if(release.draft!==true||release.tag_name!==`v${c.version}`||release.target_commitish!==c.source_sha||release.prerelease!==c.version.includes('-dev.'))throw Error('Existing Release source/version/draft differs: '+JSON.stringify({id:release.id,expected:{tag:`v${c.version}`,source:c.source_sha,draft:true,prerelease:c.version.includes('-dev.')},actual:{tag:release.tag_name,source:release.target_commitish,draft:release.draft,prerelease:release.prerelease}}));
+  if(f)return f;
   // A newly allocated DEV reservation has no package writes or assets yet.
   // Existing stable/unbound drafts have no durable no-write evidence: fail closed.
   const owner=(release.body||'').match(/Release workflow run: ([1-9]\d*)/)?.[1];
   if(c.version.includes('-dev.')&&release.assets?.length===0&&owner===String(c.run_id))return null;
   throw Error('Existing draft has no bound npm intent journal; reconcile the original publication before reusing this version');
 }
+// Discovery reserves identities; it never authorizes a mismatched tag to write.
+export function releaseVersionClaims(release){
+  const versions=new Set(),valid=v=>typeof v==='string'&&/^v?\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(v);
+  if(valid(release.tag_name))versions.add(release.tag_name.replace(/^v/,''));
+  if(release.draft===true&&valid(release.name))versions.add(release.name.replace(/^v/,''));
+  const fence=readFence(release.body||'');
+  if(fence)versions.add(fence.version);
+  return [...versions];
+}
 export function findVersionRelease(c){
-  const found=pages(`repos/${c.repository}/releases?per_page=100`).flat().filter(r=>r.tag_name===`v${c.version}`);
+  const found=pages(`repos/${c.repository}/releases?per_page=100`).flat().filter(r=>releaseVersionClaims(r).includes(c.version));
   if(found.length>1)throw Error('Duplicate version Release');
   return found[0]||null;
 }
@@ -99,7 +109,9 @@ export function persistVersionFence(packages){
   const next={...f,phase:'fenced',scoped_packages:identities(packages)};
   const directory=mkdtempSync(path.join(tmpdir(),'rsrs-npm-fence-'));
   try{
-    const file=path.join(directory,'body.json');writeFileSync(file,JSON.stringify({body:fenceBody(release.body||'',next)}));
+    // Preserve the canonical tag explicitly on a draft body update. Still read
+    // back and reject every identity drift; do not normalize an untagged draft.
+    const file=path.join(directory,'body.json');writeFileSync(file,JSON.stringify({tag_name:release.tag_name,body:fenceBody(release.body||'',next)}));
     command('gh',['api','--method','PATCH',`repos/${c.repository}/releases/${release.id}`,'--input',file]);
     const confirmed=api(`repos/${c.repository}/releases/${release.id}`);
     const actual=assertReusableRelease(confirmed,c,m);

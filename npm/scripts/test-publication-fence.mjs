@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync,rmSync} from 'node:fs';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
-import {readFence,fenceBody,assertFenceOwner,assertFencePackages,assertReusableRelease} from './publication-fence.mjs';
+import {readFence,fenceBody,assertFenceOwner,assertFencePackages,assertReusableRelease,releaseVersionClaims} from './publication-fence.mjs';
 const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const c={repository:'risense-ai/respire-cli',version:'1.2.3',source_sha:'a'.repeat(40),run_id:'700',first_attempt:'1'};
 const packages=[...m.targets.map(t=>t.pkg),m.npmScope].map(name=>({name,version:c.version,integrity:'sha512-'+'a'.repeat(86)+'==',shasum:'b'.repeat(40)}));
@@ -50,6 +50,29 @@ test('two real Release-run processes: old unknown + continuous registry 404 neve
   assert.equal(report.runs[1].status,1);assert.match(report.runs[1].stderr,/fenced by previous Release run 700/);
   assert.equal(report.publish_calls,1);assert.deepEqual(report.write_runs,['700']);
   assert.deepEqual(report.all_npm_calls,['700 pack','700 publish']);assert.equal(report.fence_phase,'fenced');assert.equal(report.fence_owner,'700');
+});
+test('observed untagged draft shape reserves its intent and cannot relax canonical-tag or owner checks',()=>{
+  const untagged={...release(fenced),name:'v'+c.version,tag_name:'untagged-4eefed3edfaad61e6aa3',assets:Array.from({length:12},(_,id)=>({id}))};
+  assert.deepEqual(releaseVersionClaims(untagged),[c.version]);
+  assert.throws(()=>assertReusableRelease(untagged,c,m),/Existing Release source\/version\/draft differs/);
+  assert.throws(()=>assertReusableRelease(untagged,{...c,run_id:'701'},m),/fenced by previous Release run 700/);
+});
+test('full guard PATCH/GET preserves explicit tag; later untagged intent still refuses another run with registry404',t=>{
+  const script=fileURLToPath(new URL('./fixtures/publication-crossrun.mjs',import.meta.url));
+  const result=spawnSync(process.execPath,[script,fileURLToPath(new URL('../../',import.meta.url)),'untagged'],{encoding:'utf8',timeout:20000});
+  assert.equal(result.error,undefined);assert.equal(result.status,0,result.stderr);
+  const report=JSON.parse(result.stdout);t.after(()=>rmSync(report.root,{recursive:true,force:true}));
+  assert.match(report.runs[0].stderr,/uncertain/);assert.match(report.runs[1].stderr,/fenced by previous Release run 700/);
+  assert.equal(report.publish_calls,1);assert.deepEqual(report.write_runs,['700']);
+  assert.deepEqual(report.all_npm_calls,['700 pack','700 publish']);assert.equal(report.fence_phase,'fenced');assert.equal(report.fence_owner,'700');
+});
+test('a second canonical draft cannot conceal the original untagged unknown-write owner',t=>{
+  const script=fileURLToPath(new URL('./fixtures/publication-crossrun.mjs',import.meta.url));
+  const result=spawnSync(process.execPath,[script,fileURLToPath(new URL('../../',import.meta.url)),'duplicate-untagged'],{encoding:'utf8',timeout:20000});
+  assert.equal(result.status,0,result.stderr);const report=JSON.parse(result.stdout);
+  t.after(()=>rmSync(report.root,{recursive:true,force:true}));
+  assert.match(report.runs[0].stderr,/uncertain/);assert.match(report.runs[1].stderr,/Duplicate version Release/);
+  assert.equal(report.publish_calls,1);assert.deepEqual(report.write_runs,['700']);assert.equal(report.fence_owner,'700');
 });
 test('workflow guards a previous owner before replacing draft notes or clobbering assets',()=>{
   const w=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');

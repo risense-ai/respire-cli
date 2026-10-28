@@ -18,8 +18,8 @@ const executable=(name,code)=>{const p=path.join(root,'bin',name);writeFileSync(
 executable('gh',`const fs=require('fs'),args=process.argv.slice(2),endpoint=args.find(a=>a.startsWith('repos/')),f=JSON.parse(fs.readFileSync('fixture.json'));
 let result;
 if(endpoint.includes('/actions/runs/'))result={id:Number(process.env.GITHUB_RUN_ID),run_attempt:1,path:'.github/workflows/release.yml',head_repository:{full_name:'risense-ai/respire-cli'},event:'workflow_dispatch',status:'in_progress'};
-else if(endpoint.includes('/releases?'))result=[f.release];
-else if(endpoint.endsWith('/releases/300')){if(args.includes('PATCH')){f.release.body=JSON.parse(fs.readFileSync(args[args.indexOf('--input')+1])).body;fs.writeFileSync('fixture.json',JSON.stringify(f));}result=f.release;}
+else if(endpoint.includes('/releases?'))result=[f.release,...(f.extra||[])];
+else if(endpoint.endsWith('/releases/300')||endpoint.endsWith('/releases/301')){const release=endpoint.endsWith('/300')?f.release:f.extra[0];if(args.includes('PATCH')){const p=JSON.parse(fs.readFileSync(args[args.indexOf('--input')+1]));release.body=p.body;release.tag_name=p.tag_name||'untagged-observed-draft-shape';fs.writeFileSync('fixture.json',JSON.stringify(f));}result=release;}
 else throw Error('Unexpected fake API '+endpoint);
 process.stdout.write(JSON.stringify(args.includes('--slurp')?[result]:result));`);
 executable('npm',`const fs=require('fs'),path=require('path'),args=process.argv.slice(2),f=JSON.parse(fs.readFileSync(path.join(process.env.FIXTURE_ROOT,'fixture.json')));
@@ -32,7 +32,7 @@ let elapsed=0;const options={timeoutMs:30,pollMs:10,now:()=>elapsed,sleep:async 
 try{await main('guard-accepted');const f=JSON.parse(fs.readFileSync('fixture.json'));const p=f.expected[0];await publishAcceptedPackage('npm/dist/'+p.name,p,'latest',options);}catch(error){console.error(error.message);process.exitCode=1;}`);
 const env={...process.env};for(const key of Object.keys(env))if(/TOKEN|SECRET|PASSWORD/i.test(key))delete env[key];
 Object.assign(env,{PATH:path.join(root,'bin')+path.delimiter+process.env.PATH,GITHUB_REPOSITORY:'risense-ai/respire-cli',GITHUB_RUN_ATTEMPT:'1',CLI_SHA:sha,CLI_VERSION:version,FIXTURE_ROOT:root});
-const runs=[];for(const runId of ['700','701']){const r=spawnSync(process.execPath,[path.join(root,'run.mjs')],{cwd:root,env:{...env,GITHUB_RUN_ID:runId},encoding:'utf8',timeout:10000});runs.push({run:runId,status:r.status,error:r.error?.message,stderr:r.stderr.trim()});}
+const runs=[];for(const runId of ['700','701']){if(runId==='701'&&['untagged','duplicate-untagged'].includes(process.argv[3])){const f=JSON.parse(readFileSync(path.join(root,'fixture.json')));f.release.tag_name='untagged-observed-draft-shape';f.release.name='v'+version;if(process.argv[3]==='duplicate-untagged'){const next={...fence,run_id:'701'};f.extra=[{...f.release,id:301,tag_name:'v'+version,body:'<!-- rsrs-npm-write-fence:'+Buffer.from(JSON.stringify(next)).toString('base64url')+' -->'}];}writeFileSync(path.join(root,'fixture.json'),JSON.stringify(f));}const r=spawnSync(process.execPath,[path.join(root,'run.mjs')],{cwd:root,env:{...env,GITHUB_RUN_ID:runId},encoding:'utf8',timeout:10000});runs.push({run:runId,status:r.status,error:r.error?.message,stderr:r.stderr.trim()});}
 const writes=existsSync(path.join(root,'npm-writes.log'))?readFileSync(path.join(root,'npm-writes.log'),'utf8').trim().split('\n'):[];
 const allCalls=existsSync(path.join(root,'npm-all.log'))?readFileSync(path.join(root,'npm-all.log'),'utf8').trim().split('\n'):[];
 const finalBody=JSON.parse(readFileSync(path.join(root,'fixture.json'))).release.body;
