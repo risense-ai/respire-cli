@@ -66,8 +66,10 @@ if (requested) {
   if (tags.includes(`v${requested}`) || packages.some(metadata => metadata && Object.hasOwn(metadata.versions, requested))) {
     throw new Error('Requested DEV version already has a tag or published npm package');
   }
-  const reserved = releases.find(release => releaseVersionClaims(release).includes(requested));
-  if(reserved&&readFence(reserved.body||''))throw new Error('Requested DEV version has a durable npm intent; preserve the original owner and choose an unused version');
+  const reservations = releases.filter(release => releaseVersionClaims(release).includes(requested));
+  if(reservations.some(release=>readFence(release.body||'')))throw new Error('Requested DEV version has a durable npm intent; preserve the original owner and choose an unused version');
+  if(reservations.length>1)throw new Error('Requested DEV version has duplicate Release claims');
+  const reserved=reservations[0];
   if (reserved && (!reserved.draft || !reserved.prerelease)) throw new Error('Requested DEV version is already public or is not a DEV draft');
   console.log(requested);
   process.exit(0);

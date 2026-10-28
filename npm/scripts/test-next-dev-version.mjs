@@ -31,6 +31,8 @@ test('untagged DEV13 fence remains reserved automatically and rejects explicit r
   const automatic=run({releases});assert.equal(automatic.status,0,automatic.stderr);assert.equal(automatic.stdout.trim(),'1.0.17-dev.14');
   const explicit=run({releases,requested:'1.0.17-dev.13'});assert.notEqual(explicit.status,0);assert.match(explicit.stderr,/durable npm intent/);
   releases[0].name='Renamed human notes';assert.equal(run({releases}).stdout.trim(),'1.0.17-dev.14');
+  releases.unshift({tag_name:'v1.0.17-dev.13',name:'v1.0.17-dev.13',draft:true,prerelease:true,body:'unbound duplicate'});
+  const duplicate=run({releases,requested:'1.0.17-dev.13'});assert.notEqual(duplicate.status,0);assert.match(duplicate.stderr,/durable npm intent/);
 });
 test('explicit DEV rejects a version already accepted for the short entry alone',()=>{
   const result=run({aliasVersion:'1.0.17-dev.13',requested:'1.0.17-dev.13'});assert.notEqual(result.status,0);assert.match(result.stderr,/already has a tag or published npm package/);assert.equal(result.stdout,'');
