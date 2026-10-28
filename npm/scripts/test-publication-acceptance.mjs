@@ -112,9 +112,9 @@ function preparedCleanupFixture(){
   const origin=preparationLink(proof,{id:80,name:'release-prepared-50-1',size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:50,head_sha:sha}});
   f.run.head_branch='main';
   const owner={repository:source.repository,workflow:source.workflow,run_id:'100',run_attempt:1,sha,version,workflow_head_sha:f.run.head_sha};
-  f.imported={schema:1,kind:'prepared-import',state:'verified-copy',owner:{...owner,import_job_id:'1000'},origin,preparation:proof,
+  f.imported={schema:1,kind:'prepared-import',state:'verified-copy',owner:{...owner,import_job_id:'1000'},origin:copy(origin),preparation:proof,
     validated_assets:copy(assets),validated_packs:copy(packs),imported_at:'2026-10-27T00:05:00Z'};
-  f.intent={schema:1,kind:'prepared-consumer',state:'reading',owner,origin,created_at:'2026-10-27T00:00:30Z'};
+  f.intent={schema:1,kind:'prepared-consumer',state:'reading',owner,origin:copy(origin),created_at:'2026-10-27T00:00:30Z'};
   const artifact=(id,name)=>({id,name,expired:false,digest:'sha256:'+hash,size_in_bytes:100,created_at:'2026-10-27T00:06:00Z',workflow_run:{id:100,head_sha:f.run.head_sha}});
   f.artifacts.set(14,artifact(14,'prepared-import-100-1'));f.artifacts.set(15,artifact(15,'prepared-consumer-100-1'));
   f.scoped.validation_origin=importedAnchor(f.imported,f.artifacts.get(14),f.run);
@@ -140,6 +140,31 @@ test('prepared cleanup requires original full gates, current completed import an
 test('original source gate changes during cleanup stop before deleting any copied proof or payload',async()=>{
   const at=Date.parse('2026-10-27T01:20:00Z'),f=preparedCleanupFixture(),plan=await planCleanup(f.io,100,m,at);
   f.history.ci.run_attempt=2;await assert.rejects(executeCleanup(f.io,plan,{apply:true,now:()=>at}),/proof changed|stale/);assert.deepEqual(f.deleted,[]);
+});
+
+test('prepared cleanup rejects wrong origin, import, consumer, history and public bytes before selecting any deletion',async()=>{
+  const at=Date.parse('2026-10-27T02:00:00Z');
+  const cases=[
+    ['scoped origin',f=>f.scoped.validation_origin.artifact.id='999',/origin changed/],
+    ['original origin',f=>f.imported.origin.artifact.id='999',/origin changed/],
+    ['import owner',f=>f.imported.owner.import_job_id='999',/import job/],
+    ['consumer origin',f=>f.intent.origin.artifact.id='999',/registration differs/],
+    ['consumer missing',f=>f.artifacts.delete(15),/proof missing/],
+    ['history lock',f=>f.history.identity.hashes['Cargo.lock']='f'.repeat(64),/SDK, toolchain or layout differs/],
+    ['history attempt',f=>f.history.run.run_attempt=2,/stale/],
+    ['public asset',f=>f.scoped.assets[0].sha256='f'.repeat(64),/Public assets differ/],
+  ];
+  for(const [name,mutate,expected] of cases){
+    const f=preparedCleanupFixture();mutate(f);
+    await assert.rejects(planCleanup(f.io,100,m,at),expected,name);assert.deepEqual(f.deleted,[],name);
+  }
+});
+
+test('prepared cleanup rechecks a changed public hash before the first copied artifact deletion',async()=>{
+  const at=Date.parse('2026-10-27T02:00:00Z'),f=preparedCleanupFixture(),plan=await planCleanup(f.io,100,m,at);
+  assert.equal(plan.skip,undefined);f.scoped.assets[0].sha256='f'.repeat(64);
+  await assert.rejects(executeCleanup(f.io,plan,{apply:true,now:()=>at}),/Public release assets differ/);
+  assert.deepEqual(f.deleted,[]);
 });
 
 test('cleanup waits for verified proof and the last background consumer/report plus an hour',async()=>{
