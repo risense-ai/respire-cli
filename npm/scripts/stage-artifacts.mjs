@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {copyFileSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {verifyBinary} from './verify-binary.mjs';
 
 const [target] = process.argv.slice(2);
 const manifest = JSON.parse(readFileSync('npm/artifact-manifest.json', 'utf8'));
@@ -9,6 +10,7 @@ if (!manifest.targets.some(item => item.triple === target)) throw new Error('Unk
 const directory = join('target/ci', target, 'release');
 const extension = target.includes('windows') ? '.exe' : '';
 const source = join(directory, manifest.binaryName+extension);
+verifyBinary(source, target);
 const actualVersion = execFileSync(source, ['--version'], {encoding:'utf8'}).trim();
 if (actualVersion !== `${manifest.binaryName} ${manifest.cliVersion}`) {
   throw new Error(`CLI binary version mismatch: ${actualVersion}`);

@@ -71,6 +71,16 @@
       "cpu": [
         "x64"
       ]
+    },
+    {
+      "triple": "aarch64-pc-windows-msvc",
+      "pkg": "@rsrsai/win-arm64",
+      "os": [
+        "win32"
+      ],
+      "cpu": [
+        "arm64"
+      ]
     }
   ],
   "sidecar": {

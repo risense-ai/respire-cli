@@ -80,12 +80,22 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rustflags: -C target-feature=-crt-static
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.resolve.outputs.sha }}
           persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'

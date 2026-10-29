@@ -304,11 +304,20 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
           ref: ${{ needs.plan.outputs.sha }}
           persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
@@ -479,6 +488,8 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
@@ -575,6 +586,8 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v5
         with:
@@ -733,7 +746,7 @@ jobs:
           const targets=m.targets.map(t=>t.triple);
           const gnu=targets.includes('aarch64-unknown-linux-gnu'),musl=targets.includes('aarch64-unknown-linux-musl');
           if(gnu!==musl)throw Error('Prepared Linux ARM64 inventory must include both libc routes');
-          appendFileSync(process.env.GITHUB_OUTPUT,`arm64=${gnu}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT,`arm64=${gnu}\nwindows_arm64=${targets.includes('aarch64-pc-windows-msvc')}\n`);
           NODE
       - name: Require registration before reading cross-run binary artifacts
         env:
@@ -792,6 +805,16 @@ jobs:
             imported-assets/rsrs-x86_64-pc-windows-msvc.exe
             imported-assets/rsrs-x86_64-pc-windows-msvc-runtime.tar.gz
             imported-assets/cli-build-x86_64-pc-windows-msvc.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: steps.platforms.outputs.windows_arm64 == 'true'
+        with:
+          retention-days: 1
+          name: cli-release-aarch64-pc-windows-msvc
+          path: |
+            imported-assets/rsrs-aarch64-pc-windows-msvc.exe
+            imported-assets/rsrs-aarch64-pc-windows-msvc-runtime.tar.gz
+            imported-assets/cli-build-aarch64-pc-windows-msvc.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: steps.platforms.outputs.arm64 == 'true'
@@ -1074,7 +1097,7 @@ jobs:
           const expected=fs.readdirSync('release-assets').sort();
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
           const m=JSON.parse(fs.readFileSync('npm/artifact-manifest.json','utf8'));
-          if(expected.length!==m.targets.length*3||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain every exact-source binary/runtime/metadata asset (18 for six platforms)');
+          if(expected.length!==m.targets.length*3||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain every exact-source binary/runtime/metadata asset (three per platform)');
           NODE
       - name: Reconcile any interrupted previous-attempt npm submission
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

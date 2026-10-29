@@ -7,7 +7,7 @@ on:
         type: boolean
         default: false
       research_feedback_only:
-        description: Token-free six-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
+        description: Token-free seven-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
         type: boolean
         default: false
       version_upgrade_only:
@@ -43,7 +43,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   platform-build:
-    # Release builds all six targets. Keep the separate compile matrix manual.
+    # Release builds all seven targets. Keep the separate compile matrix manual.
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
@@ -62,11 +62,21 @@ jobs:
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            rustflags: -C target-feature=-crt-static
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require native Windows ARM64 hardware
+        if: matrix.target == 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
+            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          }
       - name: Require real native Linux ARM64 hardware
         shell: bash
         run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
@@ -626,9 +636,9 @@ jobs:
           node --input-type=module - <<'JS'
           import {readFileSync,appendFileSync} from 'node:fs';
           const plan=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/research-sdk-plan.json'));
-          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest'};
+          const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-pc-windows-msvc':'windows-latest','aarch64-pc-windows-msvc':'windows-11-arm'};
           const matrix={include:plan.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
-          if(matrix.include.length!==6)throw Error('Expected all six native consumers');
+          if(matrix.include.length!==7)throw Error('Expected all seven native consumers');
           appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\n`);
           JS
   research-feedback-native:

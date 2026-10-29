@@ -1,6 +1,7 @@
 """Explicit historical gaps; a missing asset is never a general skip rule."""
 ARM_TARGETS = frozenset({"aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"})
 ABSENT_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16", "v1.0.17-dev.12"})
+ABSENT_WINDOWS_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16"})
 
 
 def platform_applicability(tag, target, asset_names):
@@ -11,4 +12,6 @@ def platform_applicability(tag, target, asset_names):
         return None
     if target in ARM_TARGETS and tag in ABSENT_ARM_RELEASES and not present:
         return "Linux ARM64 was not distributed for this exact release"
+    if target == "aarch64-pc-windows-msvc" and tag in ABSENT_WINDOWS_ARM_RELEASES and not present:
+        return "Windows ARM64 was not distributed for this exact release"
     raise ValueError(f"missing platform artifact: {tag} {target}; present={sorted(present)}")

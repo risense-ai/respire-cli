@@ -11,6 +11,7 @@ const PKGS = {
   'linux-arm64': '@rsrsai/linux-arm64',
   'darwin-arm64': '@rsrsai/macos-arm64',
   'win32-x64': '@rsrsai/win-x64',
+  'win32-arm64': '@rsrsai/win-arm64',
 };
 
 const key = `${process.platform}-${process.arch}`;
