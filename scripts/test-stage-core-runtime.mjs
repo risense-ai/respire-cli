@@ -26,6 +26,10 @@ for (const overwrite of [false, true]) {
     try {
       const files = cases.map(entry => {
         const bytes = Buffer.from(`Synthetic SDK fixture: ${entry.path}\n`);
+        if (entry.path.startsWith('runtime/')) {
+          bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]);
+          bytes.writeUInt16LE(62, 18);
+        }
         const source = join(sdk, entry.path);
         mkdirSync(dirname(source), {recursive: true});
         writeFileSync(source, bytes); chmodSync(source, entry.mode);

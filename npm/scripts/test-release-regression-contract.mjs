@@ -34,7 +34,7 @@ test('both Linux ARM targets require native runners, every source feedback phase
   assert.match(background,/publication-arm64-verified-/);assert.doesNotMatch(background,/id-token:|contents: write|actions: write|npm publish|concurrency:/);
 });
 test('new full gate requires every native, cloud, migration fixture, join and API success',()=>{
-  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,6);assert.equal(contract.cloud.length,5);assert.equal(contract.migration.length,2);assert.equal(contract.migration_gate.length,2);
+  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,7);assert.equal(contract.cloud.length,6);assert.equal(contract.migration.length,3);assert.equal(contract.migration_gate.length,3);
   assert.equal(regressionStatus(inventory(),contract),'success');requireRegressions(inventory(),contract.native,contract);
   for(let index=0;index<inventory().length-1;index++){
     for(const conclusion of ['failure','cancelled','skipped',null]){

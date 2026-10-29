@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {execFileSync, spawnSync} from 'node:child_process';
+import {verifyBinary} from './verify-binary.mjs';
 
 const root = process.cwd();
 const assets = resolve(process.argv[2] || 'release-assets');
@@ -12,6 +13,7 @@ for (const target of manifest.targets) {
   const metadata = JSON.parse(readFileSync(join(assets, `cli-build-${target.triple}.json`), 'utf8'));
   const binary = `${manifest.binaryName}-${target.triple}${target.triple.includes('windows') ? '.exe' : ''}`;
   const runtime = `${manifest.binaryName}-${target.triple}-runtime.tar.gz`;
+  verifyBinary(join(assets, binary), target.triple);
   if (metadata.schema_version !== 1 || metadata.git_sha !== sha || metadata.version !== manifest.cliVersion
       || metadata.target !== target.triple || metadata.binary_file !== binary || metadata.runtime_file !== runtime
       || hash(join(assets, binary)) !== metadata.binary_sha256 || hash(join(assets, runtime)) !== metadata.runtime_sha256) {
