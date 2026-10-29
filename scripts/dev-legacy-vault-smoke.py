@@ -19,7 +19,7 @@ import urllib.request
 from dev_model_fixture import share_cpu_container
 from dev_fixture_tty import run_hidden
 
-UPSTREAM = "https://api.dev.rsrs.rs"
+UPSTREAM = "https://api-dev.rsrs.rs"
 REQUIRED = ("model_cpu_real", "local_v1_upgrade", "cloud_v2_recovery_upgrade", "cloud_v3_secret_key_recovery_upgrade")
 MODEL_HASHES = {
     "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",

@@ -50,7 +50,7 @@ class MigrationJoinReportTests(unittest.TestCase):
         supplements = sorted(gate.SUPPLEMENTS)
         self.base = {"source_sha": self.source, "observed_version": self.version,
                      "expected_version": self.version, "binary_sha256": self.digest,
-                     "server": "https://api.dev.rsrs.rs", "base_complete": True,
+                     "server": "https://api-dev.rsrs.rs", "base_complete": True,
                      "failed": 0, "required_missing": [], "supplemental_required": supplements,
                      "catalog": {"required_remaining": [], "supplemental_required": supplements,
                                  "required_assertions": ["synthetic-base-case"]},

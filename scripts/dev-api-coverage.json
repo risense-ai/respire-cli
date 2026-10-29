@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "authority": "CLI baseline cloud API contract reviewed against server 686f1d1 on 2026-10-13; this is not complete browser/Passkey API coverage.",
+  "authority": "CLI baseline cloud API contract reviewed against server 22096e8 on 2026-10-29; this is not complete browser/Passkey API coverage.",
   "expected_route_count": 66,
   "routes": [
     {
@@ -334,13 +334,15 @@
       "group": "admin"
     }
   ],
-  "server_source_sha": "686f1d1e84721675906e792c71b96cde4772429e",
+  "server_source_sha": "22096e8e237a5b49588678577cbd96af066eabe3",
   "review": {
-    "previous_server_source_sha": "7f0b10756011759e2960ffbeae8d61f15d337785",
-    "compare_url": "https://github.com/risense-ai/respire-server/compare/7f0b10756011759e2960ffbeae8d61f15d337785...686f1d1e84721675906e792c71b96cde4772429e",
+    "previous_server_source_sha": "686f1d1e84721675906e792c71b96cde4772429e",
+    "compare_url": "https://github.com/risense-ai/respire-server/compare/686f1d1e84721675906e792c71b96cde4772429e...22096e8e237a5b49588678577cbd96af066eabe3",
     "baseline_routes_preserved": 66,
     "canonical_server_operations": 85,
-    "changed_baseline_routes": [],
+    "changed_baseline_routes": [
+      "GET /admin/users: additive nullable updated_at and optional validated sort/order; default ordering preserved"
+    ],
     "retained_vault_assertions": [
       "stable account_id",
       "initial key_generation",
@@ -350,7 +352,7 @@
       "rejected operations preserve vault bytes"
     ],
     "changed_baseline_assertions": [],
-    "scope_note": "Only Passkey handlers, their no-store transport header, and additive schema 9 metadata changed. The 66 CLI baseline routes and vault generation semantics are preserved. One new Passkey cancellation operation belongs to separate browser acceptance."
+    "scope_note": "Reviewed all five intervening commits and the complete product-source diff. Only GET /admin/users and its DB query changed: optional validated sorting and additive updated_at. All 66 CLI baseline routes, their default behavior and vault generation semantics are preserved. CI, artifact cleanup and separate Passkey smoke tooling do not add server routes."
   },
   "separate_coverage": {
     "github_transport": {

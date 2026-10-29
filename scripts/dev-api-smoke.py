@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Opt-in cloud API smoke for Actions and api.dev.rsrs.rs; never prints credentials.
+"""Opt-in cloud API smoke for Actions and api-dev.rsrs.rs; never prints credentials.
 
 Run: python3 scripts/dev-api-smoke.py --scope all --report <coverage.json>
-Requires GITHUB_ACTIONS=true, RSRS_DEV_SERVER_ADDR=https://api.dev.rsrs.rs,
+Requires GITHUB_ACTIONS=true, RSRS_DEV_SERVER_ADDR=https://api-dev.rsrs.rs,
 RSRS_DEV_API_ADMIN_APPROVED=true and secret RSRS_DEV_ADMIN_TOKEN.
 This checks the reviewed 66-operation CLI baseline, not all browser/Passkey APIs.
 Synthetic opaque ciphertext checks the server
@@ -99,7 +99,7 @@ class Smoke:
         """Reject unapproved environments or any drift from the reviewed route inventory."""
         if os.environ.get('GITHUB_ACTIONS') != 'true':
             raise SmokeFailure('github-actions-required')
-        if self.base != 'https://api.dev.rsrs.rs':
+        if self.base != 'https://api-dev.rsrs.rs':
             raise SmokeFailure('exact-development-address-required')
         if not re.fullmatch(r'ci-api-\d+-\d+-[0-9a-f]{8}', self.namespace):
             raise SmokeFailure('github-run-identity-required')
@@ -637,7 +637,7 @@ class Smoke:
         missing_vault = sorted(REQUIRED_VAULT_ASSERTIONS - observed_vault)
         complete = error is None and not uncovered and not negative_uncovered and not missing_vault and not self.users and not self.admins and not self.unconfirmed_creations and all(x['passed'] for x in self.cleanup_events)
         workflow_sha = os.environ.get('GITHUB_SHA', '').lower()
-        result = {'schema': 1, 'scope': 'development-cli-baseline-api', 'server': 'https://api.dev.rsrs.rs',
+        result = {'schema': 1, 'scope': 'development-cli-baseline-api', 'server': 'https://api-dev.rsrs.rs',
                   'namespace': self.namespace, 'complete': complete, 'error': error,
                   'server_sha_expected': self.expected_server_sha,
                   'server_sha_actual': self.actual_server_sha,
