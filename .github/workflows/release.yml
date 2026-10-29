@@ -2,55 +2,11 @@ name: Release
 
 on:
   push:
-    branches: [main]
     tags: ['v*']
-    paths-ignore:
-      - 'scripts/sdk-ci-cache.mjs'
-      - 'scripts/test-sdk-ci-cache.mjs'
-      - "scripts/publish-interface-crate.mjs"
-      # SDK download tooling takes effect with the separately validated SDK pin change.
-      - 'crates/core-sdk/private-sdk-download.mjs'
-      - 'crates/core-sdk/prepare-sdk.mjs'
-      - 'crates/core-sdk/Cargo.toml'
-      - 'scripts/test-private-sdk-download.mjs'
-      - '.github/**'
-      - 'docs/**'
-      - '**/*.md'
-      - 'npm/scripts/next-dev-version.mjs'
-      # Packaging-only changes take effect at the next requested native release.
-      - 'npm/alias/**'
-      - 'npm/scripts/pack-alias.mjs'
-      - 'npm/scripts/pack.mjs'
-      - 'npm/scripts/release-publication.mjs'
-      - 'npm/scripts/publication-acceptance.mjs'
-      - 'npm/scripts/release-regression-contract.mjs'
-      - 'npm/scripts/test-release-regression-contract.mjs'
-      - 'npm/scripts/test-parallel-ci-contracts.mjs'
-      - 'npm/scripts/release-preparation.mjs'
-      - 'npm/scripts/prepared-import.mjs'
-      - 'npm/scripts/verified-receipt.mjs'
-      - 'npm/scripts/test-verified-receipt.mjs'
-      - 'npm/scripts/fixtures/prepared-consumer-flow.mjs'
-      - 'npm/scripts/test-release-preparation.mjs'
-      - 'npm/scripts/test-prepared-import.mjs'
-      - 'npm/scripts/test-next-dev-version.mjs'
-
-      - 'npm/scripts/publication-fence.mjs'
-      - 'npm/scripts/fixtures/publication-crossrun.mjs'
-      - 'npm/scripts/test-publication-fence.mjs'
-      - 'npm/scripts/test-publication-acceptance.mjs'
-      - 'npm/scripts/registry-publication.mjs'
-      - 'npm/scripts/parallel-publication.mjs'
-      - 'npm/scripts/cleanup-release-artifacts.mjs'
-      - 'npm/scripts/test-cleanup-release-artifacts.mjs'
-      - 'npm/scripts/test-*-publication.mjs'
-      - 'scripts/test-real-m3-account-switch.py'
-      - 'scripts/test-dev-fixture-tty.py'
-      - 'scripts/test-ci-source-profile.py'
   workflow_dispatch:
     inputs:
       ref:
-        description: CLI branch, commit or stable vX.Y.Z tag
+        description: CLI branch, commit, vX.Y.Z or vX.Y.Z-dev.N tag
         default: main
         required: true
         type: string
@@ -60,7 +16,7 @@ on:
         type: boolean
       full_regression_before_publish:
         description: Wait for native upgrades, system/migration fixtures, joins and API regressions before DEV publication
-        default: false
+        default: true
         type: boolean
       dev_version:
         description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
@@ -102,7 +58,7 @@ jobs:
           exit 1
 
   plan:
-    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation) && !(github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[manual-release]')) }}
+    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation) }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -221,10 +177,9 @@ jobs:
           const tagEvent=process.env.RELEASE_REF.startsWith('refs/tags/')||/^v\d+\./.test(ref);
           let channel,version;
           if(tagEvent){
-            if(process.env.RELEASE_DEV_VERSION) throw new Error('An exact DEV version cannot be used for a stable release');
-            if(!/^v\d+\.\d+\.\d+$/.test(ref)) throw new Error('Stable publication accepts only vX.Y.Z tags, never dev tags');
-            version=ref.slice(1);channel='latest';
-            if(cargo!==version) throw new Error(`Stable tag ${ref} must equal CLI Cargo/npm version ${cargo}`);
+            if(process.env.RELEASE_DEV_VERSION) throw new Error('A release tag cannot be combined with an exact DEV override');
+            if(!/^v\d+\.\d+\.\d+(?:-dev\.\d+)?$/.test(ref)) throw new Error('Release tags must use vX.Y.Z or vX.Y.Z-dev.N');
+            version=ref.slice(1);channel=version.includes('-dev.')?'dev':'latest';
             cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
           }else{
             if(process.env.RELEASE_PUBLISH==='true') cp.execFileSync('git',['merge-base','--is-ancestor','HEAD','origin/main']);
@@ -241,7 +196,7 @@ jobs:
             const notes=`Build and regression results pending.\nRelease workflow run: ${process.env.GITHUB_RUN_ID}`;
             if(reserved){
               cp.execFileSync('node',['npm/scripts/release-publication.mjs','guard-reservation-accepted'],{stdio:'inherit',env:{...process.env,CLI_VERSION:version,CLI_SHA:sha}});
-              if(!process.env.RELEASE_DEV_VERSION||!reserved.draft||!reserved.prerelease||reserved.asset_count!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
+              if((!process.env.RELEASE_DEV_VERSION&&!tagEvent)||!reserved.draft||!reserved.prerelease||reserved.asset_count!==0) throw new Error('Only an explicitly requested empty DEV draft can be resumed');
               const owner=reserved.body?.match(/Release workflow run: (\d+)/)?.[1];
               if(owner){
                 const prior=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${owner}`],{encoding:'utf8'}));

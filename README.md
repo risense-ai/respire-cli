@@ -66,6 +66,11 @@ Startup preserves the selected account and does not import old profiles automati
 | [WorkBuddy connector](connectors/workbuddy/README.md) | Tool integration |
 | [Command checks](docs/command-regression.md) | Existing validation commands |
 
+## Release
+
+DEV and stable releases run automatically after pushing `vX.Y.Z-dev.N` or
+`vX.Y.Z` tags. See [release workflow](docs/releasing.md) for gates and timing.
+
 ## Test
 
 ```sh

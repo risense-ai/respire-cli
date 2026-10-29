@@ -1,5 +1,6 @@
 """Every published stable >=1.0.6 is a mandatory actual-artifact upgrade source."""
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
+from concurrent.futures import ThreadPoolExecutor
 from published_upgrade_policy import platform_applicability
 
 parser=argparse.ArgumentParser()
@@ -47,51 +48,56 @@ report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pa
         'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
+def verify_upgrade(source):
+    tag,release=source
+    folder=root/tag; folder.mkdir(exist_ok=True)
+    extension='.exe' if 'windows' in args.target else ''
+    names=[f'rsrs-{args.target}{extension}',f'rsrs-{args.target}-runtime.tar.gz',f'cli-build-{args.target}.json']
+    assets={asset['name']:asset for asset in release['assets']}
+    not_applicable=platform_applicability(tag,args.target,assets)
+    if not_applicable:
+        return {'version':tag[1:],'formal':tag in formal_sources,'status':'not-applicable','reason':not_applicable}
+    needed=[]
+    for name in names:
+        digest=assets[name].get('digest')
+        assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
+        path=folder/name
+        if not path.is_file(): needed.append(name)
+        else:
+            with path.open('rb') as stream:
+                if hashlib.file_digest(stream,'sha256').hexdigest()!=digest[7:]: needed.append(name)
+    if needed:
+        if release['draft']:
+            for name in needed:
+                with (folder/name).open('wb') as output:
+                    subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
+                        '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180)
+        else:
+            subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
+    for name in names:
+        digest=assets[name].get('digest')
+        assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
+        with (folder/name).open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==digest[7:]
+    manifest=json.loads((folder/names[2]).read_text())
+    assert manifest['version']==tag[1:] and manifest['target']==args.target
+    for name,key in zip(names[:2],['binary_sha256','runtime_sha256']):
+        with (folder/name).open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==manifest[key]
+    with tarfile.open(folder/names[1]) as bundle: bundle.extractall(folder,filter='data')
+    old=folder/('rsrs'+extension)
+    shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
+    result=folder/'results'
+    subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
+        '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
+    checks=json.loads((result/'real-account-return-verification.json').read_text())
+    assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
+    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')}
+
 try:
-    for tag,release in sorted(sources.items()):
-        folder=root/tag; folder.mkdir(exist_ok=True)
-        extension='.exe' if 'windows' in args.target else ''
-        names=[f'rsrs-{args.target}{extension}',f'rsrs-{args.target}-runtime.tar.gz',f'cli-build-{args.target}.json']
-        assets={asset['name']:asset for asset in release['assets']}
-        not_applicable=platform_applicability(tag,args.target,assets)
-        if not_applicable:
-            report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'status':'not-applicable','reason':not_applicable})
-            continue
-        needed=[]
-        for name in names:
-            digest=assets[name].get('digest')
-            assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
-            path=folder/name
-            if not path.is_file(): needed.append(name)
-            else:
-                with path.open('rb') as stream:
-                    if hashlib.file_digest(stream,'sha256').hexdigest()!=digest[7:]: needed.append(name)
-        if needed:
-            if release['draft']:
-                for name in needed:
-                    with (folder/name).open('wb') as output:
-                        subprocess.run(['gh','api',f"repos/risense-ai/respire-cli/releases/assets/{assets[name]['id']}",
-                            '-H','Accept: application/octet-stream'],stdout=output,check=True,timeout=180)
-            else:
-                subprocess.run(['gh','release','download',tag,'--repo','risense-ai/respire-cli','--dir',str(folder),'--clobber',*[value for name in needed for value in ['--pattern',name]]],check=True,timeout=180)
-        for name in names:
-            digest=assets[name].get('digest')
-            assert digest and digest.startswith('sha256:'),'published asset digest missing: '+tag+' '+name
-            with (folder/name).open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==digest[7:]
-        manifest=json.loads((folder/names[2]).read_text())
-        assert manifest['version']==tag[1:] and manifest['target']==args.target
-        for name,key in zip(names[:2],['binary_sha256','runtime_sha256']):
-            with (folder/name).open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==manifest[key]
-        with tarfile.open(folder/names[1]) as bundle: bundle.extractall(folder,filter='data')
-        old=folder/('rsrs'+extension)
-        shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
-        result=folder/'results'
-        subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
-            '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
-            '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
-        checks=json.loads((result/'real-account-return-verification.json').read_text())
-        assert all(check['passed'] and check['binary_sha256']==report['candidate_sha256'] for check in checks),'candidate changed during upgrade validation'
-        report['sources'].append({'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')})
+    # Profiles, runtime ports and reports are unique per version; model inputs are read-only.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        for outcome in pool.map(verify_upgrade, sorted(sources.items())):
+            report['sources'].append(outcome)
     assert any(item.get('passed') is True for item in report['sources']),'no actual applicable upgrade was exercised'
     report['passed']=True
 finally:
