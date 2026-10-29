@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,mkdtempSync,mkdirSync,writeFileSync,utimesSync,statSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {runInNewContext} from 'node:vm';
 import {cacheKey} from '../../scripts/rust-ci-cache.mjs';
@@ -96,8 +99,16 @@ test('source metadata optimization retains unoptimized tests, debug assertions, 
   assert.notEqual(key,cacheKey('workspace',identity));
   for(const field of Object.keys(identity))assert.notEqual(key,cacheKey('coverage',{...identity,[field]:'changed'}));
   assert.throws(()=>cacheKey('sdk',identity));
-  const cacheScript=readFileSync(new URL('../../scripts/rust-ci-cache.mjs',import.meta.url),'utf8');
-  assert.match(cacheScript,/preserveTimestamps: true/);
+  const directory=mkdtempSync(path.join(tmpdir(),'rust-cache-timestamps-'));
+  try {
+    const cached=path.join(directory,'.rust-ci-cache/target/debug/deps/dependency.rlib');
+    mkdirSync(path.dirname(cached),{recursive:true});writeFileSync(cached,'compiled dependency');
+    const stamp=new Date('2001-01-01T00:00:00Z');utimesSync(cached,stamp,stamp);
+    execFileSync(process.execPath,[fileURLToPath(new URL('../../scripts/rust-ci-cache.mjs',import.meta.url)),'restore','workspace'],{cwd:directory});
+    const restored=path.join(directory,'target/debug/deps/dependency.rlib');
+    assert.equal(readFileSync(restored,'utf8'),'compiled dependency');
+    assert(Math.abs(statSync(restored).mtimeMs-stamp.getTime())<1,'Cargo dependency timestamps must survive restore');
+  } finally {rmSync(directory,{recursive:true});}
   const writer=section('rust-build-save');
   assert.match(writer,/cache-mode: write-only/);assert.match(writer,/filter='data'/);
   assert.match(writer,/\^rust-ci-v1-/);
