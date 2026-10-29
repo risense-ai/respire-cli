@@ -60,6 +60,15 @@ producer can save SDK caches; selected-source jobs cannot write dependency
 caches even during a main workflow_dispatch run. Other source build/model
 caches are restored read-only too; these workflows no longer populate them.
 
+Rust compilation caching keeps these source jobs read-only. They restore separate
+ordinary/instrumented dependency caches and stage a new snapshot only on a miss,
+after successful tests. Workspace builds and old LLVM counters are excluded.
+The separate `rust-build-save` job has write-only cache access: it never checks
+out or executes source, validates the `rust-ci-v1-` key, extracts only dependency
+data, and saves that compilation cache. It cannot restore SDK caches and never
+receives the private SDK credential. Existing SDK key and producer rules stay in
+effect.
+
 Official permission semantics: https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching#controlling-cache-access-with-cache-mode
 
 ## Activation sequence and evidence
