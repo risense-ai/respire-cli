@@ -3,6 +3,10 @@ resolver = "2"
 members = ["cli", "spawn", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/storage"]
 default-members = ["cli"]
 
+# Keep real PBKDF2 iteration counts fast without optimizing workspace test code.
+[profile.dev.package.sha2]
+opt-level = 3
+
 # Match the separately linked Core's unwind runtime and avoid host cross-crate LTO.
 [profile.release]
 strip = "debuginfo"
