@@ -62,6 +62,7 @@ Startup preserves the selected account and does not import old profiles automati
 | [Inference](docs/inference.md) | Model installation and engines |
 | [Retrieval](docs/retrieval.md) | Retrieval modes and index migration |
 | [npm launcher](npm/README.md) | Package layout and platform selection |
+| [Platform support](docs/platform-support.md) | Release targets, requirements and blocked architectures |
 | [WorkBuddy connector](connectors/workbuddy/README.md) | Tool integration |
 | [Command checks](docs/command-regression.md) | Existing validation commands |
 

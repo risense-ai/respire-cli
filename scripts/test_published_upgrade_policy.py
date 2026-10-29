@@ -4,8 +4,11 @@ from published_upgrade_policy import platform_applicability
 
 class UpgradePolicyTest(unittest.TestCase):
     def test_only_exact_documented_arm_gaps_are_not_applicable(self):
-        for target in ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"]:
-            for tag in ["v1.0.15", "v1.0.16", "v1.0.17-dev.12"]:
+        for target in ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc"]:
+            gaps = ["v1.0.15", "v1.0.16"]
+            if "linux" in target:
+                gaps.append("v1.0.17-dev.12")
+            for tag in gaps:
                 self.assertIsNotNone(platform_applicability(tag, target, []))
             for tag in ["v1.0.7", "v1.0.10", "v1.0.12", "v1.0.17", "v1.0.18"]:
                 with self.assertRaises(ValueError):

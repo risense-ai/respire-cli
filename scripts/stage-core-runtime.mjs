@@ -2,6 +2,7 @@ import {createHash, randomUUID} from 'node:crypto';
 import {chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync} from 'node:fs';
 import {basename, dirname, join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
+import {verifyBinary} from '../npm/scripts/verify-binary.mjs';
 const [destination] = process.argv.slice(2);
 const configured = process.env.RSRS_CORE_SDK_DIR ?? process.env.ONEMEMORY_CORE_SDK_DIR ?? process.env.RESPIRE_CORE_SDK_DIR;
 if (!destination || !configured) throw new Error('Set RSRS_CORE_SDK_DIR and pass the binary directory');
@@ -34,6 +35,7 @@ for (const file of manifest.files) {
   const source = join(sdk,file.path);
   const bytes = readFileSync(source);
   if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`SDK checksum mismatch: ${file.path}`);
+  if (file.path.startsWith('runtime/')) verifyBinary(join(sdk,file.path), manifest.target);
   mkdirSync(dirname(join(output,path)),{recursive:true});
   stage(join(output,path),bytes,statSync(source).mode & 0o777);
   files.push({path,sha256:file.sha256});

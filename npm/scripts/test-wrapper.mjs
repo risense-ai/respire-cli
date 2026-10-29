@@ -14,6 +14,7 @@ const targets = [
   ['linux', 'arm64', 'glibc', 'linux-arm64-gnu'],
   ['linux', 'arm64', '', 'linux-arm64'],
   ['darwin', 'arm64', '', 'macos-arm64'], ['win32', 'x64', '', 'win-x64'],
+  ['win32', 'arm64', '', 'win-arm64'],
 ];
 let cases = 0;
 for (const [platform, arch, libc, name] of targets) {
@@ -58,7 +59,7 @@ for (const [platform, arch, libc, name] of targets) {
     }
   }
 }
-for (const [platform, arch] of [['win32', 'arm64'], ['darwin', 'x64']]) {
+for (const [platform, arch] of [['win32', 'ia32'], ['darwin', 'x64']]) {
   let exit, stderr = '';
   const quit = {};
   const require = (name) => {

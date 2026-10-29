@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {chmodSync, copyFileSync, mkdirSync, readFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {verifyBinary} from './verify-binary.mjs';
 
 const [source, destination] = process.argv.slice(2);
 if (!source || !destination) throw new Error('Pass artifact source and destination');
@@ -20,6 +21,7 @@ if (metadata.schema_version !== 1 || metadata.git_sha !== sha || metadata.versio
   throw new Error('CLI artifact metadata or checksum mismatch');
 }
 mkdirSync(destination, {recursive:true});
+verifyBinary(join(source, binary), target);
 copyFileSync(join(source, binary), join(destination, manifest.binaryName+extension));
 if (!extension) chmodSync(join(destination, manifest.binaryName), 0o755);
 const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
