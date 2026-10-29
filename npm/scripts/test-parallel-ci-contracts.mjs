@@ -80,4 +80,12 @@ test('source metadata optimization retains unoptimized tests, debug assertions, 
   }
   assert.match(section('check'),/--fail-under-lines 90/);
   assert.doesNotMatch(section('platform-build'),/CARGO_PROFILE_/);
+  const manifest=readFileSync(new URL('../../Cargo.toml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.match(manifest,/\[profile.dev.package.sha2\]\nopt-level = 3/);
+  assert.doesNotMatch(manifest,/\[profile\.(?:dev|test)\]\n[^[]*opt-level\s*=\s*[1-3]/);
+  assert.doesNotMatch(manifest,/\[profile\.(?:dev|test)\.package\.(?:"\*"|respire[\w-]*)\]/);
+  const archive=section('coverage-tests');
+  assert.match(archive,/set -euo pipefail/);
+  assert.match(archive,/tar -cf -[^\n]+\| gzip -1/);
+  assert.match(archive,/compression-level: 0/);
 });
