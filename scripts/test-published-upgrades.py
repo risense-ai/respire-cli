@@ -94,8 +94,8 @@ def verify_upgrade(source):
     return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')}
 
 try:
-    # Profiles, runtime ports and reports are unique per version; model inputs are read-only.
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    # Legacy macOS model workers have a fixed 30-second deadline; avoid competing model loads.
+    with ThreadPoolExecutor(max_workers=1 if sys.platform == 'darwin' else 2) as pool:
         for outcome in pool.map(verify_upgrade, sorted(sources.items())):
             report['sources'].append(outcome)
     assert any(item.get('passed') is True for item in report['sources']),'no actual applicable upgrade was exercised'
