@@ -206,8 +206,13 @@ jobs:
       # This offline ownership fixture requires the dependencies cached above.
       - run: python3 scripts/test-core-payload-lifetime.py
 
-  check:
+  coverage-tests:
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    name: Coverage (${{ matrix.group }})
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [core, runtime_smoke, runtime_autostart]
     runs-on: ubuntu-latest
     env:
       RSRS_ENGINE: cpu
@@ -268,15 +273,78 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # respire tests run once through llvm-cov; other workspace tests use an independent runner.
+      - name: Run this group's instrumented tests
+        env:
+          COVERAGE_GROUP: ${{ matrix.group }}
+        run: |
+          node --input-type=module <<'NODE'
+          import {execFileSync, spawnSync} from 'node:child_process';
+          const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
+          const tests = metadata.packages.find(p => p.name === 'respire').targets.filter(t => t.kind.includes('test')).map(t => t.name);
+          const isolated = ['runtime_smoke', 'runtime_autostart'];
+          if (!isolated.every(name => tests.includes(name))) throw Error('Missing isolated coverage test target');
+          const group = process.env.COVERAGE_GROUP;
+          if (group !== 'core' && !isolated.includes(group)) throw Error('Unknown coverage group');
+          const selected = group === 'core' ? tests.filter(name => !isolated.includes(name)) : [group];
+          const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report'];
+          if (group === 'core') args.push('--lib', '--bins', '--examples');
+          for (const name of selected) args.push('--test', name);
+          const result = spawnSync('cargo', args, {stdio: 'inherit'});
+          if (result.error) throw result.error;
+          process.exit(result.status ?? 1);
+          NODE
+      - name: Archive current-run coverage counters and executable mappings
+        env:
+          COVERAGE_GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          for profile in target/llvm-cov-target/*.profraw; do
+            test -s "$profile"
+            mv "$profile" "$(dirname "$profile")/$COVERAGE_GROUP-$(basename "$profile")"
+          done
+          find target/llvm-cov-target -maxdepth 1 -name '*.profraw' -type f > "$RUNNER_TEMP/coverage-files"
+          find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -executable >> "$RUNNER_TEMP/coverage-files"
+          test -x target/llvm-cov-target/debug/rsrs
+          echo target/llvm-cov-target/debug/rsrs >> "$RUNNER_TEMP/coverage-files"
+          tar -czf "$RUNNER_TEMP/coverage-$COVERAGE_GROUP.tar.gz" -T "$RUNNER_TEMP/coverage-files"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.group }}
+          path: ${{ runner.temp }}/coverage-${{ matrix.group }}.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+  check:
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    needs: coverage-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: coverage
+          merge-multiple: true
+      - name: Merge all three current-run groups
+        run: |
+          set -euo pipefail
+          for group in core runtime_smoke runtime_autostart; do
+            tar -xzf "coverage/coverage-$group.tar.gz"
+          done
       - name: CLI line coverage ≥ 90% (exclude entry points, UI and network adapters)
         run: |
           result=0
-          cargo llvm-cov --locked -p respire --fail-under-lines 90 \
+          cargo llvm-cov report -p respire --fail-under-lines 90 \
             --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || result=$?
           if [ "$result" -ne 0 ]; then
-            # Diagnose missing production lines without changing the gate or
-            # uploading another temporary artifact. Preserve the original exit.
             cargo llvm-cov report -p respire --show-missing-lines \
               --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || printf "%s\n" "Coverage diagnostic unavailable; original failure retained"
           fi
