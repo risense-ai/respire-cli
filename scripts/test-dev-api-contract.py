@@ -12,11 +12,11 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).parent
-SHA = '686f1d1e84721675906e792c71b96cde4772429e'
-OLD_SHA = '7f0b10756011759e2960ffbeae8d61f15d337785'
+SHA = '22096e8e237a5b49588678577cbd96af066eabe3'
+OLD_SHA = '686f1d1e84721675906e792c71b96cde4772429e'
 IDENTITY = '11111111-2222-4333-8444-555555555555'
 ENV = {'GITHUB_ACTIONS': 'true', 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
-       'RSRS_DEV_SERVER_ADDR': 'https://api.dev.rsrs.rs', 'RSRS_DEV_SERVER_SHA': SHA,
+       'RSRS_DEV_SERVER_ADDR': 'https://api-dev.rsrs.rs', 'RSRS_DEV_SERVER_SHA': SHA,
        'RSRS_DEV_API_ADMIN_APPROVED': 'true', 'RSRS_DEV_ADMIN_TOKEN': 'synthetic-never-sent'}
 
 

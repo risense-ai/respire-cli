@@ -32,7 +32,7 @@ fn browser_authorization(addr: &str, user: Option<&str>, dashboard: Option<&str>
     let dashboard = match dashboard {
         Some(value) => origin(value).context("invalid OAuth dashboard from --dashboard; supply an HTTPS origin")?,
         None if addr == "https://api.rsrs.rs" => "https://dash.rsrs.rs".to_owned(),
-        None if addr == "https://api.dev.rsrs.rs" => "https://dash.dev.rsrs.rs".to_owned(),
+        None if addr == "https://api.dev.rsrs.rs" || addr == "https://api-dev.rsrs.rs" => "https://dash.dev.rsrs.rs".to_owned(),
         None if respire::prompt::interactive() => origin(&respire::prompt::ask("dashboard origin: ")?).context("invalid OAuth dashboard from terminal input; supply an HTTPS origin")?,
         None => anyhow::bail!("custom login servers require --dashboard <dashboard-origin>"),
     };

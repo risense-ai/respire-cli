@@ -17,7 +17,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dev_model_fixture import share_cpu_container
 
-UPSTREAM = "https://api.dev.rsrs.rs"
+UPSTREAM = "https://api-dev.rsrs.rs"
 
 
 def require(condition, code):
