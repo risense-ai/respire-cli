@@ -121,11 +121,14 @@ $script:CloudCleanupCompleted = $false
 $script:CloudCleanupRunning = $false
 $script:ModelProgressEvidence = $null
 $script:IndexPendingEvents = New-Object System.Collections.Generic.List[object]
-trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport; Stop-OurRuntimes; throw $failure }
+$script:SweepReportClock = [Diagnostics.Stopwatch]::StartNew()
+trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport -Force; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
 
-function Write-SweepReport {
+function Write-SweepReport([switch]$Force) {
+    # Keep periodic diagnostics without rebuilding the entire report after every assertion.
+    if (-not $Force -and $script:SweepReportClock.Elapsed.TotalSeconds -lt 5) { return }
     $lines = @('# CLI development sweep', '', "- Server: $Server", "- Version: $ExpectVersion", '', '| Step | Command | Exit | Status | Result | Note |', '| --- | --- | --- | --- | --- | --- |')
     foreach ($row in $Rows) {
         $mark = if (-not $row.Ok) { 'FAIL' } elseif ($row.Status -eq 'fail') { 'EXPECTED_ERROR' } elseif ($row.Status -eq 'skip') { 'SKIP' } else { 'PASS' }
@@ -156,6 +159,7 @@ function Write-SweepReport {
         coverage_full = @($script:Catalog.required_remaining).Count -eq 0 -and @($script:Catalog.supplemental_required).Count -eq 0 -and @($Rows | Where-Object { -not $_.Ok }).Count -eq 0 -and @($script:Catalog.required_assertions | Where-Object { $required = $_; -not @($Rows | Where-Object { $_.Name -ceq $required -and $_.Ok -and $_.Status -ceq 'ok' }).Count }).Count -eq 0
     }
     [IO.File]::WriteAllText($CoveragePath, ($coverage | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
+    $script:SweepReportClock.Restart()
 }
 
 function Get-SafeReportNote([string]$Text) {
@@ -229,7 +233,7 @@ function Add-SweepRow([string]$Name, [bool]$Ok, [string]$Note) {
 
 function Assert-Smoke([string]$Name, [bool]$Condition) {
     Add-SweepRow $Name $Condition 'semantic assertion'
-    Write-SweepReport
+    Write-SweepReport -Force:(-not $Condition)
     if (-not $Condition) { throw "Release smoke assertion failed: $Name" }
 }
 
@@ -558,7 +562,7 @@ function Invoke-Om {
         Note   = $(if ($timedOut) { "timeout ${TimeoutSec}s; $Note" } else { $Note })
     }
     $Rows.Add($row) | Out-Null
-    Write-SweepReport
+    Write-SweepReport -Force:(-not $ok)
     $flag = if (-not $ok) { 'FAIL' } elseif ($status -eq 'fail') { 'EXPECTED_ERROR' } elseif ($status -eq 'skip') { 'SKIP' } else { 'PASS' }
     Write-Host "$flag $Name exit=$exit status=$status leak=$($row.Leak)"
     if (-not $ok) {
@@ -1761,7 +1765,7 @@ foreach ($required in $script:Catalog.required_assertions) {
     }
 }
 Invoke-CloudCleanup
-Write-SweepReport
+Write-SweepReport -Force
 
 $failed = @($Rows | Where-Object { -not $_.Ok })
 $passed = @($Rows | Where-Object { $_.Ok -and $_.Status -notin @('fail', 'skip') })

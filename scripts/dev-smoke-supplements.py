@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run independent CLI supplements and then enforce their joint coverage gate."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -34,8 +35,8 @@ def main():
         ("profile_migration", "dev-profile-migration-smoke.py", common + ["--root", str(root / "profile-migration")]),
         ("login_interruption", "dev-login-interruption-smoke.py", common + ["--root", str(root / "login-interruption"), "--model-dir", str(root / "outbox/models")]),
     ]
-    outcomes = []
-    for name, script, flags in commands:
+    def run_suite(command):
+        name, script, flags = command
         process = subprocess.Popen([sys.executable, str(scripts / script), *flags],
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
@@ -49,8 +50,13 @@ def main():
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
             outcome = {"suite": name, "passed": False, "failure_code": "suite_timeout"}
-        outcomes.append(outcome)
         print(json.dumps(outcome), flush=True)
+        return outcome
+
+    # Each suite owns its profiles and ports. Only login interruption shares outbox's prepared model.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(run_suite, commands[:-1]))
+    outcomes.append(run_suite(commands[-1]))
     (root / "suite-results.json").write_text(json.dumps(outcomes, indent=2) + "\n", encoding="utf-8")
     gate = [sys.executable, str(scripts / "dev-smoke-gate.py"), "--cli-report", str(args.cli_report),
             "--outbox", str(root / "outbox/outbox-coverage.json"), "--ai-inject", str(root / "ai-inject/ai-inject-coverage.json"),

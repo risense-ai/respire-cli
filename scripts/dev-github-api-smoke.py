@@ -76,7 +76,9 @@ class GithubSmoke(baseline.Smoke):
             state = self.grant(start, auth)
             payload = {'state': state, 'code': 'invalid-fixture-' + secrets.token_hex(16)}
             self.probe('POST', exchange, payload, auth, expected=502,
-                       predicate=lambda r: r.get('error') == 'GitHub authorization failed; please start again'
+                       predicate=lambda r: (r.get('error') == 'GitHub authorization failed; please start again'
+                       or (r.get('cloudflare_error') is True and r.get('error_code') == 502 and r.get('status') == 502
+                           and r.get('type') == 'https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-5xx-errors/error-502/'))
                        and not any(field in r for field in ('token', 'access_token', 'refresh_token', 'session_id')),
                        label='invalid-provider-code-no-session')
             self.probe('POST', exchange, payload, auth, expected=400,
@@ -105,7 +107,8 @@ class GithubSmoke(baseline.Smoke):
                   'server_sha_actual': self.actual_server_sha, 'assertions': self.github_events + self.events,
                   'cleanup': self.cleanup_events, 'remaining_fixture_count': len(self.users) + len(self.admins),
                   'not_run': ['Real GitHub consent/login/binding, TOTP and sole-method unbinding require separate provider acceptance.'],
-                  'limits': ['Invalid provider codes test failure and state consumption; they do not prove successful GitHub login.']}
+                  'limits': ['Invalid provider codes test failure and state consumption; they do not prove successful GitHub login.',
+                             'Cloudflare may replace an intentional origin 502 with its exact structured 502 envelope; no-session and consumed-state replay checks remain required.']}
         Path(self.args.report).write_text(json.dumps(result, indent=2) + '\n', encoding='utf-8')
         print(json.dumps({'complete': complete, 'assertions': len(result['assertions']), 'error': error,
                           'remaining_fixture_count': result['remaining_fixture_count']}))

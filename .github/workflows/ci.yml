@@ -32,6 +32,7 @@ on:
         type: string
   push:
     branches: [main, 'fix/prompt-*']
+    tags: ['v*']
   pull_request:
     branches: [main]
 cache-mode: read
