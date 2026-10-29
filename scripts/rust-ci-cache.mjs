@@ -35,7 +35,7 @@ function main(action, kind) {
   } else if (action === 'restore') {
     for (const [from, to] of [[`${stage}/target/debug`, `${target}/debug`],
       [`${stage}/cargo/cache`, `${registry}/cache`], [`${stage}/cargo/index`, `${registry}/index`]]) {
-      if (existsSync(from)) { mkdirSync(path.dirname(to), {recursive: true}); cpSync(from, to, {recursive: true}); }
+      if (existsSync(from)) { mkdirSync(path.dirname(to), {recursive: true}); cpSync(from, to, {recursive: true, preserveTimestamps: true}); }
     }
   } else if (action === 'pack') {
     // Cache dependency builds only; workspace binaries and old coverage cannot prove a new run.

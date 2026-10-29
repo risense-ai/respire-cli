@@ -96,6 +96,8 @@ test('source metadata optimization retains unoptimized tests, debug assertions, 
   assert.notEqual(key,cacheKey('workspace',identity));
   for(const field of Object.keys(identity))assert.notEqual(key,cacheKey('coverage',{...identity,[field]:'changed'}));
   assert.throws(()=>cacheKey('sdk',identity));
+  const cacheScript=readFileSync(new URL('../../scripts/rust-ci-cache.mjs',import.meta.url),'utf8');
+  assert.match(cacheScript,/preserveTimestamps: true/);
   const writer=section('rust-build-save');
   assert.match(writer,/cache-mode: write-only/);assert.match(writer,/filter='data'/);
   assert.match(writer,/\^rust-ci-v1-/);
