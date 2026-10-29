@@ -6577,7 +6577,9 @@ fn run(args: Cli) -> Result<()> {
         }
         return mcp::serve();
     }
-    if !DIRECT_MODE.load(Ordering::Relaxed) && changes_profile(args.command.as_ref()) {
+    let host_auth_change = HOST_RPC_OUTPUT.get() && matches!(args.command.as_ref(),
+        Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. }));
+    if !DIRECT_MODE.load(Ordering::Relaxed) && (changes_profile(args.command.as_ref()) || host_auth_change) {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);

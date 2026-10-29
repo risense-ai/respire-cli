@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::{json, Value};
 
-fn origin(value: &str) -> Result<String> {
+pub(crate) fn origin(value: &str) -> Result<String> {
     let url = url::Url::parse(value).context("login server must be an absolute origin")?;
     let local = matches!(url.host(), Some(url::Host::Domain("localhost")))
         || matches!(url.host(), Some(url::Host::Ipv4(address)) if address.is_loopback())

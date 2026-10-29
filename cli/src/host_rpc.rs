@@ -72,6 +72,14 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
             "unknown authentication field"
         );
     }
+    if let Some(addr) = request.params.get("addr").filter(|value| !value.is_empty()) {
+        crate::login::origin(addr).context("invalid authentication server origin")?;
+    }
+    if request.method == "auth.recover" {
+        let present = |key: &str| request.params.get(key).is_some_and(|value| !value.is_empty());
+        ensure!(present("super") || (present("password") && present("secret")),
+            "recovery requires a super password or the legacy password and Account Secret");
+    }
     if let Some(code) = request.params.get("totp") {
         ensure!(
             code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),

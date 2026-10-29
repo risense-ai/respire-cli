@@ -15,7 +15,7 @@ Launch `rsrs --json --host-rpc-stdio`, write one UTF-8 JSON request to stdin, th
 | `auth.recover` | `kdf_salt`, `wrapped_urk`, `urk_nonce` | `addr`, `user`, `password`, `super`, `secret` |
 | `auth.reset` | none | `super` |
 
-`totp` is a six-digit code used only if password login requires two-step verification. Recovery can run offline when cloud routing fields are omitted. Omit empty optional fields. No method accepts arbitrary commands or flags.
+`totp` is a six-digit code used only if password login requires two-step verification. Recovery additionally requires `super` or the legacy `password` and `secret` pair, and can run offline when cloud routing fields are omitted. Explicit server addresses must be HTTPS origins, except HTTP loopback fixtures. Omit empty optional fields. No method accepts arbitrary commands or flags.
 
 The request is limited to 64 KiB, each credential field to 16 KiB. Unknown fields/methods, trailing JSON, invalid versions and client-only invocation are rejected. Request IDs contain 1–96 ASCII letters, digits, hyphens or underscores.
 
