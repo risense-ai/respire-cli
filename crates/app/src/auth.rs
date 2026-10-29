@@ -656,8 +656,12 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
 pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
+    password_authorization_with_totp(addr,user,pass,None)
+}
+
+pub fn password_authorization_with_totp(addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<serde_json::Value> {
     let mut authorization = serde_json::json!({});
-    authenticate_session(&mut authorization, addr, user, pass)?;
+    authenticate_session_with_totp(&mut authorization, addr, user, pass,totp)?;
     Ok(authorization)
 }
 
@@ -674,6 +678,10 @@ fn server_authentication_salt(addr: &str, user: &str) -> Result<String> {
 }
 
 fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str) -> Result<()> {
+    authenticate_session_with_totp(data,addr,user,pass,None)
+}
+
+fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<()> {
     let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
 
@@ -686,11 +694,11 @@ fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pa
         .map_err(|e| anyhow::anyhow!("login request failed: {e}"))?;
     let mut reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
     if reply["totp_required"].as_bool() == Some(true) {
-        if !crate::prompt::interactive() {
+        if totp.is_none() && !crate::prompt::interactive() {
             anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
         }
         let ticket = reply["ticket"].as_str().ok_or_else(|| anyhow!("TOTP challenge did not return a ticket"))?;
-        let code = crate::prompt::ask_secret("TOTP code (6 digits): ")?;
+        let code = match totp {Some(code)=>code.to_owned(),None=>crate::prompt::ask_secret("TOTP code (6 digits): ")?};
         let code = code.trim();
         if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
             anyhow::bail!("TOTP code must contain 6 digits");
