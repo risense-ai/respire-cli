@@ -345,9 +345,30 @@ fn pull_pages(
     } else {
         None
     };
+    let mut restarted = false;
     loop {
         control.progress("pull");
-        let page = control.remote(|| remote.pull_v2(epoch, after, until, snapshot))?;
+        let page = match control.remote(|| remote.pull_v2(epoch, after, until, snapshot)) {
+            Ok(page) => page,
+            Err(error)
+                if !restarted
+                    && error
+                        .to_string()
+                        .contains("sync history compacted; restart snapshot") =>
+            {
+                restarted = true;
+                if snapshot {
+                    control.local(|| {
+                        local.meta_set("sync_v2_snapshot_cursor", "0")?;
+                        local.meta_set("sync_v2_snapshot_until", "")
+                    })?;
+                    after = 0;
+                }
+                until = None;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         if page.epoch != epoch || until.is_some_and(|h| h != page.until) {
             anyhow::bail!("server page snapshot changed");
         }
