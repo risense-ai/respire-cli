@@ -32,7 +32,7 @@ test('cache tokens cap selected-source jobs at read and credential producer at w
  const plan=warm.split('\n  plan:\n')[1].split('\n  download:\n')[0],producer=warm.split('\n  download:\n')[1].split('\n  native:\n')[0],caller=warm.split('\n  native:\n')[1];
  assert.match(plan,/cache-mode: none/);assert.match(producer,/cache-mode: write-only/);assert.match(producer,/package-manager-cache: false/);assert(!/cache\/restore|uses: actions\/cache@/.test(producer));assert.match(producer,/cache\/save@v4/);assert.match(caller,/cache-mode: read/);
  const reusable=readFileSync(new URL('../.github/workflows/token-free-sdk-check.yml',import.meta.url),'utf8');assert.match(reusable,/native-source:\n    cache-mode: read/);
- for(const file of ['ci.yml','release-validation.yml','accelerator.yml']){const text=readFileSync(new URL('../.github/workflows/'+file,import.meta.url),'utf8');assert.match(text,/^cache-mode: read$/m);assert(!/uses: actions\/cache(?:@|\/save)/.test(text));}
+ for(const file of ['ci.yml','release-validation.yml','accelerator.yml']){const text=readFileSync(new URL('../.github/workflows/'+file,import.meta.url),'utf8');assert.match(text,/^cache-mode: read$/m);const consumers=file==='ci.yml'?text.replace(/\n  rust-build-save:\n[\s\S]*?(?=\n  check:\n)/,''):text;assert(!/uses: actions\/cache(?:@|\/save)/.test(consumers));}
 });
 test('every SDK cache consumer rejects primary-key prefix matches before source execution',()=>{
  for(const file of ['ci.yml','release-validation.yml','accelerator.yml','token-free-sdk-check.yml']){

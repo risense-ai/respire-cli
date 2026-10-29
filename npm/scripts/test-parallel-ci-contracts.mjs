@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync} from 'node:fs';
+import {readFileSync,mkdtempSync,mkdirSync,writeFileSync,utimesSync,statSync,rmSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {runInNewContext} from 'node:vm';
+import {cacheKey} from '../../scripts/rust-ci-cache.mjs';
 const ci=readFileSync(new URL('../../.github/workflows/ci.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const section=name=>ci.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
 test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',()=>{
@@ -88,4 +92,29 @@ test('source metadata optimization retains unoptimized tests, debug assertions, 
   assert.match(archive,/set -euo pipefail/);
   assert.match(archive,/tar -cf -[^\n]+\| gzip -1/);
   assert.match(archive,/compression-level: 0/);
+  assert.match(archive,/cargo llvm-cov clean --profraw-only/);
+  const identity={rust:'pinned compiler',locks:['dependencies','sdk'],flags:['coverage']};
+  const key=cacheKey('coverage',identity);assert.match(key,/^rust-ci-v1-coverage-[a-f0-9]{64}$/);
+  assert.equal(key,cacheKey('coverage',structuredClone(identity)));
+  assert.notEqual(key,cacheKey('workspace',identity));
+  for(const field of Object.keys(identity))assert.notEqual(key,cacheKey('coverage',{...identity,[field]:'changed'}));
+  assert.throws(()=>cacheKey('sdk',identity));
+  const directory=mkdtempSync(path.join(tmpdir(),'rust-cache-timestamps-'));
+  try {
+    const cached=path.join(directory,'.rust-ci-cache/target/debug/deps/dependency.rlib');
+    mkdirSync(path.dirname(cached),{recursive:true});writeFileSync(cached,'compiled dependency');
+    const stamp=new Date('2001-01-01T00:00:00Z');utimesSync(cached,stamp,stamp);
+    execFileSync(process.execPath,[fileURLToPath(new URL('../../scripts/rust-ci-cache.mjs',import.meta.url)),'restore','workspace'],{cwd:directory});
+    const restored=path.join(directory,'target/debug/deps/dependency.rlib');
+    assert.equal(readFileSync(restored,'utf8'),'compiled dependency');
+    assert(Math.abs(statSync(restored).mtimeMs-stamp.getTime())<1,'Cargo dependency timestamps must survive restore');
+  } finally {rmSync(directory,{recursive:true});}
+  const writer=section('rust-build-save');
+  assert.match(writer,/cache-mode: write-only/);assert.match(writer,/filter='data'/);
+  assert.match(writer,/\^rust-ci-v1-/);
+  assert.doesNotMatch(writer,/actions\/checkout|secrets\.|cache\/restore|cargo |run: node/);
+  for(const name of ['workspace-tests','coverage-tests']){
+    const lane=section(name);assert.match(lane,/actions\/cache\/restore/);assert.doesNotMatch(lane,/cache-mode: write|cache\/save/);
+    assert.match(lane,/steps.rust-build.outputs.cache-hit != 'true'/);
+  }
 });

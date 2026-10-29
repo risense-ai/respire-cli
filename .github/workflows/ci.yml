@@ -154,6 +154,9 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
   workspace-tests:
+    outputs:
+      rust_cache_key: ${{ steps.rust-key.outputs.key }}
+      rust_cache_hit: ${{ steps.rust-build.outputs.cache-hit }}
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     runs-on: ubuntu-latest
     env:
@@ -212,11 +215,35 @@ jobs:
           set -euo pipefail
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-core-sdk.mjs "$target"
+      - name: Key ordinary Rust dependencies
+        id: rust-key
+        run: node scripts/rust-ci-cache.mjs key workspace
+      - uses: actions/cache/restore@v4
+        id: rust-build
+        with:
+          path: .rust-ci-cache
+          key: ${{ steps.rust-key.outputs.key }}
+      - name: Restore ordinary Rust dependencies
+        run: node scripts/rust-ci-cache.mjs restore workspace
       - run: cargo test --workspace --exclude respire --locked
       # This offline ownership fixture requires the dependencies cached above.
       - run: python3 scripts/test-core-payload-lifetime.py
+      - name: Stage ordinary Rust dependency cache
+        if: steps.rust-build.outputs.cache-hit != 'true'
+        run: node scripts/rust-ci-cache.mjs pack workspace
+      - uses: actions/upload-artifact@v4
+        if: steps.rust-build.outputs.cache-hit != 'true'
+        with:
+          name: rust-build-workspace
+          path: ${{ runner.temp }}/rust-build-workspace.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
 
   coverage-tests:
+    outputs:
+      rust_cache_key: ${{ steps.rust-key.outputs.key }}
+      rust_cache_hit: ${{ steps.rust-build.outputs.cache-hit }}
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Coverage (${{ matrix.group }})
     strategy:
@@ -283,6 +310,18 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: Key instrumented Rust dependencies
+        id: rust-key
+        run: node scripts/rust-ci-cache.mjs key coverage
+      - uses: actions/cache/restore@v4
+        id: rust-build
+        with:
+          path: .rust-ci-cache
+          key: ${{ steps.rust-key.outputs.key }}
+      - name: Restore instrumented Rust dependencies and clear counters
+        run: |
+          node scripts/rust-ci-cache.mjs restore coverage
+          cargo llvm-cov clean --profraw-only
       - name: Run this group's instrumented tests
         env:
           COVERAGE_GROUP: ${{ matrix.group }}
@@ -324,6 +363,62 @@ jobs:
           compression-level: 0
           retention-days: 1
           if-no-files-found: error
+
+      - name: Stage instrumented Rust dependency cache
+        if: matrix.group == 'core' && steps.rust-build.outputs.cache-hit != 'true'
+        run: node scripts/rust-ci-cache.mjs pack coverage
+      - uses: actions/upload-artifact@v4
+        if: matrix.group == 'core' && steps.rust-build.outputs.cache-hit != 'true'
+        with:
+          name: rust-build-coverage
+          path: ${{ runner.temp }}/rust-build-coverage.tar.gz
+          compression-level: 0
+          retention-days: 1
+          if-no-files-found: error
+
+  rust-build-save:
+    # This writer never checks out or executes source, and cannot restore SDK caches.
+    cache-mode: write-only
+    needs: [workspace-tests, coverage-tests]
+    if: ${{ needs.workspace-tests.outputs.rust_cache_hit != 'true' || needs.coverage-tests.outputs.rust_cache_hit != 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    strategy:
+      matrix:
+        kind: [workspace, coverage]
+    env:
+      BUILD_KEY: ${{ matrix.kind == 'workspace' && needs.workspace-tests.outputs.rust_cache_key || needs.coverage-tests.outputs.rust_cache_key }}
+      CACHE_HIT: ${{ matrix.kind == 'workspace' && needs.workspace-tests.outputs.rust_cache_hit || needs.coverage-tests.outputs.rust_cache_hit }}
+    steps:
+      - name: Validate the compilation-only cache key
+        if: env.CACHE_HIT != 'true'
+        run: '[[ "$BUILD_KEY" =~ ^rust-ci-v1-${{ matrix.kind }}-[a-f0-9]{64}$ ]]'
+      - uses: actions/download-artifact@v4
+        if: env.CACHE_HIT != 'true'
+        with:
+          name: rust-build-${{ matrix.kind }}
+          path: incoming
+      - name: Extract dependency data without executing it
+        if: env.CACHE_HIT != 'true'
+        env:
+          CACHE_KIND: ${{ matrix.kind }}
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, tarfile
+          with tarfile.open('incoming/rust-build-'+os.environ['CACHE_KIND']+'.tar.gz') as archive:
+              for member in archive.getmembers():
+                  path=pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or '..' in path.parts or path.parts[0] not in ['target','cargo']:
+                      raise ValueError('Unexpected Rust dependency cache path')
+              archive.extractall('.rust-ci-cache', filter='data')
+          PY
+      - uses: actions/cache/save@v4
+        if: env.CACHE_HIT != 'true'
+        with:
+          path: .rust-ci-cache
+          key: ${{ env.BUILD_KEY }}
 
   check:
     if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
