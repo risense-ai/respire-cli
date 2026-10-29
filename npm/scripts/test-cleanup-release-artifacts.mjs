@@ -89,7 +89,7 @@ test('unknown names, SDK bundles and stale source-attempt receipts are never sel
 test('workflow uses reviewed default branch, explicit minimal write permission, alias lock and dry-run default',()=>{
   const yaml=readFileSync(new URL('../../.github/workflows/cleanup-release-artifacts.yml',import.meta.url),'utf8');
   assert(yaml.includes('actions: write'));assert(!yaml.includes('contents: write'));assert(yaml.includes('ref: ${{ github.event.repository.default_branch }}'));assert(yaml.includes('group: npm-rsrs-cli-publication'));assert(yaml.includes('default: true'));assert(!yaml.includes('workflow_run:'));
-  const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').split('  workflow_dispatch:')[0];assert(release.includes("'npm/scripts/cleanup-release-artifacts.mjs'"));assert(release.includes("'npm/scripts/test-cleanup-release-artifacts.mjs'"));
+  const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').split('  workflow_dispatch:')[0];assert.match(release,/tags: \['v\*'\]/);assert.doesNotMatch(release,/branches:|paths-ignore:/);
 });
 
 function receiptZip(entries){

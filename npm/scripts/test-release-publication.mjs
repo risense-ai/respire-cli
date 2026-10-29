@@ -154,7 +154,7 @@ test('workflow contract keeps trust identities, unprivileged waiting and acyclic
   assert.deepEqual(indices, [...indices].sort((a,b) => a-b));
   assert.equal((helper.match(/'--draft=false'/g) || []).length, 1);
   assert(final.indexOf('release-publication.mjs protocol') < final.indexOf('--publish --accepted-only --tag'));
-  assert.match(parent, /- 'npm\/scripts\/pack\.mjs'/);
+  assert.match(parent, /tags: \['v\*'\]/);
   assert.match(final, /group: cli-release-publication\n      queue: max\n      cancel-in-progress: false/);
   assert.match(final, /contents: write\n      actions: write\n      id-token: write/);
   const resolver=helper.split('async function awaitScoped()')[1].split('// Retry only')[0];

@@ -206,7 +206,7 @@ test('active/new background consumers, failed verification and digest drift stop
 test('new background workflow is read-only, outside publication locks and behind Release completion',()=>{
   const root=new URL('../../',import.meta.url),text=p=>readFileSync(new URL(p,root),'utf8');
   const background=text('.github/workflows/verify-publication.yml'),parent=text('.github/workflows/release.yml').split('  dev6-publication-resume:')[0];
-  assert.match(background,/workflow_dispatch:/);assert.doesNotMatch(background,/workflow_run:/);
+  assert.match(background,/workflow_dispatch:/);assert.match(background,/workflow_run:\s+workflows: \[Release\]\s+types: \[completed\]/);
   assert.doesNotMatch(background,/id-token:|contents: write|actions: write|concurrency:|npm publish/);
   assert.match(background,/persist-credentials: false/);assert.match(background,/verify-accepted/);
   assert.match(parent,/--publish --accepted-only --tag/);assert.match(parent,/await-alias-accepted/);assert.match(parent,/finalize-accepted/);
