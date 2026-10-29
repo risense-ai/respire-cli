@@ -327,6 +327,24 @@ function Test-RuntimeChanged($Before, $After, [string]$Profile) {
         -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile)
 }
 
+function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $taskId = [Guid]::NewGuid().ToString('N')
+    while ($clock.Elapsed.TotalSeconds -lt [Math]::Min(120, $TimeoutSec)) {
+        $health = Get-OwnedRuntimeHealth $DataDir
+        $state = [string]$health.retrieval_index.state
+        if ($state -ceq 'failed') { throw 'Owned retrieval index failed before model installation.' }
+        if ($state -cnotin @('idle', 'scheduled', 'running', 'ready')) { throw 'Owned retrieval index readiness state is invalid.' }
+        $progress = Invoke-OwnedRuntimeRpc $DataDir 'model.control' @($taskId, 'false')
+        if ($progress.active -ne $true -and $progress.active -ne $false) { throw 'Model progress active flag is missing.' }
+        if ($state -ceq 'ready' -and $progress.active -eq $false) {
+            return [int][Math]::Floor($TimeoutSec - $clock.Elapsed.TotalSeconds)
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'Owned model/index work did not finish within the bounded installation deadline.'
+}
+
 function Invoke-Om {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -1736,7 +1754,9 @@ Assert-Smoke 'mcp-http-unknown-tool-is-error' ($unknownHttp.result.isError -eq $
 Invoke-LocalSmoke -Name 'mcp-http-malformed-json' -Path '/mcp' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
 Invoke-LocalSmoke -Name 'mcp-http-foreign-origin' -Path '/mcp' -Payload @{} -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 
-$m3Install = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec 1200
+# MCP writes schedule background indexing; report serialization must not act as its synchronization.
+$m3InstallTimeout = Wait-OwnedModelIdle $DirA 1200
+$m3Install = Invoke-Om -Name 'model-install-m3' -ArgList @('--json', 'model', 'install-m3') -DataDir $DirA -TimeoutSec $m3InstallTimeout
 Assert-Smoke 'model-m3-installed-without-activation' ($m3Install.Ok -and $m3Install.Envelope.summary.activated -eq $false -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
 $m3Probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--model', 'm3', '--text', $marker) -DataDir $DirA -TimeoutSec 600
 Assert-Smoke 'model-m3-probe-success' ($m3Probe.Ok -and [string]$m3Probe.Envelope.status -eq 'ok')
