@@ -25,6 +25,7 @@ mod bench;
 mod classify;
 mod classify_config;
 mod i18n;
+mod host_rpc;
 mod login;
 mod mcp;
 mod net_rpc;
@@ -283,6 +284,7 @@ thread_local! {
     static OUTPUT_EMITTED: Cell<bool> = const { Cell::new(false) };
     static OUTPUT_EXIT_CODE: Cell<u8> = const { Cell::new(0) };
     static DEFER_PROFILE_OUTPUT: Cell<bool> = const { Cell::new(false) };
+    static HOST_RPC_OUTPUT: Cell<bool> = const { Cell::new(false) };
 }
 static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<BgeEmbedder>>> = std::sync::Mutex::new(None);
 
@@ -327,7 +329,7 @@ fn emit_result(result: ResultEnvelope) -> Result<()> {
     result.ensure_failure_diagnostics();
     result.details = output::sanitize_details(&result.command, &result.details);
     let exit_code = status_exit_code(result.status);
-    if rpc::worker_active() || DEFER_PROFILE_OUTPUT.get() {
+    if rpc::worker_active() || DEFER_PROFILE_OUTPUT.get() || HOST_RPC_OUTPUT.get() {
         CAPTURED.with(|slot| *slot.borrow_mut() = Some(result));
         mark_emitted();
         set_exit_code(exit_code);
@@ -414,7 +416,7 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     let _deferred = defer_index.then(respire::core_sdk::defer_indexing);
     let ran = match parsed {
         Ok(cli) => match run(cli) {
-            Err(error) if error.downcast_ref::<respire::transport::local::MemorySourceChanged>().is_some() => {
+            Err(error) if !HOST_RPC_OUTPUT.get() && error.downcast_ref::<respire::transport::local::MemorySourceChanged>().is_some() => {
                 Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()))
                     .map_err(anyhow::Error::from).and_then(run)
             }
@@ -814,6 +816,9 @@ enum Command {
         /// the §3.8 tidy intake: tidy this batch, do not pull the whole store
         #[arg(long)]
         since_resort: bool,
+        /// Omit memory bodies from JSON directory rows; use show to read a selected entry.
+        #[arg(long)]
+        metadata: bool,
     },
     /// Delete (tombstone; propagates with sync)
     Forget { id: String },
@@ -6084,6 +6089,16 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    if std::env::args_os().any(|arg|arg=="--host-rpc-stdio") {
+        set_json_mode(true);
+        if std::env::args_os().any(|arg|arg=="--client-only") {
+            std::env::set_var("RSRS_CLIENT_ONLY", "1");
+        }
+        return match host_rpc::serve() {
+            Ok(code)=>code,
+            Err(error)=>{let (envelope,code)=command_failure(&error);if let Err(output_error)=emit_result(envelope){eprintln!("host RPC reply failed: {output_error}");}code}
+        };
+    }
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
         return match respire_app::core_sdk::worker::run() {
             Ok(()) => 0,
@@ -6323,6 +6338,8 @@ fn run_capabilities() -> Result<()> {
             "schema_version": 1,
             "cli_version": crate::app_version::embedded(),
             "capabilities": {
+                "host_rpc": {"version":1,"transport":"stdio","flag":"--host-rpc-stdio","methods":["auth.register","auth.login","auth.recover","auth.reset"]},
+                "memory_list_metadata": true,
                 "rerank": false,
                 "model": {"install": true, "install_rerank": false}
             }
@@ -8275,6 +8292,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             limit,
             since,
             since_resort,
+            metadata,
         } => {
             let session = build_session()?;
             let (profile, store) = respire::service::open_store_with_profile()?;
@@ -8314,6 +8332,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     .filter_map(|(e, recall_count)| {
                         let mut row = serde_json::to_value(e).ok()?;
                         if let Some(obj) = row.as_object_mut() {
+                            if metadata {obj.remove("content");}
                             obj.insert("recall_count".into(), serde_json::json!(recall_count));
                         }
                         Some(row)

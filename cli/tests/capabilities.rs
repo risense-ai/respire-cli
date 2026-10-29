@@ -26,7 +26,10 @@ fn capabilities_is_typed_and_does_not_initialize_any_profile() -> anyhow::Result
         assert_eq!(result["summary"]["schema_version"], 1);
         assert!(result["summary"]["cli_version"].is_string());
         assert_eq!(result["summary"]["capabilities"], serde_json::json!({
-            "rerank":false, "model":{"install":true,"install_rerank":false}}));
+            "rerank":false, "model":{"install":true,"install_rerank":false},
+            "host_rpc":{"version":1,"transport":"stdio","flag":"--host-rpc-stdio",
+                "methods":["auth.register","auth.login","auth.recover","auth.reset"]},
+            "memory_list_metadata":true}));
         assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
     }
     Ok(())

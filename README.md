@@ -25,6 +25,8 @@ On PowerShell, set `$env:RSRS_CORE_SDK_DIR`. Include the staged runtime librarie
 
 ## Usage
 
+Desktop integrations can use the bounded [host account RPC](docs/host-rpc.md) for password registration, login/TOTP, recovery and super-password reset without placing credentials in process arguments.
+
 ```sh
 rsrs doctor
 rsrs help
