@@ -134,7 +134,8 @@ test('workflow contract keeps trust identities, unprivileged waiting and acyclic
   const child = readFileSync(new URL('.github/workflows/npm-alias.yml', root), 'utf8').replace(/\r\n/g, '\n');
   const parent = readFileSync(new URL('.github/workflows/release.yml', root), 'utf8').replace(/\r\n/g, '\n');
   const helper = readFileSync(new URL('npm/scripts/release-publication.mjs', root), 'utf8').replace(/\r\n/g, '\n');
-  assert.match(child, /types: \[in_progress\]/);
+  assert.doesNotMatch(child, /workflow_run:/);
+  assert.match(child, /release_attempt:/);
   assert.doesNotMatch(child.slice(0, child.indexOf('jobs:')), /concurrency:/);
   const waiting = child.split('  await-scoped:')[1].split('  publish-integrated:')[0];
   assert.doesNotMatch(waiting, /concurrency:|id-token:/);
@@ -144,15 +145,21 @@ test('workflow contract keeps trust identities, unprivileged waiting and acyclic
   assert.match(publishing, /group: npm-rsrs-cli-publication\n      queue: max\n      cancel-in-progress: false/);
   assert.match(publishing, /contents: read\n      actions: read\n      id-token: write/);
   assert.doesNotMatch(publishing, /contents: write|actions: write|workflow_call/);
+  assert.match(waiting, /Read this Release attempt scoped publication receipt once/);
+  assert.doesNotMatch(waiting, /concurrency:|id-token:/);
   assert.match(child.split('\n  publish:')[1], /if: github.event_name == 'workflow_dispatch'/);
   const final = parent.split('\n  publish:')[1];
-  const indices = ['--publish --accepted-only --tag', 'scoped-accepted', 'name: scoped-accepted-', 'await-alias-accepted', 'release-publication.mjs finalize-accepted'].map(s => final.indexOf(s));
+  const indices = ['--publish --accepted-only --tag', 'scoped-accepted', 'name: scoped-accepted-', 'gh workflow run npm-alias.yml', 'await-alias-accepted', 'release-publication.mjs finalize-accepted'].map(s => final.indexOf(s));
   assert(indices.every(i => i >= 0));
   assert.deepEqual(indices, [...indices].sort((a,b) => a-b));
   assert.equal((helper.match(/'--draft=false'/g) || []).length, 1);
   assert(final.indexOf('release-publication.mjs protocol') < final.indexOf('--publish --accepted-only --tag'));
   assert.match(parent, /- 'npm\/scripts\/pack\.mjs'/);
   assert.match(final, /group: cli-release-publication\n      queue: max\n      cancel-in-progress: false/);
+  assert.match(final, /contents: write\n      actions: write\n      id-token: write/);
+  const resolver=helper.split('async function awaitScoped()')[1].split('// Retry only')[0];
+  assert.doesNotMatch(resolver,/while\s*\(|sleep\(|deadline/);
+  assert.match(resolver,/Exact scoped receipt missing/);
   for (const name of ['Bind successful scoped npm submissions', 'Require every matching npm submission', 'Make the complete release public']) {
     assert.match(final.slice(final.indexOf(`- name: ${name}`)).split('\n      - ')[0], /!\(inputs.repair_dev12 \|\| inputs.repair_dev14\)/);
   }
@@ -202,7 +209,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  assert.equal(uploads, 44, 'preserve active evidence, registered consumer, verified platform copies and import proof');
+  assert.equal(uploads, 45, 'preserve active evidence, registered consumer, verified platform copies and import proof');
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);

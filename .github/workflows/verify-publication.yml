@@ -1,9 +1,6 @@
 name: Verify public npm publication
 
 on:
-  workflow_run:
-    workflows: [Release]
-    types: [completed]
   workflow_dispatch:
     inputs:
       release_run:

@@ -48,7 +48,7 @@ export function validateAcceptedAlias(receipt, scoped, run, jobs) {
       !same(receipt.dependencies, {'@rsrsai/cli': scoped.source.version}) ||
       receipt.publisher?.workflow !== ALIAS || String(receipt.publisher.run_id) !== String(run.id) ||
       Number(receipt.publisher.run_attempt) !== Number(run.run_attempt) || run.path !== ALIAS ||
-      run.event !== 'workflow_run' || run.head_repository?.full_name !== scoped.source.repository ||
+      !['workflow_run', 'workflow_dispatch'].includes(run.event) || run.head_repository?.full_name !== scoped.source.repository ||
       !jobs.some(j => j.name === 'publish-integrated' && j.status === 'completed' && j.conclusion === 'success') ||
       receipt.install !== undefined || receipt.verified_at !== undefined) throw Error('Alias acceptance/publisher binding mismatch');
   validateAcceptance(receipt.acceptance, receipt.alias);
@@ -183,7 +183,7 @@ async function publishAliasAccepted() {
   // The existing alias lock serializes writers, including duplicate wake-ups.
   // Reconcile earlier interrupted writers for this source before any new write.
   const created = assertActive(source).created_at;
-  const priorRuns = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?event=workflow_run&per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs);
+  const priorRuns = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(created)}`).flatMap(p=>p.workflow_runs);
   const knownAcceptances=[];
   for(const prior of priorRuns) {
     for(let attempt=1;attempt<=Number(prior.run_attempt);attempt++) {
@@ -220,7 +220,7 @@ async function publishAliasAccepted() {
 }
 export async function findAcceptedAlias(scoped, createdAt) {
   const source = scoped.source;
-  const runs = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?event=workflow_run&per_page=100&created=%3E%3D${encodeURIComponent(createdAt)}`).flatMap(p=>p.workflow_runs);
+  const runs = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(createdAt)}`).flatMap(p=>p.workflow_runs);
   for (const run of runs) {
     const jobs = pages(`repos/${source.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
     if (!jobs.some(j=>j.name==='publish-integrated' && j.status==='completed' && j.conclusion==='success')) continue;

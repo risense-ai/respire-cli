@@ -44,6 +44,8 @@ test('accepted receipts require all exact package ACKs and cannot masquerade as 
 test('alias ACK binds local dependency, exact source attempt and completed publisher job, without waiting for whole child workflow',()=>{
   const f=fixture();f.child.status='in_progress';f.child.conclusion=null;
   validateAcceptedAlias(f.alias,f.scoped,f.child,f.jobs);
+  validateAcceptedAlias(f.alias,f.scoped,{...f.child,event:'workflow_dispatch'},f.jobs);
+  assert.throws(()=>validateAcceptedAlias(f.alias,f.scoped,{...f.child,event:'pull_request'},f.jobs));
   for(const mutate of [r=>r.source.run_attempt='2',r=>r.dependencies['@rsrsai/cli']='0.0.0',r=>r.alias.integrity='bad',r=>r.publisher.run_id=201,r=>r.install={},r=>r.acceptance.exit_code=1]){
     const r=copy(f.alias);mutate(r);assert.throws(()=>validateAcceptedAlias(r,f.scoped,f.child,f.jobs));
   }
@@ -204,7 +206,7 @@ test('active/new background consumers, failed verification and digest drift stop
 test('new background workflow is read-only, outside publication locks and behind Release completion',()=>{
   const root=new URL('../../',import.meta.url),text=p=>readFileSync(new URL(p,root),'utf8');
   const background=text('.github/workflows/verify-publication.yml'),parent=text('.github/workflows/release.yml').split('  dev6-publication-resume:')[0];
-  assert.match(background,/types: \[completed\]/);assert.doesNotMatch(background,/workflow_run.conclusion == 'success'/);
+  assert.match(background,/workflow_dispatch:/);assert.doesNotMatch(background,/workflow_run:/);
   assert.doesNotMatch(background,/id-token:|contents: write|actions: write|concurrency:|npm publish/);
   assert.match(background,/persist-credentials: false/);assert.match(background,/verify-accepted/);
   assert.match(parent,/--publish --accepted-only --tag/);assert.match(parent,/await-alias-accepted/);assert.match(parent,/finalize-accepted/);

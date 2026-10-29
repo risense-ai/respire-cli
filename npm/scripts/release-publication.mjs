@@ -96,7 +96,7 @@ export function validateAlias(receipt, scoped, run, jobs) {
       receipt.alias?.version !== scoped.source.version || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(receipt.alias?.integrity) ||
       !/^[a-f0-9]{40}$/.test(receipt.alias?.shasum) || receipt.publisher?.workflow !== ALIAS_WORKFLOW ||
       String(receipt.publisher.run_id) !== String(run.id) || Number(receipt.publisher.run_attempt) !== Number(run.run_attempt) ||
-      run.path !== ALIAS_WORKFLOW || run.event !== 'workflow_run' || run.head_repository?.full_name !== scoped.source.repository ||
+      run.path !== ALIAS_WORKFLOW || !['workflow_run', 'workflow_dispatch'].includes(run.event) || run.head_repository?.full_name !== scoped.source.repository ||
       run.status !== 'completed' || run.conclusion !== 'success' ||
       !jobs.some(job => job.name === 'publish-integrated' && job.conclusion === 'success') ||
       receipt.install?.platform !== 'linux-x64-gnu' || receipt.install?.version !== scoped.source.version ||
@@ -183,41 +183,26 @@ export function scopedPublisherFinished(jobs) {
 async function awaitScoped() {
   const repo = process.env.GITHUB_REPOSITORY, runId = process.env.SOURCE_RUN, attempt = process.env.SOURCE_ATTEMPT;
   if (repo !== 'risense-ai/respire-cli' || !positive(runId) || !positive(attempt)) throw new Error('Invalid source event');
-  const deadline = Date.now() + 4 * 60 * 60 * 1000;
-  while (Date.now() < deadline) {
-    const run = api(`repos/${repo}/actions/runs/${runId}`);
-    if (run.path !== RELEASE_WORKFLOW || run.head_repository?.full_name !== repo || !['push', 'workflow_dispatch'].includes(run.event)) throw new Error('Unexpected source workflow');
-    if (Number(run.run_attempt) !== Number(attempt)) { output({eligible: 'false'}); return; }
-    const protocol2 = await import('./publication-acceptance.mjs');
-    const accepted = artifact(runId, protocol2.scopedAcceptedName({run_id: runId, run_attempt: attempt}), repo);
-    if (accepted) {
-      protocol2.validateAcceptedScoped(accepted, manifest());
-      // Check the durable receipt before terminal status. Publishing still
-      // requires an active exact attempt; completed attempts are read-only.
-      if (run.status === 'completed') { output({eligible: 'false'}); return; }
-      output(protocol2.acceptedScopedOutput(accepted, run, attempt));
-      return;
-    }
-    if (run.status === 'completed') { output({eligible: 'false'}); return; }
-    const scoped = artifact(runId, readyName({run_id: runId, run_attempt: attempt}), repo);
-    if (scoped) {
-      validateScoped(scoped, manifest());
-      if (String(scoped.source.run_id) !== runId || Number(scoped.source.run_attempt) !== Number(attempt)) throw new Error('Receipt does not belong to source event');
-      assertSourceRun(run, scoped.source);
-      // This runs in the read-only default-main checkout before selecting OIDC job code.
-      assertRecoveryAuthority(scoped.source, run);
-      write('scoped-ready.json', scoped);
-      output({eligible: 'true', sha: scoped.source.tooling_sha || scoped.source.sha,
-        product_sha: scoped.source.sha, version: scoped.source.version, protocol: '1',
-        artifact: readyName(scoped.source), file: 'scoped-ready.json'});
-      return;
-    }
-    // Dry runs, approved historical repair, or failed/skipped plans never emit ready.
-    const jobs = pages(`repos/${repo}/actions/runs/${runId}/attempts/${attempt}/jobs?per_page=100`).flatMap(p => p.jobs);
-    if (scopedPublisherFinished(jobs)) { output({eligible: 'false'}); return; }
-    await sleep(60000);
+  const run = api(`repos/${repo}/actions/runs/${runId}`);
+  if (run.path !== RELEASE_WORKFLOW || run.head_repository?.full_name !== repo || !['push', 'workflow_dispatch'].includes(run.event)) throw new Error('Unexpected source workflow');
+  if (Number(run.run_attempt) !== Number(attempt) || run.status === 'completed') { output({eligible: 'false'}); return; }
+  const protocol2 = await import('./publication-acceptance.mjs');
+  const accepted = artifact(runId, protocol2.scopedAcceptedName({run_id: runId, run_attempt: attempt}), repo);
+  if (accepted) {
+    protocol2.validateAcceptedScoped(accepted, manifest());
+    output(protocol2.acceptedScopedOutput(accepted, run, attempt));
+    return;
   }
-  throw new Error('Release did not reach scoped-ready within four hours');
+  const scoped = artifact(runId, readyName({run_id: runId, run_attempt: attempt}), repo);
+  if (!scoped) throw new Error('Exact scoped receipt missing after explicit publication dispatch');
+  validateScoped(scoped, manifest());
+  if (String(scoped.source.run_id) !== runId || Number(scoped.source.run_attempt) !== Number(attempt)) throw new Error('Receipt does not belong to source event');
+  assertSourceRun(run, scoped.source);
+  assertRecoveryAuthority(scoped.source, run);
+  write('scoped-ready.json', scoped);
+  output({eligible: 'true', sha: scoped.source.tooling_sha || scoped.source.sha,
+    product_sha: scoped.source.sha, version: scoped.source.version, protocol: '1',
+    artifact: readyName(scoped.source), file: 'scoped-ready.json'});
 }
 // Retry only a structured npm resolver miss for one of this release's pinned packages.
 // Publication is outside this boundary and must never be replayed.
@@ -322,7 +307,7 @@ async function awaitAlias() {
   const unrelatedCompleted = new Set();
   while (Date.now() < deadline) {
     assertActive(source);
-    const runs = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?event=workflow_run&per_page=100&created=%3E%3D${createdAt}`).flatMap(p => p.workflow_runs);
+    const runs = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${createdAt}`).flatMap(p => p.workflow_runs);
     for (const run of runs) {
       // An artifact alone is not success: the matching publisher and workflow must finish.
       if (run.status !== 'completed' || run.conclusion !== 'success' || unrelatedCompleted.has(`${run.id}:${run.run_attempt}`)) continue;
