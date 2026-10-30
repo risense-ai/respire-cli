@@ -6,10 +6,14 @@ artifact waiters allow at most two consecutive failed status reads. Authenticati
 errors, incomplete validation and failed producers still stop publication.
 The reviewed API route inventory is pinned to Server 1.0.1 source
 `fb370b2a49193db64d2530c9af9a2a3895fd231c`; all 66 baseline routes and existing
-vault assertions remain required.
+vault assertions remain required. Migration fixtures require legacy tombstones
+and live records to be re-encrypted before cloud synchronization. After an
+accepted deletion synchronizes, the same tombstone IDs and deletion flags must
+remain with empty ciphertext, nonce and encrypted embedding, matching Server
+1.0.1. Active records still require independent decryption after a fresh login.
 
-New releases target Windows x64, Linux x64 and ARM64 (GNU and musl), and macOS ARM64.
-Windows ARM64 packages are no longer published. Historical
+New releases target Windows x64 and ARM64, Linux x64 and ARM64 (GNU and musl), and macOS ARM64.
+Windows ARM64 builds and migration checks require native ARM64 runners. Historical
 published assets remain available; Intel macOS was already unsupported.
 The paired Core SDK still validates its own seven-target compatibility contract.
 

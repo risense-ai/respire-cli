@@ -569,12 +569,15 @@ class Smoke(support.Smoke):
                     self.keys.track_created_login(committed, fixture["account"]["user"],
                         fixture["code"], fixture["password"])
                     self.cli(profile_env, "sync")
+                    self.report["fixture_operation"] = "post_sync_deleted_payload_erasure"
+                    self.save()
                     with sqlite3.connect((fixture["destination"] / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
                         for tombstone in fixture["legacy_tombstones"]:
-                            row = db.execute("SELECT id,user,ciphertext,nonce,deleted FROM memories WHERE id=?", (tombstone[0],)).fetchone()
-                            require(row[:2] == tombstone[:2] and row[4] == 1
-                                and support.decrypt_content(fixture["urk"], row[2], row[3]) == fixture["payload"],
-                                "sync_changed_deleted_payload")
+                            row = db.execute("SELECT id,user,ciphertext,nonce,deleted,embedding_enc FROM memories WHERE id=?", (tombstone[0],)).fetchone()
+                            # Server 1.0.1 erases deleted payloads after sync; pre-sync re-encryption is checked above.
+                            require(row is not None and row[:2] == tombstone[:2] and row[4] == 1
+                                and row[2] == row[3] == row[5] == "",
+                                "sync_retained_deleted_payload")
                 user = fixture["account"]["user"]
                 remote = self.env("independent-" + user, user)
                 remote["RSRS_SUPER"] = fixture["code"]
@@ -585,7 +588,8 @@ class Smoke(support.Smoke):
                 self.read_entry(remote, new_id, "New-directory migration write")
                 rows = self.cli(remote, "list", "--limit", "100")
                 require("post-migration" in json.dumps(rows), "new_directory_write_not_synced")
-            self.passed("migrated_outbox_sync_and_independent_decrypt", profiles=len(fixtures))
+            self.passed("migrated_outbox_sync_and_independent_decrypt", profiles=len(fixtures),
+                deleted_payloads_erased=sum(len(f["legacy_tombstones"]) for f in fixtures))
         elif interrupt:
             self.passed("migration_interrupted_restart_recovered", real_stage_observed=True)
         elif not target:
