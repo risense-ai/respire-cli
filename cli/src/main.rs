@@ -2950,7 +2950,7 @@ fn run_bench_run(
             }
         }
         let started = std::time::Instant::now();
-        let (ranked, _, fallback, _) = recall_select::recall(&session, &embedder, &candidates, &q, &store)?;
+        let (ranked, _, fallback, _, _) = recall_select::recall(&session, &embedder, &candidates, &q, &store)?;
         latency.push(started.elapsed().as_micros());
         selector_fallbacks += usize::from(fallback.is_some());
         let ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
@@ -7932,7 +7932,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 q = q.of_project(p);
             }
             // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
-            let (mut ranked, recall_mode, selection_fallback, routing) = match mode {
+            let (mut ranked, recall_mode, selection_fallback, routing, retrieval) = match mode {
                 Some(mode) => {
                     recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &store, &mode)?
                 }
@@ -7951,7 +7951,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             if howto && r#type.is_none() {
                 let mut q_skill = q.clone().of_kind(Kind::Skill);
                 q_skill.limit = limit;
-                let (skills, _, _, _) = recall_select::recall_with_mode(
+                let (skills, _, _, _, _) = recall_select::recall_with_mode(
                     &session,
                     embedder!(),
                     &candidates,
@@ -8030,7 +8030,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     "recall",
                     OutputStatus::Skip,
                     serde_json::json!({"query":query,"query_log_id":query_log_id,"count":0,"recall_mode":recall_mode,
-                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing,
+                        "selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"routing":routing,"best_cos":retrieval["best_cos"],"best_pre_floor":retrieval["best_pre_floor"],
+                        "dropped_by_floor":retrieval["dropped_by_floor"],"cos_gate":retrieval["cos_gate"],"retrieval":retrieval,
                         "intent": intent_label,"procedure_pass":procedure_pass,
                         "index_pending":index_pending,"indexed_candidates":candidates.len().saturating_sub(index_pending),"lexical_candidates":index_pending}),
                     vec![OutputItem::new("results", OutputStatus::Skip, "0")],
@@ -8062,7 +8063,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 "recall",
                 OutputStatus::Ok,
                 serde_json::json!({"query":query,"query_log_id":query_log_id,"count":ranked.len(),"limit":limit,"project":project,
-                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing,
+                    "recall_mode":recall_mode,"selection_fallback":selection_fallback,"embedding_model":store.retrieval_model()?,"related":associations.related.len(),"routing":routing,"best_cos":retrieval["best_cos"],"best_pre_floor":retrieval["best_pre_floor"],
+                        "dropped_by_floor":retrieval["dropped_by_floor"],"cos_gate":retrieval["cos_gate"],"retrieval":retrieval,
                     "intent": intent_label,"procedure_pass":procedure_pass,"procedure_promoted":procedure_promoted,
                     "index_pending":index_pending,"indexed_candidates":candidates.len().saturating_sub(index_pending),"lexical_candidates":index_pending}),
                 items,

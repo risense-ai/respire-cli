@@ -9,7 +9,10 @@ The Core applies the research query routing by default: recency is enabled only
 for temporal queries, and the tree contribution is scaled to one quarter.
 `RSRS_ROUTE=0` restores the previous always-on scoring. `RSRS_ABLATE` accepts
 comma-separated `semantic`, `kw`, `recency`, `hot`, `emo`, and `tree`; named axes
-are zeroed without renormalization. The host reads the variables and supplies
+are zeroed and the remaining active weights are normalized. Set
+`RSRS_RECALL_NORMALIZE_ABLATION=0` for historical scores. The complete
+[recall calibration controls and migration](recall-calibration.md) describe the
+paired Core SDK update. The host reads the variables and supplies
 explicit controls to the memory-only Core. `ONEMEMORY_ROUTE` and
 `ONEMEMORY_ABLATE` remain supported compatibility names.
 
@@ -110,8 +113,8 @@ memories. Binary updates do not rewrite agent files; run `rsrs inject` after pro
 New profiles use M3. Existing legacy metadata does not select the retired model.
 Incomplete M3 generations remain resumable; semantic retrieval uses only valid,
 source-checked M3 artifacts. The runtime continues long migrations in the background;
-`rsrs reembed` remains available for an explicit repair. Existing M3
-artifacts retain their generation identity. Content, timestamps and sync flags
+`rsrs reembed` remains available for an explicit repair. The plain-document calibration update advances the M3 generation identity;
+existing source-checked checkpoints for that generation are reused. Content, timestamps and sync flags
 are unchanged; retired weight files are not deleted automatically.
 
 ## Resident retrieval and concurrency

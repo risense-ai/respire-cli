@@ -172,6 +172,7 @@ fn main() -> Result<()> {
     std::env::set_var("RSRS_DATA_DIR", root.path());
     std::env::set_var("RSRS_NO_AUTOSYNC", "1");
     std::env::set_var("RSRS_ENGINE", "cpu");
+    std::env::set_var("RSRS_RECALL_PROFILE", "legacy");
     std::env::set_var("RSRS_FEEDBACK", "0");
     std::env::set_var("RSRS_ABLATE", "");
     std::env::set_var("RSRS_MARK_SIM", "0.5");
@@ -216,6 +217,19 @@ fn main() -> Result<()> {
         anyhow::ensure!(store.put(&memory)?, "fixture insertion rejected");
     }
     let query = MemoryQuery::new(text).limit(20);
+    std::env::set_var("RSRS_RECALL_PROFILE", "calibrated");
+    let snapshots = respire::memory::engine::snapshots(&keys, &store.all(false)?);
+    let calibrated: Value = respire::core_sdk::execute("query_business", json!({
+        "model":"m3","snapshots":snapshots,"query":query,"mode":"fast","provider":null
+    }))?;
+    anyhow::ensure!(calibrated["retrieval"]["cos_gate"] == json!(0.42f32)
+        && calibrated["retrieval"]["examined"].as_u64().is_some_and(|n| n > 0)
+        && !calibrated["items"].as_array().context("calibrated items")?.is_empty(),
+        "calibrated recall must expose actual gate diagnostics and retain a real-model hit");
+    std::env::set_var("RSRS_ABLATE", "kw,recency,hot,tree");
+    anyhow::ensure!(!recall(&store, &keys, &query)?.is_empty(), "semantic-only ablation lost the real-model answer");
+    std::env::set_var("RSRS_ABLATE", "");
+    std::env::set_var("RSRS_RECALL_PROFILE", "legacy");
     let baseline = recall(&store, &keys, &query)?;
     let target = baseline
         .first()
@@ -237,6 +251,7 @@ fn main() -> Result<()> {
         (score(&recall(&store, &keys, &query)?, &target)? - neutral).abs() < 1e-6,
         "enabled feedback retained read heat"
     );
+    std::env::set_var("RSRS_RECALL_PROFILE", "legacy");
     std::env::set_var("RSRS_FEEDBACK", "0");
     let read_hot = score(&recall(&store, &keys, &query)?, &target)?;
     anyhow::ensure!(
