@@ -12,8 +12,8 @@ import unittest
 from unittest import mock
 
 ROOT = Path(__file__).parent
-SHA = '22096e8e237a5b49588678577cbd96af066eabe3'
-OLD_SHA = '686f1d1e84721675906e792c71b96cde4772429e'
+SHA = 'fb370b2a49193db64d2530c9af9a2a3895fd231c'
+OLD_SHA = '22096e8e237a5b49588678577cbd96af066eabe3'
 IDENTITY = '11111111-2222-4333-8444-555555555555'
 ENV = {'GITHUB_ACTIONS': 'true', 'GITHUB_RUN_ID': '123', 'GITHUB_RUN_ATTEMPT': '1',
        'RSRS_DEV_SERVER_ADDR': 'https://api-dev.rsrs.rs', 'RSRS_DEV_SERVER_SHA': SHA,

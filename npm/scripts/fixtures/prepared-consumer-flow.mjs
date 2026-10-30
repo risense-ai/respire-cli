@@ -63,10 +63,13 @@ if(s.allowFinalization&&a[0]==='release'&&a[1]==='edit'){
  fs.writeFileSync('edited-release','synthetic confirmed edit');process.exit(0);
 }
 if(a[0]!=='api'||a.some(x=>['--method','-X','POST','PATCH','PUT','DELETE'].includes(x)))throw Error('Only read APIs permitted');
+if(p.endsWith('/jobs?per_page=10')&&!fs.existsSync('jobs-read-fault')){
+ fs.writeFileSync('jobs-read-fault','one transient read');console.error('gh: Server Error (HTTP 502)');process.exit(1);
+}
 let r;
 if(p===base+'runs/700')r=s.original;else if(p===base+'runs/701')r=s.current;else if(p===base+'runs/600')r=s.ci;
-else if(p===base+'runs/700/attempts/1/jobs?per_page=100')r=[{jobs:s.originalJobs}];
-else if(p===base+'runs/701/attempts/1/jobs?per_page=100')r=[{jobs:s.currentJobs}];
+else if(p===base+'runs/700/attempts/1/jobs?per_page=10')r=[{jobs:s.originalJobs.slice(0,10)},{jobs:s.originalJobs.slice(10)}];
+else if(p===base+'runs/701/attempts/1/jobs?per_page=10')r=[{jobs:s.currentJobs.slice(0,10)},{jobs:s.currentJobs.slice(10)}];
 else if(p===base+'runs/700/artifacts?per_page=100')r=[{artifacts:s.originalArtifacts}];
 else if(p===base+'runs/701/artifacts?per_page=100')r=[{artifacts:s.currentArtifacts}];
 else if(p===base+'workflows/ci.yml/runs?head_sha='+s.sha+'&per_page=100')r=[{workflow_runs:[s.ci]}];
@@ -74,7 +77,7 @@ else if(s.allowFinalization&&p==='repos/risense-ai/respire-cli/releases/300')r=f
 else if(s.allowFinalization&&p==='repos/risense-ai/respire-cli/git/ref/tags/v'+s.version)r={object:{type:'commit',sha:s.sha}};
 else if(s.allowFinalization&&p==='repos/risense-ai/respire-cli/commits/'+s.sha)r={sha:s.sha,commit:{committer:{date:s.original.created_at}}};
 else if(s.allowFinalization&&p===base+'runs/702/attempts/1')r=s.aliasRun;
-else if(s.allowFinalization&&p===base+'runs/702/attempts/1/jobs?per_page=100')r=[{jobs:[{name:'publish-integrated',status:'completed',conclusion:'success'}]}];
+else if(s.allowFinalization&&p===base+'runs/702/attempts/1/jobs?per_page=10')r=[{jobs:[{name:'publish-integrated',status:'completed',conclusion:'success'}]}];
 else if(p.startsWith(base+'artifacts/')&&p.endsWith('/zip')){const id=Number(p.slice((base+'artifacts/').length,-4)),x=[...s.originalArtifacts,...s.currentArtifacts].find(x=>x.id===id);if(!x?._zip)throw Error('Missing bound ZIP');process.stdout.write(fs.readFileSync(x._zip));process.exit(0);}
 else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r));
 `,{mode:0o755});

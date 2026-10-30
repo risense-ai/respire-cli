@@ -124,7 +124,7 @@ async function guardAccepted() {
   const expected = readExpectedPacks('npm/dist',manifest(),process.env.CLI_VERSION).map(packIdentity);
   const acceptances=[];
   for(let previous=1;previous<attempt;previous++) {
-    const jobs=pages(`repos/${repo}/actions/runs/${runId}/attempts/${previous}/jobs?per_page=100`).flatMap(p=>p.jobs);
+    const jobs=pages(`repos/${repo}/actions/runs/${runId}/attempts/${previous}/jobs?per_page=10`).flatMap(p=>p.jobs);
     const crossed=jobs.some(j=>j.name==='publish' && j.steps?.some(s=>s.name==='Publish npm using Trusted Publishing' && s.conclusion!=='skipped' && s.started_at));
     if(!crossed) continue;
     const journal=artifact(runId,`npm-submissions-${runId}-${previous}`,repo);
@@ -198,7 +198,7 @@ async function publishAliasAccepted() {
           String(journal.run_id)!==String(prior.id) || Number(journal.run_attempt)!==attempt) throw Error('Foreign alias submission journal');
         knownAcceptances.push(...await reconcilePriorSubmissions(journal,[expected]));
       } else {
-        const jobs=pages(`repos/${source.repository}/actions/runs/${prior.id}/attempts/${attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+        const jobs=pages(`repos/${source.repository}/actions/runs/${prior.id}/attempts/${attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
         if(jobs.some(j=>j.name==='publish-integrated' && j.steps?.some(s=>s.name==='Publish the matching short entry (legacy also verifies installation)' && s.started_at && s.conclusion!=='skipped'))) {
           // A matching accepted receipt is also a durable acknowledgement.
           // Without a journal or receipt, an interrupted writer is ambiguous.
@@ -222,7 +222,7 @@ export async function findAcceptedAlias(scoped, createdAt) {
   const source = scoped.source;
   const runs = pages(`repos/${source.repository}/actions/workflows/npm-alias.yml/runs?per_page=100&created=%3E%3D${encodeURIComponent(createdAt)}`).flatMap(p=>p.workflow_runs);
   for (const run of runs) {
-    const jobs = pages(`repos/${source.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+    const jobs = pages(`repos/${source.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
     if (!jobs.some(j=>j.name==='publish-integrated' && j.status==='completed' && j.conclusion==='success')) continue;
     const receipt = artifact(run.id,aliasAcceptedName(source,run),source.repository);
     if (!receipt) continue;
@@ -255,11 +255,11 @@ function finalizeAccepted() {
       !same(complete.packages,[...scoped.packages,complete.alias_receipt?.alias])) throw Error('Missing exact acceptance barrier');
   assertActive(s);
   const run = api(`repos/${s.repository}/actions/runs/${complete.alias_run}/attempts/${complete.alias_attempt}`);
-  const jobs = pages(`repos/${s.repository}/actions/runs/${complete.alias_run}/attempts/${complete.alias_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const jobs = pages(`repos/${s.repository}/actions/runs/${complete.alias_run}/attempts/${complete.alias_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
   validateAcceptedAlias(complete.alias_receipt,scoped,run,jobs);
   assertDraft(api(`repos/${s.repository}/releases/${s.release_id}`),scoped); assertTag(s);
   const sourceRun=assertActive(s);
-  const readinessJobs=pages(`repos/${s.repository}/actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const readinessJobs=pages(`repos/${s.repository}/actions/runs/${s.run_id}/attempts/${s.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
   const ready=readinessJobs.filter(j=>j.name==='publication-ready');
   if(ready.length!==1 || ready[0].conclusion!=='success' || !instant(ready[0].completed_at))throw Error('Exact publication readiness time missing');
   const readyAt=parseTimestamp(ready[0].completed_at);

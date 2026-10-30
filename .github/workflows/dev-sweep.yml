@@ -91,7 +91,7 @@ jobs:
           const api=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
           const run=api(`actions/runs/${id}`);
           if(run.head_sha!==sha||!['.github/workflows/release.yml','.github/workflows/release-validation.yml'].includes(run.path)) throw new Error('Unexpected release source or workflow');
-          const jobs=api(`actions/runs/${id}/jobs?per_page=100`).jobs;
+          const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${id}/jobs?per_page=10`],{encoding:'utf8'})).flatMap(page=>page.jobs);
           const required=[...m.targets.map(t=>`Release (${t.triple})`),'npm-dry-run'];
           for(const name of required) if(!jobs.some(j=>(j.name===name||j.name.endsWith(` / ${name}`))&&j.conclusion==='success')) throw new Error(`Original release validation did not pass: ${name}`);
           NODE

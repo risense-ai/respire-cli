@@ -299,11 +299,20 @@ jobs:
           const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
           const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
           async function wait(){
+            let statusFailures=0;
             while(Date.now()<deadline){
               if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
                 console.log(`Build artifact ready: ${name}`);return;
               }
-              const job=read('jobs?per_page=100').jobs.find(j=>j.name.endsWith(`Release (${target})`));
+              let job;
+              try {
+                job=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run}/jobs?per_page=10`],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs).find(j=>j.name.endsWith(`Release (${target})`));
+                statusFailures=0;
+              } catch(error) {
+                if(!/HTTP 50[0-9]/.test(String(error.stderr))||++statusFailures>=2) throw error;
+                console.warn('GitHub job status temporarily unavailable; retrying this read once');
+                await new Promise(resolve=>setTimeout(resolve,30000));continue;
+              }
               if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
               console.log(`Waiting for ${name}; other platform tests run independently`);
               await new Promise(resolve=>setTimeout(resolve,30000));
@@ -473,11 +482,20 @@ jobs:
           const name=`cli-release-${target}`,deadline=Date.now()+45*60*1000;
           const read=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${run}/${path}`],{encoding:'utf8',timeout:30000}));
           async function wait(){
+            let statusFailures=0;
             while(Date.now()<deadline){
               if(read('artifacts?per_page=100').artifacts.some(a=>a.name===name&&!a.expired)){
                 console.log(`Build artifact ready: ${name}`);return;
               }
-              const job=read('jobs?per_page=100').jobs.find(j=>j.name.endsWith(`Release (${target})`));
+              let job;
+              try {
+                job=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${run}/jobs?per_page=10`],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs).find(j=>j.name.endsWith(`Release (${target})`));
+                statusFailures=0;
+              } catch(error) {
+                if(!/HTTP 50[0-9]/.test(String(error.stderr))||++statusFailures>=2) throw error;
+                console.warn('GitHub job status temporarily unavailable; retrying this read once');
+                await new Promise(resolve=>setTimeout(resolve,30000));continue;
+              }
               if(job?.status==='completed'&&job.conclusion!=='success') throw new Error(`Build ${job.name} concluded ${job.conclusion}`);
               console.log(`Waiting for ${name}; other platform tests run independently`);
               await new Promise(resolve=>setTimeout(resolve,30000));
@@ -871,7 +889,7 @@ jobs:
             const deadline=Date.now()+120*60*1000;
             while(Date.now()<deadline){
               const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',
-                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=100`
+                `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}/jobs?per_page=10`
               ],{encoding:'utf8',timeout:30000})).flatMap(page=>page.jobs);
               const {regressionContract,regressionStatus}=await import('./npm/scripts/release-regression-contract.mjs');
               const contract=regressionContract(require('./npm/artifact-manifest.json'));

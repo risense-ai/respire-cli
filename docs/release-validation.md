@@ -1,5 +1,13 @@
 # Release validation
 
+Job inventories are read in complete ten-job pages to keep GitHub API responses
+bounded. Publication readers retry a transient HTTP 5xx job-list read once;
+artifact waiters allow at most two consecutive failed status reads. Authentication
+errors, incomplete validation and failed producers still stop publication.
+The reviewed API route inventory is pinned to Server 1.0.1 source
+`fb370b2a49193db64d2530c9af9a2a3895fd231c`; all 66 baseline routes and existing
+vault assertions remain required.
+
 New releases target Windows x64, Linux x64 and ARM64 (GNU and musl), and macOS ARM64.
 Windows ARM64 packages are no longer published. Historical
 published assets remain available; Intel macOS was already unsupported.

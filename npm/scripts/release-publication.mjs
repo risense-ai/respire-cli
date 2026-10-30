@@ -27,7 +27,15 @@ export const publicationCommand = (name, args, options = {}) => execFileSync(nam
   {encoding: 'utf8', timeout: 30000, maxBuffer: PUBLICATION_MAX_BUFFER, ...options});
 export const command = publicationCommand;
 export const api = endpoint => JSON.parse(command('gh', ['api', endpoint]));
-export const pages = endpoint => JSON.parse(command('gh', ['api', '--paginate', '--slurp', endpoint]));
+export const pages = endpoint => {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return JSON.parse(command('gh', ['api', '--paginate', '--slurp', endpoint])); }
+    catch (error) {
+      if (attempt || !endpoint.includes('/jobs?') || !/HTTP 50[0-9]/.test(String(error.stderr))) throw error;
+      console.warn('GitHub job inventory returned a server error; retrying this read once');
+    }
+  }
+};
 export const output = values => appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([k,v]) => `${k}=${v}\n`).join(''));
 export const digest = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 export const packIdentity = pack => ({name: pack.name, version: pack.version, integrity: pack.integrity, shasum: pack.shasum});
@@ -313,7 +321,7 @@ async function awaitAlias() {
       if (run.status !== 'completed' || run.conclusion !== 'success' || unrelatedCompleted.has(`${run.id}:${run.run_attempt}`)) continue;
       const receipt = artifact(run.id, aliasName(source, run), source.repository);
       if (!receipt) { unrelatedCompleted.add(`${run.id}:${run.run_attempt}`); continue; }
-      const jobs = pages(`repos/${source.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`).flatMap(p => p.jobs);
+      const jobs = pages(`repos/${source.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=10`).flatMap(p => p.jobs);
       validateAlias(receipt, scoped, run, jobs);
       // The child proved tarball bytes; confirm public metadata is still the exact six versions.
       for (const expected of [...scoped.packages, receipt.alias]) {
@@ -339,7 +347,7 @@ function finalize() {
       String(scoped.source.run_id) !== process.env.GITHUB_RUN_ID || Number(scoped.source.run_attempt) !== Number(process.env.GITHUB_RUN_ATTEMPT)) throw new Error('Missing exact completed publication barrier');
   assertActive(scoped.source);
   const aliasRun = api(`repos/${scoped.source.repository}/actions/runs/${complete.alias_run}`);
-  const jobs = pages(`repos/${scoped.source.repository}/actions/runs/${complete.alias_run}/attempts/${complete.alias_attempt}/jobs?per_page=100`).flatMap(p => p.jobs);
+  const jobs = pages(`repos/${scoped.source.repository}/actions/runs/${complete.alias_run}/attempts/${complete.alias_attempt}/jobs?per_page=10`).flatMap(p => p.jobs);
   validateAlias(complete.alias_receipt, scoped, aliasRun, jobs);
   assertDraft(api(`repos/${scoped.source.repository}/releases/${scoped.source.release_id}`), scoped);
   assertTag(scoped.source);

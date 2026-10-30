@@ -161,7 +161,7 @@ export function validatePreparation(receipt,context){
 export function preparationContext(source){
   validatePreparationSource(source);
   const run=api(`repos/${REPO}/actions/runs/${source.run_id}`);
-  const jobs=pages(`repos/${REPO}/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const jobs=pages(`repos/${REPO}/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
   const artifacts=pages(`repos/${REPO}/actions/runs/${source.run_id}/artifacts?per_page=100`).flatMap(p=>p.artifacts);
   const candidates=pages(`repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${source.sha}&per_page=100`).flatMap(p=>p.workflow_runs)
     .filter(r=>r.head_sha===source.sha&&r.event==='push'&&r.head_branch==='main').sort((a,b)=>b.id-a.id);

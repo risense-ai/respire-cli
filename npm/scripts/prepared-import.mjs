@@ -48,7 +48,7 @@ function readConsumer(source,run,job,origin,artifacts){
 export function verifyConsumerBeforeImport(){
   requireValue(process.env.GITHUB_JOB==='prepared-import','Only the trusted import job can consume prepared artifacts');
   const {owner,run}=currentPublicationOwner(process.env.CLI_SHA,process.env.CLI_VERSION);
-  const jobs=pages(`repos/${REPO}/actions/runs/${owner.run_id}/attempts/${owner.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs).filter(j=>j.name==='prepared-import');
+  const jobs=pages(`repos/${REPO}/actions/runs/${owner.run_id}/attempts/${owner.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs).filter(j=>j.name==='prepared-import');
   requireValue(jobs.length===1&&positive(jobs[0].id)&&jobs[0].status==='in_progress','Current import job is inactive or ambiguous');
   const artifacts=pages(`repos/${REPO}/actions/runs/${owner.run_id}/artifacts?per_page=100`).flatMap(p=>p.artifacts);
   const intents=artifacts.filter(a=>a.name===consumerName(owner));
@@ -116,7 +116,7 @@ export function validateImportAnchor(anchor,source){
 export function readImportedPreparation(source,manifest){
   validatePreparationSource(source);
   const run=api(`repos/${REPO}/actions/runs/${source.run_id}`);
-  const ownerJobs=pages(`repos/${REPO}/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=100`).flatMap(p=>p.jobs);
+  const ownerJobs=pages(`repos/${REPO}/actions/runs/${source.run_id}/attempts/${source.run_attempt}/jobs?per_page=10`).flatMap(p=>p.jobs);
   const artifacts=pages(`repos/${REPO}/actions/runs/${source.run_id}/artifacts?per_page=100`).flatMap(p=>p.artifacts);
   const matches=artifacts.filter(a=>a.name===importName(source));
   requireValue(matches.length===1,'Missing or duplicate current-run import receipt');

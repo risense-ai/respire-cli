@@ -168,7 +168,7 @@ jobs:
                 (process.env.GITHUB_EVENT_NAME === 'workflow_run' && run.status !== 'completed')) {
               throw new Error('Expected a Release run from this repository; automatic runs must be completed');
             }
-            const jobs = api(`repos/${repo}/actions/runs/${sourceRun}/jobs?per_page=100`).jobs;
+            const jobs = JSON.parse(execFileSync('gh', ['api','--paginate','--slurp',`repos/${repo}/actions/runs/${sourceRun}/jobs?per_page=10`], {encoding:'utf8'})).flatMap(page=>page.jobs);
             if (!['plan', 'publish'].every(name => jobs.some(job => job.name === name && job.conclusion === 'success'))) {
               if (process.env.GITHUB_EVENT_NAME !== 'workflow_run') throw new Error('Release publication did not succeed');
               appendFileSync(process.env.GITHUB_OUTPUT, 'eligible=false\n');
