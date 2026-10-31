@@ -68,6 +68,31 @@ Startup preserves the selected account and does not import old profiles automati
 | [WorkBuddy connector](connectors/workbuddy/README.md) | Tool integration |
 | [Command checks](docs/command-regression.md) | Existing validation commands |
 
+## Plugins
+
+One engine, one plugin per host. Every adapter hooks the same `rsrs` engine into an agent loop: title-tier recall on each turn, one-prefix store (`记：` / `存：` / `remember:`), and a Stop storage check. A plugin never bundles the engine — when `rsrs` is missing it hands `npm i -g @rsrsai/cli@latest` to the agent. Setup guides: [plugin guides](https://docs.rsrs.rs/plugins/).
+
+| | Host | Install | Repository |
+| --- | --- | --- | --- |
+| <img src="docs/plugins/icons/codex.svg" width="28" height="28" alt="Codex"> | Codex (`@rsrsai/codex`) | `codex plugin marketplace add risense-ai/respire-codex --ref main`, then `codex plugin add respire@rsrsai` | [risense-ai/respire-codex](https://github.com/risense-ai/respire-codex) |
+| <img src="docs/plugins/icons/respire.svg" width="28" height="28" alt="Kimi Code"> | Kimi Code | `/plugins install https://github.com/risense-ai/respire-kimi` | [risense-ai/respire-kimi](https://github.com/risense-ai/respire-kimi) |
+| <img src="docs/plugins/icons/dimcode.png" width="28" height="28" alt="Dim"> | Dim | `dim plugin marketplace add .agents/plugins/marketplace.json`, then `dim plugin install respire@risense` | [risense-ai/respire-dimcode](https://github.com/risense-ai/respire-dimcode) |
+| <img src="docs/plugins/icons/respire.svg" width="28" height="28" alt="Qoder"> | Qoder | `qoder plugins install <repo-path>`, or add the marketplace and `qoder plugins install respire-qoder@risense` | [risense-ai/respire-qoder](https://github.com/risense-ai/respire-qoder) |
+| <img src="docs/plugins/icons/workbuddy.svg" width="28" height="28" alt="WorkBuddy"> | WorkBuddy | `bash install.sh`, or `codebuddy plugin install respire@risense-workbuddy` | [risense-ai/respire-workbuddy](https://github.com/risense-ai/respire-workbuddy) |
+| <img src="docs/plugins/icons/hermes.png" width="28" height="28" alt="Hermes"> | Hermes Agent | `hermes plugins install respire`, then `hermes memory setup` | [risense-ai/respire-hermes](https://github.com/risense-ai/respire-hermes) |
+| <img src="docs/plugins/icons/respire.svg" width="28" height="28" alt="Pi"> | Pi (`@rsrsai/pi`) | `pi install npm:@rsrsai/pi` | [risense-ai/respire-pi](https://github.com/risense-ai/respire-pi) |
+| <img src="docs/plugins/icons/zcode.png" width="28" height="28" alt="ZCode"> | ZCode | Add the repository directory as a marketplace source, then install `respire` | [risense-ai/respire-zcode](https://github.com/risense-ai/respire-zcode) |
+| <img src="docs/plugins/icons/dsh.svg" width="28" height="28" alt="DeepSeek Harness"> | DeepSeek Harness (`@rsrsai/dsh`) | `plugin_manager` with `{"action":"install_bundle","target":"@rsrsai/dsh"}` | [risense-ai/respire-dsh](https://github.com/risense-ai/respire-dsh) |
+| <img src="docs/plugins/icons/magpie.svg" width="28" height="28" alt="Magpie"> | Magpie (`@rsrsai/magpie`) | `magpie plugin add @rsrsai/magpie` | [risense-ai/respire-magpie](https://github.com/risense-ai/respire-magpie) |
+
+Icons are copied from each plugin repository into `docs/plugins/icons/`. Kimi Code, Qoder and Pi ship no logo file, so their rows use the shared Respire mark (`respire.svg`). All plugins read the same `respire.config.json` beside their hooks and invoke only `rsrs --client-only`.
+
+## Clients
+
+| | Client | Scope | Repository |
+| --- | --- | --- | --- |
+| <img src="docs/plugins/icons/client2.png" width="28" height="28" alt="Respire Client 2"> | Respire Client 2 | Wails v3 + Go desktop client for Windows, macOS and Linux. Native tray, runtime health, memory tree, recall, diary, model and index tasks, accounts and synchronization over loopback RPC. It downloads and manages its own `rsrs` CLI. [Releases](https://github.com/risense-ai/respire-client2/releases) | [risense-ai/respire-client2](https://github.com/risense-ai/respire-client2) |
+
 ## Release
 
 DEV and stable releases run automatically after pushing `vX.Y.Z-dev.N` or
