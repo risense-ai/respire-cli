@@ -8,9 +8,12 @@ git push origin v1.0.17-dev.16
 # Stable uses the same automatic workflow, for example v1.0.17.
 ```
 
-The tag determines the binary and npm version. CI prepares matching ephemeral
-Cargo, lockfile and npm versions; no separate version commit is required.
-DEV tags publish the `dev` channel; stable tags publish `latest`.
+DEV tags determine the binary and npm version; CI prepares matching ephemeral
+Cargo, lockfile and npm versions. Stable tags require the CLI source version,
+Cargo.lock and npm manifest to match first, including the protocol publication
+gate. Run `node npm/scripts/set-build-version.mjs X.Y.Z`, commit those three
+files to `main`, then push `vX.Y.Z`. DEV tags publish `dev`; stable tags publish
+`latest`.
 Ordinary `main` pushes run source CI and warm dependency caches without
 allocating a release. Manual dispatch remains available for preparation/recovery.
 

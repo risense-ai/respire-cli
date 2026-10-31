@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "respire"
-version = "1.0.19-dev.3"
+version = "1.0.19"
 dependencies = [
  "anyhow",
  "axum",
