@@ -1,33 +1,22 @@
-name: Release validation
+name: Windows workspace CGU experiment (non-production)
 
 on:
-  workflow_call:
-    inputs:
-      ref:
-        required: true
-        type: string
-      version:
-        default: ''
-        type: string
-      full_validation:
-        default: true
-        type: boolean
-    outputs:
-      sha:
-        value: ${{ jobs.resolve.outputs.sha }}
-      version:
-        value: ${{ jobs.resolve.outputs.version }}
   workflow_dispatch:
     inputs:
       ref:
-        description: CLI commit, branch or tag to validate without publishing
-        required: true
-        default: main
+        description: Fixed Rust source for this non-production experiment
         type: string
+        required: true
+        default: '824e294122ec28e40b73fa13b6b9736077b9e332'
+      version:
+        description: Fixed build version; no publication occurs
+        type: string
+        required: true
+        default: '1.0.20-dev.4'
       full_validation:
-        description: Run historical native upgrades as well as build/package checks
-        default: true
+        description: Must remain false; this experiment compiles only
         type: boolean
+        default: false
 
 cache-mode: read
 permissions:
@@ -35,255 +24,174 @@ permissions:
   actions: read
 
 jobs:
-  resolve:
-    runs-on: ubuntu-latest
-    outputs:
-      sha: ${{ steps.source.outputs.sha }}
-      version: ${{ steps.source.outputs.version }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-          fetch-depth: 0
-      - id: source
-        env:
-          BUILD_VERSION: ${{ inputs.version }}
-          BUILD_REF: ${{ inputs.ref }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-          # Manual branch candidates need a fresh dev identity; a stale checked-in
-          # prerelease would correctly fail the live registry version diagnostic.
-          if [ -z "$BUILD_VERSION" ] && [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && [[ ! "$BUILD_REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            BUILD_VERSION="$(node npm/scripts/next-dev-version.mjs)"
-          fi
-          if [ -n "$BUILD_VERSION" ]; then node npm/scripts/set-build-version.mjs "$BUILD_VERSION"; fi
-          node -e 'const fs=require("fs"); const m=require("./npm/artifact-manifest.json"); fs.appendFileSync(process.env.GITHUB_OUTPUT,`version=${m.cliVersion}\n`)'
-
-  binaries:
-    needs: resolve
-    name: Release (${{ matrix.target }})
+  compile:
+    name: Compile ${{ matrix.platform.target }} CGU ${{ matrix.cgu }}
+    runs-on: ${{ matrix.platform.os }}
+    timeout-minutes: 25
     strategy:
       fail-fast: false
+      max-parallel: 6
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-musl
-          - os: macos-latest
-            target: aarch64-apple-darwin
+        cgu: [1, 8, 16]
+        platform:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
+            arch: X64
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
-            rustflags: -C target-feature=-crt-static
-    runs-on: ${{ matrix.os }}
+            arch: ARM64
+    env:
+      RUST_SOURCE_SHA: 824e294122ec28e40b73fa13b6b9736077b9e332
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      WORKFLOW_REF: ${{ github.workflow_ref }}
+      DISPATCH_SHA: ${{ github.sha }}
+      EXPERIMENT_TARGET: ${{ matrix.platform.target }}
+      EXPERIMENT_CGU: ${{ matrix.cgu }}
+      RUSTFLAGS: -C target-feature=-crt-static
     steps:
+      - name: Reject any non-experiment inputs
+        shell: pwsh
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_FULL: ${{ inputs.full_validation }}
+        run: |
+          if ($env:REQUESTED_REF -cne '824e294122ec28e40b73fa13b6b9736077b9e332' -or $env:REQUESTED_VERSION -cne '1.0.20-dev.4' -or $env:REQUESTED_FULL -cne 'false') {
+            throw 'Only fixed source 824e294, version 1.0.20-dev.4 and full_validation=false are allowed'
+          }
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.resolve.outputs.sha }}
+          ref: 824e294122ec28e40b73fa13b6b9736077b9e332
           persist-credentials: false
-      - name: Require native Windows ARM64 hardware
-        if: matrix.target == 'aarch64-pc-windows-msvc'
+      - name: Require the native runner architecture
         shell: pwsh
         run: |
-          if ($env:RUNNER_ARCH -ne 'ARM64' -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'Arm64') {
-            throw 'Windows ARM64 acceptance requires native ARM64 hardware'
+          $expected = '${{ matrix.platform.arch }}'
+          if ($env:RUNNER_ARCH -ne $expected -or [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToUpperInvariant() -ne $expected) {
+            throw 'CGU comparisons require the matching native Windows architecture'
           }
-      - name: Require real native Linux ARM64 hardware
-        shell: bash
-        run: bash scripts/require-native-linux-arm64.sh '${{ matrix.target }}'
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Key release compilation dependencies before version rewriting
-        id: release-key
+      # Calculate the unchanged production dependency identity before the two
+      # workspace-only command-line overrides. This is not a production build.
+      - name: Resolve the existing dependency cache keys
+        id: keys
         shell: bash
-        env:
-          RELEASE_TARGET: ${{ matrix.target }}
-          RUSTFLAGS: ${{ matrix.rustflags }}
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_TARGET" == *-musl ]]; then
-            bash scripts/build-linux-musl.sh "$RELEASE_TARGET" key
-          else
-            node scripts/rust-ci-cache.mjs key release "$RELEASE_TARGET"
-          fi
+          node scripts/rust-ci-cache.mjs key release "$EXPERIMENT_TARGET"
+          sdk_key=$(node scripts/sdk-ci-cache.mjs key "$EXPERIMENT_TARGET")
+          test -n "$sdk_key"
+          echo "sdk=$sdk_key" >> "$GITHUB_OUTPUT"
+      - name: Match the DEV4 ephemeral version after calculating production cache keys
+        run: node npm/scripts/set-build-version.mjs 1.0.20-dev.4
       - uses: actions/cache/restore@v4
-        id: release-cache
+        id: dependencies
         with:
           path: .rust-release-cache
-          key: ${{ steps.release-key.outputs.key }}
-          enableCrossOsArchive: true
-      - name: Restore native release compilation dependencies
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: node scripts/rust-ci-cache.mjs restore release ${{ matrix.target }}
-      - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
-      - name: Validate release manifests
-        run: |
-          node npm/scripts/check-manifest.mjs
-          node scripts/check-sdk-release.mjs
-      - name: Resolve the pinned SDK dependency cache
-        id: sdk-cache-1
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-1-restore
-        if: steps.sdk-cache-1.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
-          key: ${{ steps.sdk-cache-1.outputs.key }}
+          key: ${{ steps.keys.outputs.key }}
           enableCrossOsArchive: true
           fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: steps.sdk-cache-1.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}
-      - name: Build release binary
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
-        env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
-      - name: Build and verify static musl binary
-        if: contains(matrix.target, '-musl')
-        env:
-          RELEASE_DEPENDENCY_CACHE: '1'
-        run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
-      - name: Stage Core runtime and notices
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
-      - name: Verify the native executable
-        shell: bash
-        run: |
-          set -euo pipefail
-          exe=target/ci/${{ matrix.target }}/release/rsrs
-          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          "$exe" --version
-          bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
       - uses: actions/cache/restore@v4
-        if: runner.os == 'macOS'
+        id: sdk
         with:
-          path: ${{ runner.temp }}/release-probe/models/bge-m3
-          key: release-m3-quantized-0826f8c1-macos
-      - name: Verify real macOS CPU inference before DEV publication
-        if: runner.os == 'macOS'
+          path: .sdk/${{ matrix.platform.target }}
+          key: ${{ steps.keys.outputs.sdk }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Require exact cache matches and validate the SDK bytes
         shell: bash
         env:
-          RSRS_ENGINE: cpu
-          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
-          RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
-          RSRS_NO_AUTOSYNC: '1'
-          RSRS_UPDATE_CHECK: '0'
+          DEPENDENCY_KEY: ${{ steps.keys.outputs.key }}
+          DEPENDENCY_MATCH: ${{ steps.dependencies.outputs.cache-matched-key }}
+          SDK_KEY: ${{ steps.keys.outputs.sdk }}
+          SDK_MATCH: ${{ steps.sdk.outputs.cache-matched-key }}
         run: |
           set -euo pipefail
-          exe=target/ci/${{ matrix.target }}/release/rsrs
-          "$exe" --direct model install-m3 --json
-          "$exe" --direct model probe --json
-      - name: Prepare versioned binary and runtime artifacts
-        run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-${{ matrix.target }}
-          path: dist/*
-          if-no-files-found: error
-      - name: Stage only release compilation dependencies after consuming binaries
-        id: release-cache-pack
-        continue-on-error: true
-        if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/main' && needs.resolve.outputs.sha == github.sha && steps.release-cache.outputs.cache-hit != 'true' }}
+          test -n "$DEPENDENCY_KEY" && test "$DEPENDENCY_MATCH" = "$DEPENDENCY_KEY"
+          test -n "$SDK_KEY" && test "$SDK_MATCH" = "$SDK_KEY"
+          node --input-type=module <<'NODE'
+          import {readFileSync} from 'node:fs';
+          import {planCaches,auditSdkDirectory} from './scripts/sdk-ci-cache.mjs';
+          const read = path => JSON.parse(readFileSync(path,'utf8'));
+          const target = process.env.EXPERIMENT_TARGET;
+          const entry = planCaches(read('sdk/core-sdk.lock.json'),read('crates/core-sdk/core-sdk.lock.json')).include.find(row=>row.target===target).entry;
+          auditSdkDirectory(`.sdk/${target}`,target,entry);
+          NODE
+          node scripts/rust-ci-cache.mjs restore release "$EXPERIMENT_TARGET"
+          # The audited manifest must exist: prepareSdk takes its local-only path.
+          node scripts/fetch-core-sdk.mjs "$EXPERIMENT_TARGET"
+      - name: Fresh workspace compilation and timing evidence
         shell: bash
         env:
-          RELEASE_TARGET: ${{ matrix.target }}
+          DEPENDENCY_KEY: ${{ steps.keys.outputs.key }}
+          SDK_KEY: ${{ steps.keys.outputs.sdk }}
         run: |
           set -euo pipefail
-          if [[ "$RELEASE_TARGET" == *-musl ]]; then
-            bash scripts/build-linux-musl.sh "$RELEASE_TARGET" pack
-          else
-            node scripts/rust-ci-cache.mjs pack release "$RELEASE_TARGET"
-          fi
+          node --input-type=module <<'NODE'
+          import {spawn,spawnSync} from 'node:child_process';
+          import {finished} from 'node:stream/promises';
+          import {createHash} from 'node:crypto';
+          import {mkdirSync,readFileSync,writeFileSync,createWriteStream,existsSync,cpSync,statSync} from 'node:fs';
+          import os from 'node:os';
+          const run = (command,args) => {
+            const result = spawnSync(command,args,{encoding:'utf8',maxBuffer:32*1024*1024});
+            if (result.error || result.status!==0) throw result.error || Error(`${command} failed (${result.status}): ${result.stderr}`);
+            return result.stdout.trim();
+          };
+          const target=process.env.EXPERIMENT_TARGET, cgu=Number(process.env.EXPERIMENT_CGU), output='cgu-results';
+          mkdirSync(output,{recursive:true});
+          const sha=run('git',['rev-parse','HEAD']);
+          if (sha!==process.env.RUST_SOURCE_SHA || ![1,8,16].includes(cgu)) throw Error('Unexpected source or CGU');
+          const metadata=JSON.parse(run('cargo',['metadata','--locked','--no-deps','--format-version','1']));
+          const members=metadata.packages.filter(p=>metadata.workspace_members.includes(p.id));
+          const expected=['respire','respire_app','respire_core_sdk','respire_crypto','respire_protocol','respire_spawn','respire_storage'];
+          if (JSON.stringify(members.map(p=>p.name).sort())!==JSON.stringify(expected)) throw Error('Require exact seven workspace crates');
+          if (members.find(p=>p.name==='respire').version!=='1.0.20-dev.4') throw Error('Require the exact DEV4 build version');
+          const hash=path=>createHash('sha256').update(readFileSync(path)).digest('hex');
+          const inputs=['Cargo.toml','Cargo.lock','.cargo/config.toml','rust-toolchain.toml','sdk/core-sdk.lock.json','crates/core-sdk/core-sdk.lock.json','scripts/rust-ci-cache.mjs','scripts/sdk-ci-cache.mjs','npm/scripts/set-build-version.mjs','.github/workflows/release-validation.yml',...members.map(p=>p.manifest_path)];
+          const args=['--config',`profile.release.package.respire.codegen-units=${cgu}`,'--config',`profile.release.package.respire_app.codegen-units=${cgu}`,'build','--release','--locked','-p','respire','--bin','rsrs','--target',target,'--target-dir','target/ci','--timings','--message-format=json','--verbose'];
+          const compilerEnvironment=Object.fromEntries(Object.entries(process.env).filter(([name])=>/^(?:CARGO_PROFILE_|CARGO_TARGET_|CFLAGS|CXXFLAGS|CC_|CXX_|AR_|OPENSSL_|PKG_CONFIG)/.test(name)||['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','CC','CXX','AR','RSRS_CORE_TEST_MODE'].includes(name)));
+          const report={
+            non_production:true,experiment_version:'1.0.20-dev.4',workflow_sha:process.env.WORKFLOW_SHA,workflow_ref:process.env.WORKFLOW_REF,dispatch_sha:process.env.DISPATCH_SHA,rust_source_sha:sha,target,cgu,
+            command:['cargo',...args],compiler_environment:compilerEnvironment,
+            profile:{opt_level:3,panic:'unwind',lto:false,global_codegen_units:1,overridden_packages:['respire','respire_app'],note:'CGU > 1 also enables local ThinLTO under lto=false; not a single LLVM-variable experiment'},
+            toolchain:{rustc:run('rustc',['-Vv']),cargo:run('cargo',['-V']),node:process.version,rustc_path:run('rustup',['which','rustc']),cargo_path:run('rustup',['which','cargo']),active_toolchain:run('rustup',['show','active-toolchain']),node_path:process.execPath,setup_actions:{rust:'dtolnay/rust-toolchain@1.95.0',node:'actions/setup-node@v4',checkout:'actions/checkout@v5'}},
+            runner:{name:process.env.RUNNER_NAME,arch:process.env.RUNNER_ARCH,node_arch:process.arch,image_os:process.env.ImageOS,image_version:process.env.ImageVersion,os:os.version(),cpus:os.cpus(),total_memory:os.totalmem(),free_memory:os.freemem()},
+            dependency_key:process.env.DEPENDENCY_KEY,sdk_key:process.env.SDK_KEY,sdk_manifest_sha256:hash(`.sdk/${target}/manifest.json`),input_sha256:Object.fromEntries(inputs.map(path=>[path,hash(path)])),workspace:members.map(p=>({name:p.name,version:p.version,id:p.id})),comparison_valid:false
+          };
+          const save=()=>writeFileSync(`${output}/report.json`,JSON.stringify(report,null,2)+'\n');
+          save();
+          // The trusted cache producer already stripped workspace products;
+          // require actual fresh=false evidence below instead of cleaning the restored directory.
+          const stdout=createWriteStream(`${output}/cargo.jsonl`), stderr=createWriteStream(`${output}/cargo.stderr.log`);
+          const start=process.hrtime.bigint();
+          const child=spawn('cargo',args,{stdio:['ignore','pipe','pipe']});
+          child.stdout.pipe(stdout); child.stderr.pipe(stderr); child.stderr.pipe(process.stderr);
+          const result=await new Promise(resolve=>{child.once('error',error=>resolve({error:String(error)}));child.once('close',(code,signal)=>resolve({code,signal}));});
+          await Promise.all([finished(stdout),finished(stderr)]);
+          report.wall_seconds=Number(process.hrtime.bigint()-start)/1e9;
+          Object.assign(report,result);
+          const artifacts=readFileSync(`${output}/cargo.jsonl`,'utf8').split(/\r?\n/).filter(Boolean).map(line=>JSON.parse(line)).filter(row=>row.reason==='compiler-artifact'&&!row.target.kind.includes('custom-build'));
+          const ids=new Map(members.map(p=>[p.id,p.name]));
+          report.workspace_artifacts=artifacts.filter(row=>ids.has(row.package_id)).map(row=>({name:ids.get(row.package_id),fresh:row.fresh,profile:row.profile}));
+          report.rebuilt_thirdparty=artifacts.filter(row=>!ids.has(row.package_id)&&!row.fresh).map(row=>row.package_id);
+          report.comparison_valid=result.code===0 && expected.every(name=>report.workspace_artifacts.some(row=>row.name===name&&!row.fresh)) && report.workspace_artifacts.every(row=>!row.fresh&&row.profile.opt_level==='3') && report.rebuilt_thirdparty.length===0;
+          if(existsSync('target/ci/cargo-timings')) cpSync('target/ci/cargo-timings',`${output}/cargo-timings`,{recursive:true});
+          const executable=`target/ci/${target}/release/rsrs.exe`;
+          if(result.code===0){report.executable={sha256:hash(executable),bytes:statSync(executable).size};report.comparison_valid &&= existsSync(`${output}/cargo-timings/cargo-timing.html`);}
+          save();
+          console.log(JSON.stringify({wall_seconds:report.wall_seconds,comparison_valid:report.comparison_valid,rebuilt_thirdparty:report.rebuilt_thirdparty}));
+          if(!report.comparison_valid) process.exitCode=1;
+          NODE
       - uses: actions/upload-artifact@v4
-        continue-on-error: true
-        if: ${{ (github.event_name == 'workflow_dispatch' || github.event_name == 'push') && github.ref == 'refs/heads/main' && needs.resolve.outputs.sha == github.sha && steps.release-cache.outputs.cache-hit != 'true' && steps.release-cache-pack.outcome == 'success' }}
+        if: always()
         with:
-          name: release-dependency-cache-${{ matrix.target }}
-          path: .rust-release-save.tar.gz
-          include-hidden-files: true
-          compression-level: 0
+          name: cgu-${{ matrix.platform.target }}-${{ matrix.cgu }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: cgu-results/
           retention-days: 1
-          if-no-files-found: error
-
-  native-regression:
-    if: inputs.full_validation
-    needs: [resolve, binaries]
-    permissions:
-      contents: write
-      actions: read
-    uses: ./.github/workflows/release-native-validation.yml
-    with:
-      ref: ${{ needs.resolve.outputs.sha }}
-      version: ${{ needs.resolve.outputs.version }}
-      validation_profile: full
-
-  npm-dry-run:
-    needs: [resolve, binaries]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.resolve.outputs.sha }}
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ needs.resolve.outputs.version }}
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: cli-release-*
-          path: release-assets
-          merge-multiple: true
-      - name: Pin the publication npm pack tool
-        run: npm install --global npm@11.5.1
-      - name: Assemble all four native packages
-        shell: bash
-        run: |
-          set -euo pipefail
-          node npm/scripts/test-wrapper.mjs
-          python3 scripts/test-dev-smoke-gate.py
-          node npm/scripts/verify-packages.mjs release-assets --assets-only
-          node npm/scripts/assemble-artifacts.mjs release-assets target/ci
-          node npm/scripts/pack.mjs --root target/ci
-          node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: npm-release-validation
-          path: npm/dist/**/*.pack.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: npm-release-packages
-          path: npm/release-packages/*
           if-no-files-found: error
