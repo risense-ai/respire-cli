@@ -36,6 +36,7 @@ pub use respire_app_domain::review;
 pub use respire_app_domain::review_approval;
 pub use respire_app_domain::service;
 pub use respire_app_domain::share;
+pub use respire_app_domain::snapshot;
 pub use respire_app_domain::sync;
 pub use respire_app_domain::taxonomy;
 pub use respire_app_domain::transport;
