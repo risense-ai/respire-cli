@@ -16,6 +16,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use super::MemoryTransport;
 use crate::memory::model::StoredMemory;
 
+mod annotate;
+pub use annotate::{AnnotationCandidate, AnnotationRow, LabeledQuery, LearnedModelRow, NewAnnotation};
 mod feedback;
 pub use feedback::FeedbackCounts;
 mod witness;
@@ -1217,6 +1219,37 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
     }
     connection.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_query_request ON query_log(request_id) WHERE request_id IS NOT NULL;
         CREATE TABLE IF NOT EXISTS query_feedback(query_log_id INTEGER NOT NULL REFERENCES query_log(id),memory_id TEXT NOT NULL,good INTEGER NOT NULL CHECK(good IN(0,1)),source TEXT NOT NULL CHECK(source IN('human','model','task_outcome')),marked_at INTEGER NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(query_log_id,memory_id));")?;
+    // annotation_log: LLM-in-the-loop retrieval labels (BM25 candidates + LLM pick), replayable as training rows.
+    // Local-only, never synced; distinct from query_log so real recall statistics stay unpolluted.
+    connection.execute_batch(
+        "CREATE TABLE IF NOT EXISTS annotation_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at INTEGER NOT NULL,
+            ts TEXT NOT NULL,
+            query TEXT NOT NULL,
+            project TEXT NOT NULL DEFAULT '',
+            scope TEXT NOT NULL DEFAULT '',
+            topk INTEGER NOT NULL DEFAULT 0,
+            candidates TEXT NOT NULL DEFAULT '[]',
+            selected TEXT NOT NULL DEFAULT '[]',
+            confidence REAL NOT NULL DEFAULT 0,
+            reason TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT 'model' CHECK(source IN('human','model','task_outcome')),
+            status TEXT NOT NULL DEFAULT 'ok',
+            raw TEXT NOT NULL DEFAULT '',
+            request_id TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_annotation_created ON annotation_log(created_at);
+        CREATE INDEX IF NOT EXISTS idx_annotation_request ON annotation_log(request_id) WHERE request_id IS NOT NULL;
+        CREATE TABLE IF NOT EXISTS learned_reranker (
+            id INTEGER PRIMARY KEY CHECK(id=1),
+            weights TEXT NOT NULL DEFAULT '[]',
+            bias REAL NOT NULL DEFAULT 0,
+            updates INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );",
+    )?;
 
     // query_log v1→v2: hit_ids/hit_scores renamed candidates/candidate_scores (candidates are not hits —
     // a hit is a model self-grade useful, in good_ids/bad_ids); old DBs add columns, new DBs already match and skip.

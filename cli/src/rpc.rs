@@ -2451,7 +2451,7 @@ fn is_context_query(args: &[String]) -> bool {
     match cli.command {
         Some(crate::Command::Account { action, .. }) => action == "list",
         Some(crate::Command::Space { action, .. }) => matches!(action.as_str(), "list" | "members"),
-        Some(crate::Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None })
+        Some(crate::Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None, retrieval: None })
         | Some(crate::Command::AgentConfig { set: None })
         | Some(crate::Command::Session { command: crate::SessionCommand::List }) => true,
         _ => false,
