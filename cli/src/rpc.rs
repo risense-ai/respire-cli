@@ -821,7 +821,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     crate::autostart::authorize_detached_boot_locked()?;
     let shim = self_exe
         .as_ref()
-        .is_some_and(|exe| crate::mcp::same_path(exe, &executable));
+        .is_some_and(|exe| crate::mcp::exe_matches_dest(&exe.to_string_lossy(), &executable));
     let arguments: Vec<std::ffi::OsString> = if shim {
         // The shim child reuses this binary's --runtime-internal entry, whose
         // own fallback serves in-process; the data directory and port arrive

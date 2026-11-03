@@ -279,7 +279,13 @@ pub fn exe_matches_dest(exe: &str, dest: &Path) -> bool {
     if exe.trim().is_empty() {
         return false;
     }
-    same_path(Path::new(exe), dest)
+    let source = Path::new(exe);
+    if same_path(source, dest) {
+        return true;
+    }
+    // The split-era shim may legitimately be a byte-identical copy installed
+    // under RSRS_BIN_DIR; verify content before treating it as this CLI.
+    !bin_needs_refresh(source, dest).unwrap_or(true)
 }
 
 pub fn bin_needs_refresh(src: &Path, dest: &Path) -> Result<bool, String> {
