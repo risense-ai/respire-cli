@@ -1572,6 +1572,13 @@ fn run(args: Cli) -> Result<()> {
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
     if let Some(Command::Model { action }) = args.command.as_ref() {
+        if DIRECT_MODE.load(Ordering::Relaxed)
+            && matches!(action, ModelAction::InstallM3 { .. } | ModelAction::Probe { .. })
+        {
+            // Legacy direct model maintenance and CI probes run in this host
+            // process; forwarding them would start a serving runtime shim.
+            return run_local(args);
+        }
         let request = match action {
             ModelAction::Catalog => Some(("model.catalog",Vec::new())),
             ModelAction::Configure { file } => {
