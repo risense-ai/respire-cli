@@ -1570,6 +1570,7 @@ dependencies = [
  "rand",
  "ratatui",
  "respire_app",
+ "respire_commands",
  "respire_spawn",
  "rusqlite",
  "serde",
@@ -1650,6 +1651,19 @@ dependencies = [
  "respire_protocol",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "respire_commands"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "respire_app",
+ "serde",
+ "serde_json",
+ "unicode-width 0.2.0",
 ]
 
 [[package]]

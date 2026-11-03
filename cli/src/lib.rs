@@ -6,12 +6,25 @@
 //! Module map:
 //! + re-export app-core: auth keystore prompt share sync transport lock taxonomy service inject memory
 //! + hooks / inject_tui / model_install / space / update_check / classify / bench / web
+//! + re-export the shared command surface: respire_commands (cli_def gates output output_state i18n
+//!   metadata review autostart classify app_version util)
 //! + main: CLI entry
 
 pub use respire_app::auth;
 pub use respire_app::core_sdk;
 pub use respire_app::env;
 pub use respire_app::feedback;
+pub use respire_commands::app_version;
+pub use respire_commands::autostart;
+pub use respire_commands::classify;
+pub use respire_commands::cli_def;
+pub use respire_commands::gates;
+pub use respire_commands::i18n;
+pub use respire_commands::metadata;
+pub use respire_commands::output;
+pub use respire_commands::output_state;
+pub use respire_commands::review;
+pub use respire_commands::util;
 pub mod extract_tui;
 pub mod hooks;
 pub use respire_app::inject;
