@@ -1652,6 +1652,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "hex",
  "respire_app",
  "respire_spawn",
  "serde",
@@ -1661,6 +1662,7 @@ dependencies = [
  "tiny_http",
  "unicode-width 0.2.0",
  "ureq",
+ "url",
  "uuid",
 ]
 

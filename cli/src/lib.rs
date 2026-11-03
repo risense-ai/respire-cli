@@ -31,7 +31,6 @@ pub use respire_commands::runtime_error;
 pub use respire_commands::runtime_policy;
 pub use respire_commands::util;
 pub mod extract_tui;
-pub mod hooks;
 pub use respire_app::inject;
 pub mod inject_tui;
 pub use respire_app::session_import;

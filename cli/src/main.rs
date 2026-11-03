@@ -89,9 +89,6 @@ use respire::transport::MemoryTransport;
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    }
-}
-
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
     OUTPUT_EMITTED.with(|flag| flag.set(false));

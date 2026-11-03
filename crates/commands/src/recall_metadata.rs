@@ -4,7 +4,7 @@ use respire_app::review::{AuthorizedRecallSource, ReviewService};
 
 pub fn require_metadata(brief: bool, min_score: Option<f32>) -> Result<()> {
     super::require_render_budget(min_score)?;
-    let caps: Value = respire::core_sdk::execute("capabilities", Value::Null)?;
+    let caps: Value = respire_app::core_sdk::execute("capabilities", Value::Null)?;
     anyhow::ensure!(
         caps["memory_metadata_contract"] == 1,
         "Core SDK does not support memory_metadata_contract 1; metadata recall refused"
@@ -42,7 +42,7 @@ struct MetadataResult {
     items: Vec<RecalledWithContext>,
     mode: String,
     warning: Option<String>,
-    routing: respire::memory::model::RecallRouting,
+    routing: respire_app::memory::model::RecallRouting,
     retrieval: Value,
     budget: Option<Value>,
     filtered_by_score: Option<usize>,
@@ -53,7 +53,7 @@ struct MetadataResult {
     filtered_by_evidence: usize,
 }
 
-fn full_text(entry: &respire::MemoryEntry) -> Result<String> {
+fn full_text(entry: &respire_app::MemoryEntry) -> Result<String> {
     let mut text = format!(
         "- {}\u{ff08}{}; kind={}\u{ff09}\n{}",
         entry.title,
@@ -221,12 +221,12 @@ fn validate_receipt(
     Ok(())
 }
 
-pub fn recall_metadata<E: respire::memory::search::Embedder>(
+pub fn recall_metadata<E: respire_app::memory::search::Embedder>(
     service: &ReviewService<'_>,
     source: &AuthorizedRecallSource,
     embedder: &E,
-    query: &respire::MemoryQuery,
-    store: &respire::transport::local::LocalStore,
+    query: &respire_app::MemoryQuery,
+    store: &respire_app::transport::local::LocalStore,
     layout: Option<RenderBudget>,
     min_score: Option<f32>,
     intent: &str,
@@ -235,12 +235,12 @@ pub fn recall_metadata<E: respire::memory::search::Embedder>(
     Vec<RecalledWithContext>,
     String,
     Option<String>,
-    respire::memory::model::RecallRouting,
+    respire_app::memory::model::RecallRouting,
     Value,
     Option<Value>,
 )> {
     let mode = mode.map(str::to_owned).unwrap_or_else(|| {
-        respire::service::read_agent_config()["recall_mode"]
+        respire_app::service::read_agent_config()["recall_mode"]
             .as_str()
             .unwrap_or("fast")
             .to_owned()
@@ -249,13 +249,13 @@ pub fn recall_metadata<E: respire::memory::search::Embedder>(
         matches!(mode.as_str(), "fast" | "quality") && matches!(intent, "auto" | "fact" | "howto"),
         "unknown recall mode/intent"
     );
-    let settings = respire::feedback::query_settings(store, query, source.memories())?;
+    let settings = respire_app::feedback::query_settings(store, query, source.memories())?;
     let now = settings["now"]
         .as_str()
         .context("SDK query_settings omitted now")?;
-    let scope = respire::memory::model::Scope {
+    let scope = respire_app::memory::model::Scope {
         project: query.project.clone(),
-        device: Some(respire::service::device_tag()),
+        device: Some(respire_app::service::device_tag()),
         version: None,
         from: None,
         until: None,
@@ -298,7 +298,7 @@ pub fn recall_metadata<E: respire::memory::search::Embedder>(
         payload["render_min_score"] = json!(score);
     }
     let mut result: MetadataResult =
-        respire::core_sdk::execute_with_transport("query_business", payload, &mut transport)?;
+        respire_app::core_sdk::execute_with_transport("query_business", payload, &mut transport)?;
     anyhow::ensure!(
         matches!(result.intent.as_str(), "typed" | "fact" | "howto"),
         "invalid Core intent receipt"
@@ -361,7 +361,7 @@ pub fn recall_metadata<E: respire::memory::search::Embedder>(
 mod brief_receipt_tests {
     use super::*;
 
-    fn entry() -> Result<respire::MemoryEntry> {
+    fn entry() -> Result<respire_app::MemoryEntry> {
         serde_json::from_value(json!({
             "id":"fixture","kind":"Context","tags":[],"title":"\u{539f}\u{9898}","content":"\u{539f}\u{6587}🧪e\u{301}",
             "user":"test","computer":"fixture","project":"p","created_at":"2026-11-01T00:00:00.000Z",
