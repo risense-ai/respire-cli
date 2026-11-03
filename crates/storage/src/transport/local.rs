@@ -53,6 +53,19 @@ pub struct QueryLogRow {
     pub bad: Vec<String>,
 }
 
+/// One local calendar day of query-log counts. `hits` means the recall
+/// returned at least one candidate. Adopted and good stay separate: they
+/// arrive later and are not the same event.
+#[derive(serde::Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct QueryLogDay {
+    /// `YYYY-MM-DD` in the machine's local timezone.
+    pub day: String,
+    pub recalls: i64,
+    pub hits: i64,
+    pub adopted: i64,
+    pub good: i64,
+}
+
 /// Query-log stats.
 #[derive(serde::Serialize)]
 pub struct QueryLogStats {
@@ -67,6 +80,8 @@ pub struct QueryLogStats {
     pub bad_total: i64,
     /// Top adopted entries (id, count)
     pub top: Vec<(String, i64)>,
+    /// Local-day buckets, oldest first. Days with no recalls are omitted.
+    pub daily: Vec<QueryLogDay>,
 }
 
 /// Run history for one procedure (skill/knowledge entry). Local-only.
@@ -702,6 +717,7 @@ impl LocalStore {
         if ok.is_err() {
             top.clear(); // old SQLite without json1 falls back to empty
         }
+        let daily = self.query_log_daily(30)?;
         Ok(QueryLogStats {
             total,
             with_adopted,
@@ -709,7 +725,40 @@ impl LocalStore {
             good_total,
             bad_total,
             top,
+            daily,
         })
+    }
+
+    /// Recalls grouped by the machine's local calendar day, oldest first.
+    /// A hit is a recall whose candidate list is not `[]`. Empty days are omitted.
+    pub fn query_log_daily(&self, days: i64) -> Result<Vec<QueryLogDay>> {
+        let days = days.clamp(1, 366);
+        let shift = chrono::Local::now().offset().local_minus_utc() as i64;
+        let start = chrono::Local::now().date_naive() - chrono::Duration::days(days - 1);
+        // Local midnight as a unix timestamp. Compare integers; a date string
+        // is not a unix timestamp and would drop every row.
+        let cutoff = start.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() - shift;
+        let mut statement = self.connection.prepare(
+            "SELECT strftime('%Y-%m-%d', ts_unix + ?1, 'unixepoch') AS day,
+                    COUNT(*) AS recalls,
+                    SUM(CASE WHEN candidates != '[]' THEN 1 ELSE 0 END) AS hits,
+                    SUM(CASE WHEN adopted != '[]' THEN 1 ELSE 0 END) AS adopted,
+                    SUM(CASE WHEN good_ids != '[]' THEN 1 ELSE 0 END) AS good
+             FROM query_log
+             WHERE ts_unix >= ?2
+             GROUP BY day
+             ORDER BY day ASC",
+        )?;
+        let rows = statement.query_map(params![shift, cutoff], |row| {
+            Ok(QueryLogDay {
+                day: row.get(0)?,
+                recalls: row.get(1)?,
+                hits: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                adopted: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
+                good: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Record one procedure run verdict. Local-only: not encrypted-payload
@@ -2004,5 +2053,52 @@ mod skill_run_tests {
     fn invalid_status_is_rejected() {
         let (_dir, store) = store();
         assert!(store.log_skill_run("skill-a", "maybe", "").is_err());
+    }
+}
+
+#[cfg(test)]
+mod query_log_daily_tests {
+    use super::*;
+
+    fn insert(store: &LocalStore, ts: i64, candidates: &str, adopted: &str, good: &str) {
+        store
+            .connection
+            .execute(
+                "INSERT INTO query_log(ts_unix, ts, query, candidates, adopted, good_ids)
+                 VALUES(?1, ?2, 'q', ?3, ?4, ?5)",
+                params![ts, format!("t{ts}"), candidates, adopted, good],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn daily_counts_use_local_days_and_nonempty_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = LocalStore::open(&dir.path().join("q.db")).unwrap();
+        let offset = chrono::Local::now().offset().local_minus_utc() as i64;
+        let today = chrono::Local::now().date_naive();
+        // Local noon as a unix timestamp: naive local clock minus the offset.
+        let noon = |day: chrono::NaiveDate| {
+            day.and_hms_opt(12, 0, 0).unwrap().and_utc().timestamp() - offset
+        };
+        let today_ts = noon(today);
+        let yesterday = today - chrono::Duration::days(1);
+        let midnight = today.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp() - offset;
+        insert(&store, today_ts, "[\"a\"]", "[]", "[]");
+        insert(&store, today_ts + 1, "[]", "[]", "[]");
+        insert(&store, today_ts + 2, "[\"b\"]", "[\"b\"]", "[\"b\"]");
+        insert(&store, noon(yesterday), "[\"c\"]", "[]", "[]");
+        // One second before local midnight stays on yesterday even when UTC has already rolled.
+        insert(&store, midnight - 1, "[\"d\"]", "[]", "[]");
+        let days = store.query_log_daily(30).unwrap();
+        assert_eq!(days.len(), 2, "{days:?}");
+        assert_eq!(days[0].day, yesterday.format("%Y-%m-%d").to_string());
+        assert_eq!((days[0].recalls, days[0].hits, days[0].adopted, days[0].good), (2, 2, 0, 0));
+        assert_eq!(days[1].day, today.format("%Y-%m-%d").to_string());
+        assert_eq!((days[1].recalls, days[1].hits, days[1].adopted, days[1].good), (3, 2, 1, 1));
+        let stats = store.query_log_stats().unwrap();
+        assert_eq!(stats.total, 5);
+        assert_eq!(stats.empty_candidates, 1);
+        assert_eq!(stats.daily, days);
     }
 }
