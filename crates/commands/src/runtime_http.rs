@@ -1,4 +1,8 @@
 //! Local HTTP RPC/MCP transport: loopback peers do not require a token.
+//!
+//! Split-era home: this module serves both the CLI-hosted runtime and the
+//! standalone `rsrs-runtime` binary through `respire_commands`; host-specific
+//! concerns (MCP bridge, managed-registration id) arrive via `host_hooks`.
 use serde_json::json;
 use std::io::Read;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -121,7 +125,7 @@ fn mcp_http(
             );
         }
     }
-    crate::mcp::http_response(crate::mcp::HttpIn {
+    crate::host_hooks::mcp_http_response(crate::host_hooks::McpHttpIn {
         method: method_name.to_owned(),
         path: path.to_owned(),
         origin: format!("http://{bound}"),
@@ -177,13 +181,13 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
         return (
             200,
             "application/json; charset=utf-8",
-            serde_json::to_vec(&crate::rpc::health_body()).unwrap_or_default(),
+            serde_json::to_vec(&crate::rpc_serve::health_body()).unwrap_or_default(),
         );
     }
     if path == "/api/runtime/stop" && method == tiny_http::Method::Post {
         // Coordination-version handshake, not an authorization credential. Old
         // hosts must not detach/replace a manager-supervised process.
-        if crate::autostart::managed_id().is_some() && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1" {
+        if crate::host_hooks::managed_id().is_some() && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1" {
             return (409, "application/json; charset=utf-8", br#"{"error":"managed_lifecycle_required"}"#.to_vec());
         }
         return (
@@ -219,7 +223,7 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
                     .into_bytes(),
             );
         }
-        return match crate::rpc::handle_http_rpc(body.as_bytes()) {
+        return match crate::rpc_serve::handle_http_rpc(body.as_bytes()) {
             Ok(response) => (
                 200,
                 "application/json; charset=utf-8",
@@ -247,12 +251,12 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
     )
 }
 
-pub(crate) struct BoundRuntime {
+pub struct BoundRuntime {
     pub server: std::net::TcpListener,
     pub url: String,
 }
 
-pub(crate) fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<BoundRuntime> {
+pub fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<BoundRuntime> {
     let actual = port.unwrap_or_else(crate::net_rpc::rpc_port);
     let address = if host == "localhost" {
         let addresses: Vec<SocketAddr> = (host, actual).to_socket_addrs()?.collect();
@@ -284,7 +288,7 @@ pub(crate) fn bind_runtime(port: Option<u16>, host: &str) -> anyhow::Result<Boun
     Ok(BoundRuntime { server, url })
 }
 
-pub(crate) fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
+pub fn serve_loop(server: std::net::TcpListener) -> anyhow::Result<()> {
     let bound = server.local_addr()?;
     crate::network::runtime()?.block_on(async move {
         let listener = tokio::net::TcpListener::from_std(server)?;
@@ -383,7 +387,7 @@ async fn serve_request(
         let (send, receive) = tokio::sync::oneshot::channel();
         // The completion callback only sends an in-memory result. Hyper owns
         // response ordering and all socket backpressure in its async task.
-        if let Err(error) = crate::rpc::handle_http_rpc_deferred(&bytes, move |value| {
+        if let Err(error) = crate::rpc_serve::handle_http_rpc_deferred(&bytes, move |value| {
             let _ = send.send(value);
         }) {
             return response(
@@ -423,7 +427,7 @@ async fn serve_request(
         }
     };
     if result.0 == 200 && path == "/api/runtime/stop" && parts.method == axum::http::Method::POST {
-        crate::rpc::request_drain_exit();
+        crate::rpc_serve::request_drain_exit();
     }
     response(result.0, result.1, result.2)
 }

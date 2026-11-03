@@ -8,7 +8,7 @@ const QUEUED: u8 = 0;
 const RUNNING: u8 = 1;
 const CANCELLED: u8 = 2;
 
-pub(crate) struct QueueDeadline {
+pub struct QueueDeadline {
     state: AtomicU8,
     deadline: Instant,
     created: Instant,
@@ -20,7 +20,7 @@ static QUEUE_CANCELLED: AtomicU64 = AtomicU64::new(0);
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static EXECUTING: AtomicU64 = AtomicU64::new(0);
 
-pub(crate) fn occupancy() -> (u64, u64) {
+pub fn occupancy() -> (u64, u64) {
     let executing = EXECUTING.load(Ordering::Acquire);
     (
         LIVE.load(Ordering::Acquire).saturating_sub(executing),
@@ -28,7 +28,7 @@ pub(crate) fn occupancy() -> (u64, u64) {
     )
 }
 
-pub(crate) fn timings() -> (u64, Vec<(u64, u64)>) {
+pub fn timings() -> (u64, Vec<(u64, u64)>) {
     (
         QUEUE_CANCELLED.load(Ordering::Acquire),
         TIMINGS
@@ -41,7 +41,7 @@ pub(crate) fn timings() -> (u64, Vec<(u64, u64)>) {
 }
 
 impl QueueDeadline {
-    pub(crate) fn new(wait: Duration) -> Self {
+    pub fn new(wait: Duration) -> Self {
         LIVE.fetch_add(1, Ordering::AcqRel);
         let created = Instant::now();
         Self {
@@ -53,7 +53,7 @@ impl QueueDeadline {
     }
 
     /// The winner determines whether the command may have any side effects.
-    pub(crate) fn start(&self) -> bool {
+    pub fn start(&self) -> bool {
         if Instant::now() >= self.deadline {
             self.cancel();
             return false;
@@ -72,7 +72,7 @@ impl QueueDeadline {
         started
     }
 
-    pub(crate) fn cancel(&self) -> bool {
+    pub fn cancel(&self) -> bool {
         let cancelled = self
             .state
             .compare_exchange(QUEUED, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
@@ -83,14 +83,14 @@ impl QueueDeadline {
         cancelled
     }
 
-    pub(crate) fn expired(&self) -> bool {
+    pub fn expired(&self) -> bool {
         if Instant::now() >= self.deadline {
             self.cancel();
         }
         self.state.load(Ordering::Acquire) == CANCELLED
     }
 
-    pub(crate) fn running(&self) -> bool {
+    pub fn running(&self) -> bool {
         self.state.load(Ordering::Acquire) == RUNNING
     }
 }
