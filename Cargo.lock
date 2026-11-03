@@ -1617,6 +1617,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_commands"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "respire_app",
+ "serde",
+ "serde_json",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
 name = "respire_core_sdk"
 version = "2.0.0-dev.4"
 dependencies = [
@@ -1651,19 +1664,6 @@ dependencies = [
  "respire_protocol",
  "serde_json",
  "sha2",
-]
-
-[[package]]
-name = "respire_commands"
-version = "1.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "respire_app",
- "serde",
- "serde_json",
- "unicode-width 0.2.0",
 ]
 
 [[package]]

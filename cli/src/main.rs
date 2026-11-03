@@ -30,6 +30,7 @@ mod network;
 mod progress;
 mod rpc;
 mod runtime_error;
+mod runtime_fetch;
 mod runtime_http;
 mod runtime_policy;
 mod shell;
