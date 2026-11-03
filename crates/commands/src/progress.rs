@@ -51,7 +51,7 @@ impl Scope {
                     let mut phase = entry.phase.lock().map(|phase| phase.clone()).unwrap_or_default();
                     if entry.remote.load(Ordering::Acquire) {
                         // Poll outside the command worker pool, so saturated workers can report their wait.
-                        match crate::rpc::foreground_progress(&entry.id) {
+                        match crate::host_hooks::foreground_progress(&entry.id) {
                             Ok(value) => {
                                 if let Some(current) = value["phase"].as_str() { phase = current.to_owned(); }
                                 else { phase = text("\u{7b49}\u{5f85} runtime \u{6267}\u{884c}\u{547d}\u{4ee4}", "Waiting for runtime to execute command"); }
@@ -156,7 +156,7 @@ pub fn status(id: &str) -> serde_json::Value {
         .and_then(|entry| entry.phase.lock().ok().map(|phase| serde_json::json!({"phase":*phase})))
         .unwrap_or(serde_json::Value::Null);
     if !value.is_null() {
-        if let Ok(task) = respire::model_progress::status() {
+        if let Ok(task) = crate::model_progress::status() {
             if task["id"].as_str() == Some(id) { value["model_operation"] = task; }
         }
     }

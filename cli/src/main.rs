@@ -26,7 +26,6 @@ mod host_rpc;
 mod login;
 mod mcp;
 mod network;
-mod progress;
 mod rpc;
 mod runtime_fetch;
 mod runtime_http;
@@ -55,6 +54,7 @@ use respire_commands::metadata;
 use respire_commands::model_install;
 use respire_commands::model_progress;
 use respire_commands::net_rpc;
+use respire_commands::progress;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
@@ -4891,6 +4891,7 @@ fn main() {
             })
         }),
         materialize_bin: Some(mcp::materialize_bin),
+        foreground_progress: Some(rpc::foreground_progress),
     });
     if !installed {
         eprintln!("host hooks were installed twice; keeping the first wiring");
