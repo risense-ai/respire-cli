@@ -4,7 +4,8 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Mutex};
 
-// None means not loaded; Some(None) preserves the paired Core's legacy default.
+// None means not loaded; Some(None) defers to the paired Core's default
+// (read heat off since P0-2, risense-ai/respire-core#45).
 static EFFECTIVE: Mutex<Option<(PathBuf, Option<bool>)>> = Mutex::new(None);
 
 pub fn configured() -> Result<Option<bool>> {
@@ -53,14 +54,16 @@ pub fn effective() -> Result<Option<bool>> {
 }
 
 /// Configuration observed inside this process; Core routing separately reports scoring.
+/// The stated default tracks the paired Core's QuerySettings default — P0-2
+/// flipped read heat off (risense-ai/respire-core#45), so unconfigured means off.
 pub fn receipt() -> Result<Value> {
     let configured = configured()?;
     let loaded = effective()?;
     Ok(serde_json::json!({
         "configured": configured,
         "loaded": loaded,
-        "effective": loaded.unwrap_or(true),
-        "default": true,
+        "effective": loaded.unwrap_or(false),
+        "default": false,
         "pending_reload": configured != loaded,
     }))
 }

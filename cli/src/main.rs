@@ -1076,7 +1076,7 @@ enum Command {
         /// Apply: float each reported entry (dirty; propagates with sync)
         #[arg(long)]
         go: bool,
-        /// Hit-count floor to float (default 3; relative heat - must be strictly above the parent's hits)
+        /// Explicit --good-mark floor to float (default 3; must be strictly above the parent's marks)
         #[arg(long, default_value_t = 3)]
         min: i64,
     },
@@ -4513,8 +4513,8 @@ fn run_tree_cure(
     Ok(())
 }
 
-/// Heat float: high-hit memories move up the cause chain (reattach to grandparent); the tree self-organizes by recall heat.
-/// Dry-run prints a report (hot entry -> new cause); --go applies.
+/// Explicit-good float: memories with enough query-log --good marks move up the cause chain (reattach to grandparent).
+/// Dry-run prints a report (marked entry -> new cause); --go applies. recall_count never decides (P0-2).
 fn run_tree_float(go: bool, min: i64) -> Result<()> {
     let app = respire::service::App::open()?;
     let report = app.tree_float(go, min)?;
@@ -4558,8 +4558,8 @@ fn run_tree_float(go: bool, min: i64) -> Result<()> {
                     OutputStatus::Pending
                 },
                 format!(
-                    "{} hits {} {} -> {} {}",
-                    it.recall_count,
+                    "{} good {} {} -> {} {}",
+                    it.good_marks,
                     it.title,
                     respire::service::short_id(&it.id),
                     it.new_parent_title,
