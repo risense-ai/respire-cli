@@ -802,6 +802,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         stop_occupant(health.pid)?;
     }
     let self_exe = std::env::current_exe().ok();
+    let mut fallback_shim = false;
     let executable = match crate::runtime_fetch::resolve_runtime_bin() {
         Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
         Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) | Err(_) => {
@@ -812,14 +813,19 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             // --runtime-internal shim) for the transition train.
             match crate::runtime_fetch::download_and_install(None, None) {
                 Ok(path) => path,
-                Err(_) => self_exe
-                    .clone()
-                    .context("no runtime binary resolved and no local fallback executable")?,
+                Err(download_error) => {
+                    let executable = crate::mcp::materialize_bin().map_err(|error| {
+                        anyhow::anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
+                    })?;
+                    fallback_shim = true;
+                    executable
+                }
             }
         }
     };
     crate::autostart::authorize_detached_boot_locked()?;
-    let shim = self_exe
+    let shim = fallback_shim
+        || self_exe
         .as_ref()
         .is_some_and(|exe| crate::mcp::same_path(exe, &executable));
     let arguments: Vec<std::ffi::OsString> = if shim {
