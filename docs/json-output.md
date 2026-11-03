@@ -26,7 +26,7 @@ Payload locations are intentionally command-specific for compatibility:
 
 | Command | Machine payload |
 | --- | --- |
-| `list`, `recall`, `tree`, `inject --targets` | `details` is an array of result rows. Recall rows include ranking metadata. |
+| `list`, `recall`, `tree`, `inject --targets` | `details` is an array of result rows. Recall rows include ranking metadata plus the read-time taxonomy projection `domain` and `effect`; `summary.slices` counts the returned set on both axes. See [`domain-effect.md`](domain-effect.md). |
 | `show` | `details.entry` is the decrypted public entry; `details.ancestors` and `details.children` provide context. |
 | `remember` with `summary.action` equal to `created`, `diary_appended`, or `merged` | `details` is the decrypted public entry actually written, with `details.id == summary.id`. |
 | `remember` pending or vetoed | No completed-write entry is promised. Follow `summary`, status and actions. |

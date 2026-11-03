@@ -5,13 +5,14 @@
 //!
 //! Module map:
 //! + re-export app-core: auth keystore prompt share sync transport lock taxonomy service inject memory
-//! + hooks / inject_tui / model_install / space / update_check / classify / bench / web
+//! + hooks / inject_tui / model_install / space / update_check / classify / bench / domain / web
 //! + main: CLI entry
 
 pub use respire_app::auth;
 pub use respire_app::core_sdk;
 pub use respire_app::env;
 pub use respire_app::feedback;
+pub mod domain;
 pub mod extract_tui;
 pub mod hooks;
 pub use respire_app::inject;

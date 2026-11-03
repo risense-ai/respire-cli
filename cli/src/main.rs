@@ -8407,23 +8407,47 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 items,
             );
             result.related = associations.related;
+            // Domain/effect: read-time taxonomy projection over the returned set.
+            // Labels only — no filtering, no reordering (see respire::domain).
+            let domain_index = respire::domain::Index::new(&candidates);
+            let labels: Vec<_> = ranked
+                .iter()
+                .map(|r| {
+                    let domain = domain_index.domain(&r.entry.id);
+                    (domain, respire::domain::effect(r.entry.kind.as_str(), domain))
+                })
+                .collect();
             result.details = if titles {
                 serde_json::json!(ranked
                     .iter()
-                    .map(|r| serde_json::json!({
+                    .zip(labels.iter())
+                    .map(|(r, (domain, eff))| serde_json::json!({
                         "id":r.entry.id,"title":r.entry.title,"score":r.score,
-                        "superseded_by":associations.superseded.get(&r.entry.id)
+                        "superseded_by":associations.superseded.get(&r.entry.id),
+                        "domain":domain.as_str(),"effect":eff.as_str()
                     }))
                     .collect::<Vec<_>>())
             } else {
                 serde_json::json!(ranked
                     .iter()
-                    .map(|r| serde_json::json!({
+                    .zip(labels.iter())
+                    .map(|(r, (domain, eff))| serde_json::json!({
                         "score":r.score,"entry":r.entry,"ancestors":r.ancestors,
-                        "superseded_by":associations.superseded.get(&r.entry.id)
+                        "superseded_by":associations.superseded.get(&r.entry.id),
+                        "domain":domain.as_str(),"effect":eff.as_str()
                     }))
                     .collect::<Vec<_>>())
             };
+            // Composition of the returned set on both axes (JSON only).
+            {
+                let mut by_domain: std::collections::BTreeMap<&'static str, usize> = Default::default();
+                let mut by_effect: std::collections::BTreeMap<&'static str, usize> = Default::default();
+                for (domain, eff) in &labels {
+                    *by_domain.entry(domain.as_str()).or_default() += 1;
+                    *by_effect.entry(eff.as_str()).or_default() += 1;
+                }
+                result.summary["slices"] = serde_json::json!({"domain": by_domain, "effect": by_effect});
+            }
             if metadata_aware {
                 result.summary["metadata_aware"]=serde_json::json!(true);
                 result.summary["brief"]=serde_json::json!(brief_render);

@@ -63,6 +63,7 @@ Startup preserves the selected account and does not import old profiles automati
 | [Memory refresh](docs/memory-revision.md) | Read-only profile-scoped snapshot tokens |
 | [Inference](docs/inference.md) | Model installation and engines |
 | [Retrieval](docs/retrieval.md) | Retrieval modes and index migration |
+| [Domain / effect](docs/domain-effect.md) | Read-time taxonomy projection labels on recall output |
 | [npm launcher](npm/README.md) | Package layout and platform selection |
 | [Platform support](docs/platform-support.md) | Release targets, requirements and blocked architectures |
 | [WorkBuddy connector](connectors/workbuddy/README.md) | Tool integration |
