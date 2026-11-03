@@ -447,10 +447,8 @@ fn verify_systemd_loaded(
     let expected = [
         executable,
         "runtime",
-        "run",
-        "--managed",
-        &config.id,
-        "--installation-root",
+        "supervise",
+        "--data-dir",
         config
             .installation
             .to_str()
@@ -544,8 +542,7 @@ pub(super) fn windows_argument(value: &str) -> Result<String> {
 
 fn arguments(config: &Registration) -> Result<String> {
     Ok(format!(
-        "runtime run --managed {} --installation-root {}",
-        windows_argument(&config.id)?,
+        "runtime supervise --data-dir {}",
         windows_argument(
             config
                 .installation
@@ -731,10 +728,8 @@ pub(super) fn inspect(config: &Registration) -> Result<State> {
             let expected = [
                 config.executable.to_str().context("non-UTF8 executable")?,
                 "runtime",
-                "run",
-                "--managed",
-                &config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config
                     .installation
                     .to_str()
@@ -1011,7 +1006,7 @@ pub(super) mod test_adapter {
                     match args.last().map(String::as_str) {
                         Some("DropInPaths") => ok(serde_json::json!({"data":if state.dropin {vec!["/tmp/unknown.conf"]}else{vec![]}}).to_string()),
                         Some("WorkingDirectory") => ok(serde_json::json!({"data":config.installation}).to_string()),
-                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","run","--managed",config.id,"--installation-root",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
+                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","supervise","--data-dir",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
                         _ => bail!("unexpected fake property"),
                     }
                 },
@@ -1033,10 +1028,8 @@ mod tests {
             [
                 config.executable,
                 "runtime",
-                "run",
-                "--managed",
-                config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config.installation
             ],
             false,

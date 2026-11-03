@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 mod lifecycle;
 mod manager;
+mod supervise;
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
@@ -44,6 +45,30 @@ pub enum RuntimeCommand {
     Autostart {
         #[command(subcommand)]
         command: AutostartCommand,
+    },
+    /// Install the managed runtime release; the pinned version downloads by default.
+    Install {
+        /// Install from a local release archive instead of downloading.
+        #[arg(long, value_name = "ARCHIVE")]
+        file: Option<PathBuf>,
+        /// Runtime version to record for a --file install (required with --file).
+        #[arg(long)]
+        version: Option<String>,
+        /// Override the download mirror origin (http/https, no path or credentials).
+        #[arg(long, value_name = "ORIGIN")]
+        mirror: Option<String>,
+    },
+    /// List the managed runtime versions available on disk.
+    List,
+    /// Remove old managed runtime versions, keeping the current and one rollback.
+    Clean,
+    /// Fetch and install the runtime release pinned by runtime-pin.json.
+    Update,
+    /// Supervise the managed runtime child process (startup registration entry point).
+    Supervise {
+        /// Installation root that owns the supervised runtime registration.
+        #[arg(long, value_name = "DIR")]
+        data_dir: PathBuf,
     },
 }
 
@@ -313,12 +338,14 @@ fn render(config: &Registration) -> Result<String> {
         .to_str()
         .context("installation path is not UTF-8")?;
     match config.platform {
-        Platform::Linux => Ok(format!("# Respire user runtime {}\n[Unit]\nDescription=Respire current-user runtime\nStartLimitIntervalSec=120\nStartLimitBurst=3\n[Service]\nType=simple\nExecStart=:{} runtime run --managed {} --installation-root {}\nWorkingDirectory={}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=60\nKillMode=control-group\nStandardOutput=null\nStandardError=null\n[Install]\nWantedBy=default.target\n",
-            config.id, systemd_quote(executable)?, config.id, systemd_quote(root)?, systemd_path(root)?)),
-        Platform::Macos => Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>ai.risense.respire.runtime.{}</string><key>ProgramArguments</key><array><string>{}</string><string>runtime</string><string>run</string><string>--managed</string><string>{}</string><string>--installation-root</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
-            config.id, xml(executable)?, config.id, xml(root)?, xml(root)?)),
+        // The registered task starts the CLI supervisor (`runtime supervise`),
+        // which owns and restarts the separate rsrs-runtime child process.
+        Platform::Linux => Ok(format!("# Respire user runtime {}\n[Unit]\nDescription=Respire current-user runtime\nStartLimitIntervalSec=120\nStartLimitBurst=3\n[Service]\nType=simple\nExecStart=:{} runtime supervise --data-dir {}\nWorkingDirectory={}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=60\nKillMode=control-group\nStandardOutput=null\nStandardError=null\n[Install]\nWantedBy=default.target\n",
+            config.id, systemd_quote(executable)?, systemd_quote(root)?, systemd_path(root)?)),
+        Platform::Macos => Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>ai.risense.respire.runtime.{}</string><key>ProgramArguments</key><array><string>{}</string><string>runtime</string><string>supervise</string><string>--data-dir</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
+            config.id, xml(executable)?, xml(root)?, xml(root)?)),
         Platform::Windows => {
-            let arguments=format!("runtime run --managed {} --installation-root {}",manager::windows_argument(&config.id)?,manager::windows_argument(root)?);
+            let arguments=format!("runtime supervise --data-dir {}",manager::windows_argument(root)?);
             Ok(format!("<?xml version=\"1.0\"?><Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>Respire current-user runtime {}</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{}</UserId></LogonTrigger></Triggers><Principals><Principal id=\"CurrentUser\"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled><StartWhenAvailable>true</StartWhenAvailable><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions Context=\"CurrentUser\"><Exec><Command>{}</Command><Arguments>{}</Arguments><WorkingDirectory>{}</WorkingDirectory></Exec></Actions></Task>\n",config.id,xml(&config.owner)?,xml(&config.owner)?,xml(&manager::windows_task_path(executable)?)?,xml(&arguments)?,xml(&manager::windows_task_path(root)?)?))
         },
     }
@@ -432,7 +459,7 @@ mod tests {
         let linux = render(&fixture(Platform::Linux))?;
         anyhow::ensure!(
             linux.contains("Type=simple")
-                && linux.contains("runtime run")
+                && linux.contains("runtime supervise --data-dir")
                 && !linux.contains("status --json")
         );
         anyhow::ensure!(!linux.contains("User=root") && !linux.contains("linger"));
