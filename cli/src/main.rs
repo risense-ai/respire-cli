@@ -109,7 +109,7 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
                 && std::io::IsTerminal::is_terminal(&std::io::stdout());
             let bare = !*targets && id.is_none() && !*remove && !*preview && expected.is_none();
             if *tui || (bare && !*all && interactive) {
-                return Some(crate::inject_tui::run());
+                return Some(respire::inject_tui::run());
             }
             return Some(run_inject(
                 *targets,
@@ -122,7 +122,7 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         }
 
         Some(Command::Logout { full }) => {
-            let outcome = logout_cli(*full)?;
+            let outcome = match logout_cli(*full) { Ok(value) => value, Err(error) => return Some(Err(error)) };
             let status = if outcome.session_found {
                 OutputStatus::Ok
             } else {
