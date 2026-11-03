@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 pub const DEFAULT_API_BASE: &str = "https://api.typesafe.ai/v1/systemone";
-pub const DEFAULT_MODEL: &str = "jev-latest";
+// Shared with the command surface: the clap default references the const in
+// respire_commands::classify; this re-export keeps `classify::DEFAULT_MODEL`
+// resolving inside the CLI.
+pub use respire_commands::classify::DEFAULT_MODEL;
 pub const DEFAULT_DS_BASE: &str = "https://api.deepseek.com/v1";
 pub const DEFAULT_DS_MODEL: &str = "deepseek-flash";
 
