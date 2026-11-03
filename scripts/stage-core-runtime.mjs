@@ -35,7 +35,8 @@ for (const file of manifest.files) {
   const source = join(sdk,file.path);
   const bytes = readFileSync(source);
   if (createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`SDK checksum mismatch: ${file.path}`);
-  if (file.path.startsWith('runtime/')) verifyBinary(join(sdk,file.path), manifest.target);
+  // mlx.metallib is a data resource, not a Mach-O/PE/ELF image.
+  if (file.path.startsWith('runtime/') && !file.path.endsWith('.metallib')) verifyBinary(join(sdk,file.path), manifest.target);
   mkdirSync(dirname(join(output,path)),{recursive:true});
   stage(join(output,path),bytes,statSync(source).mode & 0o777);
   files.push({path,sha256:file.sha256});

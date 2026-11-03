@@ -575,6 +575,7 @@ enum ModelAction {
     /// Save model/backend drafts from JSON without changing the active library.
     Configure { file: PathBuf },
     /// Prepare, probe and rebuild a profile before atomic activation.
+    /// Backends: onnx (default), mlx (Apple Silicon), host_transport.
     Switch {
         model: String,
         #[arg(long, default_value = "onnx")] backend: String,

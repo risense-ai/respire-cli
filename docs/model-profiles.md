@@ -103,3 +103,23 @@ profile has been activated; use the profile switch interface instead.
 Likewise, `model reset-cpu` targets the legacy M3 settings. For an active profile,
 use `model switch PROFILE --backend onnx --engine cpu`; this keeps activation
 behind the same verification and index transaction.
+
+## Apple MLX preset
+
+Apple Silicon macOS builds of the Core SDK may include the optional MLX backend.
+The built-in `m3-mlx` preset downloads the pinned
+`mlx-community/bge-m3-mlx-fp16` safetensors and tokenizer, then rebuilds the
+index through the normal profile transaction:
+
+```sh
+rsrs model switch m3-mlx --backend mlx --engine gpu --json
+```
+
+`--engine gpu` selects the MLX Metal stream; `--engine cpu` selects MLX's CPU
+stream. `npu` is rejected. The preset uses the same 1024-dimensional CLS and
+normalization profile as `m3`, but its index identity is distinct because the
+weights and execution backend differ. A Core build without the `mlx` feature
+fails explicitly instead of falling back to ONNX. MLX is unavailable on Intel
+macOS, Linux and Windows. Building that SDK requires Xcode's Metal Toolchain and
+`RSRS_SDK_MLX=1`; the SDK then carries `runtime/mlx.metallib` and advertises
+`mlx_backend_contract=1` through `capabilities`.

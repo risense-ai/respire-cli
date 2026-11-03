@@ -1,7 +1,8 @@
 # Local inference
 
-The Core executes ONNX models. CLI-side code manages downloads, checksums,
-progress and engine settings.
+The Core executes ONNX models and, in an Apple Silicon build with the optional
+`mlx` feature, BGE-M3 safetensors through Apple MLX. CLI-side code manages
+downloads, checksums, progress and engine settings.
 
 ```mermaid
 flowchart LR
@@ -63,6 +64,18 @@ Provider names do not prove execution of every operation on the requested device
 BGE-M3 uses `onnx/model_quantized.onnx` from `Xenova/bge-m3` revision
 `4de13258303883538bd53b696b452bf8099f0858`: 569694530 bytes, SHA-256
 `0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d`.
+The Apple MLX preset `m3-mlx` instead downloads
+`mlx-community/bge-m3-mlx-fp16` at revision
+`a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec` (1135554209-byte safetensors plus its
+tokenizer). Activate it with
+`rsrs model switch m3-mlx --backend mlx --engine gpu`; the Core SDK must have
+been built with the `mlx` feature on Apple Silicon. MLX uses its own index
+generation and never falls back to ONNX silently.
+
+The same SDK ships `runtime/mlx.metallib` next to the executable; MLX resolves a
+colocated `mlx.metallib` before its build-time default path. A packaged host that
+moves the executable must keep that file in the same directory, otherwise the MLX
+Metal stream fails explicitly instead of falling back to ONNX or CPU.
 The tokenizer remains pinned to the same revision and checksum. FP16 and
 `model_int8.onnx` cannot substitute for this file. This model has its own index
 generation; old vectors are rebuilt using resumable checkpoints and the completed

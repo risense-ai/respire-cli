@@ -54,7 +54,17 @@ pub fn registry() -> Result<Registry> {
             tokenizer:Some(resource(&directory,"tokenizer.json",tokenizer_size,tokenizer_hash,repo,revision)),
         });
     }
+    let mlx_revision = "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec";
+    let mlx_root = root.join("bge-m3-mlx");
+    registry.models.insert("m3-mlx".to_owned(), ModelProfile {
+        id: "m3-mlx".to_owned(),
+        embedding: json!({"model_id":"mlx-community/bge-m3-mlx-fp16","revision":mlx_revision,"dimensions":1024,"max_tokens":512,"pooling":"cls","normalize":true,"query_prefix":"","document_prefix":"","pad_token_id":0,"pad_to_max_tokens":false}),
+        onnx: Value::Null,
+        weights: Some(resource(&mlx_root,"model.safetensors",1_135_554_209,"e8028acb2e77e0010d35ef75832d823edb5851c95682deef2bde86a45bd4441d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
+        tokenizer: Some(resource(&mlx_root,"tokenizer.json",17_098_085,"5df1f55d60c9705a501ab9a75550728625740741fe4be308dac4806c16b7d51d","mlx-community/bge-m3-mlx-fp16",mlx_revision)),
+    });
     registry.backends.insert("onnx".to_owned(), BackendProfile { id:"onnx".to_owned(), backend:"onnx".to_owned(), native:None, provider:None, protocol:None, endpoint:None, keyring_service:None, keyring_account:None });
+    registry.backends.insert("mlx".to_owned(), BackendProfile { id:"mlx".to_owned(), backend:"mlx".to_owned(), native:None, provider:None, protocol:None, endpoint:None, keyring_service:None, keyring_account:None });
     match std::fs::read(registry_path()) {
         Ok(bytes) => { let saved: Registry = serde_json::from_slice(&bytes)?; registry.models.extend(saved.models); registry.backends.extend(saved.backends); }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -76,7 +86,7 @@ pub fn configure(configure: Configure) -> Result<Value> {
         if backend.backend == "host_transport" {
             validate_url(backend.endpoint.as_deref().context("embedding endpoint required")?)?;
             anyhow::ensure!(backend.protocol.as_deref() == Some("openai_embeddings"), "unsupported embedding protocol");
-        } else { anyhow::ensure!(backend.backend == "onnx", "unsupported embedding backend"); }
+        } else { anyhow::ensure!(matches!(backend.backend.as_str(), "onnx" | "mlx"), "unsupported embedding backend"); }
         registry.backends.insert(backend.id.clone(), backend);
     }
     let path = registry_path();
@@ -103,6 +113,8 @@ pub fn select(choice: Choice) -> Result<Selection> {
             let original = profile.weights.as_ref().context("M3 weights missing")?;
             let directory = original.path.parent().and_then(|p| p.parent()).context("M3 model root missing")?;
             profile.weights = Some(resource(directory,&format!("onnx/model_{}.onnx",variant.name),variant.size,variant.sha256,"Xenova/bge-m3","4de13258303883538bd53b696b452bf8099f0858"));
+        } else if choice.model == "m3-mlx" {
+            anyhow::ensure!(variant == "fp16", "m3-mlx supports only the fp16 MLX conversion");
         } else { anyhow::ensure!(variant == "quantized", "custom models select resource paths in their profile; preset small supports quantized"); }
     }
     let selection = Selection { model:choice.model,backend:choice.backend.clone(), engine:choice.engine,variant:choice.variant,
@@ -152,7 +164,7 @@ fn embedding_request(request: &Value, selection: &Selection) -> Result<Value> {
 /// Resource downloads are staged and resumable; the active library is never changed.
 pub fn prepare(selection: &Selection, mut progress: impl FnMut(&str,u64,Option<u64>) -> Result<()>) -> Result<()> {
     selection.validate()?;
-    if selection.backend_profile.backend != "onnx" { return Ok(()); }
+    if selection.backend_profile.backend == "host_transport" { return Ok(()); }
     for resource in [&selection.profile.weights,&selection.profile.tokenizer] {
         let resource = resource.as_ref().context("resource missing")?;
         if resource.path.is_file() {
