@@ -813,7 +813,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             match crate::runtime_fetch::download_and_install(None, None) {
                 Ok(path) => path,
                 Err(download_error) => crate::mcp::materialize_bin().map_err(|error| {
-                    anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
+                    anyhow::anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
                 })?,
             }
         }
