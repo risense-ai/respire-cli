@@ -18,7 +18,8 @@ const MAX_OPENCODE_SESSIONS: usize = 50_000;
 const SESSION_SQL: &str = "select id, title, directory, time_created, time_updated, cost, tokens_input, \
      tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, model, parent_id, agent \
      from session where time_archived is null order by time_updated desc limit 50000";
-const LEGACY_SESSION_SQL: &str = "select id, title, directory, time_created, time_updated, cost, tokens_input, \
+const LEGACY_SESSION_SQL: &str =
+    "select id, title, directory, time_created, time_updated, cost, tokens_input, \
      tokens_output, tokens_reasoning, tokens_cache_read, tokens_cache_write, model \
      from session where time_archived is null order by time_updated desc limit 2000";
 
@@ -88,7 +89,12 @@ fn db_path() -> Option<PathBuf> {
         candidates.push(home.join("opencode.db"));
     }
     if let Some(home) = scan_util::home() {
-        candidates.push(home.join(".local").join("share").join("opencode").join("opencode.db"));
+        candidates.push(
+            home.join(".local")
+                .join("share")
+                .join("opencode")
+                .join("opencode.db"),
+        );
         candidates.push(home.join(".opencode").join("opencode.db"));
     }
     if let Some(appdata) = scan_util::env_path("APPDATA") {
@@ -108,7 +114,10 @@ fn db_sessions() -> Vec<Session> {
     if rows.is_empty() {
         rows = common::sqlite_rows(&connection, LEGACY_SESSION_SQL);
     }
-    rows.iter().take(MAX_OPENCODE_SESSIONS).map(|row| db_session(row)).collect()
+    rows.iter()
+        .take(MAX_OPENCODE_SESSIONS)
+        .map(|row| db_session(row))
+        .collect()
 }
 
 fn db_session(row: &[SqlVal]) -> Session {
@@ -120,8 +129,14 @@ fn db_session(row: &[SqlVal]) -> Session {
         .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
         .map(|value| {
             (
-                value.get("providerID").and_then(Value::as_str).map(ToOwned::to_owned),
-                value.get("id").and_then(Value::as_str).map(ToOwned::to_owned),
+                value
+                    .get("providerID")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
             )
         })
         .unwrap_or((None, None));
@@ -145,8 +160,14 @@ fn db_session(row: &[SqlVal]) -> Session {
         id: session_id.clone(),
         path: format!("opencode://{session_id}"),
         cwd: cell_text(row, 2),
-        created_at: row.get(3).and_then(SqlVal::as_i64).and_then(scan_util::unix_millis),
-        updated_at: row.get(4).and_then(SqlVal::as_i64).and_then(scan_util::unix_millis),
+        created_at: row
+            .get(3)
+            .and_then(SqlVal::as_i64)
+            .and_then(scan_util::unix_millis),
+        updated_at: row
+            .get(4)
+            .and_then(SqlVal::as_i64)
+            .and_then(scan_util::unix_millis),
         provider,
         model,
         first_user_message: title.clone(),
@@ -169,12 +190,19 @@ fn storage_session(path: &Path) -> Option<Session> {
         .get("id")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .or_else(|| path.file_stem().and_then(|s| s.to_str()).map(ToOwned::to_owned))?;
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(ToOwned::to_owned)
+        })?;
     Some(Session {
         platform: "opencode".to_owned(),
         id,
         path: path.display().to_string(),
-        cwd: info.get("directory").and_then(Value::as_str).map(ToOwned::to_owned),
+        cwd: info
+            .get("directory")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         created_at: millis("created"),
         updated_at: millis("updated"),
         provider: None,
@@ -186,20 +214,33 @@ fn storage_session(path: &Path) -> Option<Session> {
             .to_owned(),
         last_user_message: String::new(),
         usage: Map::new(),
-        parent_id: info.get("parentID").and_then(Value::as_str).map(ToOwned::to_owned),
-        agent: info.get("agent").and_then(Value::as_str).map(ToOwned::to_owned),
+        parent_id: info
+            .get("parentID")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
+        agent: info
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }
 
 fn file_session(root: &Path, message_dir: &Path) -> Option<Session> {
     let mut messages = scan_util::files_in(message_dir, "*.json");
     messages.sort();
-    let first = messages.first().and_then(|path| scan_util::read_json(path))?;
+    let first = messages
+        .first()
+        .and_then(|path| scan_util::read_json(path))?;
     let session_id = first
         .get("sessionID")
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
-        .or_else(|| message_dir.file_name().and_then(|s| s.to_str()).map(ToOwned::to_owned))
+        .or_else(|| {
+            message_dir
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(ToOwned::to_owned)
+        })
         .unwrap_or_default();
     let model = first.get("model").and_then(Value::as_object);
     let cwd = first
@@ -209,9 +250,18 @@ fn file_session(root: &Path, message_dir: &Path) -> Option<Session> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let stamps: Vec<i64> = messages.iter().filter_map(|path| message_millis(path)).collect();
-    let created = stamps.iter().min().and_then(|value| scan_util::unix_millis(*value));
-    let updated = stamps.iter().max().and_then(|value| scan_util::unix_millis(*value));
+    let stamps: Vec<i64> = messages
+        .iter()
+        .filter_map(|path| message_millis(path))
+        .collect();
+    let created = stamps
+        .iter()
+        .min()
+        .and_then(|value| scan_util::unix_millis(*value));
+    let updated = stamps
+        .iter()
+        .max()
+        .and_then(|value| scan_util::unix_millis(*value));
     let (first_prompt, last_prompt) = prompt_edges(root, &session_id, &messages);
 
     Some(Session {

@@ -57,7 +57,8 @@ impl App {
             cursor: 0,
             list_state: ListState::default(),
             log: vec![Line::styled(
-                "Check sources to import, press e to extract; installed sources are pre-checked.".to_owned(),
+                "Check sources to import, press e to extract; installed sources are pre-checked."
+                    .to_owned(),
                 Style::default().fg(Color::DarkGray),
             )],
             receiver: None,
@@ -102,7 +103,10 @@ impl App {
         }
         let ids = self.selected_ids();
         if ids.is_empty() {
-            self.log_line("no source checked - Space to check, then press e".to_owned(), Color::Yellow);
+            self.log_line(
+                "no source checked - Space to check, then press e".to_owned(),
+                Color::Yellow,
+            );
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -111,7 +115,10 @@ impl App {
         self.done = 0;
         self.total = 0;
         self.phase = "scanning".to_owned();
-        self.log_line(format!("extracting {} source(s)\u{2026}", ids.len()), ACCENT);
+        self.log_line(
+            format!("extracting {} source(s)\u{2026}", ids.len()),
+            ACCENT,
+        );
         spawn_worker(ids, sender);
     }
 
@@ -150,7 +157,10 @@ impl App {
         }
         if disconnected && self.running {
             self.running = false;
-            self.log_line("extraction worker stopped unexpectedly".to_owned(), Color::Red);
+            self.log_line(
+                "extraction worker stopped unexpectedly".to_owned(),
+                Color::Red,
+            );
         }
         if !self.running {
             self.receiver = None;
@@ -220,7 +230,10 @@ fn spawn_worker(ids: Vec<String>, sender: Sender<Work>) {
         );
         match result {
             Ok(outcome) => {
-                let _ = sender.send(Work::Done(format!("imported {} memory(ies)", outcome.imported)));
+                let _ = sender.send(Work::Done(format!(
+                    "imported {} memory(ies)",
+                    outcome.imported
+                )));
             }
             Err(error) => {
                 let _ = sender.send(Work::Failed(format!("{error}")));
@@ -336,7 +349,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
 
     let top = Paragraph::new(Line::from(vec![
-        Span::styled(" rsrs ", Style::default().fg(Color::Black).bg(ACCENT).bold()),
+        Span::styled(
+            " rsrs ",
+            Style::default().fg(Color::Black).bg(ACCENT).bold(),
+        ),
         Span::styled(" extract ", Style::default().fg(Color::White).bg(BAR_BG)),
         Span::styled(
             "  Space check   a all   e extract   r refresh   q quit  ",
@@ -355,7 +371,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .rows
         .iter()
         .map(|source| {
-            let mark = if app.checked.contains(&source.id) { "[x]" } else { "[ ]" };
+            let mark = if app.checked.contains(&source.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
             let detect = if source.installed {
                 Span::styled(" detected", Style::default().fg(Color::Green))
             } else {
@@ -406,7 +426,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .collect();
     frame.render_widget(Paragraph::new(show).wrap(Wrap { trim: true }), log_area);
 
-    let ratio = if app.total == 0 { 0.0 } else { app.done as f64 / app.total as f64 };
+    let ratio = if app.total == 0 {
+        0.0
+    } else {
+        app.done as f64 / app.total as f64
+    };
     let label = if app.running {
         format!("{} {}/{}", app.phase, app.done, app.total)
     } else {

@@ -36,6 +36,10 @@ impl LocalStore {
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
         transaction.commit()?;
-        Ok(ReviewSnapshot { memory_revision, memories, unavailable_ids })
+        Ok(ReviewSnapshot {
+            memory_revision,
+            memories,
+            unavailable_ids,
+        })
     }
 }

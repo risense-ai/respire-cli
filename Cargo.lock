@@ -1570,6 +1570,7 @@ dependencies = [
  "rand",
  "ratatui",
  "respire_app",
+ "respire_commands",
  "respire_spawn",
  "rusqlite",
  "serde",
@@ -1598,6 +1599,7 @@ dependencies = [
  "flate2",
  "hex",
  "keyring",
+ "respire_app_domain",
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol",
@@ -1613,6 +1615,60 @@ dependencies = [
  "ureq",
  "uuid",
  "whoami",
+]
+
+[[package]]
+name = "respire_app_domain"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "dirs",
+ "flate2",
+ "hex",
+ "keyring",
+ "respire_core_sdk",
+ "respire_crypto",
+ "respire_protocol",
+ "respire_spawn",
+ "respire_storage",
+ "rpassword",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "uuid",
+ "whoami",
+]
+
+[[package]]
+name = "respire_commands"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "base64",
+ "chrono",
+ "clap",
+ "hex",
+ "respire_app",
+ "respire_protocol",
+ "respire_spawn",
+ "serde",
+ "serde_json",
+ "sha2",
+ "signal-hook",
+ "tempfile",
+ "tiny_http",
+ "tokio",
+ "unicode-width 0.2.0",
+ "ureq",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -1654,10 +1710,21 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.2"
+version = "2.0.0-dev.3"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "respire_runtime"
+version = "1.0.21-dev.1"
+dependencies = [
+ "anyhow",
+ "respire_commands",
+ "respire_protocol",
+ "respire_spawn",
  "serde_json",
 ]
 

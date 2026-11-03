@@ -8,7 +8,7 @@ use respire::{
 use respire_app as respire;
 use serde_json::{json, Value};
 
-#[path = "../src/bench.rs"]
+#[path = "../../crates/commands/src/bench.rs"]
 #[allow(dead_code)]
 mod bench;
 
@@ -76,7 +76,9 @@ fn main() -> Result<()> {
         if args.per_case {
             println!(
                 "{}",
-                serde_json::to_string(&json!({"case":result,"routing":output["routing"],"retrieval":output["retrieval"]}))?
+                serde_json::to_string(
+                    &json!({"case":result,"routing":output["routing"],"retrieval":output["retrieval"]})
+                )?
             );
         }
         results.push(result);

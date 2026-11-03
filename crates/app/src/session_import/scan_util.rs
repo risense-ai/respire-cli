@@ -227,13 +227,21 @@ pub fn date_bound(value: &str, end: bool) -> Option<DateTime<Utc>> {
         let parts: Vec<&str> = text.split('-').collect();
         if parts.is_empty()
             || parts.len() > 3
-            || parts.iter().any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+            || parts
+                .iter()
+                .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
         {
             return None;
         }
         let year = parts[0].parse::<i32>().ok()?;
-        let month = parts.get(1).map_or(Ok(1), |part| part.parse::<u32>()).ok()?;
-        let day = parts.get(2).map_or(Ok(1), |part| part.parse::<u32>()).ok()?;
+        let month = parts
+            .get(1)
+            .map_or(Ok(1), |part| part.parse::<u32>())
+            .ok()?;
+        let day = parts
+            .get(2)
+            .map_or(Ok(1), |part| part.parse::<u32>())
+            .ok()?;
         Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single()?
     };
     if !end {
@@ -245,10 +253,18 @@ pub fn date_bound(value: &str, end: bool) -> Option<DateTime<Utc>> {
     }
     if segment_count == 2 {
         return Utc
-            .with_ymd_and_hms(base.year() + (base.month() / 12) as i32, (base.month() % 12) + 1, 1, 0, 0, 0)
+            .with_ymd_and_hms(
+                base.year() + (base.month() / 12) as i32,
+                (base.month() % 12) + 1,
+                1,
+                0,
+                0,
+                0,
+            )
             .single();
     }
-    Utc.with_ymd_and_hms(base.year() + 1, 1, 1, 0, 0, 0).single()
+    Utc.with_ymd_and_hms(base.year() + 1, 1, 1, 0, 0, 0)
+        .single()
 }
 
 /// Session id fallback derived from a file stem and a marker.
@@ -294,7 +310,10 @@ pub fn content_text(value: &Value) -> String {
 
 /// Compose `nickname (role)` when both are present, else whichever exists.
 pub fn nick_role(nickname: Option<&str>, role: Option<&str>) -> Option<String> {
-    match (nickname.map(str::trim).filter(|s| !s.is_empty()), role.map(str::trim).filter(|s| !s.is_empty())) {
+    match (
+        nickname.map(str::trim).filter(|s| !s.is_empty()),
+        role.map(str::trim).filter(|s| !s.is_empty()),
+    ) {
         (Some(nick), Some(role)) => Some(format!("{nick} ({role})")),
         (Some(nick), None) => Some(nick.to_owned()),
         (None, Some(role)) => Some(role.to_owned()),
@@ -334,11 +353,18 @@ mod tests {
 
     #[test]
     fn unix_and_content_helpers() -> Result<(), Box<dyn std::error::Error>> {
-        assert!(unix_millis(1_700_000_000_000).ok_or("millis")?.starts_with("2023-11-14"));
-        assert!(unix_seconds(1_700_000_000.0).ok_or("seconds")?.starts_with("2023-11-14"));
+        assert!(unix_millis(1_700_000_000_000)
+            .ok_or("millis")?
+            .starts_with("2023-11-14"));
+        assert!(unix_seconds(1_700_000_000.0)
+            .ok_or("seconds")?
+            .starts_with("2023-11-14"));
         let parts = serde_json::json!([{"text": "a"}, {"text": "b"}, {"type": "tool"}]);
         assert_eq!(content_text(&parts), "a\nb");
-        assert_eq!(nick_role(Some("Tesla"), Some("explorer")), Some("Tesla (explorer)".into()));
+        assert_eq!(
+            nick_role(Some("Tesla"), Some("explorer")),
+            Some("Tesla (explorer)".into())
+        );
         assert_eq!(nick_role(None, Some("writer")), Some("writer".into()));
         assert_eq!(nick_role(None, None), None);
         Ok(())

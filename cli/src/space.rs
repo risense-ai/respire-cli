@@ -38,10 +38,15 @@ pub const OWNER_FILE: &str = "space_owner.json";
 pub fn validate_space_name(name: &str) -> Result<()> {
     let n = name.trim();
     if n.is_empty() {
-        return Err(respire_app::input_error::InputError("space name must not be empty".into()).into());
+        return Err(
+            respire_app::input_error::InputError("space name must not be empty".into()).into(),
+        );
     }
     if n.len() > 40 {
-        return Err(respire_app::input_error::InputError("space name too long (<=40 bytes)".into()).into());
+        return Err(respire_app::input_error::InputError(
+            "space name too long (<=40 bytes)".into(),
+        )
+        .into());
     }
     if !n
         .chars()
@@ -49,7 +54,8 @@ pub fn validate_space_name(name: &str) -> Result<()> {
     {
         return Err(respire_app::input_error::InputError(format!(
             "space name allows only letters/digits/-/_, got \"{name}\""
-        )).into());
+        ))
+        .into());
     }
     Ok(())
 }
@@ -100,14 +106,15 @@ pub fn space_create(name: &str) -> Result<serde_json::Value> {
     let n = name.trim();
     if n == "main" {
         return Err(respire_app::input_error::InputError(
-            "\"main\" is reserved for the primary profile; pick another space name"
-                .into()
-        ).into());
+            "\"main\" is reserved for the primary profile; pick another space name".into(),
+        )
+        .into());
     }
     if account_dir(n)?.exists() {
         return Err(respire_app::input_error::InputError(format!(
             "space \"{n}\" already exists - pick another name, or run rsrs space use {n}"
-        )).into());
+        ))
+        .into());
     }
     let v = account_use(n)?;
     let dir = std::path::Path::new(v["dir"].as_str().unwrap_or("")).to_path_buf();
@@ -193,25 +200,30 @@ pub fn parse_invite(code: &str) -> Result<serde_json::Value> {
     let raw = code.trim();
     let hexed = raw.strip_prefix(INVITE_PREFIX).unwrap_or(raw);
     if hexed.is_empty() || hexed.len() % 2 != 0 {
-        return Err(respire_app::input_error::InputError("invite code format is wrong (odd length)".into()).into());
+        return Err(respire_app::input_error::InputError(
+            "invite code format is wrong (odd length)".into(),
+        )
+        .into());
     }
     let cs: Vec<char> = hexed.chars().collect();
     let mut bytes = Vec::with_capacity(cs.len() / 2);
     for pair in cs.chunks(2) {
         let s: String = pair.iter().collect();
-        bytes.push(
-            u8::from_str_radix(&s, 16)
-                .map_err(|_| respire_app::input_error::InputError("invite code contains illegal characters".into()))?,
-        );
+        bytes.push(u8::from_str_radix(&s, 16).map_err(|_| {
+            respire_app::input_error::InputError("invite code contains illegal characters".into())
+        })?);
     }
-    let text = String::from_utf8(bytes).map_err(|_| respire_app::input_error::InputError("invite code is not valid text".into()))?;
-    let v: serde_json::Value =
-        serde_json::from_str(&text).map_err(|_| respire_app::input_error::InputError("invite code failed to parse".into()))?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        respire_app::input_error::InputError("invite code is not valid text".into())
+    })?;
+    let v: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|_| respire_app::input_error::InputError("invite code failed to parse".into()))?;
     for k in ["space", "addr", "user", "token", "super"] {
         if v[k].as_str().unwrap_or("").trim().is_empty() {
             return Err(respire_app::input_error::InputError(format!(
                 "invite code missing field \"{k}\" - the code may be truncated"
-            )).into());
+            ))
+            .into());
         }
     }
     Ok(v)
@@ -309,7 +321,8 @@ pub fn space_use(name: &str) -> Result<serde_json::Value> {
         return Err(respire_app::input_error::InputError(format!(
             "space \"{n}\" does not exist - rsrs space list to see current spaces; \
              to create one, run rsrs space create {n}"
-        )).into());
+        ))
+        .into());
     }
     account_use(n)
 }

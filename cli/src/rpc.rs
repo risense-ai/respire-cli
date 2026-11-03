@@ -1,979 +1,46 @@
-//! Local authenticated runtime transport. Commands connect only to loopback HTTP
-//! over TCP and auto-start the hidden `--runtime-internal` host entry.
+//! Local authenticated runtime transport (client face).
+//!
+//! Commands connect only to loopback HTTP over TCP and auto-start the managed
+//! runtime through the lifecycle coordinator. The serving half of this module
+//! (dispatch, job queue, health, HTTP wiring) moved to
+//! `respire_commands::rpc_serve` and is re-imported here so `rpc::...` call
+//! sites keep resolving unchanged.
 
-use std::cell::Cell;
-use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
-use clap::Parser;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::i18n;
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 
-pub const PROTOCOL_V: u32 = 1;
 const START_POLLS: usize = 100;
 const START_WAIT: Duration = Duration::from_millis(150);
 
-thread_local! {
-    static WORKER: Cell<bool> = const { Cell::new(false) };
-    static SYNC_CONTEXT: Cell<Option<(usize, i64)>> = const { Cell::new(None) };
-}
+// Worker-face state (worker flag, sync context, generation, index work,
+// write gate, recall statistics) lives in the shared rpc_worker module;
+// re-exported so `rpc::...` call sites keep resolving.
+pub(crate) use respire_commands::rpc_worker::{
+    check_sync_context, diary_commit, foreground_phase, index_has_work, index_loop,
+    index_loop_inner, index_status, invalidate_sync_boundary, kick_index, mark_worker,
+    recall_stats_status, request_index, set_worker_active, shared_exclusive, sync_boundary,
+    sync_generation, sync_local, worker_active, RecallStats, EXCLUSIVE, GENERATION, INDEX_CV,
+    INDEX_ON, INDEX_RUNNING, INDEX_WORK, MAX_PENDING_STATS, STATS_ENQUEUED, STATS_FAILED,
+    STATS_PENDING, STATS_PERSISTED, STATS_REJECTED, STOPPING, SYNC_CONTEXT,
+};
 
-static RUNNING: AtomicUsize = AtomicUsize::new(0);
-static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
-static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
-static WORKERS: AtomicUsize = AtomicUsize::new(1);
-static STOPPING: AtomicBool = AtomicBool::new(false);
-static STORE_READY: AtomicBool = AtomicBool::new(false);
-static SNAPSHOT_BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
-static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
-static DISPATCH_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
-const QUEUE_EXPIRED: &str = "request queue deadline exceeded; command was not started";
-static WRITE_TX: Mutex<Option<mpsc::SyncSender<WriteJob>>> = Mutex::new(None);
-static STATS_PENDING: AtomicUsize = AtomicUsize::new(0);
-static STATS_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
-static STATS_PERSISTED: AtomicUsize = AtomicUsize::new(0);
-static STATS_REJECTED: AtomicUsize = AtomicUsize::new(0);
-static STATS_FAILED: AtomicUsize = AtomicUsize::new(0);
-const MAX_PENDING_STATS: usize = 16;
-static EXCLUSIVE: OnceLock<Arc<WriteGate>> = OnceLock::new();
-static GENERATION: AtomicUsize = AtomicUsize::new(0);
-static INDEX_ON: AtomicBool = AtomicBool::new(false);
-static INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
-static INDEX_CV: Condvar = Condvar::new();
-static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
-    requested: false,
-    state: "idle",
-    error: None,
-    prepare_mirror: None,
-});
+// Server face (Job/admission queue, dispatch, health, HTTP wiring) moved to the
+// shared runtime crate; the glob keeps every `rpc::` call site in this binary
+// textually unchanged.
+pub(crate) use respire_commands::rpc_serve::*;
 
-struct IndexWork {
-    requested: bool,
-    state: &'static str,
-    error: Option<String>,
-    prepare_mirror: Option<String>,
-}
-static WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
-static CLASSIFY_RUNNING: AtomicBool = AtomicBool::new(false);
-static SYNC_KICK: Mutex<SyncSchedule> = Mutex::new(SyncSchedule {
-    due: None,
-    manual: VecDeque::new(),
-    backoff: 0,
-    blocked_generation: None,
-    last_success: None,
-});
-struct SyncSchedule {
-    due: Option<Instant>,
-    manual: VecDeque<(Job, usize, i64)>,
-    backoff: u32,
-    blocked_generation: Option<usize>,
-    last_success: Option<u64>,
-}
-#[derive(Default)]
-struct GateState {
-    held: bool,
-    foreground: usize,
-}
-#[derive(Default)]
-struct WriteGate {
-    state: Mutex<GateState>,
-    changed: Condvar,
-}
-struct WriteGuard<'a>(&'a WriteGate);
-impl WriteGate {
-    fn reserve(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .foreground += 1;
-    }
-    fn cancel_reservation(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.foreground -= 1;
-        self.changed.notify_all();
-    }
-    fn acquire_reserved(&self) -> WriteGuard<'_> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while state.held {
-            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
-        }
-        state.foreground -= 1;
-        state.held = true;
-        WriteGuard(self)
-    }
-    fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if foreground {
-            state.foreground += 1;
-        }
-        while state.held || (!foreground && state.foreground > 0) {
-            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
-        }
-        if foreground {
-            state.foreground -= 1;
-        }
-        state.held = true;
-        WriteGuard(self)
-    }
-}
-impl Drop for WriteGuard<'_> {
-    fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.held = false;
-        self.0.changed.notify_all();
-    }
-}
-static SYNC_CV: Condvar = Condvar::new();
-static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
-static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
-static WEB_URL: Mutex<String> = Mutex::new(String::new());
-static CACHE: Mutex<Vec<(String, RpcResponse)>> = Mutex::new(Vec::new());
-static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
-
-pub fn worker_active() -> bool {
-    WORKER.with(|flag| flag.get())
-}
-
-pub(crate) fn set_worker_active(on: bool) {
-    WORKER.with(|flag| flag.set(on));
-}
-
-fn mark_worker() {
-    WORKER.with(|flag| flag.set(true));
-}
-
-enum WriteJob {
-    Command(Job),
-    RecallStats(RecallStats, usize),
-}
-
-pub(crate) struct RecallStats {
-    pub request_id:String,
-    pub query: String,
-    pub project: String,
-    pub candidates: Vec<String>,
-    pub scores: Vec<f32>,
-}
-
-impl RecallStats {
-    pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
-        if respire::service::workspace_mode() != "normal" { return Ok(()); }
-        store.write_transaction(|| {
-            store.log_query_request(&self.request_id,&self.query, &self.project, "", &self.candidates, &self.scores)?;
-            store.bump_recall(&self.candidates)?;
-            store.bump_recall_pairs(&self.candidates)
-        })
-    }
-}
-
-pub(crate) fn recall_stats_status() -> Value {
-    json!({
-        "pending": STATS_PENDING.load(Ordering::Acquire),
-        "enqueued": STATS_ENQUEUED.load(Ordering::Acquire),
-        "persisted": STATS_PERSISTED.load(Ordering::Acquire),
-        "rejected": STATS_REJECTED.load(Ordering::Acquire),
-        "failed": STATS_FAILED.load(Ordering::Acquire),
-    })
-}
-
-/// Statistics are best effort; never wait for queue capacity on the recall reply path.
-pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
-    if respire::service::workspace_mode() != "normal" { return; }
-    if STATS_PENDING
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
-            (pending < MAX_PENDING_STATS).then_some(pending + 1)
-        })
-        .is_err()
-    {
-        STATS_REJECTED.fetch_add(1, Ordering::AcqRel);
-        eprintln!("recall statistics rejected: pending statistics limit reached");
-        return;
-    }
-    let queued = (|| -> Result<()> {
-        check_sync_context(generation)?;
-        let tx = WRITE_TX
-            .lock()
-            .map_err(|_| anyhow::anyhow!("write queue lock poisoned"))?
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("write worker is not running"))?;
-        let gate = shared_exclusive();
-        gate.reserve();
-        match tx.try_send(WriteJob::RecallStats(stats, generation)) {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                gate.cancel_reservation();
-                match error {
-                    mpsc::TrySendError::Full(_) => bail!("write request queue is full"),
-                    mpsc::TrySendError::Disconnected(_) => bail!("write worker is gone"),
-                }
-            }
-        }
-    })();
-    match queued {
-        Ok(()) => {
-            STATS_ENQUEUED.fetch_add(1, Ordering::AcqRel);
-        }
-        Err(error) => {
-            STATS_PENDING.fetch_sub(1, Ordering::AcqRel);
-            STATS_REJECTED.fetch_add(1, Ordering::AcqRel);
-            eprintln!("recall statistics rejected: {error:#}");
-        }
-    }
-}
-
-fn shared_exclusive() -> Arc<WriteGate> {
-    EXCLUSIVE
-        .get_or_init(|| Arc::new(WriteGate::default()))
-        .clone()
-}
-
-pub(crate) fn sync_generation() -> usize {
-    SYNC_CONTEXT
-        .with(|context| context.get().map(|v| v.0))
-        .unwrap_or_else(|| GENERATION.load(Ordering::Acquire))
-}
-
-pub(crate) fn sync_boundary() -> Option<i64> {
-    SYNC_CONTEXT.with(|context| {
-        let value = context.get()?;
-        context.set(Some((value.0, -1)));
-        (value.1 >= 0).then_some(value.1)
-    })
-}
-
-pub(crate) fn sync_local<T>(generation: usize, action: impl FnOnce() -> Result<T>) -> Result<T> {
-    let gate = shared_exclusive();
-    let _held = gate.acquire(false);
-    check_sync_context(generation)?;
-    action()
-}
-
-/// Short local preparation/commit for commands whose Core call performs networking.
-pub(crate) fn foreground_phase<T>(
-    generation: usize,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let gate = shared_exclusive();
-    let _held = gate.acquire(true);
-    check_sync_context(generation)?;
-    action()
-}
-
-pub(crate) fn invalidate_sync_boundary(generation: usize) -> Result<()> {
-    check_sync_context(generation)?;
-    GENERATION.fetch_add(1, Ordering::AcqRel);
-    context_changed();
-    Ok(())
-}
-
-pub(crate) fn check_sync_context(generation: usize) -> Result<()> {
-    anyhow::ensure!(!crate::autostart::background_paused(), "runtime maintenance pauses background work");
-    respire::service::ensure_runtime_profile()?;
-    if STOPPING.load(Ordering::Acquire) {
-        bail!("runtime is stopping");
-    }
-    if GENERATION.load(Ordering::Acquire) != generation {
-        bail!("sync context changed; pending work kept locally");
-    }
-    Ok(())
-}
-
-pub(crate) fn sync_scheduler_status() -> Value {
-    let state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-    let blocked = state.blocked_generation == Some(GENERATION.load(Ordering::Acquire));
-    let phase = if sync_running() {
-        "running"
-    } else if blocked {
-        "blocked"
-    } else if state.backoff > 0 {
-        "backoff"
-    } else if state.due.is_some() {
-        "scheduled"
-    } else {
-        "idle"
-    };
-    json!({"state":phase, "next_run_ms":state.due.map(|due| due.saturating_duration_since(Instant::now()).as_millis() as u64),
-        "manual_waiters":state.manual.len(), "last_success_unix":state.last_success})
-}
-
-fn context_changed() {
-    if let Err(error) = respire::resident::clear() { eprintln!("resident catalog reset failed: {error:#}"); }
-    let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-    state.blocked_generation = None;
-    state.backoff = 0;
-    state.due = Some(Instant::now() + Duration::from_secs(3));
-    drop(state);
-    SYNC_CV.notify_one();
-    kick_index();
-}
-
-pub(crate) fn index_status() -> Value {
-    let state = match INDEX_WORK.lock() {
-        Ok(state) => state,
-        Err(_) => return json!({"state":"failed", "error":"index work lock poisoned"}),
-    };
-    json!({"state": state.state, "scheduled": state.requested,
-        "worker_active": INDEX_ON.load(Ordering::Acquire),
-        "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
-        "model_setup": (state.state == "failed").then_some("Automatic BGE-M3 preparation or indexing failed; inspect the reported error and download source settings.")})
-}
-
-static PROFILE_SWITCH_RUNNING: AtomicBool = AtomicBool::new(false);
-
-static PROFILE_ADMISSION: Mutex<()> = Mutex::new(());
-static PROFILE_SWITCH_STATE: Mutex<Value> = Mutex::new(Value::Null);
-
-fn profile_state() -> Value {
-    PROFILE_SWITCH_STATE.lock().map(|v| v.clone()).unwrap_or_else(|_| json!({"state":"failed","error":"switch state lock poisoned"}))
-}
-fn set_profile_state(value: Value) {
-    if let Ok(mut slot) = PROFILE_SWITCH_STATE.lock() { *slot = value; }
-}
-fn start_profile_switch(choice: respire_app::embedding::Choice, task_id: String) -> Result<Value> {
-    anyhow::ensure!(!respire::service::service_paused() && !crate::autostart::background_paused(), "model switching is paused by service mode");
-    start_profile_switch_target(respire_app::embedding::select(choice)?,task_id)
-}
-fn start_profile_switch_target(mut target: respire_app::core_sdk::profiles::Selection, task_id: String) -> Result<Value> {
-    anyhow::ensure!(!respire::service::service_paused() && !crate::autostart::background_paused(),"model switching is paused by service mode");
-    target.validate()?;
-    let epoch = GENERATION.load(Ordering::Acquire);
-    let library = respire::service::data_dir();
-    let admission = PROFILE_ADMISSION.lock().map_err(|_|anyhow::anyhow!("model admission lock poisoned"))?;
-    anyhow::ensure!(PROFILE_SWITCH_RUNNING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_ok(), "another model switch is running");
-    let operation = match respire::model_progress::Operation::reserve_task(task_id.clone()) {
-        Ok(operation) => operation,
-        Err(error) => { PROFILE_SWITCH_RUNNING.store(false,Ordering::Release); return Err(error); }
-    };
-    let queued = (|| -> Result<()> {
-        check_sync_context(epoch)?;
-        let store = respire::service::open_store()?;
-        anyhow::ensure!(library == respire::service::data_dir(),"model switch library changed before acceptance");
-        store.queue_selection(&target,&task_id)
-    })();
-    if let Err(error) = queued { PROFILE_SWITCH_RUNNING.store(false,Ordering::Release); return Err(error); }
-    drop(admission);
-    set_profile_state(json!({"id":task_id,"state":"pending","target":target.model,"active_changed":false,"semantic":"busy"}));
-    let spawn = std::thread::Builder::new().name("respire-model-switch".into()).stack_size(16 * 1024 * 1024).spawn(move || {
-        struct Finish;
-        impl Drop for Finish { fn drop(&mut self) { PROFILE_SWITCH_RUNNING.store(false,Ordering::Release); } }
-        let _finish = Finish;
-        operation.enter_thread();
-        let _operation = operation;
-        let _scope = respire::model_progress::TaskScope::new(Some(task_id.clone()));
-        let result = (|| -> Result<Value> {
-            respire::model_progress::update("switch-verify",&target.model,0,None)?;
-            let waiting = Instant::now();
-            while RUNNING.load(Ordering::Acquire).saturating_sub(RUNNING_STATUS.load(Ordering::Acquire)) > 0 || CLASSIFY_RUNNING.load(Ordering::Acquire) || sync_running() {
-                check_sync_context(epoch)?;
-                respire::model_progress::check()?;
-                anyhow::ensure!(waiting.elapsed() < Duration::from_secs(1800),"model switch timed out draining in-flight requests");
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            let gate = shared_exclusive();
-            let _write = gate.acquire(true);
-            check_sync_context(epoch)?;
-            anyhow::ensure!(library == respire::service::data_dir(), "model switch library changed");
-            let store = respire::service::open_store()?;
-            let previous = store.active_selection()?;
-            let source_revision = store.meta_get("memory_revision_v1")?.context("source revision unavailable")?;
-            let keys = crate::build_session()?;
-            store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"prepare"}))?)?;
-            respire_app::embedding::prepare(&target, |item,done,total| {
-                check_sync_context(epoch)?;
-                respire::model_progress::update("switch-download",item,done,total)
-            })?;
-            target.generation = respire_app::core_sdk::profiles::generation_key_for_profile(&target)?;
-            store.meta_set("embedding_pending_selection_v1",&serde_json::to_string(&target)?)?;
-            respire_app::core_sdk::profiles::exclusive(|| {
-                let attempt = respire_app::core_sdk::profiles::scoped(target.clone(), || {
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"load"}))?)?;
-                    respire::model_progress::update("switch-load",&target.model,0,None)?;
-                    respire_app::core_sdk::profiles::load(&target)?;
-                    respire::model_progress::check()?;
-                    let embedder = respire::memory::bge::BgeEmbedder::load_model(&target.model)?;
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"main-index"}))?)?;
-                    store.build_index_with_progress(&keys,&embedder,&target.model,false,|done,total| {
-                        check_sync_context(epoch)?;
-                        respire::model_progress::update("switch-index",&target.model,done as u64,Some(total as u64))
-                    })?;
-                    store.meta_set("embedding_pending_task_v1",&serde_json::to_string(&json!({"id":task_id,"phase":"diary-index"}))?)?;
-                    respire::diary::rebuild_with_progress(&store,&keys,&embedder,
-                        || { check_sync_context(epoch)?; respire::model_progress::check() },
-                        |action| { check_sync_context(epoch)?; respire::model_progress::commit(action) },
-                        |done| respire::model_progress::update("switch-diary",&target.model,done as u64,None))?;
-                    check_sync_context(epoch)?;
-                    anyhow::ensure!(library == respire::service::data_dir(), "model switch library changed");
-                    anyhow::ensure!(!store.index_pending(&target.model)? && !respire::diary::needs_rebuild(&store)?, "candidate index/source validation failed");
-                    respire::resident::clear()?;
-                    *crate::EMBEDDER_SLOT.lock().map_err(|_|anyhow::anyhow!("embedder cache poisoned"))? = None;
-                    respire::model_progress::commit_final(|| store.activate_selection(&target,&source_revision))?;
-                    Ok(())
-                });
-                if let Err(error) = attempt {
-                    let restored = match previous {
-                        Some(ref selection) => respire_app::core_sdk::profiles::load(selection).map(|_| ()),
-                        None => {
-                            respire_app::core_sdk::profiles::set_active(None);
-                            respire::memory::onnx::reset_sessions().and_then(|_| respire::memory::bge::BgeEmbedder::load_model("m3")?.probe("Respire rollback verification").map(|_| ()))
-                        }
-                    };
-                    return match restored {
-                        Ok(()) => Err(anyhow::anyhow!("model switch failed: {error:#}; previous selection restored and trial inference passed")),
-                        Err(recovery) => Err(anyhow::anyhow!("recovery_failed: model switch failed: {error:#}; previous model reload failed: {recovery:#}; semantic availability is unverified")),
-                    };
-                }
-                respire_app::core_sdk::profiles::set_active(Some(target.clone()));
-                Ok(json!({"selection":target,"active_changed":true,"semantic":"ready"}))
-            })
-        })();
-        match result {
-            Ok(result) => set_profile_state(json!({"id":task_id,"state":"ready","active_changed":true,"semantic":"ready","result":result})),
-            Err(error) => set_profile_state(json!({"id":task_id,"state":"failed","active_changed":false,"error":format!("{error:#}"),"semantic":if format!("{error:#}").contains("recovery_failed") {"unverified"} else if format!("{error:#}").contains("previous selection restored and trial inference passed") {"previous_ready"} else {"unchanged"}})),
-        }
-        kick_index();
-    });
-    if let Err(error) = spawn {
-        PROFILE_SWITCH_RUNNING.store(false,Ordering::Release);
-        set_profile_state(json!({"state":"failed","active_changed":false,"error":error.to_string()}));
-        return Err(error.into());
-    }
-    Ok(profile_state())
-}
-
-pub(crate) fn kick_index() {
-    if STOPPING.load(Ordering::Acquire) {
-        return;
-    }
-    {
-        let mut work = match INDEX_WORK.lock() {
-            Ok(work) => work,
-            Err(_) => {
-                eprintln!("background retrieval indexing failed: index work lock poisoned");
-                return;
-            }
-        };
-        work.requested = true;
-        if !INDEX_RUNNING.load(Ordering::Acquire) && work.error.is_none() {
-            work.state = "scheduled";
-        }
-    }
-    INDEX_CV.notify_one();
-}
-
-fn index_yield_to_foreground(generation: usize) -> Result<()> {
-    anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
-    // A separate background Session no longer waits for foreground inference.
-    // Context and cancellation checks still occur between every committed source.
-    check_sync_context(generation)?;
-    respire::model_progress::check()
-}
-
-fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-    let gate = shared_exclusive();
-    let _write = gate.acquire(false);
-    // Account/mode transitions use the write gate; lifecycle transitions use
-    // takeover. Never block on takeover while its owner waits for INDEX_RUNNING.
-    let _lifecycle = crate::runtime_policy::try_takeover_lock()?;
-    respire::model_progress::commit(|| {
-        check_sync_context(generation)?;
-        anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
-        action()
-    })
-}
-
-/// The database's source-checked missing artifacts are the resumable work queue.
-/// Model preparation runs on this thread without taking the foreground write gate.
-fn index_loop() {
-    mark_worker();
-    if let Err(error) = index_loop_inner() {
-        eprintln!("background retrieval index worker stopped: {error:#}");
-    }
-    INDEX_RUNNING.store(false, Ordering::Release);
-    INDEX_ON.store(false, Ordering::Release);
-}
-
-fn index_has_work() -> bool {
-    INDEX_RUNNING.load(Ordering::Acquire)
-        || INDEX_WORK.lock().is_ok_and(|work| work.requested)
-}
-
-fn index_loop_inner() -> Result<()> {
-    let mut model_wait_started: Option<Instant> = None;
-    loop {
-        if respire::service::service_paused() || crate::autostart::background_paused() {
-            if STOPPING.load(Ordering::Acquire) {
-                let mut work=INDEX_WORK.lock().map_err(|_|anyhow::anyhow!("index work lock poisoned"))?;
-                work.requested=false;work.state="stopped";
-                return Ok(());
-            }
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            work.state = "paused";
-            let _paused = INDEX_CV.wait_timeout(work, Duration::from_secs(1)).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            continue;
-        }
-        {
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            while !work.requested && !STOPPING.load(Ordering::Acquire) {
-                work = INDEX_CV.wait(work).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            }
-            if STOPPING.load(Ordering::Acquire) {
-                work.state = "stopped";
-                work.requested = false;
-                return Ok(());
-            }
-            work.requested = false;
-            work.state = "running";
-        }
-        INDEX_RUNNING.store(true, Ordering::Release);
-        let generation = GENERATION.load(Ordering::Acquire);
-        let result = (|| -> Result<bool> {
-            check_sync_context(generation)?;
-            let store = respire::service::open_store()?;
-            let model = store.retrieval_model()?;
-            let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
-            let pending = store.index_missing(&model)?;
-            let diary_pending = respire::diary::needs_rebuild(&store)?;
-            // An indexed library still needs the CPU container for its next query.
-            // Empty libraries wait for a write or explicit preparation instead of
-            // starting an unsolicited model download during status/restart.
-            let active_profile = store.active_selection()?;
-            let cpu_upgrade = active_profile.is_none() && model == "m3" && respire::MemoryTransport::count(&store)? > 0
-                && respire::model_install::cpu_model_preparation_needed()?;
-            if !pending && !diary_pending && !prepare_requested && !cpu_upgrade {
-                return Ok(true);
-            }
-            let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
-                return Ok(false);
-            };
-            index_yield_to_foreground(generation)?;
-            if diary_pending && !pending && !prepare_requested && !cpu_upgrade
-                && respire::diary::clear_if_empty(&store, |action| diary_commit(generation,action))? {
-                return Ok(true);
-            }
-            let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
-            if let Some(mirror) = mirror {
-                respire::model_install::prepare_m3_from_mirror(&mirror)?;
-            } else if let Some(selection) = active_profile.as_ref() {
-                respire_app::embedding::prepare(selection, |item,done,total| {
-                    check_sync_context(generation)?;
-                    respire::model_progress::update("prepare",item,done,total)
-                })?;
-            } else if model == "m3" {
-                respire::model_progress::update("prepare", "BGE-M3", 0, None)?;
-                respire::model_install::prepare_m3_for_index()?;
-                check_sync_context(generation)?;
-            }
-            if !pending && !diary_pending { return Ok(true); }
-            let keys = crate::build_session()?;
-            let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
-            while pending {
-                let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
-                    index_yield_to_foreground(generation)?;
-                    respire::model_progress::update("index", &model, done as u64, Some(total as u64))
-                });
-                match rebuilt {
-                    Ok(_) => break,
-                    Err(error) if error.downcast_ref::<respire::transport::local::IndexSourceChanged>().is_some() => {
-                        // Keep this Operation across source changes: cancellation and
-                        // the 30-minute idle budget apply to the whole resumed task.
-                        respire::model_progress::check()?;
-                        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-                        work.error = Some(format!("{error:#}"));
-                        drop(work);
-                        for _ in 0..5 {
-                            check_sync_context(generation)?;
-                            respire::model_progress::check()?;
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            respire::diary::rebuild_with_progress(&store, &keys, &embedder, || {
-                index_yield_to_foreground(generation)?;
-                respire::model_progress::check()
-            }, |action| diary_commit(generation, action), |done| {
-                respire::model_progress::update("index", "diary-fragments", done as u64, None)
-            })?;
-            check_sync_context(generation)?;
-            Ok(true)
-        })();
-        INDEX_RUNNING.store(false, Ordering::Release);
-        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-        match result {
-            Ok(true) => {
-                work.state = "ready";
-                work.error = None;
-                model_wait_started = None;
-            }
-            Ok(false) => {
-                let started = model_wait_started.get_or_insert_with(Instant::now);
-                if started.elapsed() >= Duration::from_secs(1800) {
-                    work.state = "failed";
-                    work.requested = false;
-                    work.error = Some("background indexing timed out waiting for another model operation".into());
-                    model_wait_started = None;
-                    continue;
-                }
-                work.state = "waiting_model";
-                work.requested = true;
-                work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
-                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
-            }
-            Err(error) if error.downcast_ref::<respire::model_progress::OperationStopped>().is_some() => {
-                model_wait_started = None;
-                if work.prepare_mirror.is_some() {
-                    work.state = "scheduled";
-                    work.requested = true;
-                    work.error = None;
-                } else {
-                    work.state = "paused";
-                    work.requested = false;
-                    work.error = Some(format!("{error:#}"));
-                }
-            }
-            Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
-                model_wait_started = None;
-                work.state = "scheduled";
-                work.requested = true;
-                work.error = Some(format!("{error:#}"));
-            }
-            Err(error) => {
-                model_wait_started = None;
-                work.state = "failed";
-                work.error = Some(format!("{error:#}"));
-                eprintln!("background retrieval indexing failed: {error:#}");
-            }
-        }
-        drop(work);
-    }
-}
-
-/// An explicit direct command releases its library lock before starting this work.
-pub(crate) fn request_index() -> Result<Value> {
-    if worker_active() {
-        kick_index();
-        return Ok(index_status());
-    }
-    let response = call_method("index.prepare", Vec::new(), true)?;
-    anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
-    response.envelope.map(|envelope| envelope.summary)
-        .ok_or_else(|| anyhow::anyhow!("runtime did not acknowledge background indexing"))
-}
-
-pub(crate) fn sync_running() -> bool {
-    SYNC_RUNNING.load(Ordering::Acquire)
-}
-
-fn ensure_sync_worker() {
-    if FLIGHT_ON
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
-    }
-    if std::thread::Builder::new()
-        .name("respire-sync".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(flight_loop)
-        .is_err()
-    {
-        FLIGHT_ON.store(false, Ordering::Release);
-        eprintln!("command=sync status=warn error=failed to start sync worker");
-    }
-}
-
-/// Notifications are hints; the durable outbox holds the work.
-pub(crate) fn kick_autosync() {
-    let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-    if state.due.is_none() {
-        state.due = Some(Instant::now() + Duration::from_secs(3));
-    }
-    drop(state);
-    SYNC_CV.notify_one();
-    ensure_sync_worker();
-}
-
-fn enqueue_manual(job: Job) {
-    let captured = job
-        .sync_context
-        .ok_or_else(|| anyhow::anyhow!("missing sync request context"));
-    match captured {
-        Ok((generation, boundary)) => {
-            let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-            if state.manual.len() >= 64 {
-                let _ = job.reply.send(Err("sync request queue is full".into()));
-                return;
-            }
-            state.manual.push_back((job, generation, boundary));
-            drop(state);
-            SYNC_CV.notify_one();
-            ensure_sync_worker();
-        }
-        Err(error) => {
-            let _ = job.reply.send(Err(format!("{error:#}")));
-        }
-    }
-}
-
-fn flight_loop() {
-    mark_worker();
-    loop {
-        let manual = {
-            let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-            loop {
-                if STOPPING.load(Ordering::Acquire) {
-                    for (job, _, _) in state.manual.drain(..) {
-                        let _ = job.reply.send(Err("runtime is stopping".into()));
-                    }
-                    FLIGHT_ON.store(false, Ordering::Release);
-                    return;
-                }
-                if crate::autostart::background_paused() {
-                    state = SYNC_CV.wait_timeout(state, Duration::from_millis(250)).unwrap_or_else(|e| e.into_inner()).0;
-                    continue;
-                }
-                if let Some(job) = state.manual.pop_front() {
-                    break Some(job);
-                }
-                let current_generation = GENERATION.load(Ordering::Acquire);
-                if state.blocked_generation == Some(current_generation) {
-                    state = SYNC_CV.wait(state).unwrap_or_else(|e| e.into_inner());
-                    continue;
-                }
-                state.blocked_generation = None;
-                let now = Instant::now();
-                let due = state.due.get_or_insert(now + Duration::from_secs(300));
-                if *due <= now {
-                    state.due = None;
-                    break None;
-                }
-                let wait = *due - now;
-                state = SYNC_CV
-                    .wait_timeout(state, wait)
-                    .unwrap_or_else(|e| e.into_inner())
-                    .0;
-            }
-        };
-        let admission = PROFILE_ADMISSION.lock().unwrap_or_else(|error|error.into_inner());
-        if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
-            if let Some((job,_,_)) = manual { let _ = job.reply.send(Err("model_switch_busy".into())); }
-            else { SYNC_KICK.lock().unwrap_or_else(|error|error.into_inner()).due = Some(Instant::now()+Duration::from_secs(1)); }
-            drop(admission);
-            continue;
-        }
-        SYNC_RUNNING.store(true, Ordering::Release);
-        drop(admission);
-        if let Some((job, generation, boundary)) = manual {
-            let boundary = if boundary < 0 {
-                let gate = shared_exclusive();
-                let held = gate.acquire(true);
-                let snapshot = if job.deadline.expired() {
-                    Err(anyhow::anyhow!(QUEUE_EXPIRED))
-                } else {
-                    check_sync_context(generation).and_then(|_| crate::build_local()).and_then(|store| store.outgoing_boundary())
-                };
-                drop(held);
-                match snapshot {
-                    Ok(boundary) => boundary,
-                    Err(error) => {
-                        let _ = job.reply.send(Err(format!("{error:#}")));
-                        SYNC_RUNNING.store(false, Ordering::Release);
-                        continue;
-                    }
-                }
-            } else { boundary };
-            if !job.deadline.start() {
-                let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                SYNC_RUNNING.store(false, Ordering::Release);
-                continue;
-            }
-            SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
-            let result = check_sync_context(generation).map(|_| crate::capture_run(job.args));
-            if result.as_ref().is_ok_and(|captured| captured.exit == 0) {
-                let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-                state.blocked_generation = None;
-                state.backoff = 0;
-            }
-            let _ = job.reply.send(result.map_err(|error| format!("{error:#}")));
-        } else {
-            let generation = GENERATION.load(Ordering::Acquire);
-            let boundary = sync_local(generation, || {
-                anyhow::ensure!(!respire::service::service_paused(), "background sync paused by service mode");
-                crate::build_local()?.outgoing_boundary()
-            });
-            let result = boundary.and_then(|boundary| {
-                SYNC_CONTEXT.with(|context| context.set(Some((generation, boundary))));
-                crate::background_sync_once()
-            });
-            let mut state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
-            match result {
-                Ok(synchronized) => {
-                    state.backoff = 0;
-                    state.blocked_generation = None;
-                    if synchronized {
-                        state.last_success = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .ok()
-                            .map(|v| v.as_secs());
-                    }
-                }
-                Err(error)
-                    if error
-                        .downcast_ref::<respire::sync::SyncBoundaryChanged>()
-                        .is_some() =>
-                {
-                    state.backoff = 0;
-                    state.blocked_generation = None;
-                    state.due = Some(Instant::now() + Duration::from_secs(3));
-                    eprintln!("command=sync status=warn mode=auto error={error}");
-                }
-                Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
-                    state.backoff = 0;
-                    eprintln!("command=sync status=warn mode=auto error={error}");
-                }
-                Err(error) => {
-                    let transport = crate::is_retriable_sync_error(&error);
-                    let delay = if transport {
-                        30_u64.saturating_mul(1 << state.backoff.min(4)).min(300)
-                    } else {
-                        300
-                    };
-                    state.backoff = state.backoff.saturating_add(1);
-                    if transport {
-                        state.due = Some(Instant::now() + Duration::from_secs(delay));
-                    } else {
-                        state.blocked_generation = Some(generation);
-                        state.due = None;
-                    }
-                    eprintln!("command=sync status=warn mode=auto error={error}");
-                }
-            }
-        }
-        SYNC_CONTEXT.with(|context| context.set(None));
-        SYNC_RUNNING.store(false, Ordering::Release);
-        kick_index();
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RuntimeFlags {
-    pub port: Option<u16>,
-    pub host: String,
-    pub status: bool,
-    pub stop: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RpcRequest {
-    v: u32,
-    id: String,
-    method: String,
-    #[serde(default)]
-    args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    queue_wait_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    lifecycle: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RpcResponse {
-    v: u32,
-    id: String,
-    ok: bool,
-    exit: i32,
-    #[serde(default)]
-    bin: String,
-    #[serde(default)]
-    envelope: Option<ResultEnvelope>,
-    #[serde(default)]
-    error: Option<String>,
-    #[serde(default)]
-    code: Option<String>,
-    #[serde(default)]
-    web_url: Option<String>,
-    #[serde(default)]
-    pid: Option<u32>,
-    #[serde(default)]
-    data_dir: Option<String>,
-}
-
-struct Job {
-    args: Vec<String>,
-    stop: bool,
-    reply: Reply,
-    sync_context: Option<(usize, i64)>,
-    deadline: Arc<crate::admission::QueueDeadline>,
-}
-
-type CommandResult = std::result::Result<crate::Captured, String>;
-type ReplyAction = Box<dyn FnOnce(CommandResult) + Send>;
-
-/// A queued transport owns its reply without keeping a connection thread alive.
-#[derive(Clone)]
-struct Reply(Arc<Mutex<Option<ReplyAction>>>);
-impl Reply {
-    fn new(action: impl FnOnce(CommandResult) + Send + 'static) -> Self {
-        Self(Arc::new(Mutex::new(Some(Box::new(action)))))
-    }
-    fn send(&self, result: CommandResult) -> std::result::Result<(), String> {
-        let action = self.0.lock().map_err(|_| "reply lock poisoned".to_owned())?.take();
-        let action = action.ok_or_else(|| "reply already delivered".to_owned())?;
-        action(result);
-        Ok(())
-    }
-}
-
-struct QueueWatch {
-    deadline: std::sync::Weak<crate::admission::QueueDeadline>,
-    reply: std::sync::Weak<Mutex<Option<ReplyAction>>>,
-}
-
-fn watch_queue(deadline: &Arc<crate::admission::QueueDeadline>, reply: &Reply) -> Result<()> {
-    static WATCH: OnceLock<Mutex<Vec<QueueWatch>>> = OnceLock::new();
-    let entries = WATCH.get_or_init(|| {
-        Mutex::new(Vec::new())
-    });
-    static STARTED: OnceLock<()> = OnceLock::new();
-    let network = crate::network::runtime()?;
-    STARTED.get_or_init(|| {
-        network.spawn(async move {
-            let mut tick = tokio::time::interval(Duration::from_millis(20));
-            loop {
-                tick.tick().await;
-                let mut expired = Vec::new();
-                {
-                    let mut entries = entries.lock().unwrap_or_else(|error| error.into_inner());
-                    entries.retain(|entry| {
-                        let Some(deadline) = entry.deadline.upgrade() else { return false; };
-                        if deadline.expired() {
-                            if let Some(reply) = entry.reply.upgrade() { expired.push(Reply(reply)); }
-                            false
-                        } else { !deadline.running() }
-                    });
-                }
-                // Reply actions only hand off in-memory results or spawn async I/O.
-                for reply in expired { let _ = reply.send(Err(QUEUE_EXPIRED.into())); }
-            }
-        });
-    });
-    entries.lock().map_err(|_| anyhow::anyhow!("queue watch lock poisoned"))?.push(QueueWatch {
-        deadline: Arc::downgrade(deadline),
-        reply: Arc::downgrade(&reply.0),
-    });
-    Ok(())
-}
+// The wake-delivery and dispatch-loop tests reach these through `use super::*`.
+#[cfg(test)]
+use std::sync::mpsc::{self, Receiver};
+#[cfg(test)]
+use std::sync::Mutex;
 
 pub fn call_from_argv() -> Result<()> {
     call_from_argv_with_start(true)
@@ -993,9 +60,13 @@ fn call_from_argv_with_start(auto_start: bool) -> Result<()> {
         || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true");
     crate::set_json_mode(json);
     if let Some(id) = crate::progress::remote_id() {
-        let insertion = args.iter().position(|arg| arg == "--").unwrap_or(args.len());
+        let insertion = args
+            .iter()
+            .position(|arg| arg == "--")
+            .unwrap_or(args.len());
         let mut progress_args = vec!["--progress-id".to_owned(), id.clone()];
-        if command_name(&args) == Some("model") && !args.iter().any(|arg| arg == "--model-task-id") {
+        if command_name(&args) == Some("model") && !args.iter().any(|arg| arg == "--model-task-id")
+        {
             progress_args.extend(["--model-task-id".to_owned(), id]);
         }
         args.splice(insertion..insertion, progress_args);
@@ -1011,7 +82,10 @@ pub fn runtime_is_up() -> bool {
 pub(crate) fn foreground_progress(id: &str) -> Result<Value> {
     let response = call_method("cli.progress", vec![id.to_owned()], false)?;
     anyhow::ensure!(response.ok, "runtime progress unavailable");
-    Ok(response.envelope.map(|envelope| envelope.summary).unwrap_or(Value::Null))
+    Ok(response
+        .envelope
+        .map(|envelope| envelope.summary)
+        .unwrap_or(Value::Null))
 }
 
 /// Run one command through the resident runtime and return its JSON envelope.
@@ -1056,7 +130,9 @@ pub fn runtime_brief() -> Option<(u32, String, String)> {
 
 pub fn stop_if_running() -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
-    if crate::autostart::stop_managed_locked()? { return Ok(()); }
+    if crate::autostart::stop_managed_locked()? {
+        return Ok(());
+    }
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
@@ -1068,16 +144,28 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let mut maintenance = crate::autostart::restart_maintenance_locked()?;
-    crate::progress::phase("\u{68c0}\u{67e5} runtime \u{8fdb}\u{7a0b}", "Checking runtime process");
+    crate::progress::phase(
+        "\u{68c0}\u{67e5} runtime \u{8fdb}\u{7a0b}",
+        "Checking runtime process",
+    );
     crate::autostart::restart_stage("restart_probe");
     let health = match probe_runtime() {
         Ok(health) => health,
-        Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-            Some(crate::runtime_error::RuntimeError::Transport(_))) => None,
+        Err(error)
+            if matches!(
+                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+                Some(crate::runtime_error::RuntimeError::Transport(_))
+            ) =>
+        {
+            None
+        }
         Err(error) => return Err(error),
     };
     if crate::autostart::managed_enabled()?
-        && health.as_ref().is_some_and(|value| !value.inference_stalled()) {
+        && health
+            .as_ref()
+            .is_some_and(|value| !value.inference_stalled())
+    {
         // The active maintenance guard forces the managed coordinator to drain
         // the authenticated, exact registered executable/profile and stop its
         // service owner before replacement. Do not route this healthy owner
@@ -1086,33 +174,54 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         let stopped_pid = health.as_ref().map(|value| value.pid);
         ensure_daemon_locked()?;
         let ready = crate::net_rpc::health()?;
-        if !respire::service::off_mode() { verify_open_store(&respire::service::data_dir())?; }
+        if !respire::service::off_mode() {
+            verify_open_store(&respire::service::data_dir())?;
+        }
         maintenance.finish()?;
         crate::autostart::restart_stage("restart_ready");
-        return Ok(json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
-            "forced":false, "data_dir":ready.data_dir, "version":ready.bin}));
+        return Ok(
+            json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
+            "forced":false, "data_dir":ready.data_dir, "version":ready.bin}),
+        );
     }
     let listener = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
-    let pid = health.as_ref().map(|health| health.pid).or(listener)
+    let pid = health
+        .as_ref()
+        .map(|health| health.pid)
+        .or(listener)
         .or_else(|| endpoint_pid().filter(|pid| crate::net_rpc::pid_is_respire(*pid)));
     let mut forced = false;
     if let Some(pid) = pid {
-        anyhow::ensure!(pid != std::process::id() && crate::net_rpc::pid_is_respire(pid),
-            "cannot verify runtime process {pid}; restart refused");
-        anyhow::ensure!(listener.is_none() || listener == Some(pid), "runtime port owner changed");
+        anyhow::ensure!(
+            pid != std::process::id() && crate::net_rpc::pid_is_respire(pid),
+            "cannot verify runtime process {pid}; restart refused"
+        );
+        anyhow::ensure!(
+            listener.is_none() || listener == Some(pid),
+            "runtime port owner changed"
+        );
         crate::autostart::restart_stage("restart_identity");
         let identity = crate::net_rpc::runtime_process_identity(pid)?;
         if health.is_none() {
-            anyhow::ensure!(endpoint_pid() == Some(pid), "unresponsive process does not match this runtime endpoint");
+            anyhow::ensure!(
+                endpoint_pid() == Some(pid),
+                "unresponsive process does not match this runtime endpoint"
+            );
         }
         crate::progress::phase("\u{8bf7}\u{6c42}\u{4f18}\u{96c5}\u{9000}\u{51fa}\u{ff1b}\u{7b49}\u{5f85}\u{8fdb}\u{7a0b}\u{91ca}\u{653e}", "Requesting graceful shutdown; waiting for process exit");
         crate::autostart::restart_stage("restart_stop");
         let deadline = Instant::now() + timeout;
         if crate::net_rpc::port_is_open() {
             match crate::net_rpc::request_stop_with_timeout(timeout.min(Duration::from_secs(2))) {
-                Ok(()) => {},
-                Err(error) if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                    Some(crate::runtime_error::RuntimeError::Transport(_) | crate::runtime_error::RuntimeError::Unavailable)) => {},
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+                        Some(
+                            crate::runtime_error::RuntimeError::Transport(_)
+                                | crate::runtime_error::RuntimeError::Unavailable
+                        )
+                    ) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1121,29 +230,48 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         }
         if crate::net_rpc::process_is_running(pid)? {
             let owner = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
-            anyhow::ensure!(owner.is_none() || owner == Some(pid), "runtime port owner changed before recovery");
-            crate::progress::phase("\u{9000}\u{51fa}\u{8d85}\u{65f6}\u{ff1b}\u{7ec8}\u{6b62} runtime \u{8fdb}\u{7a0b}", "Shutdown timed out; terminating runtime process");
+            anyhow::ensure!(
+                owner.is_none() || owner == Some(pid),
+                "runtime port owner changed before recovery"
+            );
+            crate::progress::phase(
+                "\u{9000}\u{51fa}\u{8d85}\u{65f6}\u{ff1b}\u{7ec8}\u{6b62} runtime \u{8fdb}\u{7a0b}",
+                "Shutdown timed out; terminating runtime process",
+            );
             crate::net_rpc::kill_runtime(pid, &identity)?;
             forced = true;
         }
         crate::net_rpc::wait_until_exited(pid)?;
         crate::net_rpc::wait_until_down()?;
-        let data_dir = health.as_ref().map(|health| PathBuf::from(&health.data_dir))
+        let data_dir = health
+            .as_ref()
+            .map(|health| PathBuf::from(&health.data_dir))
             .unwrap_or_else(respire::service::data_dir);
-        crate::progress::phase("\u{7b49}\u{5f85}\u{6570}\u{636e}\u{5e93}\u{9501}\u{91ca}\u{653e}", "Waiting for database lock release");
+        crate::progress::phase(
+            "\u{7b49}\u{5f85}\u{6570}\u{636e}\u{5e93}\u{9501}\u{91ca}\u{653e}",
+            "Waiting for database lock release",
+        );
         let released = respire::lock::LibraryLock::acquire(&data_dir, Duration::from_secs(15))?;
         drop(released);
         if endpoint_pid() == Some(pid) && endpoint_path().exists() {
             std::fs::remove_file(endpoint_path())?;
         }
     } else {
-        anyhow::ensure!(!crate::net_rpc::port_is_open(), "cannot identify the process occupying the runtime port");
+        anyhow::ensure!(
+            !crate::net_rpc::port_is_open(),
+            "cannot identify the process occupying the runtime port"
+        );
     }
-    crate::progress::phase("\u{542f}\u{52a8} runtime\u{ff1b}\u{7b49}\u{5f85}\u{5c31}\u{7eea}", "Starting runtime; waiting for readiness");
+    crate::progress::phase(
+        "\u{542f}\u{52a8} runtime\u{ff1b}\u{7b49}\u{5f85}\u{5c31}\u{7eea}",
+        "Starting runtime; waiting for readiness",
+    );
     crate::autostart::restart_stage("restart_start");
     ensure_daemon_locked()?;
     let ready = crate::net_rpc::health()?;
-    if !respire::service::off_mode() { verify_open_store(&respire::service::data_dir())?; }
+    if !respire::service::off_mode() {
+        verify_open_store(&respire::service::data_dir())?;
+    }
     maintenance.finish()?;
     crate::autostart::restart_stage("restart_ready");
     Ok(json!({"state":"ready", "stopped_pid":pid, "pid":ready.pid,
@@ -1153,30 +281,47 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
 /// Host profile changes release the old library before starting its successor.
 pub fn recover_interrupted_login() -> Result<()> {
     let _takeover = crate::runtime_policy::takeover_lock()?;
-    if !respire_app::login_transaction::recovery_pending() { return Ok(()); }
+    if !respire_app::login_transaction::recovery_pending() {
+        return Ok(());
+    }
     let managed = crate::autostart::managed_enabled()?;
-    let mut maintenance = crate::autostart::with_explicit_recovery(crate::autostart::begin_maintenance_locked)?;
-    if let Some(health) = probe_runtime()? { stop_occupant(health.pid)?; }
+    let mut maintenance =
+        crate::autostart::with_explicit_recovery(crate::autostart::begin_maintenance_locked)?;
+    if let Some(health) = probe_runtime()? {
+        stop_occupant(health.pid)?;
+    }
     respire_app::login_transaction::recover_interrupted()?;
-    if managed { ensure_daemon_locked()?; }
+    if managed {
+        ensure_daemon_locked()?;
+    }
     maintenance.finish()?;
-    eprintln!("Recovered an interrupted login; the original account and configuration were restored.");
+    eprintln!(
+        "Recovered an interrupted login; the original account and configuration were restored."
+    );
     Ok(())
 }
 
 /// Listener readiness alone is insufficient for a snapshot commit: the actor
 /// must have opened, checked and bound the actual restored database first.
-pub fn verify_snapshot_store(root:&std::path::Path,id:&str)->Result<()> {
-    verify_runtime_store(root,Some(id))
+pub fn verify_snapshot_store(root: &std::path::Path, id: &str) -> Result<()> {
+    verify_runtime_store(root, Some(id))
 }
-pub fn verify_open_store(root:&std::path::Path)->Result<()> {
-    verify_runtime_store(root,None)
+pub fn verify_open_store(root: &std::path::Path) -> Result<()> {
+    verify_runtime_store(root, None)
 }
-fn verify_runtime_store(root:&std::path::Path,id:Option<&str>)->Result<()> {
+fn verify_runtime_store(root: &std::path::Path, id: Option<&str>) -> Result<()> {
     for _ in 0..START_POLLS {
-        let health=crate::net_rpc::health()?;
-        anyhow::ensure!(!health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir),root),"snapshot runtime profile changed during verification");
-        if health.store_ready && id.is_none_or(|id|health.snapshot_restore_id.as_deref()==Some(id)){return Ok(());}
+        let health = crate::net_rpc::health()?;
+        anyhow::ensure!(
+            !health.data_dir.is_empty()
+                && crate::mcp::same_path(std::path::Path::new(&health.data_dir), root),
+            "snapshot runtime profile changed during verification"
+        );
+        if health.store_ready
+            && id.is_none_or(|id| health.snapshot_restore_id.as_deref() == Some(id))
+        {
+            return Ok(());
+        }
         std::thread::sleep(START_WAIT);
     }
     bail!("restored runtime did not confirm an opened and verified snapshot store")
@@ -1186,11 +331,18 @@ pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_rollback(change, || Ok(()))
 }
 
-pub fn change_profile_with_rollback(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>) -> Result<()> {
+pub fn change_profile_with_rollback(
+    change: impl FnOnce() -> Result<()>,
+    rollback: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     change_profile_with_verification(change, rollback, || Ok(()))
 }
 
-pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rollback: impl FnOnce() -> Result<()>, verify: impl FnOnce() -> Result<()>) -> Result<()> {
+pub fn change_profile_with_verification(
+    change: impl FnOnce() -> Result<()>,
+    rollback: impl FnOnce() -> Result<()>,
+    verify: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     crate::progress::phase("\u{534f}\u{8c03}\u{8d26}\u{6237}\u{64cd}\u{4f5c}\u{ff1b}\u{7b49}\u{5f85}\u{5f53}\u{524d} runtime \u{91ca}\u{653e}", "Coordinating account operation; waiting for current runtime to release");
     let _takeover = crate::runtime_policy::takeover_lock()?;
     let mut maintenance = crate::autostart::begin_maintenance_locked()?;
@@ -1201,16 +353,27 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
         Err(error) => return Err(error.into()),
     };
     let backup = if let Some(bytes) = original.as_ref() {
-        let parent = config_path.parent().context("configuration has no parent directory")?;
-        let path = parent.join(format!(".client-before-switch-{}.json", uuid::Uuid::new_v4().simple()));
+        let parent = config_path
+            .parent()
+            .context("configuration has no parent directory")?;
+        let path = parent.join(format!(
+            ".client-before-switch-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
-        #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
         let mut file = options.open(&path)?;
         file.write_all(bytes)?;
         file.sync_all()?;
         Some(path)
-    } else { None };
+    } else {
+        None
+    };
     if let Some(health) = probe_runtime()? {
         stop_occupant(health.pid)?;
     }
@@ -1220,20 +383,32 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
     }).and_then(|_| verify());
     if let Err(error) = changed {
         let cleanup = probe_runtime().and_then(|health| match health {
-            Some(health) => stop_occupant(health.pid), None => Ok(()),
+            Some(health) => stop_occupant(health.pid),
+            None => Ok(()),
         });
         let mut failures = Vec::new();
-        if let Err(error) = &cleanup { failures.push(format!("target runtime cleanup failed: {error:#}")); }
-        if let Err(error) = rollback() { failures.push(format!("account session rollback failed: {error:#}")); }
+        if let Err(error) = &cleanup {
+            failures.push(format!("target runtime cleanup failed: {error:#}"));
+        }
+        if let Err(error) = rollback() {
+            failures.push(format!("account session rollback failed: {error:#}"));
+        }
         // Startup failure must restore the original selection and all API fields,
         // including the distinction between an absent config and an empty one.
         let restored = match original {
             Some(bytes) => {
-                let temporary = config_path.with_file_name(format!(".client-restore-{}.json", uuid::Uuid::new_v4().simple()));
+                let temporary = config_path.with_file_name(format!(
+                    ".client-restore-{}.json",
+                    uuid::Uuid::new_v4().simple()
+                ));
                 (|| -> Result<()> {
                     let mut options = std::fs::OpenOptions::new();
                     options.write(true).create_new(true);
-                    #[cfg(unix)] { use std::os::unix::fs::OpenOptionsExt; options.mode(0o600); }
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::OpenOptionsExt;
+                        options.mode(0o600);
+                    }
                     let mut file = options.open(&temporary)?;
                     file.write_all(&bytes)?;
                     file.sync_all()?;
@@ -1241,35 +416,56 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
                     std::fs::rename(&temporary, &config_path)?;
                     Ok(())
                 })()
-            },
+            }
             None => match std::fs::remove_file(&config_path) {
                 Ok(()) => Ok(()),
                 Err(remove) if remove.kind() == std::io::ErrorKind::NotFound => Ok(()),
                 Err(remove) => Err(remove.into()),
             },
         };
-        if let Err(error) = &restored { failures.push(format!("configuration rollback failed: {error:#}")); }
+        if let Err(error) = &restored {
+            failures.push(format!("configuration rollback failed: {error:#}"));
+        }
         if cleanup.is_ok() && restored.is_ok() {
-            if let Err(error) = ensure_daemon_locked() { failures.push(format!("original runtime restart failed: {error:#}")); }
+            if let Err(error) = ensure_daemon_locked() {
+                failures.push(format!("original runtime restart failed: {error:#}"));
+            }
         }
         if !failures.is_empty() {
-            if let Some(path) = backup { failures.push(format!("original configuration backup: {}", path.display())); }
+            if let Some(path) = backup {
+                failures.push(format!("original configuration backup: {}", path.display()));
+            }
             return Err(error.context(failures.join("; ")));
         }
         if let Some(path) = backup {
-            if let Err(cleanup) = std::fs::remove_file(&path) { return Err(error.context(format!("configuration restored; backup retained at {}: {cleanup}", path.display()))); }
+            if let Err(cleanup) = std::fs::remove_file(&path) {
+                return Err(error.context(format!(
+                    "configuration restored; backup retained at {}: {cleanup}",
+                    path.display()
+                )));
+            }
         }
         maintenance.finish()?;
         return Err(error);
     }
     if let Some(path) = backup {
-        if let Err(error) = std::fs::remove_file(&path) { eprintln!("profile verified; configuration backup retained at {}: {error}", path.display()); }
+        if let Err(error) = std::fs::remove_file(&path) {
+            eprintln!(
+                "profile verified; configuration backup retained at {}: {error}",
+                path.display()
+            );
+        }
     }
     maintenance.finish()?;
     Ok(())
 }
 
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
+    // Split-transition shim: when this CLI exe ends up serving in-process (no
+    // managed runtime installed and none fetchable), health and replies must
+    // report this binary's train so client version gates keep matching. A real
+    // rsrs-runtime child publishes its own identity inside its own process.
+    let _ = respire_commands::rpc_serve::publish_shim_identity(env!("CARGO_PKG_VERSION"));
     if flags.status {
         return match call_method("runtime.status", Vec::new(), false) {
             Ok(response) => {
@@ -1319,9 +515,47 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
         println!("runtime=stopped");
         return Ok(());
     }
+    // Serving in-process is deprecated: forward to the managed runtime binary
+    // for one release train, then drop this entry entirely. Environments with
+    // no managed runtime installed (fresh test envs, offline hosts) fall back
+    // to in-process serving until this entry is removed.
     crate::runtime_policy::require_host("runtime startup")?;
-    std::env::set_var("RSRS_RUNTIME", "1");
-    serve(flags)
+    eprintln!("deprecated: forward to the managed runtime; removal in an upcoming release train");
+    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
+        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
+        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) => {
+            // First-launch migration: the pinned managed runtime is not on disk
+            // yet; install it before starting it. Offline hosts cannot fetch it
+            // and fall through to in-process serving below.
+            match crate::runtime_fetch::download_and_install(None, None) {
+                Ok(path) => path,
+                Err(_) => return respire_commands::rpc_serve::serve(flags),
+            }
+        }
+        Err(_) => return respire_commands::rpc_serve::serve(flags),
+    };
+    let mut arguments: Vec<std::ffi::OsString> = vec![
+        "serve".into(),
+        "--data-dir".into(),
+        respire::service::data_dir().into_os_string(),
+    ];
+    if let Some(port) = flags.port {
+        arguments.push("--port".into());
+        arguments.push(port.to_string().into());
+    }
+    let mut child = respire_spawn::spawn_binary_with_boot_token(
+        &executable,
+        &arguments,
+        crate::autostart::lifecycle_boot_token().as_deref(),
+    )
+    .context("failed to start host runtime")?;
+    // The forwarding host stays alive for the serving process's whole lifetime
+    // and passes its exit code through unchanged.
+    let status = child
+        .wait()
+        .context("failed to wait for the host runtime")?;
+    crate::set_exit_code(status.code().unwrap_or(1));
+    Ok(())
 }
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
@@ -1343,13 +577,18 @@ fn render_response(response: RpcResponse, json: bool) -> Result<()> {
     )
 }
 
-fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcResponse> {
+pub(crate) fn call_method(
+    method: &str,
+    args: Vec<String>,
+    auto_start: bool,
+) -> Result<RpcResponse> {
     let auto = auto_start && !crate::net_rpc::no_autostart();
     // Validate/start the runtime for this data directory before submitting work.
     // Once submitted, a disconnect must not cause a mutating command to be replayed.
     if auto {
         ensure_daemon()?;
-    } else if method == "cli.exec" && needs_inference(&args) && crate::runtime_policy::client_only() {
+    } else if method == "cli.exec" && needs_inference(&args) && crate::runtime_policy::client_only()
+    {
         anyhow::ensure!(!crate::net_rpc::health()?.inference_stalled(),
             "inference is unresponsive after cancellation; run rsrs from the host terminal to recover the runtime; this request was not submitted");
     }
@@ -1358,6 +597,20 @@ fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcR
         bail!("local runtime protocol/version mismatch");
     }
     Ok(response)
+}
+
+pub(crate) fn call_method_outcome(
+    method: &str,
+    args: Vec<String>,
+    auto_start: bool,
+) -> Result<respire_commands::host_hooks::MethodOutcome> {
+    call_method(method, args, auto_start).map(|response| {
+        respire_commands::host_hooks::MethodOutcome {
+            ok: response.ok,
+            error: response.error,
+            envelope: response.envelope,
+        }
+    })
 }
 
 pub(crate) fn model_control(task_id: &str, cancel: bool) -> Result<Value> {
@@ -1377,9 +630,19 @@ pub(crate) fn prepare_model(mirror: &str) -> Result<()> {
 }
 
 pub(crate) fn profile_request(method: &str, args: Vec<String>) -> Result<Value> {
-    let response = call_method(method,args,true)?;
-    anyhow::ensure!(response.ok,"{}",response.error.unwrap_or_else(|| "model profile request failed".to_owned()));
-    Ok(serde_json::to_value(response.envelope.context("model profile response missing")?)?)
+    let response = call_method(method, args, true)?;
+    anyhow::ensure!(
+        response.ok,
+        "{}",
+        response
+            .error
+            .unwrap_or_else(|| "model profile request failed".to_owned())
+    );
+    Ok(serde_json::to_value(
+        response
+            .envelope
+            .context("model profile response missing")?,
+    )?)
 }
 
 fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
@@ -1416,7 +679,9 @@ fn http_roundtrip(method: &str, args: &[String]) -> Result<RpcResponse> {
                 data_dir: None,
             })
         }
-        "cli.exec" | "cli.progress" | "model.control" | "model.prepare" | "index.prepare" | "model.catalog" | "model.configure" | "model.switch" | "model.resume" | "model.progress" => {
+        "cli.exec" | "cli.progress" | "model.control" | "model.prepare" | "index.prepare"
+        | "model.catalog" | "model.configure" | "model.switch" | "model.resume"
+        | "model.progress" => {
             let parsed = if method == "cli.exec" {
                 crate::net_rpc::rpc_exec(args.to_vec())?
             } else {
@@ -1432,1132 +697,13 @@ fn compatible(response: &RpcResponse) -> bool {
     response.v == PROTOCOL_V && response.code.as_deref() != Some("protocol_version_mismatch")
 }
 
-fn serve(flags: RuntimeFlags) -> Result<()> {
-    crate::runtime_policy::require_host("runtime startup")?;
-    // Ignore SIGHUP off this thread. signal_hook's handler install must not sit
-    // in front of bind: under llvm-cov that call can stall the thread that has
-    // to become the listener, and the coverage run then never sees the runtime.
-    #[cfg(unix)]
-    {
-        let _ = std::thread::Builder::new()
-            .name("respire-sighup".into())
-            .spawn(|| {
-                let _ = signal_hook::flag::register(
-                    signal_hook::consts::SIGHUP,
-                    Arc::new(AtomicBool::new(false)),
-                );
-            });
-    }
-    // Children only bind. The host caller owns stop/copy/upgrade decisions.
-    if probe_runtime()?.is_some() {
-        return Ok(());
-    }
-    // Keep installation ownership for the listener's entire lifetime. A port
-    // override must not start a second host for the same installation or replace
-    // its endpoint record, which the former local-socket name also prevented.
-    let _owner = match respire::lock::LibraryLock::acquire(&runtime_dir(), Duration::from_secs(15)) {
-        Ok(owner) => owner,
-        Err(error) => {
-            // Another host may have completed startup while this caller waited.
-            if probe_runtime()?.is_some() { return Ok(()); }
-            return Err(error).context("another runtime owns this installation");
-        }
-    };
-    if probe_runtime()?.is_some() { return Ok(()); }
-    // Acquire the existing library ownership before publishing readiness. This
-    // also guards an older runtime using another port, and direct-mode clients.
-    let library = respire::lock::LibraryLock::acquire(
-        &respire::service::data_dir(), Duration::from_secs(120),
-    ).context("runtime failed to lock the library")?;
-    crate::autostart::verify_managed_boot()?;
-    // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
-    // pipe/socket fallback is necessary.
-    let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
-    {
-        let mut url = WEB_URL.lock().unwrap_or_else(|err| err.into_inner());
-        *url = bound.url.clone();
-    }
-    write_endpoint(&bound.url)?;
-    let (tx, rx) = mpsc::channel();
-    let _ = JOB_TX.set(Mutex::new(tx.clone()));
-    // Sandboxed clients cannot restart an idle-exited host runtime.
-    let idle = None;
-    let limit = worker_limit();
-    WORKERS.store(limit, Ordering::Release);
-    RUNNING.store(0, Ordering::Release);
-    std::thread::Builder::new()
-        .name("respire-dispatch".into())
-        // Services do not inherit a terminal's RUST_MIN_STACK. Context-query
-        // parsing needs the same explicit stack as the command workers.
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || dispatch_loop(rx, limit, idle, library))
-        .context("failed to start the runtime dispatcher")?;
-    // Keep the host entry alive on its actual listener. Drain/worker shutdown
-    // retains its existing ownership and process-exit path in dispatch_loop.
-    crate::runtime_http::serve_loop(bound.server)
-}
-
-fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
-    if request.v != PROTOCOL_V {
-        return error_response(
-            &request,
-            "protocol_version_mismatch",
-            "protocol version mismatch",
-        );
-    }
-    if request.method != "runtime.result" {
-        if let Some(hit) = cached(&request.id) { return hit; }
-    }
-    if matches!(request.method.as_str(), "model.prepare" | "index.prepare") && crate::autostart::background_paused() {
-        return error_response(&request,"runtime_maintenance","runtime maintenance pauses model/index preparation");
-    }
-    if request.method == "cli.exec" && PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(&request.args) {
-        return error_response(&request,"model_switch_busy","model switch in progress; semantic queries and writes are paused; inspect model.progress");
-    }
-    let response = match request.method.as_str() {
-        #[cfg(feature = "native-fault-tests")]
-        "runtime.test_worker_lifecycle" => {
-            let action = request.args.first().map(String::as_str).unwrap_or("");
-            match respire_app::core_sdk::worker::fixture_control(action) {
-                Ok(result) => { let mut response = status_response(&request); response.envelope =
-                    Some(ResultEnvelope::new("runtime.test_worker_lifecycle", OutputStatus::Ok, result, Vec::new())); response },
-                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
-            }
-        }
-        #[cfg(feature = "native-fault-tests")]
-        "runtime.test_worker_hold" => {
-            match respire_app::core_sdk::execute::<Value>("test_worker_hold", json!({})) {
-                Ok(_) => status_response(&request),
-                Err(error) => error_response(&request, "worker_fixture_failed", &format!("{error:#}")),
-            }
-        }
-        #[cfg(feature = "native-fault-tests")]
-        "runtime.test_native_fault" => {
-            let mode = request.args.first().and_then(|mode| mode.parse::<u64>().ok()).unwrap_or(0);
-            match respire_app::core_sdk::execute::<Value>("engine_control", json!({"action":"test_native_fault","mode":mode})) {
-                Ok(result) => { let mut response = status_response(&request); response.envelope = Some(ResultEnvelope::new("runtime.test_native_fault", OutputStatus::Ok, result, Vec::new())); response },
-                Err(error) => error_response(&request, "native_fixture_failed", &format!("{error:#}")),
-            }
-        }
-        "model.catalog" | "model.configure" | "model.switch" | "model.resume" | "model.progress" => {
-            let result = (|| -> Result<Value> {
-                match request.method.as_str() {
-                    "model.catalog" => {
-                        let store = respire::service::open_store()?;
-                        Ok(json!({"registry":respire_app::embedding::registry()?,"active":store.active_selection()?,"switch":profile_state()}))
-                    }
-                    "model.configure" => {
-                        let config = serde_json::from_str(request.args.first().context("configuration JSON required")?)?;
-                        respire_app::embedding::configure(config)
-                    }
-                    "model.switch" => {
-                        let choice = serde_json::from_str(request.args.first().context("selection JSON required")?)?;
-                        start_profile_switch(choice,request.id.clone())
-                    }
-                    "model.resume" => {
-                        let store = respire::service::open_store()?;
-                        let target = serde_json::from_str(&store.meta_get("embedding_pending_selection_v1")?.context("no pending model selection")?)?;
-                        start_profile_switch_target(target,request.id.clone())
-                    }
-                    _ => {
-                        let store = respire::service::open_store()?;
-                        Ok(json!({"switch":profile_state(),"operation":respire::model_progress::status()?,"pending_selection":store.meta_get("embedding_pending_selection_v1")?.map(|v|serde_json::from_str::<Value>(&v)).transpose()?,"pending_task":store.meta_get("embedding_pending_task_v1")?.map(|v|serde_json::from_str::<Value>(&v)).transpose()?}))
-                    },
-                }
-            })();
-            match result {
-                Ok(value) => { let mut response = status_response(&request); response.envelope = Some(ResultEnvelope::new(&request.method,if matches!(request.method.as_str(),"model.switch" | "model.resume") {OutputStatus::Pending} else {OutputStatus::Ok},value,Vec::new())); response }
-                Err(error) => error_response(&request,"model_profile_failed",&format!("{error:#}")),
-            }
-        }
-        "model.prepare" => {
-            let mirror = request.args.first().map(String::as_str).unwrap_or("auto");
-            match respire::model_install::validate_mirror(mirror).and_then(|_| {
-                anyhow::ensure!(!respire::service::service_paused(), "model preparation is paused by service mode");
-                let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-                work.prepare_mirror = Some(mirror.to_owned());
-                work.requested = true;
-                work.error = None;
-                work.state = "scheduled";
-                drop(work);
-                INDEX_CV.notify_one();
-                Ok(())
-            }) {
-                Ok(()) => {
-                    let mut response = status_response(&request);
-                    response.envelope = Some(ResultEnvelope::new("model.prepare", OutputStatus::Pending, index_status(), Vec::new()));
-                    response
-                }
-                Err(error) => error_response(&request, "model_prepare_failed", &error.to_string()),
-            }
-        }
-        "index.prepare" => {
-            kick_index();
-            let mut response = status_response(&request);
-            response.envelope = Some(ResultEnvelope::new(
-                "index.prepare", OutputStatus::Pending, index_status(), Vec::new(),
-            ));
-            response
-        }
-        "model.control" => match respire::model_progress::control(
-            request.args.first().map(String::as_str).unwrap_or(""),
-            request.args.get(1).is_some_and(|arg| arg == "true"),
-        ) {
-            Ok(progress) => {
-                let mut response = status_response(&request);
-                response.envelope = Some(ResultEnvelope::new(
-                    "model.control",
-                    OutputStatus::Ok,
-                    progress,
-                    Vec::new(),
-                ));
-                response
-            }
-            Err(error) => error_response(&request, "model_control_failed", &error.to_string()),
-        },
-        "runtime.status" => status_response(&request),
-        "cli.progress" => {
-            let mut response = status_response(&request);
-            let mut summary = crate::progress::status(request.args.first().map(String::as_str).unwrap_or(""));
-            if summary.is_null() { summary = json!({}); }
-            summary["inference"] = inference_health_status();
-            response.envelope = Some(ResultEnvelope::new(
-                "cli.progress", OutputStatus::Ok,
-                summary, Vec::new(),
-            ));
-            response
-        }
-        "runtime.result" => {
-            let id = request.args.first().map(String::as_str).unwrap_or("");
-            let result = cached(id);
-            let pending = INFLIGHT.lock().unwrap_or_else(|error| error.into_inner()).contains(id);
-            let mut response = status_response(&request);
-            response.envelope = Some(ResultEnvelope::new(
-                "runtime.result", OutputStatus::Ok,
-                json!({"request_id":id,"state":if result.is_some() {"completed"} else if pending {"pending"} else {"unknown"},"response":result,
-                    "retention":"last 64 completed requests in this runtime; unknown is not proof of non-commit; never replay a write automatically"}),
-                Vec::new(),
-            ));
-            response
-        }
-        "runtime.stop" => {
-            if crate::autostart::managed_id().is_some() && request.lifecycle.as_deref() != Some("coordinator-v1") {
-                return error_response(&request, "managed_lifecycle_required", "use the current host runtime lifecycle coordinator");
-            }
-            request_drain_exit();
-            status_response(&request)
-        }
-        "cli.exec" => match submit(tx, request.args.clone(), false) {
-            Ok(captured) => RpcResponse {
-                v: PROTOCOL_V,
-                id: request.id.clone(),
-                ok: captured.exit == 0,
-                exit: captured.exit,
-                bin: env!("CARGO_PKG_VERSION").to_owned(),
-                envelope: Some(captured.envelope),
-                error: None,
-                code: None,
-                web_url: Some(current_url()),
-                pid: Some(std::process::id()),
-                data_dir: Some(respire::service::data_dir().display().to_string()),
-            },
-            Err(error) => error_response(&request, "daemon_unavailable", &error),
-        },
-        other => error_response(
-            &request,
-            "protocol_version_mismatch",
-            &format!("unknown method {other}"),
-        ),
-    };
-    if request.method != "runtime.result" { remember(&request.id, &response); }
-    response
-}
-
-fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse {
-    match result {
-        Ok(captured) => RpcResponse {
-            v: PROTOCOL_V, id: request.id.clone(), ok: captured.exit == 0,
-            exit: captured.exit, bin: env!("CARGO_PKG_VERSION").to_owned(),
-            envelope: Some(captured.envelope), error: None, code: None,
-            web_url: Some(current_url()), pid: Some(std::process::id()),
-            data_dir: Some(respire::service::data_dir().display().to_string()),
-        },
-        Err(error) => error_response(request, "daemon_unavailable", &error),
-    }
-}
-
-fn dispatch_deferred(request: RpcRequest, tx: &Sender<Job>, action: impl FnOnce(RpcResponse) + Send + 'static) {
-    if request.method == "cli.exec" && PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(&request.args) {
-        action(error_response(&request,"model_switch_busy","model switch in progress; semantic queries and writes are paused; inspect model.progress"));
-        return;
-    }
-    if request.method != "cli.exec" || request.v != PROTOCOL_V {
-        action(dispatch(request, tx));
-        return;
-    }
-    {
-        let mut inflight = INFLIGHT.lock().unwrap_or_else(|error| error.into_inner());
-        if let Some(response) = cached(&request.id) { drop(inflight); action(response); return; }
-        if !inflight.insert(request.id.clone()) {
-            drop(inflight);
-            action(error_response(&request, "request_in_progress", "request ID is already executing or queued; inspect runtime.result; command was not replayed"));
-            return;
-        }
-    }
-    let args = request.args.clone();
-    let wait = request.queue_wait_ms.map(Duration::from_millis).unwrap_or_else(queue_wait).min(queue_wait());
-    let reply = Reply::new(move |result| {
-        let response = command_response(&request, result);
-        remember(&request.id, &response);
-        INFLIGHT.lock().unwrap_or_else(|error| error.into_inner()).remove(&request.id);
-        action(response);
-    });
-    if let Err(error) = enqueue_job(tx, args, false, reply.clone(), wait) {
-        let _ = reply.send(Err(error));
-    }
-}
-
-fn status_response(request: &RpcRequest) -> RpcResponse {
-    RpcResponse {
-        v: PROTOCOL_V,
-        id: request.id.clone(),
-        ok: true,
-        exit: 0,
-        bin: env!("CARGO_PKG_VERSION").to_owned(),
-        envelope: None,
-        error: None,
-        code: None,
-        web_url: Some(current_url()),
-        pid: Some(std::process::id()),
-        data_dir: Some(respire::service::data_dir().display().to_string()),
-    }
-}
-
-fn error_response(request: &RpcRequest, code: &str, error: &str) -> RpcResponse {
-    RpcResponse {
-        v: PROTOCOL_V,
-        id: request.id.clone(),
-        ok: false,
-        exit: 1,
-        bin: env!("CARGO_PKG_VERSION").to_owned(),
-        envelope: None,
-        error: Some(error.to_owned()),
-        code: Some(code.to_owned()),
-        web_url: None,
-        pid: Some(std::process::id()),
-        data_dir: None,
-    }
-}
-
-fn enqueue_job(
-    tx: &Sender<Job>,
-    args: Vec<String>,
-    stop: bool,
-    reply: Reply,
-    wait: Duration,
-) -> std::result::Result<Arc<crate::admission::QueueDeadline>, String> {
-    if !stop && !respire::service::off_mode() && needs_inference(&args) && inference_health_status()["host_recovery_required"] == true {
-        return Err("inference is unresponsive after cancellation; host runtime recovery is required; request was not queued".into());
-    }
-    let slots = WORKERS.load(Ordering::Acquire).max(1);
-    if !stop
-        && is_status(&args)
-        && LIGHT_RUNNING.load(Ordering::Acquire) >= 2
-        && RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) >= slots
-    {
-        let mut envelope = ResultEnvelope::new(
-            "status",
-            OutputStatus::Warn,
-            json!({"state": "busy", "workers": slots}),
-            Vec::new(),
-        );
-        envelope.errors.push(i18n::text("busy").to_owned());
-        reply.send(Ok(crate::Captured { exit: 2, envelope }))?;
-        return Ok(Arc::new(crate::admission::QueueDeadline::new(Duration::ZERO)));
-    }
-    let sync_context = if !respire::service::off_mode() && matches!(
-        command_name(&args),
-        Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history" | "sync-restore" | "classify")
-    ) {
-        // Capture account generation without blocking a network executor on
-        // the write gate. The existing sync worker takes the snapshot later.
-        Some((GENERATION.load(Ordering::Acquire), -1))
-    } else {
-        None
-    };
-    let deadline = Arc::new(crate::admission::QueueDeadline::new(wait));
-    watch_queue(&deadline, &reply).map_err(|error| error.to_string())?;
-    tx.send(Job {
-        args,
-        stop,
-        reply,
-        sync_context,
-        deadline: Arc::clone(&deadline),
-    })
-    .map_err(|_| "runtime worker is gone".to_owned())?;
-    wake_dispatcher();
-    Ok(deadline)
-}
-
-fn submit(tx: &Sender<Job>, args: Vec<String>, stop: bool) -> CommandResult {
-    let (reply_tx, reply_rx) = mpsc::channel();
-    let deadline = enqueue_job(tx, args, stop, Reply::new(move |result| { let _ = reply_tx.send(result); }), queue_wait())?;
-    let wait = queue_wait();
-    match reply_rx.recv_timeout(wait) {
-        Ok(result) => result,
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err("runtime worker dropped the reply".to_owned()),
-        Err(mpsc::RecvTimeoutError::Timeout) if deadline.cancel() => Err(QUEUE_EXPIRED.to_owned()),
-        // Execution won admission. Especially for writes, preserve the actual
-        // commit outcome instead of returning an ambiguous client timeout.
-        Err(mpsc::RecvTimeoutError::Timeout) => reply_rx.recv()
-            .map_err(|_| "runtime worker dropped the reply".to_owned())?,
-    }
-}
-
-fn execute_json(args: Vec<String>) -> std::result::Result<Value, String> {
-    let tx = {
-        let guard = JOB_TX
-            .get()
-            .ok_or_else(|| "runtime worker is not running".to_owned())?
-            .lock()
-            .map_err(|_| "runtime worker lock poisoned".to_owned())?;
-        guard.clone()
-    };
-    let captured = submit(&tx, args, false)?;
-    serde_json::to_value(&captured.envelope).map_err(|err| err.to_string())
-}
-
-fn wait_for_drain(supervised: bool, mut busy: impl FnMut() -> bool) {
-    let mut polls=0;
-    while busy() {
-        // Preserve legacy explicit-shutdown timing, but never silently turn a
-        // supervised upgrade/profile transition into a four-second forced exit.
-        if !supervised && polls >= 80 { break; }
-        std::thread::sleep(Duration::from_millis(50));
-        polls+=1;
-    }
-}
-
-pub(crate) fn request_drain_exit() {
-    STOPPING.store(true, Ordering::Release);
-    wake_dispatcher();
-    SYNC_CV.notify_all();
-    INDEX_CV.notify_all();
-    let supervised=crate::autostart::managed_id().is_some();
-    std::thread::spawn(move || {
-        wait_for_drain(supervised, ||RUNNING.load(Ordering::Acquire) != 0
-            || WRITE_RUNNING.load(Ordering::Acquire)
-            || CLASSIFY_RUNNING.load(Ordering::Acquire)
-            || sync_running() || index_has_work() || PROFILE_SWITCH_RUNNING.load(Ordering::Acquire));
-        while PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(25)); }
-        stop_process(0);
-    });
-}
-
-pub(crate) fn handle_http_rpc(body: &[u8]) -> Result<RpcResponse> {
-    let request: RpcRequest = serde_json::from_slice(body).context("rpc body is not JSON")?;
-    let tx = {
-        let guard = JOB_TX
-            .get()
-            .ok_or_else(|| anyhow::anyhow!("runtime worker is not running"))?
-            .lock()
-            .map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?;
-        guard.clone()
-    };
-    Ok(dispatch(request, &tx))
-}
-
-pub(crate) fn handle_http_rpc_deferred(body: &[u8], action: impl FnOnce(RpcResponse) + Send + 'static) -> Result<()> {
-    let request: RpcRequest = serde_json::from_slice(body).context("rpc body is not JSON")?;
-    let tx = JOB_TX.get().ok_or_else(|| anyhow::anyhow!("runtime worker is not running"))?
-        .lock().map_err(|_| anyhow::anyhow!("runtime worker lock poisoned"))?.clone();
-    dispatch_deferred(request, &tx, action);
-    Ok(())
-}
-
-fn inference_health_status() -> Value {
-    match respire::memory::onnx::inference_status() {
-        Ok(status) => status,
-        Err(error) => json!({"state":"error","error":format!("{error:#}")}),
-    }
-}
-
-pub(crate) fn health_body() -> Value {
-    let inference = inference_health_status();
-    let (queue_cancelled, timings) = crate::admission::timings();
-    let (queued, executing) = crate::admission::occupancy();
-    let exe = std::env::current_exe()
-        .ok()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    json!({
-        "server": "respire",
-        "bin": env!("CARGO_PKG_VERSION"),
-        "pid": std::process::id(),
-        "v": PROTOCOL_V,
-        "url": current_url(),
-        "exe": exe,
-        "data_dir": respire::service::data_dir().display().to_string(),
-        "store_ready": STORE_READY.load(Ordering::Acquire),
-        "installation_root": respire::service::main_data_dir().display().to_string(),
-        "managed_id": crate::autostart::managed_id(),
-        "credential_state": crate::autostart::credential_state(),
-        "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
-        "recall_statistics": recall_stats_status(),
-        "retrieval_index": index_status(),
-        "inference": inference,
-        "rpc": {
-            "available_parallelism": cpu_count(),
-            "effective_parallelism": WORKERS.load(Ordering::Acquire),
-            "ordinary_running": RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)),
-            "lightweight_running": LIGHT_RUNNING.load(Ordering::Acquire),
-            "lightweight_capacity": 2,
-            "queue_wait_timeout_secs": queue_wait().as_secs(),
-            "queue_cancelled": queue_cancelled,
-            "queued_or_cancelled_pending_removal": queued,
-            "executing_until_reply": executing,
-            "recent_timing_micros": timings,
-            "timing_scope": "queue admission to execution start; command execution to reply consumption",
-        },
-    })
-}
-
-fn stop_process(code: i32) -> ! {
-    crate::autostart::record_exit(code == 0);
-    #[cfg(test)]
-    {
-        let _ = code;
-        loop {
-            std::thread::park();
-        }
-    }
-    #[cfg(not(test))]
-    {
-        if let Err(error) = respire_app::core_sdk::worker::shutdown() {
-            eprintln!("runtime retained its library lock because Core worker cleanup failed: {error:#}");
-            // Keep control/health alive and ownership intact; never overlap a
-            // new host with an unconfirmed native child.
-            while respire_app::core_sdk::worker::shutdown().is_err() {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        }
-        std::process::exit(code);
-    }
-}
-
-/// Job slots for this process. `RSRS_RPC_PARALLELISM` wins, then
-/// `client.json` `rpc_parallelism`, otherwise OS-reported available parallelism.
-/// Explicit settings cannot exceed the CPUs available to this process.
-/// Two additional lightweight slots keep show/list/status/revision responsive.
-/// Simple writes prepare concurrently and use short source-checked commits.
-/// Foreground and background ONNX sessions have independent serial queues.
-pub(crate) fn worker_limit() -> usize {
-    let available = cpu_count();
-    if let Ok(raw) = respire::env::var("RSRS_RPC_PARALLELISM") {
-        let raw = raw.trim();
-        if raw.is_empty() || raw.eq_ignore_ascii_case("cpu") {
-            return cpu_count();
-        }
-        if let Ok(parsed) = raw.parse::<usize>() {
-            if parsed == 0 {
-                return cpu_count();
-            }
-            return parsed.clamp(1, available);
-        }
-    }
-    if let Some(saved) = respire::service::rpc_parallelism_setting() {
-        return saved.clamp(1, available);
-    }
-    cpu_count()
-}
-
-fn cpu_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1)
-        .max(1)
-}
-
-fn queue_wait() -> Duration {
-    Duration::from_secs(respire::env::var("RSRS_RPC_QUEUE_WAIT_SECS").ok()
-        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(120).clamp(1, 3600))
-}
-
-fn is_exclusive(args: &[String]) -> bool {
-    if is_context_query(args) {
-        return false;
-    }
-    if command_name(args) == Some("update") { return false; }
-    if command_name(args) == Some("remember") && !args.iter().any(|arg|
-        matches!(arg.as_str(), "--merge-ids" | "--supersedes" | "--see-also")
-        || arg.starts_with("--merge-ids=") || arg.starts_with("--supersedes=")
-        || arg.starts_with("--see-also=")) { return false; }
-    matches!(
-        command_name(args),
-        Some(
-            "remember"
-                | "update"
-                | "forget"
-                | "restore"
-                | "purge"
-                | "attach"
-                | "promote"
-                | "demote"
-                | "retitle"
-                | "retitle-many"
-                | "import"
-                | "reembed"
-                | "resort"
-                | "split"
-                | "tree-deepen"
-                | "tree-cure"
-                | "tree-float"
-                | "sync"
-                | "sync-conflicts"
-                | "sync-resolve"
-                | "sync-restore"
-                | "sync-reset"
-                | "repack"
-                | "inject"
-                | "keygen"
-                | "account"
-                | "space"
-                | "fivekeys"
-                | "super-reset"
-                | "register"
-                | "login"
-                | "logout"
-                | "config"
-                | "agent-config"
-                | "model"
-                | "grant"
-                | "session"
-                | "query-log"
-                | "doctor"
-                | "root-create"
-                | "share-import"
-                | "backup"
-                | "snapshot"
-        )
-    )
-}
-
-fn wake_dispatcher() {
-    if let Some(thread) = DISPATCH_THREAD.get() { thread.unpark(); }
-}
-
-// The unpark token survives a completion between try_recv and park_timeout.
-// Keep the periodic check as a fallback for shutdown and queue expiry.
-fn receive_dispatch_job<T>(rx: &Receiver<T>, wait: Duration) -> Result<T, mpsc::RecvTimeoutError> {
-    match rx.try_recv() {
-        Ok(job) => return Ok(job),
-        Err(mpsc::TryRecvError::Disconnected) => return Err(mpsc::RecvTimeoutError::Disconnected),
-        Err(mpsc::TryRecvError::Empty) => {}
-    }
-    std::thread::park_timeout(wait);
-    rx.try_recv().map_err(|error| match error {
-        mpsc::TryRecvError::Empty => mpsc::RecvTimeoutError::Timeout,
-        mpsc::TryRecvError::Disconnected => mpsc::RecvTimeoutError::Disconnected,
-    })
-}
-
-struct RunningGuard {
-    status: bool,
-    light: bool,
-}
-
-impl Drop for RunningGuard {
-    fn drop(&mut self) {
-        RUNNING.fetch_sub(1, Ordering::AcqRel);
-        if self.light { LIGHT_RUNNING.fetch_sub(1, Ordering::AcqRel); }
-        if self.status {
-            RUNNING_STATUS.fetch_sub(1, Ordering::AcqRel);
-        }
-        wake_dispatcher();
-    }
-}
-
-struct ClassifyGuard;
-impl Drop for ClassifyGuard {
-    fn drop(&mut self) {
-        SYNC_CONTEXT.with(|context| context.set(None));
-        CLASSIFY_RUNNING.store(false, Ordering::Release);
-    }
-}
-
-fn dispatch_loop(rx: Receiver<Job>, limit: usize, idle: Option<Duration>, _lock: respire::lock::LibraryLock) {
-    mark_worker();
-    let _ = DISPATCH_THREAD.set(std::thread::current());
-    #[cfg(not(test))]
-    respire_app::core_sdk::worker::enable();
-    // Keep WAL open across requests: closing the last connection can briefly lock
-    // a concurrent opener during checkpoint/cleanup, even for read-only status.
-    let mut _store = if respire::service::off_mode() { None } else { Some(match respire::service::open_runtime_store(&_lock) {
-        Ok((store,snapshot_id)) => {
-            if let Ok(mut slot)=SNAPSHOT_BOOT_ID.lock(){*slot=snapshot_id;}
-            STORE_READY.store(true,Ordering::Release);
-            store
-        },
-        Err(error) => {
-            eprintln!("runtime failed to initialize the library: {error:#}");
-            stop_process(1);
-        }
-    }) };
-    respire::service::install_runtime_profile(respire::service::data_dir());
-    if let Err(error) = respire_app::read_heat::reload() {
-        eprintln!("runtime failed to load read_heat configuration: {error:#}");
-        stop_process(1);
-    }
-    let (classify_tx, classify_rx) = mpsc::sync_channel::<Job>(16);
-    let classifier = std::thread::Builder::new()
-        .name("respire-classify".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            mark_worker();
-            while let Ok(job) = classify_rx.recv() {
-                if STOPPING.load(Ordering::Acquire) {
-                    let _ = job.reply.send(Err("runtime is stopping".into()));
-                    continue;
-                }
-                if !job.deadline.start() {
-                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                    continue;
-                }
-                let Some((generation, _)) = job.sync_context else {
-                    let _ = job.reply.send(Err("missing classification context".into()));
-                    continue;
-                };
-                let admission = PROFILE_ADMISSION.lock().unwrap_or_else(|error|error.into_inner());
-                if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) { let _ = job.reply.send(Err("model_switch_busy".into())); continue; }
-                CLASSIFY_RUNNING.store(true, Ordering::Release);
-                drop(admission);
-                let _active = ClassifyGuard;
-                SYNC_CONTEXT.with(|context| context.set(Some((generation, -1))));
-                let result = check_sync_context(generation)
-                    .map(|_| crate::capture_run(job.args))
-                    .map_err(|error| format!("{error:#}"));
-                let _ = job.reply.send(result);
-            }
-        });
-    if classifier.is_err() {
-        stop_process(1);
-    }
-    let (write_tx, write_rx) = mpsc::sync_channel::<WriteJob>(256);
-    if let Ok(mut installed) = WRITE_TX.lock() {
-        *installed = Some(write_tx.clone());
-    } else {
-        eprintln!("runtime failed to install the write queue");
-        stop_process(1);
-    }
-    let writer = std::thread::Builder::new()
-        .name("respire-write".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(move || {
-            mark_worker();
-            while let Ok(work) = write_rx.recv() {
-                let job = match work {
-                    WriteJob::Command(job) => job,
-                    WriteJob::RecallStats(stats, generation) => {
-                        let result = if STOPPING.load(Ordering::Acquire) {
-                            shared_exclusive().cancel_reservation();
-                            Err(anyhow::anyhow!("runtime is stopping"))
-                        } else {
-                            WRITE_RUNNING.store(true, Ordering::Release);
-                            let gate = shared_exclusive();
-                            let _held = gate.acquire_reserved();
-                            let result = check_sync_context(generation)
-                                .and_then(|_| respire::service::open_store())
-                                .and_then(|store| stats.persist(&store));
-                            drop(_held);
-                            WRITE_RUNNING.store(false, Ordering::Release);
-                            result
-                        };
-                        STATS_PENDING.fetch_sub(1, Ordering::AcqRel);
-                        match result {
-                            Ok(()) => {
-                                STATS_PERSISTED.fetch_add(1, Ordering::AcqRel);
-                            }
-                            Err(error) => {
-                                STATS_FAILED.fetch_add(1, Ordering::AcqRel);
-                                eprintln!("recall statistics writeback failed: {error:#}");
-                            }
-                        }
-                        continue;
-                    }
-                };
-                if STOPPING.load(Ordering::Acquire) {
-                    shared_exclusive().cancel_reservation();
-                    let _ = job.reply.send(Err("runtime is stopping".into()));
-                    continue;
-                }
-                let admission = PROFILE_ADMISSION.lock().unwrap_or_else(|error|error.into_inner());
-                if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) {
-                    shared_exclusive().cancel_reservation();
-                    let _ = job.reply.send(Err("model_switch_busy".into()));
-                    continue;
-                }
-                WRITE_RUNNING.store(true, Ordering::Release);
-                drop(admission);
-                let gate = shared_exclusive();
-                let _held = gate.acquire_reserved();
-                if !job.deadline.start() {
-                    drop(_held);
-                    WRITE_RUNNING.store(false, Ordering::Release);
-                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                    continue;
-                }
-                let changing_context = !is_context_query(&job.args) && matches!(
-                    command_name(&job.args),
-                    Some(
-                        "login"
-                            | "logout"
-                            | "register"
-                            | "keygen"
-                            | "config"
-                            | "session"
-                            | "agent-config"
-                            | "sync-reset"
-                            | "account"
-                            | "space"
-                            | "fivekeys"
-                            | "super-reset"
-                    )
-                );
-                if changing_context {
-                    GENERATION.fetch_add(1, Ordering::AcqRel);
-                    SYNC_CV.notify_one();
-                }
-                let captured = crate::capture_run(job.args);
-                drop(_held);
-                kick_index();
-                if changing_context {
-                    context_changed();
-                }
-                WRITE_RUNNING.store(false, Ordering::Release);
-                let _ = job.reply.send(Ok(captured));
-            }
-        });
-    if writer.is_err() {
-        stop_process(1);
-    }
-    respire::service::install_autosync_notifier(kick_autosync);
-    respire::service::install_index_notifier(kick_index);
-    INDEX_ON.store(true, Ordering::Release);
-    let indexer = std::thread::Builder::new()
-        .name("respire-index".into())
-        .stack_size(16 * 1024 * 1024)
-        .spawn(index_loop);
-    if let Err(error) = indexer.as_ref() {
-        eprintln!("runtime failed to start the index worker: {error}");
-        stop_process(1);
-    }
-    kick_index();
-    kick_autosync();
-    let mut pending = VecDeque::<Job>::new();
-    let mut idle_since = Instant::now();
-    loop {
-        if STOPPING.load(Ordering::Acquire) {
-            break;
-        }
-        match receive_dispatch_job(&rx, Duration::from_millis(10)) {
-            Ok(job) => {
-                if job.stop {
-                    break;
-                }
-                if job.deadline.expired() {
-                    let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                    continue;
-                }
-                idle_since = Instant::now();
-                if respire::service::off_mode() {
-                    let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(job.args.iter().cloned()));
-                    if parsed.is_ok_and(|cli| cli.command.as_ref().is_some_and(|command| !crate::is_off_allowed(command))) {
-                        if !job.deadline.start() {
-                            let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                            continue;
-                        }
-                        let captured = crate::capture_run(job.args);
-                        let _ = job.reply.send(Ok(captured));
-                        continue;
-                    }
-                } else if _store.is_none() && !matches!(command_name(&job.args), Some("agent-config" | "memory-revision")) {
-                    let gate = shared_exclusive();
-                    let _held = gate.acquire(true);
-                    let opened = if !respire::service::service_paused() {
-                        respire::service::initialize_runtime_store()
-                    } else { respire::service::open_store() };
-                    match opened {
-                        Ok(store) => _store = Some(store),
-                        Err(error) => { let _ = job.reply.send(Err(format!("{error:#}"))); continue; }
-                    }
-                }
-                if matches!(
-                    command_name(&job.args),
-                    Some("sync" | "sync-conflicts" | "sync-resolve" | "sync-history" | "sync-restore")
-                ) {
-                    enqueue_manual(job);
-                } else if command_name(&job.args) == Some("classify") {
-                    match classify_tx.try_send(job) {
-                        Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(job)) => {
-                            let _ = job
-                                .reply
-                                .send(Err("classification request queue is full".into()));
-                        }
-                        Err(mpsc::TrySendError::Disconnected(job)) => {
-                            let _ = job.reply.send(Err("classification worker is gone".into()));
-                        }
-                    }
-                } else if is_exclusive(&job.args) {
-                    shared_exclusive().reserve();
-                    match write_tx.try_send(WriteJob::Command(job)) {
-                        Ok(()) => {}
-                        Err(mpsc::TrySendError::Full(WriteJob::Command(job))) => {
-                            shared_exclusive().cancel_reservation();
-                            let _ = job.reply.send(Err("write request queue is full".into()));
-                        }
-                        Err(mpsc::TrySendError::Disconnected(WriteJob::Command(job))) => {
-                            shared_exclusive().cancel_reservation();
-                            let _ = job.reply.send(Err("write worker is gone".into()));
-                        }
-                        Err(_) => unreachable!("only a command was submitted"),
-                    }
-                } else {
-                    pending.push_back(job);
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-        }
-        pending.retain(|job| {
-            if job.deadline.expired() {
-                let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                false
-            } else { true }
-        });
-        loop {
-            let ordinary_available = RUNNING.load(Ordering::Acquire).saturating_sub(LIGHT_RUNNING.load(Ordering::Acquire)) < limit;
-            let position = if LIGHT_RUNNING.load(Ordering::Acquire) < 2 {
-                pending.iter().position(|job| matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision")))
-            } else { None };
-            let job = if let Some(position) = position { pending.remove(position) }
-                else if ordinary_available {
-                    pending.iter().position(|job| !matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision")))
-                        .and_then(|position| pending.remove(position))
-                } else { None };
-            let Some(job) = job else { break; };
-            let admission = PROFILE_ADMISSION.lock().unwrap_or_else(|error|error.into_inner());
-            if PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) && !is_status(&job.args) {
-                let _ = job.reply.send(Err("model_switch_busy".into()));
-                continue;
-            }
-            let light_job = matches!(command_name(&job.args), Some("show" | "list" | "status" | "memory-revision"));
-            if light_job { LIGHT_RUNNING.fetch_add(1, Ordering::AcqRel); }
-            let status_job = is_status(&job.args);
-            if status_job {
-                RUNNING_STATUS.fetch_add(1, Ordering::AcqRel);
-            }
-            RUNNING.fetch_add(1, Ordering::AcqRel);
-            drop(admission);
-            let reply = job.reply.clone();
-            let spawned = std::thread::Builder::new()
-                .name("respire-read".into())
-                .stack_size(16 * 1024 * 1024)
-                .spawn(move || {
-                    let _slot = RunningGuard { status: status_job, light: light_job };
-                    if !job.deadline.start() {
-                        let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-                        return;
-                    }
-                    mark_worker();
-                    let generation = sync_generation();
-                    let revision_probe = command_name(&job.args) == Some("memory-revision");
-                    let captured = crate::capture_run(job.args);
-                    if !revision_probe { kick_index(); }
-                    let result = check_sync_context(generation).map(|_| captured).map_err(|error| format!("{error:#}"));
-                    let _ = job.reply.send(result);
-                });
-            if spawned.is_err() {
-                RUNNING.fetch_sub(1, Ordering::AcqRel);
-                if light_job { LIGHT_RUNNING.fetch_sub(1, Ordering::AcqRel); }
-                if status_job {
-                    RUNNING_STATUS.fetch_sub(1, Ordering::AcqRel);
-                }
-                let _ = reply.send(Err("failed to start a read thread".into()));
-            }
-        }
-        if let Some(idle) = idle {
-            if RUNNING.load(Ordering::Acquire) > 0
-                || WRITE_RUNNING.load(Ordering::Acquire)
-                || CLASSIFY_RUNNING.load(Ordering::Acquire)
-                || sync_running()
-                || index_has_work()
-                || !pending.is_empty()
-            {
-                idle_since = Instant::now();
-            } else if idle_since.elapsed() >= idle {
-                break;
-            }
-        }
-    }
-    STOPPING.store(true, Ordering::Release);
-    SYNC_CV.notify_all();
-    INDEX_CV.notify_all();
-    if let Ok(mut installed) = WRITE_TX.lock() {
-        installed.take();
-    }
-    drop(write_tx);
-    drop(classify_tx);
-    for job in pending {
-        let _ = job.reply.send(Err("runtime is stopping".into()));
-    }
-    while PROFILE_SWITCH_RUNNING.load(Ordering::Acquire) { std::thread::sleep(Duration::from_millis(25)); }
-    if let Err(error) = respire_app::core_sdk::worker::shutdown() {
-        eprintln!("Core worker shutdown failed: {error:#}");
-        // This stack still owns LibraryLock. Never reach drop(_lock) while a
-        // native child has not been confirmed dead.
-        stop_process(0);
-    }
-    if let Ok(writer) = writer {
-        let _ = writer.join();
-    }
-    if let Ok(classifier) = classifier {
-        let _ = classifier.join();
-    }
-    if let Ok(indexer) = indexer {
-        if indexer.join().is_err() {
-            eprintln!("background index worker panicked during shutdown");
-        }
-    }
-    while RUNNING.load(Ordering::Acquire) > 0 || sync_running() {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    drop(_lock);
-    stop_process(0);
-}
-
-fn is_status(args: &[String]) -> bool {
-    command_name(args) == Some("status")
-}
-
-/// Viewing account/configuration state must not invalidate ongoing sync or indexing.
-fn is_context_query(args: &[String]) -> bool {
-    if !matches!(command_name(args), Some("account" | "space" | "config" | "agent-config" | "session")) {
-        return false;
-    }
-    let Ok(cli) = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned())) else {
-        return false;
-    };
-    match cli.command {
-        Some(crate::Command::Account { action, .. }) => action == "list",
-        Some(crate::Command::Space { action, .. }) => matches!(action.as_str(), "list" | "members"),
-        Some(crate::Command::Config { data_dir: None, addr: None, autosync: None, cure_auto: None, rpc_parallelism: None })
-        | Some(crate::Command::AgentConfig { set: None })
-        | Some(crate::Command::Session { command: crate::SessionCommand::List }) => true,
-        _ => false,
-    }
-}
-
-const GLOBAL_VALUE_FLAGS: [&str; 2] = ["--progress-id", "--model-task-id"];
-
-// Keep client timeout classification and server routing on the same argv rules.
-// A tracked request ID is a value even when it spells a command such as sync.
-pub(crate) fn command_words(args: &[String]) -> impl Iterator<Item = &str> + '_ {
-    let mut values = args.iter();
-    std::iter::from_fn(move || {
-        while let Some(arg) = values.next() {
-            if GLOBAL_VALUE_FLAGS.contains(&arg.as_str()) {
-                let _ = values.next();
-            } else if !arg.starts_with('-') {
-                return Some(arg.as_str());
-            }
-        }
-        None
-    })
-}
-
-fn command_name(args: &[String]) -> Option<&str> {
-    command_words(args).next()
-}
-
-fn diary_lexical_mode(args: &[String]) -> bool {
-    // Values after -- are literal queries, never runtime routing flags.
-    let options=&args[..args.iter().position(|arg|arg=="--").unwrap_or(args.len())];
-    let modes:Vec<&str>=options.iter().enumerate().filter_map(|(index,arg)| {
-        if arg=="--mode" {Some(options.get(index+1).map(String::as_str).unwrap_or(""))}
-        else {arg.strip_prefix("--mode=")}
-    }).collect();
-    modes==["lexical"]
-}
-
-fn needs_inference(args: &[String]) -> bool {
-    matches!(command_name(args), Some("remember" | "recall" | "related" | "reembed" | "classify" | "update"))
-        || (command_name(args) == Some("diary-search") && !diary_lexical_mode(args))
-        || (command_name(args) == Some("model") && args.iter().any(|arg| matches!(arg.as_str(), "probe" | "load")))
-}
-
-fn cached(id: &str) -> Option<RpcResponse> {
-    CACHE
-        .lock()
-        .ok()?
-        .iter()
-        .find(|(key, _)| key == id)
-        .map(|(_, response)| response.clone())
-}
-
-fn remember(id: &str, response: &RpcResponse) {
-    if id.is_empty() {
-        return;
-    }
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.retain(|(key, _)| key != id);
-        cache.push((id.to_owned(), response.clone()));
-        if cache.len() > 64 {
-            let extra = cache.len() - 64;
-            cache.drain(0..extra);
-        }
-    }
-}
-
-fn current_url() -> String {
-    WEB_URL
-        .lock()
-        .unwrap_or_else(|err| err.into_inner())
-        .clone()
-}
-
-pub(crate) fn runtime_dir_path() -> PathBuf {
-    runtime_dir()
-}
-
-fn runtime_dir() -> PathBuf {
-    respire::service::main_data_dir().join("runtime")
-}
-
-fn endpoint_path() -> PathBuf {
-    runtime_dir().join("endpoint.json")
-}
-
-fn write_endpoint(url: &str) -> Result<()> {
-    let dir = runtime_dir();
-    std::fs::create_dir_all(&dir)?;
-    let body = json!({
-        "v": PROTOCOL_V,
-        "pid": std::process::id(),
-        "bin": env!("CARGO_PKG_VERSION"),
-        "url": url,
-    });
-    std::fs::write(endpoint_path(), serde_json::to_vec_pretty(&body)?)?;
-    Ok(())
-}
-
-fn endpoint_pid() -> Option<u32> {
-    let text = std::fs::read_to_string(endpoint_path()).ok()?;
-    let data: Value = serde_json::from_str(&text).ok()?;
-    data.get("pid")?
-        .as_u64()
-        .and_then(|pid| u32::try_from(pid).ok())
-}
+// Argv classification and endpoint-record plumbing live in the shared
+// rpc_worker module; re-exported so `rpc::...` call sites keep resolving.
+pub(crate) use respire_commands::rpc_worker::{
+    command_name, command_words, current_url, diary_lexical_mode, endpoint_path, endpoint_pid,
+    is_context_query, is_status, needs_inference, runtime_dir, runtime_dir_path, write_endpoint,
+    GLOBAL_VALUE_FLAGS, PROTOCOL_V, WEB_URL,
+};
 
 /// Recovery must not wait on RPC, model locks or a library lock.
 pub(crate) fn force_stop_for_reset() -> Result<Option<u32>> {
@@ -2591,23 +737,6 @@ pub(crate) fn force_stop_for_reset() -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
-/// Only a refused connection permits startup; authentication and access failures
-/// leave the existing service untouched.
-pub(crate) fn probe_runtime() -> Result<Option<crate::net_rpc::Health>> {
-    match crate::net_rpc::health() {
-        Ok(health) => Ok(Some(health)),
-        Err(error)
-            if matches!(
-                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                Some(crate::runtime_error::RuntimeError::Unavailable)
-            ) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
-}
-
 pub(crate) fn ensure_daemon() -> Result<()> {
     if crate::runtime_policy::client_only() {
         crate::net_rpc::health()?;
@@ -2616,40 +745,107 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     // Normal requests only inspect the resident owner. Lifecycle serialization
     // begins when startup, replacement or recovery is actually required.
     if let Some(health) = probe_runtime()? {
-        if runtime_matches_current(&health)? { return Ok(()); }
+        if runtime_acceptable(&health)? {
+            return Ok(());
+        }
     }
     let _takeover = crate::runtime_policy::takeover_lock()?;
     ensure_daemon_locked()
 }
 
-pub(crate) fn runtime_matches_current(health: &crate::net_rpc::Health) -> Result<bool> {
-    let dest = crate::mcp::stable_bin_path();
-    let src = std::env::current_exe().context("failed to locate the rsrs binary")?;
-    Ok(!health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir), &respire::service::data_dir())
-        && crate::autostart::may_reuse_runtime(health)?
+pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool> {
+    let override_bin = respire::env::var("RSRS_RUNTIME_BIN")
+        .ok()
+        .map(|raw| std::path::PathBuf::from(raw.trim()))
+        .filter(|path| !path.as_os_str().is_empty());
+    let managed = crate::runtime_fetch::managed_runtime_path()?;
+    // Split-transition shim track: with neither an override nor a managed
+    // runtime installed, only this CLI exe serving in-process (health
+    // reporting this binary's train) is an acceptable owner; it keeps
+    // offline hosts and isolated test environments working for the release
+    // train the shim exists for.
+    let shim = override_bin.is_none()
+        && managed.is_none()
         && health.bin == env!("CARGO_PKG_VERSION")
-        && crate::mcp::exe_matches_dest(&health.exe, &dest)
-        && !health.inference_stalled()
-        && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?)
+        && std::env::current_exe()
+            .map(|exe| crate::mcp::exe_matches_dest(&health.exe, &exe))
+            .unwrap_or(false);
+    Ok(!health.data_dir.is_empty()
+        && crate::mcp::same_path(
+            std::path::Path::new(&health.data_dir),
+            &respire::service::data_dir(),
+        )
+        && crate::autostart::may_reuse_runtime(health)?
+        && (crate::runtime_fetch::version_in_accept(&health.runtime_version) || shim)
+        && override_bin
+            .or(managed)
+            .is_none_or(|expected| crate::mcp::exe_matches_dest(&health.exe, &expected))
+        && !health.inference_stalled())
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
-    if crate::autostart::ensure_managed_locked()? { return Ok(()); }
+    if crate::autostart::ensure_managed_locked()? {
+        return Ok(());
+    }
     crate::autostart::check_direct_access()?;
     if let Some(health) = probe_runtime()? {
-        if runtime_matches_current(&health)? {
+        if runtime_acceptable(&health)? {
             return Ok(());
         }
         if health.inference_stalled() {
-            anyhow::ensure!(crate::net_rpc::pid_is_respire(health.pid), "cannot verify the unresponsive runtime process; no lifecycle action taken");
+            anyhow::ensure!(
+                crate::net_rpc::pid_is_respire(health.pid),
+                "cannot verify the unresponsive runtime process; no lifecycle action taken"
+            );
             crate::progress::phase("\u{63a8}\u{7406}\u{65e0}\u{54cd}\u{5e94}\u{ff1b}\u{5bbf}\u{4e3b}\u{6b63}\u{5728}\u{6062}\u{590d} runtime", "Inference unresponsive; host recovering runtime");
         }
         stop_occupant(health.pid)?;
     }
-    let executable = crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+    let self_exe = std::env::current_exe().ok();
+    let mut fallback_shim = false;
+    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
+        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
+        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) | Err(_) => {
+            // First-launch migration: the old owner was stopped above; bring
+            // the pinned managed runtime down before starting the new one.
+            // Offline hosts and isolated test environments cannot fetch it
+            // and fall back to this CLI exe serving in-process (the
+            // --runtime-internal shim) for the transition train.
+            match crate::runtime_fetch::download_and_install(None, None) {
+                Ok(path) => path,
+                Err(download_error) => {
+                    let executable = crate::mcp::materialize_bin().map_err(|error| {
+                        anyhow::anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
+                    })?;
+                    fallback_shim = true;
+                    executable
+                }
+            }
+        }
+    };
     crate::autostart::authorize_detached_boot_locked()?;
-    let mut child =
-        respire_spawn::spawn_runtime_with_boot_token(&executable, crate::autostart::lifecycle_boot_token().as_deref()).context("failed to start host runtime")?;
+    let shim = fallback_shim
+        || self_exe
+        .as_ref()
+        .is_some_and(|exe| crate::mcp::same_path(exe, &executable));
+    let arguments: Vec<std::ffi::OsString> = if shim {
+        // The shim child reuses this binary's --runtime-internal entry, whose
+        // own fallback serves in-process; the data directory and port arrive
+        // through the inherited environment.
+        vec!["--runtime-internal".into()]
+    } else {
+        vec![
+            "serve".into(),
+            "--data-dir".into(),
+            respire::service::data_dir().into_os_string(),
+        ]
+    };
+    let mut child = respire_spawn::spawn_binary_with_boot_token(
+        &executable,
+        &arguments,
+        crate::autostart::lifecycle_boot_token().as_deref(),
+    )
+    .context("failed to start host runtime")?;
     let result = wait_daemon_ready(&mut child, &executable);
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
@@ -2669,8 +865,11 @@ fn confirm_stop_outcome(request: Result<()>, confirm: impl FnOnce() -> Result<()
     match request {
         Ok(()) => Ok(()),
         Err(error) => {
-            if matches!(error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                Some(crate::runtime_error::RuntimeError::Transport(_))) && confirm().is_ok() {
+            if matches!(
+                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
+                Some(crate::runtime_error::RuntimeError::Transport(_))
+            ) && confirm().is_ok()
+            {
                 Ok(())
             } else {
                 Err(error)
@@ -2704,8 +903,10 @@ pub(crate) fn stop_occupant(pid: u32) -> Result<()> {
     crate::net_rpc::wait_until_exited(pid)?;
     // Prove lock.db has been released before a successor opens the library.
     let released = respire::lock::LibraryLock::acquire(
-        std::path::Path::new(&health.data_dir), Duration::from_secs(15),
-    ).context("stopped runtime has not released its library lock")?;
+        std::path::Path::new(&health.data_dir),
+        Duration::from_secs(15),
+    )
+    .context("stopped runtime has not released its library lock")?;
     drop(released);
     Ok(())
 }
@@ -2721,7 +922,11 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
             anyhow::ensure!(
                 health.pid == child.id()
                     && crate::mcp::exe_matches_dest(&health.exe, executable)
-                    && health.bin == env!("CARGO_PKG_VERSION")
+                    // Legacy combined binaries carry this CLI's exact version;
+                    // the standalone runtime reports its own train, accepted
+                    // through the pinned version window instead.
+                    && (health.bin == env!("CARGO_PKG_VERSION")
+                        || crate::runtime_fetch::version_in_accept(&health.runtime_version))
                     && !health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir), &respire::service::data_dir()),
                 "runtime owner changed during startup"
             );
@@ -2744,21 +949,34 @@ mod tests {
     #[test]
     fn diary_inference_routing_honours_modes_and_literal_query_arguments() {
         use clap::Parser;
-        for (args,inference) in [
-            (vec!["diary-search","q"],true),
-            (vec!["diary-search","q","--mode","lexical"],false),
-            (vec!["diary-search","--mode=lexical","q"],false),
-            (vec!["diary-search","--mode","hybrid","--","--mode=lexical"],true),
-            (vec!["diary-search","--","--mode=lexical"],true),
-            (vec!["diary-search","--mode","lexical","--","--mode=hybrid"],false),
-            (vec!["diary-fragment","--neighbors","1","--","s","f"],false),
+        for (args, inference) in [
+            (vec!["diary-search", "q"], true),
+            (vec!["diary-search", "q", "--mode", "lexical"], false),
+            (vec!["diary-search", "--mode=lexical", "q"], false),
+            (
+                vec!["diary-search", "--mode", "hybrid", "--", "--mode=lexical"],
+                true,
+            ),
+            (vec!["diary-search", "--", "--mode=lexical"], true),
+            (
+                vec!["diary-search", "--mode", "lexical", "--", "--mode=hybrid"],
+                false,
+            ),
+            (
+                vec!["diary-fragment", "--neighbors", "1", "--", "s", "f"],
+                false,
+            ),
         ] {
-            let arguments:Vec<String>=args.iter().map(|s|(*s).to_owned()).collect();
-            assert_eq!(needs_inference(&arguments),inference,"{arguments:?}");
-            let parsed=crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args)).unwrap();
-            if let Some(crate::Command::DiarySearch{query,mode,..})=parsed.command {
-                if query=="--mode=lexical" {assert_eq!(mode,"hybrid");}
-                if query=="--mode=hybrid" {assert_eq!(mode,"lexical");}
+            let arguments: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+            assert_eq!(needs_inference(&arguments), inference, "{arguments:?}");
+            let parsed = crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args)).unwrap();
+            if let Some(crate::Command::DiarySearch { query, mode, .. }) = parsed.command {
+                if query == "--mode=lexical" {
+                    assert_eq!(mode, "hybrid");
+                }
+                if query == "--mode=hybrid" {
+                    assert_eq!(mode, "lexical");
+                }
             }
         }
     }
@@ -2766,18 +984,42 @@ mod tests {
     #[test]
     fn shutdown_transport_requires_confirmed_exit_without_replay() {
         use crate::runtime_error::RuntimeError;
-        assert!(confirm_stop_outcome(Err(RuntimeError::Transport("lost ack".into()).into()), || Ok(())).is_ok());
-        let rejected = confirm_stop_outcome(Err(RuntimeError::Transport("original lost ack".into()).into()), || anyhow::bail!("still alive"));
+        assert!(confirm_stop_outcome(
+            Err(RuntimeError::Transport("lost ack".into()).into()),
+            || Ok(())
+        )
+        .is_ok());
+        let rejected = confirm_stop_outcome(
+            Err(RuntimeError::Transport("original lost ack".into()).into()),
+            || anyhow::bail!("still alive"),
+        );
         assert!(rejected.is_err_and(|error| error.to_string().contains("original lost ack")));
-        for error in [RuntimeError::Unauthorized, RuntimeError::Unavailable,
+        for error in [
+            RuntimeError::Unauthorized,
+            RuntimeError::Unavailable,
             RuntimeError::TokenUnreadable("synthetic".into()),
-            RuntimeError::OutcomeUnknown { request_id: "synthetic".into(), detail: "unknown".into() }] {
+            RuntimeError::OutcomeUnknown {
+                request_id: "synthetic".into(),
+                detail: "unknown".into(),
+            },
+        ] {
             let mut called = false;
-            assert!(confirm_stop_outcome(Err(error.into()), || { called = true; Ok(()) }).is_err());
-            assert!(!called, "non-transport failures must never become a successful stop");
+            assert!(confirm_stop_outcome(Err(error.into()), || {
+                called = true;
+                Ok(())
+            })
+            .is_err());
+            assert!(
+                !called,
+                "non-transport failures must never become a successful stop"
+            );
         }
         let mut called = false;
-        assert!(confirm_stop_outcome(Ok(()), || { called = true; Ok(()) }).is_ok());
+        assert!(confirm_stop_outcome(Ok(()), || {
+            called = true;
+            Ok(())
+        })
+        .is_ok());
         assert!(!called);
     }
 
@@ -2794,21 +1036,33 @@ mod tests {
 
     #[test]
     fn supervised_drain_waits_past_legacy_deadline_until_work_finishes() -> Result<()> {
-        let busy=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let (managed_tx,managed_rx)=mpsc::channel();
-        let work=busy.clone();
-        let managed=std::thread::spawn(move || {wait_for_drain(true,||work.load(Ordering::Acquire));let _=managed_tx.send(());});
-        let (legacy_tx,legacy_rx)=mpsc::channel();
-        let work=busy.clone();
-        let legacy=std::thread::spawn(move || {wait_for_drain(false,||work.load(Ordering::Acquire));let _=legacy_tx.send(());});
-        let legacy_result=legacy_rx.recv_timeout(Duration::from_secs(6));
-        let still_waiting=managed_rx.try_recv().is_err();
-        busy.store(false,Ordering::Release);
+        let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (managed_tx, managed_rx) = mpsc::channel();
+        let work = busy.clone();
+        let managed = std::thread::spawn(move || {
+            wait_for_drain(true, || work.load(Ordering::Acquire));
+            let _ = managed_tx.send(());
+        });
+        let (legacy_tx, legacy_rx) = mpsc::channel();
+        let work = busy.clone();
+        let legacy = std::thread::spawn(move || {
+            wait_for_drain(false, || work.load(Ordering::Acquire));
+            let _ = legacy_tx.send(());
+        });
+        let legacy_result = legacy_rx.recv_timeout(Duration::from_secs(6));
+        let still_waiting = managed_rx.try_recv().is_err();
+        busy.store(false, Ordering::Release);
         managed_rx.recv_timeout(Duration::from_secs(2))?;
-        managed.join().map_err(|_|anyhow::anyhow!("managed drain panicked"))?;
-        legacy.join().map_err(|_|anyhow::anyhow!("legacy drain panicked"))?;
-        anyhow::ensure!(legacy_result.is_ok() && still_waiting,
-            "supervised drain exited while work remained or legacy shutdown timing changed");
+        managed
+            .join()
+            .map_err(|_| anyhow::anyhow!("managed drain panicked"))?;
+        legacy
+            .join()
+            .map_err(|_| anyhow::anyhow!("legacy drain panicked"))?;
+        anyhow::ensure!(
+            legacy_result.is_ok() && still_waiting,
+            "supervised drain exited while work remained or legacy shutdown timing changed"
+        );
         Ok(())
     }
 
@@ -2837,15 +1091,25 @@ mod tests {
 
     #[test]
     fn writes_queue_and_reads_may_run_together() {
-        for args in [vec!["account", "list"], vec!["config"], vec!["agent-config"],
-            vec!["session", "list"], vec!["space", "list"], vec!["space", "members"]] {
+        for args in [
+            vec!["account", "list"],
+            vec!["config"],
+            vec!["agent-config"],
+            vec!["session", "list"],
+            vec!["space", "list"],
+            vec!["space", "members"],
+        ] {
             let args = args.into_iter().map(String::from).collect::<Vec<_>>();
             assert!(is_context_query(&args));
             assert!(!is_exclusive(&args));
         }
-        for args in [vec!["account", "use", "main"], vec!["config", "--autosync", "false"],
-            vec!["agent-config", "--set", "model_mirror=auto"], vec!["session", "revoke", "fixture"],
-            vec!["space", "use", "fixture"]] {
+        for args in [
+            vec!["account", "use", "main"],
+            vec!["config", "--autosync", "false"],
+            vec!["agent-config", "--set", "model_mirror=auto"],
+            vec!["session", "revoke", "fixture"],
+            vec!["space", "use", "fixture"],
+        ] {
             let args = args.into_iter().map(String::from).collect::<Vec<_>>();
             assert!(!is_context_query(&args));
             assert!(is_exclusive(&args));
@@ -2871,12 +1135,19 @@ mod tests {
         use clap::CommandFactory;
         let mut command = crate::Cli::command();
         command.build();
-        let actual: std::collections::BTreeSet<_> = command.get_arguments()
+        let actual: std::collections::BTreeSet<_> = command
+            .get_arguments()
             .filter(|arg| arg.is_global_set() && arg.get_action().takes_values())
             .filter_map(|arg| arg.get_long().map(|name| format!("--{name}")))
             .collect();
-        let expected = GLOBAL_VALUE_FLAGS.iter().map(|flag| (*flag).to_owned()).collect();
-        assert_eq!(actual, expected, "new valued globals must update the shared argv classifier");
+        let expected = GLOBAL_VALUE_FLAGS
+            .iter()
+            .map(|flag| (*flag).to_owned())
+            .collect();
+        assert_eq!(
+            actual, expected,
+            "new valued globals must update the shared argv classifier"
+        );
     }
 
     #[test]
@@ -2888,8 +1159,16 @@ mod tests {
         );
         assert!(is_status(&["--json".into(), "status".into()]));
         assert!(!is_status(&["remember".into()]));
-        let tracked = ["--json", "--progress-id", "request-one", "--model-task-id", "task-one", "remember", "body"]
-            .map(String::from);
+        let tracked = [
+            "--json",
+            "--progress-id",
+            "request-one",
+            "--model-task-id",
+            "task-one",
+            "remember",
+            "body",
+        ]
+        .map(String::from);
         assert_eq!(command_name(&tracked), Some("remember"));
         assert!(!is_exclusive(&tracked));
         assert!(needs_inference(&tracked));
@@ -2944,16 +1223,28 @@ mod tests {
         assert_eq!(unknown.code.as_deref(), Some("protocol_version_mismatch"));
         assert!(unknown.error.unwrap_or_default().contains("unknown method"));
         let scope = crate::progress::Scope::start(Some("foreground-one".into()), false, false);
-        crate::progress::phase("\u{7b49}\u{5f85}\u{670d}\u{52a1}\u{5668}", "Waiting for server");
+        crate::progress::phase(
+            "\u{7b49}\u{5f85}\u{670d}\u{52a1}\u{5668}",
+            "Waiting for server",
+        );
         let mut request = req("cli.progress", "progress-one");
         request.args = vec!["foreground-one".into()];
         let response = dispatch(request, &tx);
-        assert!(response.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_string()));
+        assert!(response
+            .envelope
+            .as_ref()
+            .is_some_and(|value| value.summary["phase"].is_string()));
         let mut request = req("cli.progress", "progress-other");
         request.args = vec!["foreground-other".into()];
         let unrelated = dispatch(request, &tx);
-        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["phase"].is_null()));
-        assert!(unrelated.envelope.as_ref().is_some_and(|value| value.summary["inference"]["capacity"] == 64
+        assert!(unrelated
+            .envelope
+            .as_ref()
+            .is_some_and(|value| value.summary["phase"].is_null()));
+        assert!(unrelated
+            .envelope
+            .as_ref()
+            .is_some_and(|value| value.summary["inference"]["capacity"] == 64
                 && value.summary["inference"]["foreground"]["capacity"] == 32
                 && value.summary["inference"]["background"]["capacity"] == 32));
         drop(scope);
@@ -2962,21 +1253,33 @@ mod tests {
 
     #[test]
     fn deferred_requests_return_before_execution_and_reply_exactly_once() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (tx, rx) = mpsc::channel();
         let (finished, response) = mpsc::channel();
         let mut request = req("cli.exec", "deferred-test-write");
         request.args = vec!["show".into(), "synthetic-id".into()];
-        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        dispatch_deferred(request, &tx, move |value| {
+            let _ = finished.send(value);
+        });
         // Dispatch did not wait for a worker or create a waiting transport thread.
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(response.try_recv().is_err());
         assert!(job.deadline.start());
-        assert!(!job.deadline.cancel(), "an executing write must keep its actual result");
+        assert!(
+            !job.deadline.cancel(),
+            "an executing write must keep its actual result"
+        );
         let reply = job.reply.clone();
-        reply.send(Err("synthetic native failure after execution".into())).map_err(anyhow::Error::msg)?;
+        reply
+            .send(Err("synthetic native failure after execution".into()))
+            .map_err(anyhow::Error::msg)?;
         let result = response.recv_timeout(Duration::from_secs(1))?;
-        assert!(result.error.as_deref().is_some_and(|error| error.contains("synthetic native failure")));
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("synthetic native failure")));
         assert!(reply.send(Err("duplicate".into())).is_err());
         assert!(response.try_recv().is_err());
         Ok(())
@@ -2984,42 +1287,64 @@ mod tests {
 
     #[test]
     fn cancelled_deferred_request_cannot_execute_a_write() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (tx, rx) = mpsc::channel();
         let (finished, response) = mpsc::channel();
         let mut request = req("cli.exec", "deferred-test-cancelled");
         request.args = vec!["show".into(), "synthetic-id".into()];
         request.queue_wait_ms = Some(0);
-        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        dispatch_deferred(request, &tx, move |value| {
+            let _ = finished.send(value);
+        });
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(job.deadline.expired());
         assert!(!job.deadline.start());
         let _ = job.reply.send(Err(QUEUE_EXPIRED.into()));
-        assert!(response.recv_timeout(Duration::from_secs(1))?.error.as_deref().is_some_and(|error| error.contains("not started")));
+        assert!(response
+            .recv_timeout(Duration::from_secs(1))?
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not started")));
         // A subsequent accepted request has an independent deadline and succeeds.
         let (finished, response) = mpsc::channel();
         let mut request = req("cli.exec", "deferred-test-next");
         request.args = vec!["show".into(), "synthetic-id".into()];
-        dispatch_deferred(request, &tx, move |value| { let _ = finished.send(value); });
+        dispatch_deferred(request, &tx, move |value| {
+            let _ = finished.send(value);
+        });
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(job.deadline.start());
-        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()) })).map_err(anyhow::Error::msg)?;
+        job.reply
+            .send(Ok(crate::Captured {
+                exit: 0,
+                envelope: ResultEnvelope::new("show", OutputStatus::Ok, json!({}), Vec::new()),
+            }))
+            .map_err(anyhow::Error::msg)?;
         assert!(response.recv_timeout(Duration::from_secs(1))?.ok);
         Ok(())
     }
 
     #[test]
     fn queue_expiry_does_not_require_a_responsive_worker() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (tx, rx) = mpsc::channel();
         let (done, receive) = mpsc::channel();
         let mut request = req("cli.exec", "unresponsive-queue-write");
         request.args = vec!["remember".into(), "synthetic write".into()];
         request.queue_wait_ms = Some(30);
-        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
+        dispatch_deferred(request, &tx, move |response| {
+            let _ = done.send(response);
+        });
         // Fault injection: no dispatcher/worker consumes this accepted job.
         let response = receive.recv_timeout(Duration::from_secs(1))?;
-        assert!(response.error.as_deref().is_some_and(|error| error.contains("not started")));
+        assert!(response
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("not started")));
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(!job.deadline.start());
         Ok(())
@@ -3027,13 +1352,17 @@ mod tests {
 
     #[test]
     fn started_write_keeps_result_across_client_deadline_and_duplicate_id() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let (tx, rx) = mpsc::channel();
         let (done, receive) = mpsc::channel();
         let mut request = req("cli.exec", "held-started-write");
         request.args = vec!["remember".into(), "synthetic write".into()];
         request.queue_wait_ms = Some(50);
-        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
+        dispatch_deferred(request, &tx, move |response| {
+            let _ = done.send(response);
+        });
         let job = rx.recv_timeout(Duration::from_secs(1))?;
         assert!(job.deadline.start());
         // Controlled execution ignores cancellation while it is held, then returns.
@@ -3043,18 +1372,49 @@ mod tests {
         let (done, duplicate) = mpsc::channel();
         let mut request = req("cli.exec", "held-started-write");
         request.args = vec!["remember".into(), "synthetic write".into()];
-        dispatch_deferred(request, &tx, move |response| { let _ = done.send(response); });
-        assert_eq!(duplicate.recv_timeout(Duration::from_secs(1))?.code.as_deref(), Some("request_in_progress"));
-        assert!(rx.try_recv().is_err(), "same ID must not create another write");
+        dispatch_deferred(request, &tx, move |response| {
+            let _ = done.send(response);
+        });
+        assert_eq!(
+            duplicate
+                .recv_timeout(Duration::from_secs(1))?
+                .code
+                .as_deref(),
+            Some("request_in_progress")
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "same ID must not create another write"
+        );
         let mut inspect = req("runtime.result", "inspect-pending-write");
         inspect.args = vec!["held-started-write".into()];
-        assert_eq!(dispatch(inspect, &tx).envelope.as_ref().map(|value| &value.summary["state"]), Some(&json!("pending")));
-        job.reply.send(Ok(crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) })).map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            dispatch(inspect, &tx)
+                .envelope
+                .as_ref()
+                .map(|value| &value.summary["state"]),
+            Some(&json!("pending"))
+        );
+        job.reply
+            .send(Ok(crate::Captured {
+                exit: 0,
+                envelope: ResultEnvelope::new(
+                    "remember",
+                    OutputStatus::Ok,
+                    json!({"committed":true}),
+                    Vec::new(),
+                ),
+            }))
+            .map_err(anyhow::Error::msg)?;
         assert!(receive.recv_timeout(Duration::from_secs(1))?.ok);
         let mut inspect = req("runtime.result", "inspect-completed-write");
         inspect.args = vec!["held-started-write".into()];
         let response = dispatch(inspect, &tx);
-        assert!(response.envelope.as_ref().is_some_and(|value| value.summary["state"] == "completed" && value.summary["response"]["envelope"]["summary"]["committed"] == true));
+        assert!(response
+            .envelope
+            .as_ref()
+            .is_some_and(|value| value.summary["state"] == "completed"
+                && value.summary["response"]["envelope"]["summary"]["committed"] == true));
         Ok(())
     }
 
@@ -3066,22 +1426,37 @@ mod tests {
         if std::env::var_os("RSRS_TRANSPORT_TEST_CHILD").is_none() {
             let profile = tempfile::tempdir()?;
             let output = Command::new(std::env::current_exe()?)
-                .args(["--exact", "rpc::tests::http_pipeline_with_held_execution_and_nonreading_peer", "--nocapture", "--test-threads=1"])
+                .args([
+                    "--exact",
+                    "rpc::tests::http_pipeline_with_held_execution_and_nonreading_peer",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
                 .env("RSRS_TRANSPORT_TEST_CHILD", "1")
                 .env("RSRS_DATA_DIR", profile.path())
                 .env("RSRS_CORE_TEST_MODE", "1")
                 .env_remove("RSRS_RPC_TOKEN")
                 .output()?;
-            anyhow::ensure!(output.status.success(), "isolated transport regression failed: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            anyhow::ensure!(
+                output.status.success(),
+                "isolated transport regression failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Ok(());
         }
         let (tx, rx) = mpsc::channel();
-        anyhow::ensure!(JOB_TX.set(Mutex::new(tx.clone())).is_ok(), "child sender already initialized");
+        anyhow::ensure!(
+            JOB_TX.set(Mutex::new(tx.clone())).is_ok(),
+            "child sender already initialized"
+        );
         WORKERS.store(1, Ordering::Release);
         let bound = crate::runtime_http::bind_runtime(Some(0), "127.0.0.1")?;
         let address = bound.server.local_addr()?;
         let base = bound.url;
-        std::thread::spawn(move || { let _ = crate::runtime_http::serve_loop(bound.server); });
+        std::thread::spawn(move || {
+            let _ = crate::runtime_http::serve_loop(bound.server);
+        });
         let url = format!("{base}/api/rpc");
         let blocker = std::thread::spawn(move || -> Result<serde_json::Value> {
             Ok(ureq::post(&url).timeout(Duration::from_secs(5)).send_json(json!({"v":1,"id":"held-slot","method":"cli.exec","args":["remember","controlled blocker"]}))?.into_json()?)
@@ -3093,43 +1468,94 @@ mod tests {
         pipeline.set_read_timeout(Some(Duration::from_secs(5)))?;
         for (id, wait) in [("held-pipeline-a", None), ("held-pipeline-b", Some(0u64))] {
             let mut body = json!({"v":1,"id":id,"method":"cli.exec","args":["remember","controlled queued write"]});
-            if let Some(wait) = wait { body["queue_wait_ms"] = json!(wait); }
+            if let Some(wait) = wait {
+                body["queue_wait_ms"] = json!(wait);
+            }
             let body = body.to_string();
-            let connection = if wait.is_some() { "Connection: close\r\n" } else { "" };
+            let connection = if wait.is_some() {
+                "Connection: close\r\n"
+            } else {
+                ""
+            };
             write!(pipeline, "POST /api/rpc HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\n{connection}Content-Length: {}\r\n\r\n{body}", body.len())?;
         }
         let queued = rx.recv_timeout(Duration::from_secs(2))?;
-        anyhow::ensure!(!queued.deadline.running(), "queued request consumed the held execution slot");
-        let health: Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(1)).call()?.into_json()?;
-        anyhow::ensure!(health["pid"] == std::process::id(), "control channel was blocked");
-        let captured = || crate::Captured { exit: 0, envelope: ResultEnvelope::new("remember", OutputStatus::Ok, json!({"committed":true}), Vec::new()) };
-        held.reply.send(Ok(captured())).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            !queued.deadline.running(),
+            "queued request consumed the held execution slot"
+        );
+        let health: Value = ureq::get(&format!("{base}/api/health"))
+            .timeout(Duration::from_secs(1))
+            .call()?
+            .into_json()?;
+        anyhow::ensure!(
+            health["pid"] == std::process::id(),
+            "control channel was blocked"
+        );
+        let captured = || crate::Captured {
+            exit: 0,
+            envelope: ResultEnvelope::new(
+                "remember",
+                OutputStatus::Ok,
+                json!({"committed":true}),
+                Vec::new(),
+            ),
+        };
+        held.reply
+            .send(Ok(captured()))
+            .map_err(anyhow::Error::msg)?;
         RUNNING.store(0, Ordering::Release);
-        anyhow::ensure!(blocker.join().map_err(|_| anyhow::anyhow!("blocker client panicked"))??["ok"] == true, "blocker result lost");
-        anyhow::ensure!(queued.deadline.start(), "A expired before the held slot was released");
+        anyhow::ensure!(
+            blocker
+                .join()
+                .map_err(|_| anyhow::anyhow!("blocker client panicked"))??["ok"]
+                == true,
+            "blocker result lost"
+        );
+        anyhow::ensure!(
+            queued.deadline.start(),
+            "A expired before the held slot was released"
+        );
         // Sending a large reply while the peer does not read must not hold the
         // actor/worker. Only the async connection task may wait for socket space.
         let mut large = captured();
         large.envelope.details = json!({"controlled_payload":"x".repeat(8*1024*1024)});
         let start = Instant::now();
         queued.reply.send(Ok(large)).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(start.elapsed() < Duration::from_millis(200), "response I/O blocked the execution actor");
+        anyhow::ensure!(
+            start.elapsed() < Duration::from_millis(200),
+            "response I/O blocked the execution actor"
+        );
         std::thread::sleep(Duration::from_millis(100));
-        let health: Value = ureq::get(&format!("{base}/api/health")).timeout(Duration::from_secs(1)).call()?.into_json()?;
-        anyhow::ensure!(health["pid"] == std::process::id(), "slow-reader blocked control");
+        let health: Value = ureq::get(&format!("{base}/api/health"))
+            .timeout(Duration::from_secs(1))
+            .call()?
+            .into_json()?;
+        anyhow::ensure!(
+            health["pid"] == std::process::id(),
+            "slow-reader blocked control"
+        );
         let mut wire = String::new();
         pipeline.read_to_string(&mut wire)?;
-        let first = wire.find("held-pipeline-a").ok_or_else(|| anyhow::anyhow!("pipeline A reply missing"))?;
-        let second = wire.find("held-pipeline-b").ok_or_else(|| anyhow::anyhow!("pipeline B reply missing"))?;
+        let first = wire
+            .find("held-pipeline-a")
+            .ok_or_else(|| anyhow::anyhow!("pipeline A reply missing"))?;
+        let second = wire
+            .find("held-pipeline-b")
+            .ok_or_else(|| anyhow::anyhow!("pipeline B reply missing"))?;
         anyhow::ensure!(first < second, "pipeline replies reordered");
-        anyhow::ensure!(wire.contains("command was not started"), "B did not expire before execution");
+        anyhow::ensure!(
+            wire.contains("command was not started"),
+            "B did not expire before execution"
+        );
         let cancelled = rx.recv_timeout(Duration::from_secs(2))?;
         anyhow::ensure!(!cancelled.deadline.start(), "expired B executed a write");
         Ok(())
     }
 
     #[test]
-    fn sync_snapshot_wait_does_not_stop_dispatching_reads_and_cancelled_sync_never_starts() -> Result<()> {
+    fn sync_snapshot_wait_does_not_stop_dispatching_reads_and_cancelled_sync_never_starts(
+    ) -> Result<()> {
         if std::env::var_os("RSRS_SYNC_GATE_TEST_CHILD").is_none() {
             let profile = tempfile::tempdir()?;
             let output = Command::new(std::env::current_exe()?)
@@ -3140,15 +1566,34 @@ mod tests {
                 .env("RSRS_NO_AUTOSYNC", "1")
                 .env_remove("RSRS_RPC_TOKEN")
                 .output()?;
-            anyhow::ensure!(output.status.success(), "isolated sync gate regression failed: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            anyhow::ensure!(
+                output.status.success(),
+                "isolated sync gate regression failed: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
             return Ok(());
         }
         let (tx, rx) = mpsc::channel();
         WORKERS.store(1, Ordering::Release);
-        let library = respire::lock::LibraryLock::acquire(&respire::service::data_dir(), Duration::from_secs(120))?;
+        let library = respire::lock::LibraryLock::acquire(
+            &respire::service::data_dir(),
+            Duration::from_secs(120),
+        )?;
         std::thread::spawn(move || dispatch_loop(rx, 1, None, library));
-        let commands = [vec!["--json".into(), "show".into(), "controlled-missing-id".into()],
-            vec!["--json".into(), "recall".into(), "controlled empty-profile query".into(), "--no-related".into()]];
+        let commands = [
+            vec![
+                "--json".into(),
+                "show".into(),
+                "controlled-missing-id".into(),
+            ],
+            vec![
+                "--json".into(),
+                "recall".into(),
+                "controlled empty-profile query".into(),
+                "--no-related".into(),
+            ],
+        ];
         let mut original = Vec::new();
         for args in &commands {
             original.push(submit(&tx, args.clone(), false).map_err(anyhow::Error::msg)?);
@@ -3158,25 +1603,59 @@ mod tests {
         let gate = shared_exclusive();
         let held = gate.acquire(true);
         let (done, result) = mpsc::channel();
-        let sync = enqueue_job(&tx, vec!["sync".into()], false,
-            Reply::new(move |response| { let _ = done.send(response); }), Duration::from_millis(60)).map_err(anyhow::Error::msg)?;
+        let sync = enqueue_job(
+            &tx,
+            vec!["sync".into()],
+            false,
+            Reply::new(move |response| {
+                let _ = done.send(response);
+            }),
+            Duration::from_millis(60),
+        )
+        .map_err(anyhow::Error::msg)?;
         for (args, before) in commands.iter().zip(original.iter()) {
             let (done, result) = mpsc::channel();
-            enqueue_job(&tx, args.clone(), false, Reply::new(move |response| { let _ = done.send(response); }), Duration::from_secs(1)).map_err(anyhow::Error::msg)?;
-            let after = result.recv_timeout(Duration::from_secs(2))?.map_err(anyhow::Error::msg)?;
+            enqueue_job(
+                &tx,
+                args.clone(),
+                false,
+                Reply::new(move |response| {
+                    let _ = done.send(response);
+                }),
+                Duration::from_secs(1),
+            )
+            .map_err(anyhow::Error::msg)?;
+            let after = result
+                .recv_timeout(Duration::from_secs(2))?
+                .map_err(anyhow::Error::msg)?;
             anyhow::ensure!(after.exit == before.exit && std::mem::discriminant(&after.envelope.status) == std::mem::discriminant(&before.envelope.status) && after.envelope.errors == before.envelope.errors,
                 "read changed outcome or stopped progressing while sync snapshot awaited the write gate");
         }
         let expired = result.recv_timeout(Duration::from_secs(1))?;
-        anyhow::ensure!(expired.as_ref().err().is_some_and(|error| error.contains("not started")), "waiting sync did not expire");
-        anyhow::ensure!(!sync.running() && sync.expired(), "sync ran before its snapshot gate was available");
+        anyhow::ensure!(
+            expired
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.contains("not started")),
+            "waiting sync did not expire"
+        );
+        anyhow::ensure!(
+            !sync.running() && sync.expired(),
+            "sync ran before its snapshot gate was available"
+        );
         drop(held);
         let until = Instant::now() + Duration::from_secs(2);
         while SYNC_RUNNING.load(Ordering::Acquire) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(5));
         }
-        anyhow::ensure!(!sync.running(), "cancelled sync started after the gate was released");
-        anyhow::ensure!(!SYNC_RUNNING.load(Ordering::Acquire), "sync worker did not recover after cancellation");
+        anyhow::ensure!(
+            !sync.running(),
+            "cancelled sync started after the gate was released"
+        );
+        anyhow::ensure!(
+            !SYNC_RUNNING.load(Ordering::Acquire),
+            "sync worker did not recover after cancellation"
+        );
         Ok(())
     }
 
@@ -3293,7 +1772,9 @@ mod tests {
     }
     #[test]
     fn diary_commit_rechecks_mode_generation_shutdown_and_lifecycle_ownership() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let root = tempfile::tempdir()?;
         let previous = std::env::var_os("RSRS_DATA_DIR");
         std::env::set_var("RSRS_DATA_DIR", root.path());
@@ -3303,29 +1784,53 @@ mod tests {
             let _operation = respire::model_progress::Operation::begin("index")?;
             let mut writes = 0;
             respire::service::set_workspace_mode("normal")?;
-            diary_commit(generation, &mut || { writes += 1; Ok(()) })?;
+            diary_commit(generation, &mut || {
+                writes += 1;
+                Ok(())
+            })?;
             assert_eq!(writes, 1);
             for mode in ["readonly", "off"] {
                 respire::service::set_workspace_mode(mode)?;
-                assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+                assert!(diary_commit(generation, &mut || {
+                    writes += 1;
+                    Ok(())
+                })
+                .is_err());
                 assert_eq!(writes, 1);
             }
             respire::service::set_workspace_mode("normal")?;
-            assert!(diary_commit(generation.wrapping_add(1), &mut || { writes += 1; Ok(()) }).is_err());
+            assert!(diary_commit(generation.wrapping_add(1), &mut || {
+                writes += 1;
+                Ok(())
+            })
+            .is_err());
             STOPPING.store(true, Ordering::Release);
-            assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+            assert!(diary_commit(generation, &mut || {
+                writes += 1;
+                Ok(())
+            })
+            .is_err());
             STOPPING.store(false, Ordering::Release);
             let lifecycle = crate::runtime_policy::takeover_lock()?;
-            assert!(diary_commit(generation, &mut || { writes += 1; Ok(()) }).is_err());
+            assert!(diary_commit(generation, &mut || {
+                writes += 1;
+                Ok(())
+            })
+            .is_err());
             assert_eq!(writes, 1);
             drop(lifecycle);
-            diary_commit(generation, &mut || { writes += 1; Ok(()) })?;
+            diary_commit(generation, &mut || {
+                writes += 1;
+                Ok(())
+            })?;
             assert_eq!(writes, 2);
             Ok(())
         })();
         STOPPING.store(previous_stopping, Ordering::Release);
-        match previous { Some(value) => std::env::set_var("RSRS_DATA_DIR", value), None => std::env::remove_var("RSRS_DATA_DIR") }
+        match previous {
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
+        }
         result
     }
-
 }

@@ -37,7 +37,11 @@ fn main() -> Result<()> {
     let mut fixed = 0usize;
     let mut failed = 0usize;
     for s in &broken {
-        let title = if s.local_title.is_empty() { &s.id[..8] } else { &s.local_title };
+        let title = if s.local_title.is_empty() {
+            &s.id[..8]
+        } else {
+            &s.local_title
+        };
         let mut st = (*s).clone();
         match hydrate_local(&keys, &mut st) {
             Ok(()) => {
@@ -45,17 +49,29 @@ fn main() -> Result<()> {
                     store.put_synced(&st)?;
                 }
                 fixed += 1;
-                println!("  🔧 {} {}  importance \u{2192} {}", &s.id[..8], title, st.local_importance);
+                println!(
+                    "  🔧 {} {}  importance \u{2192} {}",
+                    &s.id[..8],
+                    title,
+                    st.local_importance
+                );
             }
             Err(e) => {
                 failed += 1;
-                println!("  \u{26a0}\u{fe0f} {} \u{89e3}\u{5bc6}\u{5931}\u{8d25}\u{ff1a}{e}", &s.id[..8]);
+                println!(
+                    "  \u{26a0}\u{fe0f} {} \u{89e3}\u{5bc6}\u{5931}\u{8d25}\u{ff1a}{e}",
+                    &s.id[..8]
+                );
             }
         }
     }
     println!(
         "{} \u{56de}\u{586b} {} \u{6761}\u{ff0c}\u{5931}\u{8d25} {failed} \u{6761}",
-        if dry { "🔎 \u{8bd5}\u{8fd0}\u{884c}" } else { "\u{2705}" },
+        if dry {
+            "🔎 \u{8bd5}\u{8fd0}\u{884c}"
+        } else {
+            "\u{2705}"
+        },
         fixed
     );
     Ok(())

@@ -1,55 +1,48 @@
 #![forbid(unsafe_code)]
 
-
-//! respire_app — auth, service, taxonomy, inject, lock, sync, and remote transport
+//! respire_app — client-side application layer (inject, session_import, login_transaction, migration).
 //!
-//! Public application services use the binary Core SDK and public ciphertext helpers.
+//! WP-2c moved the engine-side modules into the respire_app_domain crate. This crate
+//! re-exports every domain module under its original name, so existing
+//! `respire_app::service::...`, `respire_app::memory::...`, `respire_app::transport::...`
+//! and all other engine paths keep resolving with zero caller changes.
 
+pub use respire_core_sdk as core_sdk;
 pub use respire_core_sdk::env;
 
 #[cfg(test)]
 mod test_lock;
 
-pub mod auth;
-pub mod review_approval;
-pub mod review;
-pub mod metadata_gate;
-pub mod input_error;
-pub mod login_transaction;
 pub mod inject;
-pub mod lock;
+pub mod login_transaction;
 pub mod migration;
-pub mod service;
-pub mod diary;
-pub mod embedding;
-pub mod snapshot;
-pub mod feedback;
-pub mod read_heat;
-pub mod recall_fusion;
 pub mod session_import;
-pub mod resident;
-pub mod sync;
-pub mod taxonomy;
-pub mod transport;
-pub use respire_core_sdk as core_sdk;
 
-pub mod memory {
-    pub use respire_core_sdk::{bge, defrag, onnx, search};
-    pub use respire_crypto::{crypto, engine};
-    pub use respire_crypto::{hydrate_local, reembed_embedding, MemoryEngine, SessionKeys};
-    pub use respire_protocol as model;
-    pub use respire_protocol::{Kind, MemoryEntry, MemoryQuery, VERSION_TAG};
-}
+pub use respire_app_domain::auth;
+pub use respire_app_domain::diary;
+pub use respire_app_domain::embedding;
+pub use respire_app_domain::feedback;
+pub use respire_app_domain::input_error;
+pub use respire_app_domain::keystore;
+pub use respire_app_domain::lock;
+pub use respire_app_domain::memory;
+pub use respire_app_domain::metadata_gate;
+pub use respire_app_domain::prompt;
+pub use respire_app_domain::read_heat;
+pub use respire_app_domain::recall_fusion;
+pub use respire_app_domain::resident;
+pub use respire_app_domain::review;
+pub use respire_app_domain::review_approval;
+pub use respire_app_domain::service;
+pub use respire_app_domain::share;
+pub use respire_app_domain::snapshot;
+pub use respire_app_domain::sync;
+pub use respire_app_domain::taxonomy;
+pub use respire_app_domain::transport;
 
-pub use memory::{hydrate_local, MemoryEngine, SessionKeys};
 pub use memory::model::{Kind, MemoryEntry, MemoryQuery, StoredMemory, VERSION_TAG};
+pub use memory::{hydrate_local, MemoryEngine, SessionKeys};
 pub use transport::MemoryTransport;
 
 /// Compatibility version exported for server health responses.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-pub mod share;
-
-pub mod keystore;
-
-pub mod prompt;

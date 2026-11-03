@@ -95,11 +95,28 @@ impl ToolPolicy {
         Self::parse(allow.as_deref(), deny.as_deref())
     }
     fn denial_reason(&self, name: &str, access: ServiceAccess) -> String {
-        if !self.catalog.contains(name) { return "Unknown MCP tool; consult tools/list for supported names".to_owned(); }
+        if !self.catalog.contains(name) {
+            return "Unknown MCP tool; consult tools/list for supported names".to_owned();
+        }
         if access.off && name != "memory_status" {
             return "MCP tool disabled: memory is paused; ALLOW cannot override service mode. Ask the host operator to review the intended service mode".to_owned();
         }
-        if access.readonly && !matches!(name,"memory_status"|"memory_recall"|"memory_list"|"memory_show"|"memory_tree"|"memory_history"|"memory_diary"|"memory_diary_search"|"memory_diary_fragment"|"memory_chain"|"memory_taxonomy") {
+        if access.readonly
+            && !matches!(
+                name,
+                "memory_status"
+                    | "memory_recall"
+                    | "memory_list"
+                    | "memory_show"
+                    | "memory_tree"
+                    | "memory_history"
+                    | "memory_diary"
+                    | "memory_diary_search"
+                    | "memory_diary_fragment"
+                    | "memory_chain"
+                    | "memory_taxonomy"
+            )
+        {
             return "MCP tool disabled: read-only service mode forbids this write; ALLOW cannot grant write access".to_owned();
         }
         if self.deny_all || self.deny.contains(name) {
@@ -190,7 +207,11 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
     {
         return Ok(src);
     }
-    if let Some(path) = crate::autostart::coordinate_materialization().map_err(|error| error.to_string())? { return Ok(path); }
+    if let Some(path) =
+        crate::autostart::coordinate_materialization().map_err(|error| error.to_string())?
+    {
+        return Ok(path);
+    }
     install_binary(&src, &dest, respire::core_sdk::RUNTIME_FILES)?;
     Ok(dest)
 }
@@ -514,13 +535,22 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
     };
     let opt_u64 = |key: &str| args.get(key).and_then(|v| v.as_u64());
     let opt_bool = |key: &str| args.get(key).and_then(|v| v.as_bool());
-    let bounded = |key: &str, min: u64, max: u64| -> Result<Option<u64>,String> {
-        args.get(key).map(|v|v.as_u64().filter(|v|(min..=max).contains(v))
-            .ok_or_else(||format!("{key} must be an integer in {min}..={max}"))).transpose()
+    let bounded = |key: &str, min: u64, max: u64| -> Result<Option<u64>, String> {
+        args.get(key)
+            .map(|v| {
+                v.as_u64()
+                    .filter(|v| (min..=max).contains(v))
+                    .ok_or_else(|| format!("{key} must be an integer in {min}..={max}"))
+            })
+            .transpose()
     };
-    let only_fields = |allowed: &[&str]| -> Result<(),String> {
-        let fields=args.as_object().ok_or("diary arguments must be an object")?;
-        if fields.keys().any(|key|!allowed.contains(&key.as_str())) {return Err("unsupported diary tool argument".into());}
+    let only_fields = |allowed: &[&str]| -> Result<(), String> {
+        let fields = args
+            .as_object()
+            .ok_or("diary arguments must be an object")?;
+        if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err("unsupported diary tool argument".into());
+        }
         Ok(())
     };
     match name {
@@ -573,11 +603,19 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
             if let Some(merge_ids) = opt_str("merge_ids") {
                 cmd.extend(["--merge-ids".to_owned(), merge_ids.to_owned()]);
             }
-            if let Some(id) = opt_str("supersedes") { cmd.extend(["--supersedes".to_owned(),id.to_owned()]); }
+            if let Some(id) = opt_str("supersedes") {
+                cmd.extend(["--supersedes".to_owned(), id.to_owned()]);
+            }
             if let Some(value) = args.get("see_also") {
-                let ids = value.as_array().ok_or("see_also must be an array")?.iter()
-                    .map(|v| v.as_str().ok_or("see_also IDs must be strings")).collect::<Result<Vec<_>,_>>()?;
-                if !ids.is_empty() { cmd.extend(["--see-also".to_owned(),ids.join(",")]); }
+                let ids = value
+                    .as_array()
+                    .ok_or("see_also must be an array")?
+                    .iter()
+                    .map(|v| v.as_str().ok_or("see_also IDs must be strings"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !ids.is_empty() {
+                    cmd.extend(["--see-also".to_owned(), ids.join(",")]);
+                }
             }
             if opt_bool("force") == Some(true) {
                 cmd.push("--force".to_owned());
@@ -587,7 +625,9 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
         "memory_recall" => {
             let query = opt_str("query").ok_or("missing query")?;
             let mut cmd = vec!["recall".to_owned(), query.to_owned()];
-            if opt_bool("related") == Some(false) { cmd.push("--no-related".to_owned()); }
+            if opt_bool("related") == Some(false) {
+                cmd.push("--no-related".to_owned());
+            }
             if let Some(limit) = opt_u64("limit") {
                 cmd.extend(["--limit".to_owned(), limit.to_string()]);
             }
@@ -659,29 +699,42 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
             Ok(cmd)
         }
         "memory_diary_search" => {
-            only_fields(&["query","mode","limit","max_chars"])?;
-            let query=opt_str("query").filter(|q|!q.trim().is_empty() && q.chars().count()<=500)
+            only_fields(&["query", "mode", "limit", "max_chars"])?;
+            let query = opt_str("query")
+                .filter(|q| !q.trim().is_empty() && q.chars().count() <= 500)
                 .ok_or("query must contain 1..=500 Unicode characters")?;
-            let mut cmd=vec!["diary-search".to_owned()];
-            for (key,flag,min,max) in [("limit","--limit",1,20),("max_chars","--max-chars",512,12000)] {
-                if let Some(value)=bounded(key,min,max)? {cmd.extend([flag.to_owned(),value.to_string()]);}
+            let mut cmd = vec!["diary-search".to_owned()];
+            for (key, flag, min, max) in [
+                ("limit", "--limit", 1, 20),
+                ("max_chars", "--max-chars", 512, 12000),
+            ] {
+                if let Some(value) = bounded(key, min, max)? {
+                    cmd.extend([flag.to_owned(), value.to_string()]);
+                }
             }
             if args.get("mode").is_some() {
-                let mode=opt_str("mode").filter(|m|matches!(*m,"lexical"|"hybrid")).ok_or("mode must be lexical or hybrid")?;
-                cmd.extend(["--mode".to_owned(),mode.to_owned()]);
+                let mode = opt_str("mode")
+                    .filter(|m| matches!(*m, "lexical" | "hybrid"))
+                    .ok_or("mode must be lexical or hybrid")?;
+                cmd.extend(["--mode".to_owned(), mode.to_owned()]);
             }
-            cmd.extend(["--".to_owned(),query.to_owned()]);
+            cmd.extend(["--".to_owned(), query.to_owned()]);
             Ok(cmd)
         }
         "memory_diary_fragment" => {
-            only_fields(&["source_id","fragment_id","neighbors","max_chars"])?;
-            let source=opt_str("source_id").ok_or("missing source_id")?;
-            let fragment=opt_str("fragment_id").ok_or("missing fragment_id")?;
-            let mut cmd=vec!["diary-fragment".to_owned()];
-            for (key,flag,min,max) in [("neighbors","--neighbors",0,1),("max_chars","--max-chars",512,12000)] {
-                if let Some(value)=bounded(key,min,max)? {cmd.extend([flag.to_owned(),value.to_string()]);}
+            only_fields(&["source_id", "fragment_id", "neighbors", "max_chars"])?;
+            let source = opt_str("source_id").ok_or("missing source_id")?;
+            let fragment = opt_str("fragment_id").ok_or("missing fragment_id")?;
+            let mut cmd = vec!["diary-fragment".to_owned()];
+            for (key, flag, min, max) in [
+                ("neighbors", "--neighbors", 0, 1),
+                ("max_chars", "--max-chars", 512, 12000),
+            ] {
+                if let Some(value) = bounded(key, min, max)? {
+                    cmd.extend([flag.to_owned(), value.to_string()]);
+                }
             }
-            cmd.extend(["--".to_owned(),source.to_owned(),fragment.to_owned()]);
+            cmd.extend(["--".to_owned(), source.to_owned(), fragment.to_owned()]);
             Ok(cmd)
         }
         "memory_diary" => {
@@ -788,7 +841,10 @@ fn call_tool(
             .is_some_and(|ids| ids.as_str().is_none_or(|v| !v.trim().is_empty()))
         && !policy.allows("memory_forget", access)
     {
-        return Err(format!("MCP merge requires memory_forget permission: {}",policy.denial_reason("memory_forget",access)));
+        return Err(format!(
+            "MCP merge requires memory_forget permission: {}",
+            policy.denial_reason("memory_forget", access)
+        ));
     }
     let argv = tool_argv(name, &arguments)?;
     let mut envelope = invoke(argv)?;
@@ -1031,18 +1087,25 @@ mod tests {
         impl Read for Reader {
             fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
                 self.calls += 1;
-                if self.calls == 1 { return Err(std::io::ErrorKind::Interrupted.into()); }
+                if self.calls == 1 {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
                 if self.cursor.position() >= 65536 && self.fail {
                     return Err(std::io::Error::other("injected mid-read failure"));
                 }
                 // Deterministically model a source growing/truncating while read.
                 if self.cursor.position() == 65536 {
-                    if self.grow { self.cursor.get_mut().resize(150000, 7); }
-                    else { self.cursor.get_mut().truncate(70000); }
+                    if self.grow {
+                        self.cursor.get_mut().resize(150000, 7);
+                    } else {
+                        self.cursor.get_mut().truncate(70000);
+                    }
                 }
                 let until_boundary = if self.cursor.position() < 65536 {
                     65536 - self.cursor.position() as usize
-                } else { 4096 };
+                } else {
+                    4096
+                };
                 let limit = out.len().min(4096).min(until_boundary);
                 self.cursor.read(&mut out[..limit])
             }
@@ -1055,11 +1118,16 @@ mod tests {
         };
         for grow in [false, true] {
             let mut reference = Vec::new();
-            make(false, grow).read_to_end(&mut reference).map_err(|error| error.to_string())?;
+            make(false, grow)
+                .read_to_end(&mut reference)
+                .map_err(|error| error.to_string())?;
             let expected: [u8; 32] = Sha256::digest(&reference).into();
             assert_eq!(reader_sha256(make(false, grow))?, expected);
         }
-        assert_eq!(reader_sha256(make(true, false)), Err("injected mid-read failure".into()));
+        assert_eq!(
+            reader_sha256(make(true, false)),
+            Err("injected mid-read failure".into())
+        );
         Ok(())
     }
 
@@ -1233,39 +1301,87 @@ mod tests {
     }
 
     #[test]
-    fn refusal_diagnostics_explain_configuration_without_overriding_modes() -> Result<(),String> {
-        let policy=ToolPolicy::parse(None,None)?;
-        assert!(policy.denial_reason("memory_forget",ServiceAccess::default()).contains("RSRS_MCP_ALLOW"));
-        assert!(policy.denial_reason("memory_forget",ServiceAccess{readonly:true,off:false}).contains("read-only"));
-        assert!(policy.denial_reason("memory_recall",ServiceAccess{readonly:false,off:true}).contains("paused"));
-        assert!(ToolPolicy::parse(Some("all"),Some("memory_recall"))?.denial_reason("memory_recall",ServiceAccess::default()).contains("RSRS_MCP_DENY"));
-        assert!(!policy.denial_reason("untrusted-secret-like-tool-name",ServiceAccess::default()).contains("untrusted-secret"));
+    fn refusal_diagnostics_explain_configuration_without_overriding_modes() -> Result<(), String> {
+        let policy = ToolPolicy::parse(None, None)?;
+        assert!(policy
+            .denial_reason("memory_forget", ServiceAccess::default())
+            .contains("RSRS_MCP_ALLOW"));
+        assert!(policy
+            .denial_reason(
+                "memory_forget",
+                ServiceAccess {
+                    readonly: true,
+                    off: false
+                }
+            )
+            .contains("read-only"));
+        assert!(policy
+            .denial_reason(
+                "memory_recall",
+                ServiceAccess {
+                    readonly: false,
+                    off: true
+                }
+            )
+            .contains("paused"));
+        assert!(ToolPolicy::parse(Some("all"), Some("memory_recall"))?
+            .denial_reason("memory_recall", ServiceAccess::default())
+            .contains("RSRS_MCP_DENY"));
+        assert!(!policy
+            .denial_reason("untrusted-secret-like-tool-name", ServiceAccess::default())
+            .contains("untrusted-secret"));
         Ok(())
     }
 
     #[test]
     fn readonly_taxonomy_dispatch_reaches_the_real_read_only_command() -> anyhow::Result<()> {
-        let _lock=crate::TEST_ENV_LOCK.lock().map_err(|e|anyhow::anyhow!("{e}"))?;
-        let directory=tempfile::tempdir()?;
-        struct Reset { data:Option<std::ffi::OsString>,worker:bool }
-        impl Drop for Reset { fn drop(&mut self) {
-            match self.data.take(){Some(value)=>std::env::set_var("RSRS_DATA_DIR",value),None=>std::env::remove_var("RSRS_DATA_DIR")};
-            crate::rpc::set_worker_active(self.worker);
-        }}
-        let _reset=Reset{data:std::env::var_os("RSRS_DATA_DIR"),worker:crate::rpc::worker_active()};
-        std::env::set_var("RSRS_DATA_DIR",directory.path());
-        std::fs::write(directory.path().join("agent.json"),r#"{"readonly":true}"#)?;
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let directory = tempfile::tempdir()?;
+        struct Reset {
+            data: Option<std::ffi::OsString>,
+            worker: bool,
+        }
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                match self.data.take() {
+                    Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+                    None => std::env::remove_var("RSRS_DATA_DIR"),
+                };
+                crate::rpc::set_worker_active(self.worker);
+            }
+        }
+        let _reset = Reset {
+            data: std::env::var_os("RSRS_DATA_DIR"),
+            worker: crate::rpc::worker_active(),
+        };
+        std::env::set_var("RSRS_DATA_DIR", directory.path());
+        std::fs::write(directory.path().join("agent.json"), r#"{"readonly":true}"#)?;
         crate::rpc::set_worker_active(true);
-        let policy=ToolPolicy::parse(None,None).map_err(anyhow::Error::msg)?;
-        let access=ServiceAccess::current();assert!(access.readonly);
-        assert!(policy.allows("memory_taxonomy",access));
-        let invoke=|args|serde_json::to_value(crate::capture_run(args).envelope).map_err(|e|e.to_string());
-        let text=call_tool(&serde_json::json!({"name":"memory_taxonomy"}),&invoke,&policy,access).map_err(anyhow::Error::msg)?;
-        let result:serde_json::Value=serde_json::from_str(&text)?;
-        assert_eq!(result["status"],"ok");
-        assert!(result["summary"]["count"].as_u64().is_some_and(|n|n>0));
-        let write=crate::capture_run(vec!["taxonomy".into(),"--ensure".into(),"synthetic".into()]);
-        assert_ne!(write.exit,0);
+        let policy = ToolPolicy::parse(None, None).map_err(anyhow::Error::msg)?;
+        let access = ServiceAccess::current();
+        assert!(access.readonly);
+        assert!(policy.allows("memory_taxonomy", access));
+        let invoke = |args| {
+            serde_json::to_value(crate::capture_run(args).envelope).map_err(|e| e.to_string())
+        };
+        let text = call_tool(
+            &serde_json::json!({"name":"memory_taxonomy"}),
+            &invoke,
+            &policy,
+            access,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let result: serde_json::Value = serde_json::from_str(&text)?;
+        assert_eq!(result["status"], "ok");
+        assert!(result["summary"]["count"].as_u64().is_some_and(|n| n > 0));
+        let write = crate::capture_run(vec![
+            "taxonomy".into(),
+            "--ensure".into(),
+            "synthetic".into(),
+        ]);
+        assert_ne!(write.exit, 0);
         assert!(!directory.path().join("rsrs.db").exists());
         Ok(())
     }
@@ -1611,7 +1727,9 @@ mod tests {
 
     #[test]
     fn default_bin_dir_is_under_data_dir() -> Result<(), String> {
-        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
         let prev_bin = respire::env::var("RSRS_BIN_DIR").ok();
@@ -1666,24 +1784,34 @@ mod tests {
         std::fs::write(&source_file, b"corrupt")?;
         assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).is_err());
         std::fs::write(source_file, RUNTIME_FIXTURE_BYTES)?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+            .map_err(anyhow::Error::msg)?;
         std::fs::write(&installed, b"stale")?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(installed)?)), expected);
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            format!("{:x}", Sha256::digest(std::fs::read(installed)?)),
+            expected
+        );
         Ok(())
     }
 
     #[test]
     fn runtime_libraries_keep_identical_readonly_files_and_native_identity() -> anyhow::Result<()> {
         let (_temporary, source, destination) = runtime_library_fixture()?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        let path = destination.parent().unwrap().join(RUNTIME_FIXTURE_FILES[0].0);
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+            .map_err(anyhow::Error::msg)?;
+        let path = destination
+            .parent()
+            .unwrap()
+            .join(RUNTIME_FIXTURE_FILES[0].0);
         let original_permissions = std::fs::metadata(&path)?.permissions();
         let mut readonly = original_permissions.clone();
         readonly.set_readonly(true);
         std::fs::set_permissions(&path, readonly)?;
         let before = std::fs::metadata(&path)?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+            .map_err(anyhow::Error::msg)?;
         let after = std::fs::metadata(&path)?;
         assert!(after.permissions().readonly());
         assert_eq!(after.modified()?, before.modified()?);
@@ -1697,28 +1825,52 @@ mod tests {
     }
 
     #[test]
-    fn runtime_library_failures_preserve_inputs_and_remove_atomic_temporary_files() -> anyhow::Result<()> {
+    fn runtime_library_failures_preserve_inputs_and_remove_atomic_temporary_files(
+    ) -> anyhow::Result<()> {
         let (name, expected) = RUNTIME_FIXTURE_FILES[0];
         let (_temporary, source, destination) = runtime_library_fixture()?;
         let source_file = source.parent().unwrap().join(name);
         std::fs::remove_file(&source_file)?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot read SDK runtime"));
+        assert!(
+            stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+                .unwrap_err()
+                .contains("cannot read SDK runtime")
+        );
         std::fs::write(&source_file, RUNTIME_FIXTURE_BYTES)?;
         let directory = destination.parent().unwrap();
         std::fs::remove_dir(directory)?;
         std::fs::write(directory, b"unrelated blocker")?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot stage SDK runtime"));
+        assert!(
+            stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+                .unwrap_err()
+                .contains("cannot stage SDK runtime")
+        );
         assert_eq!(std::fs::read(directory)?, b"unrelated blocker");
         std::fs::remove_file(directory)?;
         std::fs::create_dir(directory)?;
         std::fs::create_dir(directory.join(name))?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot install SDK runtime"));
+        assert!(
+            stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+                .unwrap_err()
+                .contains("cannot install SDK runtime")
+        );
         assert!(directory.join(name).is_dir());
-        assert_eq!(std::fs::read_dir(directory)?.count(), 1, "failed rename left a temporary file");
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&source_file)?)), expected);
+        assert_eq!(
+            std::fs::read_dir(directory)?.count(),
+            1,
+            "failed rename left a temporary file"
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(std::fs::read(&source_file)?)),
+            expected
+        );
         std::fs::remove_dir(directory.join(name))?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(directory.join(name))?)), expected);
+        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES)
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(
+            format!("{:x}", Sha256::digest(std::fs::read(directory.join(name))?)),
+            expected
+        );
         Ok(())
     }
 
@@ -1726,12 +1878,19 @@ mod tests {
     fn runtime_library_staging_rejects_missing_parent_paths() {
         let root = Path::new(std::path::MAIN_SEPARATOR_STR);
         let file = Path::new("fixture/rsrs");
-        assert_eq!(stage_runtime_libraries(root, file, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no source directory");
-        assert_eq!(stage_runtime_libraries(file, root, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no destination directory");
+        assert_eq!(
+            stage_runtime_libraries(root, file, RUNTIME_FIXTURE_FILES).unwrap_err(),
+            "binary has no source directory"
+        );
+        assert_eq!(
+            stage_runtime_libraries(file, root, RUNTIME_FIXTURE_FILES).unwrap_err(),
+            "binary has no destination directory"
+        );
     }
 
     #[test]
-    fn binary_installation_repairs_runtime_without_replacing_a_current_executable() -> anyhow::Result<()> {
+    fn binary_installation_repairs_runtime_without_replacing_a_current_executable(
+    ) -> anyhow::Result<()> {
         let (_temporary, source, executable) = runtime_library_fixture()?;
         let (name, expected) = RUNTIME_FIXTURE_FILES[0];
         install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
@@ -1743,9 +1902,13 @@ mod tests {
             } else {
                 std::fs::remove_file(&library)?;
             }
-            install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
+            install_binary(&source, &executable, RUNTIME_FIXTURE_FILES)
+                .map_err(anyhow::Error::msg)?;
             assert_eq!(std::fs::read(&executable)?, b"synthetic executable payload");
-            assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&library)?)), expected);
+            assert_eq!(
+                format!("{:x}", Sha256::digest(std::fs::read(&library)?)),
+                expected
+            );
             let after = std::fs::metadata(&executable)?;
             assert_eq!(after.modified()?, before.modified()?);
             #[cfg(unix)]
@@ -1759,7 +1922,9 @@ mod tests {
 
     #[test]
     fn materialize_bin_honors_override_dir() -> Result<(), String> {
-        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev = respire::env::var("RSRS_BIN_DIR").ok();
         std::env::set_var("RSRS_BIN_DIR", dir.path());

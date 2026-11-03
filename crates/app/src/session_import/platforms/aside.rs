@@ -41,7 +41,11 @@ pub fn platforms() -> Vec<PlatformDef> {
 }
 
 fn roots() -> Vec<PathBuf> {
-    scan_util::existing([scan_util::home().map(|home| home.join(".aside"))].into_iter().flatten())
+    scan_util::existing(
+        [scan_util::home().map(|home| home.join(".aside"))]
+            .into_iter()
+            .flatten(),
+    )
 }
 
 fn scan(opts: &ScanOptions) -> Vec<Session> {
@@ -135,7 +139,9 @@ fn state_index(db_path: &Path) -> HashMap<String, StateRow> {
 
 /// A SQLite cell as text, mirroring the reference `_cell_text`.
 fn cell_text(row: &[SqlVal], index: usize) -> Option<String> {
-    row.get(index).and_then(SqlVal::as_text).map(ToOwned::to_owned)
+    row.get(index)
+        .and_then(SqlVal::as_text)
+        .map(ToOwned::to_owned)
 }
 
 /// A SQLite numeric cell, mirroring the reference `_cell_number`.

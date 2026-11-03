@@ -230,14 +230,19 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
         )?)?,
         "pending long diary"
     );
-    anyhow::ensure!(!store.index_missing("m3")?, "ordinary index fixture not ready");
-    anyhow::ensure!(respire::diary::needs_rebuild(&store)?, "diary fixture not pending");
+    anyhow::ensure!(
+        !store.index_missing("m3")?,
+        "ordinary index fixture not ready"
+    );
+    anyhow::ensure!(
+        respire::diary::needs_rebuild(&store)?,
+        "diary fixture not pending"
+    );
     drop(store);
     // The restarted debug runtime verifies both pinned ~569 MB containers before
     // it can start diary inference. Give that distinct prerequisite a bounded
     // budget; keep the actual diary observation window at 120 seconds.
-    let preparation_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let preparation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
         let status = cli.run(&["--json", "status"])?;
@@ -245,7 +250,9 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
             break;
         }
         check_pending_work(
-            &status, preparation_deadline, &mut deadline,
+            &status,
+            preparation_deadline,
+            &mut deadline,
             "did not observe actual background diary work",
         )?;
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -340,8 +347,7 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
     );
     let mut other_hybrid = cli.run(&["--json", "diary-search", "bread"])?;
     // Profile changes enter the same model-preparation path as runtime restarts.
-    let preparation_deadline =
-        std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let preparation_deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     let mut deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut reported_pending = false;
     while other_hybrid["summary"]["semantic_ready"] != true {
@@ -354,7 +360,9 @@ pub fn run(exe: &std::path::Path) -> Result<Value> {
             reported_pending = true;
         }
         check_pending_work(
-            &status, preparation_deadline, &mut deadline,
+            &status,
+            preparation_deadline,
+            &mut deadline,
             "other-account real semantic index never became ready",
         )?;
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -410,14 +418,16 @@ fn check_pending_work(
         anyhow::ensure!(
             std::time::Instant::now() < preparation_deadline,
             "{message}; model preparation did not finish: model_operation={}, retrieval_index={}",
-            operation, status["summary"]["retrieval_index"]
+            operation,
+            status["summary"]["retrieval_index"]
         );
         *work_deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     }
     anyhow::ensure!(
         std::time::Instant::now() < *work_deadline,
         "{message}: model_operation={}, retrieval_index={}",
-        operation, status["summary"]["retrieval_index"]
+        operation,
+        status["summary"]["retrieval_index"]
     );
     Ok(())
 }
