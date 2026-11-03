@@ -166,6 +166,10 @@ jobs:
         if: matrix.target == 'x86_64-apple-darwin'
         shell: bash
         run: echo 'MACOSX_DEPLOYMENT_TARGET=13.4' >> "$GITHUB_ENV"
+      - name: Match the Apple MLX deployment baseline
+        if: matrix.target == 'aarch64-apple-darwin'
+        shell: bash
+        run: echo 'MACOSX_DEPLOYMENT_TARGET=14.0' >> "$GITHUB_ENV"
       - name: Build release binary
         if: ${{ !contains(matrix.target, '-musl') }}
         run: cargo build --release --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci

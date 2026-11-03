@@ -106,7 +106,8 @@ behind the same verification and index transaction.
 
 ## Apple MLX preset
 
-Apple Silicon macOS builds of the Core SDK may include the optional MLX backend.
+Apple Silicon macOS builds of the Core SDK include the MLX backend and require
+macOS 14.0 or newer. Intel macOS retains its macOS 13.4 baseline without MLX.
 The built-in `m3-mlx` preset downloads the pinned
 `mlx-community/bge-m3-mlx-fp16` safetensors and tokenizer, then rebuilds the
 index through the normal profile transaction:
