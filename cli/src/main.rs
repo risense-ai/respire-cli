@@ -19,6 +19,8 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 mod admission;
+mod lexical;
+mod learn;
 mod app_version;
 mod autostart;
 mod bench;
@@ -288,9 +290,9 @@ thread_local! {
     static DEFER_PROFILE_OUTPUT: Cell<bool> = const { Cell::new(false) };
     static HOST_RPC_OUTPUT: Cell<bool> = const { Cell::new(false) };
 }
-static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<BgeEmbedder>>> = std::sync::Mutex::new(None);
+static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<learn::LocalEmbedder>>> = std::sync::Mutex::new(None);
 
-struct EmbedderHold(Option<Box<BgeEmbedder>>);
+struct EmbedderHold(Option<Box<learn::LocalEmbedder>>);
 
 impl Drop for EmbedderHold {
     fn drop(&mut self) {
@@ -637,6 +639,29 @@ enum ModelAction {
 }
 
 #[derive(Subcommand)]
+enum LearnCmd {
+    /// Show current weights, update count and annotation count
+    Status,
+    /// Persist BM25-only mode (no BGE); `--off` returns to hybrid BGE
+    Lexical {
+        #[arg(long)]
+        off: bool,
+    },
+    /// Batch-train from stored annotation_log rows
+    Train {
+        #[arg(long, default_value_t = 5000)]
+        limit: usize,
+        #[arg(long, default_value_t = 1)]
+        epochs: usize,
+        /// Train from real query_log adoption labels (BM25 residual) instead of annotations
+        #[arg(long)]
+        from_labels: bool,
+    },
+    /// Clear the learned reranker (next recall falls back to BM25 weights)
+    Reset,
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Review evidence, due records and explicit approval-backed confirmations.
     Review {
@@ -754,6 +779,9 @@ enum Command {
         /// Recall intent: auto (keyword), howto (extra skill pass, keeps one procedure visible), fact (single pass)
         #[arg(long, value_parser = ["auto", "howto", "fact"], default_value = "auto")]
         intent: String,
+        /// BM25 + locally learned reranker; no BGE/model required
+        #[arg(long)]
+        lexical: bool,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -773,6 +801,11 @@ enum Command {
     Bench {
         #[command(subcommand)]
         cmd: BenchCmd,
+    },
+    /// Local retrieval learning: inspect, batch-train or reset the BM25 reranker
+    Learn {
+        #[command(subcommand)]
+        cmd: LearnCmd,
     },
     /// Record a procedure run verdict (ok|fail|confounded|no_effect) for a skill/knowledge entry; local-only, feeds how-to ordering and audit
     RunLog {
@@ -1146,6 +1179,9 @@ enum Command {
         /// Max concurrent ordinary runtime jobs. 0 follows available CPU parallelism; explicit values cannot exceed it. Applies after runtime restart.
         #[arg(long)]
         rpc_parallelism: Option<u32>,
+        /// Retrieval path: auto (BGE if installed, else local), bge (hybrid), self (BM25 + learned reranker)
+        #[arg(long, value_name = "auto|bge|self")]
+        retrieval: Option<String>,
     },
     /// Judge-then-store candidate bill (read-only): high similarity suggests merge, medium suggests attach, similar candidates suggest merging them
     Candidates { content: String },
@@ -2738,6 +2774,25 @@ fn run_run_log(id: &str, status: &str, note: &str) -> Result<()> {
 /// Query log: list recent queries and adoption/self-grade, or stats (--stats), or report a self-grade (mark).
 /// Post-training terms: candidates ≠ hits; chosen = model mark --good, rejected = mark --bad;
 /// adopted (used when writing) is a weak signal only.
+fn run_learn(cmd: &LearnCmd) -> Result<()> {
+    let store = build_local()?;
+    match cmd {
+        LearnCmd::Status => learn::status(&store),
+        LearnCmd::Train { limit, epochs, from_labels } => {
+            if *from_labels {
+                learn::train_from_labels(&store, *limit, *epochs)
+            } else {
+                learn::train_from_annotations(&store, *limit, *epochs)
+            }
+        }
+        LearnCmd::Lexical { off } => {
+            learn::set_lexical(!*off)?;
+            learn::status(&store)
+        }
+        LearnCmd::Reset => learn::reset(&store),
+    }
+}
+
 fn run_query_log(
     limit: usize,
     stats: bool,
@@ -5504,13 +5559,14 @@ fn run_space(
     }
 }
 
-/// Local config: --data-dir/--addr/--autosync/--cure-auto set (all empty = read only).
+/// Local config: --data-dir/--addr/--autosync/--cure-auto/--retrieval set (all empty = read only).
 fn run_config(
     data_dir: Option<&str>,
     addr: Option<&str>,
     autosync: Option<bool>,
     cure_auto: Option<bool>,
     rpc_parallelism: Option<u32>,
+    retrieval: Option<&str>,
 ) -> Result<()> {
     if let Some(d) = data_dir {
         respire::service::set_data_dir(d)?;
@@ -5527,6 +5583,9 @@ fn run_config(
     if let Some(v) = rpc_parallelism {
         respire::service::set_rpc_parallelism(v)?;
     }
+    if let Some(v) = retrieval {
+        respire::service::set_retrieval(v)?;
+    }
     let workers = rpc::worker_limit();
     let mut worker_text = workers.to_string();
     if rpc_parallelism.is_some() {
@@ -5541,6 +5600,7 @@ fn run_config(
         "cure_auto": respire::service::cure_auto_enabled(),
         "rpc_parallelism": respire::service::rpc_parallelism_setting(),
         "rpc_workers": workers,
+        "retrieval": respire::service::retrieval_mode(),
     });
     let items = vec![
         OutputItem::new(
@@ -5556,6 +5616,11 @@ fn run_config(
         OutputItem::new("auto-sync", OutputStatus::Ok, info["autosync"].to_string()),
         OutputItem::new("auto-cure", OutputStatus::Ok, info["cure_auto"].to_string()),
         OutputItem::new("rpc workers", OutputStatus::Ok, worker_text),
+        OutputItem::new(
+            "retrieval",
+            OutputStatus::Ok,
+            info["retrieval"].as_str().unwrap_or("auto"),
+        ),
     ];
     emit_result(ResultEnvelope::new("config", OutputStatus::Ok, info, items))
 }
@@ -6860,6 +6925,7 @@ fn run_local(args: Cli) -> Result<()> {
         Some(Command::Remember { .. }) => "remember",
         Some(Command::Candidates { .. }) => "candidates",
         Some(Command::Bench { .. }) => "bench",
+        Some(Command::Learn { .. }) => "learn",
         Some(Command::TreeDeepen { .. }) => "tree-deepen",
         Some(Command::TreeCure { .. }) => "tree-cure",
         Some(Command::TreeFloat { .. }) => "tree-float",
@@ -7313,6 +7379,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             cmd,
         }) => return run_query_log(*limit, *stats, *json, cmd.as_ref()),
         Some(Command::Bench { cmd }) => return run_bench(cmd),
+        Some(Command::Learn { cmd }) => return run_learn(cmd),
         Some(Command::RunLog { id, status, note }) => {
             return run_run_log(id, status, note);
         }
@@ -7515,6 +7582,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             autosync,
             cure_auto,
             rpc_parallelism,
+            retrieval,
         }) => {
             return run_config(
                 data_dir.as_deref(),
@@ -7522,6 +7590,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 *autosync,
                 *cure_auto,
                 *rpc_parallelism,
+                retrieval.as_deref(),
             )
         }
         Some(Command::Export { file }) => return run_export(file),
@@ -7621,17 +7690,24 @@ fn run_local_inner(args: Cli) -> Result<()> {
     );
     macro_rules! embedder {
         () => {{
-            let model = build_local()?.retrieval_model()?;
-            let generation = respire::core_sdk::generation_key(&model)?;
-            if embedder_hold
-                .0
-                .as_ref()
-                .is_some_and(|e| e.model_name() != model || e.generation_key() != generation)
-            {
-                embedder_hold.0 = None;
-            }
-            if embedder_hold.0.is_none() {
-                embedder_hold.0 = Some(Box::new(BgeEmbedder::load_model(&model)?));
+            let no_embed = learn::no_embed();
+            if no_embed {
+                if embedder_hold.0.as_ref().is_none_or(|e| e.model_name() != "none") {
+                    embedder_hold.0 = Some(Box::new(learn::LocalEmbedder::Zero(learn::ZeroEmbedder)));
+                }
+            } else {
+                let model = build_local()?.retrieval_model()?;
+                let generation = respire::core_sdk::generation_key(&model)?;
+                if embedder_hold
+                    .0
+                    .as_ref()
+                    .is_some_and(|e| e.model_name() != model || e.generation_key() != generation)
+                {
+                    embedder_hold.0 = None;
+                }
+                if embedder_hold.0.is_none() {
+                    embedder_hold.0 = Some(Box::new(learn::LocalEmbedder::load(&model)?));
+                }
             }
             match embedder_hold.0.as_deref() {
                 Some(e) => e,
@@ -7824,7 +7900,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
 
             // -- Judge-then-store (dedup first, then choose): unless --force/--merge-ids/--parent (explicit attach is intent)
             //    run an internal recall of similar candidates; diary trivia skips dedup (daily log is not a duplicate event; it goes on the time chain) --
-            if !force && merge_ids.is_none() && supersedes.is_none() && see_also.is_empty() && parent.is_empty() && importance != "trivial" {
+            if !force && !learn::no_embed() && merge_ids.is_none() && supersedes.is_none() && see_also.is_empty() && parent.is_empty() && importance != "trivial" {
                 let (candidates_all, pending, lease) = respire::resident::recall_catalog(&session, &store)?;
                 let _resident = lease.enter();
                 if pending > 0 { rpc::kick_index(); }
@@ -8187,6 +8263,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             render_min_score,
             no_related,
             intent,
+            lexical,
         } => {
             anyhow::ensure!(render_budget_base64.is_none() || titles || brief, "render budget requires --titles or --brief");
             anyhow::ensure!(render_min_score.is_none() || render_budget_base64.is_some() || brief, "render minimum score requires a render budget");
@@ -8198,6 +8275,10 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let (session,owner) = build_session_with_owner()?;
             let owner=owner.unwrap_or_else(||"local".to_owned());
             let store = build_local()?;
+            // New-user / no-BGE path: BM25 candidates re-ranked by the local learner.
+            if lexical || learn::lexical_default() {
+                return learn::run_lexical(&store, &query, limit, project.as_deref(), r#type.as_deref(), titles);
+            }
             let review=respire_app::review::ReviewService::new(&session,&store,&owner)?;
             let source=review.recall_source()?;
             let metadata_aware=brief || source.has_metadata();
@@ -8337,6 +8418,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 } else if let Err(error) = stats.persist(&store) {
                     eprintln!("recall statistics writeback failed: {error:#}");
                 }
+                // Opt-in (RSRS_ANNOTATE=1): label this recall's query with BM25 + LLM in a
+                // detached process. The reply path never waits for the model call.
                 // Hit-heat writeback: top hits recall_count+1 - source of the heat-axis hit_score (used to be read-only, always 0; this round fills it)
                 // Plugin hook post-recall: query and hit summary (post-training / external telemetry)
                 {
@@ -9896,6 +9979,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Prompt
         | Command::QueryLog { .. }
         | Command::Bench { .. }
+        | Command::Learn { .. }
         | Command::RunLog { .. }
         | Command::Classify { .. }
         | Command::Web { .. }

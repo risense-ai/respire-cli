@@ -1570,6 +1570,46 @@ pub fn set_autosync(on: bool) -> Result<()> {
     write_client_config(&data)
 }
 
+/// Retrieval mode: `RSRS_RETRIEVAL` wins over `client.json` `retrieval`; default `auto`.
+/// auto = BGE when installed, otherwise the local lexical/learned path.
+/// self = BM25 + learned residual reranker, no vectors (BGE can stay installed but is unused).
+/// bge  = hybrid BGE retrieval with the lexical fallback only when the model is absent.
+pub fn normalize_retrieval(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "self" | "self-learning" | "lexical" | "lexical_only" | "bm25" => "self".into(),
+        "bge" | "hybrid" | "semantic" => "bge".into(),
+        _ => "auto".into(),
+    }
+}
+
+pub fn retrieval_mode() -> String {
+    crate::env::var("RSRS_RETRIEVAL")
+        .ok()
+        .or_else(|| {
+            read_client_config()
+                .and_then(|data| data["retrieval"].as_str().map(ToOwned::to_owned))
+        })
+        .map(|raw| normalize_retrieval(&raw))
+        .unwrap_or_else(|| "auto".into())
+}
+
+/// The local BM25 + learned reranker path, independent of whether BGE is installed.
+pub fn self_learning_enabled() -> bool {
+    retrieval_mode() == "self"
+}
+
+pub fn set_retrieval(mode: &str) -> Result<()> {
+    let lowered = mode.trim().to_ascii_lowercase();
+    if !matches!(lowered.as_str(), "auto" | "default" | "bge" | "hybrid" | "semantic"
+        | "self" | "self-learning" | "lexical" | "lexical_only" | "bm25")
+    {
+        anyhow::bail!("retrieval mode must be auto, bge or self; got `{mode}`");
+    }
+    let mut data = read_client_config().unwrap_or_else(|| serde_json::json!({}));
+    data["retrieval"] = serde_json::json!(normalize_retrieval(mode));
+    write_client_config(&data)
+}
+
 /// Periodic tree-cure switch (client.json cure_auto, default on): client background iterates cure every 10 minutes.
 pub fn cure_auto_enabled() -> bool {
     read_client_config()

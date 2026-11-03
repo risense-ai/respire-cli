@@ -83,3 +83,34 @@ remain release gates. No external corpus replication is claimed: the user asked
 to implement the supplied algorithms without requiring the original evaluation
 archive. Lower admission floors may return candidates for questions with no
 answer; titles remain reference material, not evidence that an answer exists.
+
+## Lexical learning from real adoption
+
+`rsrs learn train --from-labels` rebuilds BM25 top-100 candidates for every
+`query_log` row with `adopted` or `good_ids`, uses those ids as positives, and
+samples up to eight deep negatives (candidate rank >= 20). Negatives are kept
+deep on purpose: an adopted result can sit at rank 40, and treating the lexical
+top-20 as negatives teaches the model to invert BM25.
+
+The BM25 log score is the fixed base (`weights[0] = 1`); only the other eight
+features learn, capped at `[-2, 2]`. At recall the residual is normalized per
+query and added with weight 0.5, so learned evidence can promote a deep
+candidate but cannot erase the lexical order on its own. The model lives in the
+local `learned_reranker` singleton and is never synced. `--epochs` replays the
+same labeled rows; `rsrs learn reset` returns to pure BM25.
+
+## Retrieval-mode switch
+
+`client.json` stores `retrieval` (`auto|bge|self`), set with:
+
+```bash
+rsrs config --retrieval self   # BM25 + learned reranker, no vectors
+rsrs config --retrieval bge    # hybrid BGE retrieval
+rsrs config --retrieval auto   # BGE if installed, otherwise the local path
+```
+
+`RSRS_RETRIEVAL` overrides the file for one process. In `self` mode writes use
+the zero embedder and recall goes through the lexical learner even when BGE is
+installed; switching back to `bge` requires `rsrs reembed` for entries written
+during the self-learning window. GUI/TUI should expose the same three-way switch
+instead of asking users to edit `client.json`.
