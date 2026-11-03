@@ -146,34 +146,10 @@ pub fn recover_interrupted() -> Result<()> {
 }
 
 /// Read the selected source as one committed snapshot, without creating plaintext files.
+/// WP-2c: the implementation moved into the domain crate (`service::local_snapshot`);
+/// this wrapper keeps the `respire_app::login_transaction::local_snapshot` path stable.
 pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
-    let session = crate::auth::read_session_json()?;
-    let user = session["user"].as_str().unwrap_or("local");
-    let alias = session["keyring_account"].as_str().unwrap_or(user);
-    let version = session["vault_version"].as_i64().unwrap_or(1);
-    let password = if version == 1 {
-        source_secret.map(str::to_owned)
-            .or_else(|| session["pass"].as_str().map(str::to_owned))
-            .or_else(|| crate::keystore::load_login_pass(alias)).unwrap_or_default()
-    } else { String::new() };
-    let keys = crate::auth::unlock_session_keys(&session, &password,
-        if version == 1 { None } else { source_secret }, alias)?;
-    let directory = crate::service::data_dir();
-    let path = crate::service::database_path(&directory)?;
-    ensure!(path.is_file(), "selected source has no local library; nothing was migrated");
-    let database = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let mut statement = database.prepare("SELECT id,ciphertext,nonce,COALESCE(parent_id,'') FROM memories WHERE COALESCE(deleted,0)=0 ORDER BY id")?;
-    let mut rows = statement.query([])?;
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next()? {
-        let mut stored = crate::memory::model::StoredMemory::new_pending(row.get(0)?, String::new());
-        stored.ciphertext = row.get(1)?;
-        stored.nonce = row.get(2)?;
-        stored.local_parent_id = row.get(3)?;
-        entries.push(crate::memory::MemoryEngine::open(&keys, &stored)
-            .context("source record cannot be decrypted; original library was preserved")?);
-    }
-    Ok(serde_json::to_string(&entries)?)
+    crate::service::local_snapshot(source_secret)
 }
 
 // A sessionless library can identify itself only by decrypting with the authorized data key.

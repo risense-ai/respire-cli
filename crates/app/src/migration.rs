@@ -16,6 +16,10 @@ use rusqlite::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+// WP-2c: internally_configured_root sank into the domain service module; the
+// engine side must classify the internally configured default home.
+use crate::service::internally_configured_root;
+
 const RECEIPT: &str = ".rsrs-migration.json";
 const SOURCE_RECEIPT: &str = ".rsrs-migrated.json";
 const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
@@ -25,54 +29,6 @@ struct Profile {
     destination: PathBuf,
     identity: String,
     services: [&'static str; 3],
-}
-
-/// The SDK accepts the original data-root environment variable. This marker lets
-/// app configuration retain its default-home and active-profile semantics.
-pub(crate) fn internally_configured_root(value: &str) -> bool {
-    crate::env::var(DEFAULT_ENV).ok().is_some_and(|marker| {
-        equivalent_path(
-            &crate::service::expand_tilde(&marker),
-            &crate::service::expand_tilde(value),
-        ) && equivalent_path(
-            &crate::service::expand_tilde(value),
-            &crate::service::default_data_dir(),
-        )
-    })
-}
-
-fn equivalent_path(left: &Path, right: &Path) -> bool {
-    let absolute = |path: &Path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|root| root.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    };
-    let normalize = |path: PathBuf| {
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                _ => normalized.push(component.as_os_str()),
-            }
-        }
-        normalized
-    };
-    let left = normalize(absolute(left));
-    let right = normalize(absolute(right));
-    if cfg!(windows) {
-        left.to_string_lossy()
-            .replace('/', "\\")
-            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
-    } else {
-        left == right
-    }
 }
 
 /// Configure the current home before parsing. Legacy import is always explicit.
