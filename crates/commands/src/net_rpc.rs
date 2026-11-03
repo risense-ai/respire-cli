@@ -55,7 +55,7 @@ impl Health {
 }
 
 pub fn rpc_port() -> u16 {
-    if let Ok(raw) = respire::env::var("RSRS_RPC_PORT") {
+    if let Ok(raw) = respire_app::env::var("RSRS_RPC_PORT") {
         let trimmed = raw.trim();
         if let Ok(port) = trimmed.parse::<u16>() {
             if port != 0 {
@@ -74,8 +74,22 @@ pub fn no_autostart() -> bool {
     crate::runtime_policy::client_only()
 }
 
+/// Stable path of the installed CLI binary. Runtime process identity checks
+/// compare a suspect process image against this location (previously provided
+/// by the CLI's mcp module; the transport owns the same rule in one place).
+pub fn stable_bin_path() -> PathBuf {
+    let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
+    if let Ok(raw) = respire_app::env::var("RSRS_BIN_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed).join(name);
+        }
+    }
+    respire_app::service::main_data_dir().join("bin").join(name)
+}
+
 pub fn token_path() -> PathBuf {
-    crate::rpc::runtime_dir_path().join("token")
+    crate::rpc_worker::runtime_dir_path().join("token")
 }
 
 #[cfg(test)]
@@ -84,7 +98,7 @@ fn load_token() -> Option<String> {
 }
 
 fn read_token() -> Result<Option<String>> {
-    if let Ok(raw) = respire::env::var("RSRS_RPC_TOKEN") {
+    if let Ok(raw) = respire_app::env::var("RSRS_RPC_TOKEN") {
         let trimmed = raw.trim().to_owned();
         if !trimmed.is_empty() {
             return Ok(Some(trimmed));
@@ -93,7 +107,7 @@ fn read_token() -> Result<Option<String>> {
     if let Some(token) = read_token_file(&token_path())? {
         return Ok(Some(token));
     }
-    read_token_file(&respire::service::data_dir().join("runtime").join("token"))
+    read_token_file(&respire_app::service::data_dir().join("runtime").join("token"))
 }
 
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
@@ -208,12 +222,12 @@ pub fn pid_is_respire(pid: u32) -> bool {
 pub fn load_or_create_token() -> Result<String> {
     crate::runtime_policy::require_host("creating runtime credentials")?;
     if let Some(existing) = read_token()? {
-        if respire::env::var("RSRS_RPC_TOKEN").is_ok() {
+        if respire_app::env::var("RSRS_RPC_TOKEN").is_ok() {
             return Ok(existing);
         }
         return Ok(existing);
     }
-    let generated = respire::memory::crypto::random_hex(32);
+    let generated = respire_app::memory::crypto::random_hex(32);
     persist_token(&generated)?;
     Ok(generated)
 }
@@ -346,7 +360,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     }
     // Native inference stays inside the runtime. Tracking IDs are values, not
     // command words, and longer write budgets never authorize a request replay.
-    let command: Vec<_> = crate::rpc::command_words(args).take(2).collect();
+    let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
     if matches!(command.as_slice(), ["model", "install" | "install-m3" | "activate"])
         || command.first().is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
     {
@@ -360,7 +374,7 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
     if method != "cli.progress" { check_connection()?; }
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
-        "v": crate::rpc::PROTOCOL_V,
+        "v": crate::rpc_worker::PROTOCOL_V,
         "id": uuid::Uuid::new_v4().to_string(),
         "method": method,
         "args": args,
@@ -504,7 +518,7 @@ pub(crate) fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentit
         let text = text.trim_end();
         let started_at = text.get(..24).context("runtime process creation time missing")?.to_owned();
         let command = text.get(24..).context("runtime process command missing")?.trim();
-        let stable = crate::mcp::stable_bin_path();
+        let stable = stable_bin_path();
         let foreground = command.strip_prefix(stable.to_string_lossy().as_ref())
             .is_some_and(|tail| { let mut args = vec!["rsrs"]; args.extend(tail.split_whitespace()); foreground_runtime_arguments(&args) });
         let args: Vec<_> = command.split_whitespace().collect();
@@ -569,7 +583,7 @@ mod tests {
 
     fn valid_timeout_args(args: &[&str]) -> Vec<String> {
         use clap::Parser;
-        crate::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))
+        crate::cli_def::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))
             .expect("timeout regression must exercise valid CLI argv");
         args.iter().map(|arg| (*arg).to_owned()).collect()
     }
@@ -701,7 +715,7 @@ mod tests {
     fn rpc_port_reads_env() -> Result<(), String> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = respire::env::var("RSRS_RPC_PORT").ok();
+        let prev = respire_app::env::var("RSRS_RPC_PORT").ok();
         std::env::set_var("RSRS_RPC_PORT", "26111");
         let got = rpc_port();
         match prev {
@@ -773,8 +787,8 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
-        let prev_tok = respire::env::var("RSRS_RPC_TOKEN").ok();
+        let prev_data = respire_app::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire_app::env::var("RSRS_RPC_TOKEN").ok();
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         std::env::set_var("RSRS_RPC_TOKEN", "from-env");
         let got = load_token();
@@ -797,8 +811,8 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
-        let prev_tok = respire::env::var("RSRS_RPC_TOKEN").ok();
+        let prev_data = respire_app::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire_app::env::var("RSRS_RPC_TOKEN").ok();
         std::env::remove_var("RSRS_RPC_TOKEN");
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         persist_token("file-token").map_err(|e| e.to_string())?;

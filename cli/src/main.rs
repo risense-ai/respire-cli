@@ -25,11 +25,9 @@ mod classify_config;
 mod host_rpc;
 mod login;
 mod mcp;
-mod net_rpc;
 mod network;
 mod progress;
 mod rpc;
-mod runtime_error;
 mod runtime_fetch;
 mod runtime_http;
 mod shell;
@@ -49,12 +47,14 @@ use respire_commands::gates::{
 };
 use respire_commands::i18n;
 use respire_commands::metadata;
+use respire_commands::net_rpc;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
     set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
     HOST_RPC_OUTPUT, OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
 };
+use respire_commands::runtime_error;
 use respire_commands::runtime_policy;
 use respire_commands::util::{
     current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id,
