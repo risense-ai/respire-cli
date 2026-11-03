@@ -8,7 +8,7 @@
 //! Run-history reads (see `skill_runs` in the local store) only break ties
 //! between procedures. Fact entries keep Core's order and score.
 
-use respire::memory::engine::RecalledWithContext;
+use respire_app::memory::engine::RecalledWithContext;
 use std::collections::HashMap;
 
 /// Canonical labels a skill body should carry, inside the standard
@@ -199,7 +199,7 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn entry(id: &str, kind: &str, title: &str) -> respire::MemoryEntry {
+    fn entry(id: &str, kind: &str, title: &str) -> respire_app::MemoryEntry {
         // Kind deserializes from its variant name (Context, Skill, ...), not the lowercase wire form.
         let variant = format!("{}{}", &kind[..1].to_uppercase(), &kind[1..]);
         serde_json::from_value(json!({

@@ -235,7 +235,7 @@ pub fn compare(base: &[CaseResult], now: &[CaseResult]) -> CompareReport {
 /// still active in the store; merge same query (newest first, unique); shorten
 /// ids to 8 chars (readable; matching still uses prefix either way).
 pub fn mine_from_rows(
-    rows: &[respire::transport::local::QueryLogRow],
+    rows: &[respire_app::transport::local::QueryLogRow],
     strict: bool,
     limit: usize,
     active: &HashSet<String>,
@@ -335,7 +335,7 @@ pub const PARAM_KEYS: &[&str] = &[
 pub fn snapshot_params() -> anyhow::Result<BTreeMap<String, String>> {
     let mut m = BTreeMap::new();
     for k in PARAM_KEYS {
-        if let Ok(v) = respire::env::var(k) {
+        if let Ok(v) = respire_app::env::var(k) {
             if !v.trim().is_empty() {
                 m.insert((*k).to_owned(), v);
             }
@@ -353,7 +353,7 @@ pub fn snapshot_params() -> anyhow::Result<BTreeMap<String, String>> {
                 value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()));
         }
     }
-    m.insert("feedback_contract".into(),respire::core_sdk::FEEDBACK_CONTRACT.to_string());
+    m.insert("feedback_contract".into(),respire_app::core_sdk::FEEDBACK_CONTRACT.to_string());
     {
         use sha2::{Digest,Sha256};
         m.insert("sdk_lock_sha256".into(),format!("{:x}",Sha256::digest(include_bytes!("../../sdk/core-sdk.lock.json"))));
@@ -497,7 +497,7 @@ mod tests {
 
     #[test]
     fn mine_filters_inactive_and_merges() {
-        use respire::transport::local::QueryLogRow;
+        use respire_app::transport::local::QueryLogRow;
         let row = |id: i64, q: &str, good: &[&str], adopted: &[&str]| QueryLogRow {
             request_id:None,
             id,

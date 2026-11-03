@@ -19,8 +19,6 @@ use uuid::Uuid;
 
 mod admission;
 mod autostart;
-mod bench;
-mod classify;
 mod classify_config;
 mod host_rpc;
 mod login;
@@ -30,8 +28,6 @@ mod rpc;
 mod runtime_fetch;
 mod runtime_http;
 mod shell;
-mod skill;
-mod review;
 mod web;
 
 // Shared command surface extracted into the respire_commands crate; the bin
@@ -61,6 +57,7 @@ pub(crate) use respire_commands::sync_flow::{
     sync_tracked_boundary, sync_with_retry,
 };
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
+use respire_commands::{bench, classify, recall_select, review, skill};
 use respire_commands::output_emit::{command_failure, emit_details, emit_result};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
@@ -80,7 +77,6 @@ use respire::memory::search::Embedder;
 use respire::memory::{MemoryEngine, MemoryQuery, SessionKeys};
 use respire::sync::{remote_configured, SyncStats};
 
-mod recall_select;
 use respire::transport::local::LocalStore;
 use respire::transport::remote::{RemoteConfig, RemoteTransport};
 use respire::transport::MemoryTransport;

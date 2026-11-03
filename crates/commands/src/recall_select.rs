@@ -3,9 +3,9 @@
 mod metadata;
 pub use metadata::{brief_layout, recall_metadata, require_metadata};
 use anyhow::{Context, Result};
-use respire::memory::model::{RenderBudget, RenderBudgetReceipt, RenderItem, RecallRepresentation};
-use respire::memory::engine::RecalledWithContext;
-use respire::transport::MemoryTransport;
+use respire_app::memory::model::{RenderBudget, RenderBudgetReceipt, RenderItem, RecallRepresentation};
+use respire_app::memory::engine::RecalledWithContext;
+use respire_app::transport::MemoryTransport;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -14,7 +14,7 @@ struct RecallResult {
     items: Vec<RecalledWithContext>,
     mode: String,
     warning: Option<String>,
-    routing: respire::memory::model::RecallRouting,
+    routing: respire_app::memory::model::RecallRouting,
     retrieval: Value,
     #[serde(default)]
     budget: Option<RenderBudgetReceipt>,
@@ -45,7 +45,7 @@ pub fn decode_render_budget(encoded: Option<&str>, limit: usize, intent: &str) -
 
 pub fn require_render_budget(render_min_score: Option<f32>) -> Result<()> {
     anyhow::ensure!(render_min_score.is_none_or(f32::is_finite), "render minimum score must be finite");
-    let capabilities: Value = respire::core_sdk::execute("capabilities", json!({}))?;
+    let capabilities: Value = respire_app::core_sdk::execute("capabilities", json!({}))?;
     anyhow::ensure!(capabilities["render_budget_contract"] == 1,
         "Core SDK does not support render budget contract 1; install a matching SDK");
     anyhow::ensure!(capabilities["howto_recall_contract"] == 1,
@@ -59,38 +59,38 @@ pub fn require_render_budget(render_min_score: Option<f32>) -> Result<()> {
     Ok(())
 }
 
-pub fn recall<E: respire::memory::search::Embedder>(
-    keys: &respire::memory::SessionKeys,
+pub fn recall<E: respire_app::memory::search::Embedder>(
+    keys: &respire_app::memory::SessionKeys,
     embedder: &E,
-    candidates: &[respire::StoredMemory],
-    query: &respire::MemoryQuery,
-    store: &respire::transport::local::LocalStore,
+    candidates: &[respire_app::StoredMemory],
+    query: &respire_app::MemoryQuery,
+    store: &respire_app::transport::local::LocalStore,
     render_budget: Option<RenderBudget>,
     render_min_score: Option<f32>,
     intent: Option<&str>,
-) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting, Value, Option<RenderBudgetReceipt>)> {
-    let mode = respire::service::read_agent_config()["recall_mode"]
+) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire_app::memory::model::RecallRouting, Value, Option<RenderBudgetReceipt>)> {
+    let mode = respire_app::service::read_agent_config()["recall_mode"]
         .as_str()
         .unwrap_or("fast")
         .to_owned();
     recall_with_mode(keys, embedder, candidates, query, store, render_budget, render_min_score, intent, &mode)
 }
 
-pub fn recall_with_mode<E: respire::memory::search::Embedder>(
-    keys: &respire::memory::SessionKeys,
+pub fn recall_with_mode<E: respire_app::memory::search::Embedder>(
+    keys: &respire_app::memory::SessionKeys,
     embedder: &E,
-    candidates: &[respire::StoredMemory],
-    query: &respire::MemoryQuery,
-    store: &respire::transport::local::LocalStore,
+    candidates: &[respire_app::StoredMemory],
+    query: &respire_app::MemoryQuery,
+    store: &respire_app::transport::local::LocalStore,
     render_budget: Option<RenderBudget>,
     render_min_score: Option<f32>,
     intent: Option<&str>,
     mode: &str,
-) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire::memory::model::RecallRouting, Value, Option<RenderBudgetReceipt>)> {
+) -> Result<(Vec<RecalledWithContext>, String, Option<String>, respire_app::memory::model::RecallRouting, Value, Option<RenderBudgetReceipt>)> {
     anyhow::ensure!(matches!(mode, "fast" | "quality"), "unknown recall mode");
     let superseded = if render_budget.is_some() {
-        let metadata: respire::memory::model::RelatedResult = respire::core_sdk::execute("related_business", json!({
-            "model": embedder.model_name(), "snapshots": respire::memory::engine::snapshots(keys, candidates)?,
+        let metadata: respire_app::memory::model::RelatedResult = respire_app::core_sdk::execute("related_business", json!({
+            "model": embedder.model_name(), "snapshots": respire_app::memory::engine::snapshots(keys, candidates)?,
             "query": query, "ids": [], "pairs": [],
             "related_settings": {"enabled": false}, "all_superseded": true,
         }))?;
@@ -101,7 +101,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
         let authorized: std::collections::HashSet<&str> = candidates.iter().map(|memory| memory.id.as_str()).collect();
         let records = store.all(false)?;
         budget.items = records.iter().filter(|memory| authorized.contains(memory.id.as_str())).map(|memory| {
-            let entry = respire::memory::engine::MemoryEngine::open(keys, memory)
+            let entry = respire_app::memory::engine::MemoryEngine::open(keys, memory)
                 .context("decrypt title for render budget")?;
             let title = if entry.title.is_empty() { "(untitled)" } else { &entry.title };
             let state = if superseded.contains_key(&entry.id) { " \u{2192}superseded" } else { "" };
@@ -120,9 +120,9 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
         crate::classify::call_api(backend, request)
     };
     let mut payload = json!({
-        "model": embedder.model_name(), "snapshots": respire::memory::engine::snapshots(keys, candidates)?,
+        "model": embedder.model_name(), "snapshots": respire_app::memory::engine::snapshots(keys, candidates)?,
         "query": query, "mode": mode,
-        "query_settings": respire::feedback::query_settings(store, query, candidates)?,
+        "query_settings": respire_app::feedback::query_settings(store, query, candidates)?,
         "provider": provider.as_ref().map(|backend| json!({"name":backend.name,"model":backend.model})),
     });
     if let Some(budget) = &render_budget { payload["render_budget"] = json!(budget); }
@@ -134,7 +134,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
         payload["intent"] = json!(intent);
         payload["skill_runs"] = json!(runs);
     }
-    let mut result: RecallResult = respire::core_sdk::execute_with_transport(
+    let mut result: RecallResult = respire_app::core_sdk::execute_with_transport(
         "query_business",
         payload,
         &mut transport,
@@ -154,7 +154,7 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
     if let Some(request) = &render_budget {
         let receipt = result.budget.as_ref().context("Core omitted required render budget receipt")?;
         let body = receipt.items.iter().map(|item| item.rendered_text.as_str()).collect::<Vec<_>>().join(&request.separator);
-        let text = if receipt.status == respire::memory::model::RenderBudgetStatus::WrapperOverBudget {
+        let text = if receipt.status == respire_app::memory::model::RenderBudgetStatus::WrapperOverBudget {
             anyhow::ensure!(receipt.items.is_empty(), "Core returned items with an over-budget wrapper");
             String::new()
         } else {
@@ -169,24 +169,24 @@ pub fn recall_with_mode<E: respire::memory::search::Embedder>(
             && result.items.iter().map(|item| item.entry.id.as_str()).eq(receipt.items.iter().map(|item| item.id.as_str())),
             "Core render budget contract mismatch; dynamic block refused");
     }
-    if respire::env::var("RSRS_DEBUG_SCORE").is_ok_and(|value| value == "1") {
+    if respire_app::env::var("RSRS_DEBUG_SCORE").is_ok_and(|value| value == "1") {
         eprintln!("{}", serde_json::to_string(&result.retrieval)?);
     }
     Ok((result.items, result.mode, result.warning, result.routing, result.retrieval, result.budget))
 }
 
 fn configured_provider() -> Option<crate::classify::Backend> {
-    let config = respire::service::read_agent_config();
+    let config = respire_app::service::read_agent_config();
     let base = config["recall_api_base"]
         .as_str()
         .map(str::to_owned)
-        .or_else(respire::keystore::load_ds_last_base)
+        .or_else(respire_app::keystore::load_ds_last_base)
         .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned());
-    let slot = format!("ds@{}", respire::keystore::host_of(&base));
-    let key = respire::env::var("RSRS_RECALL_API_KEY")
+    let slot = format!("ds@{}", respire_app::keystore::host_of(&base));
+    let key = respire_app::env::var("RSRS_RECALL_API_KEY")
         .ok()
         .filter(|key| !key.trim().is_empty())
-        .or_else(|| respire::keystore::load_classify_key(&slot))?;
+        .or_else(|| respire_app::keystore::load_classify_key(&slot))?;
     let model = config["recall_model"]
         .as_str()
         .unwrap_or(crate::classify::DEFAULT_DS_MODEL);
