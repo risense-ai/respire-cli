@@ -9,13 +9,12 @@
 //! Without a token, sync and post-write auto-sync cannot reach the server.
 //! An existing session.json, or RSRS_ADDR/TOKEN, also works.
 
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use uuid::Uuid;
 
 mod admission;
@@ -45,9 +44,20 @@ use respire_commands::cli_def::{
     changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
     SessionCommand, SnapshotCmd,
 };
+use respire_commands::gates::{
+    is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,
+};
 use respire_commands::i18n;
 use respire_commands::metadata;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
+use respire_commands::output_state::{
+    exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
+    set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
+    HOST_RPC_OUTPUT, OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
+};
+use respire_commands::util::{
+    current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id,
+};
 
 use respire::auth;
 use respire::memory::bge::BgeEmbedder;
@@ -287,13 +297,6 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 static DIRECT_MODE: AtomicBool = AtomicBool::new(false);
 
-thread_local! {
-    static JSON_MODE: Cell<bool> = const { Cell::new(false) };
-    static OUTPUT_EMITTED: Cell<bool> = const { Cell::new(false) };
-    static OUTPUT_EXIT_CODE: Cell<u8> = const { Cell::new(0) };
-    static DEFER_PROFILE_OUTPUT: Cell<bool> = const { Cell::new(false) };
-    static HOST_RPC_OUTPUT: Cell<bool> = const { Cell::new(false) };
-}
 static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<BgeEmbedder>>> = std::sync::Mutex::new(None);
 
 struct EmbedderHold(Option<Box<BgeEmbedder>>);
@@ -304,32 +307,6 @@ impl Drop for EmbedderHold {
             *slot = self.0.take();
         }
     }
-}
-
-fn status_exit_code(status: OutputStatus) -> i32 {
-    match status {
-        OutputStatus::Ok | OutputStatus::Skip => 0,
-        OutputStatus::Warn | OutputStatus::Pending => 2,
-        OutputStatus::Fail => 1,
-    }
-}
-
-fn json_mode() -> bool {
-    JSON_MODE.with(|flag| flag.get())
-}
-
-/// Whether to print progress lines on stderr. The web bridge sets RSRS_PROGRESS=1
-/// for long async jobs: stdout stays JSON (for the bridge), stderr streams progress
-/// (so the UI can "scroll"). Without that env var, a TTY decides - same as before.
-fn progress_enabled() -> bool {
-    if json_mode() { return false; }
-    if respire::env::var("RSRS_PROGRESS")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    !json_mode() && std::io::IsTerminal::is_terminal(&std::io::stderr())
 }
 
 fn emit_result(result: ResultEnvelope) -> Result<()> {
@@ -350,35 +327,6 @@ fn emit_result(result: ResultEnvelope) -> Result<()> {
     Ok(())
 }
 
-thread_local! {
-    static CAPTURED: std::cell::RefCell<Option<ResultEnvelope>> = const { std::cell::RefCell::new(None) };
-}
-
-pub(crate) struct Captured {
-    pub exit: i32,
-    pub envelope: ResultEnvelope,
-}
-
-pub(crate) fn set_json_mode(on: bool) {
-    JSON_MODE.with(|flag| flag.set(on));
-}
-
-pub(crate) fn mark_emitted() {
-    OUTPUT_EMITTED.with(|flag| flag.set(true));
-}
-
-pub(crate) fn set_exit_code(code: i32) {
-    OUTPUT_EXIT_CODE.with(|flag| flag.set(code.clamp(0, 255) as u8));
-}
-
-pub(crate) fn exit_code() -> i32 {
-    OUTPUT_EXIT_CODE.with(|flag| flag.get() as i32)
-}
-
-fn output_emitted() -> bool {
-    OUTPUT_EMITTED.with(|flag| flag.get())
-}
-
 fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
     let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
@@ -396,17 +344,6 @@ fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
         envelope.details = serde_json::json!({"error_type":"outcome_unknown","request_id":id,"replayed":false,"result_method":"runtime.result"});
     }
     (envelope, if input { 2 } else { 1 })
-}
-
-/// Keep the complete parser diagnostic separately from its concise UI message.
-fn parse_failure(error: &clap::Error) -> ResultEnvelope {
-    let usage = error.to_string();
-    let mut envelope = ResultEnvelope::new("cli", OutputStatus::Fail,
-        serde_json::json!({"reason":"invalid_input"}), Vec::new());
-    envelope.errors.push(usage.lines().find(|line| !line.trim().is_empty())
-        .unwrap_or("invalid command input").to_owned());
-    envelope.details = serde_json::json!({"error_type":"user", "usage":usage});
-    envelope
 }
 
 /// Run one command on the runtime worker thread and keep the envelope instead of printing it.
@@ -769,14 +706,6 @@ fn run_resort(
         emit_result(result)?;
     }
     Ok(())
-}
-
-fn now_stamp() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
-fn current_user() -> String {
-    respire::env::var("RSRS_USER").unwrap_or_else(|_| "local".to_owned())
 }
 
 /// Daily identity is stable even when its display title or importance changes.
@@ -2915,17 +2844,6 @@ fn run_repack() -> Result<()> {
     ))
 }
 
-/// Local-timezone YYYY-MM-DD (parse failure falls back to the first 10 chars of the original).
-fn local_day_of(s: &str) -> String {
-    chrono::DateTime::parse_from_rfc3339(s)
-        .map(|dt| {
-            dt.with_timezone(&chrono::Local)
-                .format("%Y-%m-%d")
-                .to_string()
-        })
-        .unwrap_or_else(|_| s.chars().take(10).collect())
-}
-
 fn emit_diary_fragments(command: &str, fragments: respire::diary::FragmentResult) -> Result<()> {
     if !json_mode() {
         println!("{}", serde_json::to_string(&fragments)?);
@@ -3673,36 +3591,6 @@ fn run_keygen(pass: Option<&str>, force: bool) -> Result<()> {
         .actions
         .push("login --interactive --user <user> --pass <password>".into());
     emit_result(result)
-}
-
-/// Device label: `device` first, `computer` as fallback; both empty -> "unknown device (old data)" -
-/// so an AI does not miss the empty field and copy commands across machines.
-fn dev_label(device: &str, computer: &str) -> String {
-    if !device.trim().is_empty() {
-        device.trim().to_owned()
-    } else if !computer.trim().is_empty() {
-        computer.trim().to_owned()
-    } else {
-        "unknown device (old data, do not copy commands across machines)".to_owned()
-    }
-}
-
-/// Time lower bound for list (§3.8 tidy intake). --since takes an explicit time (RFC3339 or YYYY-MM-DD,
-/// the latter from 00:00 UTC that day); --since-resort reads maintenance.json resort_at
-/// (written when resort --go resets, i.e. "last tidy time"). Both together take the later one.
-/// Missing resort_at (never tidied) -> 1970 epoch, i.e. no filter.
-fn list_since_bound(since: Option<&str>, since_resort: bool) -> Result<String> {
-    let explicit = since.map(respire::service::normalize_since).transpose()?;
-    let from_resort = if since_resort {
-        respire::service::resort_at()
-    } else {
-        None
-    };
-    Ok(respire::service::later_bound(explicit, from_resort))
-}
-
-fn short_id(id: &str) -> String {
-    id.chars().take(8).collect()
 }
 
 /// Version check (`update-check`): query the npm registry for a newer CLI.
@@ -4973,120 +4861,6 @@ fn run_share_import(
 
 /// Whether this command writes the store (must refuse in read-only mode).
 ///
-/// Rule: commands that change local store data. **The sync family is not a write** - it only moves existing data;
-/// a read-only member must still pull memories others just stored (pull rewrite is the sync engine, not this gate).
-/// Also not a write: recall/list/show/chain/diary/tree/status/audit/export/backup/
-/// doctor/bench/query-log/taxonomy/agent-config/config/space(switch profile)/inject(writes external files).
-fn is_write_command(c: &Command) -> bool {
-    matches!(
-        c,
-        Command::Remember { .. }
-            | Command::Update { .. }
-            | Command::Metadata { command: metadata::Command::Enable { .. } | metadata::Command::Disable }
-            | Command::Forget { .. }
-            | Command::Restore { .. }
-            | Command::Purge { .. }
-            | Command::Attach { .. }
-            | Command::Promote { .. }
-            | Command::Demote { .. }
-            | Command::Resort { .. }
-            | Command::Split { .. }
-            | Command::Import { .. }
-            | Command::Extract { .. }
-            | Command::Repack
-            | Command::RootCreate { .. }
-            | Command::TreeCure { .. }
-            | Command::TreeDeepen { .. }
-            | Command::TreeFloat { .. }
-            | Command::Defrag { .. }
-            // Audit add (2026-09-20): these change the store or credentials; they were missing so read-only could bypass.
-            // Grant writes access_grants (a read-only grant is itself a write);
-            // Taxonomy --ensure creates roots; Keygen rotates key material (--force can wreck the store);
-            // Model installs to disk; Account switch writes client.json; Login/Register/
-            // Fivekeys/SuperReset/KeysExport change session and credentials; Session/Logout change session;
-            // Space creates/deletes profiles and issues sessions.
-            | Command::Grant { .. }
-            | Command::Taxonomy { list: false, .. }
-            | Command::Taxonomy { ensure: Some(_), .. }
-            | Command::Keygen { .. }
-            | Command::Model { .. }
-            | Command::Login { .. }
-            | Command::Register { .. }
-            | Command::Fivekeys { .. }
-            | Command::SuperReset { .. }
-            | Command::KeysExport { .. }
-            | Command::Logout { .. }
-            | Command::Space { .. }
-            | Command::Reembed { .. }
-            | Command::Retitle { .. }
-            | Command::RetitleMany { .. }
-            | Command::Snapshot { cmd: SnapshotCmd::Restore { .. } | SnapshotCmd::ResumeSync { .. } | SnapshotCmd::Recover { .. } }
-            | Command::SyncReset
-            | Command::Doctor { fix: true, .. }
-            | Command::SyncResolve { .. }
-            | Command::SyncRestore { .. }
-    )
-}
-
-/// Whether this command **changes the read-only switch itself** (agent.json `readonly` key).
-///
-/// Why (2026-09-20 audit): the read-only gate reads agent.json; if the command that edits it is not gated,
-/// a read-only member can `agent-config --set readonly=false` and unlock themselves (reproduced).
-/// So identify it separately, and in read-only **only allow keeping/enabling read-only, never turning it off**.
-fn is_readonly_switch_off(c: &Command) -> bool {
-    match c {
-        Command::AgentConfig { set: Some(kv) } => {
-            let (k, v) = kv.split_once('=').unwrap_or(("", ""));
-            k.trim() == "readonly"
-                && matches!(v.trim().to_ascii_lowercase().as_str(), "false" | "0" | "no")
-        }
-        _ => false,
-    }
-}
-
-/// Fine-grained write check: these commands are **part write, part read**, so they cannot go wholesale into `is_write_command`.
-///
-/// Why (2026-09-20 audit): putting all of `Account`/`Session` on the list would block read-only members -
-/// they should still `account list` and `session list`.
-/// `Account`: list/use read, remove deletes a profile (write); `Session`: list read, revoke changes session (write).
-/// Temporarily-off **allowlist**: memory is fully stopped, but admin/identity/inject infrastructure must still work.
-///
-/// Use an **allowlist** not a blocklist - a new command is refused by default, which matches "off";
-/// missing an admin command is only a hassle (turn memory back on); missing a memory command is an accident.
-fn is_off_allowed(c: &Command) -> bool {
-    matches!(
-        c,
-        // Self-restore and inject (the only way out of off)
-        Command::AgentConfig { .. } | Command::Inject { .. }
-        // Status and doctor
-        | Command::Status | Command::MemoryRevision | Command::Capabilities | Command::UpdateCheck { .. }
-        // Infrastructure (web server, MCP shell, models, plugins, config)
-        | Command::Web { .. } | Command::Mcp { .. } | Command::V | Command::ClassifyConfig { .. }
-        | Command::Plugin { .. } | Command::Config { .. }
-        // Sync reads and writes memory, so it is paused while disabled.
-        // Identity / account / credentials / space admin
-        | Command::Login { .. } | Command::Logout { .. } | Command::Register { .. }
-        | Command::Account { .. } | Command::Session { .. }
-        | Command::KeysExport { .. } | Command::SuperReset { .. } | Command::Fivekeys { .. }
-        | Command::Secret { .. } | Command::Space { .. }
-    )
-}
-
-fn is_write_command_fine(c: &Command) -> bool {
-    match c {
-        Command::Review { args } => args.writes(),
-        Command::Account { action, .. } => {
-            let a = action.trim().to_ascii_lowercase();
-            a == "remove"
-        }
-        Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
-        Command::QueryLog { cmd: Some(QueryLogCmd::Mark { .. }), .. } => true,
-        // share-import without --go only prints the candidate bill (read); --go writes
-        Command::ShareImport { go, .. } => *go,
-        _ => false,
-    }
-}
-
 fn main() {
     // The command enum and the ONNX session are large. Debug builds on Windows
     // give the main thread a 1MB stack, which overflows inside clap. Do the work
