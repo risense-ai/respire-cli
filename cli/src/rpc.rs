@@ -812,9 +812,9 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             // --runtime-internal shim) for the transition train.
             match crate::runtime_fetch::download_and_install(None, None) {
                 Ok(path) => path,
-                Err(_) => self_exe
-                    .clone()
-                    .context("no runtime binary resolved and no local fallback executable")?,
+                Err(download_error) => crate::mcp::materialize_bin().map_err(|error| {
+                    anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
+                })?,
             }
         }
     };
