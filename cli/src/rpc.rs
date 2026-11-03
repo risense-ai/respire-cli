@@ -605,6 +605,15 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     ensure_daemon_locked()
 }
 
+/// Direct commands may reuse a ready runtime, but never start the lifecycle
+/// fallback that leaves a serving shim holding the library lock after return.
+pub(crate) fn direct_runtime_available() -> Result<bool> {
+    match probe_runtime()? {
+        Some(health) => runtime_acceptable(&health),
+        None => Ok(false),
+    }
+}
+
 pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool> {
     let override_bin = respire::env::var("RSRS_RUNTIME_BIN").ok()
         .map(|raw| std::path::PathBuf::from(raw.trim()))

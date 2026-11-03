@@ -1572,13 +1572,6 @@ fn run(args: Cli) -> Result<()> {
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );
     if let Some(Command::Model { action }) = args.command.as_ref() {
-        if DIRECT_MODE.load(Ordering::Relaxed)
-            && matches!(action, ModelAction::InstallM3 { .. } | ModelAction::Probe { .. })
-        {
-            // Legacy direct model maintenance and CI probes run in this host
-            // process; forwarding them would start a serving runtime shim.
-            return run_local(args);
-        }
         let request = match action {
             ModelAction::Catalog => Some(("model.catalog",Vec::new())),
             ModelAction::Configure { file } => {
@@ -1753,6 +1746,11 @@ fn run(args: Cli) -> Result<()> {
         return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
+        if !matches!(rpc::direct_runtime_available(), Ok(true)) {
+            // No runtime is ready, so preserve the in-process direct path and
+            // its local diagnostics instead of starting a serving shim.
+            return run_local(args);
+        }
         // Deprecated downgrade: --direct used to bypass the resident runtime.
         // For one release train it forwards to the local runtime instead.
         eprintln!("deprecated: --direct now forwards to the local runtime; the in-process bypass is removed in an upcoming release train");
