@@ -1,7 +1,6 @@
 //! Local authenticated runtime transport. Commands connect only to loopback HTTP
 //! over TCP and auto-start the hidden `--runtime-internal` host entry.
 
-use std::cell::Cell;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::path::PathBuf;
@@ -22,46 +21,29 @@ use crate::output::{ResultEnvelope, Status as OutputStatus};
 const START_POLLS: usize = 100;
 const START_WAIT: Duration = Duration::from_millis(150);
 
-thread_local! {
-    static WORKER: Cell<bool> = const { Cell::new(false) };
-    static SYNC_CONTEXT: Cell<Option<(usize, i64)>> = const { Cell::new(None) };
-}
+// Worker-face state (worker flag, sync context, generation, index work,
+// write gate, recall statistics) lives in the shared rpc_worker module;
+// re-exported so `rpc::...` call sites keep resolving.
+pub(crate) use respire_commands::rpc_worker::{
+    check_sync_context, diary_commit, foreground_phase, index_has_work, index_loop,
+    index_loop_inner, index_status, invalidate_sync_boundary, kick_index, mark_worker,
+    recall_stats_status, request_index, set_worker_active, shared_exclusive, sync_boundary,
+    sync_generation, sync_local, worker_active, MAX_PENDING_STATS,
+    STATS_ENQUEUED, STATS_FAILED, STATS_PENDING, STATS_PERSISTED, STATS_REJECTED, STOPPING,
+    SYNC_CONTEXT, GENERATION, INDEX_CV, INDEX_ON, INDEX_RUNNING, INDEX_WORK, EXCLUSIVE,
+    RecallStats,
+};
 
 static RUNNING: AtomicUsize = AtomicUsize::new(0);
 static RUNNING_STATUS: AtomicUsize = AtomicUsize::new(0);
 static LIGHT_RUNNING: AtomicUsize = AtomicUsize::new(0);
 static WORKERS: AtomicUsize = AtomicUsize::new(1);
-static STOPPING: AtomicBool = AtomicBool::new(false);
 static STORE_READY: AtomicBool = AtomicBool::new(false);
 static SNAPSHOT_BOOT_ID: Mutex<Option<String>> = Mutex::new(None);
 static JOB_TX: OnceLock<Mutex<Sender<Job>>> = OnceLock::new();
 static DISPATCH_THREAD: OnceLock<std::thread::Thread> = OnceLock::new();
 const QUEUE_EXPIRED: &str = "request queue deadline exceeded; command was not started";
 static WRITE_TX: Mutex<Option<mpsc::SyncSender<WriteJob>>> = Mutex::new(None);
-static STATS_PENDING: AtomicUsize = AtomicUsize::new(0);
-static STATS_ENQUEUED: AtomicUsize = AtomicUsize::new(0);
-static STATS_PERSISTED: AtomicUsize = AtomicUsize::new(0);
-static STATS_REJECTED: AtomicUsize = AtomicUsize::new(0);
-static STATS_FAILED: AtomicUsize = AtomicUsize::new(0);
-const MAX_PENDING_STATS: usize = 16;
-static EXCLUSIVE: OnceLock<Arc<WriteGate>> = OnceLock::new();
-static GENERATION: AtomicUsize = AtomicUsize::new(0);
-static INDEX_ON: AtomicBool = AtomicBool::new(false);
-static INDEX_RUNNING: AtomicBool = AtomicBool::new(false);
-static INDEX_CV: Condvar = Condvar::new();
-static INDEX_WORK: Mutex<IndexWork> = Mutex::new(IndexWork {
-    requested: false,
-    state: "idle",
-    error: None,
-    prepare_mirror: None,
-});
-
-struct IndexWork {
-    requested: bool,
-    state: &'static str,
-    error: Option<String>,
-    prepare_mirror: Option<String>,
-}
 static WRITE_RUNNING: AtomicBool = AtomicBool::new(false);
 static CLASSIFY_RUNNING: AtomicBool = AtomicBool::new(false);
 static SYNC_KICK: Mutex<SyncSchedule> = Mutex::new(SyncSchedule {
@@ -78,113 +60,20 @@ struct SyncSchedule {
     blocked_generation: Option<usize>,
     last_success: Option<u64>,
 }
-#[derive(Default)]
-struct GateState {
-    held: bool,
-    foreground: usize,
-}
-#[derive(Default)]
-struct WriteGate {
-    state: Mutex<GateState>,
-    changed: Condvar,
-}
-struct WriteGuard<'a>(&'a WriteGate);
-impl WriteGate {
-    fn reserve(&self) {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .foreground += 1;
-    }
-    fn cancel_reservation(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.foreground -= 1;
-        self.changed.notify_all();
-    }
-    fn acquire_reserved(&self) -> WriteGuard<'_> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while state.held {
-            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
-        }
-        state.foreground -= 1;
-        state.held = true;
-        WriteGuard(self)
-    }
-    fn acquire(&self, foreground: bool) -> WriteGuard<'_> {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if foreground {
-            state.foreground += 1;
-        }
-        while state.held || (!foreground && state.foreground > 0) {
-            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
-        }
-        if foreground {
-            state.foreground -= 1;
-        }
-        state.held = true;
-        WriteGuard(self)
-    }
-}
-impl Drop for WriteGuard<'_> {
-    fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.held = false;
-        self.0.changed.notify_all();
-    }
-}
 static SYNC_CV: Condvar = Condvar::new();
 static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static FLIGHT_ON: AtomicBool = AtomicBool::new(false);
 static CACHE: Mutex<Vec<(String, RpcResponse)>> = Mutex::new(Vec::new());
 static INFLIGHT: std::sync::LazyLock<Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
-pub fn worker_active() -> bool {
-    WORKER.with(|flag| flag.get())
-}
-
-pub(crate) fn set_worker_active(on: bool) {
-    WORKER.with(|flag| flag.set(on));
-}
-
-fn mark_worker() {
-    WORKER.with(|flag| flag.set(true));
-}
-
 enum WriteJob {
     Command(Job),
     RecallStats(RecallStats, usize),
 }
 
-pub(crate) struct RecallStats {
-    pub request_id:String,
-    pub query: String,
-    pub project: String,
-    pub candidates: Vec<String>,
-    pub scores: Vec<f32>,
-}
-
-impl RecallStats {
-    pub(crate) fn persist(&self, store: &respire::transport::local::LocalStore) -> Result<()> {
-        if respire::service::workspace_mode() != "normal" { return Ok(()); }
-        store.write_transaction(|| {
-            store.log_query_request(&self.request_id,&self.query, &self.project, "", &self.candidates, &self.scores)?;
-            store.bump_recall(&self.candidates)?;
-            store.bump_recall_pairs(&self.candidates)
-        })
-    }
-}
-
-pub(crate) fn recall_stats_status() -> Value {
-    json!({
-        "pending": STATS_PENDING.load(Ordering::Acquire),
-        "enqueued": STATS_ENQUEUED.load(Ordering::Acquire),
-        "persisted": STATS_PERSISTED.load(Ordering::Acquire),
-        "rejected": STATS_REJECTED.load(Ordering::Acquire),
-        "failed": STATS_FAILED.load(Ordering::Acquire),
-    })
-}
-
-/// Statistics are best effort; never wait for queue capacity on the recall reply path.
+/// Statistics enqueueing stays with the write queue: the queue element type
+/// (WriteJob) still lives beside the runtime Job/admission machinery, while
+/// the statistics state and the read-side status moved to rpc_worker.
 pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
     if respire::service::workspace_mode() != "normal" { return; }
     if STATS_PENDING
@@ -229,63 +118,6 @@ pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
     }
 }
 
-fn shared_exclusive() -> Arc<WriteGate> {
-    EXCLUSIVE
-        .get_or_init(|| Arc::new(WriteGate::default()))
-        .clone()
-}
-
-pub(crate) fn sync_generation() -> usize {
-    SYNC_CONTEXT
-        .with(|context| context.get().map(|v| v.0))
-        .unwrap_or_else(|| GENERATION.load(Ordering::Acquire))
-}
-
-pub(crate) fn sync_boundary() -> Option<i64> {
-    SYNC_CONTEXT.with(|context| {
-        let value = context.get()?;
-        context.set(Some((value.0, -1)));
-        (value.1 >= 0).then_some(value.1)
-    })
-}
-
-pub(crate) fn sync_local<T>(generation: usize, action: impl FnOnce() -> Result<T>) -> Result<T> {
-    let gate = shared_exclusive();
-    let _held = gate.acquire(false);
-    check_sync_context(generation)?;
-    action()
-}
-
-/// Short local preparation/commit for commands whose Core call performs networking.
-pub(crate) fn foreground_phase<T>(
-    generation: usize,
-    action: impl FnOnce() -> Result<T>,
-) -> Result<T> {
-    let gate = shared_exclusive();
-    let _held = gate.acquire(true);
-    check_sync_context(generation)?;
-    action()
-}
-
-pub(crate) fn invalidate_sync_boundary(generation: usize) -> Result<()> {
-    check_sync_context(generation)?;
-    GENERATION.fetch_add(1, Ordering::AcqRel);
-    context_changed();
-    Ok(())
-}
-
-pub(crate) fn check_sync_context(generation: usize) -> Result<()> {
-    anyhow::ensure!(!crate::autostart::background_paused(), "runtime maintenance pauses background work");
-    respire::service::ensure_runtime_profile()?;
-    if STOPPING.load(Ordering::Acquire) {
-        bail!("runtime is stopping");
-    }
-    if GENERATION.load(Ordering::Acquire) != generation {
-        bail!("sync context changed; pending work kept locally");
-    }
-    Ok(())
-}
-
 pub(crate) fn sync_scheduler_status() -> Value {
     let state = SYNC_KICK.lock().unwrap_or_else(|e| e.into_inner());
     let blocked = state.blocked_generation == Some(GENERATION.load(Ordering::Acquire));
@@ -313,17 +145,6 @@ fn context_changed() {
     drop(state);
     SYNC_CV.notify_one();
     kick_index();
-}
-
-pub(crate) fn index_status() -> Value {
-    let state = match INDEX_WORK.lock() {
-        Ok(state) => state,
-        Err(_) => return json!({"state":"failed", "error":"index work lock poisoned"}),
-    };
-    json!({"state": state.state, "scheduled": state.requested,
-        "worker_active": INDEX_ON.load(Ordering::Acquire),
-        "running": INDEX_RUNNING.load(Ordering::Acquire), "error": state.error,
-        "model_setup": (state.state == "failed").then_some("Automatic BGE-M3 preparation or indexing failed; inspect the reported error and download source settings.")})
 }
 
 static PROFILE_SWITCH_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -446,227 +267,6 @@ fn start_profile_switch_target(mut target: respire_app::core_sdk::profiles::Sele
         return Err(error.into());
     }
     Ok(profile_state())
-}
-
-pub(crate) fn kick_index() {
-    if STOPPING.load(Ordering::Acquire) {
-        return;
-    }
-    {
-        let mut work = match INDEX_WORK.lock() {
-            Ok(work) => work,
-            Err(_) => {
-                eprintln!("background retrieval indexing failed: index work lock poisoned");
-                return;
-            }
-        };
-        work.requested = true;
-        if !INDEX_RUNNING.load(Ordering::Acquire) && work.error.is_none() {
-            work.state = "scheduled";
-        }
-    }
-    INDEX_CV.notify_one();
-}
-
-fn index_yield_to_foreground(generation: usize) -> Result<()> {
-    anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
-    // A separate background Session no longer waits for foreground inference.
-    // Context and cancellation checks still occur between every committed source.
-    check_sync_context(generation)?;
-    respire::model_progress::check()
-}
-
-fn diary_commit(generation: usize, action: &mut dyn FnMut() -> Result<()>) -> Result<()> {
-    let gate = shared_exclusive();
-    let _write = gate.acquire(false);
-    // Account/mode transitions use the write gate; lifecycle transitions use
-    // takeover. Never block on takeover while its owner waits for INDEX_RUNNING.
-    let _lifecycle = crate::runtime_policy::try_takeover_lock()?;
-    respire::model_progress::commit(|| {
-        check_sync_context(generation)?;
-        anyhow::ensure!(!respire::service::service_paused(), "background index paused by service mode");
-        action()
-    })
-}
-
-/// The database's source-checked missing artifacts are the resumable work queue.
-/// Model preparation runs on this thread without taking the foreground write gate.
-fn index_loop() {
-    mark_worker();
-    if let Err(error) = index_loop_inner() {
-        eprintln!("background retrieval index worker stopped: {error:#}");
-    }
-    INDEX_RUNNING.store(false, Ordering::Release);
-    INDEX_ON.store(false, Ordering::Release);
-}
-
-fn index_has_work() -> bool {
-    INDEX_RUNNING.load(Ordering::Acquire)
-        || INDEX_WORK.lock().is_ok_and(|work| work.requested)
-}
-
-fn index_loop_inner() -> Result<()> {
-    let mut model_wait_started: Option<Instant> = None;
-    loop {
-        if respire::service::service_paused() || crate::autostart::background_paused() {
-            if STOPPING.load(Ordering::Acquire) {
-                let mut work=INDEX_WORK.lock().map_err(|_|anyhow::anyhow!("index work lock poisoned"))?;
-                work.requested=false;work.state="stopped";
-                return Ok(());
-            }
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            work.state = "paused";
-            let _paused = INDEX_CV.wait_timeout(work, Duration::from_secs(1)).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            continue;
-        }
-        {
-            let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            while !work.requested && !STOPPING.load(Ordering::Acquire) {
-                work = INDEX_CV.wait(work).map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-            }
-            if STOPPING.load(Ordering::Acquire) {
-                work.state = "stopped";
-                work.requested = false;
-                return Ok(());
-            }
-            work.requested = false;
-            work.state = "running";
-        }
-        INDEX_RUNNING.store(true, Ordering::Release);
-        let generation = GENERATION.load(Ordering::Acquire);
-        let result = (|| -> Result<bool> {
-            check_sync_context(generation)?;
-            let store = respire::service::open_store()?;
-            let model = store.retrieval_model()?;
-            let prepare_requested = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.is_some();
-            let pending = store.index_missing(&model)?;
-            let diary_pending = respire::diary::needs_rebuild(&store)?;
-            // An indexed library still needs the CPU container for its next query.
-            // Empty libraries wait for a write or explicit preparation instead of
-            // starting an unsolicited model download during status/restart.
-            let active_profile = store.active_selection()?;
-            let cpu_upgrade = active_profile.is_none() && model == "m3" && respire::MemoryTransport::count(&store)? > 0
-                && respire::model_install::cpu_model_preparation_needed()?;
-            if !pending && !diary_pending && !prepare_requested && !cpu_upgrade {
-                return Ok(true);
-            }
-            let Some(_operation) = respire::model_progress::Operation::try_begin_background_index()? else {
-                return Ok(false);
-            };
-            index_yield_to_foreground(generation)?;
-            if diary_pending && !pending && !prepare_requested && !cpu_upgrade
-                && respire::diary::clear_if_empty(&store, |action| diary_commit(generation,action))? {
-                return Ok(true);
-            }
-            let mirror = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.prepare_mirror.take();
-            if let Some(mirror) = mirror {
-                respire::model_install::prepare_m3_from_mirror(&mirror)?;
-            } else if let Some(selection) = active_profile.as_ref() {
-                respire_app::embedding::prepare(selection, |item,done,total| {
-                    check_sync_context(generation)?;
-                    respire::model_progress::update("prepare",item,done,total)
-                })?;
-            } else if model == "m3" {
-                respire::model_progress::update("prepare", "BGE-M3", 0, None)?;
-                respire::model_install::prepare_m3_for_index()?;
-                check_sync_context(generation)?;
-            }
-            if !pending && !diary_pending { return Ok(true); }
-            let keys = crate::build_session()?;
-            let embedder = respire::memory::bge::BgeEmbedder::load_model(&model)?;
-            while pending {
-                let rebuilt = store.rebuild_index_with_progress(&keys, &embedder, &model, |done, total| {
-                    index_yield_to_foreground(generation)?;
-                    respire::model_progress::update("index", &model, done as u64, Some(total as u64))
-                });
-                match rebuilt {
-                    Ok(_) => break,
-                    Err(error) if error.downcast_ref::<respire::transport::local::IndexSourceChanged>().is_some() => {
-                        // Keep this Operation across source changes: cancellation and
-                        // the 30-minute idle budget apply to the whole resumed task.
-                        respire::model_progress::check()?;
-                        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-                        work.error = Some(format!("{error:#}"));
-                        drop(work);
-                        for _ in 0..5 {
-                            check_sync_context(generation)?;
-                            respire::model_progress::check()?;
-                            std::thread::sleep(Duration::from_millis(100));
-                        }
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-            respire::diary::rebuild_with_progress(&store, &keys, &embedder, || {
-                index_yield_to_foreground(generation)?;
-                respire::model_progress::check()
-            }, |action| diary_commit(generation, action), |done| {
-                respire::model_progress::update("index", "diary-fragments", done as u64, None)
-            })?;
-            check_sync_context(generation)?;
-            Ok(true)
-        })();
-        INDEX_RUNNING.store(false, Ordering::Release);
-        let mut work = INDEX_WORK.lock().map_err(|_| anyhow::anyhow!("index work lock poisoned"))?;
-        match result {
-            Ok(true) => {
-                work.state = "ready";
-                work.error = None;
-                model_wait_started = None;
-            }
-            Ok(false) => {
-                let started = model_wait_started.get_or_insert_with(Instant::now);
-                if started.elapsed() >= Duration::from_secs(1800) {
-                    work.state = "failed";
-                    work.requested = false;
-                    work.error = Some("background indexing timed out waiting for another model operation".into());
-                    model_wait_started = None;
-                    continue;
-                }
-                work.state = "waiting_model";
-                work.requested = true;
-                work = INDEX_CV.wait_timeout(work, Duration::from_secs(1))
-                    .map_err(|_| anyhow::anyhow!("index work lock poisoned"))?.0;
-            }
-            Err(error) if error.downcast_ref::<respire::model_progress::OperationStopped>().is_some() => {
-                model_wait_started = None;
-                if work.prepare_mirror.is_some() {
-                    work.state = "scheduled";
-                    work.requested = true;
-                    work.error = None;
-                } else {
-                    work.state = "paused";
-                    work.requested = false;
-                    work.error = Some(format!("{error:#}"));
-                }
-            }
-            Err(error) if generation != GENERATION.load(Ordering::Acquire) => {
-                model_wait_started = None;
-                work.state = "scheduled";
-                work.requested = true;
-                work.error = Some(format!("{error:#}"));
-            }
-            Err(error) => {
-                model_wait_started = None;
-                work.state = "failed";
-                work.error = Some(format!("{error:#}"));
-                eprintln!("background retrieval indexing failed: {error:#}");
-            }
-        }
-        drop(work);
-    }
-}
-
-/// An explicit direct command releases its library lock before starting this work.
-pub(crate) fn request_index() -> Result<Value> {
-    if worker_active() {
-        kick_index();
-        return Ok(index_status());
-    }
-    let response = call_method("index.prepare", Vec::new(), true)?;
-    anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
-    response.envelope.map(|envelope| envelope.summary)
-        .ok_or_else(|| anyhow::anyhow!("runtime did not acknowledge background indexing"))
 }
 
 pub(crate) fn sync_running() -> bool {
@@ -1341,7 +941,7 @@ fn render_response(response: RpcResponse, json: bool) -> Result<()> {
     )
 }
 
-fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcResponse> {
+pub(crate) fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcResponse> {
     let auto = auto_start && !crate::net_rpc::no_autostart();
     // Validate/start the runtime for this data directory before submitting work.
     // Once submitted, a disconnect must not cause a mutating command to be replayed.
@@ -1356,6 +956,16 @@ fn call_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<RpcR
         bail!("local runtime protocol/version mismatch");
     }
     Ok(response)
+}
+
+pub(crate) fn call_method_outcome(method: &str, args: Vec<String>, auto_start: bool) -> Result<respire_commands::host_hooks::MethodOutcome> {
+    call_method(method, args, auto_start).map(|response| {
+        respire_commands::host_hooks::MethodOutcome {
+            ok: response.ok,
+            error: response.error,
+            envelope: response.envelope,
+        }
+    })
 }
 
 pub(crate) fn model_control(task_id: &str, cancel: bool) -> Result<Value> {

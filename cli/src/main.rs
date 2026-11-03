@@ -39,8 +39,13 @@ mod web;
 // re-binds the module names so existing `crate::` paths keep resolving.
 use respire_commands::app_version;
 use respire_commands::cli_def::{
-    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand,
-    QueryLogCmd, SessionCommand, SnapshotCmd,
+    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
+    SessionCommand, SnapshotCmd,
+};
+use respire_commands::engine::{
+    build_local, build_remote, build_session, build_session_with_owner,
+    build_session_with_owner_inner, build_transport, read_session_json,
+    remote_config_from_session_or_env,
 };
 use respire_commands::gates::{
     is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,
@@ -4865,6 +4870,31 @@ fn run_share_import(
 /// Whether this command writes the store (must refuse in read-only mode).
 ///
 fn main() {
+    // Host services consumed by the shared worker/engine modules are wired once
+    // here; the shared code calls them through respire_commands::host_hooks.
+    let installed = respire_commands::host_hooks::install(respire_commands::host_hooks::HostHooks {
+        background_paused: Some(|| autostart::background_paused()),
+        check_direct_access: Some(|| autostart::check_direct_access()),
+        note_credential_access: Some(|available| autostart::note_credential_access(available)),
+        context_changed: Some(rpc::context_changed),
+        call_runtime_method: Some(rpc::call_method_outcome),
+        update_hint: Some(respire::update_check::hint),
+        update_enabled: Some(respire::update_check::enabled),
+        update_check_run: Some(|force| {
+            respire::update_check::check(force).map(|status| {
+                respire_commands::host_hooks::UpdateStatus {
+                    current: status.current,
+                    latest: status.latest,
+                    outdated: status.outdated,
+                    cached: status.cached,
+                }
+            })
+        }),
+        materialize_bin: Some(mcp::materialize_bin),
+    });
+    if !installed {
+        eprintln!("host hooks were installed twice; keeping the first wiring");
+    }
     // The command enum and the ONNX session are large. Debug builds on Windows
     // give the main thread a 1MB stack, which overflows inside clap. Do the work
     // on a thread with room.
