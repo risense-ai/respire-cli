@@ -275,8 +275,37 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;
     {
+        // Diagnostics: if the fixture lock is already held at this point,
+        // print the holders so the CI log identifies the leaking process.
         let ownership =
-            respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1))?;
+            match respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1)) {
+                Ok(ownership) => ownership,
+                Err(error) => {
+                    eprintln!(
+                        "DIAG staged: fixture lock held after create; scanning holders"
+                    );
+                    if let Ok(entries) = std::fs::read_dir("/proc") {
+                        for entry in entries.flatten() {
+                            let pid = entry.file_name();
+                            let pid = pid.to_string_lossy();
+                            if !pid.chars().all(|c| c.is_ascii_digit()) {
+                                continue;
+                            }
+                            if let Ok(cmd) = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                            {
+                                let cmd = cmd.replace('\0', " ");
+                                if cmd.contains(&fixture.root.path().to_string_lossy().as_ref())
+                                    || cmd.contains("rsrs")
+                                {
+                                    eprintln!("DIAG staged holder pid={pid} cmd={cmd}");
+                                }
+                            }
+                        }
+                    }
+                    eprintln!("DIAG staged create child error: {error:#}");
+                    return Err(error);
+                }
+            };
         respire_app::snapshot::restore_locked(
             fixture.root.path(),
             "snapshot-fixture",
@@ -299,6 +328,16 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
+    {
+        let stderr = serving.stderr.take().context("serve stderr")?;
+        std::thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                eprintln!("DIAG staged serve: {line}");
+            }
+        });
+    }
     let recovered_at = Instant::now();
     let mut exited_failed = false;
     let mut exited = false;
@@ -380,7 +419,9 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || -> std::io::Result<()> {
         for line in BufReader::new(stderr).lines() {
-            if line?.contains("memory library is locked") {
+            let line = line?;
+            eprintln!("DIAG queued child: {line}");
+            if line.contains("memory library is locked") {
                 let _ = tx.send(());
             }
         }
