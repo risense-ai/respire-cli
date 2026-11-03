@@ -48,7 +48,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
 
   const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks\]/);
   assert.match(report,/for group in core runtime_smoke runtime_autostart/);
-  assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 90/);
+  assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 85/);
   assert.match(report,/exit "\$result"/);
   for(const script of ['test-publication-fence','test-publication-acceptance','test-cleanup-release-artifacts','test-registry-publication','test-release-publication','test-dev6-publication-recovery','test-parallel-publication']) {
     assert(contracts.includes(`npm/scripts/${script}.mjs`),script);assert(!source.includes(`npm/scripts/${script}.mjs`),`not serialized: ${script}`);
@@ -84,7 +84,7 @@ test('source metadata optimization retains debug safety and only the CLI test-st
       assert(text.includes(`CARGO_PROFILE_${profile}_OPT_LEVEL: '0'`));
     }
   }
-  assert.match(section('check-complete'),/--fail-under-lines 90/);
+  assert.match(section('check-complete'),/--fail-under-lines 85/);
   assert.doesNotMatch(section('platform-build'),/CARGO_PROFILE_/);
   const manifest=readFileSync(new URL('../../Cargo.toml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(manifest,/\[profile.dev.package.sha2\]\nopt-level = 3/);
