@@ -141,8 +141,11 @@ in contrast, belong to each library and follow account/library switching.
 
 The resident host supervises a dedicated Core worker that reuses foreground and
 background native sessions. Worker IPC uses private inherited anonymous
-stdin/stdout pipes; it opens no network listener or SQLite database. The local
-HTTP RPC interface uses TCP loopback, without named-pipe or Unix-socket listeners.
+stdin/stdout pipes. Before native initialization, the worker duplicates its
+protocol output and redirects ordinary stdout to stderr, so native diagnostics
+cannot be interpreted as binary IPC frame headers. It opens no network listener
+or SQLite database. The local HTTP RPC interface uses TCP loopback, without
+named-pipe or Unix-socket listeners.
 Transport credentials, library ownership and SQLite commits remain in the host;
 health and progress requests remain independent of native execution.
 
