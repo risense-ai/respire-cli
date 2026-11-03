@@ -542,7 +542,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
     }
     check_direct_access()?;
     if let Some(health) = crate::rpc::probe_runtime()? {
-        if crate::rpc::runtime_matches_current(&health)?
+        if crate::rpc::runtime_acceptable(&health)?
             && health.managed_id.as_deref() == Some(config.id.as_str())
         {
             return Ok(true);
@@ -565,7 +565,7 @@ fn start_explicit_locked() -> Result<()> {
     if !config.manually_stopped {
         if let Some(health) = crate::rpc::probe_runtime()? {
             if health.managed_id.as_deref() == Some(config.id.as_str())
-                && crate::rpc::runtime_matches_current(&health)?
+                && crate::rpc::runtime_acceptable(&health)?
             {
                 reset_attempts(&config)?;
                 return Ok(());
