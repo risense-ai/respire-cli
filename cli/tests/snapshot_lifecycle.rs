@@ -307,7 +307,15 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
                                     let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
                                         .map(|cmd| cmd.replace('\0', " "))
                                         .unwrap_or_default();
-                                    eprintln!("DIAG staged holder pid={pid} fd={:?} target={target} cmd={cmd}", fd.file_name());
+                                    let env = std::fs::read_to_string(format!("/proc/{pid}/environ"))
+                                        .map(|env| {
+                                            env.split('\0')
+                                                .find(|entry| entry.starts_with("RSRS_DATA_DIR="))
+                                                .unwrap_or("RSRS_DATA_DIR=<unset>")
+                                                .to_owned()
+                                        })
+                                        .unwrap_or_default();
+                                    eprintln!("DIAG staged holder pid={pid} fd={:?} target={target} cmd={cmd} {env}", fd.file_name());
                                 }
                             }
                         }
