@@ -281,23 +281,33 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
             match respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1)) {
                 Ok(ownership) => ownership,
                 Err(error) => {
-                    eprintln!(
-                        "DIAG staged: fixture lock held after create; scanning holders"
-                    );
+                    let lock_path = fixture.root.path().join("lock.db");
+                    let lock_target = std::fs::canonicalize(&lock_path)
+                        .map(|path| path.to_string_lossy().to_string());
+                    eprintln!("DIAG staged: lock held; scanning fd holders of {lock_path:?}");
                     if let Ok(entries) = std::fs::read_dir("/proc") {
                         for entry in entries.flatten() {
-                            let pid = entry.file_name();
-                            let pid = pid.to_string_lossy();
+                            let pid = entry.file_name().to_string_lossy().to_string();
                             if !pid.chars().all(|c| c.is_ascii_digit()) {
                                 continue;
                             }
-                            if let Ok(cmd) = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                            {
-                                let cmd = cmd.replace('\0', " ");
-                                if cmd.contains(&fixture.root.path().to_string_lossy().as_ref())
-                                    || cmd.contains("rsrs")
-                                {
-                                    eprintln!("DIAG staged holder pid={pid} cmd={cmd}");
+                            let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                                continue;
+                            };
+                            for fd in fds.flatten() {
+                                let Ok(target) = std::fs::read_link(fd.path()) else {
+                                    continue;
+                                };
+                                let target = target.to_string_lossy().to_string();
+                                let matches = match &lock_target {
+                                    Ok(canonical) => target == *canonical,
+                                    Err(_) => target.ends_with("lock.db"),
+                                };
+                                if matches {
+                                    let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                                        .map(|cmd| cmd.replace('\0', " "))
+                                        .unwrap_or_default();
+                                    eprintln!("DIAG staged holder pid={pid} fd={:?} target={target} cmd={cmd}", fd.file_name());
                                 }
                             }
                         }
