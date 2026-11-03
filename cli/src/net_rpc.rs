@@ -24,6 +24,8 @@ const STOP_WAIT: Duration = Duration::from_millis(250);
 pub struct Health {
     pub server: String,
     pub bin: String,
+    #[serde(default)]
+    pub runtime_version: String,
     pub pid: u32,
     pub v: u32,
     #[serde(default)]
@@ -169,11 +171,13 @@ pub fn pid_is_respire(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
+    // Accept both the combined legacy binary and the split rsrs-runtime child.
     #[cfg(windows)]
     {
         respire_spawn::process_identity(pid).ok().flatten()
             .and_then(|value| value.executable.file_name().map(|name|name.to_owned()))
-            .is_some_and(|name|name.to_str().is_some_and(|name|name.eq_ignore_ascii_case("rsrs.exe")))
+            .is_some_and(|name|name.to_str().is_some_and(|name|
+                name.eq_ignore_ascii_case("rsrs.exe") || name.eq_ignore_ascii_case("rsrs-runtime.exe")))
     }
     #[cfg(target_os = "linux")]
     {
@@ -182,7 +186,8 @@ pub fn pid_is_respire(pid: u32) -> bool {
         std::fs::read_link(format!("/proc/{pid}/exe")).ok()
             .and_then(|path| path.file_name().map(|name| name.to_owned()))
             .and_then(|name| name.to_str().map(|name|
-                name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs"))
+                name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs"
+                    || name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs-runtime"))
             .unwrap_or(false)
     }
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -196,6 +201,7 @@ pub fn pid_is_respire(pid: u32) -> bool {
         let text = String::from_utf8_lossy(&out.stdout);
         let name = text.trim();
         name == "rsrs" || name.ends_with("/rsrs")
+            || name == "rsrs-runtime" || name.ends_with("/rsrs-runtime")
     }
 }
 

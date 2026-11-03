@@ -2616,28 +2616,33 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     // Normal requests only inspect the resident owner. Lifecycle serialization
     // begins when startup, replacement or recovery is actually required.
     if let Some(health) = probe_runtime()? {
-        if runtime_matches_current(&health)? { return Ok(()); }
+        if runtime_acceptable(&health)? { return Ok(()); }
     }
     let _takeover = crate::runtime_policy::takeover_lock()?;
     ensure_daemon_locked()
 }
 
-pub(crate) fn runtime_matches_current(health: &crate::net_rpc::Health) -> Result<bool> {
-    let dest = crate::mcp::stable_bin_path();
-    let src = std::env::current_exe().context("failed to locate the rsrs binary")?;
+pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool> {
+    let override_bin = respire::env::var("RSRS_RUNTIME_BIN").ok()
+        .map(|raw| std::path::PathBuf::from(raw.trim()))
+        .filter(|path| !path.as_os_str().is_empty());
+    let expected = match override_bin {
+        Some(path) => path,
+        None => crate::runtime_fetch::managed_runtime_path()?
+            .context("no managed runtime is installed")?,
+    };
     Ok(!health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir), &respire::service::data_dir())
         && crate::autostart::may_reuse_runtime(health)?
-        && health.bin == env!("CARGO_PKG_VERSION")
-        && crate::mcp::exe_matches_dest(&health.exe, &dest)
-        && !health.inference_stalled()
-        && !crate::mcp::bin_needs_refresh(&src, &dest).map_err(anyhow::Error::msg)?)
+        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+        && crate::mcp::exe_matches_dest(&health.exe, &expected)
+        && !health.inference_stalled())
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
     if crate::autostart::ensure_managed_locked()? { return Ok(()); }
     crate::autostart::check_direct_access()?;
     if let Some(health) = probe_runtime()? {
-        if runtime_matches_current(&health)? {
+        if runtime_acceptable(&health)? {
             return Ok(());
         }
         if health.inference_stalled() {
@@ -2646,10 +2651,22 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         }
         stop_occupant(health.pid)?;
     }
-    let executable = crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+    let executable = match crate::runtime_fetch::resolve_runtime_bin()? {
+        crate::runtime_fetch::ResolvedRuntime::Ready(path) => path,
+        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_) => {
+            // First-launch migration: the old owner was stopped above; bring
+            // the pinned managed runtime down before starting the new one.
+            crate::runtime_fetch::download_and_install(None, None)?
+        }
+    };
     crate::autostart::authorize_detached_boot_locked()?;
+    let arguments: Vec<std::ffi::OsString> = vec![
+        "serve".into(),
+        "--data-dir".into(),
+        respire::service::data_dir().into_os_string(),
+    ];
     let mut child =
-        respire_spawn::spawn_runtime_with_boot_token(&executable, crate::autostart::lifecycle_boot_token().as_deref()).context("failed to start host runtime")?;
+        respire_spawn::spawn_binary_with_boot_token(&executable, &arguments, crate::autostart::lifecycle_boot_token().as_deref()).context("failed to start host runtime")?;
     let result = wait_daemon_ready(&mut child, &executable);
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
