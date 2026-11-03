@@ -630,13 +630,6 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
-    // --direct means "run in process, without the runtime": a direct command
-    // must never reach the lifecycle fallback, or it leaves a serving shim
-    // child holding the library lock after the caller exits.
-    anyhow::ensure!(
-        !crate::DIRECT_MODE.load(std::sync::atomic::Ordering::Relaxed),
-        "direct commands run in process and do not start the runtime"
-    );
     if crate::autostart::ensure_managed_locked()? { return Ok(()); }
     crate::autostart::check_direct_access()?;
     if let Some(health) = probe_runtime()? {
