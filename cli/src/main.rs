@@ -200,7 +200,6 @@ fn logout_cli(full: bool) -> Result<LogoutOutcome> {
     }
 }
 
-/// Candidate set: active entries (shared by recall/list/remember judge-then-store).
 fn run_inject(
     targets_only: bool,
     id: Option<&str>,
@@ -336,7 +335,6 @@ fn run_inject(
     }
 }
 
-/// Split a mixed node: CLI emits material, the AI decides, CLI applies.
 fn run_keygen(pass: Option<&str>, force: bool) -> Result<()> {
     // v4: --pass is unused for encryption (super password is system-generated); kept for old scripts
     if pass.is_some() {
