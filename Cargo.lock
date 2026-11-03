@@ -1650,17 +1650,21 @@ name = "respire_commands"
 version = "1.0.0"
 dependencies = [
  "anyhow",
+ "axum",
  "base64",
  "chrono",
  "clap",
  "hex",
  "respire_app",
+ "respire_protocol",
  "respire_spawn",
  "serde",
  "serde_json",
  "sha2",
+ "signal-hook",
  "tempfile",
  "tiny_http",
+ "tokio",
  "unicode-width 0.2.0",
  "ureq",
  "url",
@@ -1710,6 +1714,17 @@ version = "2.0.0-dev.3"
 dependencies = [
  "anyhow",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "respire_runtime"
+version = "1.0.21-dev.1"
+dependencies = [
+ "anyhow",
+ "respire_commands",
+ "respire_protocol",
+ "respire_spawn",
  "serde_json",
 ]
 
