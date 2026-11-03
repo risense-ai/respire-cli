@@ -15,7 +15,6 @@ use respire_app::transport::local::LocalStore;
 use respire_app::transport::remote::{RemoteConfig, RemoteTransport};
 use respire_app::{MemoryTransport, SessionKeys};
 
-
 /// Assemble transport: RSRS_ADDR (or session.json addr) -> remote backup store; else local store.
 pub fn build_transport() -> Result<Arc<dyn MemoryTransport>> {
     if let Some((addr, token)) = remote_config_from_session_or_env()? {
@@ -97,7 +96,10 @@ pub fn build_session_with_owner_inner() -> Result<(SessionKeys, Option<String>)>
         .map_err(|_| anyhow!("need RSRS_WRAPPED_URK (from keygen/login)"))?;
     let urk_nonce = respire_app::env::var("RSRS_URK_NONCE")
         .map_err(|_| anyhow!("need RSRS_URK_NONCE (from keygen/login)"))?;
-    Ok((SessionKeys::unlock(&password, &secret, &kdf_salt, &wrapped_urk, &urk_nonce)?, None))
+    Ok((
+        SessionKeys::unlock(&password, &secret, &kdf_salt, &wrapped_urk, &urk_nonce)?,
+        None,
+    ))
 }
 
 pub fn read_session_json() -> Result<serde_json::Value> {
@@ -124,10 +126,12 @@ use respire_app::sync::remote_configured;
 use crate::bench;
 use crate::classify;
 use crate::cli_def::{
-    BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
-    SessionCommand, SnapshotCmd,
+    BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd, SessionCommand,
+    SnapshotCmd,
 };
-use crate::gates::{is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine};
+use crate::gates::{
+    is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,
+};
 use crate::metadata;
 use crate::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use crate::output_emit::{command_failure, emit_details, emit_result};
@@ -184,7 +188,11 @@ pub fn candidates_count_normal(all: &[respire_app::StoredMemory]) -> usize {
 }
 
 /// Memory-tree outline (--outline): full depth, id+title indent tree, no bodies - the AI tidy's input surface.
-pub fn collect_outline(nodes: &[respire_app::service::TreeNode], indent: usize, out: &mut Vec<String>) {
+pub fn collect_outline(
+    nodes: &[respire_app::service::TreeNode],
+    indent: usize,
+    out: &mut Vec<String>,
+) {
     for n in nodes {
         out.push(format!(
             "{}[{}] {}",
@@ -240,11 +248,26 @@ pub fn run_agent_config(set: Option<&str>) -> Result<()> {
     let object = config
         .as_object_mut()
         .ok_or_else(|| anyhow!("agent config must be an object"))?;
-    object.insert("readonly".into(), serde_json::json!(respire_app::service::readonly_mode()));
-    object.insert("memory_off".into(), serde_json::json!(respire_app::service::off_mode()));
-    object.insert("workspace_mode".into(), serde_json::json!(respire_app::service::workspace_mode()));
-    object.insert("read_heat_runtime".into(), respire_app::read_heat::receipt()?);
-    object.insert("recall_fusion_runtime".into(), respire_app::recall_fusion::receipt()?);
+    object.insert(
+        "readonly".into(),
+        serde_json::json!(respire_app::service::readonly_mode()),
+    );
+    object.insert(
+        "memory_off".into(),
+        serde_json::json!(respire_app::service::off_mode()),
+    );
+    object.insert(
+        "workspace_mode".into(),
+        serde_json::json!(respire_app::service::workspace_mode()),
+    );
+    object.insert(
+        "read_heat_runtime".into(),
+        respire_app::read_heat::receipt()?,
+    );
+    object.insert(
+        "recall_fusion_runtime".into(),
+        respire_app::recall_fusion::receipt()?,
+    );
     let rows = object
         .iter()
         .map(|(key, value)| OutputItem::new(key, OutputStatus::Ok, value.to_string()))
@@ -336,19 +359,28 @@ pub fn run_resort(
     })?;
     let ops = v["ops"].as_array().cloned().unwrap_or_default();
     if ops.is_empty() {
-        return Err(respire_app::input_error::InputError("spec has no ops (shape {\"ops\":[{\"id\":...,\"parent\":...}]})".into()).into());
+        return Err(respire_app::input_error::InputError(
+            "spec has no ops (shape {\"ops\":[{\"id\":...,\"parent\":...}]})".into(),
+        )
+        .into());
     }
     let all = store.all(true)?;
     let mut moved = 0usize;
     let mut rows = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         let (Some(cid), Some(pid)) = (op["id"].as_str(), op["parent"].as_str()) else {
-            return Err(respire_app::input_error::InputError(format!("op#{i} missing id/parent string")).into());
+            return Err(respire_app::input_error::InputError(format!(
+                "op#{i} missing id/parent string"
+            ))
+            .into());
         };
         let child = respire_app::service::resolve_prefix(&all, cid)?;
         let parent = respire_app::service::resolve_prefix(&all, pid)?;
         if child == parent {
-            return Err(respire_app::input_error::InputError(format!("op#{i} cannot parent itself: {child}")).into());
+            return Err(respire_app::input_error::InputError(format!(
+                "op#{i} cannot parent itself: {child}"
+            ))
+            .into());
         }
         for anc in store.ancestor_chain(&parent)? {
             if anc == child {
@@ -356,7 +388,8 @@ pub fn run_resort(
                     "op#{i} cycle: new parent {} is a descendant of {}",
                     respire_app::service::short_id(&parent),
                     respire_app::service::short_id(&child)
-                )).into());
+                ))
+                .into());
             }
         }
         if go {
@@ -381,7 +414,10 @@ pub fn run_resort(
         ));
     }
     if go && moved > 0 {
-        respire_app::service::counter_reset(&respire_app::service::maintenance_path(), &now_stamp())?;
+        respire_app::service::counter_reset(
+            &respire_app::service::maintenance_path(),
+            &now_stamp(),
+        )?;
         auto_sync(&session, &store);
         emit_result(ResultEnvelope::new(
             "resort",
@@ -416,13 +452,18 @@ pub fn select_diary_tracks<'a>(
         // Accept authors only from the logical identity or unlocked local profile.
         if memory.id == track_id || memory.local_title == track_title {
             let accepted = accepted_author(memory)?;
-            anyhow::ensure!(memory.id != track_id || accepted,
-                "daily track author does not match this profile; append was not applied");
-            if accepted { tracks.push(memory); }
+            anyhow::ensure!(
+                memory.id != track_id || accepted,
+                "daily track author does not match this profile; append was not applied"
+            );
+            if accepted {
+                tracks.push(memory);
+            }
         }
     }
     tracks.sort_by(|left, right| {
-        (left.id != track_id).cmp(&(right.id != track_id))
+        (left.id != track_id)
+            .cmp(&(right.id != track_id))
             .then_with(|| left.local_created_at.cmp(&right.local_created_at))
             .then_with(|| left.id.cmp(&right.id))
     });
@@ -452,7 +493,13 @@ pub fn run_tree_deepen(
             for r in &roots {
                 let plan = match respire_app::service::deepen_plan(&app.store, &r.id, min) {
                     Ok((_, p)) if !p.sub_roots.is_empty() => p,
-                    Err(error) if error.downcast_ref::<respire_app::service::IndexPending>().is_some() => return Err(error),
+                    Err(error)
+                        if error
+                            .downcast_ref::<respire_app::service::IndexPending>()
+                            .is_some() =>
+                    {
+                        return Err(error)
+                    }
                     _ => continue,
                 };
                 let titles: Vec<String> = plan.sub_roots.iter().map(|s| s.title.clone()).collect();
@@ -593,7 +640,13 @@ pub fn run_tree_deepen(
                             "sub_roots": plan.sub_roots,
                         }));
                     }
-                    Err(error) if error.downcast_ref::<respire_app::service::IndexPending>().is_some() => return Err(error),
+                    Err(error)
+                        if error
+                            .downcast_ref::<respire_app::service::IndexPending>()
+                            .is_some() =>
+                    {
+                        return Err(error)
+                    }
                     Err(_) => {}
                 }
             }
@@ -706,7 +759,9 @@ pub fn run_extract(
         kind,
         "context" | "decision" | "preference" | "task" | "emotion" | "time" | "skill" | "knowledge"
     ) {
-        anyhow::bail!("--kind must be context|decision|preference|task|emotion|time|skill|knowledge");
+        anyhow::bail!(
+            "--kind must be context|decision|preference|task|emotion|time|skill|knowledge"
+        );
     }
     if targets_only {
         let sources = respire_app::session_import::source_list();
@@ -716,7 +771,11 @@ pub fn run_extract(
             .map(|source| {
                 OutputItem::new(
                     source.id.clone(),
-                    if source.installed { OutputStatus::Ok } else { OutputStatus::Skip },
+                    if source.installed {
+                        OutputStatus::Ok
+                    } else {
+                        OutputStatus::Skip
+                    },
                     if source.installed {
                         format!("{} ({} root(s))", source.name, source.roots.len())
                     } else {
@@ -756,11 +815,13 @@ pub fn run_extract(
         since: match since {
             None => None,
             Some(value) => Some(
-                respire_app::session_import::scan_util::date_bound(value, false).ok_or_else(|| {
-                    respire_app::input_error::InputError(format!(
-                        "invalid --since '{value}': use today|yesterday|Nd|YYYY-MM-DD"
-                    ))
-                })?,
+                respire_app::session_import::scan_util::date_bound(value, false).ok_or_else(
+                    || {
+                        respire_app::input_error::InputError(format!(
+                            "invalid --since '{value}': use today|yesterday|Nd|YYYY-MM-DD"
+                        ))
+                    },
+                )?,
             ),
         },
         until: None,
@@ -769,9 +830,11 @@ pub fn run_extract(
     };
 
     let scanners: Vec<Box<dyn respire_app::session_import::SessionScanner>> = match id {
-        Some(id) => vec![respire_app::session_import::find_scanner(id).ok_or_else(|| {
-            anyhow::anyhow!("unknown platform '{id}' (run `rsrs extract --targets`)")
-        })?],
+        Some(id) => vec![
+            respire_app::session_import::find_scanner(id).ok_or_else(|| {
+                anyhow::anyhow!("unknown platform '{id}' (run `rsrs extract --targets`)")
+            })?,
+        ],
         None => respire_app::session_import::scanners()
             .into_iter()
             .filter(|scanner| !scanner.roots().is_empty())
@@ -808,7 +871,8 @@ pub fn run_extract(
     let pending = respire_app::session_import::cap_per_platform(fresh, scan_options.limit);
 
     let convert_options = respire_app::session_import::ConvertOptions {
-        kind: respire_app::Kind::try_from_str(&kind.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
+        kind: respire_app::Kind::try_from_str(&kind.trim().to_lowercase())
+            .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
         importance: importance.to_owned(),
         parent: String::new(),
         user: respire_app::service::current_user(),
@@ -826,14 +890,19 @@ pub fn run_extract(
             let id = scanner.id();
             (
                 id.to_owned(),
-                pending.iter().filter(|session| session.platform == id).count(),
+                pending
+                    .iter()
+                    .filter(|session| session.platform == id)
+                    .count(),
             )
         })
         .filter(|(_, count)| *count > 0)
         .collect();
     let items: Vec<OutputItem> = platform_counts
         .iter()
-        .map(|(id, count)| OutputItem::new(id.clone(), OutputStatus::Ok, format!("{count} session(s)")))
+        .map(|(id, count)| {
+            OutputItem::new(id.clone(), OutputStatus::Ok, format!("{count} session(s)"))
+        })
         .collect();
 
     if dry_run {
@@ -870,11 +939,21 @@ pub fn run_extract(
         return emit_result(result);
     }
 
-    progress::phase("Embedding and storing memories", "Embedding and storing memories");
+    progress::phase(
+        "Embedding and storing memories",
+        "Embedding and storing memories",
+    );
     let outcome = respire_app::session_import::import_entries(
         &mut entries,
         parent,
-        |done, total| progress::phase_count("\u{5199}\u{5165}\u{8bb0}\u{5fc6}", "Storing memories", done, total),
+        |done, total| {
+            progress::phase_count(
+                "\u{5199}\u{5165}\u{8bb0}\u{5fc6}",
+                "Storing memories",
+                done,
+                total,
+            )
+        },
         |start, completed| {
             for (offset, ok) in completed.iter().enumerate() {
                 if *ok {
@@ -934,13 +1013,21 @@ pub fn run_split(id: &str, go: bool, spec_json: Option<&str>) -> Result<()> {
     }
     let Some(spec_json) = spec_json else {
         return Err(respire_app::input_error::InputError(
-            "--go requires --spec '<split-plan JSON>' (run with no flags first to get material)".into()
-        ).into());
+            "--go requires --spec '<split-plan JSON>' (run with no flags first to get material)"
+                .into(),
+        )
+        .into());
     };
-    let spec: respire_app::service::SplitSpec =
-        serde_json::from_str(spec_json).map_err(|e| respire_app::input_error::InputError(format!("plan JSON failed to parse: {e}")))?;
-    let n =
-        respire_app::service::split_exec(&app.keys, &app.embedder, &app.store, &detail.entry, &spec)?;
+    let spec: respire_app::service::SplitSpec = serde_json::from_str(spec_json).map_err(|e| {
+        respire_app::input_error::InputError(format!("plan JSON failed to parse: {e}"))
+    })?;
+    let n = respire_app::service::split_exec(
+        &app.keys,
+        &app.embedder,
+        &app.store,
+        &detail.entry,
+        &spec,
+    )?;
     let mut result = ResultEnvelope::new(
         "split",
         OutputStatus::Ok,
@@ -1087,7 +1174,14 @@ pub fn run_query_log(
     }
     let store = build_local()?;
     // mark: model self-grade - the main post-training signal
-    if let Some(QueryLogCmd::Mark { ids, good, bad, query_log_id, source }) = cmd {
+    if let Some(QueryLogCmd::Mark {
+        ids,
+        good,
+        bad,
+        query_log_id,
+        source,
+    }) = cmd
+    {
         if *good == *bad {
             anyhow::bail!("pick exactly one of --good or --bad");
         }
@@ -1098,12 +1192,15 @@ pub fn run_query_log(
             .map(ToOwned::to_owned)
             .collect();
         anyhow::ensure!(!id_list.is_empty(), "ids is empty");
-        let (unmatched,revision)=if let Some(request_id)=query_log_id {
-            (Vec::new(),Some(store.mark_query_feedback(request_id,&id_list,*good,source)?))
-        }else{
+        let (unmatched, revision) = if let Some(request_id) = query_log_id {
+            (
+                Vec::new(),
+                Some(store.mark_query_feedback(request_id, &id_list, *good, source)?),
+            )
+        } else {
             anyhow::ensure!(source=="model","legacy grading without --query-log-id supports only --source model; use an explicit query request for human/task_outcome attribution");
             anyhow::ensure!(!respire_app::feedback::enabled()?,"enabled feedback requires --query-log-id from the recall summary and complete memory IDs");
-            (store.mark_verdict(&id_list,*good)?,None)
+            (store.mark_verdict(&id_list, *good)?, None)
         };
         let status = if unmatched.is_empty() {
             OutputStatus::Ok
@@ -1264,10 +1361,8 @@ pub fn run_bench(cmd: &BenchCmd) -> Result<()> {
 pub fn run_bench_mine(out: &str, limit: usize, strict: bool) -> Result<()> {
     let store = build_local()?;
     let rows = store.query_log_rows(limit * 5)?;
-    let active: std::collections::HashSet<String> = store.all(false)?
-        .iter()
-        .map(|m| m.id.clone())
-        .collect();
+    let active: std::collections::HashSet<String> =
+        store.all(false)?.iter().map(|m| m.id.clone()).collect();
     let cases = bench::mine_from_rows(&rows, strict, limit, &active);
     anyhow::ensure!(
         !cases.is_empty(),
@@ -1324,7 +1419,8 @@ pub fn run_bench_run(
 
     let session = build_session()?;
     let store = build_local()?;
-    let (candidates, index_pending, resident) = respire_app::resident::recall_catalog(&session, &store)?;
+    let (candidates, index_pending, resident) =
+        respire_app::resident::recall_catalog(&session, &store)?;
     let _resident_scope = resident.enter();
     let active_ids: std::collections::HashSet<String> =
         candidates.iter().map(|m| m.id.clone()).collect();
@@ -1344,7 +1440,10 @@ pub fn run_bench_run(
     let mut latency = Vec::new();
     let mut selector_fallbacks = 0usize;
     for (i, c) in cases.iter().enumerate() {
-        progress::phase(&format!("\u{8bc4}\u{4f30}\u{53ec}\u{56de} {}/{}", i + 1, cases.len()), &format!("Evaluating recall {}/{}", i + 1, cases.len()));
+        progress::phase(
+            &format!("\u{8bc4}\u{4f30}\u{53ec}\u{56de} {}/{}", i + 1, cases.len()),
+            &format!("Evaluating recall {}/{}", i + 1, cases.len()),
+        );
         let mut q = MemoryQuery::new(&c.query).limit(topk);
         if let Some(p) = &c.project {
             if !p.is_empty() {
@@ -1352,7 +1451,16 @@ pub fn run_bench_run(
             }
         }
         let started = std::time::Instant::now();
-        let (ranked, _, fallback, _, _, _) = recall_select::recall(&session, &embedder, &candidates, &q, &store, None, None, None)?;
+        let (ranked, _, fallback, _, _, _) = recall_select::recall(
+            &session,
+            &embedder,
+            &candidates,
+            &q,
+            &store,
+            None,
+            None,
+            None,
+        )?;
         latency.push(started.elapsed().as_micros());
         selector_fallbacks += usize::from(fallback.is_some());
         let ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
@@ -1721,9 +1829,16 @@ pub fn run_classify(
             store.write_transaction(|| {
                 let current = store.all(false)?;
                 for action in &result.actions {
-                    let row = current.iter().find(|row| row.id == action.id)
-                        .ok_or_else(|| anyhow!("classification memory disappeared: {}", action.id))?;
-                    respire_app::metadata_gate::ensure_write(&store, &MemoryEngine::open(session, row)?)?;
+                    let row = current
+                        .iter()
+                        .find(|row| row.id == action.id)
+                        .ok_or_else(|| {
+                            anyhow!("classification memory disappeared: {}", action.id)
+                        })?;
+                    respire_app::metadata_gate::ensure_write(
+                        &store,
+                        &MemoryEngine::open(session, row)?,
+                    )?;
                 }
                 for action in &result.actions {
                     respire_app::service::reparent(session, &store, &action.id, &action.parent_id)?;
@@ -1946,7 +2061,6 @@ pub fn classify_api_key() -> Result<String> {
     )
 }
 
-
 pub fn run_audit(json_flag: bool) -> Result<()> {
     if json_flag {
         set_json_mode(true);
@@ -2038,17 +2152,13 @@ pub fn run_audit(json_flag: bool) -> Result<()> {
     let max_depth = active.iter().map(|m| depth(&m.id)).max().unwrap_or(0);
     // 6. Procedure template gaps: skill entries should read as a manual, not an essay.
     //    Needs the body, so decryption is best-effort: a locked store reports `skipped` instead of failing audit.
-    let skills: Vec<&&respire_app::StoredMemory> = active
-        .iter()
-        .filter(|m| m.local_kind == "skill")
-        .collect();
+    let skills: Vec<&&respire_app::StoredMemory> =
+        active.iter().filter(|m| m.local_kind == "skill").collect();
     // 7. Hot but untyped: frequently recalled, not a skill, and reads like a manual.
     //    Advisory for tidy only - the AI decides whether it is worth an upgrade.
     let hot_candidates: Vec<&&respire_app::StoredMemory> = active
         .iter()
-        .filter(|m| {
-            m.local_kind != "skill" && m.local_recall_count >= skill::HOT_RECALL_THRESHOLD
-        })
+        .filter(|m| m.local_kind != "skill" && m.local_recall_count >= skill::HOT_RECALL_THRESHOLD)
         .collect();
     let bodies = if skills.is_empty() && hot_candidates.is_empty() {
         None
@@ -2069,11 +2179,7 @@ pub fn run_audit(json_flag: bool) -> Result<()> {
         for m in &hot_candidates {
             if let Ok(full) = MemoryEngine::open(session, m) {
                 if skill::looks_operational(&full.content) {
-                    hot_untyped.push((
-                        m.id.clone(),
-                        m.local_title.clone(),
-                        m.local_recall_count,
-                    ));
+                    hot_untyped.push((m.id.clone(), m.local_title.clone(), m.local_recall_count));
                 }
             }
         }
@@ -2254,7 +2360,11 @@ pub fn run_audit(json_flag: bool) -> Result<()> {
         OutputItem::new(
             "failing skill",
             OutputStatus::Warn,
-            format!("{} {} consecutive fail", respire_app::service::short_id(id), streak),
+            format!(
+                "{} {} consecutive fail",
+                respire_app::service::short_id(id),
+                streak
+            ),
         )
         .action("run-log")
     }));
@@ -2289,7 +2399,10 @@ pub fn run_repack() -> Result<()> {
         for stored in store.all(true)? {
             let payload_parent = MemoryEngine::payload_parent(&session, &stored)?;
             if payload_parent != stored.local_parent_id {
-                respire_app::metadata_gate::ensure_write(&store, &MemoryEngine::open(&session, &stored)?)?;
+                respire_app::metadata_gate::ensure_write(
+                    &store,
+                    &MemoryEngine::open(&session, &stored)?,
+                )?;
                 pending.push(stored);
             }
         }
@@ -2317,16 +2430,22 @@ pub fn run_repack() -> Result<()> {
     ))
 }
 
-
-pub fn emit_diary_fragments(command: &str, fragments: respire_app::diary::FragmentResult) -> Result<()> {
+pub fn emit_diary_fragments(
+    command: &str,
+    fragments: respire_app::diary::FragmentResult,
+) -> Result<()> {
     if !json_mode() {
         println!("{}", serde_json::to_string(&fragments)?);
         return Ok(());
     }
-    let mut result = ResultEnvelope::new(command, OutputStatus::Ok,
+    let mut result = ResultEnvelope::new(
+        command,
+        OutputStatus::Ok,
         serde_json::json!({"count":fragments.items.len(), "semantic_ready":fragments.semantic_ready,
             "pending_fragments":fragments.pending_fragments,"truncated":fragments.truncated,
-            "max_chars":fragments.max_chars,"offset_unit":fragments.offset_unit}), Vec::new());
+            "max_chars":fragments.max_chars,"offset_unit":fragments.offset_unit}),
+        Vec::new(),
+    );
     result.details = serde_json::to_value(fragments)?;
     emit_result(result)
 }
@@ -2397,14 +2516,21 @@ pub fn run_diary(
             let position = lowered.find(needle);
             if position.is_some() || entry.title.to_lowercase().contains(needle) {
                 // Map the lowercased byte match back to original Unicode scalars.
-                let offset = position.map(|byte| {
-                    let mut folded_bytes = 0;
-                    entry.content.chars().take_while(|ch| {
-                        let before = folded_bytes;
-                        folded_bytes += ch.to_lowercase().map(char::len_utf8).sum::<usize>();
-                        before < byte
-                    }).count()
-                }).unwrap_or(0);
+                let offset = position
+                    .map(|byte| {
+                        let mut folded_bytes = 0;
+                        entry
+                            .content
+                            .chars()
+                            .take_while(|ch| {
+                                let before = folded_bytes;
+                                folded_bytes +=
+                                    ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+                                before < byte
+                            })
+                            .count()
+                    })
+                    .unwrap_or(0);
                 let start = offset.saturating_sub(100);
                 memory.local_content_head = entry.content.chars().skip(start).take(500).collect();
                 matched.push(memory);
@@ -2698,19 +2824,27 @@ pub fn run_tree_cure(
         let app = respire_app::service::App::open()?;
         let candidates = app.store.all(false)?;
         respire_app::service::require_candidates_ready(&app.store, &candidates)?;
-        let report: respire_app::core_sdk::reports::TreeCureReport = respire_app::core_sdk::execute(
-            "tree_cure",
-            serde_json::json!({
-                "snapshots": respire_app::core_sdk::metadata_snapshots(&candidates),
-                "top": top, "min": min, "auto": true,
-            }),
-        )?;
+        let report: respire_app::core_sdk::reports::TreeCureReport =
+            respire_app::core_sdk::execute(
+                "tree_cure",
+                serde_json::json!({
+                    "snapshots": respire_app::core_sdk::metadata_snapshots(&candidates),
+                    "top": top, "min": min, "auto": true,
+                }),
+            )?;
         app.store.write_transaction(|| {
             let current = app.store.all(false)?;
             for suggestion in &report.suggests {
-                let row = current.iter().find(|row| row.id == suggestion.orphan.id)
-                    .ok_or_else(|| anyhow!("tree-cure memory disappeared: {}", suggestion.orphan.id))?;
-                respire_app::metadata_gate::ensure_write(&app.store, &MemoryEngine::open(&app.keys, row)?)?;
+                let row = current
+                    .iter()
+                    .find(|row| row.id == suggestion.orphan.id)
+                    .ok_or_else(|| {
+                        anyhow!("tree-cure memory disappeared: {}", suggestion.orphan.id)
+                    })?;
+                respire_app::metadata_gate::ensure_write(
+                    &app.store,
+                    &MemoryEngine::open(&app.keys, row)?,
+                )?;
             }
             for suggestion in &report.suggests {
                 respire_app::service::reparent(
@@ -2843,8 +2977,8 @@ pub fn run_tree_cure(
     Ok(())
 }
 
-/// Heat float: high-hit memories move up the cause chain (reattach to grandparent); the tree self-organizes by recall heat.
-/// Dry-run prints a report (hot entry -> new cause); --go applies.
+/// Explicit-good float: memories with enough query-log --good marks move up the cause chain.
+/// Dry-run prints a report (marked entry -> new cause); --go applies. recall_count never decides.
 pub fn run_tree_float(go: bool, min: i64) -> Result<()> {
     let app = respire_app::service::App::open()?;
     let report = app.tree_float(go, min)?;
@@ -2888,8 +3022,8 @@ pub fn run_tree_float(go: bool, min: i64) -> Result<()> {
                     OutputStatus::Pending
                 },
                 format!(
-                    "{} hits {} {} -> {} {}",
-                    it.recall_count,
+                    "{} good {} {} -> {} {}",
+                    it.good_marks,
                     it.title,
                     respire_app::service::short_id(&it.id),
                     it.new_parent_title,
@@ -3009,7 +3143,10 @@ pub fn run_defrag(min: f32, top: usize) -> Result<()> {
 }
 
 pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<()> {
-    progress::phase("\u{68c0}\u{67e5}\u{672c}\u{5730}\u{6570}\u{636e}\u{548c}\u{6587}\u{4ef6}", "Checking local data and files");
+    progress::phase(
+        "\u{68c0}\u{67e5}\u{672c}\u{5730}\u{6570}\u{636e}\u{548c}\u{6587}\u{4ef6}",
+        "Checking local data and files",
+    );
     let mut items: Vec<(String, bool, String)> = Vec::new();
     let mut model_warnings = Vec::new();
     let add = |items: &mut Vec<(String, bool, String)>, name: &str, ok: bool, note: String| {
@@ -3023,7 +3160,12 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
             model_warnings.push("migration");
         }
         Ok(_) => {}
-        Err(error) => add(&mut items, "migration", false, format!("discovery failed: {error:#}")),
+        Err(error) => add(
+            &mut items,
+            "migration",
+            false,
+            format!("discovery failed: {error:#}"),
+        ),
     }
 
     // 1) data dir and store
@@ -3079,7 +3221,10 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
     );
 
     // 2) session (can we unlock)
-    progress::phase("\u{68c0}\u{67e5}\u{8d26}\u{6237}\u{548c}\u{89e3}\u{5bc6}\u{5bc6}\u{94a5}", "Checking account and decryption keys");
+    progress::phase(
+        "\u{68c0}\u{67e5}\u{8d26}\u{6237}\u{548c}\u{89e3}\u{5bc6}\u{5bc6}\u{94a5}",
+        "Checking account and decryption keys",
+    );
     match auth::load_local_session() {
         Ok(_) => add(
             &mut items,
@@ -3094,14 +3239,19 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
     // while it downloads, or wait here while holding its foreground command slot.
     let store = build_local()?;
     let active_model = store.retrieval_model()?;
-    progress::phase("\u{68c0}\u{67e5}\u{6a21}\u{578b}\u{548c}\u{7d22}\u{5f15}", "Checking model and index");
+    progress::phase(
+        "\u{68c0}\u{67e5}\u{6a21}\u{578b}\u{548c}\u{7d22}\u{5f15}",
+        "Checking model and index",
+    );
     let pending_index = store.index_pending(&active_model);
     let model_task = crate::model_progress::status()?;
     let model_busy = model_task["active"].as_bool() == Some(true);
     let mut index_state = rpc::index_status();
     let defer_preparation = rpc::worker_active()
         && pending_index.as_ref().is_ok_and(|pending| *pending)
-        && (fix || model_busy || index_state["scheduled"].as_bool() == Some(true)
+        && (fix
+            || model_busy
+            || index_state["scheduled"].as_bool() == Some(true)
             || index_state["running"].as_bool() == Some(true));
     if defer_preparation {
         if fix {
@@ -3113,14 +3263,32 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
                 if model_busy { "in progress" } else { "scheduled" }, model_task));
     } else if model_busy {
         model_warnings.push("embedder");
-        add(&mut items, "embedder", false,
-            format!("Model operation in progress: {model_task}; inference check deferred"));
+        add(
+            &mut items,
+            "embedder",
+            false,
+            format!("Model operation in progress: {model_task}; inference check deferred"),
+        );
     } else {
         // Diagnostics remain read-only unless --fix is explicit.
         match BgeEmbedder::load_model(&active_model) {
             Ok(e) => match e.probe("BGE-M3 doctor inference") {
-                Ok(probe) => add(&mut items, "embedder", true, format!("{active_model} {} dims; inference verified ({})", e.dims(), probe["selected"])),
-                Err(error) => add(&mut items, "embedder", false, format!("{active_model} inference failed: {error:#}")),
+                Ok(probe) => add(
+                    &mut items,
+                    "embedder",
+                    true,
+                    format!(
+                        "{active_model} {} dims; inference verified ({})",
+                        e.dims(),
+                        probe["selected"]
+                    ),
+                ),
+                Err(error) => add(
+                    &mut items,
+                    "embedder",
+                    false,
+                    format!("{active_model} inference failed: {error:#}"),
+                ),
             },
             Err(e) if !fix => {
                 add(
@@ -3131,23 +3299,45 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
                 );
             }
             Err(error) if store.active_selection()?.is_some() => {
-                let selection = store.active_selection()?.context("active profile missing")?;
-                let prepared = respire_app::embedding::prepare(&selection,|_,_,_|Ok(()))
-                    .and_then(|_| BgeEmbedder::load_model(&active_model)?.probe("Respire doctor inference"));
+                let selection = store
+                    .active_selection()?
+                    .context("active profile missing")?;
+                let prepared = respire_app::embedding::prepare(&selection, |_, _, _| Ok(()))
+                    .and_then(|_| {
+                        BgeEmbedder::load_model(&active_model)?.probe("Respire doctor inference")
+                    });
                 match prepared {
                     Ok(probe) => add(&mut items,"embedder",true,format!("{active_model}; inference verified ({})",probe["selected"])),
                     Err(repair) => add(&mut items,"embedder",false,format!("{active_model} unavailable: {error:#}; profile preparation failed: {repair:#}")),
                 }
             }
             Err(_) => {
-                progress::phase("\u{4e0b}\u{8f7d} BGE-M3 \u{6a21}\u{578b}", "Downloading BGE-M3 model");
+                progress::phase(
+                    "\u{4e0b}\u{8f7d} BGE-M3 \u{6a21}\u{578b}",
+                    "Downloading BGE-M3 model",
+                );
                 let mirror = crate::model_install::mirror_from_env();
                 let install = crate::model_install::install_m3(mirror.as_deref());
                 match install {
                     Ok(report) => match BgeEmbedder::load_model(&active_model) {
                         Ok(e) => match e.probe("BGE-M3 doctor inference") {
-                            Ok(probe) => add(&mut items, "embedder", true, format!("BGE-M3 {} dims; inference verified ({}) (auto-installed {})", e.dims(), probe["selected"], report.dir.display())),
-                            Err(error) => add(&mut items, "embedder", false, format!("BGE-M3 inference failed after install: {error:#}")),
+                            Ok(probe) => add(
+                                &mut items,
+                                "embedder",
+                                true,
+                                format!(
+                                    "BGE-M3 {} dims; inference verified ({}) (auto-installed {})",
+                                    e.dims(),
+                                    probe["selected"],
+                                    report.dir.display()
+                                ),
+                            ),
+                            Err(error) => add(
+                                &mut items,
+                                "embedder",
+                                false,
+                                format!("BGE-M3 inference failed after install: {error:#}"),
+                            ),
                         },
                         Err(e) => add(
                             &mut items,
@@ -3160,9 +3350,7 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
                         &mut items,
                         "embedder",
                         false,
-                        format!(
-                            "auto-install failed: {e}"
-                        ),
+                        format!("auto-install failed: {e}"),
                     ),
                 }
             }
@@ -3179,11 +3367,25 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
             if progressing {
                 model_warnings.push("model index");
             }
-            add(&mut items, "model index", false,
-                format!("BGE-M3 index pending; runtime status: {indexing}"));
+            add(
+                &mut items,
+                "model index",
+                false,
+                format!("BGE-M3 index pending; runtime status: {indexing}"),
+            );
         }
-        Ok(false) => add(&mut items, "model index", true, "BGE-M3 index ready".to_owned()),
-        Err(error) => add(&mut items, "model index", false, format!("BGE-M3 index check failed: {error:#}")),
+        Ok(false) => add(
+            &mut items,
+            "model index",
+            true,
+            "BGE-M3 index ready".to_owned(),
+        ),
+        Err(error) => add(
+            &mut items,
+            "model index",
+            false,
+            format!("BGE-M3 index check failed: {error:#}"),
+        ),
     }
 
     // 4) lock: main already holds it exclusively (reaching here proves lock.db is takeable) - never take it twice; two connections in one process deadlock
@@ -3235,7 +3437,10 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
     }
 
     // 6) inject status
-    progress::phase("\u{68c0}\u{67e5}\u{5de5}\u{5177}\u{6ce8}\u{5165}\u{72b6}\u{6001}", "Checking tool injection status");
+    progress::phase(
+        "\u{68c0}\u{67e5}\u{5de5}\u{5177}\u{6ce8}\u{5165}\u{72b6}\u{6001}",
+        "Checking tool injection status",
+    );
     match respire_app::inject::targets() {
         Ok(ts) => {
             let fresh = ts.iter().filter(|t| t.state == "fresh").count();
@@ -3281,13 +3486,18 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
         &mut items,
         "Runtime version",
         true,
-        runtime_version.clone().unwrap_or_else(|| "not connected".to_owned()),
+        runtime_version
+            .clone()
+            .unwrap_or_else(|| "not connected".to_owned()),
     );
 
     // 9) CLI version (--check-update or RSRS_UPDATE_CHECK=1 hits the network; default reads cache, no network)
     //    Doctor must not stall on the network, so it does not force a query - report known result, hint how to check if no cache.
     if crate::host_hooks::update_enabled() {
-        progress::phase("\u{68c0}\u{67e5} CLI \u{7248}\u{672c}\u{ff1b}\u{7b49}\u{5f85}\u{7248}\u{672c}\u{6e90}", "Checking CLI version; waiting for version registry");
+        progress::phase(
+            "\u{68c0}\u{67e5} CLI \u{7248}\u{672c}\u{ff1b}\u{7b49}\u{5f85}\u{7248}\u{672c}\u{6e90}",
+            "Checking CLI version; waiting for version registry",
+        );
         let force = check_update;
         match crate::host_hooks::update_check_run(force) {
             Some(s) if s.outdated => add(
@@ -3376,8 +3586,11 @@ pub fn run_doctor(check_remote: bool, check_update: bool, fix: bool) -> Result<(
 
 /// One bounded network pass on the runtime synchronization worker.
 pub fn background_sync_once() -> Result<bool> {
-    if respire_app::service::service_paused() { return Ok(false); }
-    let configured = sync_phase(|| Ok(respire_app::service::autosync_active() && remote_configured()))?;
+    if respire_app::service::service_paused() {
+        return Ok(false);
+    }
+    let configured =
+        sync_phase(|| Ok(respire_app::service::autosync_active() && remote_configured()))?;
     if !configured {
         return Ok(false);
     }
@@ -3405,7 +3618,6 @@ pub fn schedule_autosync(_session: &SessionKeys, _local: &LocalStore) {
 pub fn auto_sync(session: &SessionKeys, local: &LocalStore) {
     schedule_autosync(session, local);
 }
-
 
 pub fn run_passport() -> Result<()> {
     let si = respire_app::service::session_info();
@@ -3715,7 +3927,9 @@ pub fn run_memory_revision() -> Result<()> {
 }
 
 pub fn run_capabilities() -> Result<()> {
-    emit_result(ResultEnvelope::new("capabilities", OutputStatus::Ok,
+    emit_result(ResultEnvelope::new(
+        "capabilities",
+        OutputStatus::Ok,
         serde_json::json!({
             "schema_version": 1,
             "cli_version": crate::app_version::embedded(),
@@ -3727,7 +3941,9 @@ pub fn run_capabilities() -> Result<()> {
                 "rerank": false,
                 "model": {"install": true, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
             }
-        }), Vec::new()))
+        }),
+        Vec::new(),
+    ))
 }
 
 pub fn run_metadata_status() -> Result<()> {
@@ -3735,18 +3951,25 @@ pub fn run_metadata_status() -> Result<()> {
     let path = respire_app::service::database_path(&root)?;
     let details = if path.exists() {
         let store = respire_app::transport::local::LocalStore::open_read_only(&path)?;
-        let backup = store.meta_get("memory_metadata_v1_backup")?
-            .map(|value| serde_json::from_str::<serde_json::Value>(&value)).transpose()?;
+        let backup = store
+            .meta_get("memory_metadata_v1_backup")?
+            .map(|value| serde_json::from_str::<serde_json::Value>(&value))
+            .transpose()?;
         serde_json::json!({"enabled":store.memory_metadata_v1_enabled()?,
             "mode":respire_app::metadata_gate::mode(&store)?,
             "metadata_retained":store.has_memory_metadata()?,"backup":backup})
     } else {
         serde_json::json!({"enabled":false,"mode":"isolated","metadata_retained":false,"backup":null})
     };
-    let capabilities: serde_json::Value = respire_app::core_sdk::execute("capabilities", serde_json::Value::Null)?;
-    let mut result = ResultEnvelope::new("metadata", OutputStatus::Ok,
+    let capabilities: serde_json::Value =
+        respire_app::core_sdk::execute("capabilities", serde_json::Value::Null)?;
+    let mut result = ResultEnvelope::new(
+        "metadata",
+        OutputStatus::Ok,
         serde_json::json!({"action":"status","enabled":details["enabled"],"mode":details["mode"],
-            "sdk_supported":capabilities["memory_metadata_contract"].as_u64()==Some(1)}), Vec::new());
+            "sdk_supported":capabilities["memory_metadata_contract"].as_u64()==Some(1)}),
+        Vec::new(),
+    );
     result.details = details;
     emit_result(result)
 }
@@ -3754,7 +3977,10 @@ pub fn run_metadata_status() -> Result<()> {
 pub fn change_metadata_profile(change: impl FnOnce() -> Result<()> + Send + 'static) -> Result<()> {
     if DIRECT_MODE.load(Ordering::Relaxed) {
         let _takeover = runtime_policy::takeover_lock()?;
-        anyhow::ensure!(!crate::host_hooks::runtime_is_up(), "stop the local runtime before direct metadata configuration");
+        anyhow::ensure!(
+            !crate::host_hooks::runtime_is_up(),
+            "stop the local runtime before direct metadata configuration"
+        );
         change()
     } else {
         crate::host_hooks::change_profile(Box::new(change))
@@ -3763,15 +3989,24 @@ pub fn change_metadata_profile(change: impl FnOnce() -> Result<()> + Send + 'sta
 
 pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
     runtime_policy::require_host("metadata deployment configuration")?;
-    anyhow::ensure!(!rpc::worker_active(), "metadata enable/disable must run in the host CLI");
+    anyhow::ensure!(
+        !rpc::worker_active(),
+        "metadata enable/disable must run in the host CLI"
+    );
     respire_app::service::ensure_writable()?;
-    anyhow::ensure!(!respire_app::service::off_mode(), "restore normal service before changing the metadata gate");
+    anyhow::ensure!(
+        !respire_app::service::off_mode(),
+        "restore normal service before changing the metadata gate"
+    );
     let root = respire_app::service::data_dir();
     // The lifecycle hook requires a Send closure, so shared state crosses it
     // by owned handles instead of borrows.
     let details = std::sync::Arc::new(std::sync::Mutex::new(serde_json::Value::Null));
     match command {
-        metadata::Command::Enable { mode, deployment_review } => {
+        metadata::Command::Enable {
+            mode,
+            deployment_review,
+        } => {
             let (deployment, review) = metadata::deployment(mode, deployment_review.as_deref())?;
             respire_app::metadata_gate::require_support()?;
             let keys = build_session()?;
@@ -3779,10 +4014,16 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
             let root = root.clone();
             let details = details.clone();
             change_metadata_profile(move || {
-                let ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
-                let receipt = respire_app::metadata_gate::enable(&root, &ownership, &account, &keys, deployment)?;
-                *details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? =
-                    serde_json::json!({"receipt":receipt,"deployment_review":review,
+                let ownership = respire_app::lock::LibraryLock::acquire(
+                    &root,
+                    std::time::Duration::from_secs(15),
+                )?;
+                let receipt = respire_app::metadata_gate::enable(
+                    &root, &ownership, &account, &keys, deployment,
+                )?;
+                *details
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? = serde_json::json!({"receipt":receipt,"deployment_review":review,
                     "deployment_assurance":"operator_attestation_only","old_client_access_enforced":false});
                 Ok(())
             })?;
@@ -3791,43 +4032,80 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
             let root = root.clone();
             let details = details.clone();
             change_metadata_profile(move || {
-                let _ownership = respire_app::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
-                let store = respire_app::transport::local::LocalStore::open_existing(&respire_app::service::database_path(&root)?)?;
-                *details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? =
-                    store.write_transaction(|| {
-                    let mode = respire_app::metadata_gate::mode(&store)?;
-                    let retained = store.has_memory_metadata()?;
-                    store.meta_set("memory_metadata_v1_enabled", "0")?;
-                    Ok(serde_json::json!({"enabled":false,"mode":mode,
+                let _ownership = respire_app::lock::LibraryLock::acquire(
+                    &root,
+                    std::time::Duration::from_secs(15),
+                )?;
+                let store = respire_app::transport::local::LocalStore::open_existing(
+                    &respire_app::service::database_path(&root)?,
+                )?;
+                *details
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))? = store
+                    .write_transaction(|| {
+                        let mode = respire_app::metadata_gate::mode(&store)?;
+                        let retained = store.has_memory_metadata()?;
+                        store.meta_set("memory_metadata_v1_enabled", "0")?;
+                        Ok(serde_json::json!({"enabled":false,"mode":mode,
                         "metadata_retained":retained,"sync_isolation_retained":true}))
-                })?;
+                    })?;
                 Ok(())
             })?;
         }
         metadata::Command::Status => return run_metadata_status(),
     }
-    let mut result = ResultEnvelope::new("metadata", OutputStatus::Ok,
+    let mut result = ResultEnvelope::new(
+        "metadata",
+        OutputStatus::Ok,
         serde_json::json!({"action":if matches!(command,metadata::Command::Enable{..}){"enabled"}else{"disabled"},
-            "enabled":matches!(command,metadata::Command::Enable{..})}), Vec::new());
-    result.details = details.lock().map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))?.clone();
+            "enabled":matches!(command,metadata::Command::Enable{..})}),
+        Vec::new(),
+    );
+    result.details = details
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metadata details lock poisoned"))?
+        .clone();
     emit_result(result)
 }
 
 pub fn run_local(args: Cli) -> Result<()> {
-    set_json_mode(args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+    set_json_mode(
+        args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+    );
     if respire_app::service::off_mode() && matches!(args.command, Some(Command::Status)) {
         let session = respire_app::service::session_info();
-        return emit_result(ResultEnvelope::new("status", OutputStatus::Ok, serde_json::json!({
-            "workspace":"off", "unlocked":session.has_local_keys, "session":session,
-            "data_dir":respire_app::service::data_dir(), "autosync":false,
-            "sync_scheduler":{"phase":"paused"}, "retrieval_index":rpc::index_status(),
-            "local_total":null, "local_alive":null
-        }), Vec::new()));
+        return emit_result(ResultEnvelope::new(
+            "status",
+            OutputStatus::Ok,
+            serde_json::json!({
+                "workspace":"off", "unlocked":session.has_local_keys, "session":session,
+                "data_dir":respire_app::service::data_dir(), "autosync":false,
+                "sync_scheduler":{"phase":"paused"}, "retrieval_index":rpc::index_status(),
+                "local_total":null, "local_alive":null
+            }),
+            Vec::new(),
+        ));
     }
-    if respire_app::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
-        if !json_mode() && !rpc::worker_active() { return Ok(()); }
-        let command = match args.command.as_ref() { Some(Command::Recall { .. }) => "recall", Some(Command::Remember { .. }) => "remember", _ => "memory" };
-        let mut result = ResultEnvelope::new(command, OutputStatus::Ok, serde_json::json!({"mode":"off", "skipped":true, "count":0}), Vec::new());
+    if respire_app::service::off_mode()
+        && args
+            .command
+            .as_ref()
+            .is_some_and(|command| !is_off_allowed(command))
+    {
+        if !json_mode() && !rpc::worker_active() {
+            return Ok(());
+        }
+        let command = match args.command.as_ref() {
+            Some(Command::Recall { .. }) => "recall",
+            Some(Command::Remember { .. }) => "remember",
+            _ => "memory",
+        };
+        let mut result = ResultEnvelope::new(
+            command,
+            OutputStatus::Ok,
+            serde_json::json!({"mode":"off", "skipped":true, "count":0}),
+            Vec::new(),
+        );
         result.details = serde_json::json!([]);
         return emit_result(result);
     }
@@ -3845,14 +4123,23 @@ pub fn run_local(args: Cli) -> Result<()> {
         _ => "cli",
     };
     match run_local_inner(args) {
-        Err(error) if error.downcast_ref::<respire_app::service::IndexPending>().is_some() => {
+        Err(error)
+            if error
+                .downcast_ref::<respire_app::service::IndexPending>()
+                .is_some() =>
+        {
             // run_local_inner has released its direct LibraryLock before this
             // authenticated request starts the resident index worker.
             let indexing = rpc::request_index()?;
             let mut result = ResultEnvelope::new(
-                command, OutputStatus::Pending,
+                command,
+                OutputStatus::Pending,
                 serde_json::json!({"state":"index_pending", "retrieval_index":indexing}),
-                vec![OutputItem::new("index", OutputStatus::Pending, error.to_string())],
+                vec![OutputItem::new(
+                    "index",
+                    OutputStatus::Pending,
+                    error.to_string(),
+                )],
             );
             result.actions.push("status".into());
             emit_result(result)
@@ -3861,9 +4148,16 @@ pub fn run_local(args: Cli) -> Result<()> {
     }
 }
 
-pub fn commit_prepared_write<T>(simple: bool, generation: usize, action: impl FnOnce() -> Result<T>) -> Result<T> {
-    if simple && rpc::worker_active() { rpc::foreground_phase(generation, action) }
-    else { action() }
+pub fn commit_prepared_write<T>(
+    simple: bool,
+    generation: usize,
+    action: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    if simple && rpc::worker_active() {
+        rpc::foreground_phase(generation, action)
+    } else {
+        action()
+    }
 }
 
 pub fn run_local_inner(args: Cli) -> Result<()> {
@@ -3883,7 +4177,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
     if matches!(args.command, Some(Command::V)) {
         return crate::app_version::emit(json_mode());
     }
-    if matches!(args.command, Some(Command::Web { .. } | Command::Restart { .. })) {
+    if matches!(
+        args.command,
+        Some(Command::Web { .. } | Command::Restart { .. })
+    ) {
         anyhow::bail!("the dashboard launcher does not run inside a command worker");
     }
     if matches!(args.command, Some(Command::MemoryRevision)) {
@@ -3902,7 +4199,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
     // A direct caller can wait here while a restore installs maintenance. The
     // pre-dispatch check cannot authorize a mutation after that ownership wait.
     respire_app::snapshot::ensure_no_incomplete_restore(&respire_app::service::data_dir())?;
-    progress::phase("\u{6267}\u{884c}\u{672c}\u{5730}\u{64cd}\u{4f5c}", "Executing local operation");
+    progress::phase(
+        "\u{6267}\u{884c}\u{672c}\u{5730}\u{64cd}\u{4f5c}",
+        "Executing local operation",
+    );
     crate::host_hooks::check_direct_access()?;
     // -- Read-only gate (added 2026-09-20; same-day audit moved it) --
     // When this space's agent.json has readonly=true, every write command is refused.
@@ -3932,7 +4232,12 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             }
         } else {
             let device_sync_write = respire_app::service::service_paused()
-                && matches!(cmd, Command::Sync | Command::SyncConflicts { .. } | Command::SyncHistory { remote: true, .. });
+                && matches!(
+                    cmd,
+                    Command::Sync
+                        | Command::SyncConflicts { .. }
+                        | Command::SyncHistory { remote: true, .. }
+                );
             if is_write_command(cmd) || is_write_command_fine(cmd) || device_sync_write {
                 respire_app::service::ensure_writable()?;
             }
@@ -3959,19 +4264,33 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         return outcome;
     }
     match args.command.as_ref() {
-        Some(Command::Metadata { command: metadata::Command::Status }) => return run_metadata_status(),
-        Some(Command::Metadata { .. }) => anyhow::bail!("metadata enable/disable must run in the host CLI"),
+        Some(Command::Metadata {
+            command: metadata::Command::Status,
+        }) => return run_metadata_status(),
+        Some(Command::Metadata { .. }) => {
+            anyhow::bail!("metadata enable/disable must run in the host CLI")
+        }
         Some(Command::Review { args }) => return review::run(args),
         Some(Command::Grant { command }) => {
             let store = respire_app::service::open_store()?;
             let (action, result) = match command {
                 GrantCommand::Create { root, label } => {
-                    uuid::Uuid::parse_str(root).map_err(|error| respire_app::input_error::InputError(format!("grant root must be a full UUID: {error}")))?;
+                    uuid::Uuid::parse_str(root).map_err(|error| {
+                        respire_app::input_error::InputError(format!(
+                            "grant root must be a full UUID: {error}"
+                        ))
+                    })?;
                     if label.trim().is_empty() || label.len() > 128 {
-                        return Err(respire_app::input_error::InputError("grant label must be 1\u{2013}128 bytes of non-empty text".into()).into());
+                        return Err(respire_app::input_error::InputError(
+                            "grant label must be 1\u{2013}128 bytes of non-empty text".into(),
+                        )
+                        .into());
                     }
                     if !store.all(false)?.iter().any(|entry| entry.id == *root) {
-                        return Err(respire_app::input_error::InputError("grant root does not exist or is deleted".into()).into());
+                        return Err(respire_app::input_error::InputError(
+                            "grant root does not exist or is deleted".into(),
+                        )
+                        .into());
                     }
                     let (grant, token) = store.create_grant(root, label)?;
                     (
@@ -4056,15 +4375,41 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         Some(Command::TreeFloat { go, min }) => return run_tree_float(*go, *min),
         Some(Command::Split { id, go, spec }) => return run_split(id, *go, spec.as_deref()),
         Some(command @ Command::Extract { .. }) => return run_extract_command(command),
-        Some(Command::DiarySearch { query, limit, max_chars, mode }) => {
+        Some(Command::DiarySearch {
+            query,
+            limit,
+            max_chars,
+            mode,
+        }) => {
             let store = build_local()?;
             let keys = build_session()?;
-            let result = respire_app::diary::search(&store, &keys, query, *limit, *max_chars, mode == "hybrid")?;
-            if result.pending_fragments > 0 { respire_app::service::notify_index(); }
+            let result = respire_app::diary::search(
+                &store,
+                &keys,
+                query,
+                *limit,
+                *max_chars,
+                mode == "hybrid",
+            )?;
+            if result.pending_fragments > 0 {
+                respire_app::service::notify_index();
+            }
             return emit_diary_fragments("diary-search", result);
         }
-        Some(Command::DiaryFragment { source_id, fragment_id, neighbors, max_chars }) => {
-            let result = respire_app::diary::read_fragment(&build_local()?, &build_session()?, source_id, fragment_id, *neighbors, *max_chars)?;
+        Some(Command::DiaryFragment {
+            source_id,
+            fragment_id,
+            neighbors,
+            max_chars,
+        }) => {
+            let result = respire_app::diary::read_fragment(
+                &build_local()?,
+                &build_session()?,
+                source_id,
+                fragment_id,
+                *neighbors,
+                *max_chars,
+            )?;
             return emit_diary_fragments("diary-fragment", result);
         }
         Some(Command::Diary {
@@ -4178,12 +4523,29 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }) => return run_doctor(*remote, *check_update, *fix),
         Some(Command::Audit { json }) => return run_audit(*json),
         Some(Command::Witness { verify: _ }) => {
-            let report=build_local()?.witness_verify()?;
-            let mut result=ResultEnvelope::new("witness",if report.intact{OutputStatus::Ok}else{OutputStatus::Fail},serde_json::to_value(&report)?,Vec::new());
-            if !report.intact {result.errors.push(format!("witness verification failed at sequence {}: {}",report.broken_at.map_or_else(||"unknown".to_owned(),|seq|seq.to_string()),report.reason.as_deref().unwrap_or("invalid chain")));}
-            result.details=serde_json::to_value(report)?;
+            let report = build_local()?.witness_verify()?;
+            let mut result = ResultEnvelope::new(
+                "witness",
+                if report.intact {
+                    OutputStatus::Ok
+                } else {
+                    OutputStatus::Fail
+                },
+                serde_json::to_value(&report)?,
+                Vec::new(),
+            );
+            if !report.intact {
+                result.errors.push(format!(
+                    "witness verification failed at sequence {}: {}",
+                    report
+                        .broken_at
+                        .map_or_else(|| "unknown".to_owned(), |seq| seq.to_string()),
+                    report.reason.as_deref().unwrap_or("invalid chain")
+                ));
+            }
+            result.details = serde_json::to_value(report)?;
             return emit_result(result);
-        },
+        }
         Some(Command::SuperReset { super_pass }) => {
             let new_super = respire_app::auth::super_reset(None, super_pass.as_deref())?;
             emit_result(ResultEnvelope::new(
@@ -4255,22 +4617,43 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }
         Some(Command::Model { action }) => {
             return match action {
-                ModelAction::Catalog | ModelAction::Configure { .. } | ModelAction::Switch { .. } | ModelAction::Progress | ModelAction::Resume => anyhow::bail!("model profile command must use the runtime interface"),
-                ModelAction::InstallM3 { mirror, model, for_engine } => {
+                ModelAction::Catalog
+                | ModelAction::Configure { .. }
+                | ModelAction::Switch { .. }
+                | ModelAction::Progress
+                | ModelAction::Resume => {
+                    anyhow::bail!("model profile command must use the runtime interface")
+                }
+                ModelAction::InstallM3 {
+                    mirror,
+                    model,
+                    for_engine,
+                } => {
                     let mirror_env = crate::model_install::mirror_from_env();
                     let resolved = mirror.as_deref().or(mirror_env.as_deref());
                     let prepare = || -> Result<_> {
                         // Reject bad variants before downloading the baseline.
-                        if let Some(variant) = model.as_deref() { respire_app::memory::onnx::parse_variant(variant)?; }
+                        if let Some(variant) = model.as_deref() {
+                            respire_app::memory::onnx::parse_variant(variant)?;
+                        }
                         let report = crate::model_install::install_m3(resolved)?;
-                        if let Some(variant) = model.as_deref() { crate::model_install::install_variant(variant, resolved)?; }
+                        if let Some(variant) = model.as_deref() {
+                            crate::model_install::install_variant(variant, resolved)?;
+                        }
                         Ok(report)
                     };
                     let report = if let Some(engine) = for_engine {
                         let engine = respire_app::memory::onnx::Engine::parse(engine)?;
-                        respire_app::memory::onnx::with_selection(engine,
-                            model.as_deref().unwrap_or(respire_app::memory::onnx::default_variant(engine)), prepare)?
-                    } else { prepare()? };
+                        respire_app::memory::onnx::with_selection(
+                            engine,
+                            model
+                                .as_deref()
+                                .unwrap_or(respire_app::memory::onnx::default_variant(engine)),
+                            prepare,
+                        )?
+                    } else {
+                        prepare()?
+                    };
                     emit_result(ResultEnvelope::new(
                         "model install-m3",
                         OutputStatus::Ok,
@@ -4323,13 +4706,18 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     respire_app::core_sdk::profiles::set_active(selected.clone());
                     anyhow::ensure!(selected.is_none() || (engine.is_none() && model.is_none()),"library uses a model profile; use model switch instead of legacy engine settings");
                     if let Some(engine) = engine {
-                        onnx::save_engine_with_variant(onnx::Engine::parse(engine)?, model.as_deref())?;
+                        onnx::save_engine_with_variant(
+                            onnx::Engine::parse(engine)?,
+                            model.as_deref(),
+                        )?;
                         *EMBEDDER_SLOT
                             .lock()
                             .map_err(|_| anyhow!("embedder cache poisoned"))? = None;
                     } else if let Some(model) = model.as_deref() {
                         onnx::save_model_variant(model)?;
-                        *EMBEDDER_SLOT.lock().map_err(|_| anyhow!("embedder cache poisoned"))? = None;
+                        *EMBEDDER_SLOT
+                            .lock()
+                            .map_err(|_| anyhow!("embedder cache poisoned"))? = None;
                     }
                     let engine = onnx::configured_engine()?;
                     emit_result(ResultEnvelope::new(
@@ -4352,8 +4740,15 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     respire_app::memory::onnx::validate_selection(engine, model)?;
                     crate::model_progress::update("load", model, 0, None)?;
                     let result = respire_app::memory::onnx::load_selection(engine, model)?;
-                    *EMBEDDER_SLOT.lock().map_err(|_| anyhow!("embedder cache poisoned"))? = None;
-                    emit_result(ResultEnvelope::new("model load", OutputStatus::Ok, result, vec![]))?;
+                    *EMBEDDER_SLOT
+                        .lock()
+                        .map_err(|_| anyhow!("embedder cache poisoned"))? = None;
+                    emit_result(ResultEnvelope::new(
+                        "model load",
+                        OutputStatus::Ok,
+                        result,
+                        vec![],
+                    ))?;
                     Ok(())
                 }
                 ModelAction::InstallEngines => {
@@ -4361,8 +4756,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 }
                 ModelAction::Probe { text, model } => {
                     let current = build_local()?.retrieval_model()?;
-                    let selected = model.clone().unwrap_or_else(||current.clone());
-                    anyhow::ensure!(selected == current,"probe must name the active library profile; switch before probing");
+                    let selected = model.clone().unwrap_or_else(|| current.clone());
+                    anyhow::ensure!(
+                        selected == current,
+                        "probe must name the active library profile; switch before probing"
+                    );
                     let result = BgeEmbedder::load_model(&selected)?.probe(text)?;
                     emit_result(ResultEnvelope::new(
                         "model",
@@ -4410,7 +4808,9 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         &build_session()?,
                     )?)?
                 }
-                SnapshotCmd::List => serde_json::to_value(respire_app::snapshot::list_report(&root)?)?,
+                SnapshotCmd::List => {
+                    serde_json::to_value(respire_app::snapshot::list_report(&root)?)?
+                }
                 SnapshotCmd::ResumeSync { reviewed_revision } => {
                     respire_app::service::ensure_writable()?;
                     respire_app::snapshot::resume_sync(&root, reviewed_revision)?;
@@ -4426,12 +4826,16 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 serde_json::json!({"action":match cmd {SnapshotCmd::Create{..}=>"created",SnapshotCmd::List=>"list",SnapshotCmd::ResumeSync{..}=>"sync_resumed",SnapshotCmd::Restore{..}=>"restored",SnapshotCmd::Recover{..}=>"recovered"}}),
                 Vec::new(),
             );
-            if matches!(cmd,SnapshotCmd::Create{..}) && details["witness_intact"]==false {
-                result.status=OutputStatus::Warn;
+            if matches!(cmd, SnapshotCmd::Create { .. }) && details["witness_intact"] == false {
+                result.status = OutputStatus::Warn;
                 result.errors.push("snapshot file created, but its witness chain is invalid; preserved for explicit recovery/repair".into());
             }
-            if matches!(cmd,SnapshotCmd::List) && details["problems"].as_array().is_some_and(|items|!items.is_empty()) {
-                result.status=OutputStatus::Warn;
+            if matches!(cmd, SnapshotCmd::List)
+                && details["problems"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            {
+                result.status = OutputStatus::Warn;
                 result.errors.push("some snapshots failed verification; inspect details.problems; healthy snapshots remain usable".into());
             }
             result.details = details;
@@ -4499,9 +4903,17 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let metadata_patch = metadata.patch();
             let requested_kind = Kind::try_from_str(&r#type.trim().to_lowercase())
                 .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?;
-            let new_kind = matches!(requested_kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote);
-            if metadata_patch.is_some() || new_kind { respire_app::metadata_gate::require_support()?; }
-            anyhow::ensure!((supersedes.is_none() && see_also.is_empty()) || importance == "important", "associations require important memory");
+            let new_kind = matches!(
+                requested_kind,
+                Kind::Hypothesis | Kind::Reflection | Kind::SelfNote
+            );
+            if metadata_patch.is_some() || new_kind {
+                respire_app::metadata_gate::require_support()?;
+            }
+            anyhow::ensure!(
+                (supersedes.is_none() && see_also.is_empty()) || importance == "important",
+                "associations require important memory"
+            );
             // importance enum check: an illegal value (e.g. a kind name "task" by mistake) cannot be filtered by audit/UI after write
             // 2026-09-19 two-tier: normal is retired - new writes are important/trivial only (stock normal still reads)
             if !matches!(importance.as_str(), "important" | "trivial") {
@@ -4558,7 +4970,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let (session, profile_owner) = build_session_with_owner()?;
             let store = build_local()?;
             if metadata_patch.is_some() || new_kind {
-                anyhow::ensure!(store.memory_metadata_v1_enabled()?, "memory_metadata_v1_disabled");
+                anyhow::ensure!(
+                    store.memory_metadata_v1_enabled()?,
+                    "memory_metadata_v1_disabled"
+                );
             }
             let stamp = now_stamp();
             let mut id = Uuid::new_v4().to_string();
@@ -4574,14 +4989,22 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             //    an explicit title names an independent entry in either mode.
             //    verbose = one diary entry each (old behavior) --
             let (mut content, mut title) = (content, title);
-            if importance == "trivial" && merge_ids.is_none() && metadata_patch.is_none() && !new_kind {
+            if importance == "trivial"
+                && merge_ids.is_none()
+                && metadata_patch.is_none()
+                && !new_kind
+            {
                 if respire_app::service::diary_mode() != "verbose" && title.trim().is_empty() {
                     // Stable identity survives retitling; dated titles remain a fallback
                     // for legacy tracks created before deterministic IDs were used.
                     let now_local = chrono::Local::now();
                     let day = now_local.format("%Y-%m-%d").to_string();
                     let track_title = format!("\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} {day}");
-                    let line = format!("\u{3010}{}\u{3011}{}", now_local.format("%H:%M"), content.trim());
+                    let line = format!(
+                        "\u{3010}{}\u{3011}{}",
+                        now_local.format("%H:%M"),
+                        content.trim()
+                    );
                     let all = store.all(false)?;
                     let user = current_user();
                     let track_id = uuid::Uuid::new_v5(
@@ -4601,7 +5024,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         for t in &tracks {
                             let full = MemoryEngine::open(&session, t)?;
                             for row in full.content.lines() {
-                                if row.trim() == format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}")
+                                if row.trim()
+                                    == format!(
+                                        "\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}"
+                                    )
                                     || row.trim().is_empty()
                                 {
                                     continue;
@@ -4609,7 +5035,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                                 merged.push_str(row.trim_end());
                                 merged.push('\n');
                             }
-
                         }
                         merged.push_str(&line);
                         // Appending must preserve a user's title and other metadata.
@@ -4619,10 +5044,18 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                         e.modified_by = respire_app::service::device_tag();
                         let metadata_receipt = metadata::prepare(&session, &store, &e)?;
                         let stored = MemoryEngine::seal(&session, embedder!(), &e, &main.user)?;
-                        anyhow::ensure!(commit_prepared_write(short_write, write_generation, || store.put_diary_checked(&stored, &main.ciphertext, &tracks[1..]))?, "diary was not saved");
+                        anyhow::ensure!(
+                            commit_prepared_write(short_write, write_generation, || store
+                                .put_diary_checked(&stored, &main.ciphertext, &tracks[1..]))?,
+                            "diary was not saved"
+                        );
                         crate::hooks::fire(
                             crate::hooks::HookEvent::PostRemember,
-                            crate::hooks::remember_done_payload(&stored.id, &e.title, &e.importance),
+                            crate::hooks::remember_done_payload(
+                                &stored.id,
+                                &e.title,
+                                &e.importance,
+                            ),
                         );
                         // Return the same decrypted public entry that show exposes,
                         // never the sealed StoredMemory persistence representation.
@@ -4648,7 +5081,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     }
                     // No track for today: create with a deterministic id (same id across devices that day; sync converges), then the generic create path
                     id = track_id;
-                    content = format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}\n{line}");
+                    content =
+                        format!("\u{3010}\u{6d3b}\u{52a8}\u{8f68}\u{8ff9}\u{3011}{day}\n{line}");
                     title = track_title;
                 } else {
                     content = respire_app::taxonomy::diary_content(&content);
@@ -4661,15 +5095,28 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
 
             // -- Judge-then-store (dedup first, then choose): unless --force/--merge-ids/--parent (explicit attach is intent)
             //    run an internal recall of similar candidates; diary trivia skips dedup (daily log is not a duplicate event; it goes on the time chain) --
-            if !force && merge_ids.is_none() && supersedes.is_none() && see_also.is_empty() && parent.is_empty() && importance != "trivial" {
-                let (candidates_all, pending, lease) = respire_app::resident::recall_catalog(&session, &store)?;
+            if !force
+                && merge_ids.is_none()
+                && supersedes.is_none()
+                && see_also.is_empty()
+                && parent.is_empty()
+                && importance != "trivial"
+            {
+                let (candidates_all, pending, lease) =
+                    respire_app::resident::recall_catalog(&session, &store)?;
                 let _resident = lease.enter();
-                if pending > 0 { rpc::kick_index(); }
+                if pending > 0 {
+                    rpc::kick_index();
+                }
                 let q = MemoryQuery::new(&content).limit(5);
-                let candidates:respire_app::core_sdk::RememberCandidates=respire_app::core_sdk::execute("remember_candidates",serde_json::json!({
-                    "model":embedder!().model_name(),"snapshots":respire_app::memory::engine::snapshots(&session,&candidates_all)?,
-                    "query":q,"query_settings":respire_app::feedback::query_settings(&store,&q,&candidates_all)?
-                }))?;
+                let candidates: respire_app::core_sdk::RememberCandidates =
+                    respire_app::core_sdk::execute(
+                        "remember_candidates",
+                        serde_json::json!({
+                            "model":embedder!().model_name(),"snapshots":respire_app::memory::engine::snapshots(&session,&candidates_all)?,
+                            "query":q,"query_settings":respire_app::feedback::query_settings(&store,&q,&candidates_all)?
+                        }),
+                    )?;
                 let merge_cand = candidates.merge;
                 let parent_cand = candidates.parent;
 
@@ -4717,7 +5164,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     result
                         .actions
                         .push("Read candidate bodies; choose update, merge or a real --parent, or explicitly defer. Do not bypass candidate review with bare --force.".into());
-                    result.actions.extend(respire_app::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
+                    result.actions.extend(
+                        respire_app::service::write_decision_actions()
+                            .iter()
+                            .map(|action| (*action).to_owned()),
+                    );
                     emit_result(result)?;
                     return Ok(());
                 }
@@ -4753,7 +5204,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     result
                         .actions
                         .push("Read candidate bodies; choose update, merge or a real --parent, or explicitly defer. Do not bypass candidate review with bare --force.".into());
-                    result.actions.extend(respire_app::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
+                    result.actions.extend(
+                        respire_app::service::write_decision_actions()
+                            .iter()
+                            .map(|action| (*action).to_owned()),
+                    );
                     emit_result(result)?;
                     return Ok(());
                 }
@@ -4770,9 +5225,14 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     requested_kind
                 } else {
                     let all = store.all(false)?;
-                    let first = to_merge.first().ok_or_else(|| anyhow!("merge needs at least one live entry"))?;
+                    let first = to_merge
+                        .first()
+                        .ok_or_else(|| anyhow!("merge needs at least one live entry"))?;
                     let full = respire_app::service::resolve_prefix(&all, first)?;
-                    let row = all.iter().find(|row| row.id == full).ok_or_else(|| anyhow!("missing merge source"))?;
+                    let row = all
+                        .iter()
+                        .find(|row| row.id == full)
+                        .ok_or_else(|| anyhow!("missing merge source"))?;
                     MemoryEngine::open(&session, row)?.kind
                 };
                 let mut entry = respire_app::MemoryEntry {
@@ -4802,21 +5262,26 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     device: respire_app::service::device_tag(),
                     modified_by: respire_app::service::device_tag(),
                 };
-                let (merged_full, record_revision) = respire_app::service::merge_entries_with_metadata_revision(
-                    &session, &store, embedder!(), &mut entry, &to_merge, &parent, true,
-                    metadata_patch.as_ref(),
-                )?;
-                let metadata_receipt = record_revision.as_deref().map(|revision| metadata::receipt(&entry, revision))
+                let (merged_full, record_revision) =
+                    respire_app::service::merge_entries_with_metadata_revision(
+                        &session,
+                        &store,
+                        embedder!(),
+                        &mut entry,
+                        &to_merge,
+                        &parent,
+                        true,
+                        metadata_patch.as_ref(),
+                    )?;
+                let metadata_receipt = record_revision
+                    .as_deref()
+                    .map(|revision| metadata::receipt(&entry, revision))
                     .unwrap_or_else(|| serde_json::json!({}));
                 let dropped = merged_full.len();
                 report_orphans(&store, "merge");
                 crate::hooks::fire(
                     crate::hooks::HookEvent::PostRemember,
-                    crate::hooks::remember_done_payload(
-                        &entry.id,
-                        &entry.title,
-                        &entry.importance,
-                    ),
+                    crate::hooks::remember_done_payload(&entry.id, &entry.title, &entry.importance),
                 );
                 // Adoption: a merge adopts the old entries (they were the preferred recall candidates)
                 for mid in &merged_full {
@@ -4874,7 +5339,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 superseded_by: String::new(),
                 see_also: Vec::new(),
                 id,
-                kind: Kind::try_from_str(&r#type.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
+                kind: Kind::try_from_str(&r#type.trim().to_lowercase())
+                    .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
                 tags: tags
                     .split(',')
                     .map(str::trim)
@@ -4910,10 +5376,21 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 Vec::new()
             };
             let stored = if supersedes.is_some() || !see_also.is_empty() {
-                respire_app::service::store_related(&session,&store,embedder!(),&mut entry,supersedes.as_deref(),&see_also)?
+                respire_app::service::store_related(
+                    &session,
+                    &store,
+                    embedder!(),
+                    &mut entry,
+                    supersedes.as_deref(),
+                    &see_also,
+                )?
             } else {
                 let sealed = MemoryEngine::seal(&session, embedder!(), &entry, &entry.user)?;
-                anyhow::ensure!(commit_prepared_write(short_write, write_generation, || store.put_checked(&sealed, None))?, "memory was not saved");
+                anyhow::ensure!(
+                    commit_prepared_write(short_write, write_generation, || store
+                        .put_checked(&sealed, None))?,
+                    "memory was not saved"
+                );
                 sealed
             };
             // Plugin hook post-remember: observe only, never blocks (failure policy is inside hooks::fire)
@@ -4977,7 +5454,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 serde_json::to_value(&report)?,
                 vec![
                     OutputItem::new("written", OutputStatus::Ok, report.imported.to_string()),
-                    OutputItem::new("duplicates", OutputStatus::Ok, report.duplicates.to_string()),
+                    OutputItem::new(
+                        "duplicates",
+                        OutputStatus::Ok,
+                        report.duplicates.to_string(),
+                    ),
                     OutputItem::new(
                         "skipped",
                         if report.skipped > report.duplicates {
@@ -5025,35 +5506,69 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             no_related,
             intent,
         } => {
-            anyhow::ensure!(render_budget_base64.is_none() || titles || brief, "render budget requires --titles or --brief");
-            anyhow::ensure!(render_min_score.is_none() || render_budget_base64.is_some() || brief, "render minimum score requires a render budget");
-            let mut render_budget = recall_select::decode_render_budget(render_budget_base64.as_deref(), limit, &intent)?;
-            if brief && render_budget.is_none() { render_budget=Some(recall_select::brief_layout(limit)?); }
-            if brief { recall_select::require_metadata(true,render_min_score)?; }
-            if render_budget.is_some() { recall_select::require_render_budget(render_min_score)?; }
+            anyhow::ensure!(
+                render_budget_base64.is_none() || titles || brief,
+                "render budget requires --titles or --brief"
+            );
+            anyhow::ensure!(
+                render_min_score.is_none() || render_budget_base64.is_some() || brief,
+                "render minimum score requires a render budget"
+            );
+            let mut render_budget = recall_select::decode_render_budget(
+                render_budget_base64.as_deref(),
+                limit,
+                &intent,
+            )?;
+            if brief && render_budget.is_none() {
+                render_budget = Some(recall_select::brief_layout(limit)?);
+            }
+            if brief {
+                recall_select::require_metadata(true, render_min_score)?;
+            }
+            if render_budget.is_some() {
+                recall_select::require_render_budget(render_min_score)?;
+            }
             let recall_generation = rpc::sync_generation();
-            let (session,owner) = build_session_with_owner()?;
-            let owner=owner.unwrap_or_else(||"local".to_owned());
+            let (session, owner) = build_session_with_owner()?;
+            let owner = owner.unwrap_or_else(|| "local".to_owned());
             let store = build_local()?;
-            let review=respire_app::review::ReviewService::new(&session,&store,&owner)?;
-            let source=review.recall_source()?;
-            let metadata_aware=brief || source.has_metadata();
+            let review = respire_app::review::ReviewService::new(&session, &store, &owner)?;
+            let source = review.recall_source()?;
+            let metadata_aware = brief || source.has_metadata();
             // Dynamic blocks from new records need complete qualified variants.
             // Legacy-only title budgets retain their original WP3a bytes.
-            let brief_render=brief || (metadata_aware && render_budget.is_some());
-            if metadata_aware {recall_select::require_metadata(brief_render,render_min_score)?;}
-            let (candidates,index_pending,resident)=if metadata_aware {
-                let rows:Vec<_>=source.memories().iter().filter(|row|!row.deleted).cloned().collect();
-                let pending=rows.iter().filter(|row|row.local_artifact.is_empty()).count();
-                let lease=respire_app::core_sdk::ResidentLease::publish(uuid::Uuid::new_v4().to_string(),None,
-                    &store.retrieval_model()?,source.snapshots(),&[])?;
-                (Arc::new(rows),pending,Some(lease))
+            let brief_render = brief || (metadata_aware && render_budget.is_some());
+            if metadata_aware {
+                recall_select::require_metadata(brief_render, render_min_score)?;
+            }
+            let (candidates, index_pending, resident) = if metadata_aware {
+                let rows: Vec<_> = source
+                    .memories()
+                    .iter()
+                    .filter(|row| !row.deleted)
+                    .cloned()
+                    .collect();
+                let pending = rows
+                    .iter()
+                    .filter(|row| row.local_artifact.is_empty())
+                    .count();
+                let lease = respire_app::core_sdk::ResidentLease::publish(
+                    uuid::Uuid::new_v4().to_string(),
+                    None,
+                    &store.retrieval_model()?,
+                    source.snapshots(),
+                    &[],
+                )?;
+                (Arc::new(rows), pending, Some(lease))
             } else {
-                let (rows,pending,lease)=respire_app::resident::recall_catalog(&session,&store)?;
-                (rows,pending,Some(lease))
+                let (rows, pending, lease) =
+                    respire_app::resident::recall_catalog(&session, &store)?;
+                (rows, pending, Some(lease))
             };
-            let _resident_scope=resident.as_ref().map(|lease|lease.enter());
-            if index_pending > 0 { rpc::kick_index(); }
+            let _resident_scope = resident.as_ref().map(|lease| lease.enter());
+            if index_pending > 0 {
+                rpc::kick_index();
+            }
             if trace {
                 let preview = &candidates;
                 let primary = candidates_count_primary(&preview);
@@ -5069,40 +5584,89 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             }
             let mut q = MemoryQuery::new(&query).limit(limit);
             if let Some(k) = &r#type {
-                q = q.of_kind(Kind::try_from_str(&k.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?);
+                q = q.of_kind(
+                    Kind::try_from_str(&k.trim().to_lowercase())
+                        .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
+                );
             }
             if let Some(p) = &project {
                 q = q.of_project(p);
             }
-            let core_intent = if metadata_aware || render_budget.is_some() {Some(intent.as_str())}else{None};
-            // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
-            let (mut ranked, recall_mode, selection_fallback, routing, retrieval, budget) = if metadata_aware {
-                recall_select::recall_metadata(&review,&source,embedder!(),&q,&store,render_budget,render_min_score,&intent,mode.as_deref())?
+            let core_intent = if metadata_aware || render_budget.is_some() {
+                Some(intent.as_str())
             } else {
-                let (ranked,recall_mode,selection_fallback,routing,retrieval,budget)=match mode {
-                Some(mode) => {
-                    recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &store, render_budget, render_min_score, core_intent, &mode)?
-                }
-                None => recall_select::recall(&session, embedder!(), &candidates, &q, &store, render_budget, render_min_score, core_intent)?,
-                };
-                (ranked,recall_mode,selection_fallback,routing,retrieval,budget.map(serde_json::to_value).transpose()?)
+                None
             };
+            // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
+            let (mut ranked, recall_mode, selection_fallback, routing, retrieval, budget) =
+                if metadata_aware {
+                    recall_select::recall_metadata(
+                        &review,
+                        &source,
+                        embedder!(),
+                        &q,
+                        &store,
+                        render_budget,
+                        render_min_score,
+                        &intent,
+                        mode.as_deref(),
+                    )?
+                } else {
+                    let (ranked, recall_mode, selection_fallback, routing, retrieval, budget) =
+                        match mode {
+                            Some(mode) => recall_select::recall_with_mode(
+                                &session,
+                                embedder!(),
+                                &candidates,
+                                &q,
+                                &store,
+                                render_budget,
+                                render_min_score,
+                                core_intent,
+                                &mode,
+                            )?,
+                            None => recall_select::recall(
+                                &session,
+                                embedder!(),
+                                &candidates,
+                                &q,
+                                &store,
+                                render_budget,
+                                render_min_score,
+                                core_intent,
+                            )?,
+                        };
+                    (
+                        ranked,
+                        recall_mode,
+                        selection_fallback,
+                        routing,
+                        retrieval,
+                        budget.map(serde_json::to_value).transpose()?,
+                    )
+                };
             // Procedural-memory routing (P1/P2): a how-to question gets a second,
             // skill-only pass; the union keeps one procedure inside the top three.
             // Facts keep Core's order and score; run history only ranks procedures.
             let howto = if core_intent.is_some() {
                 retrieval["intent"] == "howto"
-            } else { match intent.as_str() {
-                "howto" => true,
-                "fact" => false,
-                _ => r#type.is_none() && skill::howto_intent(&query),
-            }};
+            } else {
+                match intent.as_str() {
+                    "howto" => true,
+                    "fact" => false,
+                    _ => r#type.is_none() && skill::howto_intent(&query),
+                }
+            };
             let mut procedure_pass = if core_intent.is_some() {
                 serde_json::from_value::<usize>(retrieval["procedure_pass"].clone())?
-            } else { 0 };
+            } else {
+                0
+            };
             let mut procedure_promoted = if core_intent.is_some() {
                 serde_json::from_value::<bool>(retrieval["procedure_promoted"].clone())?
-            } else { false };
+            } else {
+                false
+            };
             if core_intent.is_none() && howto && r#type.is_none() {
                 let mut q_skill = q.clone().of_kind(Kind::Skill);
                 q_skill.limit = limit;
@@ -5127,7 +5691,15 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     let runs = store
                         .skill_run_stats(&ids)?
                         .into_iter()
-                        .map(|(id, st)| (id, skill::RunScore { ok: st.ok, fail: st.fail }))
+                        .map(|(id, st)| {
+                            (
+                                id,
+                                skill::RunScore {
+                                    ok: st.ok,
+                                    fail: st.fail,
+                                },
+                            )
+                        })
                         .collect();
                     let (merged, promoted) = skill::merge_howto(ranked, skills, limit, &runs);
                     ranked = merged;
@@ -5135,7 +5707,9 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 }
             }
             let intent_label = if core_intent.is_some() {
-                retrieval["intent"].as_str().ok_or_else(|| anyhow::anyhow!("missing Core intent receipt"))?
+                retrieval["intent"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing Core intent receipt"))?
             } else if r#type.is_some() {
                 "typed"
             } else if howto {
@@ -5148,22 +5722,34 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 Default::default()
             } else if budget.is_some() {
                 respire_app::memory::model::RelatedResult {
-                    related: Vec::new(), superseded: serde_json::from_value(retrieval["superseded"].clone())?,
+                    related: Vec::new(),
+                    superseded: serde_json::from_value(retrieval["superseded"].clone())?,
                 }
             } else if no_related {
                 Default::default()
-            } else { respire_app::core_sdk::execute("related_business",serde_json::json!({
-                "model":embedder!().model_name(), "snapshots":respire_app::memory::engine::snapshots(&session,&candidates)?,
-                "query":q,"ids":hit_ids,"pairs":store.recall_pairs(&hit_ids)?
-            }))? };
-            let query_log_id=if respire_app::service::workspace_mode()=="normal" {Some(uuid::Uuid::new_v4().to_string())}else{None};
+            } else {
+                respire_app::core_sdk::execute(
+                    "related_business",
+                    serde_json::json!({
+                        "model":embedder!().model_name(), "snapshots":respire_app::memory::engine::snapshots(&session,&candidates)?,
+                        "query":q,"ids":hit_ids,"pairs":store.recall_pairs(&hit_ids)?
+                    }),
+                )?
+            };
+            let query_log_id = if respire_app::service::workspace_mode() == "normal" {
+                Some(uuid::Uuid::new_v4().to_string())
+            } else {
+                None
+            };
             // Query log: each recall writes a candidate record (including empty - negatives are post-training material too).
             // Note: this is the candidate set, not a hit - a hit is the model query-log mark self-grade
             {
                 let candidates: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
                 let scores: Vec<f32> = ranked.iter().map(|r| r.score).collect();
                 let stats = rpc::RecallStats {
-                    request_id:query_log_id.clone().unwrap_or_else(||uuid::Uuid::new_v4().to_string()),
+                    request_id: query_log_id
+                        .clone()
+                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
                     query: query.clone(),
                     project: project.clone().unwrap_or_default(),
                     candidates,
@@ -5192,7 +5778,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 }
             }
             if ranked.is_empty() {
-                let mut result=ResultEnvelope::new(
+                let mut result = ResultEnvelope::new(
                     "recall",
                     OutputStatus::Skip,
                     serde_json::json!({"query":query,"budget":budget,"query_log_id":query_log_id,"count":0,"recall_mode":recall_mode,
@@ -5203,11 +5789,12 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     vec![OutputItem::new("results", OutputStatus::Skip, "0")],
                 );
                 if metadata_aware {
-                    result.summary["metadata_aware"]=serde_json::json!(true);
-                    result.summary["brief"]=serde_json::json!(brief_render);
-                    result.summary["filtered_by_evidence"]=retrieval["filtered_by_evidence"].clone();
-                    result.summary["evidence"]=retrieval["evidence"].clone();
-                    result.details=serde_json::json!([]);
+                    result.summary["metadata_aware"] = serde_json::json!(true);
+                    result.summary["brief"] = serde_json::json!(brief_render);
+                    result.summary["filtered_by_evidence"] =
+                        retrieval["filtered_by_evidence"].clone();
+                    result.summary["evidence"] = retrieval["evidence"].clone();
+                    result.details = serde_json::json!([]);
                 }
                 emit_result(result)?;
                 return Ok(());
@@ -5230,8 +5817,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     )
                 })
                 .collect::<Vec<_>>();
-            for (hit,row) in ranked.iter().zip(items.iter_mut()) {
-                if associations.superseded.contains_key(&hit.entry.id) { row.value.push_str(" [superseded]"); }
+            for (hit, row) in ranked.iter().zip(items.iter_mut()) {
+                if associations.superseded.contains_key(&hit.entry.id) {
+                    row.value.push_str(" [superseded]");
+                }
             }
             let mut result = ResultEnvelope::new(
                 "recall",
@@ -5262,19 +5851,36 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     .collect::<Vec<_>>())
             };
             if metadata_aware {
-                result.summary["metadata_aware"]=serde_json::json!(true);
-                result.summary["brief"]=serde_json::json!(brief_render);
-                result.summary["filtered_by_evidence"]=retrieval["filtered_by_evidence"].clone();
-                if let Some(details)=result.details.as_array_mut() {
-                    for (detail,hit) in details.iter_mut().zip(ranked.iter()) {
-                        detail["evidence"]=retrieval["evidence"].as_array().and_then(|values|values.iter().find(|value|value["id"]==hit.entry.id))
-                            .ok_or_else(||anyhow!("Core omitted recall evidence"))?.clone();
-                        detail["source_refs"]=serde_json::json!(hit.entry.metadata.source_refs);
-                        detail["scope"]=serde_json::json!(hit.entry.metadata.verification.as_ref().map(|value|&value.scope));
-                        detail["valid_until"]=serde_json::json!(hit.entry.metadata.valid_until);
-                        detail["representation"]=budget.as_ref().and_then(|receipt|receipt["items"].as_array())
-                            .and_then(|values|values.iter().find(|value|value["id"]==hit.entry.id)).map(|item|item["representation"].clone())
-                            .unwrap_or_else(||serde_json::json!(if titles{"title"}else{"full"}));
+                result.summary["metadata_aware"] = serde_json::json!(true);
+                result.summary["brief"] = serde_json::json!(brief_render);
+                result.summary["filtered_by_evidence"] = retrieval["filtered_by_evidence"].clone();
+                if let Some(details) = result.details.as_array_mut() {
+                    for (detail, hit) in details.iter_mut().zip(ranked.iter()) {
+                        detail["evidence"] = retrieval["evidence"]
+                            .as_array()
+                            .and_then(|values| {
+                                values.iter().find(|value| value["id"] == hit.entry.id)
+                            })
+                            .ok_or_else(|| anyhow!("Core omitted recall evidence"))?
+                            .clone();
+                        detail["source_refs"] = serde_json::json!(hit.entry.metadata.source_refs);
+                        detail["scope"] = serde_json::json!(hit
+                            .entry
+                            .metadata
+                            .verification
+                            .as_ref()
+                            .map(|value| &value.scope));
+                        detail["valid_until"] = serde_json::json!(hit.entry.metadata.valid_until);
+                        detail["representation"] = budget
+                            .as_ref()
+                            .and_then(|receipt| receipt["items"].as_array())
+                            .and_then(|values| {
+                                values.iter().find(|value| value["id"] == hit.entry.id)
+                            })
+                            .map(|item| item["representation"].clone())
+                            .unwrap_or_else(|| {
+                                serde_json::json!(if titles { "title" } else { "full" })
+                            });
                     }
                 }
             }
@@ -5288,12 +5894,17 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let child = respire_app::service::resolve_prefix(&all, &id)?;
             let parent_full = respire_app::service::resolve_prefix(&all, &parent)?;
             if child == parent_full {
-                return Err(respire_app::input_error::InputError("cannot attach to itself".into()).into());
+                return Err(
+                    respire_app::input_error::InputError("cannot attach to itself".into()).into(),
+                );
             }
             // Cycle guard: the new parent's cause chain must not contain the child
             for anc in store.ancestor_chain(&parent_full)? {
                 if anc == child {
-                    return Err(respire_app::input_error::InputError("cycle: new parent is a descendant of this entry".into()).into());
+                    return Err(respire_app::input_error::InputError(
+                        "cycle: new parent is a descendant of this entry".into(),
+                    )
+                    .into());
                 }
             }
             respire_app::service::reparent(&session, &store, &child, &parent_full)?;
@@ -5435,7 +6046,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 if s.id == id
                     || (s.id.len() >= 8
                         && id.len() >= 8
-                        && respire_app::service::short_id(&s.id) == respire_app::service::short_id(&id))
+                        && respire_app::service::short_id(&s.id)
+                            == respire_app::service::short_id(&id))
                 {
                     hit = Some(s);
                     break;
@@ -5527,7 +6139,9 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     .filter_map(|(e, recall_count)| {
                         let mut row = serde_json::to_value(e).ok()?;
                         if let Some(obj) = row.as_object_mut() {
-                            if metadata {obj.remove("content");}
+                            if metadata {
+                                obj.remove("content");
+                            }
                             obj.insert("recall_count".into(), serde_json::json!(recall_count));
                         }
                         Some(row)
@@ -5598,7 +6212,9 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }
         Command::Restore { id } => {
             if !build_local()?.all(true)?.iter().any(|entry| entry.id == id) {
-                return Err(respire_app::input_error::InputError(format!("not found #{id}")).into());
+                return Err(
+                    respire_app::input_error::InputError(format!("not found #{id}")).into(),
+                );
             }
             let app = respire_app::service::App::open()?;
             let entry = app.restore(&id)?;
@@ -5896,7 +6512,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             for item in &items {
                 let id = item["id"].as_str().unwrap_or_default();
                 if let Some(stored) = by_id.get(id).copied().filter(|row| !row.deleted) {
-                    respire_app::metadata_gate::ensure_write(&store, &MemoryEngine::open(&session, stored)?)?;
+                    respire_app::metadata_gate::ensure_write(
+                        &store,
+                        &MemoryEngine::open(&session, stored)?,
+                    )?;
                 }
             }
             let mut done = 0usize;
@@ -6144,7 +6763,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             emit_result(result)?;
         }
         Command::Sync => {
-            progress::phase("\u{8bfb}\u{53d6}\u{8d26}\u{6237}\u{548c}\u{5f85}\u{540c}\u{6b65}\u{6570}\u{636e}", "Reading account and pending sync data");
+            progress::phase(
+                "\u{8bfb}\u{53d6}\u{8d26}\u{6237}\u{548c}\u{5f85}\u{540c}\u{6b65}\u{6570}\u{636e}",
+                "Reading account and pending sync data",
+            );
             let session = sync_phase(build_session)?;
             let local = sync_phase(build_local)?;
             let remote = sync_phase(build_remote)?;
@@ -6383,10 +7005,12 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let store = build_local()?;
             let model = store.retrieval_model()?;
             let n = store.rebuild_index_with_progress(
-                &session, embedder!(), &model,
-                |done, total| crate::model_progress::update(
-                    "index", &model, done as u64, Some(total as u64),
-                ),
+                &session,
+                embedder!(),
+                &model,
+                |done, total| {
+                    crate::model_progress::update("index", &model, done as u64, Some(total as u64))
+                },
             )?;
             let dims = embedder!().dims();
             emit_result(ResultEnvelope::new(
@@ -6403,7 +7027,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let session = build_session()?;
             let store = build_local()?;
             let all = scoped_candidates(&store)?;
-            let report = respire_app::service::candidate_report(&session, embedder!(), &all, &content)?;
+            let report =
+                respire_app::service::candidate_report(&session, embedder!(), &all, &content)?;
             let mut result = ResultEnvelope::new(
                 "candidates",
                 OutputStatus::Ok,
@@ -6423,7 +7048,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             );
             result.details = serde_json::json!({"merge":report.merge,"parent":report.parent});
             result.actions.push("candidates <content> --json".into());
-            result.actions.extend(respire_app::service::write_decision_actions().iter().map(|action| (*action).to_owned()));
+            result.actions.extend(
+                respire_app::service::write_decision_actions()
+                    .iter()
+                    .map(|action| (*action).to_owned()),
+            );
             emit_result(result)?;
         }
         Command::V => unreachable!("version is printed before run_local work"),
@@ -6575,7 +7204,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             kind,
             importance,
         } => {
-            if metadata.patch().is_some() || kind.as_deref().is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self")) {
+            if metadata.patch().is_some()
+                || kind
+                    .as_deref()
+                    .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
+            {
                 respire_app::metadata_gate::require_support()?;
             }
             if let Some(imp) = importance.as_deref() {
@@ -6612,7 +7245,8 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     .collect();
             }
             if let Some(k) = kind {
-                entry.kind = Kind::try_from_str(&k.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?;
+                entry.kind = Kind::try_from_str(&k.trim().to_lowercase())
+                    .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?;
             }
             if let Some(imp) = importance {
                 let imp = imp.trim().to_lowercase();
@@ -6643,11 +7277,19 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let user = entry.user.clone();
             let mut new_stored = MemoryEngine::seal(&session, embedder!(), &entry, &user)?;
             if respire_app::core_sdk::indexing_deferred() && !stored.local_artifact.is_empty() {
-                let reusable: bool = respire_app::core_sdk::execute("index_reusable",
-                    serde_json::json!({"before":original_entry,"after":entry}))?;
-                if reusable { new_stored.local_artifact = stored.local_artifact.clone(); }
+                let reusable: bool = respire_app::core_sdk::execute(
+                    "index_reusable",
+                    serde_json::json!({"before":original_entry,"after":entry}),
+                )?;
+                if reusable {
+                    new_stored.local_artifact = stored.local_artifact.clone();
+                }
             }
-            anyhow::ensure!(commit_prepared_write(short_write, write_generation, || store.put_checked(&new_stored, Some(&stored.ciphertext)))?, "memory was not saved");
+            anyhow::ensure!(
+                commit_prepared_write(short_write, write_generation, || store
+                    .put_checked(&new_stored, Some(&stored.ciphertext)))?,
+                "memory was not saved"
+            );
             // Adoption: an update is adoption - if a query in the last 10 minutes hit this entry, record it in query_log
             let _ = store.mark_adopted(&stored.id);
             let hint = note_write_maintenance();
@@ -6744,4 +7386,3 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
     }
     Ok(())
 }
-
