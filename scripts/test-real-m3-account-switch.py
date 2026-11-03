@@ -148,6 +148,8 @@ for binary in BINARIES:
                 time.sleep(.02)
     try:
         run('--direct','model','engine','cpu')
+        stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+        assert stopped.returncode==0,'direct engine preparation runtime stop failed'
         global_engine=(main/'inference.json').read_bytes()
         for profile in [main,alternate]:
             select(profile)
@@ -157,6 +159,8 @@ for binary in BINARIES:
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
+        stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+        assert stopped.returncode==0,'direct seed runtime stop failed'
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
         select(main)
         if args.seed_binary:
