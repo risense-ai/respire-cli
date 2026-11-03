@@ -2808,10 +2808,13 @@ fn run_query_log(
         } else {
             0.0
         };
+        let today_key = chrono::Local::now().date_naive().format("%Y-%m-%d").to_string();
+        let today = s.daily.iter().find(|day| day.day == today_key);
         let mut result = ResultEnvelope::new(
             "query-log",
             OutputStatus::Ok,
-            serde_json::json!({"stats":true,"queries":s.total,"adopted":s.with_adopted,"empty_candidates":s.empty_candidates,"good":s.good_total,"bad":s.bad_total,"adopt_rate":adopt_rate,"empty_rate":empty_rate}),
+            serde_json::json!({"stats":true,"queries":s.total,"adopted":s.with_adopted,"empty_candidates":s.empty_candidates,"good":s.good_total,"bad":s.bad_total,"adopt_rate":adopt_rate,"empty_rate":empty_rate,
+                "today":{"day":today_key,"recalls":today.map(|day| day.recalls).unwrap_or(0),"hits":today.map(|day| day.hits).unwrap_or(0)},"hit_definition":"nonempty_candidates"}),
             vec![
                 OutputItem::new("queries", OutputStatus::Ok, s.total.to_string()),
                 OutputItem::new(
@@ -2828,6 +2831,14 @@ fn run_query_log(
                     "self grade",
                     OutputStatus::Ok,
                     format!("good {} / bad {}", s.good_total, s.bad_total),
+                ),
+                OutputItem::new(
+                    "today",
+                    OutputStatus::Ok,
+                    match today {
+                        Some(day) => format!("{} recalls {} hits {}", day.day, day.recalls, day.hits),
+                        None => format!("{today_key} recalls 0 hits 0"),
+                    },
                 ),
             ],
         );
