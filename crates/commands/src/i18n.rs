@@ -12,7 +12,7 @@ pub enum Lang {
 }
 
 pub fn lang() -> Lang {
-    if let Ok(raw) = respire::env::var("RSRS_LANG") {
+    if let Ok(raw) = respire_app::env::var("RSRS_LANG") {
         if let Some(lang) = parse_lang(&raw) {
             return lang;
         }
@@ -376,10 +376,10 @@ fn read_lang_file() -> Option<Lang> {
 
 /// Same path rule as app-core: `RSRS_DATA_DIR/client.json`, else `~/.rsrs/client.json`.
 pub fn client_config_path() -> PathBuf {
-    if let Some(root) = respire::service::env_root_dir() {
+    if let Some(root) = respire_app::service::env_root_dir() {
         return root.join("client.json");
     }
-    respire::service::home_dir()
+    respire_app::service::home_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".rsrs")
         .join("client.json")
@@ -417,7 +417,7 @@ mod tests {
     #[test]
     fn field_labels_follow_the_configured_language() -> anyhow::Result<()> {
         let _guard = lock_env();
-        let prev = respire::env::var("RSRS_LANG").ok();
+        let prev = respire_app::env::var("RSRS_LANG").ok();
         let keys = [
             "conflict_history",
             "conflicts",
@@ -488,8 +488,8 @@ mod tests {
     #[test]
     fn lang_file_and_text_follow_isolated_config() -> anyhow::Result<()> {
         let _guard = lock_env();
-        let previous_dir = respire::env::var("RSRS_DATA_DIR").ok();
-        let previous_lang = respire::env::var("RSRS_LANG").ok();
+        let previous_dir = respire_app::env::var("RSRS_DATA_DIR").ok();
+        let previous_lang = respire_app::env::var("RSRS_LANG").ok();
         let dir = tempfile::tempdir()?;
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         std::env::remove_var("RSRS_LANG");

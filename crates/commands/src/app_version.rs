@@ -1,14 +1,18 @@
 //! Embedded CLI version. Printed by `--version`, `-v`, and `rsrs v`.
+//!
+//! The version is the rsrs CLI release version, supplied at build time by this
+//! crate's build script as `RSRS_CLI_VERSION` (read from the CLI manifest),
+//! because this crate keeps its own independent package version.
 
 use crate::output::{Item as OutputItem, ResultEnvelope, Status};
 
 pub fn embedded() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    env!("RSRS_CLI_VERSION")
 }
 
 pub fn clap_version() -> &'static str {
     #[cfg(feature = "native-fault-tests")]
-    { concat!(env!("CARGO_PKG_VERSION"), " (native fault fixture; not releasable)") }
+    { concat!(env!("RSRS_CLI_VERSION"), " (native fault fixture; not releasable)") }
     #[cfg(not(feature = "native-fault-tests"))]
     { embedded() }
 }

@@ -1,15 +1,15 @@
 use anyhow::{Context, Result};
-use respire::memory::model::{Artifact, MemoryMeta, SourceRef};
-use respire::{Kind, MemoryEntry, SessionKeys};
-use respire::transport::local::LocalStore;
+use respire_app::memory::model::{Artifact, MemoryMeta, SourceRef};
+use respire_app::{Kind, MemoryEntry, SessionKeys};
+use respire_app::transport::local::LocalStore;
 use serde_json::{json, Value};
 
 // A JSON array is one clap value; Option<Vec<T>> would mean repeated T values.
 #[derive(Clone)]
-pub(crate) struct SourceRefs(Vec<SourceRef>);
+pub struct SourceRefs(Vec<SourceRef>);
 
 #[derive(clap::Args, Clone, Default)]
-pub(crate) struct Flags {
+pub struct Flags {
     /// Candidate summary, at most 120 Unicode scalars; does not confirm a fact.
     #[arg(long, value_parser = summary)]
     pub summary: Option<String>,
@@ -42,13 +42,13 @@ fn summary(value: &str) -> std::result::Result<String, String> {
     Ok(value.to_owned())
 }
 
-pub(crate) fn kind(value: &str) -> std::result::Result<String, String> {
+pub fn kind(value: &str) -> std::result::Result<String, String> {
     let value = value.trim().to_lowercase();
     Kind::try_from_str(&value).ok_or_else(|| "unsupported_metadata: unknown memory kind".to_owned())?;
     Ok(value)
 }
 fn timestamp(value: &str) -> std::result::Result<String, String> {
-    respire::memory::model::metadata::validate_timestamp(value).map_err(|e| e.to_string())?;
+    respire_app::memory::model::metadata::validate_timestamp(value).map_err(|e| e.to_string())?;
     Ok(value.to_owned())
 }
 fn sources(value: &str) -> std::result::Result<SourceRefs, String> {
@@ -65,8 +65,8 @@ fn artifact(value: &str) -> std::result::Result<Artifact, String> {
 }
 
 impl Flags {
-    pub fn patch(&self) -> Option<respire::service::MetadataPatch> {
-        let patch = respire::service::MetadataPatch {
+    pub fn patch(&self) -> Option<respire_app::service::MetadataPatch> {
+        let patch = respire_app::service::MetadataPatch {
             summary: self.summary.clone().map(Some).or_else(|| self.clear_summary.then_some(None)),
             source_refs: self.source_refs.as_ref().map(|refs| refs.0.clone()).or_else(|| self.clear_source_refs.then(Vec::new)),
             valid_until: self.valid_until.clone().map(Some).or_else(|| self.clear_valid_until.then_some(None)),
@@ -85,31 +85,31 @@ impl Flags {
 }
 
 /// Compute the receipt before committing, so a Core rejection cannot follow a save.
-pub(crate) fn prepare(keys: &SessionKeys, store: &LocalStore, entry: &MemoryEntry) -> Result<Value> {
+pub fn prepare(keys: &SessionKeys, store: &LocalStore, entry: &MemoryEntry) -> Result<Value> {
     respire_app::metadata_gate::ensure_write(store, entry)?;
     respire_app::metadata_gate::ensure_sources(keys, store, entry)?;
     if entry.metadata.memory_contract == 0 { return Ok(json!({})); }
-    let validation: Value = respire::core_sdk::execute("memory_metadata_validate", json!({"entry": entry}))?;
+    let validation: Value = respire_app::core_sdk::execute("memory_metadata_validate", json!({"entry": entry}))?;
     let revision = validation["record_revision"].as_str().context("Core omitted record_revision")?;
-    respire::memory::model::metadata::validate_revision(revision)?;
+    respire_app::memory::model::metadata::validate_revision(revision)?;
     Ok(receipt(entry, revision))
 }
 
-pub(crate) fn receipt(entry: &MemoryEntry, revision: &str) -> Value {
+pub fn receipt(entry: &MemoryEntry, revision: &str) -> Value {
     json!({"saved":true,"memory_contract":entry.metadata.memory_contract,
         "record_revision":revision,"metadata":entry.metadata,
         "evidence_state":if entry.metadata.verification.is_none(){"unverified"}else{"unavailable"},
         "evidence_evaluated":false})
 }
 
-pub(crate) fn add_receipt(result: &mut crate::output::ResultEnvelope, receipt: Value) {
+pub fn add_receipt(result: &mut crate::output::ResultEnvelope, receipt: Value) {
     if let Value::Object(fields) = receipt {
         for (key, value) in fields { result.summary[key] = value; }
     }
 }
 
 #[derive(clap::Subcommand)]
-pub(crate) enum Command {
+pub enum Command {
     /// Inspect the gate; no enablement or deployment claim is made.
     Status,
     /// Enable only after a validated local backup and explicit deployment review.
@@ -126,14 +126,14 @@ pub(crate) enum Command {
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DeploymentReview {
+pub struct DeploymentReview {
     pub operator: String,
     pub upgraded_writers: String,
     pub disconnected_old_clients: String,
     pub reconciled_offline_writes: String,
 }
 
-pub(crate) fn deployment(mode: &str, file: Option<&std::path::Path>) -> Result<(respire_app::metadata_gate::Deployment, Option<DeploymentReview>)> {
+pub fn deployment(mode: &str, file: Option<&std::path::Path>) -> Result<(respire_app::metadata_gate::Deployment, Option<DeploymentReview>)> {
     if mode == "isolated" {
         anyhow::ensure!(file.is_none(), "isolated mode does not accept --deployment-review");
         return Ok((respire_app::metadata_gate::Deployment::Isolated, None));

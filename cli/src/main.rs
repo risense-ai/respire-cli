@@ -19,18 +19,15 @@ use clap::{Parser, Subcommand};
 use uuid::Uuid;
 
 mod admission;
-mod app_version;
 mod autostart;
 mod bench;
 mod classify;
 mod classify_config;
-mod i18n;
 mod host_rpc;
 mod login;
 mod mcp;
 mod net_rpc;
 mod network;
-mod output;
 mod progress;
 mod rpc;
 mod runtime_error;
@@ -39,8 +36,14 @@ mod runtime_policy;
 mod shell;
 mod skill;
 mod review;
-mod metadata;
 mod web;
+
+// Shared command surface extracted into the respire_commands crate; the bin
+// re-binds the module names so existing `crate::` paths keep resolving.
+use respire_commands::app_version;
+use respire_commands::i18n;
+use respire_commands::metadata;
+use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 
 use respire::auth;
 use respire::memory::bge::BgeEmbedder;
@@ -271,7 +274,6 @@ fn sync_tracked_boundary(
     }
     result
 }
-use output::{Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use respire::transport::local::LocalStore;
 use respire::transport::remote::{RemoteConfig, RemoteTransport};
 use respire::transport::MemoryTransport;
