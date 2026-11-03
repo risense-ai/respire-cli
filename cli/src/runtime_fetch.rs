@@ -1017,6 +1017,13 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
             }
         }
     }
+    // Test harnesses set RSRS_CORE_TEST_MODE=1 for hermetic runs: downloads
+    // are refused so every caller takes its local fallback (the in-process
+    // shim) deterministically instead of touching the network.
+    anyhow::ensure!(
+        !respire::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
+        "runtime downloads are disabled in core test mode"
+    );
     let archive_name = format!("rsrs-runtime-{triple}.tar.gz");
     let metadata_name = format!("runtime-build-{triple}.json");
     let origins = download_origins(mirror)?;

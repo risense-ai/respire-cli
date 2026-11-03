@@ -448,8 +448,9 @@ fn wait_ready(config: &Registration) -> Result<()> {
         if let Some(health) = crate::rpc::probe_runtime()? {
             anyhow::ensure!(
                 (crate::runtime_fetch::version_in_accept(&health.runtime_version)
-                    || (health.runtime_version.is_empty()
-                        && health.bin == env!("CARGO_PKG_VERSION")))
+                    // Legacy combined binaries and the split-transition shim
+                    // both report this CLI's exact train.
+                    || health.bin == env!("CARGO_PKG_VERSION"))
                     && (crate::mcp::exe_matches_dest(&health.exe, &config.executable)
                         || crate::runtime_fetch::managed_runtime_path()
                             .ok()

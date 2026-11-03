@@ -67,8 +67,8 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             return Ok(());
         }
         let started = Instant::now();
-        let binary = match resolve_child_binary() {
-            Ok(binary) => binary,
+        let plan = match resolve_child_plan() {
+            Ok(plan) => plan,
             Err(error) => {
                 eprintln!("runtime resolution failed: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, Duration::ZERO)? {
@@ -78,18 +78,42 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             }
         };
         lifecycle::record_supervise_event(&config, "starting");
-        let arguments: Vec<std::ffi::OsString> = vec![
-            std::ffi::OsString::from("serve"),
-            std::ffi::OsString::from("--data-dir"),
-            root.clone().into_os_string(),
-            std::ffi::OsString::from("--supervised"),
-        ];
-        let outcome = respire_spawn::spawn_binary_with_boot_token(
-            &binary,
-            &arguments,
-            lifecycle::current_boot_token().as_deref(),
-        )
-        .map(|mut child| wait_child(&mut child, &stopped));
+        let outcome = match plan {
+            ChildPlan::Runtime(binary) => {
+                let arguments: Vec<std::ffi::OsString> = vec![
+                    std::ffi::OsString::from("serve"),
+                    std::ffi::OsString::from("--data-dir"),
+                    root.clone().into_os_string(),
+                    std::ffi::OsString::from("--supervised"),
+                ];
+                respire_spawn::spawn_binary_with_boot_token(
+                    &binary,
+                    &arguments,
+                    lifecycle::current_boot_token().as_deref(),
+                )
+                .map(|mut child| wait_child(&mut child, &stopped))
+            }
+            ChildPlan::Shim => {
+                // Split-transition shim: offline hosts and isolated test
+                // environments cannot fetch the pinned runtime. Run this same
+                // binary through the managed foreground entry in a child; it
+                // serves in-process, reports the managed identity and keeps
+                // the supervised ownership contract intact.
+                let mut command = std::process::Command::new(&config.executable);
+                command
+                    .args(["runtime", "run", "--managed", &config.id, "--installation-root"])
+                    .arg(&root);
+                #[cfg(windows)]
+                command.arg("--supervised-child");
+                command
+                    .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                respire_spawn::spawn_host_control(&mut command)
+                    .map(|mut child| wait_child(&mut child, &stopped))
+            }
+        };
         let uptime = started.elapsed();
         match outcome {
             // Signalled shutdown: the supervisor exits without retrying.
@@ -138,18 +162,32 @@ fn wait_child(
     }
 }
 
+/// How the supervisor starts the next runtime child.
+enum ChildPlan {
+    /// A resolved `rsrs-runtime` executable spawned with serve arguments.
+    Runtime(PathBuf),
+    /// This CLI exe serving in-process through the managed foreground entry
+    /// (offline/test fallback during the split transition).
+    Shim,
+}
+
 /// Resolve the managed runtime binary, migrating away from a legacy combined
-/// layout by installing the pinned release on the fly.
-fn resolve_child_binary() -> Result<PathBuf> {
-    match crate::runtime_fetch::resolve_runtime_bin()? {
-        crate::runtime_fetch::ResolvedRuntime::Ready(binary) => Ok(binary),
-        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(legacy) => {
-            eprintln!(
-                "legacy combined runtime found at {}; installing the pinned managed runtime",
-                legacy.display()
-            );
-            crate::runtime_fetch::download_and_install(None, None)
-        }
+/// layout by installing the pinned release on the fly; hosts that cannot
+/// fetch it fall back to the in-process shim child.
+fn resolve_child_plan() -> Result<ChildPlan> {
+    let resolved = crate::runtime_fetch::resolve_runtime_bin();
+    if let Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(legacy)) = &resolved {
+        eprintln!(
+            "legacy combined runtime found at {}; installing the pinned managed runtime",
+            legacy.display()
+        );
+    }
+    match resolved {
+        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(binary)) => Ok(ChildPlan::Runtime(binary)),
+        _ => match crate::runtime_fetch::download_and_install(None, None) {
+            Ok(binary) => Ok(ChildPlan::Runtime(binary)),
+            Err(_) => Ok(ChildPlan::Shim),
+        },
     }
 }
 

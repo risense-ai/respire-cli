@@ -338,6 +338,11 @@ pub fn change_profile_with_verification(change: impl FnOnce() -> Result<()>, rol
 }
 
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
+    // Split-transition shim: when this CLI exe ends up serving in-process (no
+    // managed runtime installed and none fetchable), health and replies must
+    // report this binary's train so client version gates keep matching. A real
+    // rsrs-runtime child publishes its own identity inside its own process.
+    let _ = respire_commands::rpc_serve::publish_shim_identity(env!("CARGO_PKG_VERSION"));
     if flags.status {
         return match call_method("runtime.status", Vec::new(), false) {
             Ok(response) => {
@@ -604,15 +609,23 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
     let override_bin = respire::env::var("RSRS_RUNTIME_BIN").ok()
         .map(|raw| std::path::PathBuf::from(raw.trim()))
         .filter(|path| !path.as_os_str().is_empty());
-    let expected = match override_bin {
-        Some(path) => path,
-        None => crate::runtime_fetch::managed_runtime_path()?
-            .context("no managed runtime is installed")?,
-    };
+    let managed = crate::runtime_fetch::managed_runtime_path()?;
+    // Split-transition shim track: with neither an override nor a managed
+    // runtime installed, only this CLI exe serving in-process (health
+    // reporting this binary's train) is an acceptable owner; it keeps
+    // offline hosts and isolated test environments working for the release
+    // train the shim exists for.
+    let shim = override_bin.is_none()
+        && managed.is_none()
+        && health.bin == env!("CARGO_PKG_VERSION")
+        && std::env::current_exe()
+            .map(|exe| crate::mcp::exe_matches_dest(&health.exe, &exe))
+            .unwrap_or(false);
     Ok(!health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir), &respire::service::data_dir())
         && crate::autostart::may_reuse_runtime(health)?
-        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
-        && crate::mcp::exe_matches_dest(&health.exe, &expected)
+        && (crate::runtime_fetch::version_in_accept(&health.runtime_version) || shim)
+        && override_bin.or(managed)
+            .is_none_or(|expected| crate::mcp::exe_matches_dest(&health.exe, &expected))
         && !health.inference_stalled())
 }
 
@@ -629,20 +642,39 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         }
         stop_occupant(health.pid)?;
     }
-    let executable = match crate::runtime_fetch::resolve_runtime_bin()? {
-        crate::runtime_fetch::ResolvedRuntime::Ready(path) => path,
-        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_) => {
+    let self_exe = std::env::current_exe().ok();
+    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
+        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
+        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) | Err(_) => {
             // First-launch migration: the old owner was stopped above; bring
             // the pinned managed runtime down before starting the new one.
-            crate::runtime_fetch::download_and_install(None, None)?
+            // Offline hosts and isolated test environments cannot fetch it
+            // and fall back to this CLI exe serving in-process (the
+            // --runtime-internal shim) for the transition train.
+            match crate::runtime_fetch::download_and_install(None, None) {
+                Ok(path) => path,
+                Err(_) => self_exe
+                    .clone()
+                    .context("no runtime binary resolved and no local fallback executable")?,
+            }
         }
     };
     crate::autostart::authorize_detached_boot_locked()?;
-    let arguments: Vec<std::ffi::OsString> = vec![
-        "serve".into(),
-        "--data-dir".into(),
-        respire::service::data_dir().into_os_string(),
-    ];
+    let shim = self_exe
+        .as_ref()
+        .is_some_and(|exe| crate::mcp::same_path(exe, &executable));
+    let arguments: Vec<std::ffi::OsString> = if shim {
+        // The shim child reuses this binary's --runtime-internal entry, whose
+        // own fallback serves in-process; the data directory and port arrive
+        // through the inherited environment.
+        vec!["--runtime-internal".into()]
+    } else {
+        vec![
+            "serve".into(),
+            "--data-dir".into(),
+            respire::service::data_dir().into_os_string(),
+        ]
+    };
     let mut child =
         respire_spawn::spawn_binary_with_boot_token(&executable, &arguments, crate::autostart::lifecycle_boot_token().as_deref()).context("failed to start host runtime")?;
     let result = wait_daemon_ready(&mut child, &executable);

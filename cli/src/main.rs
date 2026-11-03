@@ -1134,9 +1134,10 @@ fn run_register(
 
 /// Whether this command writes the store (must refuse in read-only mode).
 ///
-fn main() {
-    // Host services consumed by the shared worker/engine modules are wired once
-    // here; the shared code calls them through respire_commands::host_hooks.
+/// Wire the host services consumed by the shared worker/engine modules; the
+/// shared code calls them through `respire_commands::host_hooks`. Installation
+/// is idempotent (first wiring wins).
+fn install_cli_host_hooks() -> bool {
     let installed = respire_commands::host_hooks::install(respire_commands::host_hooks::HostHooks {
         background_paused: Some(|| autostart::background_paused()),
         check_direct_access: Some(|| autostart::check_direct_access()),
@@ -1177,8 +1178,14 @@ fn main() {
             })
         }),
     });
-    respire_commands::rpc_worker::install_recall_stats_enqueue(rpc::enqueue_recall_stats_local);
-    if !installed {
+    if installed {
+        respire_commands::rpc_worker::install_recall_stats_enqueue(rpc::enqueue_recall_stats_local);
+    }
+    installed
+}
+
+fn main() {
+    if !install_cli_host_hooks() {
         eprintln!("host hooks were installed twice; keeping the first wiring");
     }
     // The command enum and the ONNX session are large. Debug builds on Windows
@@ -1449,6 +1456,10 @@ fn run_classify_config(
 }
 
 fn run(args: Cli) -> Result<()> {
+    // The binary's main wires the host hooks before dispatch; test builds and
+    // in-process capture callers reach run() without main(), so wire them
+    // idempotently here too (the first installation always wins).
+    let _ = install_cli_host_hooks();
     if let Some(Command::Runtime { command }) = args.command.as_ref() {
         return autostart::execute(command);
     }
