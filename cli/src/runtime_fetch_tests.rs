@@ -327,7 +327,9 @@ fn mirror_override_builds_fallback_origins() -> Result<()> {
     let _env = env_scope(&["RSRS_MIRROR", "RSRS_DATA_DIR"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
-    let official = format!("{RELEASE_BASE}/{RUNTIME_REPO}");
+    // Origins are host-level prefixes: release_asset appends the repo path,
+    // tag and asset name itself.
+    let official = RELEASE_BASE.to_owned();
     anyhow::ensure!(
         download_origins(Some("https://mirror.example"))?
             == vec![format!("https://mirror.example/{official}"), official.clone()]

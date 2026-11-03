@@ -151,9 +151,52 @@ impl AcceptRange {
 
     /// True when `version` satisfies every configured bound.
     pub fn contains(&self, version: &str) -> bool {
-        let ordering = |bound: &str| crate::net_rpc::version_cmp(version, bound);
+        let ordering = |bound: &str| semver_cmp(version, bound);
         self.min.as_deref().is_none_or(|min| ordering(min) != std::cmp::Ordering::Less)
             && self.max.as_deref().is_none_or(|max| ordering(max) == std::cmp::Ordering::Less)
+    }
+}
+
+/// Semver-aware ordering for `M.m.p[-pre]` release names. Core triples
+/// compare numerically; a release outranks any prerelease of the same
+/// triple; prerelease identifiers compare per semver (numeric numerically,
+/// alphanumeric lexically, numeric below alphanumeric).
+fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
+    fn split(value: &str) -> (Vec<u64>, Option<String>) {
+        let (core, pre) = match value.split_once('-') {
+            Some((core, pre)) => (core, Some(pre.to_owned())),
+            None => (value, None),
+        };
+        let numbers = core
+            .split('.')
+            .map(|part| part.parse().unwrap_or(0))
+            .collect();
+        (numbers, pre)
+    }
+    let (ours_core, ours_pre) = split(ours);
+    let (theirs_core, theirs_pre) = split(theirs);
+    let by_core = ours_core.cmp(&theirs_core);
+    if by_core != std::cmp::Ordering::Equal {
+        return by_core;
+    }
+    match (ours_pre.as_deref(), theirs_pre.as_deref()) {
+        (None, None) => std::cmp::Ordering::Equal,
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (Some(a), Some(b)) => {
+            // Numeric identifiers compare numerically; None ranks below any
+            // number (the semver numeric-below-alphanumeric rule); two
+            // alphanumeric identifiers compare lexically via Option<u64>.
+            let rank = |id: &str| id.parse::<u64>().ok();
+            let left = a.split('.').map(rank).collect::<Vec<_>>();
+            let right = b.split('.').map(rank).collect::<Vec<_>>();
+            for (x, y) in left.iter().zip(right.iter()) {
+                if x != y {
+                    return x.cmp(y);
+                }
+            }
+            left.len().cmp(&right.len())
+        }
     }
 }
 
@@ -1095,7 +1138,7 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
     let _operation = model_progress::Operation::begin_download()?;
     let lock = install_lock()?;
     let stage = staging_dir()?;
-    let outcome = (|| -> Result<PathBuf> {
+    let outcome = (|| -> Result<()> {
         let unpacked = stage.join("unpacked");
         extract_archive(archive, &unpacked)?;
         let triple = release_triple()?;
@@ -1114,20 +1157,19 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         publish_manifest(&ManagedManifest {
             version: version.to_owned(),
             sha256: binary_hash,
-        })?;
-        Ok(binary)
+    })?;
+    Ok(())
     })();
     let installed = match outcome {
-        Ok(binary) => Ok(binary),
+        Ok(()) => managed_binary_path(version),
         Err(error) => {
             let _ = fs::remove_dir_all(&stage);
-            Err(error)
+            return Err(error);
         }
     };
     drop(lock);
-    let binary = installed?;
     retain_one_previous_version(version);
-    Ok(binary)
+    Ok(installed)
 }
 
 // ---------------------------------------------------------------------------
