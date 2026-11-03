@@ -307,7 +307,7 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
             exited_failed = !output.status.success();
             break;
         }
-        let healthy = fs::metadata(fixture.root.path().join("rsrs.db"))
+        let healthy = std::fs::metadata(fixture.root.path().join("rsrs.db"))
             .map(|meta| meta.len() > 0)
             .unwrap_or(false)
             && !fixture.root.path().join(".snapshot-recovery.json").exists();
