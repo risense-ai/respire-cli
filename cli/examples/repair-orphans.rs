@@ -38,7 +38,11 @@ fn main() -> Result<()> {
     let mut reattached = 0usize;
     let mut promoted = 0usize;
     for s in &orphans {
-        let title = if s.local_title.is_empty() { &s.id[..8] } else { &s.local_title };
+        let title = if s.local_title.is_empty() {
+            &s.id[..8]
+        } else {
+            &s.local_title
+        };
         let entry = MemoryEngine::open(&keys, s)?;
         // Reject cycles: the target ancestor chain must not contain this entry.
         let chain = store.ancestor_chain(&s.id)?;
@@ -48,7 +52,13 @@ fn main() -> Result<()> {
         };
         match decide {
             ("reattach", full) => {
-                println!("  🔗 {} {}  \u{5047}\u{7236} {} \u{2192} \u{771f}\u{7236} {}", &s.id[..8], title, &s.local_parent_id[..8], &full[..8]);
+                println!(
+                    "  🔗 {} {}  \u{5047}\u{7236} {} \u{2192} \u{771f}\u{7236} {}",
+                    &s.id[..8],
+                    title,
+                    &s.local_parent_id[..8],
+                    &full[..8]
+                );
                 if !dry {
                     let mut e = entry;
                     e.parent_id = full;

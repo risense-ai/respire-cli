@@ -36,7 +36,9 @@ pub fn store_related<E: Embedder>(
                 .context("missing superseded memory")?;
             let mut previous = MemoryEngine::open(keys, row)?;
             if previous.importance != "important" {
-                return Err(crate::input_error::InputError("cannot supersede diary memory".into()).into());
+                return Err(
+                    crate::input_error::InputError("cannot supersede diary memory".into()).into(),
+                );
             }
             ensure!(
                 !all.iter()
@@ -79,7 +81,9 @@ pub fn store_related<E: Embedder>(
             }
             let (_, other) = edits.get_mut(&full).context("missing association edit")?;
             if other.importance != "important" {
-                return Err(crate::input_error::InputError("cannot link diary memory".into()).into());
+                return Err(
+                    crate::input_error::InputError("cannot link diary memory".into()).into(),
+                );
             }
             if !other.see_also.contains(&entry.id) {
                 other.see_also.push(entry.id.clone());
@@ -88,7 +92,9 @@ pub fn store_related<E: Embedder>(
         entry.see_also = linked.into_iter().collect();
         crate::metadata_gate::ensure_write(store, entry)?;
         crate::metadata_gate::ensure_sources(keys, store, entry)?;
-        for (_, other) in edits.values() { crate::metadata_gate::ensure_write(store, other)?; }
+        for (_, other) in edits.values() {
+            crate::metadata_gate::ensure_write(store, other)?;
+        }
         let sealed = MemoryEngine::seal(keys, embedder, entry, &entry.user)?;
         ensure!(store.put(&sealed)?, "association entry was not saved");
         for (id, (row, other)) in edits {

@@ -25,17 +25,14 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     let root = data_dir
         .canonicalize()
         .with_context(|| format!("invalid --data-dir {}", data_dir.display()))?;
-    let config = read_registration(&root)?.context(
-        "no startup registration for this installation; enable runtime autostart first",
-    )?;
+    let config = read_registration(&root)?
+        .context("no startup registration for this installation; enable runtime autostart first")?;
     lifecycle::owned(&config)?;
     // Align this process with the registration environment before resolving
     // the runtime, exactly like the managed foreground run does.
     for (key, _) in std::env::vars_os() {
         if key.to_str().is_some_and(|key| {
-            key.starts_with("RSRS_")
-                || key.starts_with("ONEMEMORY_")
-                || key.starts_with("RESPIRE_")
+            key.starts_with("RSRS_") || key.starts_with("ONEMEMORY_") || key.starts_with("RESPIRE_")
         }) {
             std::env::remove_var(key);
         }
@@ -101,7 +98,13 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
                 // the supervised ownership contract intact.
                 let mut command = std::process::Command::new(&config.executable);
                 command
-                    .args(["runtime", "run", "--managed", &config.id, "--installation-root"])
+                    .args([
+                        "runtime",
+                        "run",
+                        "--managed",
+                        &config.id,
+                        "--installation-root",
+                    ])
                     .arg(&root);
                 #[cfg(windows)]
                 command.arg("--supervised-child");
@@ -155,7 +158,9 @@ fn wait_child(
         }
         if stopped.load(Ordering::Acquire) {
             let _ = child.kill();
-            child.wait().context("cannot reap the stopped runtime child")?;
+            child
+                .wait()
+                .context("cannot reap the stopped runtime child")?;
             return Ok(None);
         }
         std::thread::sleep(Duration::from_millis(250));

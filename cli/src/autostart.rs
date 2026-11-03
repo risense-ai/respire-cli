@@ -17,8 +17,8 @@ pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
     check_direct_access, check_managed_request, coordinate_materialization, credential_state,
     ensure_managed_locked, execute, managed_enabled, managed_id, may_reuse_runtime,
-    note_credential_access, record_exit, restart_maintenance_locked, restart_stage, stop_managed_locked,
-    verify_managed_boot, with_explicit_recovery,
+    note_credential_access, record_exit, restart_maintenance_locked, restart_stage,
+    stop_managed_locked, verify_managed_boot, with_explicit_recovery,
 };
 
 pub use respire_commands::autostart::{AutostartCommand, RuntimeCommand};
@@ -324,7 +324,9 @@ mod tests {
         let mut config = fixture(Platform::current()?);
         config.installation = root.clone();
         config.id = identity(&root, &config.owner);
-        config.environment.insert("RSRS_RPC_PORT".into(), "45678".into());
+        config
+            .environment
+            .insert("RSRS_RPC_PORT".into(), "45678".into());
         let original = serde_json::to_value(&config)?;
         let bytes = serde_json::to_vec(&original)?;
         fs::write(&path, &bytes)?;
@@ -335,7 +337,14 @@ mod tests {
         let mut cases = Vec::new();
         for (field, value) in [
             ("schema", json!(2)),
-            ("platform", json!(if config.platform == Platform::Linux { "windows" } else { "linux" })),
+            (
+                "platform",
+                json!(if config.platform == Platform::Linux {
+                    "windows"
+                } else {
+                    "linux"
+                }),
+            ),
             ("installation", json!(root.join("other"))),
             ("id", json!("foreign-installation")),
             ("unexpected", json!(true)),
@@ -349,7 +358,10 @@ mod tests {
             changed["environment"]["RSRS_RPC_PORT"] = port;
             cases.push(changed);
         }
-        for (key, value) in [("RSRS_SUPER", "synthetic-only"), ("RSRS_ENGINE", "cpu\nforeign")] {
+        for (key, value) in [
+            ("RSRS_SUPER", "synthetic-only"),
+            ("RSRS_ENGINE", "cpu\nforeign"),
+        ] {
             let mut changed = original.clone();
             changed["environment"][key] = json!(value);
             cases.push(changed);
@@ -357,8 +369,14 @@ mod tests {
         for changed in cases {
             let evidence = serde_json::to_vec(&changed)?;
             fs::write(&path, &evidence)?;
-            anyhow::ensure!(read_registration(&root).is_err(), "tampered registration accepted");
-            anyhow::ensure!(fs::read(&path)? == evidence, "read rewrote rejected evidence");
+            anyhow::ensure!(
+                read_registration(&root).is_err(),
+                "tampered registration accepted"
+            );
+            anyhow::ensure!(
+                fs::read(&path)? == evidence,
+                "read rewrote rejected evidence"
+            );
         }
         for evidence in [b"invalid-json".to_vec(), vec![b' '; 65537]] {
             fs::write(&path, &evidence)?;
@@ -385,7 +403,9 @@ mod tests {
         // RegisterTask receives a Unicode BSTR, not the UTF-8 file bytes.
         // Keep its declaration encoding-neutral after ReadAllText.
         let windows = render(&fixture(Platform::Windows))?;
-        anyhow::ensure!(windows.starts_with("<?xml version=\"1.0\"?>") && !windows.contains("encoding="));
+        anyhow::ensure!(
+            windows.starts_with("<?xml version=\"1.0\"?>") && !windows.contains("encoding=")
+        );
         let linux = render(&fixture(Platform::Linux))?;
         anyhow::ensure!(
             linux.contains("Type=simple")

@@ -40,7 +40,10 @@ fn scan(opts: &ScanOptions) -> Vec<Session> {
     for root in &roots {
         mains.extend(scan_util::files_in(&root.join("transcripts"), "*.jsonl"));
         mains.extend(scan_util::files_below(&root.join("projects"), 2, "*.jsonl"));
-        mains.extend(scan_util::files_in(&root.join("pre-compact-session-histories"), "*.jsonl"));
+        mains.extend(scan_util::files_in(
+            &root.join("pre-compact-session-histories"),
+            "*.jsonl",
+        ));
         subagents.extend(
             scan_util::files_below(&root.join("projects"), 8, "agent-*.jsonl")
                 .into_iter()
@@ -65,10 +68,16 @@ fn subagent_session(path: &Path) -> Option<Session> {
     }
     let parent_sid = components[index - 1].to_owned();
 
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default();
     let meta_path = path.with_file_name(format!("{stem}.meta.json"));
     let meta = scan_util::read_json(&meta_path).unwrap_or(Value::Null);
-    let first = scan_util::iter_jsonl(path).into_iter().next().unwrap_or(Value::Null);
+    let first = scan_util::iter_jsonl(path)
+        .into_iter()
+        .next()
+        .unwrap_or(Value::Null);
     let description = meta
         .get("description")
         .and_then(Value::as_str)
@@ -96,7 +105,10 @@ fn subagent_session(path: &Path) -> Option<Session> {
         platform: "claude".to_owned(),
         id: stem.strip_prefix("agent-").unwrap_or(stem).to_owned(),
         path: path.display().to_string(),
-        cwd: first.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned),
+        cwd: first
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         created_at: created,
         updated_at: updated,
         provider: None,
@@ -105,6 +117,9 @@ fn subagent_session(path: &Path) -> Option<Session> {
         last_user_message: prompt,
         usage: serde_json::Map::new(),
         parent_id: Some(parent_sid),
-        agent: meta.get("agentType").and_then(Value::as_str).map(ToOwned::to_owned),
+        agent: meta
+            .get("agentType")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
     })
 }

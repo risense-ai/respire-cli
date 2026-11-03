@@ -2,7 +2,6 @@
 
 use anyhow::Result;
 
-
 pub fn now_stamp() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
@@ -39,7 +38,9 @@ pub fn dev_label(device: &str, computer: &str) -> String {
 /// (written when resort --go resets, i.e. "last tidy time"). Both together take the later one.
 /// Missing resort_at (never tidied) -> 1970 epoch, i.e. no filter.
 pub fn list_since_bound(since: Option<&str>, since_resort: bool) -> Result<String> {
-    let explicit = since.map(respire_app::service::normalize_since).transpose()?;
+    let explicit = since
+        .map(respire_app::service::normalize_since)
+        .transpose()?;
     let from_resort = if since_resort {
         respire_app::service::resort_at()
     } else {

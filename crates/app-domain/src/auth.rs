@@ -39,20 +39,31 @@ fn device_name() -> String {
 /// Manage independent network sessions; never send decryption keys to the server.
 pub fn sessions(revoke: Option<&str>) -> Result<serde_json::Value> {
     let mut data = read_session_json()?;
-    let addr = data["addr"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("cloud address is not configured"))?;
-    let token = data["token"].as_str().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("no cloud token; log in first"))?;
+    let addr = data["addr"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("cloud address is not configured"))?;
+    let token = data["token"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("no cloud token; log in first"))?;
     let base = addr.trim_end_matches('/');
     let response = if let Some(id) = revoke {
-        let id = uuid::Uuid::parse_str(id).map_err(|_| anyhow!("session id must be a full UUID"))?;
+        let id =
+            uuid::Uuid::parse_str(id).map_err(|_| anyhow!("session id must be a full UUID"))?;
         ureq::post(&format!("{base}/api/self/sessions/{id}/revoke"))
-            .set("Authorization", &format!("Bearer {token}")).send_json(serde_json::json!({}))?
+            .set("Authorization", &format!("Bearer {token}"))
+            .send_json(serde_json::json!({}))?
     } else {
         ureq::get(&format!("{base}/api/self/sessions"))
-            .set("Authorization", &format!("Bearer {token}")).call()?
+            .set("Authorization", &format!("Bearer {token}"))
+            .call()?
     };
     let reply: serde_json::Value = response.into_json()?;
-    if revoke.is_some() && reply["revoked"].as_bool() == Some(true)
-        && reply["session_id"] == data["session_id"] {
+    if revoke.is_some()
+        && reply["revoked"].as_bool() == Some(true)
+        && reply["session_id"] == data["session_id"]
+    {
         if let Some(fields) = data.as_object_mut() {
             fields.remove("token");
             fields.remove("session_id");
@@ -74,8 +85,13 @@ pub fn logout(full: bool) -> Result<()> {
         crate::keystore::delete_super(&user);
         crate::keystore::delete_login_pass(&user);
         match std::fs::remove_file(&path) {
-            Ok(_) => println!("forgot local identity: {} deleted (reconnect with register or the five-piece kit)", path.display()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => println!("no session ({} does not exist)", path.display()),
+            Ok(_) => println!(
+                "forgot local identity: {} deleted (reconnect with register or the five-piece kit)",
+                path.display()
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                println!("no session ({} does not exist)", path.display())
+            }
             Err(e) => return Err(anyhow::anyhow!("clear failed: {e}")),
         }
         return Ok(());
@@ -106,15 +122,27 @@ pub fn load_local_session_with_owner() -> Result<(SessionKeys, Option<String>)> 
 }
 
 /// Keep key material and owner inseparable even if the profile changes after reading.
-fn unlock_local_session_snapshot(data: &serde_json::Value) -> Result<(SessionKeys, Option<String>)> {
+fn unlock_local_session_snapshot(
+    data: &serde_json::Value,
+) -> Result<(SessionKeys, Option<String>)> {
     let user = data["user"].as_str().unwrap_or("").to_owned();
     let explicit_pass = if data["vault_version"] == 1 {
-        crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
-    } else { None };
-    let pass = explicit_pass.or_else(|| data["pass"].as_str().map(ToOwned::to_owned))
-        .or_else(|| crate::keystore::load_login_pass(&user)).unwrap_or_default();
+        crate::env::var("RSRS_PASS")
+            .ok()
+            .filter(|value| !value.is_empty())
+    } else {
+        None
+    };
+    let pass = explicit_pass
+        .or_else(|| data["pass"].as_str().map(ToOwned::to_owned))
+        .or_else(|| crate::keystore::load_login_pass(&user))
+        .unwrap_or_default();
     let keys = unlock_session_keys(data, &pass, None, &user)?;
-    let owner = if user.trim().is_empty() { None } else { Some(user) };
+    let owner = if user.trim().is_empty() {
+        None
+    } else {
+        Some(user)
+    };
     Ok((keys, owner))
 }
 
@@ -210,7 +238,9 @@ fn fetch_count(addr: &str, token: &str) -> Result<i64> {
         .set("Authorization", &format!("Bearer {token}"))
         .call()
     {
-        Ok(resp) => Ok(resp.into_json::<serde_json::Value>()?["count"].as_i64().unwrap_or(0)),
+        Ok(resp) => Ok(resp.into_json::<serde_json::Value>()?["count"]
+            .as_i64()
+            .unwrap_or(0)),
         Err(ureq::Error::Status(404, _)) => Ok(0),
         Err(e) => Err(anyhow!("failed to fetch memory count: {e}")),
     }
@@ -248,9 +278,15 @@ pub fn unlock_session_keys(
     super_arg: Option<&str>,
     user: &str,
 ) -> Result<crate::memory::SessionKeys> {
-    let wrapped = data["wrapped_urk"].as_str().ok_or_else(|| anyhow!("session missing wrapped_urk"))?;
-    let nonce = data["urk_nonce"].as_str().ok_or_else(|| anyhow!("session missing urk_nonce"))?;
-    let salt = data["kdf_salt"].as_str().ok_or_else(|| anyhow!("session missing kdf_salt"))?;
+    let wrapped = data["wrapped_urk"]
+        .as_str()
+        .ok_or_else(|| anyhow!("session missing wrapped_urk"))?;
+    let nonce = data["urk_nonce"]
+        .as_str()
+        .ok_or_else(|| anyhow!("session missing urk_nonce"))?;
+    let salt = data["kdf_salt"]
+        .as_str()
+        .ok_or_else(|| anyhow!("session missing kdf_salt"))?;
     let keys = match data["vault_version"].as_i64() {
         // v4: super password as the single factor — source: --super > OS keyring/env > leftover session field
         Some(v) if v >= 4 => {
@@ -271,7 +307,9 @@ pub fn unlock_session_keys(
         Some(3) => {
             let stored_super = if super_arg.is_none() && data["super"].as_str().is_none() {
                 crate::keystore::load_super(user)
-            } else { None };
+            } else {
+                None
+            };
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
@@ -286,7 +324,9 @@ pub fn unlock_session_keys(
         Some(2) => {
             let stored_super = if super_arg.is_none() && data["super"].as_str().is_none() {
                 crate::keystore::load_super(user)
-            } else { None };
+            } else {
+                None
+            };
             let super_pass = super_arg
                 .or_else(|| data["super"].as_str())
                 .or(stored_super.as_deref())
@@ -296,7 +336,9 @@ pub fn unlock_session_keys(
         // v1: original login password + Account Secret, retained during normal login.
         _ => crate::memory::SessionKeys::unlock(
             login_pass,
-            data["secret"].as_str().ok_or_else(|| anyhow!("session missing secret"))?,
+            data["secret"]
+                .as_str()
+                .ok_or_else(|| anyhow!("session missing secret"))?,
             salt,
             wrapped,
             nonce,
@@ -327,9 +369,7 @@ fn session_for_other_user(user: &str) -> Result<serde_json::Value> {
         std::fs::create_dir_all(&dir)?;
         crate::service::set_data_dir(&dir.to_string_lossy())?;
     }
-    eprintln!(
-        "switching profile for `{user}` (account `{cur_user}` stays in its own data dir)"
-    );
+    eprintln!("switching profile for `{user}` (account `{cur_user}` stays in its own data dir)");
     Ok(read_session_json().unwrap_or_else(|_| serde_json::json!({})))
 }
 
@@ -361,19 +401,40 @@ fn existing_super(data: &serde_json::Value, passed: &str, user: &str) -> Result<
 
 /// Register: login password is auth only; super password (v4 single factor) wraps URK and uploads the vault.
 /// A brand-new profile generates the super password. An existing keygen vault uses `--super`, then the keyring.
-pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Result<Option<String>> {
+pub fn register(
+    addr: &str,
+    user: &str,
+    pass: &str,
+    super_pass_arg: &str,
+) -> Result<Option<String>> {
     let mut data = session_for_other_user(user)?;
     let issued: Option<String>;
-    if data["wrapped_urk"].as_str().filter(|s| !s.is_empty()).is_some() {
+    if data["wrapped_urk"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
         // keygen (or this same profile) already wrapped the URK. Bind it to this username.
         data["user"] = serde_json::Value::String(user.to_owned());
         let super_pass = existing_super(&data, super_pass_arg, user)?;
-        unlock_session_keys(&data, data["pass"].as_str().unwrap_or(pass), Some(&super_pass), user)?;
+        unlock_session_keys(
+            &data,
+            data["pass"].as_str().unwrap_or(pass),
+            Some(&super_pass),
+            user,
+        )?;
         crate::keystore::save_super(user, &super_pass)?;
         issued = Some(super_pass);
     } else {
         let (super_pass, _urk, kdf_salt, wrapped_urk, urk_nonce) = new_vault_v4()?;
-        apply_vault_v4(&mut data, user, &super_pass, kdf_salt, wrapped_urk, urk_nonce)?;
+        apply_vault_v4(
+            &mut data,
+            user,
+            &super_pass,
+            kdf_salt,
+            wrapped_urk,
+            urk_nonce,
+        )?;
         issued = Some(super_pass);
     }
     let auth_salt = server_authentication_salt(addr, user)?;
@@ -394,10 +455,20 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
         }
         Err(e) => return Err(anyhow::anyhow!("register request failed: {e}")),
     };
-    let reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
+    let reply: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
     let token = reply["token"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("register failed: {}", reply.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "register failed: {}",
+                reply
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+            )
+        })?
         .to_owned();
     if let Err(e) = crate::keystore::save_login_pass(user, pass) {
         eprintln!("warning: login password not stored in keyring: {e}");
@@ -407,7 +478,10 @@ pub fn register(addr: &str, user: &str, pass: &str, super_pass_arg: &str) -> Res
     data["user"] = serde_json::Value::String(user.to_owned());
     data["addr"] = serde_json::Value::String(addr.trim().trim_end_matches('/').to_owned());
     data["token"] = serde_json::Value::String(token.clone());
-    data["session_id"] = reply.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
+    data["session_id"] = reply
+        .get("session_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     data.as_object_mut().map(|o| o.remove("pass"));
     write_session_json(&data)?;
     put_vault(addr, &token, &data)?;
@@ -456,7 +530,10 @@ pub fn login(
             data["secret_key"] = serde_json::Value::String(s.to_owned());
         }
     }
-    let has_wrap = data["wrapped_urk"].as_str().filter(|s| !s.is_empty()).is_some();
+    let has_wrap = data["wrapped_urk"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .is_some();
 
     // 1. Auth first: send the login password to the server. On failure local material is untouched —
     // the old impl unlocked locally first and died on "local key unlock failed" when material was
@@ -467,7 +544,10 @@ pub fn login(
     if let Err(e) = crate::keystore::save_login_pass(user, pass) {
         eprintln!("warning: login password not stored in keyring: {e}");
     }
-    let token = data["token"].as_str().ok_or_else(|| anyhow!("login did not return a token"))?.to_owned();
+    let token = data["token"]
+        .as_str()
+        .ok_or_else(|| anyhow!("login did not return a token"))?
+        .to_owned();
 
     // 2. Fetch cloud vault and reconcile with local material
     let vault = fetch_vault(addr, &token)?;
@@ -494,7 +574,9 @@ pub fn login(
             // Overwrite guard: local memories encrypted with the current local key become undecryptable if we switch keys.
             if has_wrap && !reset_vault {
                 use crate::transport::MemoryTransport as _;
-                let alive = crate::service::open_store().and_then(|s| s.count()).unwrap_or(0);
+                let alive = crate::service::open_store()
+                    .and_then(|s| s.count())
+                    .unwrap_or(0);
                 if alive > 0 {
                     anyhow::bail!(
                         "local library already has {alive} memories encrypted with the current local key, which does not match cloud account \"{user}\". \
@@ -505,7 +587,15 @@ pub fn login(
             }
             // Super password source: --super > interactive (TTY) > local keyring
             let super_pass = obtain_super(user, super_pass)?;
-            return unlock_cloud_vault(&mut data, addr, user, &token, &vault, &super_pass, secret_key);
+            return unlock_cloud_vault(
+                &mut data,
+                addr,
+                user,
+                &token,
+                &vault,
+                &super_pass,
+                secret_key,
+            );
         }
         None => {
             // Overwrite guard: server has data but no vault — those rows were encrypted with another key.
@@ -520,7 +610,14 @@ pub fn login(
                 );
             }
             let (super_pass, _urk, kdf_salt, wrapped_urk, urk_nonce) = new_vault_v4()?;
-            apply_vault_v4(&mut data, user, &super_pass, kdf_salt, wrapped_urk, urk_nonce)?;
+            apply_vault_v4(
+                &mut data,
+                user,
+                &super_pass,
+                kdf_salt,
+                wrapped_urk,
+                urk_nonce,
+            )?;
             put_vault(addr, &token, &data)?;
             write_session_json(&data)?;
             return Ok(Some(super_pass));
@@ -564,9 +661,15 @@ fn unlock_cloud_vault(
     super_pass: &str,
     secret_key: Option<&str>,
 ) -> Result<Option<String>> {
-    let salt = vault["kdf_salt"].as_str().ok_or_else(|| anyhow!("vault missing kdf_salt"))?;
-    let wrapped = vault["wrapped_urk"].as_str().ok_or_else(|| anyhow!("vault missing wrapped_urk"))?;
-    let nonce = vault["urk_nonce"].as_str().ok_or_else(|| anyhow!("vault missing urk_nonce"))?;
+    let salt = vault["kdf_salt"]
+        .as_str()
+        .ok_or_else(|| anyhow!("vault missing kdf_salt"))?;
+    let wrapped = vault["wrapped_urk"]
+        .as_str()
+        .ok_or_else(|| anyhow!("vault missing wrapped_urk"))?;
+    let nonce = vault["urk_nonce"]
+        .as_str()
+        .ok_or_else(|| anyhow!("vault missing urk_nonce"))?;
     let version = vault["version"].as_i64().unwrap_or(2);
     if version >= 4 {
         // v4: super password as the single factor. Keyring may hold an old code — on unlock failure in a TTY, ask again.
@@ -628,16 +731,25 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
     let mut data = read_session_json()?;
     let user = data["user"].as_str().unwrap_or("").to_owned();
     let token = data["token"].as_str().unwrap_or("").to_owned();
-    anyhow::ensure!(!token.is_empty(), "not logged in \u{2014} run rsrs login before resetting the super password");
+    anyhow::ensure!(
+        !token.is_empty(),
+        "not logged in \u{2014} run rsrs login before resetting the super password"
+    );
     let addr = match addr.map(|s| s.trim()).filter(|s| !s.is_empty()) {
         Some(a) => a.to_owned(),
-        None => data["addr"].as_str().unwrap_or(crate::service::DEFAULT_SERVER_ADDR).to_owned(),
+        None => data["addr"]
+            .as_str()
+            .unwrap_or(crate::service::DEFAULT_SERVER_ADDR)
+            .to_owned(),
     };
     let keys = unlock_session_keys(&data, data["pass"].as_str().unwrap_or(""), super_arg, &user)
         .context("unlock failed \u{2014} current super password required (or one stored in the local keyring)")?;
     let new_super = crypto::generate_secret_key();
-    let (kdf_salt, wrapped_urk, urk_nonce) = if data["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
-        || data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX) {
+    let (kdf_salt, wrapped_urk, urk_nonce) = if data["wrapped_urk"]
+        .as_str()
+        .is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
+        || data["crypto_namespace"].as_str() == Some(crypto::RSRS_PREFIX)
+    {
         wrap_with_rsrs(&new_super, &keys.urk)?
     } else {
         wrap_with_v4(&new_super, &keys.urk)?
@@ -656,32 +768,56 @@ pub fn super_reset(addr: Option<&str>, super_arg: Option<&str>) -> Result<String
 
 /// Mutate the in-memory candidate session only; do not overwrite saved material on network or unlock failure.
 pub fn password_authorization(addr: &str, user: &str, pass: &str) -> Result<serde_json::Value> {
-    password_authorization_with_totp(addr,user,pass,None)
+    password_authorization_with_totp(addr, user, pass, None)
 }
 
-pub fn password_authorization_with_totp(addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<serde_json::Value> {
+pub fn password_authorization_with_totp(
+    addr: &str,
+    user: &str,
+    pass: &str,
+    totp: Option<&str>,
+) -> Result<serde_json::Value> {
     let mut authorization = serde_json::json!({});
-    authenticate_session_with_totp(&mut authorization, addr, user, pass,totp)?;
+    authenticate_session_with_totp(&mut authorization, addr, user, pass, totp)?;
     Ok(authorization)
 }
 
 fn server_authentication_salt(addr: &str, user: &str) -> Result<String> {
-    let salt_response = ureq::AgentBuilder::new().redirects(0).timeout(std::time::Duration::from_secs(30)).build()
-        .get(&format!("{}/auth/salt", addr.trim().trim_end_matches('/'))).query("user", user).call();
+    let salt_response = ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .get(&format!("{}/auth/salt", addr.trim().trim_end_matches('/')))
+        .query("user", user)
+        .call();
     let salt = match salt_response {
-        Ok(response) => response.into_json::<serde_json::Value>()?["salt"].as_str()
-            .filter(|salt| !salt.is_empty()).context("server did not return an authentication salt")?.to_owned(),
+        Ok(response) => response.into_json::<serde_json::Value>()?["salt"]
+            .as_str()
+            .filter(|salt| !salt.is_empty())
+            .context("server did not return an authentication salt")?
+            .to_owned(),
         Err(ureq::Error::Status(404, _)) => crypto::derive_legacy_auth_salt(user)?,
         Err(error) => return Err(anyhow!("authentication salt request failed: {error}")),
     };
     Ok(salt)
 }
 
-fn authenticate_session(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str) -> Result<()> {
-    authenticate_session_with_totp(data,addr,user,pass,None)
+fn authenticate_session(
+    data: &mut serde_json::Value,
+    addr: &str,
+    user: &str,
+    pass: &str,
+) -> Result<()> {
+    authenticate_session_with_totp(data, addr, user, pass, None)
 }
 
-fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user: &str, pass: &str, totp:Option<&str>) -> Result<()> {
+fn authenticate_session_with_totp(
+    data: &mut serde_json::Value,
+    addr: &str,
+    user: &str,
+    pass: &str,
+    totp: Option<&str>,
+) -> Result<()> {
     let auth_salt = server_authentication_salt(addr, user)?;
     let pass_hash = crypto::derive_pass_hash(pass, &auth_salt)?;
 
@@ -692,13 +828,22 @@ fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user
             "device_name": device_name(),
         }))
         .map_err(|e| anyhow::anyhow!("login request failed: {e}"))?;
-    let mut reply: serde_json::Value = resp.into_json().map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
+    let mut reply: serde_json::Value = resp
+        .into_json()
+        .map_err(|e| anyhow::anyhow!("failed to parse response: {e}"))?;
     if reply["totp_required"].as_bool() == Some(true) {
         if totp.is_none() && !crate::prompt::interactive() {
-            anyhow::bail!("TOTP verification requires an interactive terminal or browser authorization");
+            anyhow::bail!(
+                "TOTP verification requires an interactive terminal or browser authorization"
+            );
         }
-        let ticket = reply["ticket"].as_str().ok_or_else(|| anyhow!("TOTP challenge did not return a ticket"))?;
-        let code = match totp {Some(code)=>code.to_owned(),None=>crate::prompt::ask_secret("TOTP code (6 digits): ")?};
+        let ticket = reply["ticket"]
+            .as_str()
+            .ok_or_else(|| anyhow!("TOTP challenge did not return a ticket"))?;
+        let code = match totp {
+            Some(code) => code.to_owned(),
+            None => crate::prompt::ask_secret("TOTP code (6 digits): ")?,
+        };
         let code = code.trim();
         if code.len() != 6 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
             anyhow::bail!("TOTP code must contain 6 digits");
@@ -706,18 +851,31 @@ fn authenticate_session_with_totp(data: &mut serde_json::Value, addr: &str, user
         let response = ureq::post(&format!("{}/login/totp", addr.trim().trim_end_matches('/')))
             .send_json(serde_json::json!({"ticket":ticket,"code":code,"device_name":device_name()}))
             .map_err(|error| anyhow!("TOTP verification failed: {error}"))?;
-        reply = response.into_json().map_err(|error| anyhow!("failed to parse TOTP response: {error}"))?;
+        reply = response
+            .into_json()
+            .map_err(|error| anyhow!("failed to parse TOTP response: {error}"))?;
     }
     let token = reply["token"]
         .as_str()
-        .ok_or_else(|| anyhow::anyhow!("login failed: {}", reply.get("error").and_then(|e| e.as_str()).unwrap_or("unknown")))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "login failed: {}",
+                reply
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+            )
+        })?
         .to_owned();
 
     // Fill addr/token/user (keep key material)
     data["user"] = serde_json::Value::String(user.to_owned());
     data["addr"] = serde_json::Value::String(addr.trim().trim_end_matches('/').to_owned());
     data["token"] = serde_json::Value::String(token);
-    data["session_id"] = reply.get("session_id").cloned().unwrap_or(serde_json::Value::Null);
+    data["session_id"] = reply
+        .get("session_id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     data["auth_salt"] = serde_json::Value::String(auth_salt);
     data["pass"] = serde_json::Value::String(pass.to_owned());
     Ok(())
@@ -763,9 +921,14 @@ pub fn fivekeys_login(
                 data
             }
             Err(v4_err) => {
-                crate::memory::SessionKeys::unlock_super(super_pass, kdf_salt, wrapped_urk, urk_nonce)
-                    .map_err(|_| v4_err)
-                    .context("super password cannot unwrap the wrap")?;
+                crate::memory::SessionKeys::unlock_super(
+                    super_pass,
+                    kdf_salt,
+                    wrapped_urk,
+                    urk_nonce,
+                )
+                .map_err(|_| v4_err)
+                .context("super password cannot unwrap the wrap")?;
                 serde_json::json!({
                     "pass": pass,
                     "super": super_pass,
@@ -812,8 +975,14 @@ mod tests {
 
     #[test]
     fn auth_salt_deterministic() -> Result<()> {
-        assert_eq!(crypto::derive_auth_salt("Alice")?, crypto::derive_auth_salt("alice")?);
-        assert_ne!(crypto::derive_auth_salt("Alice")?, crypto::derive_auth_salt("Bob")?);
+        assert_eq!(
+            crypto::derive_auth_salt("Alice")?,
+            crypto::derive_auth_salt("alice")?
+        );
+        assert_ne!(
+            crypto::derive_auth_salt("Alice")?,
+            crypto::derive_auth_salt("Bob")?
+        );
         Ok(())
     }
 
@@ -829,7 +998,13 @@ mod tests {
             let (n, w) = crypto::wrap_key(&urk, &kek)?;
             (sk, kdf_salt, w, n)
         };
-        crate::memory::SessionKeys::unlock_vault("master-pass", &secret, &salt3, &wrapped3, &nonce3)?;
+        crate::memory::SessionKeys::unlock_vault(
+            "master-pass",
+            &secret,
+            &salt3,
+            &wrapped3,
+            &nonce3,
+        )?;
         assert!(crate::memory::SessionKeys::unlock_vault(
             "wrong-pass",
             &secret,
@@ -838,10 +1013,22 @@ mod tests {
             &nonce3
         )
         .is_err());
-        assert!(crate::memory::SessionKeys::unlock_super("master-pass", &salt3, &wrapped3, &nonce3).is_err());
+        assert!(crate::memory::SessionKeys::unlock_super(
+            "master-pass",
+            &salt3,
+            &wrapped3,
+            &nonce3
+        )
+        .is_err());
         // v4 roundtrip: correct super password unlocks, wrong key does not
         crate::memory::SessionKeys::unlock_v4(&super_pass, &salt, &wrapped, &nonce)?;
-        assert!(crate::memory::SessionKeys::unlock_v4("A3-000000-000000-000000-000000-000000-000000", &salt, &wrapped, &nonce).is_err());
+        assert!(crate::memory::SessionKeys::unlock_v4(
+            "A3-000000-000000-000000-000000-000000-000000",
+            &salt,
+            &wrapped,
+            &nonce
+        )
+        .is_err());
         assert_ne!(super_pass, "master-pass");
         let _ = salt3;
         Ok(())
@@ -861,7 +1048,13 @@ mod tests {
             "secret_key": super_pass,
         });
         unlock_session_keys(&v4, "login-pass", None, "u")?;
-        assert!(unlock_session_keys(&v4, "login-pass", Some("A3-000000-000000-000000-000000-000000-000000"), "u").is_err());
+        assert!(unlock_session_keys(
+            &v4,
+            "login-pass",
+            Some("A3-000000-000000-000000-000000-000000-000000"),
+            "u"
+        )
+        .is_err());
 
         let (secret, salt, wrapped, nonce) = {
             let sk = crypto::generate_secret_key();
@@ -925,7 +1118,11 @@ mod tests {
         let (keys, owner) = load_local_session_with_owner()?;
         assert!(keys.urk == second_urk);
         assert_eq!(owner.as_deref(), Some("replacement-owner"));
-        for user in [serde_json::Value::Null, serde_json::json!(""), serde_json::json!(" ")] {
+        for user in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(" "),
+        ] {
             second["user"] = user;
             write_session_json(&second)?;
             let (keys, owner) = load_local_session_with_owner()?;
@@ -973,7 +1170,10 @@ mod tests {
             )?;
             let session = read_session_json()?;
             if session["vault_version"].as_i64() != Some(4) {
-                anyhow::bail!("v4 fivekeys wrote vault_version {}", session["vault_version"]);
+                anyhow::bail!(
+                    "v4 fivekeys wrote vault_version {}",
+                    session["vault_version"]
+                );
             }
             crate::memory::SessionKeys::unlock_v4(&super_pass, &salt, &wrapped, &nonce)?;
             if fivekeys_login(
@@ -1010,10 +1210,11 @@ mod tests {
             if old["vault_version"].as_i64() != Some(2) {
                 anyhow::bail!("old fivekeys wrote vault_version {}", old["vault_version"]);
             }
-            let root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-                dir.path().join("session.json"),
-            )?)?;
-            if root["user"].as_str() != Some("fivekeys-v4-test") || root["vault_version"].as_i64() != Some(4) {
+            let root: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.path().join("session.json"))?)?;
+            if root["user"].as_str() != Some("fivekeys-v4-test")
+                || root["vault_version"].as_i64() != Some(4)
+            {
                 anyhow::bail!("fivekeys for another user overwrote the open profile");
             }
             Ok(())
@@ -1042,27 +1243,25 @@ mod tests {
                 "wrapped_urk": wrapped,
                 "urk_nonce": nonce,
             }))?;
-            let err = register(
-                "http://127.0.0.1:1",
-                "otheruser",
-                "password12",
-                "",
-            )
-            .expect_err("register against a closed port must fail after switching profiles");
+            let err = register("http://127.0.0.1:1", "otheruser", "password12", "")
+                .expect_err("register against a closed port must fail after switching profiles");
             let msg = format!("{err:#}");
             if msg.contains("none in the local keyring") {
                 anyhow::bail!("register tried to unlock the open vault: {msg}");
             }
-            let root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-                dir.path().join("session.json"),
-            )?)?;
+            let root: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.path().join("session.json"))?)?;
             if root["user"] != "mainuser" || root["wrapped_urk"] != wrapped {
                 anyhow::bail!("open profile was rewritten");
             }
             let current = crate::service::data_dir();
             let expected = dir.path().join("accounts").join("otheruser");
             if current != expected {
-                anyhow::bail!("new account profile is {}, want {}", current.display(), expected.display());
+                anyhow::bail!(
+                    "new account profile is {}, want {}",
+                    current.display(),
+                    expected.display()
+                );
             }
             Ok(())
         })();
@@ -1089,8 +1288,13 @@ mod tests {
                 "wrapped_urk": wrapped,
                 "urk_nonce": nonce,
             }))?;
-            let opened = register("http://127.0.0.1:1", "keygenuser", "password12", &super_pass)
-                .expect_err("closed port");
+            let opened = register(
+                "http://127.0.0.1:1",
+                "keygenuser",
+                "password12",
+                &super_pass,
+            )
+            .expect_err("closed port");
             let opened_msg = format!("{opened:#}");
             if opened_msg.contains("none in the local keyring") {
                 anyhow::bail!("correct A3 was ignored: {opened_msg}");
@@ -1117,16 +1321,20 @@ mod tests {
             if !keyring_has_it && !omitted_msg.contains("none in the local keyring") {
                 anyhow::bail!("missing super and empty keyring should say so: {omitted_msg}");
             }
-            let root: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
-                dir.path().join("session.json"),
-            )?)?;
+            let root: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.path().join("session.json"))?)?;
             if root["user"].as_str().unwrap_or("").is_empty() == false {
                 anyhow::bail!("failed register wrote a user into the keygen profile");
             }
             if root["wrapped_urk"].as_str() != Some(wrapped.as_str()) {
                 anyhow::bail!(
                     "failed register rewrote the keygen wrap file={} expect={}",
-                    root["wrapped_urk"].as_str().unwrap_or("").chars().take(12).collect::<String>(),
+                    root["wrapped_urk"]
+                        .as_str()
+                        .unwrap_or("")
+                        .chars()
+                        .take(12)
+                        .collect::<String>(),
                     wrapped.chars().take(12).collect::<String>()
                 );
             }

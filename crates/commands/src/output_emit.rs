@@ -35,13 +35,16 @@ pub fn emit_result(result: ResultEnvelope) -> Result<()> {
 }
 
 pub fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
-    let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
+    let input = error
+        .downcast_ref::<respire_app::input_error::InputError>()
+        .is_some();
     let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
         Some(runtime_error::RuntimeError::OutcomeUnknown { request_id, .. }) => Some(request_id),
         _ => None,
     };
     let mut envelope = ResultEnvelope::new(
-        "cli", OutputStatus::Fail,
+        "cli",
+        OutputStatus::Fail,
         serde_json::json!({"reason": if unknown.is_some() { "request_outcome_unknown" } else if input { "invalid_input" } else { "runtime_error" }}),
         Vec::new(),
     );

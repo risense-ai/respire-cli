@@ -216,8 +216,13 @@ pub fn sync_tracked_boundary(
     let control = RuntimeSyncControl {
         generation: rpc::sync_generation(),
     };
-    let result = respire_app::sync::sync_controlled(session, local, remote, &control,
-        rpc::worker_active().then_some(boundary));
+    let result = respire_app::sync::sync_controlled(
+        session,
+        local,
+        remote,
+        &control,
+        rpc::worker_active().then_some(boundary),
+    );
     {
         let mut guard = SYNC_LIVE.lock().unwrap_or_else(|err| err.into_inner());
         match &result {

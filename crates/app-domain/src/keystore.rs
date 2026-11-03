@@ -143,7 +143,12 @@ pub fn import_credential(account: &str, slot: &str, value: &str) -> Result<&'sta
 }
 
 /// Record the selected backend before a credential can be created.
-pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut checkpoint: impl FnMut(&str) -> Result<()>) -> Result<&'static str> {
+pub fn import_credential_checkpoint(
+    account: &str,
+    slot: &str,
+    value: &str,
+    mut checkpoint: impl FnMut(&str) -> Result<()>,
+) -> Result<&'static str> {
     let label = format!("{slot}:{account}");
     if read_credentials(VAULT_SERVICE, &label)
         .iter()
@@ -188,10 +193,12 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
             }
             Ok(_) => {
                 if created {
-                    entry.delete_credential().context("remove new credential after readback mismatch")?;
+                    entry
+                        .delete_credential()
+                        .context("remove new credential after readback mismatch")?;
                 }
                 return Err(anyhow!("migration keyring readback mismatch"));
-            },
+            }
             Err(_) => {
                 if created {
                     match entry.delete_credential() {
@@ -200,7 +207,7 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
                     }
                 }
                 continue;
-            },
+            }
         }
     }
     Err(anyhow!(
@@ -210,7 +217,9 @@ pub fn import_credential_checkpoint(account: &str, slot: &str, value: &str, mut 
 
 /// Remove only the entry created by this login when its transaction rolls back.
 pub fn remove_imported(account: &str, slot: &str, backend_name: &str) -> Result<()> {
-    let backend = backends().iter().find(|backend| backend.name() == backend_name)
+    let backend = backends()
+        .iter()
+        .find(|backend| backend.name() == backend_name)
         .ok_or_else(|| anyhow!("credential backend is unavailable during login rollback"))?;
     let entry = credential_entry(VAULT_SERVICE, &format!("{slot}:{account}"), *backend)?;
     match entry.delete_credential() {
@@ -285,11 +294,14 @@ pub fn delete_login_pass(user: &str) {
 /// Headless login supplies its verified key through the environment; an old
 /// credential for the same user must not replace that explicitly selected key.
 pub fn load_super(user: &str) -> Option<String> {
-    crate::env::var("RSRS_SUPER").ok().filter(|s| !s.is_empty()).or_else(|| {
-        read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
-            .into_iter()
-            .next()
-    })
+    crate::env::var("RSRS_SUPER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            read_credentials(SERVICE, &format!("super:{}", credential_account(user)))
+                .into_iter()
+                .next()
+        })
 }
 
 /// Delete the super password from the keyring (logout --full / post-reset cleanup).

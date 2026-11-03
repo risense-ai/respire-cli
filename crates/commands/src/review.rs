@@ -112,11 +112,8 @@ impl ReviewArgs {
 }
 // CLI review shell (migrated): dispatch and emission for the shared inputs.
 
-
 use respire_app::review::{ReviewInput, ReviewService};
 use serde_json::{json, Value};
-
-
 
 fn invoke(args: &ReviewArgs) -> Result<Value> {
     args.validate()?;
@@ -189,7 +186,8 @@ fn error_code(error: &anyhow::Error) -> &str {
     if let Some(error) = error.downcast_ref::<respire_app::review_approval::ApprovalError>() {
         return error.code;
     }
-    if let Some(error) = error.downcast_ref::<respire_app::memory::model::metadata::MetadataError>() {
+    if let Some(error) = error.downcast_ref::<respire_app::memory::model::metadata::MetadataError>()
+    {
         return error.code;
     }
     let message = error.to_string();
@@ -276,9 +274,15 @@ mod review_coverage {
             "evidence_unavailable",
             "review_conflict",
         ] {
-            assert_eq!(error_code(&anyhow::anyhow!("fixture: {code}: detail")), code);
+            assert_eq!(
+                error_code(&anyhow::anyhow!("fixture: {code}: detail")),
+                code
+            );
         }
-        for diagnostic in ["Core SDK lacks review support", "missing memory_metadata_contract"] {
+        for diagnostic in [
+            "Core SDK lacks review support",
+            "missing memory_metadata_contract",
+        ] {
             assert_eq!(
                 error_code(&anyhow::anyhow!("{diagnostic}")),
                 "unsupported_core_capability"
@@ -291,7 +295,9 @@ mod review_coverage {
         // Isolated environment (the CLI's capture fixture is bin-local), with
         // the same save/restore contract around the unchanged assertions.
         let isolation = (|| -> anyhow::Result<()> {
-            let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+            let _lock = crate::TEST_ENV_LOCK
+                .lock()
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
             let dir = tempfile::tempdir()?;
             let previous = std::env::var_os("RSRS_DATA_DIR");
             std::env::set_var("RSRS_DATA_DIR", dir.path());

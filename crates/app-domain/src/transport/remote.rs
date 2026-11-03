@@ -161,7 +161,10 @@ impl RemoteTransport {
                 // could not see the server error text. Now read it and warn (return contract unchanged).
                 let body = resp.into_string().unwrap_or_default();
                 if !body.trim().is_empty() {
-                    eprintln!("warning: server returned {code}: {}", body.chars().take(300).collect::<String>());
+                    eprintln!(
+                        "warning: server returned {code}: {}",
+                        body.chars().take(300).collect::<String>()
+                    );
                 }
                 Ok(Err(code))
             }
@@ -180,36 +183,74 @@ impl RemoteTransport {
 }
 
 impl MemoryTransport for RemoteTransport {
-    fn resolve_conflicts(&self,request:&super::protocol::ResolveRequest)->Result<super::protocol::ResolveReply> {
-        let text=self.send(self.agent.post(&format!("{}/v2/conflicts/resolve",self.base())),Some(serde_json::to_value(request)?))?;
+    fn resolve_conflicts(
+        &self,
+        request: &super::protocol::ResolveRequest,
+    ) -> Result<super::protocol::ResolveReply> {
+        let text = self.send(
+            self.agent
+                .post(&format!("{}/v2/conflicts/resolve", self.base())),
+            Some(serde_json::to_value(request)?),
+        )?;
         Ok(serde_json::from_str(&text)?)
     }
 
-    fn fetch_resolutions(&self,epoch:&str,after:i64,until:Option<i64>)->Result<super::protocol::ResolutionPage> {
-        let mut req=self.agent.get(&format!("{}/v2/conflicts/resolutions",self.base()))
-            .query("epoch",epoch).query("after",&after.to_string());
-        if let Some(high)=until {req=req.query("until",&high.to_string());}
-        Ok(serde_json::from_str(&self.send(req,None)?)?)
+    fn fetch_resolutions(
+        &self,
+        epoch: &str,
+        after: i64,
+        until: Option<i64>,
+    ) -> Result<super::protocol::ResolutionPage> {
+        let mut req = self
+            .agent
+            .get(&format!("{}/v2/conflicts/resolutions", self.base()))
+            .query("epoch", epoch)
+            .query("after", &after.to_string());
+        if let Some(high) = until {
+            req = req.query("until", &high.to_string());
+        }
+        Ok(serde_json::from_str(&self.send(req, None)?)?)
     }
     fn capabilities(&self) -> Result<Option<super::protocol::Capabilities>> {
-        match self.send_with_status(self.agent.get(&format!("{}/sync/capabilities",self.base())),None)? {
-            Ok(body)=>Ok(Some(serde_json::from_str(&body)?)),
-            Err(404)=>Ok(None),
-            Err(code)=>bail!("sync capability query failed ({code})"),
+        match self.send_with_status(
+            self.agent
+                .get(&format!("{}/sync/capabilities", self.base())),
+            None,
+        )? {
+            Ok(body) => Ok(Some(serde_json::from_str(&body)?)),
+            Err(404) => Ok(None),
+            Err(code) => bail!("sync capability query failed ({code})"),
         }
     }
 
-    fn push_v2(&self, request:&super::protocol::PushRequest)->Result<super::protocol::PushReply> {
-        let body=self.send(self.agent.post(&format!("{}/v2/push/batch",self.base())),Some(serde_json::to_value(request)?))?;
+    fn push_v2(
+        &self,
+        request: &super::protocol::PushRequest,
+    ) -> Result<super::protocol::PushReply> {
+        let body = self.send(
+            self.agent.post(&format!("{}/v2/push/batch", self.base())),
+            Some(serde_json::to_value(request)?),
+        )?;
         Ok(serde_json::from_str(&body)?)
     }
 
-    fn pull_v2(&self, epoch:&str, after:i64, until:Option<i64>, snapshot:bool)->Result<super::protocol::Page> {
-        let endpoint=if snapshot {"snapshot"} else {"pull"};
-        let mut req=self.agent.get(&format!("{}/v2/{endpoint}",self.base()))
-            .query("epoch",epoch).query("after",&after.to_string());
-        if let Some(high)=until {req=req.query("until",&high.to_string());}
-        let body=self.send(req,None)?;
+    fn pull_v2(
+        &self,
+        epoch: &str,
+        after: i64,
+        until: Option<i64>,
+        snapshot: bool,
+    ) -> Result<super::protocol::Page> {
+        let endpoint = if snapshot { "snapshot" } else { "pull" };
+        let mut req = self
+            .agent
+            .get(&format!("{}/v2/{endpoint}", self.base()))
+            .query("epoch", epoch)
+            .query("after", &after.to_string());
+        if let Some(high) = until {
+            req = req.query("until", &high.to_string());
+        }
+        let body = self.send(req, None)?;
         Ok(serde_json::from_str(&body)?)
     }
 

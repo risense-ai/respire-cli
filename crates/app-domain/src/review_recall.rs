@@ -86,10 +86,15 @@ impl ReviewService<'_> {
         let (checks, errors) = self.checks(&source.view, None)?;
         let context = json!({"now":now,"request_scope":{"project":scope.project,"device":scope.device,"version":scope.version,"at":now},
             "authority_checks":checks,"unavailable_ids":source.view.unavailable});
-        let snapshots: Vec<_> = source.snapshots().iter().cloned().map(|mut snapshot| {
-            snapshot.features = None;
-            snapshot
-        }).collect();
+        let snapshots: Vec<_> = source
+            .snapshots()
+            .iter()
+            .cloned()
+            .map(|mut snapshot| {
+                snapshot.features = None;
+                snapshot
+            })
+            .collect();
         let evaluations = crate::core_sdk::execute(
             "memory_evidence_evaluate",
             json!({

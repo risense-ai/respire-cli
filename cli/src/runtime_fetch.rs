@@ -53,7 +53,11 @@ const RELEASE_BASE: &str = "https://github.com";
 const MIRROR_PREFIX: &str = "https://gh-proxy.com";
 
 /// Managed runtime binary name for the running platform.
-pub const RUNTIME_BINARY: &str = if cfg!(windows) { "rsrs-runtime.exe" } else { "rsrs-runtime" };
+pub const RUNTIME_BINARY: &str = if cfg!(windows) {
+    "rsrs-runtime.exe"
+} else {
+    "rsrs-runtime"
+};
 /// Binary name of the legacy combined CLI+runtime layout.
 pub const LEGACY_COMBINED_BINARY: &str = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
 /// Shared managed-install manifest, written next to `<installation_root>/runtime/`.
@@ -124,7 +128,10 @@ impl AcceptRange {
     /// separated; `>=min` is inclusive, `<max` is exclusive. Empty bounds are
     /// rejected so a typo never silently accepts every version.
     pub fn parse(raw: &str) -> Result<Self> {
-        let mut range = Self { min: None, max: None };
+        let mut range = Self {
+            min: None,
+            max: None,
+        };
         for part in raw.split(',') {
             let part = part.trim();
             if let Some(min) = part.strip_prefix(">=") {
@@ -139,7 +146,10 @@ impl AcceptRange {
                 bail!("unsupported accept bound {part:?}; use >=min or <max");
             }
         }
-        anyhow::ensure!(range.min.is_some() || range.max.is_some(), "empty accept range");
+        anyhow::ensure!(
+            range.min.is_some() || range.max.is_some(),
+            "empty accept range"
+        );
         if let (Some(min), Some(max)) = (range.min.as_deref(), range.max.as_deref()) {
             anyhow::ensure!(
                 crate::net_rpc::version_cmp(min, max) == std::cmp::Ordering::Less,
@@ -152,8 +162,13 @@ impl AcceptRange {
     /// True when `version` satisfies every configured bound.
     pub fn contains(&self, version: &str) -> bool {
         let ordering = |bound: &str| semver_cmp(version, bound);
-        self.min.as_deref().is_none_or(|min| ordering(min) != std::cmp::Ordering::Less)
-            && self.max.as_deref().is_none_or(|max| ordering(max) == std::cmp::Ordering::Less)
+        self.min
+            .as_deref()
+            .is_none_or(|min| ordering(min) != std::cmp::Ordering::Less)
+            && self
+                .max
+                .as_deref()
+                .is_none_or(|max| ordering(max) == std::cmp::Ordering::Less)
     }
 }
 
@@ -214,8 +229,7 @@ static PIN: OnceLock<std::result::Result<RuntimePin, String>> = OnceLock::new();
 /// Parse the embedded `runtime-pin.json`. Pin errors are cached so every
 /// caller reports the same configuration defect.
 pub fn pinned() -> Result<&'static RuntimePin> {
-    PIN
-        .get_or_init(|| parse_pin(PIN_JSON).map_err(|error| format!("{error:#}")))
+    PIN.get_or_init(|| parse_pin(PIN_JSON).map_err(|error| format!("{error:#}")))
         .as_ref()
         .map_err(|error| anyhow::anyhow!("invalid runtime-pin.json: {error}"))
 }
@@ -248,7 +262,9 @@ pub fn valid_version(version: &str) -> bool {
         !part.is_empty()
             && part.split('.').all(|piece| {
                 !piece.is_empty()
-                    && piece.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    && piece
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
             })
     }
     fn core_and_prerelease(version: &str) -> bool {
@@ -264,7 +280,9 @@ pub fn valid_version(version: &str) -> bool {
         prerelease.is_empty() || identifier(prerelease)
     }
     match version.split_once('+') {
-        Some((core_pre, build)) => !build.is_empty() && identifier(build) && core_and_prerelease(core_pre),
+        Some((core_pre, build)) => {
+            !build.is_empty() && identifier(build) && core_and_prerelease(core_pre)
+        }
         None => core_and_prerelease(version),
     }
 }
@@ -342,8 +360,8 @@ pub fn read_manifest() -> Result<Option<ManagedManifest>> {
         metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= 64 * 1024,
         "invalid runtime manifest"
     );
-    let manifest: ManagedManifest = serde_json::from_slice(&fs::read(&path)?)
-        .context("invalid runtime manifest")?;
+    let manifest: ManagedManifest =
+        serde_json::from_slice(&fs::read(&path)?).context("invalid runtime manifest")?;
     anyhow::ensure!(
         valid_version(&manifest.version) && valid_sha256(&manifest.sha256),
         "invalid runtime manifest"
@@ -359,7 +377,11 @@ fn valid_sha256(value: &str) -> bool {
 /// sha256 matches the manifest entry.
 fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
     let binary = managed_binary_path(&manifest.version);
-    anyhow::ensure!(binary.is_file(), "managed runtime {} is missing its binary", manifest.version);
+    anyhow::ensure!(
+        binary.is_file(),
+        "managed runtime {} is missing its binary",
+        manifest.version
+    );
     let actual = sha256_file(&binary)?;
     anyhow::ensure!(
         actual.eq_ignore_ascii_case(&manifest.sha256),
@@ -403,7 +425,10 @@ pub enum ResolvedRuntime {
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
     if let Ok(raw) = respire::env::var("RSRS_RUNTIME_BIN") {
         let explicit = PathBuf::from(raw.trim());
-        anyhow::ensure!(!explicit.as_os_str().is_empty(), "RSRS_RUNTIME_BIN is empty");
+        anyhow::ensure!(
+            !explicit.as_os_str().is_empty(),
+            "RSRS_RUNTIME_BIN is empty"
+        );
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
         return Ok(ResolvedRuntime::Ready(explicit));
     }
@@ -483,7 +508,10 @@ impl BuildMetadata {
         );
         anyhow::ensure!(
             !self.tag.is_empty()
-                && !self.tag.chars().any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | ' ')),
+                && !self
+                    .tag
+                    .chars()
+                    .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':' | ' ')),
             "release metadata has an invalid tag"
         );
         anyhow::ensure!(
@@ -501,7 +529,10 @@ impl BuildMetadata {
             self.binary_file
         );
         let cli = env!("CARGO_PKG_VERSION");
-        anyhow::ensure!(valid_version(&self.compat.min_cli), "release metadata has an invalid compat range");
+        anyhow::ensure!(
+            valid_version(&self.compat.min_cli),
+            "release metadata has an invalid compat range"
+        );
         anyhow::ensure!(
             self.compat.max_cli == "*" || valid_version(&self.compat.max_cli),
             "release metadata has an invalid compat range"
@@ -514,7 +545,8 @@ impl BuildMetadata {
         );
         anyhow::ensure!(
             self.compat.max_cli == "*"
-                || crate::net_rpc::version_cmp(cli, &self.compat.max_cli) == std::cmp::Ordering::Less,
+                || crate::net_rpc::version_cmp(cli, &self.compat.max_cli)
+                    == std::cmp::Ordering::Less,
             "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
             self.runtime_version,
             self.compat.max_cli
@@ -620,8 +652,13 @@ fn fetch_metadata(url: &str) -> Result<BuildMetadata> {
         .with_context(|| format!("release metadata request failed ({url})"))?;
     let mut reader = response.into_reader().take((MAX_METADATA_BYTES + 1) as u64);
     let mut bytes = Vec::new();
-    reader.read_to_end(&mut bytes).context("release metadata read failed")?;
-    anyhow::ensure!(bytes.len() <= MAX_METADATA_BYTES, "release metadata too large");
+    reader
+        .read_to_end(&mut bytes)
+        .context("release metadata read failed")?;
+    anyhow::ensure!(
+        bytes.len() <= MAX_METADATA_BYTES,
+        "release metadata too large"
+    );
     serde_json::from_slice(&bytes)
         .with_context(|| format!("release metadata is not valid JSON ({url})"))
 }
@@ -735,7 +772,10 @@ fn octal_field(field: &[u8]) -> Result<u64> {
 }
 
 fn c_string_field(field: &[u8]) -> String {
-    let end = field.iter().position(|byte| *byte == 0).unwrap_or(field.len());
+    let end = field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(field.len());
     String::from_utf8_lossy(&field[..end]).into_owned()
 }
 
@@ -743,7 +783,11 @@ fn verify_header_checksum(header: &[u8; 512]) -> Result<()> {
     let stored = octal_field(&header[148..156])?;
     let mut sum: u64 = 0;
     for (index, byte) in header.iter().enumerate() {
-        sum += if (148..156).contains(&index) { u64::from(b' ') } else { u64::from(*byte) };
+        sum += if (148..156).contains(&index) {
+            u64::from(b' ')
+        } else {
+            u64::from(*byte)
+        };
     }
     anyhow::ensure!(sum == stored, "archive header checksum mismatch");
     Ok(())
@@ -756,7 +800,10 @@ fn parse_header(header: &[u8; 512]) -> Result<Option<TarHeader>> {
     if header.iter().all(|byte| *byte == 0) {
         return Ok(None);
     }
-    anyhow::ensure!(&header[257..262] == b"ustar", "archive is not a ustar tarball");
+    anyhow::ensure!(
+        &header[257..262] == b"ustar",
+        "archive is not a ustar tarball"
+    );
     verify_header_checksum(header)?;
     let typeflag = header[156];
     anyhow::ensure!(
@@ -825,7 +872,11 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                options.mode(if entry.mode & 0o111 != 0 { 0o700 } else { 0o600 });
+                options.mode(if entry.mode & 0o111 != 0 {
+                    0o700
+                } else {
+                    0o600
+                });
             }
             options.open(&target)
         }
@@ -855,7 +906,8 @@ fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
 }
 
 fn create_private_dir(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).with_context(|| format!("failed to create directory {}", dir.display()))?;
+    fs::create_dir_all(dir)
+        .with_context(|| format!("failed to create directory {}", dir.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -929,9 +981,16 @@ fn verify_stage(
         let Some(name) = safe_entry_name(&file.path) else {
             bail!("unsafe runtime manifest path: {}", file.path);
         };
-        anyhow::ensure!(valid_sha256(&file.sha256), "invalid runtime manifest checksum");
+        anyhow::ensure!(
+            valid_sha256(&file.sha256),
+            "invalid runtime manifest checksum"
+        );
         let target = stage.join(name);
-        anyhow::ensure!(target.is_file(), "runtime manifest file is missing: {}", file.path);
+        anyhow::ensure!(
+            target.is_file(),
+            "runtime manifest file is missing: {}",
+            file.path
+        );
         let actual = sha256_file(&target)?;
         anyhow::ensure!(
             actual.eq_ignore_ascii_case(&file.sha256),
@@ -959,11 +1018,9 @@ fn place_managed_binary(stage: &Path, binary_file: &str) -> Result<()> {
     anyhow::ensure!(full.is_file(), "archive did not contain {}", binary_file);
     let bare = stage.join(RUNTIME_BINARY);
     if bare.exists() {
-        fs::remove_file(&bare)
-            .with_context(|| format!("failed to replace {}", bare.display()))?;
+        fs::remove_file(&bare).with_context(|| format!("failed to replace {}", bare.display()))?;
     }
-    fs::rename(&full, &bare)
-        .with_context(|| format!("failed to place {}", bare.display()))
+    fs::rename(&full, &bare).with_context(|| format!("failed to place {}", bare.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -978,8 +1035,7 @@ fn install_lock() -> Result<respire::lock::LibraryLock> {
 fn publish_manifest(manifest: &ManagedManifest) -> Result<()> {
     let path = manifest_path();
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    let temporary =
-        installation_root().join(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
+    let temporary = installation_root().join(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         {
             let mut options = fs::OpenOptions::new();
@@ -1004,11 +1060,7 @@ fn publish_manifest(manifest: &ManagedManifest) -> Result<()> {
 /// Publish a staged version directory atomically. An existing directory with
 /// the identical build is reused; a different build occupying the same version
 /// fails loudly instead of being overwritten.
-fn adopt_or_verify_version_dir(
-    stage: &Path,
-    version: &str,
-    binary_hash: &str,
-) -> Result<PathBuf> {
+fn adopt_or_verify_version_dir(stage: &Path, version: &str, binary_hash: &str) -> Result<PathBuf> {
     let dest = version_dir(version);
     if dest.is_dir() {
         let existing = ManagedManifest {
@@ -1031,7 +1083,9 @@ fn staging_dir() -> Result<PathBuf> {
 }
 
 fn is_progress_abort(error: &anyhow::Error) -> bool {
-    error.downcast_ref::<model_progress::OperationStopped>().is_some()
+    error
+        .downcast_ref::<model_progress::OperationStopped>()
+        .is_some()
         || error.downcast_ref::<std::io::Error>().is_some()
 }
 
@@ -1046,7 +1100,10 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
     let _operation = model_progress::Operation::begin_download()?;
     let required = match pin {
         Some(explicit) => {
-            anyhow::ensure!(valid_version(explicit), "invalid runtime version: {explicit:?}");
+            anyhow::ensure!(
+                valid_version(explicit),
+                "invalid runtime version: {explicit:?}"
+            );
             explicit.to_owned()
         }
         None => pinned()?.required.clone(),
@@ -1076,8 +1133,10 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
     for origin in &origins {
         let stage = staging_dir()?;
         let outcome = (|| -> Result<PathBuf> {
-            let metadata =
-                fetch_metadata(&release_asset(origin, &format!("v{required}/{metadata_name}")))?;
+            let metadata = fetch_metadata(&release_asset(
+                origin,
+                &format!("v{required}/{metadata_name}"),
+            ))?;
             metadata.validate(&required, &triple)?;
             let binary_sha256 = metadata.binary_sha256()?.to_owned();
             let archive = stage.join(&archive_name);
@@ -1133,8 +1192,15 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
 /// binary checksum recorded in the manifest is computed from the archive
 /// itself, since no release metadata is available offline.
 pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
-    anyhow::ensure!(archive.is_file(), "archive {} does not exist", archive.display());
-    anyhow::ensure!(valid_version(version), "invalid runtime version: {version:?}");
+    anyhow::ensure!(
+        archive.is_file(),
+        "archive {} does not exist",
+        archive.display()
+    );
+    anyhow::ensure!(
+        valid_version(version),
+        "invalid runtime version: {version:?}"
+    );
     let _operation = model_progress::Operation::begin_download()?;
     let lock = install_lock()?;
     let stage = staging_dir()?;
@@ -1157,8 +1223,8 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
         publish_manifest(&ManagedManifest {
             version: version.to_owned(),
             sha256: binary_hash,
-    })?;
-    Ok(())
+        })?;
+        Ok(())
     })();
     let installed = match outcome {
         Ok(()) => managed_binary_path(version),
@@ -1208,9 +1274,9 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
     }
     // Newest first; equal comparisons keep a stable relative order.
     installed.sort_by(|a, b| crate::net_rpc::version_cmp(&b.version, &a.version));
-    let current = read_manifest()?.map(|manifest| manifest.version).or_else(|| {
-        installed.first().map(|entry| entry.version.clone())
-    });
+    let current = read_manifest()?
+        .map(|manifest| manifest.version)
+        .or_else(|| installed.first().map(|entry| entry.version.clone()));
     if let Some(current) = current {
         for entry in &mut installed {
             entry.current = entry.version == current;
@@ -1264,8 +1330,7 @@ fn remove_version_dir(version: &str) -> Result<()> {
         "refusing to remove {}: not a runtime version directory",
         dir.display()
     );
-    fs::remove_dir_all(&dir)
-        .with_context(|| format!("failed to remove {}", dir.display()))
+    fs::remove_dir_all(&dir).with_context(|| format!("failed to remove {}", dir.display()))
 }
 
 // ---------------------------------------------------------------------------

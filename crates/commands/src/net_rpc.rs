@@ -107,7 +107,11 @@ fn read_token() -> Result<Option<String>> {
     if let Some(token) = read_token_file(&token_path())? {
         return Ok(Some(token));
     }
-    read_token_file(&respire_app::service::data_dir().join("runtime").join("token"))
+    read_token_file(
+        &respire_app::service::data_dir()
+            .join("runtime")
+            .join("token"),
+    )
 }
 
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
@@ -188,20 +192,30 @@ pub fn pid_is_respire(pid: u32) -> bool {
     // Accept both the combined legacy binary and the split rsrs-runtime child.
     #[cfg(windows)]
     {
-        respire_spawn::process_identity(pid).ok().flatten()
-            .and_then(|value| value.executable.file_name().map(|name|name.to_owned()))
-            .is_some_and(|name|name.to_str().is_some_and(|name|
-                name.eq_ignore_ascii_case("rsrs.exe") || name.eq_ignore_ascii_case("rsrs-runtime.exe")))
+        respire_spawn::process_identity(pid)
+            .ok()
+            .flatten()
+            .and_then(|value| value.executable.file_name().map(|name| name.to_owned()))
+            .is_some_and(|name| {
+                name.to_str().is_some_and(|name| {
+                    name.eq_ignore_ascii_case("rsrs.exe")
+                        || name.eq_ignore_ascii_case("rsrs-runtime.exe")
+                })
+            })
     }
     #[cfg(target_os = "linux")]
     {
         // Use the same procfs authority as runtime_process_identity, without
         // assuming GNU ps options in minimal musl userspaces.
-        std::fs::read_link(format!("/proc/{pid}/exe")).ok()
+        std::fs::read_link(format!("/proc/{pid}/exe"))
+            .ok()
             .and_then(|path| path.file_name().map(|name| name.to_owned()))
-            .and_then(|name| name.to_str().map(|name|
-                name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs"
-                    || name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs-runtime"))
+            .and_then(|name| {
+                name.to_str().map(|name| {
+                    name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs"
+                        || name.strip_suffix(" (deleted)").unwrap_or(name) == "rsrs-runtime"
+                })
+            })
             .unwrap_or(false)
     }
     #[cfg(all(unix, not(target_os = "linux")))]
@@ -214,8 +228,10 @@ pub fn pid_is_respire(pid: u32) -> bool {
         };
         let text = String::from_utf8_lossy(&out.stdout);
         let name = text.trim();
-        name == "rsrs" || name.ends_with("/rsrs")
-            || name == "rsrs-runtime" || name.ends_with("/rsrs-runtime")
+        name == "rsrs"
+            || name.ends_with("/rsrs")
+            || name == "rsrs-runtime"
+            || name.ends_with("/rsrs-runtime")
     }
 }
 
@@ -310,7 +326,9 @@ fn send_loopback(
     };
     let response = send(request).map_err(crate::runtime_error::http)?;
     if !(200..300).contains(&response.status()) {
-        return Err(RuntimeError::Transport(format!("unexpected HTTP {}", response.status())).into());
+        return Err(
+            RuntimeError::Transport(format!("unexpected HTTP {}", response.status())).into(),
+        );
     }
     Ok(response)
 }
@@ -336,7 +354,13 @@ pub fn request_stop() -> Result<()> {
 pub fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
     crate::runtime_policy::require_host("runtime shutdown")?;
     let url = format!("{}/api/runtime/stop", rpc_base_url());
-    send_loopback(agent().post(&url).timeout(timeout).set("X-Respire-Lifecycle", "coordinator-v1"), |request| request.send_string("{}"))?;
+    send_loopback(
+        agent()
+            .post(&url)
+            .timeout(timeout)
+            .set("X-Respire-Lifecycle", "coordinator-v1"),
+        |request| request.send_string("{}"),
+    )?;
     Ok(())
 }
 
@@ -355,14 +379,18 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     match method {
         "cli.progress" => return Duration::from_secs(1),
         "model.control" => return Duration::from_secs(3),
-        "cli.exec" => {},
+        "cli.exec" => {}
         _ => return HTTP_TIMEOUT,
     }
     // Native inference stays inside the runtime. Tracking IDs are values, not
     // command words, and longer write budgets never authorize a request replay.
     let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
-    if matches!(command.as_slice(), ["model", "install" | "install-m3" | "activate"])
-        || command.first().is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
+    if matches!(
+        command.as_slice(),
+        ["model", "install" | "install-m3" | "activate"]
+    ) || command
+        .first()
+        .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
     {
         Duration::from_secs(30 * 60)
     } else {
@@ -370,8 +398,14 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     }
 }
 
-pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_timeout: Option<Duration>) -> Result<Value> {
-    if method != "cli.progress" { check_connection()?; }
+pub(crate) fn rpc_method_with_timeout(
+    method: &str,
+    args: Vec<String>,
+    test_timeout: Option<Duration>,
+) -> Result<Value> {
+    if method != "cli.progress" {
+        check_connection()?;
+    }
     let url = format!("{}/api/rpc", rpc_base_url());
     let body = json!({
         "v": crate::rpc_worker::PROTOCOL_V,
@@ -383,13 +417,22 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
     let timeout = rpc_timeout(method, &args, test_timeout);
     let resp = send_loopback(agent().post(&url).timeout(timeout), |request| {
         request.send_json(body.clone())
-    }).map_err(|error| {
-        if method == "cli.exec" && matches!(error.downcast_ref::<RuntimeError>(), Some(RuntimeError::Transport(_))) {
+    })
+    .map_err(|error| {
+        if method == "cli.exec"
+            && matches!(
+                error.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::Transport(_))
+            )
+        {
             RuntimeError::OutcomeUnknown {
                 request_id: body["id"].as_str().unwrap_or_default().to_owned(),
                 detail: error.to_string(),
-            }.into()
-        } else { error }
+            }
+            .into()
+        } else {
+            error
+        }
     })?;
     let parsed: Value = resp.into_json().map_err(|error| {
         if method == "cli.exec" {
@@ -397,7 +440,9 @@ pub(crate) fn rpc_method_with_timeout(method: &str, args: Vec<String>, test_time
                 request_id: body["id"].as_str().unwrap_or_default().to_owned(),
                 detail: format!("runtime reply unavailable: {error}"),
             })
-        } else { anyhow::anyhow!("runtime rpc is not JSON: {error}") }
+        } else {
+            anyhow::anyhow!("runtime rpc is not JSON: {error}")
+        }
     })?;
     Ok(parsed)
 }
@@ -415,7 +460,9 @@ pub fn wait_until_down() -> Result<()> {
 /// A closed listener does not prove that the library holder has exited.
 pub fn wait_until_exited(pid: u32) -> Result<()> {
     for _ in 0..STOP_POLLS {
-        if !process_is_running(pid)? { return Ok(()); }
+        if !process_is_running(pid)? {
+            return Ok(());
+        }
         std::thread::sleep(STOP_WAIT);
     }
     bail!("runtime listener closed but process {pid} has not exited")
@@ -427,8 +474,10 @@ pub fn process_is_running(pid: u32) -> Result<bool> {
         anyhow::ensure!(pid != 0, "invalid runtime process identity");
         let own = std::fs::read_to_string("/proc/self/stat")
             .context("runtime process inspection requires procfs")?;
-        anyhow::ensure!(linux_stat_is_running(&own, std::process::id())?,
-            "cannot verify current process namespace");
+        anyhow::ensure!(
+            linux_stat_is_running(&own, std::process::id())?,
+            "cannot verify current process namespace"
+        );
         match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => linux_stat_is_running(&stat, pid),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -445,9 +494,13 @@ pub fn process_is_running(pid: u32) -> Result<bool> {
     {
         let output = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "pid=", "-o", "stat="])
-            .output().context("cannot check stopped runtime process")?;
+            .output()
+            .context("cannot check stopped runtime process")?;
         let text = String::from_utf8_lossy(&output.stdout);
-        anyhow::ensure!(output.status.success() || output.stderr.is_empty(), "runtime process inspection failed");
+        anyhow::ensure!(
+            output.status.success() || output.stderr.is_empty(),
+            "runtime process inspection failed"
+        );
         let mut fields = text.split_whitespace();
         // Zombies have released their listener, native session and database locks.
         Ok(fields.next() == Some(pid.to_string().as_str())
@@ -457,11 +510,21 @@ pub fn process_is_running(pid: u32) -> Result<bool> {
 
 #[cfg(target_os = "linux")]
 fn linux_stat_is_running(stat: &str, pid: u32) -> Result<bool> {
-    anyhow::ensure!(stat.starts_with(&format!("{pid} (")), "runtime process PID mismatch");
-    let (_, fields) = stat.rsplit_once(')').context("runtime process name delimiter missing")?;
-    let state = fields.split_whitespace().next().context("runtime process state missing")?;
-    anyhow::ensure!(state.len() == 1 && "RSDZTtXxKWPI".contains(state),
-        "runtime process state is invalid");
+    anyhow::ensure!(
+        stat.starts_with(&format!("{pid} (")),
+        "runtime process PID mismatch"
+    );
+    let (_, fields) = stat
+        .rsplit_once(')')
+        .context("runtime process name delimiter missing")?;
+    let state = fields
+        .split_whitespace()
+        .next()
+        .context("runtime process state missing")?;
+    anyhow::ensure!(
+        state.len() == 1 && "RSDZTtXxKWPI".contains(state),
+        "runtime process state is invalid"
+    );
     // Zombies have exited and released library locks. Unknown states fail closed.
     Ok(state != "Z")
 }
@@ -486,66 +549,125 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
 }
 
 pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
-    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid), "cannot verify runtime process {pid}");
+    anyhow::ensure!(
+        pid != std::process::id() && pid_is_respire(pid),
+        "cannot verify runtime process {pid}"
+    );
     #[cfg(windows)]
     {
         let process = respire_spawn::runtime_process_identity(pid)?
             .context("runtime process disappeared or could not be identified")?;
-        let executable = process.executable.to_str().context("runtime process image is not UTF-8")?.to_owned();
-        Ok(RuntimeProcessIdentity { started_at: process.birth.to_string(), executable })
+        let executable = process
+            .executable
+            .to_str()
+            .context("runtime process image is not UTF-8")?
+            .to_owned();
+        Ok(RuntimeProcessIdentity {
+            started_at: process.birth.to_string(),
+            executable,
+        })
     }
     #[cfg(target_os = "linux")]
     {
         let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
         let command = std::fs::read(directory.join("cmdline"))?;
-        let args: Vec<_> = command.split(|byte| *byte == 0)
-            .filter_map(|arg| std::str::from_utf8(arg).ok()).collect();
-        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")) || foreground_runtime_arguments(&args),
-            "process {pid} is not a runtime; restart refused");
+        let args: Vec<_> = command
+            .split(|byte| *byte == 0)
+            .filter_map(|arg| std::str::from_utf8(arg).ok())
+            .collect();
+        anyhow::ensure!(
+            args.contains(&"--runtime-internal")
+                || (args.contains(&"web") && args.contains(&"--internal"))
+                || foreground_runtime_arguments(&args),
+            "process {pid} is not a runtime; restart refused"
+        );
         let stat = std::fs::read_to_string(directory.join("stat"))?;
-        let started_at = stat.rsplit_once(')').and_then(|(_, fields)| fields.split_whitespace().nth(19))
-            .context("runtime process creation time missing")?.to_owned();
-        let executable = std::fs::read_link(directory.join("exe"))?.to_string_lossy().into_owned();
-        Ok(RuntimeProcessIdentity { started_at, executable })
+        let started_at = stat
+            .rsplit_once(')')
+            .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+            .context("runtime process creation time missing")?
+            .to_owned();
+        let executable = std::fs::read_link(directory.join("exe"))?
+            .to_string_lossy()
+            .into_owned();
+        Ok(RuntimeProcessIdentity {
+            started_at,
+            executable,
+        })
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
         let output = std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
-            .env("LC_ALL", "C").output()?;
-        anyhow::ensure!(output.status.success(), "cannot inspect runtime process {pid}");
+            .env("LC_ALL", "C")
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "cannot inspect runtime process {pid}"
+        );
         let text = String::from_utf8(output.stdout)?;
         let text = text.trim_end();
-        let started_at = text.get(..24).context("runtime process creation time missing")?.to_owned();
-        let command = text.get(24..).context("runtime process command missing")?.trim();
+        let started_at = text
+            .get(..24)
+            .context("runtime process creation time missing")?
+            .to_owned();
+        let command = text
+            .get(24..)
+            .context("runtime process command missing")?
+            .trim();
         let stable = stable_bin_path();
-        let foreground = command.strip_prefix(stable.to_string_lossy().as_ref())
-            .is_some_and(|tail| { let mut args = vec!["rsrs"]; args.extend(tail.split_whitespace()); foreground_runtime_arguments(&args) });
+        let foreground = command
+            .strip_prefix(stable.to_string_lossy().as_ref())
+            .is_some_and(|tail| {
+                let mut args = vec!["rsrs"];
+                args.extend(tail.split_whitespace());
+                foreground_runtime_arguments(&args)
+            });
         let args: Vec<_> = command.split_whitespace().collect();
-        anyhow::ensure!(args.contains(&"--runtime-internal") || (args.contains(&"web") && args.contains(&"--internal")) || foreground || foreground_runtime_arguments(&args),
-            "process {pid} is not a runtime; restart refused");
-        Ok(RuntimeProcessIdentity { started_at, executable: command.to_owned() })
+        anyhow::ensure!(
+            args.contains(&"--runtime-internal")
+                || (args.contains(&"web") && args.contains(&"--internal"))
+                || foreground
+                || foreground_runtime_arguments(&args),
+            "process {pid} is not a runtime; restart refused"
+        );
+        Ok(RuntimeProcessIdentity {
+            started_at,
+            executable: command.to_owned(),
+        })
     }
 }
 
 pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
     crate::runtime_policy::require_host("runtime recovery")?;
-    anyhow::ensure!(pid != std::process::id() && pid_is_respire(pid),
-        "refusing to terminate an unverified runtime process {pid}");
-    anyhow::ensure!(&runtime_process_identity(pid)? == identity,
-        "runtime process {pid} changed during shutdown; termination refused");
+    anyhow::ensure!(
+        pid != std::process::id() && pid_is_respire(pid),
+        "refusing to terminate an unverified runtime process {pid}"
+    );
+    anyhow::ensure!(
+        &runtime_process_identity(pid)? == identity,
+        "runtime process {pid} changed during shutdown; termination refused"
+    );
     #[cfg(windows)]
     {
         let expected = respire_spawn::ProcessIdentity {
-            birth: identity.started_at.parse().context("invalid verified process creation time")?,
+            birth: identity
+                .started_at
+                .parse()
+                .context("invalid verified process creation time")?,
             executable: std::path::PathBuf::from(&identity.executable),
         };
         respire_spawn::terminate_runtime(pid, &expected)?;
     }
     #[cfg(unix)]
     {
-        let status = std::process::Command::new("kill").args(["-KILL", &pid.to_string()]).status()?;
-        anyhow::ensure!(status.success(), "failed to terminate runtime process {pid}");
+        let status = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status()?;
+        anyhow::ensure!(
+            status.success(),
+            "failed to terminate runtime process {pid}"
+        );
     }
     Ok(())
 }
@@ -602,7 +724,11 @@ mod tests {
             vec!["model", "--model-task-id", "install", "activate", "m3"],
         ] {
             let parsed = valid_timeout_args(&args);
-            assert_eq!(rpc_timeout("cli.exec", &parsed, None), Duration::from_secs(30 * 60), "{args:?}");
+            assert_eq!(
+                rpc_timeout("cli.exec", &parsed, None),
+                Duration::from_secs(30 * 60),
+                "{args:?}"
+            );
         }
     }
 
@@ -615,57 +741,118 @@ mod tests {
             vec!["show", "synthetic-id"],
         ] {
             let parsed = valid_timeout_args(&args);
-            assert_eq!(rpc_timeout("cli.exec", &parsed, None), HTTP_TIMEOUT, "{args:?}");
+            assert_eq!(
+                rpc_timeout("cli.exec", &parsed, None),
+                HTTP_TIMEOUT,
+                "{args:?}"
+            );
         }
         let long = valid_timeout_args(&["--progress-id", "request-one", "sync"]);
-        assert_eq!(rpc_timeout("cli.progress", &long, None), Duration::from_secs(1));
-        assert_eq!(rpc_timeout("model.control", &long, None), Duration::from_secs(3));
-        assert_eq!(rpc_timeout("runtime.result", &["sync".into()], None), HTTP_TIMEOUT);
-        assert_eq!(rpc_timeout("model.control", &long, Some(Duration::from_millis(7))), Duration::from_millis(7));
+        assert_eq!(
+            rpc_timeout("cli.progress", &long, None),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            rpc_timeout("model.control", &long, None),
+            Duration::from_secs(3)
+        );
+        assert_eq!(
+            rpc_timeout("runtime.result", &["sync".into()], None),
+            HTTP_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout("model.control", &long, Some(Duration::from_millis(7))),
+            Duration::from_millis(7)
+        );
     }
 
     #[test]
-    fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay() -> Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay(
+    ) -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         let directory = tempfile::tempdir()?;
-        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow::anyhow!("{error}"))?;
-        let port = server.server_addr().to_ip().ok_or_else(|| anyhow::anyhow!("missing test address"))?.port();
-        let previous: Vec<_> = ["RSRS_RPC_PORT", "RSRS_DATA_DIR", "RSRS_RPC_TOKEN"].into_iter().map(|key| (key, std::env::var_os(key))).collect();
+        let server =
+            tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow::anyhow!("{error}"))?;
+        let port = server
+            .server_addr()
+            .to_ip()
+            .ok_or_else(|| anyhow::anyhow!("missing test address"))?
+            .port();
+        let previous: Vec<_> = ["RSRS_RPC_PORT", "RSRS_DATA_DIR", "RSRS_RPC_TOKEN"]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect();
         std::env::set_var("RSRS_RPC_PORT", port.to_string());
         std::env::set_var("RSRS_DATA_DIR", directory.path());
         std::env::remove_var("RSRS_RPC_TOKEN");
         let actor = std::thread::spawn(move || -> Result<String> {
-            let mut request = server.recv_timeout(Duration::from_secs(2))?.ok_or_else(|| anyhow::anyhow!("write never arrived"))?;
+            let mut request = server
+                .recv_timeout(Duration::from_secs(2))?
+                .ok_or_else(|| anyhow::anyhow!("write never arrived"))?;
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body)?;
             let write: Value = serde_json::from_str(&body)?;
             anyhow::ensure!(write["method"] == "cli.exec", "unexpected first request");
-            let id = write["id"].as_str().ok_or_else(|| anyhow::anyhow!("missing write ID"))?.to_owned();
+            let id = write["id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("missing write ID"))?
+                .to_owned();
             // Simulated committed write returns after the shortened client deadline.
             std::thread::sleep(Duration::from_millis(150));
-            let _ = request.respond(tiny_http::Response::from_string(json!({"v":1,"id":id,"ok":true}).to_string()));
-            let mut inspect = server.recv_timeout(Duration::from_secs(2))?.ok_or_else(|| anyhow::anyhow!("result inspection never arrived"))?;
+            let _ = request.respond(tiny_http::Response::from_string(
+                json!({"v":1,"id":id,"ok":true}).to_string(),
+            ));
+            let mut inspect = server
+                .recv_timeout(Duration::from_secs(2))?
+                .ok_or_else(|| anyhow::anyhow!("result inspection never arrived"))?;
             body.clear();
             inspect.as_reader().read_to_string(&mut body)?;
             let query: Value = serde_json::from_str(&body)?;
-            anyhow::ensure!(query["method"] == "runtime.result" && query["args"][0] == id, "client replayed or inspected the wrong write");
+            anyhow::ensure!(
+                query["method"] == "runtime.result" && query["args"][0] == id,
+                "client replayed or inspected the wrong write"
+            );
             inspect.respond(tiny_http::Response::from_string(json!({"v":1,"id":query["id"],"ok":true,"envelope":{"summary":{"state":"completed","request_id":id,"response":{"ok":true,"committed":true}}}}).to_string()))?;
             Ok(id)
         });
         let result = (|| -> Result<()> {
-            let error = rpc_method_with_timeout("cli.exec", vec!["remember".into(), "synthetic write".into()], Some(Duration::from_millis(50))).err().ok_or_else(|| anyhow::anyhow!("delayed write unexpectedly completed within deadline"))?;
+            let error = rpc_method_with_timeout(
+                "cli.exec",
+                vec!["remember".into(), "synthetic write".into()],
+                Some(Duration::from_millis(50)),
+            )
+            .err()
+            .ok_or_else(|| {
+                anyhow::anyhow!("delayed write unexpectedly completed within deadline")
+            })?;
             let id = match error.downcast_ref::<RuntimeError>() {
                 Some(RuntimeError::OutcomeUnknown { request_id, .. }) => request_id.clone(),
-                _ => anyhow::bail!("ambiguous transport failure was not marked outcome_unknown: {error}"),
+                _ => anyhow::bail!(
+                    "ambiguous transport failure was not marked outcome_unknown: {error}"
+                ),
             };
-            let inspected = rpc_method_with_timeout("runtime.result", vec![id.clone()], Some(Duration::from_secs(2)))?;
-            anyhow::ensure!(inspected["envelope"]["summary"]["state"] == "completed", "inspection failed: {inspected}");
-            let seen = actor.join().map_err(|_| anyhow::anyhow!("test transport actor panicked"))??;
+            let inspected = rpc_method_with_timeout(
+                "runtime.result",
+                vec![id.clone()],
+                Some(Duration::from_secs(2)),
+            )?;
+            anyhow::ensure!(
+                inspected["envelope"]["summary"]["state"] == "completed",
+                "inspection failed: {inspected}"
+            );
+            let seen = actor
+                .join()
+                .map_err(|_| anyhow::anyhow!("test transport actor panicked"))??;
             anyhow::ensure!(seen == id, "request ID changed");
             Ok(())
         })();
         for (key, value) in previous {
-            match value { Some(value) => std::env::set_var(key, value), None => std::env::remove_var(key) }
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
         result
     }
@@ -674,9 +861,17 @@ mod tests {
     #[test]
     fn procfs_liveness_keeps_pid_and_state_checks_strict() -> Result<()> {
         assert!(linux_stat_is_running("123 (rsrs) S 1 2 3", 123)?);
-        assert!(linux_stat_is_running("123 (name with ) parentheses) R 1 2 3", 123)?);
+        assert!(linux_stat_is_running(
+            "123 (name with ) parentheses) R 1 2 3",
+            123
+        )?);
         assert!(!linux_stat_is_running("123 (rsrs) Z 1 2 3", 123)?);
-        for invalid in ["124 (rsrs) S 1", "123 rsrs S", "123 (rsrs)", "123 (rsrs) ? 1"] {
+        for invalid in [
+            "124 (rsrs) S 1",
+            "123 rsrs S",
+            "123 (rsrs)",
+            "123 (rsrs) ? 1",
+        ] {
             assert!(linux_stat_is_running(invalid, 123).is_err());
         }
         assert!(process_is_running(std::process::id())?);
@@ -687,7 +882,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn exited_child_is_not_a_running_library_holder() -> Result<()> {
-        let mut child = std::process::Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()?;
         let exited = wait_until_exited(child.id());
         child.wait()?;
         exited

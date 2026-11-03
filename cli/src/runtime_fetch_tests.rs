@@ -48,7 +48,11 @@ fn tar_header(name: &str, size: u64, typeflag: u8, mode: u32) -> [u8; 512] {
     header[263..265].copy_from_slice(b"00");
     let mut sum: u64 = 0;
     for (index, byte) in header.iter().enumerate() {
-        sum += if (148..156).contains(&index) { u64::from(b' ') } else { u64::from(*byte) };
+        sum += if (148..156).contains(&index) {
+            u64::from(b' ')
+        } else {
+            u64::from(*byte)
+        };
     }
     let checksum = format!("{sum:o}");
     let mut field = [0u8; 8];
@@ -72,8 +76,12 @@ fn tar_bytes(entries: &[(&str, u8, u32, &[u8])]) -> Vec<u8> {
 
 fn gz(bytes: &[u8]) -> Result<Vec<u8>> {
     let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(bytes).context("fixture archive compression failed")?;
-    encoder.finish().context("fixture archive compression failed")
+    encoder
+        .write_all(bytes)
+        .context("fixture archive compression failed")?;
+    encoder
+        .finish()
+        .context("fixture archive compression failed")
 }
 
 /// A complete, verifiable release fixture: binary + core manifest + library.
@@ -89,7 +97,12 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
         ("./", b'5', 0o700, b""),
         ("lib/", b'5', 0o700, b""),
         ("lib/provider.json", b'0', 0o600, b"{}"),
-        (CORE_MANIFEST_FILE, b'0', 0o600, manifest.to_string().as_bytes()),
+        (
+            CORE_MANIFEST_FILE,
+            b'0',
+            0o600,
+            manifest.to_string().as_bytes(),
+        ),
         (RUNTIME_BINARY, b'0', 0o755, BINARY),
     ]);
     Ok((gz(&raw)?, hash))
@@ -111,7 +124,14 @@ fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
 
 #[test]
 fn accept_ranges_reject_malformed_bounds() -> Result<()> {
-    for raw in ["", "1.2.3", ">=", "<1.0.0,>=2.0.0", ">=1.0.0,<=2.0.0", "<:>"] {
+    for raw in [
+        "",
+        "1.2.3",
+        ">=",
+        "<1.0.0,>=2.0.0",
+        ">=1.0.0,<=2.0.0",
+        "<:>",
+    ] {
         anyhow::ensure!(
             AcceptRange::parse(raw).is_err(),
             "malformed range {raw:?} was accepted"
@@ -150,7 +170,10 @@ fn version_charset_rejects_separators_and_malformed_shapes() {
 #[test]
 fn entry_names_reject_traversal_and_separators() {
     for name in ["lib/x.json", "./lib/x.json", "rsrs-runtime", "a/b/c/"] {
-        assert!(safe_entry_name(name).is_some(), "{name:?} should be accepted");
+        assert!(
+            safe_entry_name(name).is_some(),
+            "{name:?} should be accepted"
+        );
     }
     for name in [
         "../escape",
@@ -163,7 +186,10 @@ fn entry_names_reject_traversal_and_separators() {
         "",
         ".",
     ] {
-        assert!(safe_entry_name(name).is_none(), "{name:?} should be rejected");
+        assert!(
+            safe_entry_name(name).is_none(),
+            "{name:?} should be rejected"
+        );
     }
 }
 
@@ -186,7 +212,11 @@ fn extraction_whitelist_matches_client2_semantics() -> Result<()> {
     let hostile = gz(&tar_bytes(&[("../escape", b'0', 0o600, b"x")]))?;
     fs::write(dir.path().join("hostile.tar.gz"), &hostile)?;
     anyhow::ensure!(
-        extract_archive(&dir.path().join("hostile.tar.gz"), &dir.path().join("hostile")).is_err(),
+        extract_archive(
+            &dir.path().join("hostile.tar.gz"),
+            &dir.path().join("hostile")
+        )
+        .is_err(),
         "traversal entry was accepted"
     );
     anyhow::ensure!(!dir.path().join("escape").exists());
@@ -194,8 +224,11 @@ fn extraction_whitelist_matches_client2_semantics() -> Result<()> {
         let entry = gz(&tar_bytes(&[(name, typeflag, 0o600, b"x")]))?;
         fs::write(dir.path().join("hostile2.tar.gz"), &entry)?;
         anyhow::ensure!(
-            extract_archive(&dir.path().join("hostile2.tar.gz"), &dir.path().join("hostile2"))
-                .is_err(),
+            extract_archive(
+                &dir.path().join("hostile2.tar.gz"),
+                &dir.path().join("hostile2")
+            )
+            .is_err(),
             "unsafe entry {name} with flag {typeflag} was accepted"
         );
     }
@@ -332,11 +365,17 @@ fn mirror_override_builds_fallback_origins() -> Result<()> {
     let official = RELEASE_BASE.to_owned();
     anyhow::ensure!(
         download_origins(Some("https://mirror.example"))?
-            == vec![format!("https://mirror.example/{official}"), official.clone()]
+            == vec![
+                format!("https://mirror.example/{official}"),
+                official.clone()
+            ]
     );
     anyhow::ensure!(
         download_origins(Some("mirror.example"))?
-            == vec![format!("https://mirror.example/{official}"), official.clone()],
+            == vec![
+                format!("https://mirror.example/{official}"),
+                official.clone()
+            ],
         "bare mirror hosts must default to https"
     );
     anyhow::ensure!(
@@ -379,8 +418,14 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
         ("sha256", serde_json::json!("zz")),
         ("binary_file", serde_json::json!("../escape")),
         ("binary_file", serde_json::json!(RUNTIME_BINARY)),
-        ("compat", serde_json::json!({"min_cli":"99.0.0","max_cli":"*"})),
-        ("compat", serde_json::json!({"min_cli":"1.0.0","max_cli":"no!pe"})),
+        (
+            "compat",
+            serde_json::json!({"min_cli":"99.0.0","max_cli":"*"}),
+        ),
+        (
+            "compat",
+            serde_json::json!({"min_cli":"1.0.0","max_cli":"no!pe"}),
+        ),
     ] {
         let mut changed = base.clone();
         changed[field] = value;

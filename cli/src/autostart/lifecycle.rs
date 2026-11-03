@@ -455,7 +455,10 @@ fn wait_ready(config: &Registration) -> Result<()> {
                         || crate::runtime_fetch::managed_runtime_path()
                             .ok()
                             .flatten()
-                            .is_some_and(|managed| crate::mcp::exe_matches_dest(&health.exe, &managed)))
+                            .is_some_and(|managed| crate::mcp::exe_matches_dest(
+                                &health.exe,
+                                &managed
+                            )))
                     && !health.data_dir.is_empty()
                     && crate::mcp::same_path(
                         Path::new(&health.data_dir),
@@ -764,9 +767,20 @@ fn event(config: &Registration, name: &str) -> Result<()> {
     // Fixed event names only. Never serialize command arguments, errors,
     // environment values, account identifiers or recovery material.
     anyhow::ensure!(
-        ["starting", "paused", "crash_limit", "exit_ok", "exit_error",
-            "restart_probe", "restart_managed", "restart_identity", "restart_stop",
-            "restart_start", "restart_ready"].contains(&name),
+        [
+            "starting",
+            "paused",
+            "crash_limit",
+            "exit_ok",
+            "exit_error",
+            "restart_probe",
+            "restart_managed",
+            "restart_identity",
+            "restart_stop",
+            "restart_start",
+            "restart_ready"
+        ]
+        .contains(&name),
         "unknown runtime event"
     );
     let path = control_path(&config.installation).with_file_name("events.jsonl");
@@ -866,7 +880,11 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             managed,
             installation_root,
             supervised_child,
-        } => run_foreground(managed.as_deref(), installation_root.as_deref(), *supervised_child),
+        } => run_foreground(
+            managed.as_deref(),
+            installation_root.as_deref(),
+            *supervised_child,
+        ),
         RuntimeCommand::Stop => {
             crate::rpc::stop_if_running()?;
             emit("runtime.stop", json!({"state":"stopped"}))
@@ -889,9 +907,11 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         RuntimeCommand::Autostart {
             command: AutostartCommand::Remove { stop },
         } => disable(*stop, true),
-        RuntimeCommand::Install { file, version, mirror } => {
-            install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref())
-        }
+        RuntimeCommand::Install {
+            file,
+            version,
+            mirror,
+        } => install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref()),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
@@ -943,9 +963,9 @@ fn runtime_inventory() -> Result<Value> {
     let installed = crate::runtime_fetch::list_installed()?;
     let versions: Vec<Value> = installed
         .iter()
-        .map(|entry| {
-            json!({"version": entry.version, "path": entry.path, "current": entry.current})
-        })
+        .map(
+            |entry| json!({"version": entry.version, "path": entry.path, "current": entry.current}),
+        )
         .collect();
     Ok(json!({
         "required": pin.required.clone(),
@@ -1055,7 +1075,10 @@ fn disable(stop: bool, remove: bool) -> Result<()> {
 }
 
 fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool) -> Result<()> {
-    anyhow::ensure!(!supervised_child || (cfg!(windows) && id.is_some()), "supervised-child requires a Windows managed registration");
+    anyhow::ensure!(
+        !supervised_child || (cfg!(windows) && id.is_some()),
+        "supervised-child requires a Windows managed registration"
+    );
     if let Some(id) = id {
         let root = root.context("managed runtime needs its explicit installation root")?;
         let config = read_registration(root)?.context("managed runtime registration missing")?;
@@ -1144,19 +1167,31 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
 
 #[cfg(any(windows, test))]
 fn retry_supervised_child(failures: &mut u8, uptime: Duration) -> bool {
-    if uptime >= Duration::from_secs(120) { *failures = 0; }
+    if uptime >= Duration::from_secs(120) {
+        *failures = 0;
+    }
     *failures = failures.saturating_add(1);
     *failures < 3
 }
 
 #[cfg(windows)]
 fn supervisor_may_run(expected: &Registration) -> Result<bool> {
-    let current=read_registration(&expected.installation)?.context("supervised registration disappeared")?;
-    anyhow::ensure!(current.id==expected.id && current.owner==expected.owner && current.executable==expected.executable,"supervised registration identity changed");
-    if !current.enabled || current.manually_stopped { return Ok(false); }
-    if let Some(value)=marker(&expected.installation)? {
-        return Ok(value.phase != Phase::Paused && controller_alive(&value)?
-            && value.id==expected.id && value.expected_version==env!("CARGO_PKG_VERSION"));
+    let current = read_registration(&expected.installation)?
+        .context("supervised registration disappeared")?;
+    anyhow::ensure!(
+        current.id == expected.id
+            && current.owner == expected.owner
+            && current.executable == expected.executable,
+        "supervised registration identity changed"
+    );
+    if !current.enabled || current.manually_stopped {
+        return Ok(false);
+    }
+    if let Some(value) = marker(&expected.installation)? {
+        return Ok(value.phase != Phase::Paused
+            && controller_alive(&value)?
+            && value.id == expected.id
+            && value.expected_version == env!("CARGO_PKG_VERSION"));
     }
     Ok(true)
 }
@@ -1166,30 +1201,53 @@ fn supervise_windows_runtime(config: &Registration) -> Result<()> {
     // Task Scheduler remains the current-user logon owner, but does not
     // reliably retry terminated Exec actions. Keep its action in the foreground
     // and supervise a foreground child; never open the library in this parent.
-    respire_spawn::confine_supervisor_tree().context("cannot establish owned supervisor process tree")?;
-    let mut failures=0;
+    respire_spawn::confine_supervisor_tree()
+        .context("cannot establish owned supervisor process tree")?;
+    let mut failures = 0;
     loop {
-        if !supervisor_may_run(config)? { return Ok(()); }
-        let mut command=std::process::Command::new(&config.executable);
-        command.args(["runtime","run","--managed",&config.id,"--installation-root"])
-            .arg(&config.installation).arg("--supervised-child")
-            .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        let started=Instant::now();
-        let status=match respire_spawn::spawn_host_control(&mut command) {
-            Ok(mut child)=>Some(child.wait().context("cannot confirm owned runtime child exit")?),
-            Err(_)=>None,
-        };
-        if status.is_some_and(|status|status.success()) { return Ok(()); }
-        event(config,"exit_error")?;
-        if !supervisor_may_run(config)? { return Ok(()); }
-        if !retry_supervised_child(&mut failures,started.elapsed()) {
-            event(config,"crash_limit")?;
+        if !supervisor_may_run(config)? {
             return Ok(());
         }
-        let deadline=Instant::now()+Duration::from_secs(60);
-        while Instant::now()<deadline {
-            if !supervisor_may_run(config)? { return Ok(()); }
+        let mut command = std::process::Command::new(&config.executable);
+        command
+            .args([
+                "runtime",
+                "run",
+                "--managed",
+                &config.id,
+                "--installation-root",
+            ])
+            .arg(&config.installation)
+            .arg("--supervised-child")
+            .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let started = Instant::now();
+        let status = match respire_spawn::spawn_host_control(&mut command) {
+            Ok(mut child) => Some(
+                child
+                    .wait()
+                    .context("cannot confirm owned runtime child exit")?,
+            ),
+            Err(_) => None,
+        };
+        if status.is_some_and(|status| status.success()) {
+            return Ok(());
+        }
+        event(config, "exit_error")?;
+        if !supervisor_may_run(config)? {
+            return Ok(());
+        }
+        if !retry_supervised_child(&mut failures, started.elapsed()) {
+            event(config, "crash_limit")?;
+            return Ok(());
+        }
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while Instant::now() < deadline {
+            if !supervisor_may_run(config)? {
+                return Ok(());
+            }
             std::thread::sleep(Duration::from_millis(250));
         }
     }
@@ -1200,39 +1258,84 @@ mod tests {
     use super::*;
     #[test]
     fn foreground_supervisor_retries_are_bounded_and_reset_only_after_stability() -> Result<()> {
-        let mut failures=0;
-        assert!(retry_supervised_child(&mut failures,Duration::from_secs(1)));
-        assert!(retry_supervised_child(&mut failures,Duration::from_secs(1)));
-        assert!(!retry_supervised_child(&mut failures,Duration::from_secs(1)));
-        assert!(retry_supervised_child(&mut failures,Duration::from_secs(120)));
-        assert_eq!(failures,1);
+        let mut failures = 0;
+        assert!(retry_supervised_child(
+            &mut failures,
+            Duration::from_secs(1)
+        ));
+        assert!(retry_supervised_child(
+            &mut failures,
+            Duration::from_secs(1)
+        ));
+        assert!(!retry_supervised_child(
+            &mut failures,
+            Duration::from_secs(1)
+        ));
+        assert!(retry_supervised_child(
+            &mut failures,
+            Duration::from_secs(120)
+        ));
+        assert_eq!(failures, 1);
         Ok(())
     }
 
     #[test]
     fn registration_captures_nonsecret_opt_outs_and_legacy_names_canonically() -> Result<()> {
-        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
         struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
         impl Drop for Restore {
             fn drop(&mut self) {
-                for (key,value) in &self.0 {
-                    match value { Some(value) => std::env::set_var(key,value), None => std::env::remove_var(key) }
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }
-        let keys=["RSRS_DATA_DIR","RSRS_BIN_DIR","RSRS_NO_AUTOSYNC","ONEMEMORY_NO_AUTOSYNC","RSRS_UPDATE_CHECK"];
-        let _restore=Restore(keys.into_iter().map(|key|(key,std::env::var_os(key))).collect());
-        let root=tempfile::tempdir()?;
-        std::env::set_var("RSRS_DATA_DIR",root.path());
-        std::env::set_var("RSRS_BIN_DIR",root.path().join("bin"));
+        let keys = [
+            "RSRS_DATA_DIR",
+            "RSRS_BIN_DIR",
+            "RSRS_NO_AUTOSYNC",
+            "ONEMEMORY_NO_AUTOSYNC",
+            "RSRS_UPDATE_CHECK",
+        ];
+        let _restore = Restore(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        let root = tempfile::tempdir()?;
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        std::env::set_var("RSRS_BIN_DIR", root.path().join("bin"));
         std::env::remove_var("RSRS_NO_AUTOSYNC");
-        std::env::set_var("ONEMEMORY_NO_AUTOSYNC","1");
-        std::env::set_var("RSRS_UPDATE_CHECK","0");
-        let config=new_registration()?;
-        anyhow::ensure!(config.environment.get("RSRS_NO_AUTOSYNC").map(String::as_str)==Some("1"));
-        anyhow::ensure!(config.environment.get("RSRS_UPDATE_CHECK").map(String::as_str)==Some("0"));
-        anyhow::ensure!(!config.environment.keys().any(|key|key.starts_with("ONEMEMORY_")));
-        anyhow::ensure!(!control_path(root.path()).exists(),"capturing settings registered startup");
+        std::env::set_var("ONEMEMORY_NO_AUTOSYNC", "1");
+        std::env::set_var("RSRS_UPDATE_CHECK", "0");
+        let config = new_registration()?;
+        anyhow::ensure!(
+            config
+                .environment
+                .get("RSRS_NO_AUTOSYNC")
+                .map(String::as_str)
+                == Some("1")
+        );
+        anyhow::ensure!(
+            config
+                .environment
+                .get("RSRS_UPDATE_CHECK")
+                .map(String::as_str)
+                == Some("0")
+        );
+        anyhow::ensure!(!config
+            .environment
+            .keys()
+            .any(|key| key.starts_with("ONEMEMORY_")));
+        anyhow::ensure!(
+            !control_path(root.path()).exists(),
+            "capturing settings registered startup"
+        );
         Ok(())
     }
 

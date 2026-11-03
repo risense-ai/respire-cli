@@ -212,7 +212,9 @@ pub fn sync_controlled(
             // working branch. Apply that decision in this sync, not a later one.
             let mut after = String::new();
             control.progress("materialize");
-            while let Some(next) = control.local(|| local.materialize_received_batch(keys, &after))? {
+            while let Some(next) =
+                control.local(|| local.materialize_received_batch(keys, &after))?
+            {
                 after = next;
             }
         }
@@ -410,8 +412,8 @@ pub fn build_remote_from_env() -> Result<RemoteTransport> {
     let addr = crate::env::var("RSRS_ADDR").map_err(|_| {
         anyhow::anyhow!("sync needs RSRS_ADDR (server address) or a prior register/login")
     })?;
-    let token = crate::env::var("RSRS_TOKEN")
-        .map_err(|_| anyhow::anyhow!("sync needs RSRS_TOKEN"))?;
+    let token =
+        crate::env::var("RSRS_TOKEN").map_err(|_| anyhow::anyhow!("sync needs RSRS_TOKEN"))?;
     Ok(RemoteTransport::new(
         crate::transport::remote::RemoteConfig {
             address: addr,
@@ -542,7 +544,10 @@ mod tests {
         let stored = MemoryEngine::seal(&keys, &embedder, &e, "local")?;
         local.put(&stored)?;
 
-        let mut changed = entry("chg-1", "\u{88ab}\u{4ed6}\u{7aef}\u{6539}\u{8fc7}\u{7684}\u{65b0}\u{5185}\u{5bb9}");
+        let mut changed = entry(
+            "chg-1",
+            "\u{88ab}\u{4ed6}\u{7aef}\u{6539}\u{8fc7}\u{7684}\u{65b0}\u{5185}\u{5bb9}",
+        );
         changed.updated_at = "2027-01-01T00:00:00.000Z".to_owned();
         let mut blob = MemoryEngine::seal(&keys, &embedder, &changed, "local")?;
         blob.local_embedding = None; // Remote records carry no local feature copy.
@@ -584,7 +589,10 @@ mod tests {
         let fresh_blob = MemoryEngine::seal(&keys, &embedder, &fresh, "local")?;
         let pulled = merge_blobs(&keys, &local, vec![fresh_blob])?;
         assert_eq!(pulled, 1);
-        assert_eq!(local.all(false)?[0].local_title, "LWW \u{65b0}\u{6807}\u{9898}");
+        assert_eq!(
+            local.all(false)?[0].local_title,
+            "LWW \u{65b0}\u{6807}\u{9898}"
+        );
         Ok(())
     }
 
@@ -623,7 +631,10 @@ mod tests {
 
         // Device A: write two rows
         let a = LocalStore::open(&dir.path().join("a.db"))?;
-        let e1 = entry("a-1", "Rust \u{6240}\u{6709}\u{6743} \u{5185}\u{5b58}\u{5b89}\u{5168}");
+        let e1 = entry(
+            "a-1",
+            "Rust \u{6240}\u{6709}\u{6743} \u{5185}\u{5b58}\u{5b89}\u{5168}",
+        );
         let s1 = MemoryEngine::seal(&keys, &embedder, &e1, "u")?;
         a.put(&s1)?;
         let e2 = entry("a-2", "Python \u{6570}\u{636e}\u{5206}\u{6790}");
@@ -731,7 +742,10 @@ mod tests {
         let cloud = LocalStore::open(&dir.path().join("cloud.db"))?;
         let a = LocalStore::open(&dir.path().join("a.db"))?;
         for i in 0..101 {
-            let e = entry(&format!("bulk-{i}"), &format!("\u{6279}\u{91cf}\u{6761}\u{76ee} {i}"));
+            let e = entry(
+                &format!("bulk-{i}"),
+                &format!("\u{6279}\u{91cf}\u{6761}\u{76ee} {i}"),
+            );
             let s = MemoryEngine::seal(&keys, &embedder, &e, "u")?;
             a.put(&s)?;
         }

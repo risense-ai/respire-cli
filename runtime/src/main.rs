@@ -108,8 +108,13 @@ fn run() -> Result<i32> {
             }
             "--port" => {
                 let value = args.next().context("--port requires a value")?;
-                let port: u16 = value.parse().map_err(|_| anyhow::anyhow!("--port requires a numeric port between 1 and 65535"))?;
-                anyhow::ensure!(port > 0, "--port requires a numeric port between 1 and 65535");
+                let port: u16 = value.parse().map_err(|_| {
+                    anyhow::anyhow!("--port requires a numeric port between 1 and 65535")
+                })?;
+                anyhow::ensure!(
+                    port > 0,
+                    "--port requires a numeric port between 1 and 65535"
+                );
                 flags.port = Some(port);
             }
             "--data-dir" => {
@@ -139,7 +144,11 @@ fn run() -> Result<i32> {
         .into_iter()
         .filter(|requested| *requested)
         .count();
-    anyhow::ensure!(requested <= 1, "combine at most one of start/serve, stop, status, version\n{}", usage());
+    anyhow::ensure!(
+        requested <= 1,
+        "combine at most one of start/serve, stop, status, version\n{}",
+        usage()
+    );
 
     if flags.version {
         if flags.json {
@@ -183,9 +192,14 @@ fn serve_command(flags: &Flags) -> Result<i32> {
         // detached from the supervisor, so the envelope is best-effort.
         print_envelope("start", true, 0, None);
     } else {
-        println!("runtime=starting host={host} port={port}",
+        println!(
+            "runtime=starting host={host} port={port}",
             host = flags.host,
-            port = flags.port.map(|port| port.to_string()).unwrap_or_else(|| "default".to_owned()));
+            port = flags
+                .port
+                .map(|port| port.to_string())
+                .unwrap_or_else(|| "default".to_owned())
+        );
     }
     let _ = flags.supervised;
     rpc_serve::serve(RuntimeFlags {
@@ -222,9 +236,7 @@ fn status_command(json: bool) -> Result<i32> {
             } else {
                 println!(
                     "runtime=up pid={} url={} data_dir={}",
-                    health.pid,
-                    health.url,
-                    health.data_dir,
+                    health.pid, health.url, health.data_dir,
                 );
             }
             Ok(0)

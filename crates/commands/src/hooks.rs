@@ -189,10 +189,7 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
         .env_clear()
         .env("PATH", respire_app::env::var("PATH").unwrap_or_default())
         .env("HOME", respire_app::env::var("HOME").unwrap_or_default())
-        .env(
-            "RSRS_HOOK_EVENT",
-            envelope["event"].as_str().unwrap_or(""),
-        );
+        .env("RSRS_HOOK_EVENT", envelope["event"].as_str().unwrap_or(""));
     #[cfg(windows)]
     if let Some(root) = respire_app::env::var_os("SystemRoot") {
         spawn.env("SystemRoot", root);
@@ -338,10 +335,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // config_path points at a missing test dir -> empty config, fire allows
-        std::env::set_var(
-            "RSRS_DATA_DIR",
-            "/tmp/onememory-hooks-test-nonexistent",
-        );
+        std::env::set_var("RSRS_DATA_DIR", "/tmp/onememory-hooks-test-nonexistent");
         let cfg = read_config();
         assert!(cfg.hooks.is_empty());
         let v = fire(HookEvent::PreRemember, serde_json::json!({}));
@@ -403,7 +397,9 @@ mod tests {
 
     #[test]
     fn hook_failure_policies_and_explicit_veto() -> anyhow::Result<()> {
-        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
         let saved = std::env::var_os("RSRS_DATA_DIR");
         std::env::set_var("RSRS_DATA_DIR", dir.path());
@@ -422,10 +418,18 @@ mod tests {
                 ]}});
                 std::fs::write(config_path(), cfg.to_string())?;
                 let verdict = fire(event, serde_json::json!({}));
-                assert_eq!(verdict.blocked, blocked, "{} policy={policy}", event.as_str());
+                assert_eq!(
+                    verdict.blocked,
+                    blocked,
+                    "{} policy={policy}",
+                    event.as_str()
+                );
                 assert_eq!(!verdict.warnings.is_empty(), warned);
                 assert!(!verdict.reason.contains("failed to start"));
-                assert!(verdict.warnings.iter().all(|warning| !warning.contains("failed to start")));
+                assert!(verdict
+                    .warnings
+                    .iter()
+                    .all(|warning| !warning.contains("failed to start")));
             }
             let veto_command = if cfg!(windows) {
                 "echo {\"verdict\":\"block\",\"reason\":\"private data\"}"

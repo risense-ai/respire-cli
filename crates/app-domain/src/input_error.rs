@@ -13,7 +13,9 @@ impl std::error::Error for InputError {}
 
 /// Validate a user-selected output directory without reclassifying write or storage failures.
 pub fn validate_output_parent(path: &std::path::Path) -> anyhow::Result<()> {
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty())
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     let metadata = std::fs::metadata(parent).map_err(|error| {
         let message = format!("invalid output directory: {} ({error})", parent.display());
@@ -24,7 +26,11 @@ pub fn validate_output_parent(path: &std::path::Path) -> anyhow::Result<()> {
         }
     })?;
     if !metadata.is_dir() {
-        return Err(InputError(format!("output parent is not a directory: {}", parent.display())).into());
+        return Err(InputError(format!(
+            "output parent is not a directory: {}",
+            parent.display()
+        ))
+        .into());
     }
     Ok(())
 }

@@ -90,7 +90,15 @@ fn category_entry(c: &Category) -> MemoryEntry {
         see_also: Vec::new(),
         id: root_id(c.title),
         kind: Kind::Knowledge,
-        tags: vec!["\u{8bcd}\u{5e93}\u{7eb2}".to_owned(), if c.ai { "AI\u{57df}" } else { "\u{4eba}\u{57df}" }.to_owned()],
+        tags: vec![
+            "\u{8bcd}\u{5e93}\u{7eb2}".to_owned(),
+            if c.ai {
+                "AI\u{57df}"
+            } else {
+                "\u{4eba}\u{57df}"
+            }
+            .to_owned(),
+        ],
         title: c.title.to_owned(),
         content: anchor_text(c),
         user: crate::service::current_user(),
@@ -118,27 +126,35 @@ pub fn ensure_category_root<E: Embedder>(
     if store.all(false)?.iter().any(|m| m.id == rid && !m.deleted) {
         return Ok(rid);
     }
-    let stored = MemoryEngine::seal(session, embedder, &category_entry(c), &category_entry(c).user)?;
+    let stored = MemoryEngine::seal(
+        session,
+        embedder,
+        &category_entry(c),
+        &category_entry(c).user,
+    )?;
     store.put(&stored)?;
     Ok(rid)
 }
 
 /// Lexical classify: lowercase body (including title) and count keyword hits.
 
-
 /// Auto-classify: lexical hits (if tied, take the class with more keyword hits) → compare to the semantic anchor.
 /// Returns (class index, anchor similarity). Lexical and semantic both use the hit class; semantic only rejects a false attach.
 /// Decision: lexical hits ≥1 and anchor sim ≥0.42 → hit; no lexical hits → None (do not guess).
-pub fn classify<E: Embedder>(
-    embedder: &E,
-    text: &str,
-) -> Result<Option<(usize, f32)>> {
-    respire_core_sdk::execute("taxonomy_classify", serde_json::json!({"model":embedder.model_name(), "text":text}))
+pub fn classify<E: Embedder>(embedder: &E, text: &str) -> Result<Option<(usize, f32)>> {
+    respire_core_sdk::execute(
+        "taxonomy_classify",
+        serde_json::json!({"model":embedder.model_name(), "text":text}),
+    )
 }
 
 /// Build a diary body from the serialized marker, date/time and original content.
 pub fn diary_content(content: &str) -> String {
-    format!("\u{3010}\u{65e5}\u{8bb0}\u{3011}{} {}", Local::now().format("%Y-%m-%d %H:%M"), content)
+    format!(
+        "\u{3010}\u{65e5}\u{8bb0}\u{3011}{} {}",
+        Local::now().format("%Y-%m-%d %H:%M"),
+        content
+    )
 }
 
 /// Orphan root: a live root with no parent and no children (the object of create-outline ask).
@@ -151,7 +167,14 @@ pub fn lone_roots(store: &LocalStore) -> Result<Vec<(String, String)>> {
         }
         let has_child = all.iter().any(|x| x.local_parent_id == m.id);
         if !has_child {
-            out.push((m.id.clone(), if m.local_title.is_empty() { m.local_content_head.chars().take(24).collect() } else { m.local_title.clone() }));
+            out.push((
+                m.id.clone(),
+                if m.local_title.is_empty() {
+                    m.local_content_head.chars().take(24).collect()
+                } else {
+                    m.local_title.clone()
+                },
+            ));
         }
     }
     Ok(out)
@@ -177,9 +200,12 @@ mod tests {
         titles.sort_unstable();
         titles.dedup();
         assert_eq!(titles.len(), CATALOG.len(), "duplicate catalog titles");
-        assert_eq!(CATALOG.iter().filter(|c| c.ai).count(), 3, "AI domain must have 3 classes");
+        assert_eq!(
+            CATALOG.iter().filter(|c| c.ai).count(),
+            3,
+            "AI domain must have 3 classes"
+        );
     }
-
 
     #[test]
     fn diary_content_stamps_body() {

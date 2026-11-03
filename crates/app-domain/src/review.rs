@@ -1,8 +1,8 @@
 //! Review candidates and CAS commits. Authority/root inputs never come from CLI JSON.
 #[path = "review_recall.rs"]
 mod recall;
-pub use recall::AuthorizedRecallSource;
 use anyhow::{ensure, Context, Result};
+pub use recall::AuthorizedRecallSource;
 use respire_protocol::{Evidence, MemoryEntry, Scope, Verification};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};

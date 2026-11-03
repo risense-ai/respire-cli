@@ -126,7 +126,9 @@ fn main() -> Result<()> {
     b.put(&MemoryEngine::seal(&keys, &provider, &entry, &user)?)?;
     let confirmed = read(&b, &keys, &entry.id)?;
     let mut earlier = entry.clone();
-    earlier.content = "\u{3010}09:00\u{3011}synthetic common event\n\u{3010}09:09\u{3011}synthetic-remote-append".into();
+    earlier.content =
+        "\u{3010}09:00\u{3011}synthetic common event\n\u{3010}09:09\u{3011}synthetic-remote-append"
+            .into();
     earlier.updated_at = "2026-10-27T09:09:00.000Z".into();
     earlier.modified_by = "synthetic-device-a".into();
     a.put(&MemoryEngine::seal(&keys, &provider, &earlier, &user)?)?;
@@ -183,7 +185,10 @@ fn main() -> Result<()> {
         .find(|c| c["status"] == "conflict_saved")
         .context("conflict history missing")?;
     let conflict_rev = conflict["rev"].as_i64().context("conflict revision")?;
-    let merged = format!("{}\n\u{3010}09:09\u{3011}synthetic-remote-append", confirmed.content);
+    let merged = format!(
+        "{}\n\u{3010}09:09\u{3011}synthetic-remote-append",
+        confirmed.content
+    );
     b.queue_conflict_resolution(
         &keys,
         &epoch,

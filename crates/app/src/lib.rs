@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-
 //! respire_app — client-side application layer (inject, session_import, login_transaction, migration).
 //!
 //! WP-2c moved the engine-side modules into the respire_app_domain crate. This crate
@@ -8,8 +7,8 @@
 //! `respire_app::service::...`, `respire_app::memory::...`, `respire_app::transport::...`
 //! and all other engine paths keep resolving with zero caller changes.
 
-pub use respire_core_sdk::env;
 pub use respire_core_sdk as core_sdk;
+pub use respire_core_sdk::env;
 
 #[cfg(test)]
 mod test_lock;
@@ -41,8 +40,8 @@ pub use respire_app_domain::sync;
 pub use respire_app_domain::taxonomy;
 pub use respire_app_domain::transport;
 
-pub use memory::{hydrate_local, MemoryEngine, SessionKeys};
 pub use memory::model::{Kind, MemoryEntry, MemoryQuery, StoredMemory, VERSION_TAG};
+pub use memory::{hydrate_local, MemoryEngine, SessionKeys};
 pub use transport::MemoryTransport;
 
 /// Compatibility version exported for server health responses.

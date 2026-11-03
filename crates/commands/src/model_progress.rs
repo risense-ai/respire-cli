@@ -74,11 +74,14 @@ impl Operation {
     /// Reserve cancellation/progress before acknowledging a queued task.
     pub fn reserve_task(id: String) -> Result<Self> {
         let _scope = TaskScope::new(Some(id));
-        let operation = Self::try_begin_inner("queued",true,true)?.ok_or_else(||anyhow!("another model operation is running"))?;
+        let operation = Self::try_begin_inner("queued", true, true)?
+            .ok_or_else(|| anyhow!("another model operation is running"))?;
         TRACKED.set(false);
         Ok(operation)
     }
-    pub fn enter_thread(&self) { TRACKED.set(true); }
+    pub fn enter_thread(&self) {
+        TRACKED.set(true);
+    }
     /// Download duration depends on bandwidth. Keep progressing downloads alive.
     pub fn begin_download() -> Result<Self> {
         Self::try_begin_with_idle_timeout("verify", true)?
@@ -134,7 +137,9 @@ impl Operation {
 }
 
 pub fn status() -> Result<Value> {
-    let slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
+    let slot = CURRENT
+        .lock()
+        .map_err(|_| anyhow!("model progress lock poisoned"))?;
     Ok(match slot.as_ref() {
         Some(progress) => json!({
             "active": true, "id": progress.id, "phase": progress.phase,
@@ -192,16 +197,31 @@ pub fn check() -> Result<()> {
 /// expensive model call runs before this guard, never while CURRENT is held.
 #[doc(hidden)]
 pub fn commit<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
-    let slot = CURRENT.lock().map_err(|_| anyhow!("model progress lock poisoned"))?;
-    anyhow::ensure!(TRACKED.get(), "diary commit requires an active model operation");
-    check_progress(slot.as_ref().ok_or_else(|| anyhow!("model operation already ended"))?)?;
+    let slot = CURRENT
+        .lock()
+        .map_err(|_| anyhow!("model progress lock poisoned"))?;
+    anyhow::ensure!(
+        TRACKED.get(),
+        "diary commit requires an active model operation"
+    );
+    check_progress(
+        slot.as_ref()
+            .ok_or_else(|| anyhow!("model operation already ended"))?,
+    )?;
     action()
 }
 
 pub fn commit_final<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
-    let mut slot = CURRENT.lock().map_err(|_|anyhow!("model progress lock poisoned"))?;
-    anyhow::ensure!(TRACKED.get(),"final commit requires an active model operation");
-    let progress = slot.as_mut().ok_or_else(||anyhow!("model operation already ended"))?;
+    let mut slot = CURRENT
+        .lock()
+        .map_err(|_| anyhow!("model progress lock poisoned"))?;
+    anyhow::ensure!(
+        TRACKED.get(),
+        "final commit requires an active model operation"
+    );
+    let progress = slot
+        .as_mut()
+        .ok_or_else(|| anyhow!("model operation already ended"))?;
     check_progress(progress)?;
     let result = action()?;
     progress.cancellable = false;
@@ -244,18 +264,24 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn loading_rejects_cancel_without_acknowledgement_at_validation_and_native_phases() -> Result<()> {
-        let _serial=crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-        let _scope=TaskScope::new(Some("synthetic-uncancellable-load".into()));
-        let _operation=Operation::begin_load()?;
+    fn loading_rejects_cancel_without_acknowledgement_at_validation_and_native_phases() -> Result<()>
+    {
+        let _serial = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _scope = TaskScope::new(Some("synthetic-uncancellable-load".into()));
+        let _operation = Operation::begin_load()?;
         for phase in ["verify", "load"] {
-            update(phase,"int8",0,None)?;
-            let before=control("synthetic-uncancellable-load",false)?;
-            assert_eq!(before["cancellable"],false);
-            assert_eq!(before["cancelled"],false);
-            let error=control("synthetic-uncancellable-load",true).unwrap_err();
+            update(phase, "int8", 0, None)?;
+            let before = control("synthetic-uncancellable-load", false)?;
+            assert_eq!(before["cancellable"], false);
+            assert_eq!(before["cancelled"], false);
+            let error = control("synthetic-uncancellable-load", true).unwrap_err();
             assert!(error.to_string().contains("cancellation was not accepted"));
-            assert_eq!(control("synthetic-uncancellable-load",false)?["cancelled"],false);
+            assert_eq!(
+                control("synthetic-uncancellable-load", false)?["cancelled"],
+                false
+            );
             check()?;
         }
         Ok(())
@@ -263,36 +289,63 @@ mod tests {
 
     #[test]
     fn cancellation_acknowledgement_is_serialized_with_durable_commit() -> Result<()> {
-        let _serial=crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-        let _scope=TaskScope::new(Some("synthetic-commit-cancel".into()));
-        let _operation=Operation::begin("index")?;
-        let (attempt_tx,attempt_rx)=std::sync::mpsc::channel();
-        let (ack_tx,ack_rx)=std::sync::mpsc::channel();
-        let mut worker=None;
-        commit(||{
-            worker=Some(std::thread::spawn(move || {
-                assert!(CURRENT.try_lock().is_err(),"commit must hold the cancellation lock");
+        let _serial = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _scope = TaskScope::new(Some("synthetic-commit-cancel".into()));
+        let _operation = Operation::begin("index")?;
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (ack_tx, ack_rx) = std::sync::mpsc::channel();
+        let mut worker = None;
+        commit(|| {
+            worker = Some(std::thread::spawn(move || {
+                assert!(
+                    CURRENT.try_lock().is_err(),
+                    "commit must hold the cancellation lock"
+                );
                 attempt_tx.send(()).unwrap();
-                let reply=control("synthetic-commit-cancel",true);
+                let reply = control("synthetic-commit-cancel", true);
                 ack_tx.send(reply).unwrap();
             }));
             attempt_rx.recv_timeout(Duration::from_secs(2))?;
-            assert!(ack_rx.recv_timeout(Duration::from_millis(20)).is_err(),"cancellation acknowledged before the protected commit ended");
+            assert!(
+                ack_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+                "cancellation acknowledged before the protected commit ended"
+            );
             Ok(())
         })?;
-        assert_eq!(ack_rx.recv_timeout(Duration::from_secs(2))??["cancelled"],true);
+        assert_eq!(
+            ack_rx.recv_timeout(Duration::from_secs(2))??["cancelled"],
+            true
+        );
         worker.unwrap().join().unwrap();
         assert!(check().is_err());
-        let mut wrote=false;
-        assert!(commit(||{wrote=true;Ok(())}).is_err());
-        assert!(!wrote,"an acknowledged cancellation must reject later durable writes");
+        let mut wrote = false;
+        assert!(commit(|| {
+            wrote = true;
+            Ok(())
+        })
+        .is_err());
+        assert!(
+            !wrote,
+            "an acknowledged cancellation must reject later durable writes"
+        );
         Ok(())
     }
 
     fn long_operation(idle_timeout: bool, idle: u64) -> Progress {
-        Progress { id: "fixture".to_owned(), phase: "index".to_owned(), item: "m3".to_owned(),
-            done: 100, total: Some(4000), started: Instant::now() - Duration::from_secs(3600),
-            updated: Instant::now() - Duration::from_secs(idle), idle_timeout, cancelled: false, cancellable: true }
+        Progress {
+            id: "fixture".to_owned(),
+            phase: "index".to_owned(),
+            item: "m3".to_owned(),
+            done: 100,
+            total: Some(4000),
+            started: Instant::now() - Duration::from_secs(3600),
+            updated: Instant::now() - Duration::from_secs(idle),
+            idle_timeout,
+            cancelled: false,
+            cancellable: true,
+        }
     }
 
     #[test]

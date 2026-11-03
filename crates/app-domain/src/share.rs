@@ -99,7 +99,9 @@ pub fn decode(text: &str) -> Result<SharePayload> {
     if candidates.is_empty() {
         // No decent candidate: same guidance as extract
         extract(text)?;
-        return Err(anyhow!("payload too short \u{2014} text may have been truncated on copy"));
+        return Err(anyhow!(
+            "payload too short \u{2014} text may have been truncated on copy"
+        ));
     }
     let mut last_err = None;
     for body in &candidates {
@@ -129,7 +131,9 @@ fn decode_body(body: &str) -> Result<SharePayload> {
         ));
     }
     if payload.items.is_empty() {
-        return Err(anyhow!("payload has no memories \u{2014} the shared subtree may be empty"));
+        return Err(anyhow!(
+            "payload has no memories \u{2014} the shared subtree may be empty"
+        ));
     }
     Ok(payload)
 }
@@ -170,7 +174,9 @@ pub fn extract(text: &str) -> Result<String> {
         }
     }
     if found {
-        return Err(anyhow!("payload is empty \u{2014} text may have been truncated on copy"));
+        return Err(anyhow!(
+            "payload is empty \u{2014} text may have been truncated on copy"
+        ));
     }
     Err(anyhow!(
         "payload not found (missing `{PAYLOAD_PREFIX}` prefix) \u{2014} feed the whole BEGIN/END block from the prompt unchanged"
@@ -302,9 +308,22 @@ pub fn items_from(
         out.push(ShareItem {
             metadata: e.metadata.clone(),
             unknown_fields: e.unknown_fields.clone(),
-            supersedes: if members.contains(&e.supersedes) { e.supersedes.clone() } else { String::new() },
-            superseded_by: if members.contains(&e.superseded_by) { e.superseded_by.clone() } else { String::new() },
-            see_also: e.see_also.iter().filter(|id| members.contains(*id)).cloned().collect(),
+            supersedes: if members.contains(&e.supersedes) {
+                e.supersedes.clone()
+            } else {
+                String::new()
+            },
+            superseded_by: if members.contains(&e.superseded_by) {
+                e.superseded_by.clone()
+            } else {
+                String::new()
+            },
+            see_also: e
+                .see_also
+                .iter()
+                .filter(|id| members.contains(*id))
+                .cloned()
+                .collect(),
             id: e.id.clone(),
             parent_id: parent,
             kind: e.kind.as_str().to_owned(),
@@ -333,7 +352,9 @@ pub fn remap_parents(
     attach_parent: &str,
 ) -> Result<(Vec<String>, usize, usize)> {
     if items.len() != new_ids.len() {
-        return Err(anyhow!("internal error: new id count does not match item count"));
+        return Err(anyhow!(
+            "internal error: new id count does not match item count"
+        ));
     }
     let mut old_index = std::collections::HashMap::new();
     for (i, it) in items.iter().enumerate() {
@@ -354,7 +375,9 @@ pub fn remap_parents(
                 break;
             }
             if !chain.insert(i) {
-                return Err(anyhow!("payload parent chain contains a cycle \u{2014} import refused"));
+                return Err(anyhow!(
+                    "payload parent chain contains a cycle \u{2014} import refused"
+                ));
             }
             cursor = old_index.get(items[i].parent_id.as_str()).copied();
         }
@@ -481,8 +504,13 @@ mod tests {
         let cut = &text[..text.len() * 2 / 3];
         assert!(decode(cut).is_err(), "truncated payload must error");
         // no prefix → explicit guidance
-        let e = decode("\u{8fd9}\u{662f}\u{4e00}\u{6bb5}\u{65e0}\u{5173}\u{6587}\u{672c}").unwrap_err().to_string();
-        assert!(e.contains("payload not found"), "missing prefix must give guidance: {e}");
+        let e = decode("\u{8fd9}\u{662f}\u{4e00}\u{6bb5}\u{65e0}\u{5173}\u{6587}\u{672c}")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            e.contains("payload not found"),
+            "missing prefix must give guidance: {e}"
+        );
         // Prefix present but body empty
         assert!(decode(PAYLOAD_PREFIX).is_err());
         Ok(())
@@ -494,7 +522,10 @@ mod tests {
         p.v = 99;
         let text = encode(&p)?;
         let e = decode(&text).unwrap_err().to_string();
-        assert!(e.contains("version"), "wrong version must be mentioned: {e}");
+        assert!(
+            e.contains("version"),
+            "wrong version must be mentioned: {e}"
+        );
         Ok(())
     }
 
@@ -509,7 +540,10 @@ mod tests {
         assert!(prompt.contains("share-import"));
         assert!(prompt.contains("--parent"));
         assert!(prompt.contains("--go"));
-        assert!(prompt.contains("Conflict gate"), "prompt must mention the conflict gate");
+        assert!(
+            prompt.contains("Conflict gate"),
+            "prompt must mention the conflict gate"
+        );
         assert!(prompt.contains("--force"));
         Ok(())
     }
@@ -519,7 +553,9 @@ mod tests {
         // Copy-paste often wraps long base64 — must reassemble
         let p = sample();
         let encoded = encode(&p)?;
-        let body = encoded.strip_prefix(PAYLOAD_PREFIX).ok_or_else(|| anyhow!("missing prefix"))?;
+        let body = encoded
+            .strip_prefix(PAYLOAD_PREFIX)
+            .ok_or_else(|| anyhow!("missing prefix"))?;
         let folded: String = body
             .as_bytes()
             .chunks(60)
@@ -536,7 +572,10 @@ mod tests {
         // The prompt appendix mentions the prefix as "after `1MEMSHARE1:` is…" — a mention must not mislead
         let p = sample();
         let prompt = build_prompt(&p, &encode(&p)?);
-        assert!(prompt.matches(PAYLOAD_PREFIX).count() >= 2, "prompt must mention the prefix more than once (repro)");
+        assert!(
+            prompt.matches(PAYLOAD_PREFIX).count() >= 2,
+            "prompt must mention the prefix more than once (repro)"
+        );
         let back = decode(&prompt)?;
         assert_eq!(back.items.len(), 2);
         Ok(())
@@ -547,7 +586,9 @@ mod tests {
         // No BEGIN/END markers, bare payload with line wraps — must still work
         let p = sample();
         let encoded = encode(&p)?;
-        let body = encoded.strip_prefix(PAYLOAD_PREFIX).ok_or_else(|| anyhow!("missing prefix"))?;
+        let body = encoded
+            .strip_prefix(PAYLOAD_PREFIX)
+            .ok_or_else(|| anyhow!("missing prefix"))?;
         let folded: String = body
             .as_bytes()
             .chunks(50)
@@ -563,7 +604,8 @@ mod tests {
         // A real payload (ending with =) then prose mentioning the prefix — must not swallow the prose into base64
         let p = sample();
         let encoded = encode(&p)?;
-        let glued = format!("{encoded}\n\n`{PAYLOAD_PREFIX}` is followed by gzip-compressed JSON.\n");
+        let glued =
+            format!("{encoded}\n\n`{PAYLOAD_PREFIX}` is followed by gzip-compressed JSON.\n");
         let back = decode(&glued)?;
         assert_eq!(back.items.len(), 2);
         Ok(())
@@ -612,10 +654,19 @@ mod tests {
     fn remap_rejects_cycle_and_duplicate() {
         let cyc = vec![item("a", "b"), item("b", "a")];
         let ids = vec!["N0".to_owned(), "N1".to_owned()];
-        assert!(remap_parents(&cyc, &ids, "").is_err(), "\u{73af}\u{987b}\u{62d2}");
+        assert!(
+            remap_parents(&cyc, &ids, "").is_err(),
+            "\u{73af}\u{987b}\u{62d2}"
+        );
         let dup = vec![item("a", ""), item("a", "")];
-        assert!(remap_parents(&dup, &ids, "").is_err(), "\u{91cd}\u{590d} id \u{987b}\u{62d2}");
-        assert!(remap_parents(&cyc, &["N0".to_owned()], "").is_err(), "\u{957f}\u{5ea6}\u{4e0d}\u{7b26}\u{987b}\u{62d2}");
+        assert!(
+            remap_parents(&dup, &ids, "").is_err(),
+            "\u{91cd}\u{590d} id \u{987b}\u{62d2}"
+        );
+        assert!(
+            remap_parents(&cyc, &["N0".to_owned()], "").is_err(),
+            "\u{957f}\u{5ea6}\u{4e0d}\u{7b26}\u{987b}\u{62d2}"
+        );
     }
 
     #[test]
@@ -663,7 +714,10 @@ mod tests {
         let items = items_from("r", &order, &lookup, &members);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].parent_id, "", "\u{6839}\u{6761}\u{4e4b}\u{7236}\u{5728}\u{5b50}\u{6811}\u{5916}\u{987b}\u{7f6e}\u{7a7a}");
-        assert_eq!(items[1].parent_id, "r", "\u{5b50}\u{6811}\u{5185}\u{7236}\u{94fe}\u{987b}\u{4fdd}\u{7559}");
+        assert_eq!(
+            items[1].parent_id, "r",
+            "\u{5b50}\u{6811}\u{5185}\u{7236}\u{94fe}\u{987b}\u{4fdd}\u{7559}"
+        );
     }
 
     #[test]

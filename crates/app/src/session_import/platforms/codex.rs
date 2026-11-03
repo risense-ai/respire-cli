@@ -13,9 +13,11 @@ use serde_json::Value;
 use super::common::{self, PlatformDef, SqlVal};
 use crate::session_import::{scan_util, ScanOptions, Session};
 
-const THREADS_SQL: &str = "SELECT id, rollout_path, cwd, created_at, updated_at, model_provider, model, \
+const THREADS_SQL: &str =
+    "SELECT id, rollout_path, cwd, created_at, updated_at, model_provider, model, \
      first_user_message, tokens_used, source, agent_nickname, agent_role FROM threads";
-const LEGACY_THREADS_SQL: &str = "SELECT id, rollout_path, cwd, created_at, updated_at, model_provider, \
+const LEGACY_THREADS_SQL: &str =
+    "SELECT id, rollout_path, cwd, created_at, updated_at, model_provider, \
      model, first_user_message, tokens_used FROM threads";
 const SPAWN_EDGES_SQL: &str = "SELECT child_thread_id, parent_thread_id FROM thread_spawn_edges";
 
@@ -30,12 +32,14 @@ pub fn platforms() -> Vec<PlatformDef> {
 }
 
 fn roots() -> Vec<PathBuf> {
-    scan_util::existing([
-        scan_util::env_path("CODEX_HOME"),
-        scan_util::home().map(|home| home.join(".codex")),
-    ]
-    .into_iter()
-    .flatten())
+    scan_util::existing(
+        [
+            scan_util::env_path("CODEX_HOME"),
+            scan_util::home().map(|home| home.join(".codex")),
+        ]
+        .into_iter()
+        .flatten(),
+    )
 }
 
 fn scan(opts: &ScanOptions) -> Vec<Session> {
@@ -44,8 +48,15 @@ fn scan(opts: &ScanOptions) -> Vec<Session> {
     let mut rollouts = Vec::new();
     for root in &roots {
         db_paths.extend(scan_util::files_in(root, "state_*.sqlite"));
-        rollouts.extend(scan_util::files_below(&root.join("sessions"), 12, "rollout-*.jsonl"));
-        rollouts.extend(scan_util::files_in(&root.join("archived_sessions"), "rollout-*.jsonl"));
+        rollouts.extend(scan_util::files_below(
+            &root.join("sessions"),
+            12,
+            "rollout-*.jsonl",
+        ));
+        rollouts.extend(scan_util::files_in(
+            &root.join("archived_sessions"),
+            "rollout-*.jsonl",
+        ));
     }
     let mut sessions = Vec::new();
     for path in &db_paths {
@@ -67,7 +78,9 @@ fn codex_db(path: &Path) -> Vec<Session> {
     if rows.is_empty() {
         rows = common::sqlite_rows(&connection, LEGACY_THREADS_SQL);
     }
-    rows.iter().map(|row| codex_row(path, row, &edges)).collect()
+    rows.iter()
+        .map(|row| codex_row(path, row, &edges))
+        .collect()
 }
 
 fn spawn_edges(connection: &rusqlite::Connection) -> HashMap<String, String> {
@@ -154,7 +167,11 @@ mod tests {
         assert_eq!(session.parent_id.as_deref(), Some("p-3"));
         assert_eq!(session.agent.as_deref(), Some("Tesla (explorer)"));
         assert_eq!(session.model.as_deref(), Some("gpt-5"));
-        assert!(session.updated_at.as_deref().ok_or("updated_at")?.starts_with("2023-11-14"));
+        assert!(session
+            .updated_at
+            .as_deref()
+            .ok_or("updated_at")?
+            .starts_with("2023-11-14"));
         Ok(())
     }
 }

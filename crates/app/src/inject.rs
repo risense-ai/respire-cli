@@ -123,10 +123,16 @@ const WORKBUDDY_MAX_CHARS: usize = 4000;
 /// Build the mode-specific reference; the full document is checked before writing.
 fn wb_ref_md(entity: &str) -> String {
     if crate::service::off_mode() {
-        return format!("{}\nPolicy reference: `{entity}`.\n", INSTRUCTIONS_OFF_MD.trim_end());
+        return format!(
+            "{}\nPolicy reference: `{entity}`.\n",
+            INSTRUCTIONS_OFF_MD.trim_end()
+        );
     }
     if crate::service::readonly_mode() {
-        return format!("{}\nPolicy reference when needed: `{entity}`.\n", INSTRUCTIONS_READONLY_MD.trim_end());
+        return format!(
+            "{}\nPolicy reference when needed: `{entity}`.\n",
+            INSTRUCTIONS_READONLY_MD.trim_end()
+        );
     }
     format!(
         "## Respire memory workflow
@@ -580,7 +586,11 @@ fn rewrite_prompt_reference(text: &str, add: bool, line: &str, legacy: &str) -> 
             if count >= 3 {
                 match fence {
                     None => fence = Some((ch, count)),
-                    Some((open, length)) if ch == open && count >= length && trimmed[count..].trim().is_empty() => fence = None,
+                    Some((open, length))
+                        if ch == open && count >= length && trimmed[count..].trim().is_empty() =>
+                    {
+                        fence = None
+                    }
                     _ => {}
                 }
                 out.push_str(piece);
@@ -717,7 +727,8 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
     bounds.sort_unstable();
     anyhow::ensure!(
         bounds.windows(2).all(|pair| pair[0].1 <= pair[1].0),
-        "inject markers overlap; fix {} first", path.display()
+        "inject markers overlap; fix {} first",
+        path.display()
     );
     let newline = if before
         .find('\n')
@@ -732,7 +743,9 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
         content.trim_end()
     );
     let after = if bounds.is_empty() {
-        if remove { before.clone() } else {
+        if remove {
+            before.clone()
+        } else {
             let sep = if before.is_empty() {
                 String::new()
             } else if before.ends_with("\n\n") {
@@ -749,7 +762,9 @@ fn block_preview_with(path: &std::path::Path, remove: bool, content: &str) -> Re
         let mut cursor = 0;
         for (index, (start, end)) in bounds.iter().copied().enumerate() {
             after.push_str(&before[cursor..start]);
-            if index == 0 && !remove { after.push_str(&block); }
+            if index == 0 && !remove {
+                after.push_str(&block);
+            }
             cursor = end;
         }
         after.push_str(&before[cursor..]);
@@ -795,10 +810,14 @@ fn apply_block_with_limit(
 ) -> Result<bool> {
     let preview = block_preview_with(path, remove, content)?;
     if !remove {
-        if let Some(limit) = max_chars { check_document_budget(&preview, limit)?; }
+        if let Some(limit) = max_chars {
+            check_document_budget(&preview, limit)?;
+        }
     }
     if expected.is_some_and(|value| value != preview.revision) {
-        anyhow::bail!("target file changed; inspect and validate its current contents again before applying");
+        anyhow::bail!(
+            "target file changed; inspect and validate its current contents again before applying"
+        );
     }
     if !preview.changed {
         return Ok(false);
@@ -939,7 +958,12 @@ mod tests {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("AGENTS.md");
-        std::fs::write(&path, format!("{INSTRUCTIONS_MD}\n<!-- \u{522b}\u{4eba}\u{52a0}\u{7684}\u{4e00}\u{884c} -->\n"))?;
+        std::fs::write(
+            &path,
+            format!(
+                "{INSTRUCTIONS_MD}\n<!-- \u{522b}\u{4eba}\u{52a0}\u{7684}\u{4e00}\u{884c} -->\n"
+            ),
+        )?;
         assert_eq!(check_state(path, "inject"), "stale");
         Ok(())
     }
@@ -988,12 +1012,16 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_reference_respects_mode_and_does_not_require_full_policy_each_round() -> Result<()> {
+    fn workbuddy_reference_respects_mode_and_does_not_require_full_policy_each_round() -> Result<()>
+    {
         let _iso = crate::test_lock::Isolate::new()?;
         for mode in ["normal", "readonly", "off"] {
             crate::service::set_workspace_mode(mode)?;
             let text = wb_ref_md("/isolated/respire.md");
-            assert!(text.chars().count() < 4000, "{mode} reference exceeds host limit");
+            assert!(
+                text.chars().count() < 4000,
+                "{mode} reference exceeds host limit"
+            );
             assert!(!text.contains("Read the complete policy before each round"));
             match mode {
                 "normal" => assert!(text.contains("one bounded archival pass")),
@@ -1013,20 +1041,28 @@ mod tests {
     }
 
     #[test]
-    fn prompt_append_migrates_legacy_reference_preserves_user_config_and_removes_cleanly() -> Result<()> {
+    fn prompt_append_migrates_legacy_reference_preserves_user_config_and_removes_cleanly(
+    ) -> Result<()> {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("config.json");
         let abs = entity_abs()?;
         let current = format!("- Memory rules (respire): {abs}");
-        let legacy = format!("- \u{8bb0}\u{5fc6}\u{94c1}\u{5f8b}\u{ff08}respire\u{ff09}\u{ff1a}{abs}");
-        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
-            "model":"owned-model", "agents":[{"prompt_append":format!("OWNED_KEEP\n{legacy}\n{current}\n")}]
-        }))?)?;
+        let legacy =
+            format!("- \u{8bb0}\u{5fc6}\u{94c1}\u{5f8b}\u{ff08}respire\u{ff09}\u{ff1a}{abs}");
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "model":"owned-model", "agents":[{"prompt_append":format!("OWNED_KEEP\n{legacy}\n{current}\n")}]
+            }))?,
+        )?;
         assert!(patch_prompt_append(&path, true)?);
-        let read = || -> Result<serde_json::Value> { Ok(serde_json::from_slice(&std::fs::read(&path)?)?) };
+        let read =
+            || -> Result<serde_json::Value> { Ok(serde_json::from_slice(&std::fs::read(&path)?)?) };
         let cfg = read()?;
-        let prompt = cfg["agents"][0]["prompt_append"].as_str().ok_or_else(|| anyhow!("missing prompt"))?;
+        let prompt = cfg["agents"][0]["prompt_append"]
+            .as_str()
+            .ok_or_else(|| anyhow!("missing prompt"))?;
         assert!(prompt.contains("OWNED_KEEP"));
         assert!(!prompt.contains(&legacy));
         assert_eq!(prompt.matches(&current).count(), 1);
@@ -1045,7 +1081,9 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("MEMORY.md");
         let content = wb_ref_md("/isolated/policy.md");
-        let overhead = format!("\n\n{BLOCK_BEGIN}\n{}\n{BLOCK_END}\n", content.trim_end()).chars().count();
+        let overhead = format!("\n\n{BLOCK_BEGIN}\n{}\n{BLOCK_END}\n", content.trim_end())
+            .chars()
+            .count();
         for total in [3999, 4000, 4001] {
             // Multibyte owned text verifies this is a character, not byte, budget.
             let owned = format!("{}\n\n", "\u{754c}".repeat(total - overhead));
@@ -1057,7 +1095,10 @@ mod tests {
                 assert!(std::fs::read_to_string(&path)?.starts_with(&owned));
                 assert!(!write_block_with(&path, &content)?);
             } else {
-                assert!(write_block_with(&path, &content).unwrap_err().to_string().contains("maximum 4000"));
+                assert!(write_block_with(&path, &content)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("maximum 4000"));
                 assert_eq!(std::fs::read(&path)?, owned.as_bytes());
                 // Removal remains possible for an already over-budget document.
                 std::fs::write(&path, &preview.after)?;
@@ -1077,7 +1118,8 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_midflight_user_changes_are_preserved_and_partial_state_is_reported() -> Result<()> {
+    fn workbuddy_midflight_user_changes_are_preserved_and_partial_state_is_reported() -> Result<()>
+    {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("MEMORY.md");
@@ -1091,7 +1133,10 @@ mod tests {
             assert!(write_cover(entity.clone())?);
             // The user edits after the first target has been updated.
             std::fs::write(&path, concurrent.as_bytes())?;
-            let error = finish_workbuddy_injection(&path, &entity, &content, &preview.revision, true).unwrap_err().to_string();
+            let error =
+                finish_workbuddy_injection(&path, &entity, &content, &preview.revision, true)
+                    .unwrap_err()
+                    .to_string();
             assert!(error.contains("partially completed: shared policy was updated"));
             assert!(error.contains("no automatic rollback"));
             assert!(error.contains("rerun rsrs inject --id workbuddy only after review"));
@@ -1102,7 +1147,8 @@ mod tests {
     }
 
     #[test]
-    fn workbuddy_second_target_io_failure_reports_partial_completion_without_rollback() -> Result<()> {
+    fn workbuddy_second_target_io_failure_reports_partial_completion_without_rollback() -> Result<()>
+    {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("MEMORY.md");
@@ -1117,7 +1163,9 @@ mod tests {
         // An actual filesystem read failure in the second target, after cover.
         std::fs::rename(&path, &moved)?;
         std::fs::create_dir(&path)?;
-        let error = finish_workbuddy_injection(&path, &entity, &content, &preview.revision, true).unwrap_err().to_string();
+        let error = finish_workbuddy_injection(&path, &entity, &content, &preview.revision, true)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("partially completed: shared policy was updated"));
         assert!(error.contains("failed to read"));
         assert!(error.contains("Inspect both current files"));
@@ -1135,13 +1183,28 @@ mod tests {
         let source = format!("{owned}{legacy}\r\n{current}\r\nTAIL\r\n");
         let migrated = rewrite_prompt_reference(&source, true, current, legacy);
         assert_eq!(migrated, format!("{owned}{current}\r\nTAIL\r\n"));
-        assert_eq!(rewrite_prompt_reference(&migrated, true, current, legacy), migrated);
-        assert_eq!(rewrite_prompt_reference(&migrated, false, current, legacy), format!("{owned}TAIL\r\n"));
-        assert_eq!(rewrite_prompt_reference(&owned, false, current, legacy), owned);
+        assert_eq!(
+            rewrite_prompt_reference(&migrated, true, current, legacy),
+            migrated
+        );
+        assert_eq!(
+            rewrite_prompt_reference(&migrated, false, current, legacy),
+            format!("{owned}TAIL\r\n")
+        );
+        assert_eq!(
+            rewrite_prompt_reference(&owned, false, current, legacy),
+            owned
+        );
         let quoted = format!("quoted \"{legacy}\"\r\n");
-        assert_eq!(rewrite_prompt_reference(&quoted, true, current, legacy), format!("{quoted}{current}"));
+        assert_eq!(
+            rewrite_prompt_reference(&quoted, true, current, legacy),
+            format!("{quoted}{current}")
+        );
         let unclosed = format!("```example\r\n{legacy}\r\n");
-        assert_eq!(rewrite_prompt_reference(&unclosed, true, current, legacy), unclosed);
+        assert_eq!(
+            rewrite_prompt_reference(&unclosed, true, current, legacy),
+            unclosed
+        );
     }
 
     #[test]
@@ -1149,8 +1212,14 @@ mod tests {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("agent.json");
-        let legacy = format!("- \u{8bb0}\u{5fc6}\u{94c1}\u{5f8b}\u{ff08}respire\u{ff09}\u{ff1a}{}", entity_abs()?);
-        let original = format!("{{\r\n  \"prompt_append\": {}\r\n}}\r\n", serde_json::to_string(&format!("Example: {legacy}\r\n`{legacy}`\r\n"))?);
+        let legacy = format!(
+            "- \u{8bb0}\u{5fc6}\u{94c1}\u{5f8b}\u{ff08}respire\u{ff09}\u{ff1a}{}",
+            entity_abs()?
+        );
+        let original = format!(
+            "{{\r\n  \"prompt_append\": {}\r\n}}\r\n",
+            serde_json::to_string(&format!("Example: {legacy}\r\n`{legacy}`\r\n"))?
+        );
         std::fs::write(&path, original.as_bytes())?;
         assert!(!patch_prompt_append(&path, false)?);
         assert_eq!(std::fs::read(&path)?, original.as_bytes());
@@ -1163,7 +1232,10 @@ mod tests {
         let _iso = crate::test_lock::Isolate::new()?;
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("MEMORY.md");
-        std::fs::write(&path, "# \u{957f}\u{671f}\u{89c4}\u{5219}\n\n\u{81ea}\u{6709}\u{5185}\u{5bb9}\n")?;
+        std::fs::write(
+            &path,
+            "# \u{957f}\u{671f}\u{89c4}\u{5219}\n\n\u{81ea}\u{6709}\u{5185}\u{5bb9}\n",
+        )?;
         let abs = entity_abs()?;
         let ref_md = wb_ref_md(&abs);
         assert!(ref_md.contains("rsrs chain <short-id> --depth 3 --json"));

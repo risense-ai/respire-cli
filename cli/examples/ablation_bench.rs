@@ -76,7 +76,9 @@ fn main() -> Result<()> {
         if args.per_case {
             println!(
                 "{}",
-                serde_json::to_string(&json!({"case":result,"routing":output["routing"],"retrieval":output["retrieval"]}))?
+                serde_json::to_string(
+                    &json!({"case":result,"routing":output["routing"],"retrieval":output["retrieval"]})
+                )?
             );
         }
         results.push(result);

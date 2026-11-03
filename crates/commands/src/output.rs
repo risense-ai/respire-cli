@@ -72,7 +72,9 @@ impl ResultEnvelope {
         {
             return;
         }
-        self.errors = self.items.iter()
+        self.errors = self
+            .items
+            .iter()
             .filter(|item| matches!(item.status, Status::Fail) && !item.value.trim().is_empty())
             .map(|item| format!("{}: {}", item.name, item.value))
             .collect();
@@ -143,7 +145,13 @@ impl ResultEnvelope {
         if rows.is_empty() && !self.summary.is_null() {
             let mut summary = human_summary(&self.command, &self.summary);
             if !matches!(self.status, Status::Ok) && !summary.is_empty() {
-                summary.insert(0, vec![crate::i18n::chrome("status").to_owned(), status_label(self.status).to_owned()]);
+                summary.insert(
+                    0,
+                    vec![
+                        crate::i18n::chrome("status").to_owned(),
+                        status_label(self.status).to_owned(),
+                    ],
+                );
             }
             if !summary.is_empty() {
                 sections.push(render_table(
@@ -180,18 +188,33 @@ impl ResultEnvelope {
     pub fn human_item_value(&self, item: &Item) -> String {
         if self.command == "doctor" {
             let zh = crate::i18n::lang() == crate::i18n::Lang::Zh;
-            if item.name == "embedder" && (item.value.starts_with("BGE-M3 preparation/indexing ")
-                || item.value.starts_with("Model operation in progress:")) {
+            if item.name == "embedder"
+                && (item.value.starts_with("BGE-M3 preparation/indexing ")
+                    || item.value.starts_with("Model operation in progress:"))
+            {
                 let task = &self.details["model_operation"];
                 if task["active"] == true {
                     return model_task_text(task);
                 }
-                return if zh { "\u{5df2}\u{5b89}\u{6392}\u{540e}\u{53f0}\u{51c6}\u{5907}" } else { "Background preparation scheduled" }.to_owned();
+                return if zh {
+                    "\u{5df2}\u{5b89}\u{6392}\u{540e}\u{53f0}\u{51c6}\u{5907}"
+                } else {
+                    "Background preparation scheduled"
+                }
+                .to_owned();
             }
             if item.name == "model index" && item.value.starts_with("BGE-M3 index pending;") {
                 let index = &self.details["retrieval_index"];
                 let state = index["state"].as_str().unwrap_or("pending");
-                let mut text = format!("{}: {}", if zh { "\u{540e}\u{53f0}\u{7d22}\u{5f15}" } else { "Background index" }, task_phase(state));
+                let mut text = format!(
+                    "{}: {}",
+                    if zh {
+                        "\u{540e}\u{53f0}\u{7d22}\u{5f15}"
+                    } else {
+                        "Background index"
+                    },
+                    task_phase(state)
+                );
                 if let Some(error) = index["error"].as_str() {
                     text.push_str(&format!("; {error}"));
                 }
@@ -208,15 +231,33 @@ pub fn model_task_text(task: &Value) -> String {
     let total = task["total"].as_u64().unwrap_or(0);
     let phase = task["phase"].as_str().unwrap_or("unknown");
     let progress = if total > 0 && phase == "download" {
-        format!("{:.1}% ({:.1}/{:.1} MB)", done as f64 / total as f64 * 100.0,
-            done as f64 / 1_000_000.0, total as f64 / 1_000_000.0)
+        format!(
+            "{:.1}% ({:.1}/{:.1} MB)",
+            done as f64 / total as f64 * 100.0,
+            done as f64 / 1_000_000.0,
+            total as f64 / 1_000_000.0
+        )
     } else if total > 0 {
-        format!("{:.1}% ({done}/{total})", done as f64 / total as f64 * 100.0)
+        format!(
+            "{:.1}% ({done}/{total})",
+            done as f64 / total as f64 * 100.0
+        )
     } else {
-        if zh { "\u{7b49}\u{5f85}\u{8fdb}\u{5ea6}" } else { "waiting for progress" }.to_owned()
+        if zh {
+            "\u{7b49}\u{5f85}\u{8fdb}\u{5ea6}"
+        } else {
+            "waiting for progress"
+        }
+        .to_owned()
     };
-    format!("{} {} {}", task_phase(phase), progress,
-        task["item"].as_str().unwrap_or("")).trim_end().to_owned()
+    format!(
+        "{} {} {}",
+        task_phase(phase),
+        progress,
+        task["item"].as_str().unwrap_or("")
+    )
+    .trim_end()
+    .to_owned()
 }
 
 fn task_phase(phase: &str) -> String {
@@ -237,7 +278,8 @@ fn task_phase(phase: &str) -> String {
         "ready" => "\u{5c31}\u{7eea}",
         "unknown" => "\u{672a}\u{77e5}",
         other => other,
-    }.to_owned()
+    }
+    .to_owned()
 }
 
 pub fn related_value(related: &respire_app::memory::model::RelatedMemory) -> String {
@@ -276,7 +318,10 @@ pub fn sanitize_details(command: &str, value: &Value) -> Value {
             || (key.eq_ignore_ascii_case("secret") && explicit != "secret")
             || (key.eq_ignore_ascii_case("secret_key") && explicit != "secret")
             || (key.eq_ignore_ascii_case("grant") && explicit != "grant")
-            || (key.eq_ignore_ascii_case("code") && explicit != "grant" && explicit != "space" && explicit != "review")
+            || (key.eq_ignore_ascii_case("code")
+                && explicit != "grant"
+                && explicit != "space"
+                && explicit != "review")
             || (key.eq_ignore_ascii_case("payload")
                 && explicit != "share"
                 && explicit != "share-import")
@@ -311,18 +356,48 @@ fn summary_rows(value: &Value) -> Vec<Vec<String>> {
 
 fn human_summary(command: &str, value: &Value) -> Vec<Vec<String>> {
     let fields: &[&str] = match command {
-        "sync" => &["pulled", "pushed", "local_alive", "remote_alive", "pending", "conflicts", "undecodable", "index_pending", "converged"],
-        "status" => &["state", "workers", "session.user", "local_alive", "workspace", "server_addr", "autosync", "retrieval_index.state", "retrieval_index.error"],
+        "sync" => &[
+            "pulled",
+            "pushed",
+            "local_alive",
+            "remote_alive",
+            "pending",
+            "conflicts",
+            "undecodable",
+            "index_pending",
+            "converged",
+        ],
+        "status" => &[
+            "state",
+            "workers",
+            "session.user",
+            "local_alive",
+            "workspace",
+            "server_addr",
+            "autosync",
+            "retrieval_index.state",
+            "retrieval_index.error",
+        ],
         _ => return summary_rows(value),
     };
-    let mut rows: Vec<Vec<String>> = fields.iter().filter_map(|field| {
-        let mut child = value;
-        for key in field.split('.') { child = child.get(key)?; }
-        if child.is_null() { return None; }
-        Some(vec![crate::i18n::field_label(field), compact_human(child)])
-    }).collect();
+    let mut rows: Vec<Vec<String>> = fields
+        .iter()
+        .filter_map(|field| {
+            let mut child = value;
+            for key in field.split('.') {
+                child = child.get(key)?;
+            }
+            if child.is_null() {
+                return None;
+            }
+            Some(vec![crate::i18n::field_label(field), compact_human(child)])
+        })
+        .collect();
     if command == "status" && value["model_operation"]["active"] == true {
-        rows.push(vec![crate::i18n::field_label("model"), model_task_text(&value["model_operation"])]);
+        rows.push(vec![
+            crate::i18n::field_label("model"),
+            model_task_text(&value["model_operation"]),
+        ]);
     }
     rows
 }
@@ -620,8 +695,12 @@ mod tests {
 
     #[test]
     fn failure_diagnostics_cover_display_only_failures_without_changing_other_states() {
-        let mut fail = ResultEnvelope::new("show", Status::Fail, serde_json::json!({}),
-            vec![Item::new("entry", Status::Fail, "not found")]);
+        let mut fail = ResultEnvelope::new(
+            "show",
+            Status::Fail,
+            serde_json::json!({}),
+            vec![Item::new("entry", Status::Fail, "not found")],
+        );
         fail.ensure_failure_diagnostics();
         assert_eq!(fail.errors, ["entry: not found"]);
         fail.ensure_failure_diagnostics();
@@ -634,8 +713,12 @@ mod tests {
         fail.ensure_failure_diagnostics();
         assert_eq!(fail.errors, ["original actionable diagnostic"]);
         for status in [Status::Ok, Status::Warn, Status::Pending, Status::Skip] {
-            let mut result = ResultEnvelope::new("decision", status, serde_json::json!({}),
-                vec![Item::new("display", Status::Fail, "optional component")]);
+            let mut result = ResultEnvelope::new(
+                "decision",
+                status,
+                serde_json::json!({}),
+                vec![Item::new("display", Status::Fail, "optional component")],
+            );
             result.ensure_failure_diagnostics();
             assert!(result.errors.is_empty());
         }
@@ -698,7 +781,10 @@ mod tests {
         assert!(value["actions"].is_array());
         let text = result.render(false)?;
         restore_lang(prev);
-        assert!(text.contains("PENDING") && !text.contains("RESULT:"), "{text}");
+        assert!(
+            text.contains("PENDING") && !text.contains("RESULT:"),
+            "{text}"
+        );
         Ok(())
     }
 
@@ -723,19 +809,36 @@ mod tests {
             "retrieval_index": {"state":"running", "error":null},
         });
         let progress_text = result.render(false)?;
-        anyhow::ensure!(progress_text.contains("5.1%") && progress_text.contains("29.0/569.7 MB"), "{progress_text}");
-        anyhow::ensure!(progress_text.contains("model_quantized.onnx") && !progress_text.contains("Elapsed"), "{progress_text}");
-        anyhow::ensure!(!progress_text.contains('{') && !progress_text.contains("worker_active"), "{progress_text}");
+        anyhow::ensure!(
+            progress_text.contains("5.1%") && progress_text.contains("29.0/569.7 MB"),
+            "{progress_text}"
+        );
+        anyhow::ensure!(
+            progress_text.contains("model_quantized.onnx") && !progress_text.contains("Elapsed"),
+            "{progress_text}"
+        );
+        anyhow::ensure!(
+            !progress_text.contains('{') && !progress_text.contains("worker_active"),
+            "{progress_text}"
+        );
         let json: Value = serde_json::from_str(&result.render(true)?)?;
         anyhow::ensure!(json["details"]["model_operation"]["done"] == 29007544);
         anyhow::ensure!(json["items"][0]["value"] == result.items[0].value);
         result.details["model_operation"]["total"] = serde_json::json!(0);
         result.details["retrieval_index"]["error"] = serde_json::json!("download failed");
         let pending = result.render(false)?;
-        anyhow::ensure!(pending.contains("waiting for progress") && pending.contains("download failed"), "{pending}");
+        anyhow::ensure!(
+            pending.contains("waiting for progress") && pending.contains("download failed"),
+            "{pending}"
+        );
         std::env::set_var("RSRS_LANG", "zh");
         let chinese = result.render(false)?;
-        anyhow::ensure!(chinese.contains("\u{4e0b}\u{8f7d}\u{4e2d}") && chinese.contains("\u{7b49}\u{5f85}\u{8fdb}\u{5ea6}") && chinese.contains("\u{540e}\u{53f0}\u{7d22}\u{5f15}"), "{chinese}");
+        anyhow::ensure!(
+            chinese.contains("\u{4e0b}\u{8f7d}\u{4e2d}")
+                && chinese.contains("\u{7b49}\u{5f85}\u{8fdb}\u{5ea6}")
+                && chinese.contains("\u{540e}\u{53f0}\u{7d22}\u{5f15}"),
+            "{chinese}"
+        );
         restore_lang(prev);
         assert!(!text.contains("SUMMARY") && !text.contains("ACTION"));
         assert!(text.contains("session") && text.contains("missing"));
@@ -799,8 +902,13 @@ mod tests {
             "{object}"
         );
         anyhow::ensure!(humanize_value("[1,true]").contains("yes"));
-        let deep = humanize_value(r#"{"state":{"task":{"active":true,"files":["model.onnx",{"done":29}]}}}"#);
-        anyhow::ensure!(!deep.contains('{') && !deep.contains('[') && deep.contains("model.onnx"), "{deep}");
+        let deep = humanize_value(
+            r#"{"state":{"task":{"active":true,"files":["model.onnx",{"done":29}]}}}"#,
+        );
+        anyhow::ensure!(
+            !deep.contains('{') && !deep.contains('[') && deep.contains("model.onnx"),
+            "{deep}"
+        );
         let nested = summary_rows(&serde_json::json!({"outer":{"inner":{"a":1}},"ids":[1,2]}));
         anyhow::ensure!(
             nested.iter().any(|row| row[0].contains("inner")),
@@ -811,14 +919,15 @@ mod tests {
         anyhow::ensure!(humanize_value("converged") == "\u{5df2}\u{5bf9}\u{9f50}");
         anyhow::ensure!(humanize_value("12 total / 3 active").contains("\u{603b}\u{6570}"));
         anyhow::ensure!(humanize_value("pulled 1 / pushed 2").contains("\u{4e0b}\u{8f7d}"));
-        anyhow::ensure!(
-            humanize_value("send 0 / conflicts 1 / decrypt 2 / index 3").contains("\u{5f85}\u{63a8}\u{9001}")
-        );
+        anyhow::ensure!(humanize_value("send 0 / conflicts 1 / decrypt 2 / index 3")
+            .contains("\u{5f85}\u{63a8}\u{9001}"));
         anyhow::ensure!(humanize_value("not-converged") == "\u{672a}\u{5bf9}\u{9f50}");
         anyhow::ensure!(humanize_value("active-count-diff").contains("\u{4e0d}\u{4e00}\u{81f4}"));
         anyhow::ensure!(humanize_value("cloud sync (auto)").contains("\u{81ea}\u{52a8}"));
         anyhow::ensure!(humanize_value("cloud sync (manual)").contains("\u{624b}\u{52a8}"));
-        anyhow::ensure!(humanize_value("local authority store (offline)").contains("\u{79bb}\u{7ebf}"));
+        anyhow::ensure!(
+            humanize_value("local authority store (offline)").contains("\u{79bb}\u{7ebf}")
+        );
         anyhow::ensure!(humanize_value("reset") == "\u{5df2}\u{91cd}\u{7f6e}");
         anyhow::ensure!(humanize_value("kept") == "\u{4fdd}\u{7559}");
         let mut result = ResultEnvelope::new("sync", Status::Ok, serde_json::json!({}), vec![]);
@@ -871,7 +980,10 @@ mod tests {
             }),
         );
         assert_eq!(share["payload"], "1MEMSHARE1:encoded");
-        let review = sanitize_details("review", &serde_json::json!({"code":"evidence_unavailable","token":"not-public"}));
+        let review = sanitize_details(
+            "review",
+            &serde_json::json!({"code":"evidence_unavailable","token":"not-public"}),
+        );
         assert_eq!(review["code"], "evidence_unavailable");
         assert!(review.get("token").is_none());
     }

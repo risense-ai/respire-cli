@@ -187,8 +187,14 @@ fn handle_request(req: &mut HttpRequest, bound: SocketAddr) -> (u16, &'static st
     if path == "/api/runtime/stop" && method == tiny_http::Method::Post {
         // Coordination-version handshake, not an authorization credential. Old
         // hosts must not detach/replace a manager-supervised process.
-        if crate::host_hooks::managed_id().is_some() && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1" {
-            return (409, "application/json; charset=utf-8", br#"{"error":"managed_lifecycle_required"}"#.to_vec());
+        if crate::host_hooks::managed_id().is_some()
+            && header_value(req, "X-Respire-Lifecycle") != "coordinator-v1"
+        {
+            return (
+                409,
+                "application/json; charset=utf-8",
+                br#"{"error":"managed_lifecycle_required"}"#.to_vec(),
+            );
         }
         return (
             200,

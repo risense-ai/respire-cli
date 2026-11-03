@@ -255,13 +255,17 @@ mod tests {
         }
         let before_rollback = store.memory_revision()?;
         let failed: Result<()> = store.write_transaction(|| {
-            store.connection.execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
+            store
+                .connection
+                .execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
             assert_ne!(store.memory_revision()?, before_rollback);
             anyhow::bail!("simulated review CAS rollback");
         });
         assert!(failed.is_err());
         assert_eq!(store.memory_revision()?, before_rollback);
-        store.connection.execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
+        store
+            .connection
+            .execute("DELETE FROM sync_remote_heads WHERE id='pending'", [])?;
         assert_ne!(store.memory_revision()?, before_rollback);
         Ok(())
     }
@@ -316,15 +320,25 @@ mod tests {
             before,
             "uncommitted writes are invisible"
         );
-        assert_ne!(store.memory_revision()?, before, "same-connection CAS sees the transaction");
+        assert_ne!(
+            store.memory_revision()?,
+            before,
+            "same-connection CAS sees the transaction"
+        );
         store.connection.execute_batch("COMMIT;")?;
         assert_ne!(read_memory_revision(&path)?, before);
         let bytes = std::fs::read(&path)?;
         let wal = std::fs::read(path.with_extension("db-wal"))?;
         let committed = read_memory_revision(&path)?;
-        for _ in 0..3 { assert_eq!(read_memory_revision(&path)?, committed); }
+        for _ in 0..3 {
+            assert_eq!(read_memory_revision(&path)?, committed);
+        }
         assert_eq!(std::fs::read(&path)?, bytes, "probe changed database bytes");
-        assert_eq!(std::fs::read(path.with_extension("db-wal"))?, wal, "probe changed WAL bytes");
+        assert_eq!(
+            std::fs::read(path.with_extension("db-wal"))?,
+            wal,
+            "probe changed WAL bytes"
+        );
         drop(store);
         let previous = read_memory_revision(&path)?;
         std::fs::remove_file(&path)?;

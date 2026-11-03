@@ -17,10 +17,13 @@ pub fn configured() -> Result<Option<bool>> {
     };
     let config: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("invalid agent configuration: {}", path.display()))?;
-    let object = config.as_object().context("agent config must be an object")?;
-    object.get("read_heat").map(|value| {
-        value.as_bool().context("read_heat must be true or false")
-    }).transpose()
+    let object = config
+        .as_object()
+        .context("agent config must be an object")?;
+    object
+        .get("read_heat")
+        .map(|value| value.as_bool().context("read_heat must be true or false"))
+        .transpose()
 }
 
 pub fn require_support() -> Result<()> {
@@ -36,14 +39,18 @@ pub fn reload() -> Result<Option<bool>> {
     if configured.is_some() {
         require_support()?;
     }
-    let mut effective = EFFECTIVE.lock().map_err(|_| anyhow::anyhow!("read_heat configuration lock poisoned"))?;
+    let mut effective = EFFECTIVE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("read_heat configuration lock poisoned"))?;
     *effective = Some((crate::service::agent_config_path(), configured));
     Ok(configured)
 }
 
 pub fn effective() -> Result<Option<bool>> {
     let path = crate::service::agent_config_path();
-    let effective = EFFECTIVE.lock().map_err(|_| anyhow::anyhow!("read_heat configuration lock poisoned"))?;
+    let effective = EFFECTIVE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("read_heat configuration lock poisoned"))?;
     if let Some((loaded_path, value)) = effective.as_ref() {
         if loaded_path == &path {
             return Ok(*value);

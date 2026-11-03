@@ -11,7 +11,6 @@ pub const DEFAULT_API_BASE: &str = "https://api.typesafe.ai/v1/systemone";
 // The clap default references the const in this module; the re-export line
 // the CLI carried is folded away now that both halves share one module.
 
-
 pub const DEFAULT_DS_BASE: &str = "https://api.deepseek.com/v1";
 pub const DEFAULT_DS_MODEL: &str = "deepseek-flash";
 
@@ -118,13 +117,25 @@ pub fn execute(
 /// Do not include credentials, endpoint query parameters, prompts or provider
 /// response bodies in errors crossing the SDK boundary.
 pub fn call_api(backend: &Backend, request: &Value) -> Result<Value> {
-    anyhow::ensure!(request["provider"].as_str() == Some(backend.name), "model provider mismatch");
-    anyhow::ensure!(!backend.endpoint.trim().is_empty(), "model endpoint is required");
+    anyhow::ensure!(
+        request["provider"].as_str() == Some(backend.name),
+        "model provider mismatch"
+    );
+    anyhow::ensure!(
+        !backend.endpoint.trim().is_empty(),
+        "model endpoint is required"
+    );
     anyhow::ensure!(!backend.key.trim().is_empty(), "model API key is required");
-    let timeout = request["timeout"].as_u64().ok_or_else(|| anyhow::anyhow!("model request timeout missing"))?;
-    let retries = request["retries"].as_u64().ok_or_else(|| anyhow::anyhow!("model request retries missing"))?;
-    let agent = ureq::AgentBuilder::new().try_proxy_from_env(true)
-        .timeout(std::time::Duration::from_secs(timeout)).build();
+    let timeout = request["timeout"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("model request timeout missing"))?;
+    let retries = request["retries"]
+        .as_u64()
+        .ok_or_else(|| anyhow::anyhow!("model request retries missing"))?;
+    let agent = ureq::AgentBuilder::new()
+        .try_proxy_from_env(true)
+        .timeout(std::time::Duration::from_secs(timeout))
+        .build();
     for attempt in 0..=retries {
         match agent.post(&backend.endpoint)
             .set("Authorization", &format!("Bearer {}", backend.key))
@@ -159,21 +170,38 @@ mod transport_tests {
         for status in [200, 401] {
             let server = tiny_http::Server::http("127.0.0.1:0")
                 .map_err(|error| anyhow::anyhow!("fixture bind failed: {error}"))?;
-            let address = server.server_addr().to_ip().ok_or_else(|| anyhow::anyhow!("fixture address missing"))?;
+            let address = server
+                .server_addr()
+                .to_ip()
+                .ok_or_else(|| anyhow::anyhow!("fixture address missing"))?;
             let fixture = std::thread::spawn(move || -> Result<()> {
-                let request = server.recv_timeout(std::time::Duration::from_secs(10))?
+                let request = server
+                    .recv_timeout(std::time::Duration::from_secs(10))?
                     .ok_or_else(|| anyhow::anyhow!("host transport did not send a request"))?;
-                anyhow::ensure!(request.headers().iter().any(|header|
-                    header.field.equiv("Authorization") && header.value.as_str() == "Bearer synthetic-host-only-key"),
-                    "host authentication header missing");
+                anyhow::ensure!(
+                    request
+                        .headers()
+                        .iter()
+                        .any(|header| header.field.equiv("Authorization")
+                            && header.value.as_str() == "Bearer synthetic-host-only-key"),
+                    "host authentication header missing"
+                );
                 let response = if status == 200 {
                     r#"{"choices":[{"message":{"content":"1"},"logprobs":{"content":[{"token":"1","logprob":0,"top_logprobs":[{"token":"1","logprob":0}]}]}}]}"#
-                } else { "synthetic-host-only-key must not be echoed" };
-                request.respond(tiny_http::Response::from_string(response).with_status_code(status))?;
+                } else {
+                    "synthetic-host-only-key must not be echoed"
+                };
+                request
+                    .respond(tiny_http::Response::from_string(response).with_status_code(status))?;
                 Ok(())
             });
-            let backend = Backend { name: "ds", key: "synthetic-host-only-key".into(), model: "fixture".into(),
-                endpoint: format!("http://{address}/model"), base_shown: "fixture".into() };
+            let backend = Backend {
+                name: "ds",
+                key: "synthetic-host-only-key".into(),
+                model: "fixture".into(),
+                endpoint: format!("http://{address}/model"),
+                base_shown: "fixture".into(),
+            };
             let payload = json!({
                 "backend":{"name":"ds","model":"fixture"},
                 "snapshots":[{"id":"host-transport","title":"native","importance":"important"}],
@@ -184,19 +212,33 @@ mod transport_tests {
             let mut calls = 0;
             let mut transport = |request: &Value| -> Result<Value> {
                 calls += 1;
-                anyhow::ensure!(request.get("key").is_none() && request.get("endpoint").is_none(), "credential field entered Core callback");
-                anyhow::ensure!(!request.to_string().contains(&backend.key), "key entered Core request");
+                anyhow::ensure!(
+                    request.get("key").is_none() && request.get("endpoint").is_none(),
+                    "credential field entered Core callback"
+                );
+                anyhow::ensure!(
+                    !request.to_string().contains(&backend.key),
+                    "key entered Core request"
+                );
                 call_api(&backend, request)
             };
             let mut core = respire_app::core_sdk::Core::new()?;
-            let result = core.call_with_transport("classify_business", payload.clone(), &mut transport)?;
-            fixture.join().map_err(|_| anyhow::anyhow!("HTTP fixture panicked"))??;
+            let result =
+                core.call_with_transport("classify_business", payload.clone(), &mut transport)?;
+            fixture
+                .join()
+                .map_err(|_| anyhow::anyhow!("HTTP fixture panicked"))??;
             assert_eq!(calls, 1);
             if status == 200 {
-                assert!(result["items"][0]["error"].is_null(), "classification failed: {}", result["items"][0]["error"]);
+                assert!(
+                    result["items"][0]["error"].is_null(),
+                    "classification failed: {}",
+                    result["items"][0]["error"]
+                );
                 assert!(result["items"][0]["verdict"].is_object());
             } else {
-                let error = result["items"][0]["error"].as_str()
+                let error = result["items"][0]["error"]
+                    .as_str()
                     .ok_or_else(|| anyhow::anyhow!("HTTP error missing"))?;
                 assert!(error.contains("HTTP 401"));
                 assert!(!error.contains(&backend.key));
@@ -205,10 +247,15 @@ mod transport_tests {
             let mut forbidden = payload;
             forbidden["backend"]["key"] = json!("must-be-rejected");
             assert!(core.call("classify_business", forbidden).is_err());
-            let rejected = core.call("query_business", json!({"mode":"fast",
+            let rejected = core.call(
+                "query_business",
+                json!({"mode":"fast",
                 "query":{"text":"native","limit":1},
-                "provider":{"name":"ds","model":"fixture","key":"must-be-rejected"}}));
-            let error = rejected.err().ok_or_else(|| anyhow::anyhow!("local recall accepted credential fields"))?;
+                "provider":{"name":"ds","model":"fixture","key":"must-be-rejected"}}),
+            );
+            let error = rejected
+                .err()
+                .ok_or_else(|| anyhow::anyhow!("local recall accepted credential fields"))?;
             assert!(error.to_string().contains("unknown field `key`"));
         }
         Ok(())

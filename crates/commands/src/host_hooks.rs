@@ -159,7 +159,9 @@ pub fn install(hooks: HostHooks) -> bool {
         capture_run.map(|hook| CAPTURE_RUN.set(hook).is_ok()),
         mcp_http_response.map(|hook| MCP_HTTP_RESPONSE.set(hook).is_ok()),
     ];
-    installed.iter().all(|slot| slot.as_ref().is_none_or(|ok| *ok))
+    installed
+        .iter()
+        .all(|slot| slot.as_ref().is_none_or(|ok| *ok))
 }
 
 /// Whether runtime maintenance fences background mutations.
@@ -191,10 +193,16 @@ pub fn context_changed() {
 }
 
 /// Submit one method to the resident runtime through the host client surface.
-pub fn call_runtime_method(method: &str, args: Vec<String>, auto_start: bool) -> Result<MethodOutcome> {
+pub fn call_runtime_method(
+    method: &str,
+    args: Vec<String>,
+    auto_start: bool,
+) -> Result<MethodOutcome> {
     match CALL_RUNTIME_METHOD.get() {
         Some(hook) => hook(method, args, auto_start),
-        None => Err(anyhow::anyhow!("runtime client is unavailable in this process")),
+        None => Err(anyhow::anyhow!(
+            "runtime client is unavailable in this process"
+        )),
     }
 }
 
@@ -225,7 +233,9 @@ pub fn materialize_bin() -> std::result::Result<PathBuf, String> {
 pub fn foreground_progress(id: &str) -> anyhow::Result<serde_json::Value> {
     match FOREGROUND_PROGRESS.get() {
         Some(hook) => hook(id),
-        None => Err(anyhow::anyhow!("runtime progress is unavailable in this process")),
+        None => Err(anyhow::anyhow!(
+            "runtime progress is unavailable in this process"
+        )),
     }
 }
 
@@ -257,7 +267,9 @@ pub fn runtime_is_up() -> bool {
 }
 
 /// Run a profile change under the host lifecycle coordinator.
-pub fn change_profile(change: Box<dyn FnOnce() -> anyhow::Result<()> + Send>) -> anyhow::Result<()> {
+pub fn change_profile(
+    change: Box<dyn FnOnce() -> anyhow::Result<()> + Send>,
+) -> anyhow::Result<()> {
     match CHANGE_PROFILE.get() {
         Some(hook) => hook(change),
         None => Err(anyhow::anyhow!("profile changes are host-managed")),
@@ -286,7 +298,10 @@ pub fn record_exit(success: bool) {
 
 /// Host credential bookkeeping state reported through /api/health.
 pub fn credential_state() -> &'static str {
-    CREDENTIAL_STATE.get().map(|hook| hook()).unwrap_or("unknown")
+    CREDENTIAL_STATE
+        .get()
+        .map(|hook| hook())
+        .unwrap_or("unknown")
 }
 
 /// Execute one argv vector through the host command engine and capture its envelope.
@@ -315,7 +330,9 @@ pub fn mcp_http_response(request: McpHttpIn) -> HttpReply {
         None => (
             503,
             "application/json; charset=utf-8",
-            serde_json::json!({"error":"the MCP bridge is host-managed"}).to_string().into_bytes(),
+            serde_json::json!({"error":"the MCP bridge is host-managed"})
+                .to_string()
+                .into_bytes(),
         ),
     }
 }

@@ -12,9 +12,16 @@ pub fn embedded() -> &'static str {
 
 pub fn clap_version() -> &'static str {
     #[cfg(feature = "native-fault-tests")]
-    { concat!(env!("RSRS_CLI_VERSION"), " (native fault fixture; not releasable)") }
+    {
+        concat!(
+            env!("RSRS_CLI_VERSION"),
+            " (native fault fixture; not releasable)"
+        )
+    }
     #[cfg(not(feature = "native-fault-tests"))]
-    { embedded() }
+    {
+        embedded()
+    }
 }
 
 pub fn line() -> String {
@@ -38,7 +45,9 @@ pub fn emit(json: bool) -> anyhow::Result<()> {
         );
         envelope.details = serde_json::json!({"bin": embedded()});
         #[cfg(feature = "native-fault-tests")]
-        { envelope.summary["test_only"] = serde_json::json!("native-fault-tests"); }
+        {
+            envelope.summary["test_only"] = serde_json::json!("native-fault-tests");
+        }
         println!("{}", envelope.render(true)?);
     } else {
         println!("{}", line());

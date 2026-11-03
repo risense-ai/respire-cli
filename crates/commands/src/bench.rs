@@ -341,24 +341,43 @@ pub fn snapshot_params() -> anyhow::Result<BTreeMap<String, String>> {
             }
         }
     }
-    for (name,default) in [("RSRS_FEEDBACK","0"),("RSRS_MARK_SIM","0.5"),("RSRS_BAD_PENALTY","1")] {
-        m.entry(name.into()).or_insert_with(||default.into());
+    for (name, default) in [
+        ("RSRS_FEEDBACK", "0"),
+        ("RSRS_MARK_SIM", "0.5"),
+        ("RSRS_BAD_PENALTY", "1"),
+    ] {
+        m.entry(name.into()).or_insert_with(|| default.into());
     }
-    m.entry("RSRS_RECALL_PROFILE".into()).or_insert_with(||"calibrated".into());
-    m.insert("recall_calibration_contract".into(),"1".into());
-    m.insert("recall_fusion_contract".into(),"1".into());
+    m.entry("RSRS_RECALL_PROFILE".into())
+        .or_insert_with(|| "calibrated".into());
+    m.insert("recall_calibration_contract".into(), "1".into());
+    m.insert("recall_fusion_contract".into(), "1".into());
     for (key, value) in respire_app::recall_fusion::query_settings()? {
         if key == "fusion" || key.starts_with("fusion_") {
-            m.insert(format!("RSRS_RECALL_{}", key.to_uppercase()),
-                value.as_str().map(str::to_owned).unwrap_or_else(|| value.to_string()));
+            m.insert(
+                format!("RSRS_RECALL_{}", key.to_uppercase()),
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string()),
+            );
         }
     }
-    m.insert("feedback_contract".into(),respire_app::core_sdk::FEEDBACK_CONTRACT.to_string());
+    m.insert(
+        "feedback_contract".into(),
+        respire_app::core_sdk::FEEDBACK_CONTRACT.to_string(),
+    );
     {
-        use sha2::{Digest,Sha256};
-        m.insert("sdk_lock_sha256".into(),format!("{:x}",Sha256::digest(include_bytes!("../../../sdk/core-sdk.lock.json"))));
+        use sha2::{Digest, Sha256};
+        m.insert(
+            "sdk_lock_sha256".into(),
+            format!(
+                "{:x}",
+                Sha256::digest(include_bytes!("../../../sdk/core-sdk.lock.json"))
+            ),
+        );
     }
-    m.insert("cli_version".into(),env!("CARGO_PKG_VERSION").into());
+    m.insert("cli_version".into(), env!("CARGO_PKG_VERSION").into());
     Ok(m)
 }
 
@@ -499,7 +518,7 @@ mod tests {
     fn mine_filters_inactive_and_merges() {
         use respire_app::transport::local::QueryLogRow;
         let row = |id: i64, q: &str, good: &[&str], adopted: &[&str]| QueryLogRow {
-            request_id:None,
+            request_id: None,
             id,
             ts: "2026-09-19".to_owned(),
             query: q.to_owned(),

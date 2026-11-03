@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
-
 #[derive(Debug, Subcommand)]
 pub enum RuntimeCommand {
     /// Serve in the foreground; service managers supervise this process.

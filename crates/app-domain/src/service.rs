@@ -35,7 +35,7 @@ pub fn write_decision_actions() -> &'static [&'static str] {
     ]
 }
 mod related;
-pub use related::{store_related, remap_relations};
+pub use related::{remap_relations, store_related};
 
 static RUNTIME_PROFILE: OnceLock<PathBuf> = OnceLock::new();
 
@@ -93,14 +93,18 @@ pub struct IndexPending;
 
 impl std::fmt::Display for IndexPending {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("local retrieval index is being prepared; retry after indexing completes")
+        formatter
+            .write_str("local retrieval index is being prepared; retry after indexing completes")
     }
 }
 
 impl std::error::Error for IndexPending {}
 
 /// Validate the actual snapshot sent to Core, including its opaque index artifacts.
-pub fn require_candidates_ready(store: &LocalStore, candidates: &[crate::StoredMemory]) -> Result<()> {
+pub fn require_candidates_ready(
+    store: &LocalStore,
+    candidates: &[crate::StoredMemory],
+) -> Result<()> {
     if !store.candidates_index_ready(candidates)? {
         notify_index();
         return Err(IndexPending.into());
@@ -149,8 +153,9 @@ pub struct App {
 impl App {
     /// Unlock the local session → open the store → load BGE. Missing model is an error (no fallback).
     pub fn open() -> Result<Self> {
-        let keys = auth::load_local_session()
-            .map_err(|e| anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first"))?;
+        let keys = auth::load_local_session().map_err(|e| {
+            anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first")
+        })?;
         let store = open_store()?;
         let embedder = BgeEmbedder::load_model(&store.retrieval_model()?)?;
         notify_index();
@@ -194,12 +199,17 @@ impl App {
             q = q.of_kind(k);
         }
         let (candidates, _) = recall_candidates(&self.store)?;
-        let ranked:Vec<(f32,MemoryEntry)>=crate::core_sdk::execute("query",serde_json::json!({
-            "model":self.embedder.model_name(),"snapshots":crate::memory::engine::snapshots(&self.keys,&candidates)?,
-            "query":q,"mode":"scored","query_settings":crate::feedback::query_settings(&self.store,&q,&candidates)?
-        }))?;
+        let ranked: Vec<(f32, MemoryEntry)> = crate::core_sdk::execute(
+            "query",
+            serde_json::json!({
+                "model":self.embedder.model_name(),"snapshots":crate::memory::engine::snapshots(&self.keys,&candidates)?,
+                "query":q,"mode":"scored","query_settings":crate::feedback::query_settings(&self.store,&q,&candidates)?
+            }),
+        )?;
         for (score, e) in &ranked {
-            if !readonly_mode() && !off_mode() { let _ = self.store.bump_recall_count(&e.id); }
+            if !readonly_mode() && !off_mode() {
+                let _ = self.store.bump_recall_count(&e.id);
+            }
             let _ = score;
         }
         Ok(ranked
@@ -364,8 +374,14 @@ impl App {
 
     /// Store a memory (after picking one of three): force write / parent as cause / merge_ids merge (delete old, store new, rehang children, inherit first item's parent).
     pub fn create(&self, req: &CreateReq) -> Result<MemoryEntry> {
-        ensure!(req.metadata.verification.is_none(), "verification is only accepted by review commit");
-        anyhow::ensure!(req.merge_ids.is_none() || (req.supersedes.is_none() && req.see_also.is_empty()), "merge and associations are mutually exclusive");
+        ensure!(
+            req.metadata.verification.is_none(),
+            "verification is only accepted by review commit"
+        );
+        anyhow::ensure!(
+            req.merge_ids.is_none() || (req.supersedes.is_none() && req.see_also.is_empty()),
+            "merge and associations are mutually exclusive"
+        );
         let stamp = now_stamp();
         let title = if req.title.trim().is_empty() {
             derive_title(&req.content)
@@ -386,8 +402,11 @@ impl App {
             superseded_by: String::new(),
             see_also: Vec::new(),
             id,
-            kind: if req.kind.trim().is_empty() { Kind::Context } else {
-                Kind::try_from_str(&req.kind.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?
+            kind: if req.kind.trim().is_empty() {
+                Kind::Context
+            } else {
+                Kind::try_from_str(&req.kind.trim().to_lowercase())
+                    .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?
             },
             tags: split_tags(&req.tags),
             title,
@@ -425,7 +444,14 @@ impl App {
                 req.merge_metadata.as_ref(),
             )?;
         } else if req.supersedes.is_some() || !req.see_also.is_empty() {
-            store_related(&self.keys,&self.store,&self.embedder,&mut entry,req.supersedes.as_deref(),&req.see_also)?;
+            store_related(
+                &self.keys,
+                &self.store,
+                &self.embedder,
+                &mut entry,
+                req.supersedes.as_deref(),
+                &req.see_also,
+            )?;
         } else {
             let stored = MemoryEngine::seal(&self.keys, &self.embedder, &entry, &entry.user)?;
             self.store.put(&stored)?;
@@ -447,8 +473,13 @@ impl App {
     }
 
     pub fn update_with_metadata(
-        &self, id: &str, title: Option<String>, content: Option<String>,
-        tags: Option<String>, kind: Option<String>, metadata: Option<&MetadataPatch>,
+        &self,
+        id: &str,
+        title: Option<String>,
+        content: Option<String>,
+        tags: Option<String>,
+        kind: Option<String>,
+        metadata: Option<&MetadataPatch>,
     ) -> Result<MemoryEntry> {
         let all = self.store.all(true)?;
         let full = resolve_prefix(&all, id)?;
@@ -467,9 +498,12 @@ impl App {
             entry.tags = split_tags(&tg);
         }
         if let Some(k) = kind {
-            entry.kind = Kind::try_from_str(&k.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?;
+            entry.kind = Kind::try_from_str(&k.trim().to_lowercase())
+                .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?;
         }
-        if let Some(patch) = metadata { patch.apply(&mut entry.metadata); }
+        if let Some(patch) = metadata {
+            patch.apply(&mut entry.metadata);
+        }
         crate::metadata_gate::ensure_write(&self.store, &entry)?;
         crate::metadata_gate::ensure_sources(&self.keys, &self.store, &entry)?;
         entry.updated_at = self.store.edit_stamp(&stored.id)?;
@@ -523,7 +557,10 @@ impl App {
         }
         for anc in self.store.ancestor_chain(&parent_full)? {
             if anc == child {
-                return Err(crate::input_error::InputError("cycle: new parent is a descendant of this entry".into()).into());
+                return Err(crate::input_error::InputError(
+                    "cycle: new parent is a descendant of this entry".into(),
+                )
+                .into());
             }
         }
         reparent(&self.keys, &self.store, &child, &parent_full)?;
@@ -684,11 +721,21 @@ pub struct MetadataPatch {
 impl MetadataPatch {
     pub fn apply(&self, metadata: &mut crate::memory::model::MemoryMeta) {
         metadata.memory_contract = 1;
-        if let Some(value) = &self.summary { metadata.summary = value.clone(); }
-        if let Some(value) = &self.source_refs { metadata.source_refs = value.clone(); }
-        if let Some(value) = &self.valid_until { metadata.valid_until = value.clone(); }
-        if let Some(value) = &self.review_at { metadata.review_at = value.clone(); }
-        if let Some(value) = &self.artifact { metadata.artifact = value.clone(); }
+        if let Some(value) = &self.summary {
+            metadata.summary = value.clone();
+        }
+        if let Some(value) = &self.source_refs {
+            metadata.source_refs = value.clone();
+        }
+        if let Some(value) = &self.valid_until {
+            metadata.valid_until = value.clone();
+        }
+        if let Some(value) = &self.review_at {
+            metadata.review_at = value.clone();
+        }
+        if let Some(value) = &self.artifact {
+            metadata.artifact = value.clone();
+        }
     }
 }
 
@@ -1059,7 +1106,9 @@ pub fn set_data_dir(dir: &str) -> Result<()> {
 // Scene: several accounts on one machine (work/personal/test); login no longer needs logout --full to wipe key material.
 
 pub fn accounts_root() -> PathBuf {
-    env_root_dir().unwrap_or_else(default_data_dir).join("accounts")
+    env_root_dir()
+        .unwrap_or_else(default_data_dir)
+        .join("accounts")
 }
 
 /// Account profile dir (name check: letters/digits/-/_; no path traversal).
@@ -1143,10 +1192,17 @@ pub fn account_remove(name: &str) -> Result<()> {
     require_profile_change_host()?;
     let dir = account_dir(name)?;
     if !dir.exists() {
-        return Err(crate::input_error::InputError(format!("no such account profile: {}", dir.display())).into());
+        return Err(crate::input_error::InputError(format!(
+            "no such account profile: {}",
+            dir.display()
+        ))
+        .into());
     }
     if data_dir() == dir {
-        return Err(crate::input_error::InputError("this profile is in use \u{2014} run rsrs account use <other> before deleting".into()).into());
+        return Err(crate::input_error::InputError(
+            "this profile is in use \u{2014} run rsrs account use <other> before deleting".into(),
+        )
+        .into());
     }
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -1302,11 +1358,23 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
         crate::read_heat::require_support()?;
     }
     if matches!(key, "memory_off" | "readonly") {
-        let enabled = value.as_bool().ok_or_else(|| anyhow!("{key} must be true or false"))?;
-        return set_workspace_mode(if !enabled { "normal" } else if key == "memory_off" { "off" } else { "readonly" });
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| anyhow!("{key} must be true or false"))?;
+        return set_workspace_mode(if !enabled {
+            "normal"
+        } else if key == "memory_off" {
+            "off"
+        } else {
+            "readonly"
+        });
     }
     if key == "workspace_mode" {
-        return set_workspace_mode(value.as_str().ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?);
+        return set_workspace_mode(
+            value
+                .as_str()
+                .ok_or_else(|| anyhow!("workspace_mode must be normal, readonly or off"))?,
+        );
     }
     if key == "recall_mode" && !matches!(value.as_str(), Some("fast" | "quality")) {
         anyhow::bail!("recall_mode must be fast or quality");
@@ -1335,10 +1403,11 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
 /// member `space join` sets local agent.json `readonly=true`;
 /// the server also refuses writes by session token (belt and braces — the client can be bypassed).
 pub fn readonly_mode() -> bool {
-    readonly_team() || match device_service_mode().as_deref() {
-        Some(mode) => mode == "readonly",
-        None => read_agent_config()["readonly"].as_bool().unwrap_or(false),
-    }
+    readonly_team()
+        || match device_service_mode().as_deref() {
+            Some(mode) => mode == "readonly",
+            None => read_agent_config()["readonly"].as_bool().unwrap_or(false),
+        }
 }
 
 /// Read-only **source=team**: written on space join --readonly (personal self-set read-only has no this key).
@@ -1353,8 +1422,12 @@ pub fn readonly_team() -> bool {
 /// Device disable mode suppresses memory reads and writes until explicitly changed.
 /// Existing account-local flags remain compatible when no device mode has been saved.
 fn device_service_mode() -> Option<String> {
-    read_client_config().and_then(|config| config["service_mode"].as_str()
-        .filter(|mode| matches!(*mode, "normal" | "readonly" | "off")).map(str::to_owned))
+    read_client_config().and_then(|config| {
+        config["service_mode"]
+            .as_str()
+            .filter(|mode| matches!(*mode, "normal" | "readonly" | "off"))
+            .map(str::to_owned)
+    })
 }
 
 pub fn off_mode() -> bool {
@@ -1366,10 +1439,11 @@ pub fn off_mode() -> bool {
 
 /// Pause device memory work without confusing a team's read-only access with a device setting.
 pub fn service_paused() -> bool {
-    off_mode() || match device_service_mode().as_deref() {
-        Some(mode) => mode == "readonly",
-        None => !readonly_team() && read_agent_config()["readonly"].as_bool().unwrap_or(false),
-    }
+    off_mode()
+        || match device_service_mode().as_deref() {
+            Some(mode) => mode == "readonly",
+            None => !readonly_team() && read_agent_config()["readonly"].as_bool().unwrap_or(false),
+        }
 }
 
 /// Workspace three-state (GUI/status): off > readonly > normal.
@@ -1387,7 +1461,10 @@ pub fn workspace_mode() -> &'static str {
 /// Existing team permissions remain effective even when the device returns to normal.
 pub fn set_workspace_mode(mode: &str) -> Result<()> {
     if !matches!(mode, "normal" | "readonly" | "off") {
-        return Err(crate::input_error::InputError(format!("unknown mode `{mode}` \u{2014} choose: normal | readonly | off")).into());
+        return Err(crate::input_error::InputError(format!(
+            "unknown mode `{mode}` \u{2014} choose: normal | readonly | off"
+        ))
+        .into());
     }
     let mut config = read_client_config().unwrap_or_else(|| serde_json::json!({}));
     anyhow::ensure!(config.is_object(), "client config must be an object");
@@ -1583,7 +1660,9 @@ pub fn resume_session() -> Result<serde_json::Value> {
 }
 
 pub fn set_server_addr(addr: &str) -> Result<()> {
-    if database_path(&data_dir())?.exists() { crate::metadata_gate::ensure_sync_allowed(&open_store()?)?; }
+    if database_path(&data_dir())?.exists() {
+        crate::metadata_gate::ensure_sync_allowed(&open_store()?)?;
+    }
     let addr = addr.trim();
     if !(addr.starts_with("http://") || addr.starts_with("https://")) {
         anyhow::bail!("server address must start with http:// or https://");
@@ -1617,7 +1696,9 @@ pub fn autosync_active() -> bool {
 }
 
 pub fn set_autosync(on: bool) -> Result<()> {
-    if on && database_path(&data_dir())?.exists() { crate::metadata_gate::ensure_sync_allowed(&open_store()?)?; }
+    if on && database_path(&data_dir())?.exists() {
+        crate::metadata_gate::ensure_sync_allowed(&open_store()?)?;
+    }
     let mut data = read_client_config().unwrap_or_else(|| serde_json::json!({}));
     data["autosync"] = serde_json::json!(on);
     write_client_config(&data)
@@ -1932,11 +2013,20 @@ pub fn import_json(path: &std::path::Path) -> Result<ImportReport> {
 
 /// Import exact-content-unique records; the same snapshot can be retried safely.
 pub fn import_json_text(text: &str) -> Result<ImportReport> {
-    ensure!(!off_mode(), "memory service is disabled; restore normal service before importing");
+    ensure!(
+        !off_mode(),
+        "memory service is disabled; restore normal service before importing"
+    );
     ensure_writable()?;
-    let items: Vec<ImportItem> = serde_json::from_str(text)
-        .map_err(|e| anyhow!("failed to parse import JSON: {e}"))?;
-    let mut report = ImportReport { imported: 0, skipped: 0, duplicates: 0, reattached: 0, orphaned: 0 };
+    let items: Vec<ImportItem> =
+        serde_json::from_str(text).map_err(|e| anyhow!("failed to parse import JSON: {e}"))?;
+    let mut report = ImportReport {
+        imported: 0,
+        skipped: 0,
+        duplicates: 0,
+        reattached: 0,
+        orphaned: 0,
+    };
     let mut entries: Vec<MemoryEntry> = Vec::new();
     let mut old_ids: HashMap<String, usize> = HashMap::new();
     for (index, item) in items.into_iter().enumerate() {
@@ -1946,19 +2036,43 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
         }
         if !item.id.is_empty() {
             if let Some(previous) = old_ids.get(&item.id) {
-                ensure!(entries[*previous].content == item.content, "duplicate id with different content at record {}", index + 1);
+                ensure!(
+                    entries[*previous].content == item.content,
+                    "duplicate id with different content at record {}",
+                    index + 1
+                );
                 let mut metadata = item.metadata.clone();
                 metadata.verification = None;
-                ensure!(entries[*previous].metadata == metadata && entries[*previous].unknown_fields == item.unknown_fields,
-                    "duplicate id with different metadata at record {}", index + 1);
+                ensure!(
+                    entries[*previous].metadata == metadata
+                        && entries[*previous].unknown_fields == item.unknown_fields,
+                    "duplicate id with different metadata at record {}",
+                    index + 1
+                );
                 report.skipped += 1;
                 report.duplicates += 1;
                 continue;
             }
             old_ids.insert(item.id, entries.len());
         }
-        let kind = item.kind.unwrap_or_else(|| "context".to_owned()).to_lowercase();
-        if !matches!(kind.as_str(), "context" | "decision" | "preference" | "task" | "emotion" | "time" | "skill" | "knowledge" | "hypothesis" | "reflection" | "self") {
+        let kind = item
+            .kind
+            .unwrap_or_else(|| "context".to_owned())
+            .to_lowercase();
+        if !matches!(
+            kind.as_str(),
+            "context"
+                | "decision"
+                | "preference"
+                | "task"
+                | "emotion"
+                | "time"
+                | "skill"
+                | "knowledge"
+                | "hypothesis"
+                | "reflection"
+                | "self"
+        ) {
             anyhow::bail!("invalid kind at record {}: {kind}", index + 1);
         }
         let importance = item.importance.unwrap_or_else(|| "trivial".to_owned());
@@ -1971,17 +2085,42 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
         }
         item.metadata.validate()?;
         crate::memory::model::metadata::validate_extra_fields(&item.unknown_fields)?;
-        let created_at = item.created_at.filter(|s| !s.is_empty()).unwrap_or_else(now_stamp);
-        let updated_at = item.updated_at.filter(|s| !s.is_empty()).unwrap_or_else(|| created_at.clone());
+        let created_at = item
+            .created_at
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(now_stamp);
+        let updated_at = item
+            .updated_at
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| created_at.clone());
         entries.push(MemoryEntry {
-            metadata: crate::memory::model::MemoryMeta { verification: None, ..item.metadata },
+            metadata: crate::memory::model::MemoryMeta {
+                verification: None,
+                ..item.metadata
+            },
             unknown_fields: item.unknown_fields,
-            supersedes: item.supersedes, superseded_by: item.superseded_by, see_also: item.see_also,
-            id: uuid::Uuid::new_v4().to_string(), kind: Kind::try_from_str(&kind).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
-            tags: match item.tags { ImportTags::List(tags) => tags, ImportTags::Text(tags) => split_tags(&tags) },
-            title: item.title, content: item.content, user: item.user.unwrap_or_else(current_user),
-            computer: item.computer, project: item.project, device: device_tag(), modified_by: device_tag(),
-            created_at, updated_at, emotion, parent_id: item.parent_id.unwrap_or_default(), importance,
+            supersedes: item.supersedes,
+            superseded_by: item.superseded_by,
+            see_also: item.see_also,
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: Kind::try_from_str(&kind)
+                .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
+            tags: match item.tags {
+                ImportTags::List(tags) => tags,
+                ImportTags::Text(tags) => split_tags(&tags),
+            },
+            title: item.title,
+            content: item.content,
+            user: item.user.unwrap_or_else(current_user),
+            computer: item.computer,
+            project: item.project,
+            device: device_tag(),
+            modified_by: device_tag(),
+            created_at,
+            updated_at,
+            emotion,
+            parent_id: item.parent_id.unwrap_or_default(),
+            importance,
         });
     }
     let mut done = HashSet::new();
@@ -1989,13 +2128,19 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
         let mut chain = HashSet::new();
         let mut cursor = Some(start);
         while let Some(index) = cursor {
-            if done.contains(&index) { break; }
-            if !chain.insert(index) { anyhow::bail!("import parent chain contains a cycle"); }
+            if done.contains(&index) {
+                break;
+            }
+            if !chain.insert(index) {
+                anyhow::bail!("import parent chain contains a cycle");
+            }
             cursor = old_ids.get(&entries[index].parent_id).copied();
         }
         done.extend(chain);
     }
-    if entries.is_empty() { return Ok(report); }
+    if entries.is_empty() {
+        return Ok(report);
+    }
     let app = App::open()?;
     app.store.write_transaction(|| {
         let mut contents = HashMap::new();
@@ -2100,7 +2245,9 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
         report.imported = stored.len();
         Ok(())
     })?;
-    if report.imported > 0 { app.auto_sync(); }
+    if report.imported > 0 {
+        app.auto_sync();
+    }
     Ok(report)
 }
 
@@ -2111,8 +2258,9 @@ pub fn import_json_text(text: &str) -> Result<ImportReport> {
 ///
 /// Do not load BGE: share export only decrypts, never searches; loading the model for seconds is waste (2026-09-21).
 pub fn export_subtree_payload(root_prefix: &str) -> Result<(crate::share::SharePayload, String)> {
-    let keys = auth::load_local_session()
-        .map_err(|e| anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first"))?;
+    let keys = auth::load_local_session().map_err(|e| {
+        anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first")
+    })?;
     let store = open_store()?;
     let all = store.all(false)?;
     let root_id = resolve_prefix(&all, root_prefix)?;
@@ -2210,8 +2358,9 @@ pub fn share_candidates_with(
     payload: &crate::share::SharePayload,
     embedder: &BgeEmbedder,
 ) -> Result<serde_json::Value> {
-    let keys = auth::load_local_session()
-        .map_err(|e| anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first"))?;
+    let keys = auth::load_local_session().map_err(|e| {
+        anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first")
+    })?;
     let store = open_store()?;
     let all = store.all(false)?;
     let query = crate::share::mount_query(payload);
@@ -2259,8 +2408,9 @@ pub fn import_share_payload(
     force: bool,
     embedder: &BgeEmbedder,
 ) -> Result<ImportReport> {
-    let keys = auth::load_local_session()
-        .map_err(|e| anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first"))?;
+    let keys = auth::load_local_session().map_err(|e| {
+        anyhow!("session not unlocked ({e}) \u{2014} register/login or keygen first")
+    })?;
     let store = open_store()?;
     // Resolve the attach point first (prefix ok); fail loudly, do not silently become a root
     let parent = if attach_parent.trim().is_empty() {
@@ -2349,7 +2499,8 @@ pub fn import_share_payload(
         it.metadata.validate()?;
         crate::memory::model::metadata::validate_extra_fields(&it.unknown_fields)?;
         let kind = it.kind.trim().to_lowercase();
-        let parsed_kind = Kind::try_from_str(&kind).ok_or_else(|| anyhow!("unsupported_metadata: unknown imported memory kind"))?;
+        let parsed_kind = Kind::try_from_str(&kind)
+            .ok_or_else(|| anyhow!("unsupported_metadata: unknown imported memory kind"))?;
         let importance = match it.importance.trim() {
             "important" => "important",
             _ => "trivial",
@@ -2365,7 +2516,10 @@ pub fn import_share_payload(
             it.updated_at.clone()
         };
         entries.push(MemoryEntry {
-            metadata: crate::memory::model::MemoryMeta { verification: None, ..it.metadata.clone() },
+            metadata: crate::memory::model::MemoryMeta {
+                verification: None,
+                ..it.metadata.clone()
+            },
             unknown_fields: it.unknown_fields.clone(),
             supersedes: it.supersedes.clone(),
             superseded_by: it.superseded_by.clone(),
@@ -2388,9 +2542,14 @@ pub fn import_share_payload(
             importance: importance.to_owned(),
         });
     }
-    let relation_ids: HashMap<String,String> = payload.items.iter().zip(new_ids.iter())
-        .filter(|(item,_)| !item.content.trim().is_empty()).map(|(item,id)| (item.id.clone(),id.clone())).collect();
-    remap_relations(&mut entries,&relation_ids)?;
+    let relation_ids: HashMap<String, String> = payload
+        .items
+        .iter()
+        .zip(new_ids.iter())
+        .filter(|(item, _)| !item.content.trim().is_empty())
+        .map(|(item, id)| (item.id.clone(), id.clone()))
+        .collect();
+    remap_relations(&mut entries, &relation_ids)?;
     let report = ImportReport {
         imported: entries.len(),
         skipped,
@@ -2429,10 +2588,14 @@ pub fn backup_db(dest: &std::path::Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn backup_database(src: &std::path::Path, dest: &std::path::Path) -> Result<PathBuf> {
-    backup_database_policy(src,dest,true)
+    backup_database_policy(src, dest, true)
 }
 
-pub(crate) fn backup_database_policy(src: &std::path::Path, dest: &std::path::Path, strip_grants: bool) -> Result<PathBuf> {
+pub(crate) fn backup_database_policy(
+    src: &std::path::Path,
+    dest: &std::path::Path,
+    strip_grants: bool,
+) -> Result<PathBuf> {
     crate::input_error::validate_output_parent(dest)?;
     let connection =
         rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
@@ -2616,7 +2779,10 @@ impl App {
             let current = self.store.all(false)?;
             for (child_id, _) in &cands {
                 if let Some(row) = current.iter().find(|row| &row.id == child_id) {
-                    crate::metadata_gate::ensure_write(&self.store, &MemoryEngine::open(&self.keys, row)?)?;
+                    crate::metadata_gate::ensure_write(
+                        &self.store,
+                        &MemoryEngine::open(&self.keys, row)?,
+                    )?;
                 }
             }
             let mut applied = 0;
@@ -2670,13 +2836,18 @@ pub fn deepen_plan(
 ) -> Result<(String, DeepenPlan)> {
     let candidates = store.all(false)?;
     let root_id = resolve_prefix(&candidates, root_prefix)?;
-    let direct: HashSet<&str> = candidates.iter()
+    let direct: HashSet<&str> = candidates
+        .iter()
         .filter(|entry| entry.local_parent_id == root_id)
-        .map(|entry| entry.id.as_str()).collect();
+        .map(|entry| entry.id.as_str())
+        .collect();
     let mut descendants = HashSet::new();
     let mut pending: Vec<&str> = direct.iter().copied().collect();
     while let Some(parent) = pending.pop() {
-        for entry in candidates.iter().filter(|entry| entry.local_parent_id == parent) {
+        for entry in candidates
+            .iter()
+            .filter(|entry| entry.local_parent_id == parent)
+        {
             if descendants.insert(entry.id.as_str()) {
                 pending.push(entry.id.as_str());
             }
@@ -2868,7 +3039,8 @@ pub fn split_exec<E: crate::memory::search::Embedder>(
             superseded_by: String::new(),
             see_also: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
-            kind: Kind::try_from_str(&op.kind.trim().to_lowercase()).ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
+            kind: Kind::try_from_str(&op.kind.trim().to_lowercase())
+                .ok_or_else(|| anyhow!("unsupported_metadata: unknown memory kind"))?,
             tags: {
                 let mut t = op.tags.clone();
                 t.push("\u{62c6}\u{5206}".to_owned());
@@ -2932,25 +3104,37 @@ pub fn open_store_with_profile() -> Result<(PathBuf, LocalStore)> {
 }
 
 /// Bootstrap under actual runtime library ownership without opening business access.
-pub fn open_runtime_store(ownership:&crate::lock::LibraryLock)->Result<(LocalStore,Option<String>)> {
-    let root=data_dir();check_runtime_profile(&root)?;
-    anyhow::ensure!(ownership.protects(&root)?,"runtime bootstrap requires matching library ownership");
-    let expected=crate::snapshot::runtime_bootstrap_target(&root)?;
+pub fn open_runtime_store(
+    ownership: &crate::lock::LibraryLock,
+) -> Result<(LocalStore, Option<String>)> {
+    let root = data_dir();
+    check_runtime_profile(&root)?;
+    anyhow::ensure!(
+        ownership.protects(&root)?,
+        "runtime bootstrap requires matching library ownership"
+    );
+    let expected = crate::snapshot::runtime_bootstrap_target(&root)?;
     respire_core_sdk::set_index_root(&root)?;
-    let store=LocalStore::open(&database_path(&root)?)?;
-    if let Some(id)=expected.as_ref() {
+    let store = LocalStore::open(&database_path(&root)?)?;
+    if let Some(id) = expected.as_ref() {
         store.verify_sqlite_integrity()?;
-        anyhow::ensure!(store.snapshot_quarantine_id()?.as_ref()==Some(id),"opened library does not match the restored snapshot transaction");
+        anyhow::ensure!(
+            store.snapshot_quarantine_id()?.as_ref() == Some(id),
+            "opened library does not match the restored snapshot transaction"
+        );
     }
     respire_core_sdk::profiles::set_active(store.active_selection()?);
     crate::embedding::install_transport()?;
-    Ok((store,expected))
+    Ok((store, expected))
 }
 
 /// Initialize the runtime's owned library after normal service is restored.
 /// Disabled startup deliberately leaves a new database uncreated.
 pub fn initialize_runtime_store() -> Result<LocalStore> {
-    anyhow::ensure!(!service_paused(), "database initialization requires normal service");
+    anyhow::ensure!(
+        !service_paused(),
+        "database initialization requires normal service"
+    );
     let root = data_dir();
     crate::snapshot::ensure_no_incomplete_restore(&root)?;
     check_runtime_profile(&root)?;
@@ -2962,9 +3146,15 @@ pub fn initialize_runtime_store() -> Result<LocalStore> {
 pub fn database_path(root: &Path) -> Result<PathBuf> {
     let current = root.join("rsrs.db");
     let legacy = root.join("onememory.db");
-    anyhow::ensure!(!(current.exists() && legacy.exists()),
-        "both rsrs.db and the legacy database exist; select the intended library explicitly");
-    Ok(if current.exists() || !legacy.exists() { current } else { legacy })
+    anyhow::ensure!(
+        !(current.exists() && legacy.exists()),
+        "both rsrs.db and the legacy database exist; select the intended library explicitly"
+    );
+    Ok(if current.exists() || !legacy.exists() {
+        current
+    } else {
+        legacy
+    })
 }
 
 /// Read the selected source as one committed snapshot, without creating plaintext files.
@@ -2977,26 +3167,41 @@ pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
     let alias = session["keyring_account"].as_str().unwrap_or(user);
     let version = session["vault_version"].as_i64().unwrap_or(1);
     let password = if version == 1 {
-        source_secret.map(str::to_owned)
+        source_secret
+            .map(str::to_owned)
             .or_else(|| session["pass"].as_str().map(str::to_owned))
-            .or_else(|| crate::keystore::load_login_pass(alias)).unwrap_or_default()
-    } else { String::new() };
-    let keys = crate::auth::unlock_session_keys(&session, &password,
-        if version == 1 { None } else { source_secret }, alias)?;
+            .or_else(|| crate::keystore::load_login_pass(alias))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let keys = crate::auth::unlock_session_keys(
+        &session,
+        &password,
+        if version == 1 { None } else { source_secret },
+        alias,
+    )?;
     let directory = crate::service::data_dir();
     let path = crate::service::database_path(&directory)?;
-    anyhow::ensure!(path.is_file(), "selected source has no local library; nothing was migrated");
-    let database = rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    anyhow::ensure!(
+        path.is_file(),
+        "selected source has no local library; nothing was migrated"
+    );
+    let database =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut statement = database.prepare("SELECT id,ciphertext,nonce,COALESCE(parent_id,'') FROM memories WHERE COALESCE(deleted,0)=0 ORDER BY id")?;
     let mut rows = statement.query([])?;
     let mut entries = Vec::new();
     while let Some(row) = rows.next()? {
-        let mut stored = crate::memory::model::StoredMemory::new_pending(row.get(0)?, String::new());
+        let mut stored =
+            crate::memory::model::StoredMemory::new_pending(row.get(0)?, String::new());
         stored.ciphertext = row.get(1)?;
         stored.nonce = row.get(2)?;
         stored.local_parent_id = row.get(3)?;
-        entries.push(crate::memory::MemoryEngine::open(&keys, &stored)
-            .context("source record cannot be decrypted; original library was preserved")?);
+        entries.push(
+            crate::memory::MemoryEngine::open(&keys, &stored)
+                .context("source record cannot be decrypted; original library was preserved")?,
+        );
     }
     Ok(serde_json::to_string(&entries)?)
 }
@@ -3146,7 +3351,10 @@ pub fn resolve_prefix(all: &[crate::memory::model::StoredMemory], prefix: &str) 
     match hits.len() {
         1 => Ok(hits[0].clone()),
         0 => Err(crate::input_error::InputError(format!("no such entry: {prefix}")).into()),
-        n => Err(crate::input_error::InputError(format!("prefix is not unique ({n} hits): {prefix}")).into()),
+        n => Err(crate::input_error::InputError(format!(
+            "prefix is not unique ({n} hits): {prefix}"
+        ))
+        .into()),
     }
 }
 
@@ -3611,7 +3819,8 @@ mod tests {
             .find(|m| m.id == "11111111-parent")
             .ok_or_else(|| anyhow!("not found"))?;
         assert!(
-            upd.local_content_head.contains("\u{7eb2}\u{ff1a}\u{8be6}\u{60c5}\u{62c6}\u{89c1}"),
+            upd.local_content_head
+                .contains("\u{7eb2}\u{ff1a}\u{8be6}\u{60c5}\u{62c6}\u{89c1}"),
             "original should become an outline"
         );
         // summary=original body: become an outline without changing content (keep-original path)
@@ -3648,7 +3857,8 @@ mod tests {
             summary: None,
             items: vec![SplitOp {
                 title: "\u{4e00}\u{679c}".into(),
-                content: "\u{552f}\u{4e00}\u{4e00}\u{679c}\u{7b49}\u{540c}\u{6539}\u{5199}\u{3002}".into(),
+                content: "\u{552f}\u{4e00}\u{4e00}\u{679c}\u{7b49}\u{540c}\u{6539}\u{5199}\u{3002}"
+                    .into(),
                 kind: "context".into(),
                 tags: vec![],
                 parent: "\u{7eb2}".into(),
@@ -3684,7 +3894,9 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         assert_eq!(workspace_mode(), "normal");
         assert_eq!(diary_mode(), "concise");
-        write_client_config(&serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}))?;
+        write_client_config(
+            &serde_json::json!({"api_base":"https://fixture.invalid", "custom":"preserved"}),
+        )?;
         set_workspace_mode("readonly")?;
         assert_eq!(workspace_mode(), "readonly");
         assert!(service_paused());
@@ -3692,8 +3904,15 @@ mod tests {
         assert!(ensure_writable().is_err());
         assert!(import_json_text("[]").is_err());
         account_use("work")?;
-        assert_eq!(workspace_mode(), "readonly", "device mode survives account switching");
-        assert_eq!(read_client_config().ok_or_else(|| anyhow::anyhow!("missing client config"))?["custom"], "preserved");
+        assert_eq!(
+            workspace_mode(),
+            "readonly",
+            "device mode survives account switching"
+        );
+        assert_eq!(
+            read_client_config().ok_or_else(|| anyhow::anyhow!("missing client config"))?["custom"],
+            "preserved"
+        );
         set_workspace_mode("off")?;
         assert_eq!(workspace_mode(), "off");
         assert!(off_mode());
@@ -3715,14 +3934,30 @@ mod tests {
         assert_eq!(workspace_mode(), "normal");
         write_agent_config_key("readonly_team", &serde_json::json!(true))?;
         set_workspace_mode("normal")?;
-        assert_eq!(workspace_mode(), "readonly", "normal mode cannot lift shared-space permissions");
-        assert!(!service_paused(), "team read-only access must still pull and index shared memory");
+        assert_eq!(
+            workspace_mode(),
+            "readonly",
+            "normal mode cannot lift shared-space permissions"
+        );
+        assert!(
+            !service_paused(),
+            "team read-only access must still pull and index shared memory"
+        );
         assert!(ensure_writable().is_err());
         set_workspace_mode("readonly")?;
-        assert!(service_paused(), "device read-only mode must pause even a shared-space replica");
-        std::fs::write(agent_config_path(), serde_json::to_vec(&serde_json::json!({"readonly":true,"readonly_team":true}))?)?;
+        assert!(
+            service_paused(),
+            "device read-only mode must pause even a shared-space replica"
+        );
+        std::fs::write(
+            agent_config_path(),
+            serde_json::to_vec(&serde_json::json!({"readonly":true,"readonly_team":true}))?,
+        )?;
         write_client_config(&serde_json::json!({"custom":"preserved"}))?;
-        assert!(!service_paused(), "legacy shared-space flags are account permissions, not device mode");
+        assert!(
+            !service_paused(),
+            "legacy shared-space flags are account permissions, not device mode"
+        );
         set_workspace_mode("normal")?;
         write_agent_config_key("readonly_team", &serde_json::json!(false))?;
         write_agent_config_key("diary_mode", &serde_json::json!("verbose"))?;
@@ -3789,8 +4024,12 @@ mod tests {
         let mut incoming = app.create(&important("incoming", "rust memory"))?;
         incoming.updated_at = "2099-01-01T00:00:00Z".into();
         incoming.content = "synchronized rust memory".into();
-        let mut source = MemoryEngine::seal(&app.keys,
-            &crate::memory::search::HashingEmbedder::default(), &incoming, "fixture")?;
+        let mut source = MemoryEngine::seal(
+            &app.keys,
+            &crate::memory::search::HashingEmbedder::default(),
+            &incoming,
+            "fixture",
+        )?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
         let (ready, pending) = recall_candidates(&app.store)?;
@@ -3800,9 +4039,15 @@ mod tests {
         let hits = app.search("rust memory", 10, None)?;
         assert!(hits.iter().any(|hit| hit.entry.id == indexed.id));
         assert!(hits.iter().all(|hit| hit.entry.id != incoming.id));
-        assert_eq!(app.store.rebuild_index_with_progress(
-            &app.keys, &crate::memory::search::HashingEmbedder::default(), "m3", |_, _| Ok(())
-        )?, 1);
+        assert_eq!(
+            app.store.rebuild_index_with_progress(
+                &app.keys,
+                &crate::memory::search::HashingEmbedder::default(),
+                "m3",
+                |_, _| Ok(())
+            )?,
+            1
+        );
         let (ready, pending) = recall_candidates(&app.store)?;
         assert_eq!(ready.len(), 2);
         assert_eq!(pending, 0);
@@ -3815,11 +4060,16 @@ mod tests {
         let app = test_app(dir.path())?;
         let mut memory = app.create(&important("source", "rust memory"))?;
         memory.updated_at = "2099-01-01T00:00:00Z".into();
-        let mut source = MemoryEngine::seal(&app.keys,
-            &crate::memory::search::HashingEmbedder::default(), &memory, "fixture")?;
+        let mut source = MemoryEngine::seal(
+            &app.keys,
+            &crate::memory::search::HashingEmbedder::default(),
+            &memory,
+            "fixture",
+        )?;
         source.local_artifact.clear();
         app.store.put_synced(&source)?;
-        let error = recall_candidates(&app.store).err()
+        let error = recall_candidates(&app.store)
+            .err()
             .ok_or_else(|| anyhow!("all-pending recall succeeded"))?;
         assert!(error.downcast_ref::<IndexPending>().is_some());
         source.local_artifact = b"invalid artifact".to_vec();
@@ -3875,25 +4125,59 @@ mod tests {
     }
 
     #[test]
-    fn rejected_associations_restore_and_attach_are_input_errors_without_writes() -> anyhow::Result<()> {
+    fn rejected_associations_restore_and_attach_are_input_errors_without_writes(
+    ) -> anyhow::Result<()> {
         let _guard = crate::test_lock::guard();
         let dir = tempfile::tempdir()?;
         let app = test_app(dir.path())?;
-        let diary = app.create(&CreateReq { title: "diary".into(), content: "diary body".into(), ..CreateReq::default() })?;
+        let diary = app.create(&CreateReq {
+            title: "diary".into(),
+            content: "diary body".into(),
+            ..CreateReq::default()
+        })?;
         let parent = app.create(&important("parent", "parent body"))?;
-        let child = app.create(&CreateReq { parent: Some(parent.id.clone()), ..important("child", "child body") })?;
+        let child = app.create(&CreateReq {
+            parent: Some(parent.id.clone()),
+            ..important("child", "child body")
+        })?;
         let before = serde_json::to_value(app.store.all(true)?)?;
-        let supersede = app.create(&CreateReq { supersedes: Some(diary.id.clone()), ..important("replacement", "replacement body") });
-        let link = app.create(&CreateReq { see_also: vec![diary.id.clone()], ..important("linked", "linked body") });
-        for error in [supersede.err(), link.err(), app.restore("deadbeef").err(), app.attach(&child.id, &child.id).err(), app.attach(&parent.id, &child.id).err()] {
+        let supersede = app.create(&CreateReq {
+            supersedes: Some(diary.id.clone()),
+            ..important("replacement", "replacement body")
+        });
+        let link = app.create(&CreateReq {
+            see_also: vec![diary.id.clone()],
+            ..important("linked", "linked body")
+        });
+        for error in [
+            supersede.err(),
+            link.err(),
+            app.restore("deadbeef").err(),
+            app.attach(&child.id, &child.id).err(),
+            app.attach(&parent.id, &child.id).err(),
+        ] {
             let error = error.ok_or_else(|| anyhow!("invalid input was accepted"))?;
-            assert!(error.downcast_ref::<crate::input_error::InputError>().is_some(), "{error:#}");
+            assert!(
+                error
+                    .downcast_ref::<crate::input_error::InputError>()
+                    .is_some(),
+                "{error:#}"
+            );
         }
         assert_eq!(serde_json::to_value(app.store.all(true)?)?, before);
         // A cryptographic failure is still a runtime error, not malformed command input.
-        let wrong = App { keys: crate::memory::SessionKeys::from_urk([9; 32])?, store: app.store, embedder: app.embedder };
-        let error = wrong.restore(&child.id).err().ok_or_else(|| anyhow!("wrong key was accepted"))?;
-        assert!(error.downcast_ref::<crate::input_error::InputError>().is_none());
+        let wrong = App {
+            keys: crate::memory::SessionKeys::from_urk([9; 32])?,
+            store: app.store,
+            embedder: app.embedder,
+        };
+        let error = wrong
+            .restore(&child.id)
+            .err()
+            .ok_or_else(|| anyhow!("wrong key was accepted"))?;
+        assert!(error
+            .downcast_ref::<crate::input_error::InputError>()
+            .is_none());
         Ok(())
     }
 
@@ -3902,7 +4186,10 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let info = status_light()?;
         assert_eq!(info.local_total, 0);
-        assert_eq!(derive_title("\u{3010}\u{7ecf}\u{9a8c}\u{3011}first line\nsecond"), "first line");
+        assert_eq!(
+            derive_title("\u{3010}\u{7ecf}\u{9a8c}\u{3011}first line\nsecond"),
+            "first line"
+        );
         assert_eq!(derive_title(""), "(untitled)");
         assert!(diary_mode() == "concise" || diary_mode() == "verbose");
         let saved_super = std::env::var_os("RSRS_SUPER");
@@ -3920,23 +4207,50 @@ mod tests {
             let again = import_json_text(snapshot)?;
             assert_eq!((again.imported, again.duplicates), (0, 5));
             let keys = auth::load_local_session()?;
-            let entries: Vec<_> = open_store()?.all(false)?.iter()
-                .map(|stored| MemoryEngine::open(&keys, stored)).collect::<Result<_>>()?;
-            let parent = entries.iter().find(|entry| entry.content == "unique parent").ok_or_else(|| anyhow!("parent missing"))?;
-            let child = entries.iter().find(|entry| entry.content == "third body").ok_or_else(|| anyhow!("child missing"))?;
+            let entries: Vec<_> = open_store()?
+                .all(false)?
+                .iter()
+                .map(|stored| MemoryEngine::open(&keys, stored))
+                .collect::<Result<_>>()?;
+            let parent = entries
+                .iter()
+                .find(|entry| entry.content == "unique parent")
+                .ok_or_else(|| anyhow!("parent missing"))?;
+            let child = entries
+                .iter()
+                .find(|entry| entry.content == "third body")
+                .ok_or_else(|| anyhow!("child missing"))?;
             assert_eq!(child.parent_id, parent.id);
             assert_eq!(child.see_also, vec![parent.id.clone()]);
             assert!(import_json_text(r#"[{"id":"a","content":"a","parent_id":"b"},{"id":"b","content":"b","parent_id":"a"}]"#).is_err());
             assert_eq!(open_store()?.all(false)?.len(), 3);
             let snapshot = local_snapshot(Some(&code))?;
-            assert_eq!(serde_json::from_str::<Vec<MemoryEntry>>(&snapshot)?.len(), 3);
+            assert_eq!(
+                serde_json::from_str::<Vec<MemoryEntry>>(&snapshot)?.len(),
+                3
+            );
             let extra = r#"[{"id":"existing","content":"unique parent"},{"id":"new","content":"fourth body","supersedes":"existing","see_also":["existing"]}]"#;
-            assert_eq!((import_json_text(extra)?.imported, import_json_text(extra)?.duplicates), (1, 2));
+            assert_eq!(
+                (
+                    import_json_text(extra)?.imported,
+                    import_json_text(extra)?.duplicates
+                ),
+                (1, 2)
+            );
             let store = open_store()?;
             let all = store.all(false)?;
-            let entries = all.iter().map(|stored| MemoryEngine::open(&keys, stored)).collect::<Result<Vec<_>>>()?;
-            let parent = entries.iter().find(|entry| entry.content == "unique parent").ok_or_else(|| anyhow!("parent missing"))?;
-            let replacement = entries.iter().find(|entry| entry.content == "fourth body").ok_or_else(|| anyhow!("replacement missing"))?;
+            let entries = all
+                .iter()
+                .map(|stored| MemoryEngine::open(&keys, stored))
+                .collect::<Result<Vec<_>>>()?;
+            let parent = entries
+                .iter()
+                .find(|entry| entry.content == "unique parent")
+                .ok_or_else(|| anyhow!("parent missing"))?;
+            let replacement = entries
+                .iter()
+                .find(|entry| entry.content == "fourth body")
+                .ok_or_else(|| anyhow!("replacement missing"))?;
             assert_eq!(parent.superseded_by, replacement.id);
             assert!(parent.see_also.contains(&replacement.id));
             Ok(())

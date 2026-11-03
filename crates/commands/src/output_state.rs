@@ -33,7 +33,9 @@ pub fn json_mode() -> bool {
 /// for long async jobs: stdout stays JSON (for the bridge), stderr streams progress
 /// (so the UI can "scroll"). Without that env var, a TTY decides - same as before.
 pub fn progress_enabled() -> bool {
-    if json_mode() { return false; }
+    if json_mode() {
+        return false;
+    }
     if respire_app::env::var("RSRS_PROGRESS")
         .map(|v| v == "1")
         .unwrap_or(false)
@@ -75,10 +77,19 @@ pub fn output_emitted() -> bool {
 /// Keep the complete parser diagnostic separately from its concise UI message.
 pub fn parse_failure(error: &clap::Error) -> ResultEnvelope {
     let usage = error.to_string();
-    let mut envelope = ResultEnvelope::new("cli", OutputStatus::Fail,
-        serde_json::json!({"reason":"invalid_input"}), Vec::new());
-    envelope.errors.push(usage.lines().find(|line| !line.trim().is_empty())
-        .unwrap_or("invalid command input").to_owned());
+    let mut envelope = ResultEnvelope::new(
+        "cli",
+        OutputStatus::Fail,
+        serde_json::json!({"reason":"invalid_input"}),
+        Vec::new(),
+    );
+    envelope.errors.push(
+        usage
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("invalid command input")
+            .to_owned(),
+    );
     envelope.details = serde_json::json!({"error_type":"user", "usage":usage});
     envelope
 }

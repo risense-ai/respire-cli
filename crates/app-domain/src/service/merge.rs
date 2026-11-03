@@ -11,19 +11,47 @@ use crate::{MemoryEngine, MemoryEntry, MemoryTransport, SessionKeys, StoredMemor
 /// promotion semantics: skip merged ancestors, rather than attach to the new row.
 /// CLI inherits the first source's importance; App preserves the request's value.
 pub fn merge_entries<E: Embedder>(
-    keys: &SessionKeys, store: &LocalStore, embedder: &E, entry: &mut MemoryEntry,
-    ids: &[String], explicit_parent: &str, inherit_importance: bool,
+    keys: &SessionKeys,
+    store: &LocalStore,
+    embedder: &E,
+    entry: &mut MemoryEntry,
+    ids: &[String],
+    explicit_parent: &str,
+    inherit_importance: bool,
 ) -> Result<Vec<String>> {
-    merge_entries_with_metadata(keys, store, embedder, entry, ids, explicit_parent, inherit_importance, None)
+    merge_entries_with_metadata(
+        keys,
+        store,
+        embedder,
+        entry,
+        ids,
+        explicit_parent,
+        inherit_importance,
+        None,
+    )
 }
 
 pub fn merge_entries_with_metadata<E: Embedder>(
-    keys: &SessionKeys, store: &LocalStore, embedder: &E, entry: &mut MemoryEntry,
-    ids: &[String], explicit_parent: &str, inherit_importance: bool,
+    keys: &SessionKeys,
+    store: &LocalStore,
+    embedder: &E,
+    entry: &mut MemoryEntry,
+    ids: &[String],
+    explicit_parent: &str,
+    inherit_importance: bool,
     metadata: Option<&super::MetadataPatch>,
 ) -> Result<Vec<String>> {
-    Ok(merge_entries_with_metadata_revision(keys, store, embedder, entry, ids, explicit_parent,
-        inherit_importance, metadata)?.0)
+    Ok(merge_entries_with_metadata_revision(
+        keys,
+        store,
+        embedder,
+        entry,
+        ids,
+        explicit_parent,
+        inherit_importance,
+        metadata,
+    )?
+    .0)
 }
 
 pub fn merge_entries_with_metadata_revision<E: Embedder>(
@@ -287,7 +315,9 @@ mod tests {
             HashingEmbedder::default().dims()
         }
 
-        fn model_name(&self) -> &str { "test-hash:256" }
+        fn model_name(&self) -> &str {
+            "test-hash:256"
+        }
         fn prepare(&self, entry: &MemoryEntry) -> Result<respire_core_sdk::Prepared> {
             self.0.fetch_add(1, Ordering::Relaxed);
             HashingEmbedder::default().prepare(entry)

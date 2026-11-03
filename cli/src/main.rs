@@ -39,6 +39,11 @@ use respire_commands::cli_def::{
     changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
     SessionCommand, SnapshotCmd,
 };
+pub(crate) use respire_commands::engine::{
+    background_sync_once, change_metadata_profile, run_capabilities, run_local,
+    run_memory_revision, run_metadata_host, run_metadata_status, schedule_autosync,
+    select_diary_tracks, DIRECT_MODE, EMBEDDER_SLOT,
+};
 use respire_commands::engine::{
     build_local, build_remote, build_session, build_session_with_owner,
     build_session_with_owner_inner, build_transport, read_session_json,
@@ -52,30 +57,24 @@ use respire_commands::metadata;
 use respire_commands::model_install;
 use respire_commands::model_progress;
 use respire_commands::net_rpc;
-use respire_commands::progress;
-pub(crate) use respire_commands::sync_flow::{
-    is_retriable_sync_error, read_remote_sync_history, run_sync_attempts, sync_live, sync_phase,
-    sync_tracked,
-    sync_tracked_boundary, sync_with_retry,
-};
-pub(crate) use respire_commands::engine::{
-    background_sync_once,
-    change_metadata_profile, run_capabilities, run_local, run_memory_revision, run_metadata_host,
-    run_metadata_status, schedule_autosync, select_diary_tracks, DIRECT_MODE, EMBEDDER_SLOT,
-};
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
-use respire_commands::{bench, classify, recall_select, review, skill};
 use respire_commands::output_emit::{command_failure, emit_details, emit_result};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
     set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
     HOST_RPC_OUTPUT, OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
 };
+use respire_commands::progress;
 use respire_commands::runtime_error;
 use respire_commands::runtime_policy;
+pub(crate) use respire_commands::sync_flow::{
+    is_retriable_sync_error, read_remote_sync_history, run_sync_attempts, sync_live, sync_phase,
+    sync_tracked, sync_tracked_boundary, sync_with_retry,
+};
 use respire_commands::util::{
     current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id,
 };
+use respire_commands::{bench, classify, recall_select, review, skill};
 
 use respire::auth;
 use respire::memory::bge::BgeEmbedder;
@@ -122,7 +121,10 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         }
 
         Some(Command::Logout { full }) => {
-            let outcome = match logout_cli(*full) { Ok(value) => value, Err(error) => return Some(Err(error)) };
+            let outcome = match logout_cli(*full) {
+                Ok(value) => value,
+                Err(error) => return Some(Err(error)),
+            };
             let status = if outcome.session_found {
                 OutputStatus::Ok
             } else {
@@ -177,18 +179,16 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             session,
             all,
             yes,
-        }) => {
-            Some(run_space(
-                action,
-                name.as_deref(),
-                note.as_deref(),
-                *readonly,
-                code.as_deref(),
-                session.as_deref(),
-                *all,
-                *yes,
-            ))
-        }
+        }) => Some(run_space(
+            action,
+            name.as_deref(),
+            note.as_deref(),
+            *readonly,
+            code.as_deref(),
+            session.as_deref(),
+            *all,
+            *yes,
+        )),
 
         Some(Command::UpdateCheck { force, clear }) => Some(run_update_check(*force, *clear)),
 
@@ -200,15 +200,13 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             autosync,
             cure_auto,
             rpc_parallelism,
-        }) => {
-            Some(run_config(
-                data_dir.as_deref(),
-                addr.as_deref(),
-                *autosync,
-                *cure_auto,
-                *rpc_parallelism,
-            ))
-        }
+        }) => Some(run_config(
+            data_dir.as_deref(),
+            addr.as_deref(),
+            *autosync,
+            *cure_auto,
+            *rpc_parallelism,
+        )),
 
         Some(Command::Secret { reveal }) => Some(run_secret(*reveal)),
 
@@ -221,32 +219,28 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             wrapped_urk,
             urk_nonce,
             super_pass,
-        }) => {
-            Some(run_fivekeys(
-                addr,
-                user,
-                pass,
-                secret,
-                kdf_salt,
-                wrapped_urk,
-                urk_nonce,
-                super_pass,
-            ))
-        }
+        }) => Some(run_fivekeys(
+            addr,
+            user,
+            pass,
+            secret,
+            kdf_salt,
+            wrapped_urk,
+            urk_nonce,
+            super_pass,
+        )),
 
         Some(Command::Register {
             addr,
             user,
             pass,
             super_pass,
-        }) => {
-            Some(run_register(
-                addr.as_deref(),
-                user.as_deref(),
-                pass.as_deref(),
-                super_pass.as_deref(),
-            ))
-        }
+        }) => Some(run_register(
+            addr.as_deref(),
+            user.as_deref(),
+            pass.as_deref(),
+            super_pass.as_deref(),
+        )),
         _ => None,
     }
 }
@@ -259,15 +253,30 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
         std::iter::once(std::ffi::OsString::from("rsrs"))
             .chain(args.iter().cloned().map(std::ffi::OsString::from)),
     );
-    let defer_index = parsed.as_ref().is_ok_and(|cli| matches!(cli.command.as_ref(),
-        Some(Command::Remember { .. } | Command::Update { .. } | Command::Import { .. }
-            | Command::Attach { .. } | Command::Restore { .. })));
+    let defer_index = parsed.as_ref().is_ok_and(|cli| {
+        matches!(
+            cli.command.as_ref(),
+            Some(
+                Command::Remember { .. }
+                    | Command::Update { .. }
+                    | Command::Import { .. }
+                    | Command::Attach { .. }
+                    | Command::Restore { .. }
+            )
+        )
+    });
     let _deferred = defer_index.then(respire::core_sdk::defer_indexing);
     let ran = match parsed {
         Ok(cli) => match run(cli) {
-            Err(error) if !HOST_RPC_OUTPUT.get() && error.downcast_ref::<respire::transport::local::MemorySourceChanged>().is_some() => {
+            Err(error)
+                if !HOST_RPC_OUTPUT.get()
+                    && error
+                        .downcast_ref::<respire::transport::local::MemorySourceChanged>()
+                        .is_some() =>
+            {
                 Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()))
-                    .map_err(anyhow::Error::from).and_then(run)
+                    .map_err(anyhow::Error::from)
+                    .and_then(run)
             }
             result => result,
         },
@@ -595,11 +604,7 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
                 "update-check",
                 status,
                 serde_json::json!({"current":s.current.clone(),"latest":s.latest.clone(),"outdated":s.outdated,"ahead":uc::is_newer(&s.current,&s.latest),"cached":s.cached}),
-                vec![OutputItem::new(
-                    "version",
-                    status,
-                    s.comparison(),
-                )],
+                vec![OutputItem::new("version", status, s.comparison())],
             );
             if s.outdated {
                 result.actions.push("npm i -g rsrs-cli@latest".into());
@@ -872,8 +877,11 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
     let is_v4 = version >= 4;
     // v4: super password = session["secret_key"] or the keyring; v3: passphrase + Secret Key two-factor
     let super_key = data["secret_key"].as_str().unwrap_or("").to_owned();
-    let legacy_super = data["super"].as_str().map(ToOwned::to_owned)
-        .or_else(|| respire::keystore::load_super(&user)).unwrap_or_default();
+    let legacy_super = data["super"]
+        .as_str()
+        .map(ToOwned::to_owned)
+        .or_else(|| respire::keystore::load_super(&user))
+        .unwrap_or_default();
     let super_key = if is_v4 && super_key.is_empty() {
         respire::keystore::load_super(&user).unwrap_or_default()
     } else {
@@ -887,8 +895,14 @@ fn run_keys_export(out: Option<&str>) -> Result<()> {
     }
     let is_v3 = version == 3;
     let body = if version == 1 {
-        let account_secret = data["secret"].as_str().filter(|value| !value.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("v1 Account Secret is missing; retain the original device and library"))?;
+        let account_secret = data["secret"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "v1 Account Secret is missing; retain the original device and library"
+                )
+            })?;
         format!(
             "rsrs v1 key-recovery notes (keep private; losing the original factors makes data unreadable)\n\
              user: {user}\nserver: {addr}\n\n\
@@ -1138,46 +1152,47 @@ fn run_register(
 /// shared code calls them through `respire_commands::host_hooks`. Installation
 /// is idempotent (first wiring wins).
 fn install_cli_host_hooks() -> bool {
-    let installed = respire_commands::host_hooks::install(respire_commands::host_hooks::HostHooks {
-        background_paused: Some(|| autostart::background_paused()),
-        check_direct_access: Some(|| autostart::check_direct_access()),
-        note_credential_access: Some(|available| autostart::note_credential_access(available)),
-        context_changed: Some(rpc::context_changed),
-        call_runtime_method: Some(rpc::call_method_outcome),
-        update_hint: Some(respire::update_check::hint),
-        update_enabled: Some(respire::update_check::enabled),
-        update_check_run: Some(|force| {
-            respire::update_check::check(force).map(|status| {
-                respire_commands::host_hooks::UpdateStatus {
-                    current: status.current,
-                    latest: status.latest,
-                    outdated: status.outdated,
-                    cached: status.cached,
-                }
-            })
-        }),
-        materialize_bin: Some(mcp::materialize_bin),
-        foreground_progress: Some(rpc::foreground_progress),
-        runtime_brief: Some(rpc::runtime_brief),
-        host_command: Some(host_command),
-        extract_tui_run: Some(respire::extract_tui::run),
-        runtime_is_up: Some(rpc::runtime_is_up),
-        change_profile: Some(|change| rpc::change_profile(|| change())),
-        managed_id: Some(|| autostart::managed_id()),
-        verify_managed_boot: Some(|| autostart::verify_managed_boot()),
-        record_exit: Some(|success| autostart::record_exit(success)),
-        credential_state: Some(|| autostart::credential_state()),
-        capture_run: Some(capture_run),
-        mcp_http_response: Some(|request| {
-            mcp::http_response(mcp::HttpIn {
-                method: request.method,
-                path: request.path,
-                origin: request.origin,
-                accept: request.accept,
-                body: request.body,
-            })
-        }),
-    });
+    let installed =
+        respire_commands::host_hooks::install(respire_commands::host_hooks::HostHooks {
+            background_paused: Some(|| autostart::background_paused()),
+            check_direct_access: Some(|| autostart::check_direct_access()),
+            note_credential_access: Some(|available| autostart::note_credential_access(available)),
+            context_changed: Some(rpc::context_changed),
+            call_runtime_method: Some(rpc::call_method_outcome),
+            update_hint: Some(respire::update_check::hint),
+            update_enabled: Some(respire::update_check::enabled),
+            update_check_run: Some(|force| {
+                respire::update_check::check(force).map(|status| {
+                    respire_commands::host_hooks::UpdateStatus {
+                        current: status.current,
+                        latest: status.latest,
+                        outdated: status.outdated,
+                        cached: status.cached,
+                    }
+                })
+            }),
+            materialize_bin: Some(mcp::materialize_bin),
+            foreground_progress: Some(rpc::foreground_progress),
+            runtime_brief: Some(rpc::runtime_brief),
+            host_command: Some(host_command),
+            extract_tui_run: Some(respire::extract_tui::run),
+            runtime_is_up: Some(rpc::runtime_is_up),
+            change_profile: Some(|change| rpc::change_profile(|| change())),
+            managed_id: Some(|| autostart::managed_id()),
+            verify_managed_boot: Some(|| autostart::verify_managed_boot()),
+            record_exit: Some(|success| autostart::record_exit(success)),
+            credential_state: Some(|| autostart::credential_state()),
+            capture_run: Some(capture_run),
+            mcp_http_response: Some(|request| {
+                mcp::http_response(mcp::HttpIn {
+                    method: request.method,
+                    path: request.path,
+                    origin: request.origin,
+                    accept: request.accept,
+                    body: request.body,
+                })
+            }),
+        });
     if installed {
         respire_commands::rpc_worker::install_recall_stats_enqueue(rpc::enqueue_recall_stats_local);
     }
@@ -1222,24 +1237,38 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
-    if std::env::args_os().any(|arg|arg=="--host-rpc-stdio") {
+    if std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
         set_json_mode(true);
-        if std::env::args_os().any(|arg|arg=="--client-only") {
+        if std::env::args_os().any(|arg| arg == "--client-only") {
             std::env::set_var("RSRS_CLIENT_ONLY", "1");
         }
         return match host_rpc::serve() {
-            Ok(code)=>code,
-            Err(error)=>{let (envelope,code)=command_failure(&error);if let Err(output_error)=emit_result(envelope){eprintln!("host RPC reply failed: {output_error}");}code}
+            Ok(code) => code,
+            Err(error) => {
+                let (envelope, code) = command_failure(&error);
+                if let Err(output_error) = emit_result(envelope) {
+                    eprintln!("host RPC reply failed: {output_error}");
+                }
+                code
+            }
         };
     }
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--core-worker-internal") {
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--core-worker-internal")
+    {
         return match respire_app::core_sdk::worker::run() {
             Ok(()) => 0,
-            Err(error) => { eprintln!("Core worker stopped: {error:#}"); 1 }
+            Err(error) => {
+                eprintln!("Core worker stopped: {error:#}");
+                1
+            }
         };
     }
-    set_json_mode(std::env::args_os().any(|arg| arg == "--json")
-        || respire::env::var("RSRS_JSON").is_ok_and(|value| value == "1" || value == "true"));
+    set_json_mode(
+        std::env::args_os().any(|arg| arg == "--json")
+            || respire::env::var("RSRS_JSON").is_ok_and(|value| value == "1" || value == "true"),
+    );
     if std::env::args_os().any(|arg| arg == "--client-only") {
         std::env::set_var("RSRS_CLIENT_ONLY", "1");
     }
@@ -1262,10 +1291,20 @@ fn main_body() -> i32 {
         Preparsed::Invalid(error) => Err(respire_app::input_error::InputError(error).into()),
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
-            match Cli::try_parse_from(
-                std::iter::once(std::ffi::OsString::from("rsrs")).chain(args),
-            ) {
-                Ok(cli) if matches!(cli.command, Some(Command::MemoryRevision | Command::Capabilities | Command::Runtime { .. })) => run(cli),
+            match Cli::try_parse_from(std::iter::once(std::ffi::OsString::from("rsrs")).chain(args))
+            {
+                Ok(cli)
+                    if matches!(
+                        cli.command,
+                        Some(
+                            Command::MemoryRevision
+                                | Command::Capabilities
+                                | Command::Runtime { .. }
+                        )
+                    ) =>
+                {
+                    run(cli)
+                }
                 Ok(cli) => prepare_command_runtime().and_then(|()| run(cli)),
                 Err(error) if error.exit_code() == 0 => error.print().map_err(Into::into),
                 Err(error) => {
@@ -1324,8 +1363,12 @@ enum Preparsed {
 fn emit_runtime_help() -> Result<()> {
     let usage = "Usage: rsrs --runtime-internal [--no-open] [--host 127.0.0.1] [--port PORT] [--status | --stop]\n\nHost runtime: loopback HTTP only. Without --status/--stop, serve until stopped.\n  --status   Inspect the existing host without starting it\n  --stop     Ask the owned host runtime to stop\n  --no-open  Do not open a browser (accepted for compatibility)\n\nClient-only tools connect to the host; lifecycle changes require the host terminal.\nFor Windows sign-in startup, see docs/runtime.md.\n";
     if json_mode() {
-        emit_result(ResultEnvelope::new("runtime-help", OutputStatus::Ok,
-            serde_json::json!({"usage":usage,"lifecycle":"host-managed","transport":"loopback-http"}), Vec::new()))
+        emit_result(ResultEnvelope::new(
+            "runtime-help",
+            OutputStatus::Ok,
+            serde_json::json!({"usage":usage,"lifecycle":"host-managed","transport":"loopback-http"}),
+            Vec::new(),
+        ))
     } else {
         print!("{usage}");
         mark_emitted();
@@ -1362,8 +1405,15 @@ fn preprocess_args() -> Preparsed {
         .find(|arg| arg.as_str() != "--json")
         .is_some_and(|arg| arg == "--runtime-internal")
     {
-        if args.iter().any(|arg| matches!(arg.as_str(), "--help" | "-h"))
-            && args.iter().all(|arg| matches!(arg.as_str(), "--runtime-internal" | "--help" | "-h" | "--json"))
+        if args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--help" | "-h"))
+            && args.iter().all(|arg| {
+                matches!(
+                    arg.as_str(),
+                    "--runtime-internal" | "--help" | "-h" | "--json"
+                )
+            })
         {
             return Preparsed::RuntimeHelp {
                 json: json_mode() || args.iter().any(|arg| arg == "--json"),
@@ -1470,20 +1520,46 @@ fn run(args: Cli) -> Result<()> {
     }
     autostart::check_managed_request()?;
     let metadata_requested = match args.command.as_ref() {
-        Some(Command::Remember { metadata, r#type, .. }) => metadata.patch().is_some()
-            || r#type.as_deref().is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self")),
-        Some(Command::Update { metadata, kind, .. }) => metadata.patch().is_some()
-            || kind.as_deref().is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self")),
+        Some(Command::Remember {
+            metadata, r#type, ..
+        }) => {
+            metadata.patch().is_some()
+                || r#type
+                    .as_deref()
+                    .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
+        }
+        Some(Command::Update { metadata, kind, .. }) => {
+            metadata.patch().is_some()
+                || kind
+                    .as_deref()
+                    .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
+        }
         _ => false,
     };
-    if metadata_requested { respire_app::metadata_gate::require_support()?; }
-    if DIRECT_MODE.load(Ordering::Relaxed) && matches!(args.command, Some(Command::Metadata { command: metadata::Command::Status })) {
+    if metadata_requested {
+        respire_app::metadata_gate::require_support()?;
+    }
+    if DIRECT_MODE.load(Ordering::Relaxed)
+        && matches!(
+            args.command,
+            Some(Command::Metadata {
+                command: metadata::Command::Status
+            })
+        )
+    {
         runtime_policy::require_host("direct metadata status")?;
-        set_json_mode(args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+        set_json_mode(
+            args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+        );
         return run_metadata_status();
     }
-    if let Some(Command::Metadata { command: command @ (metadata::Command::Enable { .. } | metadata::Command::Disable) }) = args.command.as_ref() {
-        set_json_mode(args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"));
+    if let Some(Command::Metadata {
+        command: command @ (metadata::Command::Enable { .. } | metadata::Command::Disable),
+    }) = args.command.as_ref()
+    {
+        set_json_mode(
+            args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+        );
         return run_metadata_host(command);
     }
     if let Some(Command::Snapshot {
@@ -1508,7 +1584,7 @@ fn run(args: Cli) -> Result<()> {
         let account = respire::service::session_user_of_dir(&root);
         let keys = build_session()?;
         let receipt = std::cell::RefCell::new(None::<respire_app::snapshot::RestoreReceipt>);
-        let cleanup_issue=std::cell::RefCell::new(None::<String>);
+        let cleanup_issue = std::cell::RefCell::new(None::<String>);
         rpc::change_profile_with_verification(
             || {
                 let ownership =
@@ -1524,47 +1600,85 @@ fn run(args: Cli) -> Result<()> {
                         &root,
                         std::time::Duration::from_secs(15),
                     )?;
-                    respire_app::snapshot::rollback_locked(&root,restored,&ownership)?;
+                    respire_app::snapshot::rollback_locked(&root, restored, &ownership)?;
                 }
                 Ok(())
             },
             || {
-                let held=receipt.borrow();
-                let receipt=held.as_ref().ok_or_else(||anyhow!("snapshot restore receipt missing"))?;
-                rpc::verify_snapshot_store(&root,&receipt.restored)?;
-                respire_app::snapshot::commit_restore(&root,receipt)?;
+                let held = receipt.borrow();
+                let receipt = held
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("snapshot restore receipt missing"))?;
+                rpc::verify_snapshot_store(&root, &receipt.restored)?;
+                respire_app::snapshot::commit_restore(&root, receipt)?;
                 // A durable commit is never rolled back for cleanup failure.
                 // Both the release and any recovery remain under takeover.
-                *cleanup_issue.borrow_mut()=respire_app::snapshot::release_restore(&root,receipt).err().map(|error|error.to_string());
+                *cleanup_issue.borrow_mut() =
+                    respire_app::snapshot::release_restore(&root, receipt)
+                        .err()
+                        .map(|error| error.to_string());
                 Ok(())
             },
         )?;
-        let receipt=receipt.into_inner().ok_or_else(||anyhow!("snapshot restore receipt missing"))?;
-        let cleanup=cleanup_issue.into_inner();
+        let receipt = receipt
+            .into_inner()
+            .ok_or_else(|| anyhow!("snapshot restore receipt missing"))?;
+        let cleanup = cleanup_issue.into_inner();
         let mut result = ResultEnvelope::new(
             "snapshot",
-            if cleanup.is_some(){OutputStatus::Warn}else{OutputStatus::Ok},
+            if cleanup.is_some() {
+                OutputStatus::Warn
+            } else {
+                OutputStatus::Ok
+            },
             serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false,"runtime_verified":true,"service_released":respire_app::snapshot::ensure_no_incomplete_restore(&root).is_ok()}),
             Vec::new(),
         );
         result.details = serde_json::to_value(&receipt)?;
-        if let Some(error)=cleanup {result.errors.push(format!("restored runtime verified; local rollback cleanup pending: {error}"));}
+        if let Some(error) = cleanup {
+            result.errors.push(format!(
+                "restored runtime verified; local rollback cleanup pending: {error}"
+            ));
+        }
         return emit_result(result);
     }
-    if let Some(Command::Snapshot { cmd: SnapshotCmd::Recover { confirm } }) = args.command.as_ref() {
+    if let Some(Command::Snapshot {
+        cmd: SnapshotCmd::Recover { confirm },
+    }) = args.command.as_ref()
+    {
         runtime_policy::require_host("snapshot recovery")?;
-        anyhow::ensure!(!rpc::worker_active(),"snapshot recovery must run in the host CLI");
-        anyhow::ensure!(*confirm,"snapshot recover requires --confirm");
+        anyhow::ensure!(
+            !rpc::worker_active(),
+            "snapshot recovery must run in the host CLI"
+        );
+        anyhow::ensure!(*confirm, "snapshot recover requires --confirm");
         respire::service::ensure_writable()?;
-        let root=respire::service::data_dir();let account=respire::service::session_user_of_dir(&root);
-        autostart::with_explicit_recovery(|| rpc::change_profile_with_verification(|| {
-            let ownership=respire::lock::LibraryLock::acquire(&root,std::time::Duration::from_secs(15))?;
-            respire_app::snapshot::recover_locked(&root,&account,&ownership)
-        },||Ok(()),||{
-            if !respire::service::off_mode(){rpc::verify_open_store(&root)?;}
-            Ok(())
-        }))?;
-        return emit_result(ResultEnvelope::new("snapshot",OutputStatus::Ok,serde_json::json!({"action":"recovered","runtime_verified":true}),Vec::new()));
+        let root = respire::service::data_dir();
+        let account = respire::service::session_user_of_dir(&root);
+        autostart::with_explicit_recovery(|| {
+            rpc::change_profile_with_verification(
+                || {
+                    let ownership = respire::lock::LibraryLock::acquire(
+                        &root,
+                        std::time::Duration::from_secs(15),
+                    )?;
+                    respire_app::snapshot::recover_locked(&root, &account, &ownership)
+                },
+                || Ok(()),
+                || {
+                    if !respire::service::off_mode() {
+                        rpc::verify_open_store(&root)?;
+                    }
+                    Ok(())
+                },
+            )
+        })?;
+        return emit_result(ResultEnvelope::new(
+            "snapshot",
+            OutputStatus::Ok,
+            serde_json::json!({"action":"recovered","runtime_verified":true}),
+            Vec::new(),
+        ));
     }
     respire_app::snapshot::ensure_no_incomplete_restore(&respire::service::data_dir())?;
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
@@ -1573,19 +1687,32 @@ fn run(args: Cli) -> Result<()> {
     );
     if let Some(Command::Model { action }) = args.command.as_ref() {
         let request = match action {
-            ModelAction::Catalog => Some(("model.catalog",Vec::new())),
+            ModelAction::Catalog => Some(("model.catalog", Vec::new())),
             ModelAction::Configure { file } => {
                 let value: serde_json::Value = serde_json::from_slice(&std::fs::read(file)?)?;
-                Some(("model.configure",vec![serde_json::to_string(&value)?]))
+                Some(("model.configure", vec![serde_json::to_string(&value)?]))
             }
-            ModelAction::Switch { model,backend,engine,variant } => Some(("model.switch",vec![serde_json::to_string(&serde_json::json!({"model":model,"backend":backend,"engine":engine,"variant":variant}))?])),
-            ModelAction::Progress => Some(("model.progress",Vec::new())),
-            ModelAction::Resume => Some(("model.resume",Vec::new())),
+            ModelAction::Switch {
+                model,
+                backend,
+                engine,
+                variant,
+            } => Some((
+                "model.switch",
+                vec![serde_json::to_string(
+                    &serde_json::json!({"model":model,"backend":backend,"engine":engine,"variant":variant}),
+                )?],
+            )),
+            ModelAction::Progress => Some(("model.progress", Vec::new())),
+            ModelAction::Resume => Some(("model.resume", Vec::new())),
             _ => None,
         };
-        if let Some((method,values)) = request {
-            anyhow::ensure!(!DIRECT_MODE.load(Ordering::Relaxed),"model profiles require the resident runtime; omit --direct");
-            let value = rpc::profile_request(method,values)?;
+        if let Some((method, values)) = request {
+            anyhow::ensure!(
+                !DIRECT_MODE.load(Ordering::Relaxed),
+                "model profiles require the resident runtime; omit --direct"
+            );
+            let value = rpc::profile_request(method, values)?;
             return emit_result(serde_json::from_value(value)?);
         }
     }
@@ -1601,45 +1728,92 @@ fn run(args: Cli) -> Result<()> {
         return rpc::call_existing_from_argv();
     }
     // Host-only migration and repair dispatch must obey the memory gate too.
-    if respire::service::off_mode() && matches!(args.command.as_ref(), Some(Command::Review { .. })) {
+    if respire::service::off_mode() && matches!(args.command.as_ref(), Some(Command::Review { .. }))
+    {
         set_exit_code(1);
-        let mut result = ResultEnvelope::new("review", OutputStatus::Fail, serde_json::json!({"saved":false}), Vec::new());
+        let mut result = ResultEnvelope::new(
+            "review",
+            OutputStatus::Fail,
+            serde_json::json!({"saved":false}),
+            Vec::new(),
+        );
         result.details = serde_json::json!({"code":"feature_disabled","saved":false});
-        result.errors.push("memory service is off; due state is unavailable".to_owned());
+        result
+            .errors
+            .push("memory service is off; due state is unavailable".to_owned());
         return emit_result(result);
     }
-    if respire::service::off_mode() && args.command.as_ref().is_some_and(|command| !is_off_allowed(command)) {
+    if respire::service::off_mode()
+        && args
+            .command
+            .as_ref()
+            .is_some_and(|command| !is_off_allowed(command))
+    {
         return run_local(args);
     }
-    let display = !json_mode() && !rpc::worker_active() && args.command.is_some()
-        && !matches!(args.command, Some(Command::Mcp | Command::Login { .. } | Command::V));
-    let _progress = progress::Scope::start(args.progress_id.clone(), display,
-        matches!(args.command, Some(Command::Sync | Command::Doctor { .. })));
-    if let Some(Command::Space { action, code, name, .. }) = args.command.as_ref() {
+    let display = !json_mode()
+        && !rpc::worker_active()
+        && args.command.is_some()
+        && !matches!(
+            args.command,
+            Some(Command::Mcp | Command::Login { .. } | Command::V)
+        );
+    let _progress = progress::Scope::start(
+        args.progress_id.clone(),
+        display,
+        matches!(args.command, Some(Command::Sync | Command::Doctor { .. })),
+    );
+    if let Some(Command::Space {
+        action, code, name, ..
+    }) = args.command.as_ref()
+    {
         if action == "join" {
-            let code = code.as_deref().or(name.as_deref())
-                .ok_or_else(|| respire_app::input_error::InputError("join needs an invite code".into()))?;
+            let code = code.as_deref().or(name.as_deref()).ok_or_else(|| {
+                respire_app::input_error::InputError("join needs an invite code".into())
+            })?;
             respire::space::validate_join(code)?;
         }
     }
-    if !rpc::worker_active() && !runtime_policy::client_only()
+    if !rpc::worker_active()
+        && !runtime_policy::client_only()
         && !matches!(args.command, Some(Command::V))
         && respire_app::login_transaction::recovery_pending()
     {
         rpc::recover_interrupted_login()?;
     }
-    if let Some(Command::Migrate { source, account, vault, addr, user, pass, super_pass, secret_key, new_super }) = args.command.as_ref() {
-        if *vault || source.is_some() { respire::service::ensure_writable()?; }
+    if let Some(Command::Migrate {
+        source,
+        account,
+        vault,
+        addr,
+        user,
+        pass,
+        super_pass,
+        secret_key,
+        new_super,
+    }) = args.command.as_ref()
+    {
+        if *vault || source.is_some() {
+            respire::service::ensure_writable()?;
+        }
         runtime_policy::require_host("explicit legacy migration")?;
         if *vault {
-            return login::migrate_vault(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), secret_key.as_deref(), new_super.as_deref());
+            return login::migrate_vault(
+                addr.as_deref(),
+                user.as_deref(),
+                pass.as_deref(),
+                super_pass.as_deref(),
+                secret_key.as_deref(),
+                new_super.as_deref(),
+            );
         }
         let value = match (source.as_deref(), account.as_deref()) {
             (Some(source), Some(account)) => respire::migration::migrate_profile(source, account)?,
             (None, None) => respire::migration::list_legacy_profiles()?,
             _ => anyhow::bail!("migration requires both --source and --account"),
         };
-        let mut envelope = ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
+        let mut envelope =
+            ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
         envelope.details = value;
         return emit_result(envelope);
     }
@@ -1666,23 +1840,64 @@ fn run(args: Cli) -> Result<()> {
             *key_stdin,
         );
     }
-    if let Some(Command::Login { addr, user, pass, super_pass, interactive, oauth, dashboard, no_open, migrate_local }) = args.command.as_ref() {
-        return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(), *interactive, *oauth, dashboard.as_deref(), *no_open, *migrate_local);
+    if let Some(Command::Login {
+        addr,
+        user,
+        pass,
+        super_pass,
+        interactive,
+        oauth,
+        dashboard,
+        no_open,
+        migrate_local,
+    }) = args.command.as_ref()
+    {
+        return login::run(
+            addr.as_deref(),
+            user.as_deref(),
+            pass.as_deref(),
+            super_pass.as_deref(),
+            *interactive,
+            *oauth,
+            dashboard.as_deref(),
+            *no_open,
+            *migrate_local,
+        );
     }
     if rpc::worker_active() {
         return run_local(args);
     }
     if let Some(Command::Restart { timeout }) = args.command.as_ref() {
         let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
-        return emit_result(ResultEnvelope::new("restart", OutputStatus::Ok, result, Vec::new()));
+        return emit_result(ResultEnvelope::new(
+            "restart",
+            OutputStatus::Ok,
+            result,
+            Vec::new(),
+        ));
     }
-    if matches!(args.command, Some(Command::Model { action: ModelAction::InstallEngines })) {
+    if matches!(
+        args.command,
+        Some(Command::Model {
+            action: ModelAction::InstallEngines
+        })
+    ) {
         runtime_policy::require_host("inference engine installation")?;
-        progress::phase("\u{5b89}\u{88c5}\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{ff1b}\u{7b49}\u{5f85} Windows ML", "Installing inference providers; waiting for Windows ML");
+        progress::phase(
+            "\u{5b89}\u{88c5}\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{ff1b}\u{7b49}\u{5f85} Windows ML",
+            "Installing inference providers; waiting for Windows ML",
+        );
         let mut providers = Vec::new();
-        rpc::change_profile(|| { providers = respire::model_install::install_engines()?; Ok(()) })?;
-        return emit_result(ResultEnvelope::new("model", OutputStatus::Ok,
-            serde_json::json!({"providers":providers}), Vec::new()));
+        rpc::change_profile(|| {
+            providers = respire::model_install::install_engines()?;
+            Ok(())
+        })?;
+        return emit_result(ResultEnvelope::new(
+            "model",
+            OutputStatus::Ok,
+            serde_json::json!({"providers":providers}),
+            Vec::new(),
+        ));
     }
     if matches!(
         args.command,
@@ -1694,8 +1909,12 @@ fn run(args: Cli) -> Result<()> {
         anyhow::ensure!(respire_app::embedding::saved_selection()?.is_none(),"library uses a model profile; use model switch PROFILE --backend onnx --engine cpu for CPU recovery");
         if autostart::managed_enabled()? {
             rpc::change_profile(respire::memory::onnx::reset_cpu_config)?;
-            return emit_result(ResultEnvelope::new("model", OutputStatus::Ok,
-                serde_json::json!({"engine":"cpu","force_cpu":true,"runtime_restarted":true}),Vec::new()));
+            return emit_result(ResultEnvelope::new(
+                "model",
+                OutputStatus::Ok,
+                serde_json::json!({"engine":"cpu","force_cpu":true,"runtime_restarted":true}),
+                Vec::new(),
+            ));
         }
         let _takeover = runtime_policy::takeover_lock()?;
         respire::memory::onnx::reset_cpu_config()?;
@@ -1724,17 +1943,30 @@ fn run(args: Cli) -> Result<()> {
         }
         return mcp::serve();
     }
-    let host_auth_change = HOST_RPC_OUTPUT.get() && matches!(args.command.as_ref(),
-        Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. }));
-    if !DIRECT_MODE.load(Ordering::Relaxed) && (changes_profile(args.command.as_ref()) || host_auth_change) {
+    let host_auth_change = HOST_RPC_OUTPUT.get()
+        && matches!(
+            args.command.as_ref(),
+            Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. })
+        );
+    if !DIRECT_MODE.load(Ordering::Relaxed)
+        && (changes_profile(args.command.as_ref()) || host_auth_change)
+    {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);
         let switched = rpc::change_profile(|| {
             run_local(args)?;
-            if CAPTURED.with(|slot| slot.borrow().as_ref().is_some_and(|value| matches!(value.status, OutputStatus::Fail))) {
-                let errors = CAPTURED.with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
-                anyhow::bail!("{}", errors.unwrap_or_else(|| "profile change failed".to_owned()));
+            if CAPTURED.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .is_some_and(|value| matches!(value.status, OutputStatus::Fail))
+            }) {
+                let errors = CAPTURED
+                    .with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
+                anyhow::bail!(
+                    "{}",
+                    errors.unwrap_or_else(|| "profile change failed".to_owned())
+                );
             }
             Ok(())
         });
@@ -1786,7 +2018,9 @@ mod capture_tests {
     pub(crate) fn with_isolated_session<T>(
         f: impl FnOnce(&std::path::Path) -> anyhow::Result<T>,
     ) -> anyhow::Result<T> {
-        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
         struct Restore {
             values: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -1804,9 +2038,18 @@ mod capture_tests {
             }
         }
         let _restore = Restore {
-            values: ["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_M3_DIR", "RSRS_SUPER",
-                "RSRS_NO_AUTOSYNC", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE"]
-                .into_iter().map(|key| (key, std::env::var_os(key))).collect(),
+            values: [
+                "RSRS_DATA_DIR",
+                "RSRS_BIN_DIR",
+                "RSRS_M3_DIR",
+                "RSRS_SUPER",
+                "RSRS_NO_AUTOSYNC",
+                "RSRS_RPC_PORT",
+                "RSRS_CORE_TEST_MODE",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
             worker: crate::rpc::worker_active(),
         };
         let _guard = EnvGuard {
@@ -1826,23 +2069,44 @@ mod capture_tests {
         result
     }
 
-    mod metadata_coverage;
     mod brief_coverage;
+    mod metadata_coverage;
     mod review_coverage;
 
     #[test]
     fn injected_chain_examples_follow_the_parser_contract() -> anyhow::Result<()> {
-        for policy in [respire::inject::INSTRUCTIONS_MD, respire::inject::INSTRUCTIONS_LITE_MD] {
+        for policy in [
+            respire::inject::INSTRUCTIONS_MD,
+            respire::inject::INSTRUCTIONS_LITE_MD,
+        ] {
             let mut checked = 0;
-            for example in policy.split('`').skip(1).step_by(2)
-                .filter(|example| example.starts_with("rsrs chain ") && !example.contains('[')) {
+            for example in policy
+                .split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|example| example.starts_with("rsrs chain ") && !example.contains('['))
+            {
                 let parsed = super::Cli::try_parse_from(example.split_whitespace())?;
-                assert!(matches!(parsed.command, Some(super::Command::Chain { depth: 1..=3, .. })));
+                assert!(matches!(
+                    parsed.command,
+                    Some(super::Command::Chain { depth: 1..=3, .. })
+                ));
                 checked += 1;
             }
-            assert!(checked > 0, "policy must retain an executable causal-chain example");
+            assert!(
+                checked > 0,
+                "policy must retain an executable causal-chain example"
+            );
         }
-        assert!(super::Cli::try_parse_from(["rsrs", "chain", "synthetic-id", "--depth", "1-3", "--json"]).is_err());
+        assert!(super::Cli::try_parse_from([
+            "rsrs",
+            "chain",
+            "synthetic-id",
+            "--depth",
+            "1-3",
+            "--json"
+        ])
+        .is_err());
         Ok(())
     }
 
@@ -1886,12 +2150,26 @@ mod capture_tests {
         assert!(super::Cli::try_parse_from(["rsrs", "chain", "--from", "entry-id"]).is_err());
         assert!(super::Cli::try_parse_from(["rsrs", "config", "--data-dir", "isolated"]).is_ok());
         let revision = super::Cli::try_parse_from(["rsrs", "memory-revision", "--json"])?;
-        assert!(matches!(revision.command, Some(super::Command::MemoryRevision)));
+        assert!(matches!(
+            revision.command,
+            Some(super::Command::MemoryRevision)
+        ));
         assert!(!super::is_write_command(&super::Command::MemoryRevision));
-        assert!(!super::is_write_command(&super::Command::Taxonomy {list:true,ensure:None}));
-        assert!(super::is_write_command(&super::Command::Taxonomy {list:false,ensure:None}));
-        assert!(super::is_write_command(&super::Command::Taxonomy {list:true,ensure:Some("synthetic".into())}));
-        assert!(!super::is_write_command_fine(&super::Command::MemoryRevision));
+        assert!(!super::is_write_command(&super::Command::Taxonomy {
+            list: true,
+            ensure: None
+        }));
+        assert!(super::is_write_command(&super::Command::Taxonomy {
+            list: false,
+            ensure: None
+        }));
+        assert!(super::is_write_command(&super::Command::Taxonomy {
+            list: true,
+            ensure: Some("synthetic".into())
+        }));
+        assert!(!super::is_write_command_fine(
+            &super::Command::MemoryRevision
+        ));
         assert!(super::is_off_allowed(&super::Command::MemoryRevision));
         assert!(super::Cli::try_parse_from(["rsrs", "v"]).is_ok());
         assert!(super::Cli::try_parse_from(["rsrs", "version"]).is_ok());
@@ -1908,12 +2186,17 @@ mod capture_tests {
 
     #[test]
     fn input_failures_remain_distinct_from_runtime_failures() {
-        let input: anyhow::Error = respire_app::input_error::InputError("no such entry: fixture".into()).into();
+        let input: anyhow::Error =
+            respire_app::input_error::InputError("no such entry: fixture".into()).into();
         let (envelope, code) = super::command_failure(&input.context("resort validation"));
         assert_eq!(code, 2);
         assert_eq!(envelope.summary["reason"], "invalid_input");
         assert_eq!(envelope.details["error_type"], "user");
-        let runtime: anyhow::Error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "owned fixture I/O failure").into();
+        let runtime: anyhow::Error = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "owned fixture I/O failure",
+        )
+        .into();
         let (envelope, code) = super::command_failure(&runtime);
         assert_eq!(code, 1);
         assert_eq!(envelope.summary["reason"], "runtime_error");
@@ -1931,7 +2214,9 @@ mod capture_tests {
 
     #[test]
     fn residual_input_errors_use_user_envelopes() -> anyhow::Result<()> {
-        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
         let _guard = EnvGuard {
             prev: respire::env::var("RSRS_DATA_DIR").ok(),
@@ -1940,12 +2225,28 @@ mod capture_tests {
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         crate::rpc::set_worker_active(true);
         seed_capture_session()?;
-        let missing = dir.path().join("missing.json").to_string_lossy().into_owned();
-        let missing_output = dir.path().join("absent").join("export.json").to_string_lossy().into_owned();
+        let missing = dir
+            .path()
+            .join("missing.json")
+            .to_string_lossy()
+            .into_owned();
+        let missing_output = dir
+            .path()
+            .join("absent")
+            .join("export.json")
+            .to_string_lossy()
+            .into_owned();
         for command in [
             vec!["restore", "deadbeef"],
             vec!["grant", "create", "--root", "deadbeef", "--label", "probe"],
-            vec!["grant", "create", "--root", "00000000-0000-0000-0000-000000000000", "--label", "probe"],
+            vec![
+                "grant",
+                "create",
+                "--root",
+                "00000000-0000-0000-0000-000000000000",
+                "--label",
+                "probe",
+            ],
             vec!["space", "kick"],
             vec!["import", &missing],
             vec!["bench", "run", &missing],
@@ -1958,20 +2259,33 @@ mod capture_tests {
             args.extend(command.iter().map(|arg| (*arg).to_owned()));
             let result = capture_run(args);
             assert_eq!(result.exit, 2, "{command:?}: {:?}", result.envelope);
-            assert_eq!(result.envelope.summary["reason"], "invalid_input", "{command:?}");
+            assert_eq!(
+                result.envelope.summary["reason"], "invalid_input",
+                "{command:?}"
+            );
             assert_eq!(result.envelope.details["error_type"], "user", "{command:?}");
             if matches!(command[0], "import" | "bench" | "share-import") {
-                assert!(result.envelope.errors.iter().any(|error| error.contains("failed to read")), "{command:?}: {:?}", result.envelope.errors);
+                assert!(
+                    result
+                        .envelope
+                        .errors
+                        .iter()
+                        .any(|error| error.contains("failed to read")),
+                    "{command:?}: {:?}",
+                    result.envelope.errors
+                );
             }
         }
         let invalid = dir.path().join("invalid-utf8.json");
         std::fs::write(&invalid, [0xff])?;
-        let error = respire_app::input_error::read_file(&invalid, "fixture").err()
+        let error = respire_app::input_error::read_file(&invalid, "fixture")
+            .err()
             .ok_or_else(|| anyhow::anyhow!("invalid UTF-8 was accepted"))?;
         assert_eq!(super::command_failure(&error).1, 1);
         let existing = dir.path().join("existing-backup.db");
         std::fs::write(&existing, b"preserve existing backup")?;
-        let error = respire::service::backup_db(&existing).err()
+        let error = respire::service::backup_db(&existing)
+            .err()
             .ok_or_else(|| anyhow::anyhow!("existing backup was overwritten"))?;
         assert_eq!(super::command_failure(&error).1, 1);
         assert_eq!(std::fs::read(&existing)?, b"preserve existing backup");
@@ -1982,7 +2296,9 @@ mod capture_tests {
     #[test]
     fn bench_runs_on_pending_resident_snapshot_without_writing_index() -> anyhow::Result<()> {
         use respire::MemoryTransport;
-        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow::anyhow!("{error}"))?;
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
         let _guard = EnvGuard {
             prev: respire::env::var("RSRS_DATA_DIR").ok(),
@@ -2001,17 +2317,34 @@ mod capture_tests {
         }))?;
         let stored = {
             let _defer = respire::core_sdk::defer_indexing();
-            respire::MemoryEngine::seal(&keys, &respire::core_sdk::search::HashingEmbedder::new(1024), &entry, "test")?
+            respire::MemoryEngine::seal(
+                &keys,
+                &respire::core_sdk::search::HashingEmbedder::new(1024),
+                &entry,
+                "test",
+            )?
         };
         store.put_checked(&stored, None)?;
         let eval = dir.path().join("eval.jsonl");
         let output = dir.path().join("bench.json");
-        std::fs::write(&eval, r#"{"query":"benchmark pending needle","expect":["pending-bench"]}"#)?;
-        let captured = capture_run(vec!["--json".into(), "bench".into(), "run".into(),
-            eval.to_string_lossy().into_owned(), "--save".into(), output.to_string_lossy().into_owned()]);
+        std::fs::write(
+            &eval,
+            r#"{"query":"benchmark pending needle","expect":["pending-bench"]}"#,
+        )?;
+        let captured = capture_run(vec![
+            "--json".into(),
+            "bench".into(),
+            "run".into(),
+            eval.to_string_lossy().into_owned(),
+            "--save".into(),
+            output.to_string_lossy().into_owned(),
+        ]);
         assert_eq!(captured.exit, 0, "{:?}", captured.envelope);
         let report: super::bench::BenchReport = serde_json::from_slice(&std::fs::read(output)?)?;
-        assert_eq!(report.params.get("index_pending").map(String::as_str), Some("1"));
+        assert_eq!(
+            report.params.get("index_pending").map(String::as_str),
+            Some("1")
+        );
         assert_eq!(report.metrics.hit1, 1.0);
         assert_eq!(report.n_entries, 1);
         let current = store.all(false)?;
@@ -2052,10 +2385,16 @@ mod capture_tests {
         let before = capture_run(vec!["memory-revision".into(), "--json".into()]);
         assert_eq!(before.exit, 0);
         assert_eq!(before.envelope.command, "memory-revision");
-        assert_eq!(before.envelope.summary["profile"], dir.path().to_string_lossy().as_ref());
+        assert_eq!(
+            before.envelope.summary["profile"],
+            dir.path().to_string_lossy().as_ref()
+        );
         let status = capture_run(vec!["status".into(), "--json".into()]);
         assert_eq!(status.exit, 0);
-        assert_eq!(status.envelope.summary["data_dir"], before.envelope.summary["profile"]);
+        assert_eq!(
+            status.envelope.summary["data_dir"],
+            before.envelope.summary["profile"]
+        );
         let after = capture_run(vec!["memory-revision".into(), "--json".into()]);
         assert_eq!(after.exit, 0);
         assert_eq!(after.envelope.summary, before.envelope.summary);
@@ -2107,11 +2446,18 @@ mod capture_tests {
             if captured.envelope.summary["runtime_version"] != crate::app_version::embedded() {
                 return Err("doctor did not report the executing runtime version".to_owned());
             }
-            let runtime = captured.envelope.items.iter()
+            let runtime = captured
+                .envelope
+                .items
+                .iter()
                 .find(|item| item.name == "Runtime version")
                 .ok_or("doctor did not include the runtime version check")?;
-            if runtime.value != crate::app_version::embedded() || !matches!(runtime.status, crate::OutputStatus::Ok) {
-                return Err("doctor runtime version check differs from the executing binary".to_owned());
+            if runtime.value != crate::app_version::embedded()
+                || !matches!(runtime.status, crate::OutputStatus::Ok)
+            {
+                return Err(
+                    "doctor runtime version check differs from the executing binary".to_owned(),
+                );
             }
             let want = match captured.envelope.status {
                 crate::OutputStatus::Ok | crate::OutputStatus::Skip => 0,
@@ -2126,21 +2472,26 @@ mod capture_tests {
             }
         }
         // A live background task must not make --fix launch a second installer.
-        let operation = respire::model_progress::Operation::begin("download")
-            .map_err(|err| err.to_string())?;
+        let operation =
+            respire::model_progress::Operation::begin("download").map_err(|err| err.to_string())?;
         for fix in [false, true] {
             let mut args = vec!["--json".to_owned(), "doctor".to_owned()];
             if fix {
                 args.push("--fix".to_owned());
             }
             let captured = capture_run(args);
-            let embedder = captured.envelope.items.iter()
+            let embedder = captured
+                .envelope
+                .items
+                .iter()
                 .find(|item| item.name == "embedder")
                 .ok_or("doctor did not report the embedder")?;
             if !matches!(embedder.status, crate::OutputStatus::Warn) {
                 return Err("active model preparation must be WARN, not FAIL or PASS".to_owned());
             }
-            if respire::model_progress::status().map_err(|err| err.to_string())?["phase"] != "download" {
+            if respire::model_progress::status().map_err(|err| err.to_string())?["phase"]
+                != "download"
+            {
                 return Err("doctor replaced the active model task".to_owned());
             }
         }
@@ -2169,21 +2520,51 @@ mod diary_identity_tests {
     /// Stable identity wins over older same-title legacy rows.
     #[test]
     fn stable_id_precedes_legacy_titles_and_preserves_importance_compatibility() -> Result<()> {
-        let mut legacy = track("legacy", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "2026-10-13T00:00:00Z");
+        let mut legacy = track(
+            "legacy",
+            "alice",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            "2026-10-13T00:00:00Z",
+        );
         legacy.local_importance = "normal".into();
-        let canonical = track("stable", "server-routing-owner", "User's renamed day", "2026-10-13T01:00:00Z");
+        let canonical = track(
+            "stable",
+            "server-routing-owner",
+            "User's renamed day",
+            "2026-10-13T01:00:00Z",
+        );
         let rows = vec![legacy, canonical];
-        let tracks = select_diary_tracks(&rows, "stable", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", |row| Ok(row.id == "stable" || row.user == "alice"))?;
-        assert_eq!(tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["stable", "legacy"]);
+        let tracks = select_diary_tracks(
+            &rows,
+            "stable",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            |row| Ok(row.id == "stable" || row.user == "alice"),
+        )?;
+        assert_eq!(
+            tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["stable", "legacy"]
+        );
         Ok(())
     }
 
     /// An unrelated canonical payload must fail before legacy candidates can be merged.
     #[test]
     fn canonical_author_mismatch_is_not_a_legacy_fallback() -> Result<()> {
-        let rows = vec![track("stable", "wire-owner", "renamed", "1"),
-            track("legacy", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "0")];
-        let result = select_diary_tracks(&rows, "stable", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", |row| Ok(row.id != "stable"));
+        let rows = vec![
+            track("stable", "wire-owner", "renamed", "1"),
+            track(
+                "legacy",
+                "alice",
+                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+                "0",
+            ),
+        ];
+        let result = select_diary_tracks(
+            &rows,
+            "stable",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            |row| Ok(row.id != "stable"),
+        );
         assert!(result.is_err());
         Ok(())
     }
@@ -2191,18 +2572,44 @@ mod diary_identity_tests {
     /// Blank titles remain valid while deleted and unrelated tracks stay separate.
     #[test]
     fn blank_title_deleted_rows_other_users_and_days_are_handled_separately() -> Result<()> {
-        let mut deleted = track("deleted", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "0");
+        let mut deleted = track(
+            "deleted",
+            "alice",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            "0",
+        );
         deleted.deleted = true;
         let rows = vec![
             track("stable", "alice", "", "1"),
             deleted,
-            track("other-user", "bob", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "0"),
-            track("other-day", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-12", "0"),
+            track(
+                "other-user",
+                "bob",
+                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+                "0",
+            ),
+            track(
+                "other-day",
+                "alice",
+                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-12",
+                "0",
+            ),
         ];
-        let tracks = select_diary_tracks(&rows, "stable", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", |row| Ok(row.user == "alice"))?;
+        let tracks = select_diary_tracks(
+            &rows,
+            "stable",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            |row| Ok(row.user == "alice"),
+        )?;
         assert_eq!(tracks.len(), 1);
         assert_eq!(tracks[0].id, "stable");
-        assert!(select_diary_tracks(&rows, "charlie-stable", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-14", |row| Ok(row.user == "charlie"))?.is_empty());
+        assert!(select_diary_tracks(
+            &rows,
+            "charlie-stable",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-14",
+            |row| Ok(row.user == "charlie")
+        )?
+        .is_empty());
         Ok(())
     }
 
@@ -2212,12 +2619,30 @@ mod diary_identity_tests {
         let mut deleted = track("stable", "alice", "renamed", "0");
         deleted.deleted = true;
         let rows = vec![
-            track("later", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "2"),
-            track("earlier", "alice", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", "1"),
+            track(
+                "later",
+                "alice",
+                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+                "2",
+            ),
+            track(
+                "earlier",
+                "alice",
+                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+                "1",
+            ),
             deleted,
         ];
-        let tracks = select_diary_tracks(&rows, "stable", "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13", |row| Ok(row.user == "alice"))?;
-        assert_eq!(tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(), ["earlier", "later"]);
+        let tracks = select_diary_tracks(
+            &rows,
+            "stable",
+            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
+            |row| Ok(row.user == "alice"),
+        )?;
+        assert_eq!(
+            tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["earlier", "later"]
+        );
         Ok(())
     }
 }

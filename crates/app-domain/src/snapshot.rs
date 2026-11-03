@@ -150,10 +150,18 @@ fn valid_id(id: &str) -> bool {
 
 fn sdk_target() -> Result<String> {
     let arch = std::env::consts::ARCH;
-    if cfg!(target_os = "windows") { return Ok(format!("{arch}-pc-windows-msvc")); }
-    if cfg!(target_os = "macos") { return Ok(format!("{arch}-apple-darwin")); }
+    if cfg!(target_os = "windows") {
+        return Ok(format!("{arch}-pc-windows-msvc"));
+    }
+    if cfg!(target_os = "macos") {
+        return Ok(format!("{arch}-apple-darwin"));
+    }
     if cfg!(target_os = "linux") {
-        let env = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
+        let env = if cfg!(target_env = "musl") {
+            "musl"
+        } else {
+            "gnu"
+        };
         return Ok(format!("{arch}-unknown-linux-{env}"));
     }
     anyhow::bail!("snapshot SDK target is unsupported")
@@ -186,7 +194,9 @@ pub fn create(
         let lock: serde_json::Value =
             serde_json::from_str(include_str!("../../core-sdk/core-sdk.lock.json"))?;
         let sdk_version = lock["targets"][sdk_target()?]["sdk_version"]
-            .as_str().context("snapshot SDK target version missing")?.to_owned();
+            .as_str()
+            .context("snapshot SDK target version missing")?
+            .to_owned();
         let source_library = format!(
             "{:x}",
             Sha256::digest(fs::canonicalize(&source)?.to_string_lossy().as_bytes())
@@ -229,9 +239,22 @@ pub fn create(
             sdk_version,
             sdk_abi: crate::core_sdk::ABI_VERSION,
             model: {
-                let copy = Connection::open_with_flags(&database,OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-                let snapshot: Option<String> = copy.query_row("SELECT value FROM meta WHERE key=?1",[crate::core_sdk::profiles::ACTIVE_SELECTION_KEY],|r|r.get(0)).optional()?;
-                snapshot.map(|v| serde_json::from_str::<crate::core_sdk::profiles::Selection>(&v).map(|s|s.model)).transpose()?.unwrap_or_else(||"m3".to_owned())
+                let copy =
+                    Connection::open_with_flags(&database, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                let snapshot: Option<String> = copy
+                    .query_row(
+                        "SELECT value FROM meta WHERE key=?1",
+                        [crate::core_sdk::profiles::ACTIVE_SELECTION_KEY],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                snapshot
+                    .map(|v| {
+                        serde_json::from_str::<crate::core_sdk::profiles::Selection>(&v)
+                            .map(|s| s.model)
+                    })
+                    .transpose()?
+                    .unwrap_or_else(|| "m3".to_owned())
             },
             witness_head: witness.as_ref().map(|report| report.head.clone()),
             witness_count: witness.as_ref().map(|report| report.count),
@@ -339,7 +362,11 @@ fn read_manifest(root: &Path, id: &str) -> Result<Manifest> {
 
 pub(crate) fn verify_backup(root: &Path, id: &str, keys: &crate::SessionKeys) -> Result<Manifest> {
     let manifest = read_manifest(root, id)?;
-    verify_key(&root.join("snapshots").join(format!("{id}.db")), &manifest, keys)?;
+    verify_key(
+        &root.join("snapshots").join(format!("{id}.db")),
+        &manifest,
+        keys,
+    )?;
     Ok(manifest)
 }
 
@@ -947,10 +974,16 @@ mod tests {
             &crate::SessionKeys::from_urk([7; 32])?,
         )?;
         assert_eq!(manifest.entries, 1);
-        let pinned:serde_json::Value=serde_json::from_str(include_str!("../../core-sdk/core-sdk.lock.json"))?;
-        let targets=pinned["targets"].as_object().context("pinned SDK targets")?;
-        assert_eq!(targets.len(),8);
-        assert_eq!(targets.get(&sdk_target()?).context("current SDK target")?["sdk_version"].as_str(), Some(manifest.sdk_version.as_str()));
+        let pinned: serde_json::Value =
+            serde_json::from_str(include_str!("../../core-sdk/core-sdk.lock.json"))?;
+        let targets = pinned["targets"]
+            .as_object()
+            .context("pinned SDK targets")?;
+        assert_eq!(targets.len(), 8);
+        assert_eq!(
+            targets.get(&sdk_target()?).context("current SDK target")?["sdk_version"].as_str(),
+            Some(manifest.sdk_version.as_str())
+        );
         assert_eq!(list(directory.path())?.len(), 1);
         let copied = directory
             .path()

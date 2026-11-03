@@ -78,9 +78,20 @@ fn lexical_does_not_depend_on_corrupt_derived_cache() -> Result<()> {
 
 #[test]
 fn unicode_case_expansion_and_multiple_terms_keep_original_offsets() -> Result<()> {
-    let content = format!("{}\u{130}STANBUL \u{4e2d}\u{6587}🧠{}", "🙂".repeat(795), "x".repeat(900));
+    let content = format!(
+        "{}\u{130}STANBUL \u{4e2d}\u{6587}🧠{}",
+        "🙂".repeat(795),
+        "x".repeat(900)
+    );
     let (_isolate, store, keys) = fixture(content.clone())?;
-    let result = search(&store, &keys, "i\u{307}stanbul \u{4e2d}\u{6587}", 5, 4000, false)?;
+    let result = search(
+        &store,
+        &keys,
+        "i\u{307}stanbul \u{4e2d}\u{6587}",
+        5,
+        4000,
+        false,
+    )?;
     assert_eq!(result.items.len(), 1);
     let hit = &result.items[0];
     assert!(hit.text.contains("\u{130}STANBUL \u{4e2d}\u{6587}🧠"));
@@ -417,7 +428,9 @@ fn appending_rotates_public_locators_but_keeps_unchanged_embedding_keys() -> Res
     let mut entry = MemoryEngine::open(&keys, &old_source)?;
     let before = split(&entry, &version(&old_source));
     let old_locator = before[0].fragment_id.clone();
-    entry.content.push_str("\n\u{3010}10:00\u{3011}new synthetic tail");
+    entry
+        .content
+        .push_str("\n\u{3010}10:00\u{3011}new synthetic tail");
     entry.updated_at = "2026-10-27T09:00:01Z".into();
     let updated = MemoryEngine::seal(
         &keys,

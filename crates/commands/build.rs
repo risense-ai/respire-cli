@@ -9,8 +9,7 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-changed=../../cli/Cargo.toml");
-    let manifest_path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/Cargo.toml");
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/Cargo.toml");
     let manifest = match std::fs::read_to_string(&manifest_path) {
         Ok(manifest) => manifest,
         Err(error) => panic!(

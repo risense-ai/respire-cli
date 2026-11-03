@@ -93,12 +93,10 @@ mod tests {
         let json = identity().health_extension_json();
         assert_eq!(json["runtime_version"], "1.0.21-dev.1");
         assert_eq!(json["runtime_compat"]["min_cli"], "1.0.20");
-        let back: RuntimeIdentity = serde_json::from_value(
-            serde_json::json!({
-                "runtime_version": "1.0.21-dev.1",
-                "runtime_compat": {"min_cli": "1.0.20", "max_cli": "*"}
-            }),
-        )?;
+        let back: RuntimeIdentity = serde_json::from_value(serde_json::json!({
+            "runtime_version": "1.0.21-dev.1",
+            "runtime_compat": {"min_cli": "1.0.20", "max_cli": "*"}
+        }))?;
         assert_eq!(back, identity());
         Ok(())
     }
@@ -123,7 +121,10 @@ mod tests {
             sha256: "abc".to_owned(),
             binary_file: "rsrs-runtime.exe".to_owned(),
             binary_sha256: "def".to_owned(),
-            compat: RuntimeCompat { min_cli: "1.0.20".to_owned(), max_cli: "*".to_owned() },
+            compat: RuntimeCompat {
+                min_cli: "1.0.20".to_owned(),
+                max_cli: "*".to_owned(),
+            },
         };
         let json = serde_json::to_string(&meta)?;
         let back: RuntimeBuildMeta = serde_json::from_str(&json)?;

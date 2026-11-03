@@ -52,7 +52,10 @@ impl LibraryLock {
                         );
                     }
                     if waited >= next_report {
-                        eprintln!("still waiting for another session to release the library ({}s)", waited.as_secs());
+                        eprintln!(
+                            "still waiting for another session to release the library ({}s)",
+                            waited.as_secs()
+                        );
                         next_report += Duration::from_secs(10);
                     } else if !reported_first {
                         eprintln!("memory library is locked by another session; waiting (lock.db exclusive, released when the holder exits)");

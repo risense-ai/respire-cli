@@ -341,8 +341,10 @@ pub fn recall_metadata<E: respire_app::memory::search::Embedder>(
     result.retrieval["evidence"] = json!(result.evidence);
     result.retrieval["filtered_by_evidence"] = json!(result.filtered_by_evidence);
     // `code` is a credential-reserved output key outside review commands.
-    result.retrieval["authority_errors"] = json!(authority_errors.iter().map(|error|
-        json!({"id":error["id"],"reason":error["code"]})).collect::<Vec<_>>());
+    result.retrieval["authority_errors"] = json!(authority_errors
+        .iter()
+        .map(|error| json!({"id":error["id"],"reason":error["code"]}))
+        .collect::<Vec<_>>());
     result.retrieval["memory_revision"] = json!(source.memory_revision());
     result.retrieval["superseded"] = json!({});
     result.retrieval["representation_qualification"] =
@@ -400,61 +402,108 @@ mod brief_receipt_tests {
         let receipt = json!({"items":[{"id":entry.id,"representation":"full","rendered_text":body,"evidence":evidence}],
             "rendered_text":text,"chars":text.chars().count(),"budget_chars":1500,"selected_count":1,
             "tokens":null,"tokenizer_id":null,"estimated":true,"status":"selected"});
-        let results = vec![RecalledWithContext { score:1.0,entry,ancestors:Vec::new() }];
-        validate_receipt(&receipt,&request,&results,&[evidence.clone()])?;
+        let results = vec![RecalledWithContext {
+            score: 1.0,
+            entry,
+            ancestors: Vec::new(),
+        }];
+        validate_receipt(&receipt, &request, &results, &[evidence.clone()])?;
         for (key, value) in [
-            ("chars",json!(1)),("budget_chars",json!(1)),("selected_count",json!(2)),
-            ("tokens",json!(10)),("tokenizer_id",json!("unknown")),("estimated",json!(false)),
-            ("status",json!("unknown")),("status",json!("empty_candidates")),
+            ("chars", json!(1)),
+            ("budget_chars", json!(1)),
+            ("selected_count", json!(2)),
+            ("tokens", json!(10)),
+            ("tokenizer_id", json!("unknown")),
+            ("estimated", json!(false)),
+            ("status", json!("unknown")),
+            ("status", json!("empty_candidates")),
         ] {
             let mut changed = receipt.clone();
             changed[key] = value;
-            assert!(validate_receipt(&changed,&request,&results,&[evidence.clone()]).is_err(),"{key}");
+            assert!(
+                validate_receipt(&changed, &request, &results, &[evidence.clone()]).is_err(),
+                "{key}"
+            );
         }
         let mut duplicate = receipt.clone();
-        duplicate["items"] = json!([receipt["items"][0],receipt["items"][0]]);
+        duplicate["items"] = json!([receipt["items"][0], receipt["items"][0]]);
         duplicate["selected_count"] = json!(2);
-        assert!(validate_receipt(&duplicate,&request,&results,&[evidence.clone()]).err()
-            .context("duplicate accepted")?.to_string().contains("duplicate"));
+        assert!(
+            validate_receipt(&duplicate, &request, &results, &[evidence.clone()])
+                .err()
+                .context("duplicate accepted")?
+                .to_string()
+                .contains("duplicate")
+        );
         for (key, value) in [
-            ("id",json!("unknown")),("representation",json!("title")),("rendered_text",json!("changed")),
-            ("evidence",json!({"id":"fixture","record_revision":"changed"})),
+            ("id", json!("unknown")),
+            ("representation", json!("title")),
+            ("rendered_text", json!("changed")),
+            (
+                "evidence",
+                json!({"id":"fixture","record_revision":"changed"}),
+            ),
         ] {
             let mut changed = receipt.clone();
             changed["items"][0][key] = value;
-            assert!(validate_receipt(&changed,&request,&results,&[evidence.clone()]).is_err(),"{key}");
+            assert!(
+                validate_receipt(&changed, &request, &results, &[evidence.clone()]).is_err(),
+                "{key}"
+            );
         }
-        assert!(validate_receipt(&receipt,&request,&results,&[]).is_err());
-        assert!(validate_receipt(&receipt,&request,&[],&[evidence.clone()]).is_err());
+        assert!(validate_receipt(&receipt, &request, &results, &[]).is_err());
+        assert!(validate_receipt(&receipt, &request, &[], &[evidence.clone()]).is_err());
         let mut unqualified = request.clone();
         unqualified["items"][0]["complete"] = json!(false);
-        assert!(validate_receipt(&receipt,&unqualified,&results,&[evidence.clone()]).is_err());
+        assert!(validate_receipt(&receipt, &unqualified, &results, &[evidence.clone()]).is_err());
         let mut changed = receipt.clone();
         changed["rendered_text"] = json!("X".repeat(text.chars().count()));
-        assert!(validate_receipt(&changed,&request,&results,&[evidence]).err()
-            .context("changed wrapper accepted")?.to_string().contains("wrapper rendering"));
+        assert!(validate_receipt(&changed, &request, &results, &[evidence])
+            .err()
+            .context("changed wrapper accepted")?
+            .to_string()
+            .contains("wrapper rendering"));
         Ok(())
     }
 
     #[test]
     fn empty_receipts_validate_status_wrapper_and_exact_zero() -> Result<()> {
-        let request = json!({"budget_chars":0,"prefix_by_count":[""],"separator":"","suffix":"","items":[]});
+        let request =
+            json!({"budget_chars":0,"prefix_by_count":[""],"separator":"","suffix":"","items":[]});
         let receipt = json!({"items":[],"rendered_text":"","chars":0,"budget_chars":0,"selected_count":0,
             "tokens":null,"tokenizer_id":null,"estimated":true,"status":"empty_candidates"});
-        for status in ["empty_candidates","all_dropped_by_budget","all_dropped_by_incomplete","all_dropped","wrapper_over_budget"] {
+        for status in [
+            "empty_candidates",
+            "all_dropped_by_budget",
+            "all_dropped_by_incomplete",
+            "all_dropped",
+            "wrapper_over_budget",
+        ] {
             let mut receipt = receipt.clone();
             receipt["status"] = json!(status);
-            validate_receipt(&receipt,&request,&[],&[])?;
+            validate_receipt(&receipt, &request, &[], &[])?;
         }
-        for key in ["items","rendered_text","status","tokens","tokenizer_id"] {
+        for key in ["items", "rendered_text", "status", "tokens", "tokenizer_id"] {
             let mut changed = receipt.clone();
-            changed.as_object_mut().context("receipt object")?.remove(key);
-            assert!(validate_receipt(&changed,&request,&[],&[]).is_err(),"{key}");
+            changed
+                .as_object_mut()
+                .context("receipt object")?
+                .remove(key);
+            assert!(
+                validate_receipt(&changed, &request, &[], &[]).is_err(),
+                "{key}"
+            );
         }
-        for key in ["budget_chars","prefix_by_count","separator","suffix"] {
+        for key in ["budget_chars", "prefix_by_count", "separator", "suffix"] {
             let mut changed = request.clone();
-            changed.as_object_mut().context("request object")?.remove(key);
-            assert!(validate_receipt(&receipt,&changed,&[],&[]).is_err(),"{key}");
+            changed
+                .as_object_mut()
+                .context("request object")?
+                .remove(key);
+            assert!(
+                validate_receipt(&receipt, &changed, &[], &[]).is_err(),
+                "{key}"
+            );
         }
         Ok(())
     }

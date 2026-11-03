@@ -64,7 +64,9 @@ fn cache_path() -> std::path::PathBuf {
 }
 
 fn model_cache_path(model: &str) -> Result<std::path::PathBuf> {
-    if core_sdk::profiles::current()?.is_none() { return Ok(cache_path()); }
+    if core_sdk::profiles::current()?.is_none() {
+        return Ok(cache_path());
+    }
     let generation = core_sdk::generation_key(model)?;
     Ok(cache_path().with_file_name(format!("diary-fragments-{}.db", digest(&generation))))
 }
@@ -359,7 +361,9 @@ fn select(mut hits: Vec<Fragment>, limit: usize) -> Vec<Fragment> {
 pub fn needs_rebuild(store: &LocalStore) -> Result<bool> {
     let sources = diaries(store)?;
     let result = (|| -> Result<bool> {
-        let model = core_sdk::profiles::current()?.map(|s| s.model).unwrap_or(store.retrieval_model()?);
+        let model = core_sdk::profiles::current()?
+            .map(|s| s.model)
+            .unwrap_or(store.retrieval_model()?);
         let Some(db) = model_cache(&model, true)? else {
             return Ok(!sources.is_empty());
         };

@@ -29,15 +29,23 @@ impl LocalStore {
         if label.trim().is_empty() || label.len() > 128 {
             bail!("grant label must be 1\u{2013}128 bytes of non-empty text");
         }
-        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let exists = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1 AND deleted = 0)",
-            params![root], |row| row.get::<_, bool>(0),
+            params![root],
+            |row| row.get::<_, bool>(0),
         )?;
-        if !exists { bail!("grant root does not exist or is deleted"); }
+        if !exists {
+            bail!("grant root does not exist or is deleted");
+        }
         let grant = AccessGrant {
-            id: uuid::Uuid::new_v4().to_string(), label: label.to_owned(),
-            root_id: root.to_owned(), created_at: chrono::Utc::now().to_rfc3339(),
+            id: uuid::Uuid::new_v4().to_string(),
+            label: label.to_owned(),
+            root_id: root.to_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
             revoked: false,
         };
         let token = random_hex(32);
@@ -53,10 +61,17 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id,label,root_id,created_at,revoked FROM access_grants ORDER BY created_at,id",
         )?;
-        let grants = statement.query_map([], |row| Ok(AccessGrant {
-            id: row.get(0)?, label: row.get(1)?, root_id: row.get(2)?,
-            created_at: row.get(3)?, revoked: row.get(4)?,
-        }))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let grants = statement
+            .query_map([], |row| {
+                Ok(AccessGrant {
+                    id: row.get(0)?,
+                    label: row.get(1)?,
+                    root_id: row.get(2)?,
+                    created_at: row.get(3)?,
+                    revoked: row.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(grants)
     }
 
@@ -67,9 +82,9 @@ impl LocalStore {
             id.to_owned()
         } else {
             let like = format!("{id}%");
-            let mut statement = self.connection.prepare(
-                "SELECT id FROM access_grants WHERE id LIKE ?1 AND revoked = 0",
-            )?;
+            let mut statement = self
+                .connection
+                .prepare("SELECT id FROM access_grants WHERE id LIKE ?1 AND revoked = 0")?;
             let hits = statement
                 .query_map(params![like], |row| row.get::<_, String>(0))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -83,27 +98,40 @@ impl LocalStore {
             }
         };
         Ok(self.connection.execute(
-            "UPDATE access_grants SET revoked = 1 WHERE id = ?1 AND revoked = 0", params![full],
+            "UPDATE access_grants SET revoked = 1 WHERE id = ?1 AND revoked = 0",
+            params![full],
         )? != 0)
     }
 
     /// Auth and tree reads share one SQLite snapshot; missing root is refused, never expanded to the whole library.
     pub fn grant_snapshot(&self, token: &str) -> Result<Option<Vec<StoredMemory>>> {
         let transaction = self.connection.unchecked_transaction()?;
-        let root: Option<String> = self.connection.query_row(
-            "SELECT root_id FROM access_grants WHERE token_hash = ?1 AND revoked = 0",
-            params![token_hash(token)], |row| row.get(0),
-        ).optional()?;
-        let Some(root) = root else { return Ok(None); };
+        let root: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT root_id FROM access_grants WHERE token_hash = ?1 AND revoked = 0",
+                params![token_hash(token)],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(root) = root else {
+            return Ok(None);
+        };
         let mut all = self.all(false)?;
-        if !all.iter().any(|entry| entry.id == root) { return Ok(None); }
+        if !all.iter().any(|entry| entry.id == root) {
+            return Ok(None);
+        }
         let mut members = HashSet::from([root]);
         loop {
             let before = members.len();
             for entry in &all {
-                if members.contains(&entry.local_parent_id) { members.insert(entry.id.clone()); }
+                if members.contains(&entry.local_parent_id) {
+                    members.insert(entry.id.clone());
+                }
             }
-            if members.len() == before { break; }
+            if members.len() == before {
+                break;
+            }
         }
         all.retain(|entry| members.contains(&entry.id));
         transaction.commit()?;

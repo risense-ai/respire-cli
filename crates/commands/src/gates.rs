@@ -114,7 +114,10 @@ pub fn is_write_command_fine(c: &Command) -> bool {
             a == "remove"
         }
         Command::Session { command } => matches!(command, SessionCommand::Revoke { .. }),
-        Command::QueryLog { cmd: Some(QueryLogCmd::Mark { .. }), .. } => true,
+        Command::QueryLog {
+            cmd: Some(QueryLogCmd::Mark { .. }),
+            ..
+        } => true,
         // share-import without --go only prints the candidate bill (read); --go writes
         Command::ShareImport { go, .. } => *go,
         _ => false,

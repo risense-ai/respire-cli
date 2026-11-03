@@ -39,10 +39,13 @@ pub fn set_lang(lang: Lang) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("client.json is not an object"))?;
     obj.insert(
         "lang".to_owned(),
-        Value::String(match lang {
-            Lang::Zh => "zh",
-            Lang::En => "en",
-        }.to_owned()),
+        Value::String(
+            match lang {
+                Lang::Zh => "zh",
+                Lang::En => "en",
+            }
+            .to_owned(),
+        ),
     );
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -390,7 +393,9 @@ mod tests {
     use super::*;
 
     fn lock_env() -> std::sync::MutexGuard<'static, ()> {
-        crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner())
+        crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
     }
 
     #[test]
