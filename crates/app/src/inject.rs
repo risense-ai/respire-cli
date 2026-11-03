@@ -105,12 +105,12 @@ pub struct Target {
 }
 
 fn home() -> Result<std::path::PathBuf> {
-    dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))
+    crate::service::home_dir()
 }
 
 fn expand(p: &str) -> std::path::PathBuf {
     if let Some(rest) = p.strip_prefix("~/").or_else(|| p.strip_prefix("~\\")) {
-        if let Some(home) = dirs::home_dir() {
+        if let Ok(home) = crate::service::home_dir() {
             return home.join(rest);
         }
     }

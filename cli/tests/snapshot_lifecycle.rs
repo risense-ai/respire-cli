@@ -11,6 +11,7 @@ use std::{
 };
 
 struct Fixture {
+    runtime: Option<std::process::Child>,
     root: tempfile::TempDir,
     port: u16,
     secret: String,
@@ -31,7 +32,12 @@ impl Fixture {
                 &json!({"user":"snapshot-fixture","vault_version":4,"kdf_salt":salt,"wrapped_urk":format!("{}{wrapped}",crypto::RSRS_PREFIX),"urk_nonce":nonce}),
             )?,
         )?;
-        let fixture = Self { root, port, secret };
+        let mut fixture = Self {
+            runtime: None,
+            root,
+            port,
+            secret,
+        };
         let entry = MemoryEntry {
             metadata: Default::default(),
             unknown_fields: Default::default(),
@@ -62,7 +68,78 @@ impl Fixture {
             "snapshot-fixture",
         )?;
         assert!(LocalStore::open(&fixture.root.path().join("rsrs.db"))?.put(&stored)?);
+        fixture.start_runtime()?;
         Ok(fixture)
+    }
+    fn start_runtime(&mut self) -> Result<()> {
+        let mut runtime = Command::new(env!("CARGO_BIN_EXE_rsrs"))
+            .arg("--runtime-internal")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .current_dir(self.root.path())
+            .env("HOME", self.root.path())
+            .env("USERPROFILE", self.root.path())
+            .env("RSRS_DATA_DIR", self.root.path())
+            .env("RSRS_RPC_PORT", self.port.to_string())
+            .env("RSRS_PASS", &self.secret)
+            .env("RSRS_SUPER", &self.secret)
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
+            .env("RSRS_CORE_TEST_MODE", "1")
+            .spawn()?;
+        let began = Instant::now();
+        loop {
+            if let Some(status) = runtime.try_wait()? {
+                let _ = runtime.wait();
+                anyhow::bail!("runtime exited during fixture startup: {status}");
+            }
+            let ready = Command::new(env!("CARGO_BIN_EXE_rsrs"))
+                .args(["--client-only", "--json", "status"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .current_dir(self.root.path())
+                .env("HOME", self.root.path())
+                .env("USERPROFILE", self.root.path())
+                .env("RSRS_DATA_DIR", self.root.path())
+                .env("RSRS_RPC_PORT", self.port.to_string())
+                .status()?;
+            if ready.success() {
+                self.runtime = Some(runtime);
+                return Ok(());
+            }
+            if began.elapsed() > Duration::from_secs(15) {
+                let _ = runtime.kill();
+                let _ = runtime.wait();
+                anyhow::bail!("runtime did not become ready");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+    fn stop_runtime(&mut self) -> Result<()> {
+        let _ = self.run(&["--json", "--runtime-internal", "--stop"]);
+        if let Some(mut runtime) = self.runtime.take() {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match runtime.try_wait()? {
+                    Some(status) => {
+                        let _ = runtime.wait();
+                        if !status.success() {
+                            anyhow::bail!("runtime exited unsuccessfully during cleanup: {status}");
+                        }
+                        return Ok(());
+                    }
+                    None if Instant::now() >= deadline => {
+                        runtime.kill()?;
+                        runtime.wait()?;
+                        anyhow::bail!("runtime did not stop after its stop acknowledgement");
+                    }
+                    None => std::thread::sleep(Duration::from_millis(50)),
+                }
+            }
+        }
+        Ok(())
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rsrs"));
@@ -136,6 +213,7 @@ impl Drop for Fixture {
                 let _ = self.run(&["--json", "--runtime-internal", "--stop"]);
             }
         }
+        let _ = self.stop_runtime();
     }
 }
 
@@ -270,60 +348,63 @@ fn concurrent_host_recover_cannot_interleave_with_restore_commit() -> Result<()>
 
 #[test]
 fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> Result<()> {
-    let fixture = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
     let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;
+    fixture.stop_runtime()?;
     {
         // Diagnostics: if the fixture lock is already held at this point,
         // print the holders so the CI log identifies the leaking process.
-        let ownership =
-            match respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1)) {
-                Ok(ownership) => ownership,
-                Err(error) => {
-                    let lock_path = fixture.root.path().join("lock.db");
-                    let lock_target = std::fs::canonicalize(&lock_path)
-                        .map(|path| path.to_string_lossy().to_string());
-                    eprintln!("DIAG staged: lock held; scanning fd holders of {lock_path:?}");
-                    if let Ok(entries) = std::fs::read_dir("/proc") {
-                        for entry in entries.flatten() {
-                            let pid = entry.file_name().to_string_lossy().to_string();
-                            if !pid.chars().all(|c| c.is_ascii_digit()) {
-                                continue;
-                            }
-                            let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        let ownership = match respire::lock::LibraryLock::acquire(
+            fixture.root.path(),
+            Duration::from_secs(1),
+        ) {
+            Ok(ownership) => ownership,
+            Err(error) => {
+                let lock_path = fixture.root.path().join("lock.db");
+                let lock_target = std::fs::canonicalize(&lock_path)
+                    .map(|path| path.to_string_lossy().to_string());
+                eprintln!("DIAG staged: lock held; scanning fd holders of {lock_path:?}");
+                if let Ok(entries) = std::fs::read_dir("/proc") {
+                    for entry in entries.flatten() {
+                        let pid = entry.file_name().to_string_lossy().to_string();
+                        if !pid.chars().all(|c| c.is_ascii_digit()) {
+                            continue;
+                        }
+                        let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+                            continue;
+                        };
+                        for fd in fds.flatten() {
+                            let Ok(target) = std::fs::read_link(fd.path()) else {
                                 continue;
                             };
-                            for fd in fds.flatten() {
-                                let Ok(target) = std::fs::read_link(fd.path()) else {
-                                    continue;
-                                };
-                                let target = target.to_string_lossy().to_string();
-                                let matches = match &lock_target {
-                                    Ok(canonical) => target == *canonical,
-                                    Err(_) => target.ends_with("lock.db"),
-                                };
-                                if matches {
-                                    let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
-                                        .map(|cmd| cmd.replace('\0', " "))
-                                        .unwrap_or_default();
-                                    let env = std::fs::read_to_string(format!("/proc/{pid}/environ"))
-                                        .map(|env| {
-                                            env.split('\0')
-                                                .find(|entry| entry.starts_with("RSRS_DATA_DIR="))
-                                                .unwrap_or("RSRS_DATA_DIR=<unset>")
-                                                .to_owned()
-                                        })
-                                        .unwrap_or_default();
-                                    eprintln!("DIAG staged holder pid={pid} fd={:?} target={target} cmd={cmd} {env}", fd.file_name());
-                                }
+                            let target = target.to_string_lossy().to_string();
+                            let matches = match &lock_target {
+                                Ok(canonical) => target == *canonical,
+                                Err(_) => target.ends_with("lock.db"),
+                            };
+                            if matches {
+                                let cmd = std::fs::read_to_string(format!("/proc/{pid}/cmdline"))
+                                    .map(|cmd| cmd.replace('\0', " "))
+                                    .unwrap_or_default();
+                                let env = std::fs::read_to_string(format!("/proc/{pid}/environ"))
+                                    .map(|env| {
+                                        env.split('\0')
+                                            .find(|entry| entry.starts_with("RSRS_DATA_DIR="))
+                                            .unwrap_or("RSRS_DATA_DIR=<unset>")
+                                            .to_owned()
+                                    })
+                                    .unwrap_or_default();
+                                eprintln!("DIAG staged holder pid={pid} fd={:?} target={target} cmd={cmd} {env}", fd.file_name());
                             }
                         }
                     }
-                    eprintln!("DIAG staged create child error: {error:#}");
-                    return Err(error);
                 }
-            };
+                eprintln!("DIAG staged create child error: {error:#}");
+                return Err(error);
+            }
+        };
         respire_app::snapshot::restore_locked(
             fixture.root.path(),
             "snapshot-fixture",
@@ -396,8 +477,7 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
 
 #[test]
 fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> Result<()> {
-    use std::io::{BufRead, BufReader};
-    let fixture = Fixture::new()?;
+    let mut fixture = Fixture::new()?;
     let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;
@@ -406,6 +486,7 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
     let token = revision["summary"]["revision"]
         .as_str()
         .context("revision token")?;
+    fixture.stop_runtime()?;
     // Parallel tests may briefly hold a serve child; wait patiently for the
     // fixture's own lock instead of a hard 1s budget.
     let ownership = {
@@ -433,22 +514,16 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
-    let stderr = queued.stderr.take().context("queued stderr")?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || -> std::io::Result<()> {
-        for line in BufReader::new(stderr).lines() {
-            let line = line?;
-            eprintln!("DIAG queued child: {line}");
-            if line.contains("memory library is locked") {
-                let _ = tx.send(());
-            }
-        }
-        Ok(())
-    });
-    if rx.recv_timeout(Duration::from_secs(5)).is_err() {
-        let _ = queued.kill();
-        let _ = queued.wait();
-        anyhow::bail!("direct command did not reach the controlled ownership wait");
+    // The lock wait moved inside the runtime process, so stderr no longer
+    // reports it. Prove the wait by requiring the child to remain alive while
+    // ownership is held, then verify the post-wait quarantine recheck.
+    let began = Instant::now();
+    while began.elapsed() < Duration::from_millis(500) {
+        anyhow::ensure!(
+            queued.try_wait()?.is_none(),
+            "direct command completed while maintenance held library ownership"
+        );
+        std::thread::sleep(Duration::from_millis(50));
     }
     let receipt = respire_app::snapshot::restore_locked(
         fixture.root.path(),
@@ -459,9 +534,6 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
     )?;
     drop(ownership);
     let rejected = wait_bounded(queued)?;
-    reader
-        .join()
-        .map_err(|_| anyhow::anyhow!("stderr observer panicked"))??;
     assert!(
         !rejected.status.success(),
         "queued direct command removed maintenance quarantine"
@@ -474,6 +546,7 @@ fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> R
             .as_deref(),
         Some(id)
     );
+    fixture.stop_runtime()?;
     let ownership =
         respire::lock::LibraryLock::acquire(fixture.root.path(), Duration::from_secs(1))?;
     respire_app::snapshot::rollback_locked(fixture.root.path(), &receipt, &ownership)?;
