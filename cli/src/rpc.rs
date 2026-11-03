@@ -630,6 +630,12 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
+    // Hermetic runs must never spawn a serving child: the lifecycle fallback
+    // would leave an orphan holding the fixture library lock.
+    anyhow::ensure!(
+        !respire::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
+        "runtime lifecycle is disabled in core test mode"
+    );
     if crate::autostart::ensure_managed_locked()? { return Ok(()); }
     crate::autostart::check_direct_access()?;
     if let Some(health) = probe_runtime()? {
