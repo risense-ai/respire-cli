@@ -74,7 +74,7 @@ enum WriteJob {
 /// Statistics enqueueing stays with the write queue: the queue element type
 /// (WriteJob) still lives beside the runtime Job/admission machinery, while
 /// the statistics state and the read-side status moved to rpc_worker.
-pub(crate) fn queue_recall_stats(stats: RecallStats, generation: usize) {
+pub(crate) fn enqueue_recall_stats_local(stats: RecallStats, generation: usize) {
     if respire::service::workspace_mode() != "normal" { return; }
     if STATS_PENDING
         .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
