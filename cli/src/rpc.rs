@@ -812,22 +812,9 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             // --runtime-internal shim) for the transition train.
             match crate::runtime_fetch::download_and_install(None, None) {
                 Ok(path) => path,
-                Err(download_error) => {
-                    // Windows package layouts need the packaged runtime copied
-                    // beside the CLI before autostart can pin its path.
-                    #[cfg(windows)]
-                    {
-                        crate::mcp::materialize_bin().map_err(|error| {
-                            anyhow::anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
-                        })?
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        return Err(anyhow::anyhow!(
-                            "no runtime binary resolved ({download_error:#}); local fallback is unavailable on this platform"
-                        ));
-                    }
-                }
+                Err(_) => self_exe
+                    .clone()
+                    .context("no runtime binary resolved and no local fallback executable")?,
             }
         }
     };
