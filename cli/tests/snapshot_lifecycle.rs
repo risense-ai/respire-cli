@@ -301,10 +301,12 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
         .spawn()?;
     let recovered_at = Instant::now();
     let mut exited_failed = false;
+    let mut exited = false;
     loop {
-        if serving.try_wait()?.is_some() {
-            let output = serving.wait_with_output()?;
-            exited_failed = !output.status.success();
+        if let Some(status) = serving.try_wait()? {
+            let _ = serving.wait();
+            exited_failed = !status.success();
+            exited = true;
             break;
         }
         let healthy = std::fs::metadata(fixture.root.path().join("rsrs.db"))
@@ -322,7 +324,7 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(
-        exited_failed || serving.try_wait().is_ok(),
+        exited_failed || !exited,
         "runtime reported ready with a broken staged store"
     );
     let _ = serving.kill();
