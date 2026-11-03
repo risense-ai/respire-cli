@@ -32,7 +32,6 @@ mod rpc;
 mod runtime_error;
 mod runtime_fetch;
 mod runtime_http;
-mod runtime_policy;
 mod shell;
 mod skill;
 mod review;
@@ -56,6 +55,7 @@ use respire_commands::output_state::{
     set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
     HOST_RPC_OUTPUT, OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
 };
+use respire_commands::runtime_policy;
 use respire_commands::util::{
     current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id,
 };

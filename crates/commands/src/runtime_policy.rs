@@ -8,7 +8,7 @@ pub fn client_only() -> bool {
     if ["RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"]
         .iter()
         .any(|name| {
-            respire::env::var(name).is_ok_and(|value| {
+            respire_app::env::var(name).is_ok_and(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
                     "1" | "true" | "on" | "yes"
@@ -35,20 +35,20 @@ pub fn require_host(action: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn takeover_lock() -> Result<respire::lock::LibraryLock> {
+pub fn takeover_lock() -> Result<respire_app::lock::LibraryLock> {
     require_host("runtime lifecycle")?;
-    respire::lock::LibraryLock::acquire(
-        &crate::rpc::runtime_dir_path().join("takeover"),
+    respire_app::lock::LibraryLock::acquire(
+        &crate::rpc_worker::runtime_dir_path().join("takeover"),
         std::time::Duration::from_secs(60),
     )
 }
 
 /// Background commits must yield to a lifecycle owner that is draining them,
 /// rather than wait for that owner's lock and deadlock the drain.
-pub(crate) fn try_takeover_lock() -> Result<respire::lock::LibraryLock> {
+pub fn try_takeover_lock() -> Result<respire_app::lock::LibraryLock> {
     require_host("background diary cache commit")?;
-    respire::lock::LibraryLock::acquire(
-        &crate::rpc::runtime_dir_path().join("takeover"),
+    respire_app::lock::LibraryLock::acquire(
+        &crate::rpc_worker::runtime_dir_path().join("takeover"),
         std::time::Duration::ZERO,
     )
 }

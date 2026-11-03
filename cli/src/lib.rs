@@ -24,6 +24,8 @@ pub use respire_commands::metadata;
 pub use respire_commands::output;
 pub use respire_commands::output_state;
 pub use respire_commands::review;
+pub use respire_commands::runtime_policy;
+pub use respire_commands::rpc_worker;
 pub use respire_commands::util;
 pub mod extract_tui;
 pub mod hooks;
