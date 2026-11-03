@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli", "spawn", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/storage", "crates/commands"]
+members = ["cli", "spawn", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/app-domain", "crates/storage", "crates/commands"]
 default-members = ["cli"]
 
 # Keep real PBKDF2 iteration counts fast without optimizing workspace test code.
