@@ -8,6 +8,7 @@ platform acceptance run; passing this script does not claim that acceptance.
 import argparse
 import json
 import os
+import shutil
 from pathlib import Path
 import socket
 import subprocess
@@ -126,6 +127,9 @@ def main():
         (off_root / "client.json").write_text(json.dumps({"service_mode":"off"}))
         off_env = dict(env, RSRS_DATA_DIR=str(off_root), RSRS_BIN_DIR=str(base/"off-bin"))
         try:
+            off_bin = base/"off-bin"
+            off_bin.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(binary, off_bin/("rsrs.exe" if os.name == "nt" else "rsrs"))
             for argv in [("runtime","start"),("runtime","stop")]*3+[("runtime","restart")]:
                 result = subprocess.run([binary,"--json",*argv],env=off_env,capture_output=True,text=True,timeout=45)
                 assert result.returncode == 0, f"off mode {argv}: {result.stdout} {result.stderr}"
