@@ -447,8 +447,14 @@ fn wait_ready(config: &Registration) -> Result<()> {
     while Instant::now() < deadline {
         if let Some(health) = crate::rpc::probe_runtime()? {
             anyhow::ensure!(
-                health.bin == env!("CARGO_PKG_VERSION")
-                    && crate::mcp::exe_matches_dest(&health.exe, &config.executable)
+                (crate::runtime_fetch::version_in_accept(&health.runtime_version)
+                    || (health.runtime_version.is_empty()
+                        && health.bin == env!("CARGO_PKG_VERSION")))
+                    && (crate::mcp::exe_matches_dest(&health.exe, &config.executable)
+                        || crate::runtime_fetch::managed_runtime_path()
+                            .ok()
+                            .flatten()
+                            .is_some_and(|managed| crate::mcp::exe_matches_dest(&health.exe, &managed)))
                     && !health.data_dir.is_empty()
                     && crate::mcp::same_path(
                         Path::new(&health.data_dir),
