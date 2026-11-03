@@ -61,6 +61,20 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
     std::fs::create_dir_all(models.join("onnx"))?;
     std::fs::write(models.join("tokenizer.json"), b"{}")?;
     std::fs::write(models.join("onnx/model_quantized.onnx"), b"invalid synthetic weights")?;
+    // Forwarded model settings above can leave the local runtime owning the
+    // library; the legacy probe below intentionally runs outside that runtime.
+    let stopped = Command::new(env!("CARGO_BIN_EXE_rsrs"))
+        .args(["--json", "--runtime-internal", "--stop"])
+        .current_dir(profile.path())
+        .env("HOME", profile.path()).env("USERPROFILE", profile.path())
+        .env("RSRS_DATA_DIR", profile.path().join("data"))
+        .env("RSRS_RPC_PORT", port.to_string())
+        .output()?;
+    anyhow::ensure!(
+        stopped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&stopped.stderr)
+    );
     // Missing weights must fail without silently loading the quantized default.
     let probe = run(&["model", "probe", "--model", "m3"])?;
     assert!(!probe.status.success());
