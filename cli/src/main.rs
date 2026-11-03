@@ -91,6 +91,166 @@ use respire::transport::MemoryTransport;
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
+    match args.command.as_ref() {
+        Some(Command::Keygen { pass, force }) => Some(run_keygen(pass.as_deref(), *force)),
+
+        Some(Command::Inject {
+            targets,
+            id,
+            remove,
+            all,
+            preview,
+            expected,
+            tui,
+        }) => {
+            // Default interactive: no args + real TTY -> TUI; client child/script (no tty) -> original full inject, same behavior
+            let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let bare = !*targets && id.is_none() && !*remove && !*preview && expected.is_none();
+            if *tui || (bare && !*all && interactive) {
+                return Some(crate::inject_tui::run());
+            }
+            return Some(run_inject(
+                *targets,
+                id.as_deref(),
+                *remove,
+                *all,
+                *preview,
+                expected.as_deref(),
+            ));
+        }
+
+        Some(Command::Logout { full }) => {
+            let outcome = logout_cli(*full)?;
+            let status = if outcome.session_found {
+                OutputStatus::Ok
+            } else {
+                OutputStatus::Skip
+            };
+            let action = if outcome.full {
+                if outcome.session_found {
+                    "deleted"
+                } else {
+                    "absent"
+                }
+            } else if outcome.session_found {
+                "cleared"
+            } else {
+                "absent"
+            };
+            let mut result = ResultEnvelope::new(
+                "logout",
+                status,
+                serde_json::json!({
+                    "mode": if outcome.full { "full" } else { "session" },
+                    "action": action,
+                    "session_found": outcome.session_found,
+                }),
+                vec![OutputItem::new("session", status, action)],
+            );
+            result.details = serde_json::json!({
+                "path": outcome.path.display().to_string(),
+                "identity_deleted": outcome.full && outcome.session_found,
+                "credentials_cleared": !outcome.full && outcome.session_found,
+            });
+            if outcome.full && outcome.session_found {
+                result
+                    .actions
+                    .push("register or import five-key material to reconnect".to_owned());
+            } else if !outcome.full && outcome.session_found {
+                result.actions.push("login to reconnect".to_owned());
+            }
+            return Some(emit_result(result));
+        }
+
+        Some(Command::Account { action, name, yes }) => {
+            Some(run_account(action, name.as_deref(), *yes))
+        }
+
+        Some(Command::Space {
+            action,
+            name,
+            note,
+            readonly,
+            code,
+            session,
+            all,
+            yes,
+        }) => {
+            Some(run_space(
+                action,
+                name.as_deref(),
+                note.as_deref(),
+                *readonly,
+                code.as_deref(),
+                session.as_deref(),
+                *all,
+                *yes,
+            ))
+        }
+
+        Some(Command::UpdateCheck { force, clear }) => Some(run_update_check(*force, *clear)),
+
+        Some(Command::KeysExport { out }) => Some(run_keys_export(out.as_deref())),
+
+        Some(Command::Config {
+            data_dir,
+            addr,
+            autosync,
+            cure_auto,
+            rpc_parallelism,
+        }) => {
+            Some(run_config(
+                data_dir.as_deref(),
+                addr.as_deref(),
+                *autosync,
+                *cure_auto,
+                *rpc_parallelism,
+            ))
+        }
+
+        Some(Command::Secret { reveal }) => Some(run_secret(*reveal)),
+
+        Some(Command::Fivekeys {
+            addr,
+            user,
+            pass,
+            secret,
+            kdf_salt,
+            wrapped_urk,
+            urk_nonce,
+            super_pass,
+        }) => {
+            Some(run_fivekeys(
+                addr,
+                user,
+                pass,
+                secret,
+                kdf_salt,
+                wrapped_urk,
+                urk_nonce,
+                super_pass,
+            ))
+        }
+
+        Some(Command::Register {
+            addr,
+            user,
+            pass,
+            super_pass,
+        }) => {
+            Some(run_register(
+                addr.as_deref(),
+                user.as_deref(),
+                pass.as_deref(),
+                super_pass.as_deref(),
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
     OUTPUT_EMITTED.with(|flag| flag.set(false));
