@@ -56,6 +56,7 @@ use respire_commands::model_progress;
 use respire_commands::net_rpc;
 use respire_commands::progress;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
+use respire_commands::output_emit::{command_failure, emit_details, emit_result};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
     set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
@@ -317,44 +318,6 @@ impl Drop for EmbedderHold {
     }
 }
 
-fn emit_result(result: ResultEnvelope) -> Result<()> {
-    let mut result = result;
-    result.ensure_failure_diagnostics();
-    result.details = output::sanitize_details(&result.command, &result.details);
-    let exit_code = status_exit_code(result.status);
-    if rpc::worker_active() || DEFER_PROFILE_OUTPUT.get() || HOST_RPC_OUTPUT.get() {
-        CAPTURED.with(|slot| *slot.borrow_mut() = Some(result));
-        mark_emitted();
-        set_exit_code(exit_code);
-        return Ok(());
-    }
-    progress::finish();
-    println!("{}", result.render(json_mode())?);
-    mark_emitted();
-    set_exit_code(exit_code);
-    Ok(())
-}
-
-fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
-    let input = error.downcast_ref::<respire_app::input_error::InputError>().is_some();
-    let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
-        Some(runtime_error::RuntimeError::OutcomeUnknown { request_id, .. }) => Some(request_id),
-        _ => None,
-    };
-    let mut envelope = ResultEnvelope::new(
-        "cli", OutputStatus::Fail,
-        serde_json::json!({"reason": if unknown.is_some() { "request_outcome_unknown" } else if input { "invalid_input" } else { "runtime_error" }}),
-        Vec::new(),
-    );
-    envelope.errors.push(format!("{error:#}"));
-    envelope.details = serde_json::json!({"error_type": if input { "user" } else { "runtime" }});
-    if let Some(id) = unknown {
-        envelope.details = serde_json::json!({"error_type":"outcome_unknown","request_id":id,"replayed":false,"result_method":"runtime.result"});
-    }
-    (envelope, if input { 2 } else { 1 })
-}
-
-/// Run one command on the runtime worker thread and keep the envelope instead of printing it.
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
     CAPTURED.with(|slot| *slot.borrow_mut() = None);
     OUTPUT_EMITTED.with(|flag| flag.set(false));
@@ -413,17 +376,6 @@ pub(crate) fn capture_run(args: Vec<String>) -> Captured {
         exit: exit_code(),
         envelope,
     }
-}
-
-fn emit_details(
-    command: &str,
-    status: OutputStatus,
-    summary: serde_json::Value,
-    details: serde_json::Value,
-) -> Result<()> {
-    let mut result = ResultEnvelope::new(command, status, summary, Vec::new());
-    result.details = details;
-    emit_result(result)
 }
 
 struct LogoutOutcome {
