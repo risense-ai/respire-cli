@@ -218,6 +218,10 @@ impl MemoryEngine {
         Self::prepare_resolution(keys, stored, stamp, None)
     }
 
+    /// Content fingerprint for sync equivalence. Version clocks (`updated_at`,
+    /// `created_at`) and writer identity (`device`, `modified_by`, `computer`)
+    /// do not participate. Unknown fields and every semantic field do.
+    /// A shared clock or device name never proves two different bodies are one.
     pub fn equivalent_versions(
         keys: &SessionKeys,
         left: &StoredMemory,
@@ -232,16 +236,7 @@ impl MemoryEngine {
         if left.ciphertext.is_empty() || right.ciphertext.is_empty() {
             return Ok(false);
         }
-        let normalize = |b: &StoredMemory| -> Result<serde_json::Value> {
-            let text = keys.decrypt_content(&b.ciphertext, &b.nonce)?;
-            let mut payload: serde_json::Value = serde_json::from_str(&text)?;
-            let object = payload
-                .as_object_mut()
-                .ok_or_else(|| anyhow::anyhow!("invalid encrypted payload"))?;
-            object.remove("updated_at");
-            Ok(payload)
-        };
-        Ok(normalize(left)? == normalize(right)?)
+        Ok(content_fingerprint(keys, left)? == content_fingerprint(keys, right)?)
     }
 
     pub fn prepare_resolution(
@@ -400,6 +395,33 @@ fn validate_metadata(kind: &str, metadata: &super::model::MemoryMeta,
     anyhow::ensure!(metadata.memory_contract != 0 || !matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote),
         "invalid_metadata: new memory kinds require contract 1");
     Ok(())
+}
+
+/// Semantic payload identity. Same content written on another device, or
+/// resealed with a new clock, compares equal. Absent and empty optional strings
+/// are normalized so two encoders of one memory agree.
+fn content_fingerprint(keys: &SessionKeys, stored: &StoredMemory) -> Result<serde_json::Value> {
+    let text = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
+    let mut payload: serde_json::Value = serde_json::from_str(&text)?;
+    let object = payload
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("invalid encrypted payload"))?;
+    for ignored in ["updated_at", "created_at", "device", "modified_by", "computer"] {
+        object.remove(ignored);
+    }
+    for optional in ["supersedes", "superseded_by"] {
+        if object.get(optional).and_then(|value| value.as_str()) == Some("") {
+            object.remove(optional);
+        }
+    }
+    if object
+        .get("see_also")
+        .and_then(|value| value.as_array())
+        .is_some_and(|items| items.is_empty())
+    {
+        object.remove("see_also");
+    }
+    Ok(payload)
 }
 
 fn payload_kind(value: &str, memory_contract: u8) -> Result<Kind> {
