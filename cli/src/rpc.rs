@@ -388,16 +388,23 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
         return Ok(());
     }
     // Serving in-process is deprecated: forward to the managed runtime binary
-    // for one release train, then drop this entry entirely.
+    // for one release train, then drop this entry entirely. Environments with
+    // no managed runtime installed (fresh test envs, offline hosts) fall back
+    // to in-process serving until this entry is removed.
     crate::runtime_policy::require_host("runtime startup")?;
     eprintln!("deprecated: forward to the managed runtime; removal in an upcoming release train");
-    let executable = match crate::runtime_fetch::resolve_runtime_bin()? {
-        crate::runtime_fetch::ResolvedRuntime::Ready(path) => path,
-        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_) => {
+    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
+        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
+        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) => {
             // First-launch migration: the pinned managed runtime is not on disk
-            // yet; install it before starting it.
-            crate::runtime_fetch::download_and_install(None, None)?
+            // yet; install it before starting it. Offline hosts cannot fetch it
+            // and fall through to in-process serving below.
+            match crate::runtime_fetch::download_and_install(None, None) {
+                Ok(path) => path,
+                Err(_) => return respire_commands::rpc_serve::serve(flags),
+            }
         }
+        Err(_) => return respire_commands::rpc_serve::serve(flags),
     };
     let mut arguments: Vec<std::ffi::OsString> = vec![
         "serve".into(),

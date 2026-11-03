@@ -8,7 +8,7 @@ use respire::{
 use respire_app as respire;
 use serde_json::{json, Value};
 
-#[path = "../src/bench.rs"]
+#[path = "../../crates/commands/src/bench.rs"]
 #[allow(dead_code)]
 mod bench;
 
