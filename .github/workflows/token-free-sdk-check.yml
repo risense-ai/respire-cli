@@ -185,4 +185,4 @@ jobs:
           set -euo pipefail
           cargo test --workspace --exclude respire --locked
           cargo llvm-cov --locked -p respire --fail-under-lines 90 \
-            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
+            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'

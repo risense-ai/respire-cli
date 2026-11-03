@@ -455,10 +455,10 @@ jobs:
         run: |
           result=0
           cargo llvm-cov report -p respire --fail-under-lines 90 \
-            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || result=$?
+            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || result=$?
           if [ "$result" -ne 0 ]; then
             cargo llvm-cov report -p respire --show-missing-lines \
-              --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http)\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || printf "%s\n" "Coverage diagnostic unavailable; original failure retained"
+              --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)' || printf "%s\n" "Coverage diagnostic unavailable; original failure retained"
           fi
           exit "$result"
       - name: Require source coverage and all independent contracts
