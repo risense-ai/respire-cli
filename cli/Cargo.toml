@@ -9,7 +9,7 @@ repository = "https://github.com/risense-ai/respire-cli"
 
 [features]
 default = ["cpu-owned-ort-experiment"]
-native-fault-tests = ["respire_app/native-fault-tests"]
+native-fault-tests = ["respire_app/native-fault-tests", "respire_commands/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_app/cpu-owned-ort-experiment"]
 
 [[bin]]
@@ -18,6 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
+respire_commands = { path = "../crates/commands" }
 respire_spawn = { path = "../spawn" }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

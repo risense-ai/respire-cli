@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cli", "spawn", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/storage"]
+members = ["cli", "spawn", "crates/core-sdk", "crates/protocol", "crates/crypto", "crates/app", "crates/storage", "crates/commands"]
 default-members = ["cli"]
 
 # Keep real PBKDF2 iteration counts fast without optimizing workspace test code.
@@ -15,5 +15,10 @@ codegen-units = 1
 panic = "unwind"
 
 # Keep the derived clap command builder within the default test-thread stack.
+# The builder now lives in respire_commands; both entries stay pinned while the
+# CLI still carries command-shaped code from earlier split steps.
 [profile.test.package.respire]
+opt-level = 1
+
+[profile.test.package.respire_commands]
 opt-level = 1
