@@ -194,7 +194,6 @@ def main():
                 pattern = os.environ.get("LLVM_PROFILE_FILE")
                 if not pattern:
                     return
-                import shutil
                 import uuid
                 destination = Path(pattern).parent
                 assert destination.is_dir(), "coverage profile destination missing"
@@ -354,7 +353,6 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
             try:
                 if args.previous_binary:
                     import hashlib
-                    import shutil
                     previous=args.previous_binary.resolve(strict=True)
                     version=subprocess.run([str(previous),"--version"],env=env,capture_output=True,text=True,timeout=15)
                     assert version.returncode == 0 and "1.0.17-dev.6" in version.stdout, "unexpected previous native version"
