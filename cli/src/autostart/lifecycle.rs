@@ -93,7 +93,7 @@ fn ensure_control_endpoint(config: &Registration) -> Result<()> {
     Ok(())
 }
 
-fn owned(config: &Registration) -> Result<()> {
+pub(super) fn owned(config: &Registration) -> Result<()> {
     anyhow::ensure!(
         config.owner == manager::owner()?,
         "runtime registration belongs to another OS user"
@@ -745,6 +745,14 @@ pub(crate) fn restart_stage(name: &str) {
     }
 }
 
+/// Supervisor events reuse the fixed lifecycle event names so the diagnostic
+/// file stays bounded and never captures free-form text.
+pub(super) fn record_supervise_event(config: &Registration, name: &str) {
+    if let Err(error) = event(config, name) {
+        eprintln!("supervisor event could not be recorded: {error}");
+    }
+}
+
 fn event(config: &Registration, name: &str) -> Result<()> {
     // Fixed event names only. Never serialize command arguments, errors,
     // environment values, account identifiers or recovery material.
@@ -874,8 +882,69 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         RuntimeCommand::Autostart {
             command: AutostartCommand::Remove { stop },
         } => disable(*stop, true),
+        RuntimeCommand::Install { file, version, mirror } => {
+            install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref())
+        }
+        RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
+        RuntimeCommand::Clean => {
+            let removed = crate::runtime_fetch::clean_old()?;
+            emit("runtime.clean", json!({"removed": removed}))
+        }
+        RuntimeCommand::Update => {
+            let binary = crate::runtime_fetch::download_and_install(None, None)?;
+            emit(
+                "runtime.update",
+                json!({"version": crate::runtime_fetch::pinned()?.required.clone(), "binary": binary}),
+            )
+        }
+        RuntimeCommand::Supervise { data_dir } => {
+            return super::supervise::supervise(data_dir);
+        }
         _ => bail!("unsupported runtime lifecycle command"),
     }
+}
+
+/// `runtime install`: pinned download by default, or an offline archive with
+/// `--file`/`--version`, with an optional explicit `--mirror` origin.
+fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+    match (file, version) {
+        (Some(archive), Some(explicit_version)) => {
+            anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
+            let binary = crate::runtime_fetch::install_from_file(archive, explicit_version)?;
+            emit(
+                "runtime.install",
+                json!({"source":"file","version":explicit_version,"binary":binary}),
+            )
+        }
+        (Some(_), None) => bail!("--file requires --version"),
+        (None, Some(_)) => bail!("--version is only accepted together with --file"),
+        (None, None) => {
+            if let Some(origin) = mirror {
+                crate::model_install::validate_mirror(origin)?;
+            }
+            let binary = crate::runtime_fetch::download_and_install(None, mirror)?;
+            emit(
+                "runtime.install",
+                json!({"source":"download","version":crate::runtime_fetch::pinned()?.required.clone(),"binary":binary}),
+            )
+        }
+    }
+}
+
+fn runtime_inventory() -> Result<Value> {
+    let pin = crate::runtime_fetch::pinned()?;
+    let installed = crate::runtime_fetch::list_installed()?;
+    let versions: Vec<Value> = installed
+        .iter()
+        .map(|entry| {
+            json!({"version": entry.version, "path": entry.path, "current": entry.current})
+        })
+        .collect();
+    Ok(json!({
+        "required": pin.required.clone(),
+        "accept": pin.accept_raw.clone(),
+        "installed": versions,
+    }))
 }
 
 fn enable(now: bool) -> Result<()> {
