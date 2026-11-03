@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 use sha2::{Digest, Sha256};
 
-use crate::memory::bge::{expand_home, model_files_present};
+use respire_app::memory::bge::{expand_home, model_files_present};
 use crate::model_progress;
 
 pub fn install_engines() -> Result<Vec<String>> {
     #[cfg(windows)]
     {
-        let dll = crate::memory::onnx::accelerator_catalog_path()?.context("Windows ML catalog path missing")?;
+        let dll = respire_app::memory::onnx::accelerator_catalog_path()?.context("Windows ML catalog path missing")?;
         let paths = respire_spawn::install_accelerators(&dll)?;
         let directory = dll.parent().and_then(Path::parent).context("Windows ML engine directory missing")?;
         let target = directory.join("providers.json");
@@ -62,12 +62,12 @@ pub const MIRRORS: &[&str] = &["auto", "https://hf-mirror.com", "https://hf-mirr
 
 pub fn mirror_from_env() -> Option<String> {
     respire_app::env::var("RSRS_MIRROR").ok().filter(|s| !s.trim().is_empty())
-        .or_else(|| crate::service::read_agent_config()["model_mirror"].as_str().map(str::to_owned))
+        .or_else(|| respire_app::service::read_agent_config()["model_mirror"].as_str().map(str::to_owned))
 }
 
 pub fn install_target_dir(explicit: Option<&str>) -> PathBuf {
     explicit.filter(|s| !s.trim().is_empty()).map(|s| expand_home(s.trim()))
-        .unwrap_or_else(crate::memory::bge::m3_model_dir)
+        .unwrap_or_else(respire_app::memory::bge::m3_model_dir)
 }
 
 pub fn install_m3(mirror: Option<&str>) -> Result<InstallReport> {
@@ -78,11 +78,11 @@ pub fn install_m3(mirror: Option<&str>) -> Result<InstallReport> {
 /// Cheap runtime inventory for settings UIs. Presence/size is not a checksum or
 /// provider compatibility claim; inference and the installer still verify hashes.
 pub fn variant_inventory() -> Result<serde_json::Value> {
-    let directory = crate::memory::bge::resolve_model_dir().unwrap_or_else(|_| install_target_dir(None));
+    let directory = respire_app::memory::bge::resolve_model_dir().unwrap_or_else(|_| install_target_dir(None));
     let baseline = model_files_present(&directory);
-    crate::memory::onnx::MODEL_VARIANTS.iter().map(|variant| {
+    respire_app::memory::onnx::MODEL_VARIANTS.iter().map(|variant| {
         let state = if baseline {
-            variant_file_state(&directory.join(crate::memory::onnx::variant_file_name(variant.name)), variant.size)?
+            variant_file_state(&directory.join(respire_app::memory::onnx::variant_file_name(variant.name)), variant.size)?
         } else { "baseline_missing" };
         Ok(serde_json::json!({"name":variant.name,"size":variant.size,"state":state}))
     }).collect::<Result<Vec<_>>>().map(serde_json::Value::from)
@@ -100,7 +100,7 @@ fn variant_file_state(path: &Path, expected_size: u64) -> Result<&'static str> {
 /// Fetch one extra onnx variant (e.g. fp16 for GPU/NPU) into the model dir.
 /// Skips when the pinned file already verifies. Never removes other variants.
 pub fn install_variant(variant_name: &str, mirror: Option<&str>) -> Result<()> {
-    use crate::memory::onnx::parse_variant;
+    use respire_app::memory::onnx::parse_variant;
     let _operation = model_progress::Operation::begin_download()?;
     let variant = parse_variant(variant_name)?;
     let dest = install_target_dir(None);
@@ -108,8 +108,8 @@ pub fn install_variant(variant_name: &str, mirror: Option<&str>) -> Result<()> {
     install_variant_into(variant, &dest, &origins)
 }
 
-fn install_variant_into(variant: crate::memory::onnx::ModelVariant, dest: &Path, origins: &[String]) -> Result<()> {
-    let file = crate::memory::onnx::variant_file_name(variant.name);
+fn install_variant_into(variant: respire_app::memory::onnx::ModelVariant, dest: &Path, origins: &[String]) -> Result<()> {
+    let file = respire_app::memory::onnx::variant_file_name(variant.name);
     std::fs::create_dir_all(&dest)?;
     let tmp = variant_staging_dir(&dest);
     std::fs::create_dir_all(tmp.join("onnx"))?;
@@ -188,8 +188,8 @@ fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
 /// Runs outside the Core worker on the existing cancellable model-operation thread.
 /// Keep ONNX for GPU/NPU. A CPU container upgrade does not change stored vectors or index schema.
 fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
-    use crate::memory::bge;
-    if !bge::cpu_owned_mode(crate::memory::onnx::configured_engine()?)? { return Ok(true); }
+    use respire_app::memory::bge;
+    if !bge::cpu_owned_mode(respire_app::memory::onnx::configured_engine()?)? { return Ok(true); }
     if file_valid(&bge::cpu_ort_path(directory), bge::CPU_ORT_SHA256)? { return Ok(true); }
     // Legacy packaged/system model directories may be read-only. Upgrade into the user cache.
     let dest = bge::cpu_ort_cache_path();
@@ -216,9 +216,9 @@ fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
 }
 
 pub fn cpu_model_preparation_needed() -> Result<bool> {
-    if !crate::memory::bge::cpu_owned_mode(crate::memory::onnx::configured_engine()?)? { return Ok(false); }
-    Ok(match crate::memory::bge::resolve_model_dir() {
-        Ok(directory) => !crate::memory::bge::cpu_ort_present(&directory)?,
+    if !respire_app::memory::bge::cpu_owned_mode(respire_app::memory::onnx::configured_engine()?)? { return Ok(false); }
+    Ok(match respire_app::memory::bge::resolve_model_dir() {
+        Ok(directory) => !respire_app::memory::bge::cpu_ort_present(&directory)?,
         Err(_) => true,
     })
 }
@@ -251,7 +251,7 @@ fn remove_model_dir(path: &Path) -> Result<bool> {
 
 /// Delete the BGE-M3 files at the install target and drop the in-process session.
 pub fn uninstall_m3() -> Result<UninstallReport> {
-    crate::memory::onnx::reset_sessions()?;
+    respire_app::memory::onnx::reset_sessions()?;
     let dest = install_target_dir(None);
     let removed = remove_model_dir(&dest)?;
     Ok(UninstallReport { dir: dest, removed })
@@ -308,14 +308,14 @@ fn model_origins(mirror: Option<&str>) -> Result<Vec<String>> {
 
 fn cpu_ort_sources() -> Result<Vec<String>> {
     let setting = respire_app::env::var("RSRS_CPU_ORT_MIRROR").ok().filter(|value| !value.trim().is_empty())
-        .or_else(|| crate::service::read_agent_config()["model_cpu_ort_mirror"].as_str()
+        .or_else(|| respire_app::service::read_agent_config()["model_cpu_ort_mirror"].as_str()
             .filter(|value| !value.trim().is_empty()).map(str::to_owned))
         .unwrap_or_else(|| "auto".to_owned());
     cpu_ort_sources_from_setting(&setting)
 }
 
 fn cpu_ort_sources_from_setting(setting: &str) -> Result<Vec<String>> {
-    use crate::memory::bge::CPU_ORT_URL;
+    use respire_app::memory::bge::CPU_ORT_URL;
     // Release containers and Hugging Face ONNX files use different URL layouts.
     // Never turn a Hugging Face model into a substitute for the pinned CPU ORT.
     match setting.trim() {
@@ -363,7 +363,7 @@ fn variant_staging_dir(dest: &Path) -> PathBuf {
     dest.join(format!(".variants-{MODEL_REVISION}"))
 }
 
-fn variant_file_valid(path: &Path, variant: crate::memory::onnx::ModelVariant) -> Result<bool> {
+fn variant_file_valid(path: &Path, variant: respire_app::memory::onnx::ModelVariant) -> Result<bool> {
     if !path.is_file() || path.metadata()?.len() != variant.size { return Ok(false); }
     file_valid(path, variant.sha256)
 }
@@ -371,10 +371,10 @@ fn variant_file_valid(path: &Path, variant: crate::memory::onnx::ModelVariant) -
 fn pinned_size(expected: &str) -> Option<u64> {
     // tokenizer.json at the same fixed upstream revision (LFS size/hash verified).
     if expected == TOKENIZER_SHA256 { return Some(17_082_821); }
-    if expected == crate::memory::bge::CPU_ORT_SHA256 {
-        Some(crate::memory::bge::CPU_ORT_SIZE)
+    if expected == respire_app::memory::bge::CPU_ORT_SHA256 {
+        Some(respire_app::memory::bge::CPU_ORT_SIZE)
     } else {
-        crate::memory::onnx::MODEL_VARIANTS.iter()
+        respire_app::memory::onnx::MODEL_VARIANTS.iter()
             .find(|variant| variant.sha256.eq_ignore_ascii_case(expected)).map(|variant| variant.size)
     }
 }
@@ -766,7 +766,7 @@ mod tests {
         std::env::set_var("RSRS_ENGINE", "cpu");
         std::env::set_var("RSRS_MODEL_VARIANT", "fp16");
         std::env::remove_var("RSRS_CPU_OWNED_ORT_EXPERIMENT");
-        let error = crate::memory::bge::BgeEmbedder::load().err()
+        let error = respire_app::memory::bge::BgeEmbedder::load().err()
             .ok_or_else(|| anyhow!("missing explicit fp16 must fail"))?;
         let message = format!("{error:#}");
         assert!(message.contains("model_fp16.onnx"), "{message}");
@@ -779,7 +779,7 @@ mod tests {
     fn verified_variant_survives_base_cleanup_and_publishes_without_network() -> Result<()> {
         let _lock = crate::TEST_ENV_LOCK.lock().map_err(|error| anyhow!("{error}"))?;
         let dir = tempfile::tempdir()?;
-        let variant = crate::memory::onnx::ModelVariant { name: "fp16", size: 3,
+        let variant = respire_app::memory::onnx::ModelVariant { name: "fp16", size: 3,
             sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad" };
         let staging = variant_staging_dir(dir.path());
         std::fs::create_dir_all(staging.join("onnx"))?;
@@ -845,7 +845,7 @@ mod tests {
 
     #[test]
     fn cpu_source_policy_preserves_exact_release_and_explicit_sources() -> Result<()> {
-        let official = crate::memory::bge::CPU_ORT_URL;
+        let official = respire_app::memory::bge::CPU_ORT_URL;
         assert_eq!(cpu_ort_sources_from_setting("auto")?, vec![format!("https://gh-proxy.org/{official}"), official.to_owned()]);
         assert_eq!(cpu_ort_sources_from_setting(" github ")?, vec![official.to_owned()]);
         assert_eq!(cpu_ort_sources_from_setting("https://github.com/")?, vec![official.to_owned()]);
@@ -857,8 +857,8 @@ mod tests {
         }
         assert_eq!(model_origins(Some("auto"))?, MIRRORS[1..].iter().map(|value| (*value).to_owned()).collect::<Vec<_>>());
         assert_eq!(model_origins(Some("hf-mirror.com"))?, vec!["https://hf-mirror.com"]);
-        assert_eq!(crate::memory::bge::CPU_ORT_SIZE, 569654128);
-        assert_eq!(crate::memory::bge::CPU_ORT_SHA256, "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff");
+        assert_eq!(respire_app::memory::bge::CPU_ORT_SIZE, 569654128);
+        assert_eq!(respire_app::memory::bge::CPU_ORT_SHA256, "7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff");
         Ok(())
     }
 

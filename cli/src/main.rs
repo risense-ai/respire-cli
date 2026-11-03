@@ -47,6 +47,8 @@ use respire_commands::gates::{
 };
 use respire_commands::i18n;
 use respire_commands::metadata;
+use respire_commands::model_install;
+use respire_commands::model_progress;
 use respire_commands::net_rpc;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
 use respire_commands::output_state::{

@@ -79,7 +79,7 @@ pub struct HooksConfig {
 }
 
 pub fn config_path() -> std::path::PathBuf {
-    crate::service::data_dir().join("plugins.json")
+    respire_app::service::data_dir().join("plugins.json")
 }
 
 /// Read hook config. Missing or corrupt files fall back to empty - a bad plugin config must not crash the CLI.
