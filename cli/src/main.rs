@@ -39,8 +39,8 @@ mod web;
 // re-binds the module names so existing `crate::` paths keep resolving.
 use respire_commands::app_version;
 use respire_commands::cli_def::{
-    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
-    SessionCommand, SnapshotCmd,
+    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand,
+    QueryLogCmd, SessionCommand, SnapshotCmd,
 };
 use respire_commands::gates::{
     is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,

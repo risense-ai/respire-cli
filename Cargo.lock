@@ -1599,6 +1599,35 @@ dependencies = [
  "flate2",
  "hex",
  "keyring",
+ "respire_app_domain",
+ "respire_core_sdk",
+ "respire_crypto",
+ "respire_protocol",
+ "respire_spawn",
+ "respire_storage",
+ "rpassword",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "uuid",
+ "whoami",
+]
+
+[[package]]
+name = "respire_app_domain"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "dirs",
+ "flate2",
+ "hex",
+ "keyring",
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol",
@@ -1624,9 +1653,15 @@ dependencies = [
  "chrono",
  "clap",
  "respire_app",
+ "respire_spawn",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
+ "tiny_http",
  "unicode-width 0.2.0",
+ "ureq",
+ "uuid",
 ]
 
 [[package]]
