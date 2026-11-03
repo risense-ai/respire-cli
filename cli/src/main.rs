@@ -17,18 +17,20 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use uuid::Uuid;
 
-mod admission;
 mod autostart;
 mod classify_config;
 mod host_rpc;
 mod login;
 mod mcp;
-mod network;
 mod rpc;
 mod runtime_fetch;
-mod runtime_http;
 mod shell;
 mod web;
+
+// Server-face modules moved into the shared runtime crate; these crate-root
+// rebindings keep `crate::admission` / `crate::runtime_http` paths resolving.
+use respire_commands::admission;
+use respire_commands::runtime_http;
 
 // Shared command surface extracted into the respire_commands crate; the bin
 // re-binds the module names so existing `crate::` paths keep resolving.
@@ -1000,6 +1002,20 @@ fn main() {
         extract_tui_run: Some(respire::extract_tui::run),
         runtime_is_up: Some(rpc::runtime_is_up),
         change_profile: Some(|change| rpc::change_profile(|| change())),
+        managed_id: Some(|| autostart::managed_id()),
+        verify_managed_boot: Some(|| autostart::verify_managed_boot()),
+        record_exit: Some(|success| autostart::record_exit(success)),
+        credential_state: Some(|| autostart::credential_state()),
+        capture_run: Some(capture_run),
+        mcp_http_response: Some(|request| {
+            mcp::http_response(mcp::HttpIn {
+                method: request.method,
+                path: request.path,
+                origin: request.origin,
+                accept: request.accept,
+                body: request.body,
+            })
+        }),
     });
     respire_commands::rpc_worker::install_recall_stats_enqueue(rpc::enqueue_recall_stats_local);
     if !installed {
@@ -1559,14 +1575,10 @@ fn run(args: Cli) -> Result<()> {
         return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
-        runtime_policy::require_host("direct local execution")?;
-        if rpc::runtime_is_up() {
-            anyhow::bail!(
-                "the local runtime is running; stop it with `rsrs --runtime-internal --stop` before --direct"
-            );
-        }
-        eprintln!("{}", i18n::text("direct"));
-        return run_local(args);
+        // Deprecated downgrade: --direct used to bypass the resident runtime.
+        // For one release train it forwards to the local runtime instead.
+        eprintln!("deprecated: --direct now forwards to the local runtime; the in-process bypass is removed in an upcoming release train");
+        return rpc::call_from_argv();
     }
     if args.command.is_none() {
         if std::io::IsTerminal::is_terminal(&std::io::stdin())
