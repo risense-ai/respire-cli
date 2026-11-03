@@ -11,8 +11,9 @@
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
 //!   `RSRS_MIRROR` override). Archives are sha256-verified against the released
-//!   `runtime-build-<triple>.json` (its `binary_sha256` field, with `sha256`
-//!   accepted as an alias) and extracted with a strict whitelist (regular
+//!   `runtime-build-<triple>.json` (`sha256` for the archive and
+//!   `binary_sha256` for the binary; either field alone is a legacy alias for
+//!   both) and extracted with a strict whitelist (regular
 //!   files and directories only, no absolute/`..`/`\`/`:`
 //!   paths, bounded sizes, 0700/0600 modes). Release archives name the binary
 //!   with the full triple (`rsrs-runtime-<triple>(.exe)`); install placement
@@ -447,11 +448,13 @@ pub struct BuildMetadata {
     pub runtime_version: String,
     pub tag: String,
     pub triple: String,
-    /// Archive checksum field (`sha256`); `binary_sha256` is accepted as an
-    /// alias and both must agree when present.
+    /// Archive checksum; a legacy document with only `binary_sha256` uses that
+    /// value for the archive too.
     #[serde(default)]
     pub sha256: String,
     #[serde(default)]
+    /// Bare binary checksum; a legacy document with only `sha256` uses that
+    /// value for the binary too.
     pub binary_sha256: String,
     /// Archive-side binary file name, the full-triple name.
     pub binary_file: String,
@@ -461,18 +464,24 @@ pub struct BuildMetadata {
 impl BuildMetadata {
     /// The authoritative binary checksum, accepting either metadata field.
     fn binary_sha256(&self) -> Result<&str> {
-        match (self.sha256.is_empty(), self.binary_sha256.is_empty()) {
-            (false, true) => Ok(&self.sha256),
-            (true, false) => Ok(&self.binary_sha256),
-            (true, true) => bail!("release metadata has no sha256"),
-            (false, false) => {
-                anyhow::ensure!(
-                    self.sha256.eq_ignore_ascii_case(&self.binary_sha256),
-                    "release metadata carries conflicting archive checksums"
-                );
-                Ok(&self.sha256)
-            }
+        if !self.binary_sha256.is_empty() {
+            return Ok(&self.binary_sha256);
         }
+        if self.sha256.is_empty() {
+            bail!("release metadata has no sha256");
+        }
+        Ok(&self.sha256)
+    }
+
+    /// The archive checksum, falling back to the legacy single-checksum alias.
+    fn archive_sha256(&self) -> Result<&str> {
+        if !self.sha256.is_empty() {
+            return Ok(&self.sha256);
+        }
+        if self.binary_sha256.is_empty() {
+            bail!("release metadata has no sha256");
+        }
+        Ok(&self.binary_sha256)
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
@@ -492,7 +501,7 @@ impl BuildMetadata {
             self.triple
         );
         anyhow::ensure!(
-            valid_sha256(self.binary_sha256()?),
+            valid_sha256(self.binary_sha256()?) && valid_sha256(self.archive_sha256()?),
             "release metadata has an invalid sha256"
         );
         anyhow::ensure!(
@@ -1080,14 +1089,15 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
                 fetch_metadata(&release_asset(origin, &format!("v{required}/{metadata_name}")))?;
             metadata.validate(&required, &triple)?;
             let binary_sha256 = metadata.binary_sha256()?.to_owned();
+            let archive_sha256 = metadata.archive_sha256()?.to_owned();
             let archive = stage.join(&archive_name);
             let actual = download_archive(
                 &release_asset(origin, &format!("v{required}/{archive_name}")),
                 &archive,
             )?;
             anyhow::ensure!(
-                actual.eq_ignore_ascii_case(&binary_sha256),
-                "archive checksum failed: found {actual}, expected {binary_sha256}"
+                actual.eq_ignore_ascii_case(&archive_sha256),
+                "archive checksum failed: found {actual}, expected {archive_sha256}"
             );
             let unpacked = stage.join("unpacked");
             extract_archive(&archive, &unpacked)?;
@@ -1151,7 +1161,7 @@ pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
             RUNTIME_BINARY.to_owned()
         };
         let binary_hash = sha256_file(&unpacked.join(&binary_file))?;
-        let binary = verify_stage(&unpacked, &binary_file, &triple, &binary_hash)?;
+        let _binary = verify_stage(&unpacked, &binary_file, &triple, &binary_hash)?;
         place_managed_binary(&unpacked, &binary_file)?;
         adopt_or_verify_version_dir(&unpacked, version, &binary_hash)?;
         publish_manifest(&ManagedManifest {

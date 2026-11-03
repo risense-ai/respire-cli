@@ -245,7 +245,99 @@ fn supervise_retry(failures: &mut u8, uptime: Duration) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::autostart::Platform;
+
     use super::*;
+
+    fn registration(root: &Path) -> Result<Registration> {
+        Ok(Registration {
+            schema: 1,
+            platform: Platform::current()?,
+            installation: root.to_path_buf(),
+            executable: root.join("bin").join("rsrs"),
+            user_home: root.to_path_buf(),
+            owner: "1000".into(),
+            id: super::super::identity(root, "1000"),
+            enabled: true,
+            manually_stopped: false,
+            maintenance: false,
+            environment: std::iter::once(("RSRS_RPC_PORT".into(), "45678".into())).collect(),
+            artifact_hashes: Default::default(),
+            digest: None,
+        })
+    }
+
+    fn write_registration(root: &Path, mut config: Registration) -> Result<Registration> {
+        config.installation = root.to_path_buf();
+        config.id = super::super::identity(root, &config.owner);
+        let path = super::super::control_path(root);
+        std::fs::create_dir_all(path.parent().context("registration parent missing")?)?;
+        std::fs::write(&path, serde_json::to_vec(&config)?)?;
+        read_registration(root)?.context("fixture registration disappeared")
+    }
+
+    #[test]
+    fn supervisor_runs_only_an_unchanged_enabled_registration() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let expected = write_registration(&root, registration(&root)?)?;
+        anyhow::ensure!(supervise_may_run(&root, &expected)?);
+        let mut stopped = expected.clone();
+        stopped.manually_stopped = true;
+        std::fs::write(super::super::control_path(&root), serde_json::to_vec(&stopped)?)?;
+        anyhow::ensure!(!supervise_may_run(&root, &expected)?);
+        let missing = temporary.path().join("absent");
+        anyhow::ensure!(!supervise_may_run(&missing, &expected)?);
+        let mut foreign = expected.clone();
+        foreign.owner = "2000".into();
+        anyhow::ensure!(supervise_may_run(&root, &foreign).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn supervisor_reaps_a_normal_child_exit() -> Result<()> {
+        let mut command = std::process::Command::new(if cfg!(windows) { "cmd" } else { "sh" });
+        if cfg!(windows) {
+            command.args(["/C", "exit", "0"]);
+        } else {
+            command.args(["-c", "exit 0"]);
+        }
+        let mut child = command.spawn().context("fixture child failed to start")?;
+        let status = wait_child(&mut child, &AtomicBool::new(false))?
+            .context("normal child had no exit status")?;
+        anyhow::ensure!(status.success());
+        Ok(())
+    }
+
+    #[test]
+    fn supervisor_stops_lingering_children_and_trips_the_circuit_breaker() -> Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().canonicalize()?;
+        let mut command = std::process::Command::new(if cfg!(windows) {
+            "powershell"
+        } else {
+            "sleep"
+        });
+        if cfg!(windows) {
+            command.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"]);
+        } else {
+            command.arg("30");
+        }
+        let mut child = command.spawn().context("lingering fixture failed to start")?;
+        let stopped = AtomicBool::new(true);
+        anyhow::ensure!(wait_child(&mut child, &stopped)?.is_none());
+        let expected = write_registration(&root, registration(&root)?)?;
+        let mut failures = 3_u8;
+        anyhow::ensure!(!failure_backoff(&expected, &root, &mut failures, Duration::ZERO)?);
+        let disabled = write_registration(&root, {
+            let mut config = expected.clone();
+            config.enabled = false;
+            config
+        })?;
+        let mut failures = 0_u8;
+        anyhow::ensure!(!failure_backoff(&disabled, &root, &mut failures, Duration::ZERO)?);
+        Ok(())
+    }
 
     #[test]
     fn supervisor_retries_are_bounded_and_reset_only_after_stability() {

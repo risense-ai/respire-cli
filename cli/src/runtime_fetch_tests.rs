@@ -78,21 +78,61 @@ fn gz(bytes: &[u8]) -> Result<Vec<u8>> {
 
 /// A complete, verifiable release fixture: binary + core manifest + library.
 fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
+    release_fixture_with(triple, RUNTIME_BINARY)
+}
+
+/// Build a fixture with either the bare managed name or the release triple name.
+fn release_fixture_with(triple: &str, binary_file: &str) -> Result<(Vec<u8>, String)> {
     const BINARY: &[u8] = b"synthetic rsrs-runtime binary bytes";
     let hash = sha256_hex(BINARY);
     let manifest = serde_json::json!({
         "schema_version": 1,
         "target": triple,
-        "files": [{"path": RUNTIME_BINARY, "sha256": hash}],
+        "files": [{"path": binary_file, "sha256": hash}],
     });
     let raw = tar_bytes(&[
         ("./", b'5', 0o700, b""),
         ("lib/", b'5', 0o700, b""),
         ("lib/provider.json", b'0', 0o600, b"{}"),
         (CORE_MANIFEST_FILE, b'0', 0o600, manifest.to_string().as_bytes()),
-        (RUNTIME_BINARY, b'0', 0o755, BINARY),
+        (binary_file, b'0', 0o755, BINARY),
     ]);
     Ok((gz(&raw)?, hash))
+}
+
+/// Build release metadata carrying the two distinct published checksums.
+fn release_metadata(triple: &str, archive_sha256: &str, binary_sha256: &str) -> Result<String> {
+    anyhow::ensure!(archive_sha256 != binary_sha256);
+    Ok(serde_json::json!({
+        "runtime_version": "1.0.21-dev.1",
+        "tag": "v1.0.21-dev.1",
+        "triple": triple,
+        "sha256": archive_sha256,
+        "binary_sha256": binary_sha256,
+        "binary_file": release_binary_name(triple),
+        "compat": {"min_cli": "1.0.0", "max_cli": "*"},
+    })
+    .to_string())
+}
+
+/// Serve one metadata response followed by one archive response.
+fn fixture_release_server(metadata: String, archive: Vec<u8>) -> Result<std::net::SocketAddr> {
+    let server = tiny_http::Server::http("127.0.0.1:0")
+        .map_err(|error| anyhow::anyhow!("fixture HTTP server bind failed: {error}"))?;
+    let address = server.server_addr().to_ip().context("fixture server address")?;
+    std::thread::spawn(move || -> Result<(), String> {
+        for body in [metadata.into_bytes(), archive] {
+            let request = server
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .map_err(|error| error.to_string())?
+                .ok_or("fixture download request timed out")?;
+            request
+                .respond(tiny_http::Response::from_data(body))
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    });
+    Ok(address)
 }
 
 #[test]
@@ -375,8 +415,10 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
     alias.validate("1.0.21-dev.1", &triple)?;
     for (field, value) in [
         ("runtime_version", serde_json::json!("1.0.22")),
+        ("tag", serde_json::json!("bad /tag")),
         ("triple", serde_json::json!("x86_64-unknown-freebsd")),
         ("sha256", serde_json::json!("zz")),
+        ("binary_sha256", serde_json::json!("zz")),
         ("binary_file", serde_json::json!("../escape")),
         ("binary_file", serde_json::json!(RUNTIME_BINARY)),
         ("compat", serde_json::json!({"min_cli":"99.0.0","max_cli":"*"})),
@@ -390,10 +432,78 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
             "invalid metadata accepted: {field}"
         );
     }
-    // Conflicting checksum fields never install.
+    // Distinct archive and binary checksums match the release protocol.
     let mut conflicting = base.clone();
-    conflicting["binary_sha256"] = serde_json::json!(sha256_hex(b"other"));
+    conflicting["sha256"] = serde_json::json!(sha256_hex(b"archive"));
+    conflicting["binary_sha256"] = serde_json::json!(sha256_hex(b"binary"));
     let conflicting: BuildMetadata = serde_json::from_value(conflicting)?;
-    anyhow::ensure!(conflicting.validate("1.0.21-dev.1", &triple).is_err());
+    anyhow::ensure!(conflicting.validate("1.0.21-dev.1", &triple).is_ok());
+    Ok(())
+}
+
+#[test]
+fn download_installs_verified_release_from_local_mirror() -> Result<()> {
+    let _env = env_scope(&["RSRS_CORE_TEST_MODE", "RSRS_DATA_DIR", "RSRS_RUNTIME_TRIPLE"])?;
+    let triple = "x86_64-pc-windows-msvc";
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", &triple);
+    std::env::remove_var("RSRS_CORE_TEST_MODE");
+    let (archive, binary_sha256) =
+        release_fixture_with(triple, &release_binary_name(triple))?;
+    let archive_sha256 = sha256_hex(&archive);
+    let metadata = release_metadata(triple, &archive_sha256, &binary_sha256)?;
+    let address = fixture_release_server(metadata, archive)?;
+    let mirror = format!("http://{address}");
+    let installed = download_and_install(Some("1.0.21-dev.1"), Some(&mirror))?;
+    anyhow::ensure!(installed.is_file());
+    anyhow::ensure!(fs::read(&installed)? == b"synthetic rsrs-runtime binary bytes");
+    anyhow::ensure!(managed_runtime_path()?.as_ref() == Some(&installed));
+    let manifest = read_manifest()?.context("download manifest missing")?;
+    anyhow::ensure!(manifest.version == "1.0.21-dev.1");
+    anyhow::ensure!(manifest.sha256 == binary_sha256);
+    let installed_list = list_installed()?;
+    anyhow::ensure!(installed_list.len() == 1);
+    anyhow::ensure!(installed_list[0].current);
+    let reused = download_and_install(Some("1.0.21-dev.1"), Some(&mirror))?;
+    anyhow::ensure!(reused == installed);
+    anyhow::ensure!(download_and_install(Some("bad-version"), None).is_err());
+    Ok(())
+}
+
+#[test]
+fn runtime_resolution_prefers_explicit_and_managed_binaries() -> Result<()> {
+    let _env = env_scope(&[
+        "RSRS_CORE_TEST_MODE",
+        "RSRS_DATA_DIR",
+        "RSRS_RUNTIME_BIN",
+        "RSRS_RUNTIME_TRIPLE",
+        "RSRS_BIN_DIR",
+    ])?;
+    let triple = release_triple()?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("absent-bin"));
+    std::env::set_var("RSRS_RUNTIME_TRIPLE", &triple);
+    std::env::remove_var("RSRS_CORE_TEST_MODE");
+    std::env::set_var("RSRS_RUNTIME_BIN", "");
+    anyhow::ensure!(resolve_runtime_bin().is_err());
+    std::env::set_var("RSRS_RUNTIME_BIN", dir.path().join("absent-runtime"));
+    anyhow::ensure!(resolve_runtime_bin().is_err());
+    let explicit = dir.path().join("explicit-runtime");
+    fs::write(&explicit, b"synthetic explicit runtime")?;
+    std::env::set_var("RSRS_RUNTIME_BIN", &explicit);
+    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(explicit));
+    std::env::remove_var("RSRS_RUNTIME_BIN");
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    anyhow::ensure!(resolve_runtime_bin().is_err());
+    std::env::remove_var("RSRS_CORE_TEST_MODE");
+    let managed_dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", managed_dir.path());
+    let (archive, _) = release_fixture(&triple)?;
+    let archive_path = managed_dir.path().join("runtime.tar.gz");
+    fs::write(&archive_path, &archive)?;
+    let managed = install_from_file(&archive_path, "1.0.21-dev.1")?;
+    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(managed));
     Ok(())
 }
