@@ -10,7 +10,12 @@ on:
       - 'cli/src/main.rs'
       - 'cli/src/rpc.rs'
       - 'cli/src/net_rpc.rs'
+      - 'crates/commands/src/net_rpc.rs'
       - 'cli/src/runtime_http.rs'
+      - 'crates/commands/src/runtime_http.rs'
+      - 'crates/commands/src/admission.rs'
+      - 'crates/commands/src/rpc_serve.rs'
+      - 'crates/commands/src/rpc_worker.rs'
       - 'cli/src/mcp.rs'
       - 'spawn/**'
   workflow_dispatch:

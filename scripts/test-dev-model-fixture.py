@@ -20,7 +20,7 @@ cache_spec.loader.exec_module(model_cache)
 class NativeModelCacheTests(unittest.TestCase):
     def test_public_pins_match_existing_consumers_and_key_covers_every_input(self):
         root = Path(__file__).parents[1]
-        installer = (root / "cli/src/model_install.rs").read_text(encoding="utf-8")
+        installer = (root / "crates/commands/src/model_install.rs").read_text(encoding="utf-8")
         cpu = (root / "crates/core-sdk/src/cpu_model.rs").read_text(encoding="utf-8")
         fixture = (root / "scripts/test-real-m3-account-switch.py").read_text(encoding="utf-8")
         self.assertIn(model_cache.REVISION, installer)
