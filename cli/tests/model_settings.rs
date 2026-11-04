@@ -46,7 +46,13 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
             String::from_utf8_lossy(&saved.stderr)
         );
         // A new process must use the saved variant, including after an engine-only change.
-        anyhow::ensure!(run(&["model", "engine", "cpu"])?.status.success());
+        let engine_only = run(&["model", "engine", "cpu"])?;
+        anyhow::ensure!(
+            engine_only.status.success(),
+            "stdout: {} stderr: {}",
+            String::from_utf8_lossy(&engine_only.stdout),
+            String::from_utf8_lossy(&engine_only.stderr)
+        );
         let read = run(&["model", "engine"])?;
         anyhow::ensure!(
             read.status.success(),

@@ -112,6 +112,12 @@ pub enum Command {
         #[command(flatten)]
         args: review::ReviewArgs,
     },
+    /// List open promises: important task records past their review time with no live replacement.
+    Due {
+        /// Maximum number of due promises to list, ordered by review time.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Host-owned foreground runtime and opt-in current-user sign-in startup.
     Runtime {
         #[command(subcommand)]
@@ -223,6 +229,9 @@ pub enum Command {
         /// Recall intent: auto (keyword), howto (extra skill pass, keeps one procedure visible), fact (single pass)
         #[arg(long, value_parser = ["auto", "howto", "fact"], default_value = "auto")]
         intent: String,
+        /// Channel: auto (former cues in the query open the history walk), current (hide superseded/expired), former (always walk history)
+        #[arg(long, value_parser = ["auto", "current", "former"], default_value = "auto")]
+        when: String,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -620,12 +629,19 @@ pub enum Command {
     Candidates { content: String },
     /// Memory passport: ASCII-art card (user / memory count / connected agents / devices) for sharing
     Passport,
-    /// Entry change history (audit stream: create/update/delete/restore/purge; SQLite triggers record it)
+    /// Entry change history (audit stream: create/update/delete/restore/purge; SQLite triggers record it; supersession events are derived from the local projection)
     History {
         /// Entry id (8-char prefix ok); omit = recent changes for the whole store
         id: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Version diff: one id diffs its previous version into it (supersession predecessor, else the first recorded head); two ids diff <from> -> <to>
+    Diff {
+        /// Entry id (8-char prefix ok); with <to> this is the older side
+        id: String,
+        /// Newer side; when omitted the auto predecessor of <id> is used
+        to: Option<String>,
     },
     /// Plugin hooks (plugins.json): list shows config; test <EVENT> fires an event
     Plugin {

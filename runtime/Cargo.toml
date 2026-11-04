@@ -13,6 +13,7 @@ name = "rsrs-runtime"
 path = "src/main.rs"
 
 [dependencies]
+respire_app = { path = "../crates/app" }
 respire_commands = { path = "../crates/commands" }
 respire_protocol = { path = "../crates/protocol" }
 # Boot-token consumption stays aligned with the spawner semantics (P2 moves

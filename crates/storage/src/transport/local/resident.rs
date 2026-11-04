@@ -123,7 +123,7 @@ impl LocalStore {
             let memory = self.connection.query_row(
                 "SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted,
                  kind,tags,title,project,computer,embedding,created_at,parent_id,content_head,recall_count,importance,device,modified_by,
-                 memory_contract,summary,source_refs,valid_until,review_at,COALESCE(artifact,'null'),COALESCE(verification,'null')
+                 memory_contract,summary,source_refs,valid_until,review_at,COALESCE(artifact,'null'),COALESCE(verification,'null'),superseded_by
                  FROM memories WHERE id=?1 AND deleted=0", [&id], Self::row_to_memory).optional()?;
             if let Some(mut memory) = memory {
                 memory.local_artifact = self.connection.query_row(

@@ -2072,6 +2072,7 @@ mod capture_tests {
     mod brief_coverage;
     mod metadata_coverage;
     mod review_coverage;
+    mod supersession_coverage;
 
     #[test]
     fn injected_chain_examples_follow_the_parser_contract() -> anyhow::Result<()> {

@@ -1,0 +1,627 @@
+//! Acceptance checks for the current/former recall channels and `rsrs due`.
+//!
+//! Every check runs against a fresh isolated library: a changed fact is kept as
+//! a superseding record (the old wording stays quotable), the current channel
+//! scores only live records, the former channel walks back through the chain,
+//! expired statements leave the current view without being deleted, and open
+//! promises surface in `rsrs due` until a replacement fulfils them.
+
+use super::with_isolated_session;
+use crate::{capture_run, output::ResultEnvelope};
+use anyhow::{Context, Result};
+use serde_json::json;
+
+fn command(args: &[&str], exit: i32) -> Result<ResultEnvelope> {
+    let result = capture_run(
+        std::iter::once("--json".to_owned())
+            .chain(args.iter().map(|arg| (*arg).to_owned()))
+            .collect(),
+    );
+    anyhow::ensure!(
+        result.exit == exit,
+        "{args:?}: expected {exit}, got {}: {:?}",
+        result.exit,
+        result.envelope
+    );
+    Ok(result.envelope)
+}
+
+/// Leave no resident runtime behind: every isolated test reuses the same
+/// fixed RPC port, so a leftover owner would make the next test's host-only
+/// configuration step refuse to run.
+fn stop_runtime() {
+    let previous = crate::rpc::worker_active();
+    crate::rpc::set_worker_active(false);
+    let _ = command(&["runtime", "stop"], 0);
+    crate::rpc::set_worker_active(previous);
+}
+
+fn recall(query: &str) -> Result<ResultEnvelope> {
+    command(&["recall", query, "--titles", "--limit", "10"], 0)
+}
+
+fn show(id: &str) -> Result<ResultEnvelope> {
+    command(&["show", id], 0)
+}
+
+/// Ids of a `--titles` recall, in ranked order.
+fn ids(result: &ResultEnvelope) -> Vec<String> {
+    result
+        .details
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn detail<'a>(result: &'a ResultEnvelope, id: &str) -> Option<&'a serde_json::Value> {
+    result
+        .details
+        .as_array()?
+        .iter()
+        .find(|row| row["id"].as_str() == Some(id))
+}
+
+fn item_value<'a>(result: &'a ResultEnvelope, title: &str) -> Option<&'a str> {
+    // Rows read "<score> <title> [label]": match the title in position so a
+    // label that mentions another title ("[supersedes alcohol-before]") does
+    // not satisfy a lookup for that title.
+    result.items.iter().map(|item| item.value.as_str()).find(|value| {
+        let Some((_, rest)) = value.split_once(' ') else {
+            return false;
+        };
+        rest == title || rest.starts_with(&format!("{title} [")) || rest.starts_with(&format!("{title} "))
+    })
+}
+
+/// The seeded fixture session belongs to user `test`; the metadata-aware
+/// recall view filters rows by the session owner, so the tests must run as the
+/// same user even though the runtime is the one opening the store.
+struct UserGuard(Option<std::ffi::OsString>);
+impl UserGuard {
+    fn enter() -> Self {
+        let previous = std::env::var_os("RSRS_USER");
+        std::env::set_var("RSRS_USER", "test");
+        Self(previous)
+    }
+}
+impl Drop for UserGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(value) => std::env::set_var("RSRS_USER", value),
+            None => std::env::remove_var("RSRS_USER"),
+        }
+    }
+}
+
+/// Run commands as the fixture user with profile output deferred into the
+/// capture slot: the seeded records belong to `test`, and a direct in-process
+/// run still reports through the normal envelope.
+struct DirectGuard {
+    direct: bool,
+    defer: bool,
+    user: Option<std::ffi::OsString>,
+}
+impl DirectGuard {
+    fn enter() -> Self {
+        let user = std::env::var_os("RSRS_USER");
+        std::env::set_var("RSRS_USER", "test");
+        Self {
+            direct: crate::DIRECT_MODE.swap(true, std::sync::atomic::Ordering::Relaxed),
+            defer: crate::DEFER_PROFILE_OUTPUT.replace(true),
+            user,
+        }
+    }
+}
+impl Drop for DirectGuard {
+    fn drop(&mut self) {
+        crate::DIRECT_MODE.store(self.direct, std::sync::atomic::Ordering::Relaxed);
+        crate::DEFER_PROFILE_OUTPUT.set(self.defer);
+        match &self.user {
+            Some(value) => std::env::set_var("RSRS_USER", value),
+            None => std::env::remove_var("RSRS_USER"),
+        }
+    }
+}
+
+/// Metadata writes (`--valid-until`, `--review-at`) need contract 1, which needs
+/// the local metadata gate. `metadata enable` takes the library lock itself
+/// (worker off, then released on exit), and the gate's writes check the flag,
+/// not a held lock — so nothing stays held here: a held lock would deadlock the
+/// recalls below, which re-acquire it whenever their worker flag is off.
+fn enable_metadata() -> Result<()> {
+    // `metadata enable` is a host-only configuration step: run it with the
+    // worker flag off so the host gate accepts it, and in direct mode so the
+    // profile change re-keys the isolated library in-process — the indirect
+    // path restarts a resident runtime, which a cargo test harness cannot
+    // materialize (the spawned child is this harness and readiness exits 101).
+    // The worker flag is restored before the recalls below.
+    let _direct = DirectGuard::enter();
+    let _store = crate::build_local()?;
+    let previous = crate::rpc::worker_active();
+    crate::rpc::set_worker_active(false);
+    let enabled = command(&["metadata", "enable"], 0);
+    crate::rpc::set_worker_active(previous);
+    enabled?;
+    Ok(())
+}
+
+/// Seed the shared fixture: `before` states the old fact, `after` supersedes it.
+/// The replacement body carries the "previously" cue so the auto-channel query
+/// clears the cosine gate against it — the test-mode hashing embedder scores
+/// exact token overlap, unlike a dense production model. The old record is
+/// reached through the chain walk, which never re-scores.
+fn seed_replacement(before: &str, after: &str) -> Result<(String, String)> {
+    let old = command(
+        &[
+            "remember",
+            before,
+            "--title",
+            "alcohol-before",
+            "--importance",
+            "important",
+            "--force",
+        ],
+        0,
+    )?;
+    let old_id = old.summary["id"].as_str().context("old id")?.to_owned();
+    let new = command(
+        &[
+            "remember",
+            after,
+            "--title",
+            "alcohol-now",
+            "--importance",
+            "important",
+            "--force",
+            "--supersedes",
+            &old_id,
+        ],
+        0,
+    )?;
+    let new_id = new.summary["id"].as_str().context("new id")?.to_owned();
+    Ok((old_id, new_id))
+}
+
+#[test]
+fn current_channel_returns_only_the_replacement_and_keeps_history_readable() -> Result<()> {
+    with_isolated_session(|_| {
+        let _user = UserGuard::enter();
+        let old = command(
+            &[
+                "remember",
+                "alcoholstance: never drink alcohol, zero tolerance",
+                "--title",
+                "alcohol-before",
+                "--importance",
+                "important",
+                "--force",
+            ],
+            0,
+        )?;
+        let old_id = old.summary["id"].as_str().context("old id")?.to_owned();
+
+        // Baseline: the live record answers the query on its own, and the hit
+        // moves its heat once - that is the number the filter must not touch.
+        let baseline = recall("alcoholstance")?;
+        assert!(
+            ids(&baseline).contains(&old_id),
+            "baseline must find the live record: {baseline:?}"
+        );
+        let before = show(&old_id)?.details["recall_count"].clone();
+
+        let new = command(
+            &[
+                "remember",
+                "alcoholstance: drink a little alcohol now and then",
+                "--title",
+                "alcohol-now",
+                "--importance",
+                "important",
+                "--force",
+                "--supersedes",
+                &old_id,
+            ],
+            0,
+        )?;
+        let new_id = new.summary["id"].as_str().context("new id")?.to_owned();
+
+        let current = recall("alcoholstance")?;
+        let current_ids = ids(&current);
+        assert!(
+            current_ids.contains(&new_id),
+            "the replacement must answer the current question: {current:?}"
+        );
+        assert!(
+            !current_ids.contains(&old_id),
+            "the superseded record must leave the current channel: {current:?}"
+        );
+
+        // The old wording stays quotable, and the current recall did not move its heat.
+        let shown = show(&old_id)?;
+        assert_eq!(
+            shown.details["entry"]["content"].as_str().context("old content")?,
+            "alcoholstance: never drink alcohol, zero tolerance"
+        );
+        assert_eq!(
+            shown.details["recall_count"],
+            before,
+            "a current-channel recall must not bump the superseded record"
+        );
+        stop_runtime();
+        Ok(())
+    })
+}
+
+#[test]
+fn former_channel_walks_back_from_the_live_hit_to_the_replacement() -> Result<()> {
+    with_isolated_session(|_| {
+        let _user = UserGuard::enter();
+        let (old_id, new_id) = seed_replacement(
+            "alcoholstance: never drink alcohol, zero tolerance",
+            "alcoholstance: now drink a little alcohol, previously zero tolerance",
+        )?;
+
+        // Auto channel: a past-seeking cue in the query opens the history walk.
+        let auto = recall("previously alcoholstance")?;
+        let auto_ids = ids(&auto);
+        assert!(
+            auto_ids.contains(&new_id),
+            "the live replacement still answers: {auto:?}"
+        );
+        assert!(
+            auto_ids.contains(&old_id),
+            "the former channel must surface the superseded record: {auto:?}"
+        );
+        let label = item_value(&auto, "alcohol-before")
+            .context("former channel must list the old record")?;
+        assert!(
+            label.contains("[superseded by"),
+            "the old record must point at its replacement: {label}"
+        );
+        assert_eq!(
+            detail(&auto, &old_id).map(|row| row["superseded_by"].clone()),
+            Some(json!(new_id)),
+            "JSON details must carry the replacement id"
+        );
+
+        // Explicit channel selection with a neutral query.
+        let flagged = command(
+            &["recall", "alcoholstance", "--titles", "--when", "former"],
+            0,
+        )?;
+        assert!(
+            ids(&flagged).contains(&old_id),
+            "--when former must walk the chain too: {flagged:?}"
+        );
+        assert!(
+            item_value(&flagged, "alcohol-before")
+                .is_some_and(|value| value.contains("[superseded by")),
+            "flagged former recall must label the old record: {flagged:?}"
+        );
+        stop_runtime();
+        Ok(())
+    })
+}
+
+#[test]
+fn expired_record_leaves_the_current_channel_but_stays_open_by_id() -> Result<()> {
+    with_isolated_session(|_| {
+        let _user = UserGuard::enter();
+        enable_metadata()?;
+
+        let live = command(
+            &[
+                "remember",
+                "residenceaddress: 9 Pine Avenue, quiet street",
+                "--title",
+                "address-now",
+                "--importance",
+                "important",
+                "--force",
+            ],
+            0,
+        )?;
+        let live_id = live.summary["id"].as_str().context("live id")?.to_owned();
+        let expiring = command(
+            &[
+                "remember",
+                "residenceaddress: 42 Maple Street, old flat",
+                "--title",
+                "address-before",
+                "--importance",
+                "important",
+                "--force",
+                "--valid-until",
+                "2099-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let expiring_id = expiring
+            .summary["id"]
+            .as_str()
+            .context("expiring id")?
+            .to_owned();
+
+        // While the window is open both addresses answer.
+        let before = recall("residenceaddress")?;
+        assert!(
+            ids(&before).contains(&expiring_id),
+            "a valid address must answer before expiry: {before:?}"
+        );
+
+        // Close the window: the statement stops being current, but is not deleted.
+        command(
+            &[
+                "update",
+                &expiring_id,
+                "--valid-until",
+                "2000-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let after = recall("residenceaddress")?;
+        let after_ids = ids(&after);
+        assert!(
+            after_ids.contains(&live_id),
+            "the live address must keep answering: {after:?}"
+        );
+        assert!(
+            !after_ids.contains(&expiring_id),
+            "an expired statement must leave the current channel: {after:?}"
+        );
+
+        // The record itself survives: an explicit id still opens it.
+        let shown = show(&expiring_id)?;
+        assert_eq!(
+            shown.details["entry"]["content"]
+                .as_str()
+                .context("expired content")?,
+            "residenceaddress: 42 Maple Street, old flat"
+        );
+        stop_runtime();
+        Ok(())
+    })
+}
+
+fn due_ids(result: &ResultEnvelope) -> Vec<String> {
+    result
+        .details
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| row["id"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn due_lists_open_promise_tasks_until_a_replacement_fulfills_them() -> Result<()> {
+    with_isolated_session(|_| {
+        let _user = UserGuard::enter();
+        enable_metadata()?;
+
+        // An open promise whose review time has passed.
+        let promise = command(
+            &[
+                "remember",
+                "promise: send the quarterly report to the team",
+                "--title",
+                "quarterly-report",
+                "--type",
+                "task",
+                "--importance",
+                "important",
+                "--force",
+                "--review-at",
+                "2020-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let promise_id = promise.summary["id"].as_str().context("promise id")?.to_owned();
+
+        // A promise that is not due yet.
+        let future = command(
+            &[
+                "remember",
+                "promise: renew the domain name next year",
+                "--title",
+                "domain-renewal",
+                "--type",
+                "task",
+                "--importance",
+                "important",
+                "--force",
+                "--review-at",
+                "2099-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let future_id = future.summary["id"].as_str().context("future id")?.to_owned();
+
+        // A past review date is not a promise unless it is an important task.
+        let note = command(
+            &[
+                "remember",
+                "standing note that carries a review date",
+                "--title",
+                "not-a-promise",
+                "--importance",
+                "important",
+                "--force",
+                "--review-at",
+                "2020-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let note_id = note.summary["id"].as_str().context("note id")?.to_owned();
+        let diary = command(
+            &[
+                "remember",
+                "diary task that carries a review date",
+                "--title",
+                "diary-promise",
+                "--type",
+                "task",
+                "--importance",
+                "trivial",
+                "--force",
+                "--review-at",
+                "2020-01-01T00:00:00.000Z",
+            ],
+            0,
+        )?;
+        let diary_id = diary.summary["id"].as_str().context("diary id")?.to_owned();
+
+        let due = command(&["due"], 0)?;
+        let listed = due_ids(&due);
+        assert!(
+            listed.contains(&promise_id),
+            "the due promise must be listed: {due:?}"
+        );
+        assert!(
+            !listed.contains(&future_id),
+            "a future promise is not due: {due:?}"
+        );
+        assert!(
+            !listed.contains(&note_id),
+            "only tasks count as promises: {due:?}"
+        );
+        assert!(
+            !listed.contains(&diary_id),
+            "diary importance never qualifies as a promise: {due:?}"
+        );
+
+        // Fulfillment is a superseding record, not a forget.
+        command(
+            &[
+                "remember",
+                "promise fulfilled: quarterly report sent to the team",
+                "--title",
+                "quarterly-report-sent",
+                "--type",
+                "task",
+                "--importance",
+                "important",
+                "--force",
+                "--supersedes",
+                &promise_id,
+            ],
+            0,
+        )?;
+        let after = command(&["due"], 0)?;
+        assert!(
+            !due_ids(&after).contains(&promise_id),
+            "a superseded promise must leave the due list: {after:?}"
+        );
+        stop_runtime();
+        Ok(())
+    })
+}
+
+#[test]
+fn history_reports_both_sides_of_a_supersession() -> Result<()> {
+    with_isolated_session(|_| {
+        let _direct = DirectGuard::enter();
+        let (old_id, new_id) = seed_replacement(
+            "alcoholstance: never drink alcohol, zero tolerance",
+            "alcoholstance: now drink a little alcohol, previously zero tolerance",
+        )?;
+
+        // The replaced record reports its successor in its own stream.
+        let old_history = command(&["history", &old_id], 0)?;
+        let supersede = old_history
+            .details
+            .as_array()
+            .context("old history rows")?
+            .iter()
+            .find(|row| row["action"] == "supersede")
+            .cloned()
+            .context("old history must derive the supersession event")?;
+        assert_eq!(supersede["entry_id"], json!(old_id));
+        assert_eq!(supersede["content_head"], json!(new_id));
+        assert_eq!(supersede["derived"], json!(true));
+
+        // The replacement lists what it replaced in its own stream.
+        let new_history = command(&["history", &new_id], 0)?;
+        let supersedes = new_history
+            .details
+            .as_array()
+            .context("new history rows")?
+            .iter()
+            .find(|row| row["action"] == "supersedes")
+            .cloned()
+            .context("new history must list the replaced record")?;
+        assert_eq!(supersedes["entry_id"], json!(old_id));
+        assert_eq!(supersedes["derived"], json!(true));
+
+        // The whole-store stream shows the event once, on the replaced side.
+        let store_history = command(&["history"], 0)?;
+        let rows = store_history
+            .details
+            .as_array()
+            .context("store history rows")?;
+        let events: Vec<_> = rows
+            .iter()
+            .filter(|row| row["action"] == "supersede" && row["entry_id"] == json!(old_id))
+            .collect();
+        assert_eq!(events.len(), 1, "one event per supersession: {rows:?}");
+        Ok(())
+    })
+}
+
+#[test]
+fn diff_reads_the_previous_wording_into_the_replacement() -> Result<()> {
+    with_isolated_session(|_| {
+        let _direct = DirectGuard::enter();
+        let (old_id, new_id) = seed_replacement(
+            "alcoholstance: never drink alcohol, zero tolerance",
+            "alcoholstance: now drink a little alcohol, previously zero tolerance",
+        )?;
+
+        // One id: the supersession predecessor diffed into the replacement.
+        let diff = command(&["diff", &new_id], 0)?;
+        assert_eq!(diff.summary["kind"], json!("supersession"));
+        assert_eq!(diff.summary["from"], json!(old_id));
+        assert_eq!(diff.summary["to"], json!(new_id));
+        assert_eq!(diff.summary["identical"], json!(false));
+        let text = diff.details["diff"].as_str().context("diff text")?;
+        assert!(
+            text.lines()
+                .any(|line| line == "- alcoholstance: never drink alcohol, zero tolerance"),
+            "the old wording must appear as removed: {text}"
+        );
+        assert!(
+            text.lines().any(|line| line
+                == "+ alcoholstance: now drink a little alcohol, previously zero tolerance"),
+            "the new wording must appear as added: {text}"
+        );
+
+        // Two ids: the same pair addressed explicitly, from -> to.
+        let pair = command(&["diff", &old_id, &new_id], 0)?;
+        assert_eq!(pair.summary["kind"], json!("pair"));
+        assert_eq!(pair.summary["identical"], json!(false));
+
+        // A record with a single version reports there is nothing to compare.
+        let fresh = command(
+            &[
+                "remember",
+                "languagepreference: prefers plain statements",
+                "--title",
+                "language-style",
+                "--importance",
+                "important",
+                "--force",
+            ],
+            0,
+        )?;
+        let fresh_id = fresh.summary["id"].as_str().context("fresh id")?.to_owned();
+        let single = command(&["diff", &fresh_id], 0)?;
+        assert_eq!(single.summary["kind"], json!("single"));
+        Ok(())
+    })
+}

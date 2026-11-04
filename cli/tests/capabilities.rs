@@ -39,7 +39,9 @@ fn capabilities_is_typed_and_does_not_initialize_any_profile() -> anyhow::Result
                 "methods":["auth.register","auth.login","auth.recover","auth.reset"]},
             "memory_list_metadata":true,
             "memory_metadata_flags":true,
-            "memory_metadata_gate_default":false})
+            "memory_metadata_gate_default":false,
+            "history_supersession":true,
+            "diff":true})
         );
         assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
     }

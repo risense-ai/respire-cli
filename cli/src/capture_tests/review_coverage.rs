@@ -380,6 +380,98 @@ fn review_invalid_arguments_and_inputs_never_write() -> Result<()> {
 }
 
 #[test]
+fn review_due_skips_empty_ciphertext_tombstones() -> Result<()> {
+    with_isolated_session(|root| {
+        use respire::MemoryTransport;
+        let _direct = DirectGuard::enter();
+        let store = crate::build_local()?;
+        crate::rpc::set_worker_active(false);
+        command(&["metadata", "enable"], 0)?;
+        crate::rpc::set_worker_active(true);
+        let _ownership =
+            respire::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+        let created = command(
+            &[
+                "remember",
+                "empty tombstone fixture",
+                "--summary",
+                "tombstone",
+                "--importance",
+                "important",
+                "--force",
+            ],
+            0,
+        )?;
+        let id = created.summary["id"]
+            .as_str()
+            .context("tombstone fixture id")?;
+        let mut row = store
+            .all(false)?
+            .into_iter()
+            .find(|row| row.id == id)
+            .context("tombstone fixture row")?;
+        row.updated_at = "2099-01-01T00:00:00.000Z".to_owned();
+        row.deleted = true;
+        row.ciphertext = String::new();
+        row.nonce = String::new();
+        assert!(store.put(&row)?);
+        let before = store.memory_revision()?;
+        let due = command(&["review", "--due"], 0)?;
+        assert_eq!(due.details["due"].as_array().map(Vec::len), Some(0), "{due:?}");
+        assert_eq!(due.summary["due_count"], json!(0));
+        assert!(
+            !due.errors.iter().any(|error| error.contains("decode")),
+            "{due:?}"
+        );
+        assert_eq!(store.memory_revision()?, before);
+        assert!(store.review_history(id, 200)?.is_empty());
+        Ok(())
+    })
+}
+
+#[test]
+fn review_due_limit_truncates_returned_candidates() -> Result<()> {
+    with_isolated_session(|root| {
+        let _direct = DirectGuard::enter();
+        let store = crate::build_local()?;
+        crate::rpc::set_worker_active(false);
+        command(&["metadata", "enable"], 0)?;
+        crate::rpc::set_worker_active(true);
+        let _ownership =
+            respire::lock::LibraryLock::acquire(root, std::time::Duration::from_secs(1))?;
+        for (content, summary) in [
+            ("limit fixture one", "limit one"),
+            ("limit fixture two", "limit two"),
+        ] {
+            command(
+                &[
+                    "remember",
+                    content,
+                    "--summary",
+                    summary,
+                    "--importance",
+                    "important",
+                    "--force",
+                    "--review-at",
+                    "2020-01-01T00:00:00.000Z",
+                ],
+                0,
+            )?;
+        }
+        let before = store.memory_revision()?;
+        let limited = command(&["review", "--due", "--limit", "1"], 0)?;
+        let due = limited.details["due"].as_array().context("due array")?;
+        assert_eq!(due.len(), 1, "{limited:?}");
+        assert_eq!(limited.summary["due_count"], json!(1));
+        let full = command(&["review", "--due", "--limit", "20"], 0)?;
+        assert_eq!(full.details["due"].as_array().map(Vec::len), Some(2), "{full:?}");
+        assert_eq!(full.summary["due_count"], json!(2));
+        assert_eq!(store.memory_revision()?, before);
+        Ok(())
+    })
+}
+
+#[test]
 fn review_due_decode_failure_is_not_an_empty_success() -> Result<()> {
     with_isolated_session(|root| {
         use respire::MemoryTransport;

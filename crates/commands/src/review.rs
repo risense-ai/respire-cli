@@ -141,7 +141,13 @@ fn invoke(args: &ReviewArgs) -> Result<Value> {
         unknown_fields: Default::default(),
     };
     if args.due {
-        return service.due(&scope, &now);
+        let mut details = service.due(&scope, &now)?;
+        // --limit applies to the due list only; history keeps its own limit.
+        let limit = usize::from(args.limit.max(1));
+        if let Some(due) = details.get_mut("due").and_then(Value::as_array_mut) {
+            due.truncate(limit);
+        }
+        return Ok(details);
     }
     let id = args.id.as_deref().context("missing review id")?;
     if args.history {

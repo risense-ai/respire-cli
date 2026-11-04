@@ -51,11 +51,7 @@ impl LocalStore {
                 None => (0, "needs_review", "head_not_available"),
                 Some((head_rev, current)) => {
                     match MemoryEngine::equivalent_versions(keys, &candidate, &current) {
-                        Ok(true) => (
-                            head_rev,
-                            "equivalent",
-                            "same_payload_except_version_timestamp",
-                        ),
+                        Ok(true) => (head_rev, "equivalent", "same_content_fingerprint"),
                         Ok(false) if status == "legacy_rejected" => (
                             head_rev,
                             "needs_review",
@@ -614,6 +610,55 @@ mod tests {
             pending[0]["candidate"]["entry"]["content"],
             "unique old edit"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn content_fingerprint_ignores_clock_and_writer_but_not_body() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        respire_core_sdk::set_index_root(dir.path())?;
+        let keys = SessionKeys::from_urk([9; 32])?;
+        let seal = |content: &str, stamp: &str, computer: &str, device: &str, modified_by: &str| {
+            let entry: crate::MemoryEntry = serde_json::from_value(serde_json::json!({
+                "id":"entry","kind":"Context","tags":["a"],
+                "title":"record","content":content,"user":"u","computer":computer,"project":"sync",
+                "created_at":stamp,"updated_at":stamp,"emotion":-1.0,"parent_id":"","importance":"important",
+                "device":device,"modified_by":modified_by
+            }))?;
+            crate::MemoryEngine::seal(
+                &keys,
+                &crate::memory::search::HashingEmbedder::default(),
+                &entry,
+                "u",
+            )
+        };
+        let left = seal(
+            "same body",
+            "2026-09-19T00:00:00.001Z",
+            "host-a",
+            "dev-a",
+            "writer-a",
+        )?;
+        let right = seal(
+            "same body",
+            "2026-11-03T08:00:00.000Z",
+            "host-b",
+            "dev-b",
+            "writer-b",
+        )?;
+        let edited = seal(
+            "other body",
+            "2026-11-03T08:00:00.000Z",
+            "host-b",
+            "dev-b",
+            "writer-b",
+        )?;
+        assert!(crate::MemoryEngine::equivalent_versions(
+            &keys, &left, &right
+        )?);
+        assert!(!crate::MemoryEngine::equivalent_versions(
+            &keys, &left, &edited
+        )?);
         Ok(())
     }
 

@@ -16,6 +16,7 @@ mod test_lock;
 pub mod inject;
 pub mod login_transaction;
 pub mod migration;
+pub mod supersession;
 pub mod session_import;
 
 pub use respire_app_domain::auth;
