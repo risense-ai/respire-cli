@@ -16,7 +16,10 @@ use serde_json::{json, Value};
 
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 
-const START_POLLS: usize = 100;
+// 45s total: a cold debug runtime (Core SDK load, database open) can take
+// well over the old 15s budget on a loaded machine, and a slow boot must not
+// read as "host runtime did not become ready" while the child is alive.
+const START_POLLS: usize = 300;
 const START_WAIT: Duration = Duration::from_millis(150);
 
 // Worker-face state (worker flag, sync context, generation, index work,
