@@ -629,12 +629,19 @@ pub enum Command {
     Candidates { content: String },
     /// Memory passport: ASCII-art card (user / memory count / connected agents / devices) for sharing
     Passport,
-    /// Entry change history (audit stream: create/update/delete/restore/purge; SQLite triggers record it)
+    /// Entry change history (audit stream: create/update/delete/restore/purge; SQLite triggers record it; supersession events are derived from the local projection)
     History {
         /// Entry id (8-char prefix ok); omit = recent changes for the whole store
         id: Option<String>,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+    /// Version diff: one id diffs its previous version into it (supersession predecessor, else the first recorded head); two ids diff <from> -> <to>
+    Diff {
+        /// Entry id (8-char prefix ok); with <to> this is the older side
+        id: String,
+        /// Newer side; when omitted the auto predecessor of <id> is used
+        to: Option<String>,
     },
     /// Plugin hooks (plugins.json): list shows config; test <EVENT> fires an event
     Plugin {

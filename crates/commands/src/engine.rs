@@ -1095,8 +1095,107 @@ pub fn report_orphans(store: &respire_app::transport::local::LocalStore, action:
     }
 }
 
-/// Record a procedure run outcome. Local-only (same contract as query_log):
-/// the row never enters the encrypted payload and never syncs.
+/// Line-level diff of two texts: the shared prefix and suffix stay as context
+/// and the differing middle runs a bounded LCS, falling back to a plain
+/// replace block when the two middle sizes exceed the cell budget.
+fn diff_lines(from: &str, to: &str) -> (String, usize, usize) {
+    let a: Vec<&str> = from.lines().collect();
+    let b: Vec<&str> = to.lines().collect();
+    let mut prefix = 0usize;
+    while prefix < a.len() && prefix < b.len() && a[prefix] == b[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0usize;
+    while suffix < a.len() - prefix
+        && suffix < b.len() - prefix
+        && a[a.len() - 1 - suffix] == b[b.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let mid_a = &a[prefix..a.len() - suffix];
+    let mid_b = &b[prefix..b.len() - suffix];
+    let mut out = String::new();
+    let mut removed = 0usize;
+    let mut added = 0usize;
+    for line in &a[..prefix] {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    const BUDGET: usize = 4_000_000;
+    if mid_a.len().saturating_mul(mid_b.len()) <= BUDGET {
+        for (mark, line) in lcs_ops(mid_a, mid_b) {
+            match mark {
+                '-' => removed += 1,
+                '+' => added += 1,
+                _ => {}
+            }
+            out.push(mark);
+            out.push(' ');
+            out.push_str(line);
+            out.push('\n');
+        }
+    } else {
+        for line in mid_a {
+            removed += 1;
+            out.push_str("- ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        for line in mid_b {
+            added += 1;
+            out.push_str("+ ");
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    for line in &a[a.len() - suffix..] {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    (out, removed, added)
+}
+
+/// Longest-common-subsequence walk over line slices as keep/delete/insert marks.
+fn lcs_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<(char, &'a str)> {
+    let width = b.len() + 1;
+    let mut table = vec![0u32; (a.len() + 1) * width];
+    for i in (0..a.len()).rev() {
+        for j in (0..b.len()).rev() {
+            table[i * width + j] = if a[i] == b[j] {
+                table[(i + 1) * width + j + 1] + 1
+            } else {
+                table[(i + 1) * width + j].max(table[i * width + j + 1])
+            };
+        }
+    }
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        if a[i] == b[j] {
+            ops.push((' ', a[i]));
+            i += 1;
+            j += 1;
+        } else if table[(i + 1) * width + j] >= table[i * width + j + 1] {
+            ops.push(('-', a[i]));
+            i += 1;
+        } else {
+            ops.push(('+', b[j]));
+            j += 1;
+        }
+    }
+    while i < a.len() {
+        ops.push(('-', a[i]));
+        i += 1;
+    }
+    while j < b.len() {
+        ops.push(('+', b[j]));
+        j += 1;
+    }
+    ops
+}
+
 /// Open promises: important task records past their review time with no live
 /// replacement. Distinct from `review --due`, which lists evidence-based
 /// governance dues; this is the promise ledger the writing rules create.
@@ -1162,6 +1261,8 @@ fn run_due(limit: usize) -> Result<()> {
     emit_result(result)
 }
 
+/// Record a procedure run outcome. Local-only (same contract as query_log):
+/// the row never enters the encrypted payload and never syncs.
 pub fn run_run_log(id: &str, status: &str, note: &str) -> Result<()> {
     let store = build_local()?;
     let all = store.all(false)?;
@@ -4044,6 +4145,8 @@ pub fn run_capabilities() -> Result<()> {
                 "memory_metadata_flags": true,
                 "memory_metadata_gate_default": false,
                 "rerank": false,
+                "history_supersession": true,
+                "diff": true,
                 "model": {"install": true, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
             }
         }),
@@ -7333,15 +7436,67 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             return run_passport();
         }
         Command::History { id, limit } => {
+            let session = build_session()?;
             let store = build_local()?;
+            // Legacy rows learn their supersession edge from ciphertext once;
+            // after that an empty column means "no live replacement".
+            respire_app::supersession::ensure_projection(&session, &store)?;
+            let all = store.all(true)?;
             let full = match id.as_deref() {
-                Some(i) => {
-                    let all = store.all(true)?;
-                    Some(respire_app::service::resolve_prefix(&all, i)?)
-                }
+                Some(i) => Some(respire_app::service::resolve_prefix(&all, i)?),
                 None => None,
             };
-            let rows = store.entry_audit(full.as_deref(), limit)?;
+            let mut rows = store.entry_audit(full.as_deref(), limit)?;
+            // Supersession changes only the projection column, which no audit
+            // trigger watches, so the stream derives those events here: a
+            // replaced record reports its successor, a replacement lists what
+            // it replaced, and the whole-store view shows each event once on
+            // the replaced side.
+            let event = |row: &respire_protocol::StoredMemory, action: &str, other: &str| {
+                serde_json::json!({
+                    "entry_id": row.id,
+                    "action": action,
+                    "title": row.local_title,
+                    "content_head": other,
+                    "actor": row.local_computer,
+                    "ts": row.updated_at,
+                    "derived": true,
+                })
+            };
+            let mut derived = Vec::new();
+            match full.as_deref() {
+                Some(subject) => {
+                    if let Some(me) = all.iter().find(|row| row.id == subject) {
+                        if !me.local_superseded_by.is_empty() {
+                            derived.push(event(me, "supersede", &me.local_superseded_by));
+                        }
+                    }
+                    for row in all
+                        .iter()
+                        .filter(|row| row.id != subject && row.local_superseded_by == subject)
+                    {
+                        derived.push(event(row, "supersedes", &row.id));
+                    }
+                }
+                None => {
+                    for row in all
+                        .iter()
+                        .filter(|row| !row.local_superseded_by.is_empty())
+                    {
+                        derived.push(event(row, "supersede", &row.local_superseded_by));
+                    }
+                }
+            }
+            rows.extend(derived);
+            // Audit and derived rows both carry fixed-width UTC timestamps, so
+            // one lexicographic pass interleaves them chronologically.
+            rows.sort_by(|a, b| {
+                b["ts"]
+                    .as_str()
+                    .unwrap_or("")
+                    .cmp(a["ts"].as_str().unwrap_or(""))
+            });
+            rows.truncate(limit);
             if json_mode() {
                 let mut result = ResultEnvelope::new(
                     "history",
@@ -7365,7 +7520,16 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     let action = r["action"].as_str().unwrap_or("");
                     let id = r["entry_id"].as_str().unwrap_or("").get(..8).unwrap_or("");
                     let title = r["title"].as_str().unwrap_or("");
-                    OutputItem::new("change", status, format!("{ts} {action} {id} {title}"))
+                    let line = match action {
+                        "supersede" => {
+                            let successor =
+                                r["content_head"].as_str().unwrap_or("").get(..8).unwrap_or("");
+                            format!("{ts} supersede {id} {title} -> {successor}")
+                        }
+                        "supersedes" => format!("{ts} supersedes {id} {title}"),
+                        _ => format!("{ts} {action} {id} {title}"),
+                    };
+                    OutputItem::new("change", status, line)
                 })
                 .collect::<Vec<_>>();
             let mut result = ResultEnvelope::new(
@@ -7383,6 +7547,122 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 },
             );
             result.details = serde_json::Value::Array(rows);
+            emit_result(result)?;
+        }
+        Command::Diff { id, to } => {
+            let session = build_session()?;
+            let store = build_local()?;
+            let all = store.all(true)?;
+            let resolve = |arg: &str| -> Result<respire_protocol::StoredMemory> {
+                let full = respire_app::service::resolve_prefix(&all, arg)?;
+                all.iter()
+                    .find(|row| row.id == full)
+                    .cloned()
+                    .with_context(|| format!("entry not found: {arg}"))
+            };
+            let text_of =
+                |entry: &respire_app::MemoryEntry| format!("{}\n{}", entry.title, entry.content);
+            let head = |row: &serde_json::Value| {
+                format!(
+                    "{}\n{}",
+                    row["title"].as_str().unwrap_or(""),
+                    row["content_head"].as_str().unwrap_or("")
+                )
+            };
+            // Two ids diff <from> -> <to> directly; one id diffs its previous
+            // version into it: the supersession predecessor when there is one,
+            // otherwise the first recorded head against the latest one.
+            let (kind, from_id, to_id, from_title, to_title, from_text, to_text) =
+                if let Some(newer) = to.as_deref() {
+                    let older = resolve(&id)?;
+                    let newer = resolve(newer)?;
+                    let from_e = MemoryEngine::open(&session, &older)?;
+                    let to_e = MemoryEngine::open(&session, &newer)?;
+                    (
+                        "pair".to_owned(),
+                        from_e.id.clone(),
+                        to_e.id.clone(),
+                        from_e.title.clone(),
+                        to_e.title.clone(),
+                        text_of(&from_e),
+                        text_of(&to_e),
+                    )
+                } else {
+                    let target = resolve(&id)?;
+                    let target_e = MemoryEngine::open(&session, &target)?;
+                    if !target_e.supersedes.is_empty() {
+                        let prev = resolve(&target_e.supersedes)?;
+                        let prev_e = MemoryEngine::open(&session, &prev)?;
+                        (
+                            "supersession".to_owned(),
+                            prev_e.id.clone(),
+                            target_e.id.clone(),
+                            prev_e.title.clone(),
+                            target_e.title.clone(),
+                            text_of(&prev_e),
+                            text_of(&target_e),
+                        )
+                    } else {
+                        let audit = store.entry_audit(Some(&target.id), 20)?;
+                        if audit.len() < 2 {
+                            emit_result(ResultEnvelope::new(
+                                "diff",
+                                OutputStatus::Skip,
+                                serde_json::json!({"id": target.id, "kind": "single"}),
+                                vec![OutputItem::new(
+                                    "diff",
+                                    OutputStatus::Skip,
+                                    "single version; nothing to compare",
+                                )],
+                            ))?;
+                            return Ok(());
+                        }
+                        // Audit rows arrive newest first.
+                        let latest = &audit[0];
+                        let first = &audit[audit.len() - 1];
+                        (
+                            "heads".to_owned(),
+                            target.id.clone(),
+                            target.id.clone(),
+                            first["title"].as_str().unwrap_or("").to_owned(),
+                            latest["title"].as_str().unwrap_or("").to_owned(),
+                            head(first),
+                            head(latest),
+                        )
+                    }
+                };
+            let (diff, removed, added) = diff_lines(&from_text, &to_text);
+            let identical = removed == 0 && added == 0;
+            let status = if identical {
+                OutputStatus::Skip
+            } else {
+                OutputStatus::Ok
+            };
+            let items = diff
+                .lines()
+                .map(|line| OutputItem::new("diff", status, line))
+                .collect::<Vec<_>>();
+            let mut result = ResultEnvelope::new(
+                "diff",
+                status,
+                serde_json::json!({
+                    "from": &from_id,
+                    "to": &to_id,
+                    "kind": kind,
+                    "removed": removed,
+                    "added": added,
+                    "identical": identical,
+                }),
+                items,
+            );
+            result.details = serde_json::json!({
+                "from": {"id": from_id, "title": from_title},
+                "to": {"id": to_id, "title": to_title},
+                "kind": kind,
+                "diff": diff,
+                "removed": removed,
+                "added": added,
+            });
             emit_result(result)?;
         }
         Command::Plugin { command } => match command {

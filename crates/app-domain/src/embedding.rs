@@ -38,6 +38,16 @@ fn registry_path() -> PathBuf {
 pub fn saved_selection() -> Result<Option<Selection>> {
     use rusqlite::OptionalExtension;
     let path = crate::service::database_path(&crate::service::data_dir())?;
+    // Resolve only the directory; a symlinked data root (/tmp -> /var/tmp,
+    // macOS /var) is a legitimate alias, while NOFOLLOW still refuses a
+    // symlinked database file itself (same rule as the diary cache).
+    let path = match path.parent() {
+        Some(dir) => dir
+            .canonicalize()
+            .unwrap_or_else(|_| dir.to_path_buf())
+            .join(path.file_name().unwrap_or_default()),
+        None => path,
+    };
     if !path.is_file() {
         return Ok(None);
     }
