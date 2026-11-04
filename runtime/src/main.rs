@@ -31,6 +31,21 @@ const MIN_CLI: &str = "1.0.20";
 const MAX_CLI: &str = "*";
 
 fn main() -> ExitCode {
+    // The runtime hosts Core in an owned worker process; that worker is this
+    // same binary re-invoked with the shared hidden flag. Handle it before the
+    // argv contract below so `serve` and the worker never disagree.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--core-worker-internal")
+    {
+        return match respire_app::core_sdk::worker::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("rsrs-runtime: Core worker stopped: {error:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
     // Consume the spawn-time boot token first: exactly one process may read it
     // and it must never leak into child processes.
     let boot_token = consume_boot_token();

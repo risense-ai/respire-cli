@@ -26,59 +26,18 @@ fn command(args: &[&str], exit: i32) -> Result<ResultEnvelope> {
     Ok(result.envelope)
 }
 
-struct DirectGuard {
-    direct: bool,
-    defer: bool,
-    user: Option<std::ffi::OsString>,
-}
-impl DirectGuard {
-    fn enter() -> Self {
-        let user = std::env::var_os("RSRS_USER");
-        std::env::set_var("RSRS_USER", "test");
-        Self {
-            direct: crate::DIRECT_MODE.swap(true, std::sync::atomic::Ordering::Relaxed),
-            defer: crate::DEFER_PROFILE_OUTPUT.replace(true),
-            user,
-        }
-    }
-}
-impl Drop for DirectGuard {
-    fn drop(&mut self) {
-        crate::DIRECT_MODE.store(self.direct, std::sync::atomic::Ordering::Relaxed);
-        crate::DEFER_PROFILE_OUTPUT.set(self.defer);
-        match &self.user {
-            Some(value) => std::env::set_var("RSRS_USER", value),
-            None => std::env::remove_var("RSRS_USER"),
-        }
-    }
-}
-
-/// Recall heat is written by the recall statistics path: queued for the write
-/// worker, persisted inline when no worker runs. Tests drop the worker flag so
-/// `recall_count` moves synchronously and the "no bump" assertion is real.
-struct WorkerGuard(bool);
-impl WorkerGuard {
-    fn inline_stats() -> Self {
-        let previous = crate::rpc::worker_active();
-        crate::rpc::set_worker_active(false);
-        Self(previous)
-    }
-}
-impl Drop for WorkerGuard {
-    fn drop(&mut self) {
-        crate::rpc::set_worker_active(self.0);
-    }
-}
-
-fn recall_args(args: &[&str]) -> Result<ResultEnvelope> {
-    let _worker = WorkerGuard::inline_stats();
-    let mut input = vec!["recall"];
-    input.extend(args);
-    command(&input, 0)
+/// Leave no resident runtime behind: every isolated test reuses the same
+/// fixed RPC port, so a leftover owner would make the next test's host-only
+/// configuration step refuse to run.
+fn stop_runtime() {
+    let previous = crate::rpc::worker_active();
+    crate::rpc::set_worker_active(false);
+    let _ = command(&["runtime", "stop"], 0);
+    crate::rpc::set_worker_active(previous);
 }
 
 fn recall(query: &str) -> Result<ResultEnvelope> {
-    recall_args(&[query, "--titles", "--limit", "10"])
+    command(&["recall", query, "--titles", "--limit", "10"], 0)
 }
 
 fn show(id: &str) -> Result<ResultEnvelope> {
@@ -118,15 +77,41 @@ fn item_value<'a>(result: &'a ResultEnvelope, title: &str) -> Option<&'a str> {
     })
 }
 
+/// The seeded fixture session belongs to user `test`; the metadata-aware
+/// recall view filters rows by the session owner, so the tests must run as the
+/// same user even though the runtime is the one opening the store.
+struct UserGuard(Option<std::ffi::OsString>);
+impl UserGuard {
+    fn enter() -> Self {
+        let previous = std::env::var_os("RSRS_USER");
+        std::env::set_var("RSRS_USER", "test");
+        Self(previous)
+    }
+}
+impl Drop for UserGuard {
+    fn drop(&mut self) {
+        match &self.0 {
+            Some(value) => std::env::set_var("RSRS_USER", value),
+            None => std::env::remove_var("RSRS_USER"),
+        }
+    }
+}
+
 /// Metadata writes (`--valid-until`, `--review-at`) need contract 1, which needs
 /// the local metadata gate. `metadata enable` takes the library lock itself
 /// (worker off, then released on exit), and the gate's writes check the flag,
 /// not a held lock — so nothing stays held here: a held lock would deadlock the
 /// recalls below, which re-acquire it whenever their worker flag is off.
 fn enable_metadata() -> Result<()> {
+    // `metadata enable` is a host-only configuration step: it must run with the
+    // worker flag off, otherwise the request is routed to the resident runtime
+    // and refused. The flag is restored before the recalls below.
     let _store = crate::build_local()?;
-    let _worker = WorkerGuard::inline_stats();
-    command(&["metadata", "enable"], 0)?;
+    let previous = crate::rpc::worker_active();
+    crate::rpc::set_worker_active(false);
+    let enabled = command(&["metadata", "enable"], 0);
+    crate::rpc::set_worker_active(previous);
+    enabled?;
     Ok(())
 }
 
@@ -170,7 +155,7 @@ fn seed_replacement(before: &str, after: &str) -> Result<(String, String)> {
 #[test]
 fn current_channel_returns_only_the_replacement_and_keeps_history_readable() -> Result<()> {
     with_isolated_session(|_| {
-        let _direct = DirectGuard::enter();
+        let _user = UserGuard::enter();
         let old = command(
             &[
                 "remember",
@@ -232,6 +217,7 @@ fn current_channel_returns_only_the_replacement_and_keeps_history_readable() -> 
             before,
             "a current-channel recall must not bump the superseded record"
         );
+        stop_runtime();
         Ok(())
     })
 }
@@ -239,7 +225,7 @@ fn current_channel_returns_only_the_replacement_and_keeps_history_readable() -> 
 #[test]
 fn former_channel_walks_back_from_the_live_hit_to_the_replacement() -> Result<()> {
     with_isolated_session(|_| {
-        let _direct = DirectGuard::enter();
+        let _user = UserGuard::enter();
         let (old_id, new_id) = seed_replacement(
             "alcoholstance: never drink alcohol, zero tolerance",
             "alcoholstance: now drink a little alcohol, previously zero tolerance",
@@ -269,7 +255,10 @@ fn former_channel_walks_back_from_the_live_hit_to_the_replacement() -> Result<()
         );
 
         // Explicit channel selection with a neutral query.
-        let flagged = recall_args(&["alcoholstance", "--titles", "--when", "former"])?;
+        let flagged = command(
+            &["recall", "alcoholstance", "--titles", "--when", "former"],
+            0,
+        )?;
         assert!(
             ids(&flagged).contains(&old_id),
             "--when former must walk the chain too: {flagged:?}"
@@ -279,6 +268,7 @@ fn former_channel_walks_back_from_the_live_hit_to_the_replacement() -> Result<()
                 .is_some_and(|value| value.contains("[superseded by")),
             "flagged former recall must label the old record: {flagged:?}"
         );
+        stop_runtime();
         Ok(())
     })
 }
@@ -286,7 +276,7 @@ fn former_channel_walks_back_from_the_live_hit_to_the_replacement() -> Result<()
 #[test]
 fn expired_record_leaves_the_current_channel_but_stays_open_by_id() -> Result<()> {
     with_isolated_session(|_| {
-        let _direct = DirectGuard::enter();
+        let _user = UserGuard::enter();
         enable_metadata()?;
 
         let live = command(
@@ -358,6 +348,7 @@ fn expired_record_leaves_the_current_channel_but_stays_open_by_id() -> Result<()
                 .context("expired content")?,
             "residenceaddress: 42 Maple Street, old flat"
         );
+        stop_runtime();
         Ok(())
     })
 }
@@ -377,7 +368,7 @@ fn due_ids(result: &ResultEnvelope) -> Vec<String> {
 #[test]
 fn due_lists_open_promise_tasks_until_a_replacement_fulfills_them() -> Result<()> {
     with_isolated_session(|_| {
-        let _direct = DirectGuard::enter();
+        let _user = UserGuard::enter();
         enable_metadata()?;
 
         // An open promise whose review time has passed.
@@ -493,6 +484,7 @@ fn due_lists_open_promise_tasks_until_a_replacement_fulfills_them() -> Result<()
             !due_ids(&after).contains(&promise_id),
             "a superseded promise must leave the due list: {after:?}"
         );
+        stop_runtime();
         Ok(())
     })
 }
