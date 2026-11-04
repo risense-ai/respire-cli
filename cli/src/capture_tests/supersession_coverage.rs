@@ -97,15 +97,49 @@ impl Drop for UserGuard {
     }
 }
 
+/// Run commands as the fixture user with profile output deferred into the
+/// capture slot: the seeded records belong to `test`, and a direct in-process
+/// run still reports through the normal envelope.
+struct DirectGuard {
+    direct: bool,
+    defer: bool,
+    user: Option<std::ffi::OsString>,
+}
+impl DirectGuard {
+    fn enter() -> Self {
+        let user = std::env::var_os("RSRS_USER");
+        std::env::set_var("RSRS_USER", "test");
+        Self {
+            direct: crate::DIRECT_MODE.swap(true, std::sync::atomic::Ordering::Relaxed),
+            defer: crate::DEFER_PROFILE_OUTPUT.replace(true),
+            user,
+        }
+    }
+}
+impl Drop for DirectGuard {
+    fn drop(&mut self) {
+        crate::DIRECT_MODE.store(self.direct, std::sync::atomic::Ordering::Relaxed);
+        crate::DEFER_PROFILE_OUTPUT.set(self.defer);
+        match &self.user {
+            Some(value) => std::env::set_var("RSRS_USER", value),
+            None => std::env::remove_var("RSRS_USER"),
+        }
+    }
+}
+
 /// Metadata writes (`--valid-until`, `--review-at`) need contract 1, which needs
 /// the local metadata gate. `metadata enable` takes the library lock itself
 /// (worker off, then released on exit), and the gate's writes check the flag,
 /// not a held lock — so nothing stays held here: a held lock would deadlock the
 /// recalls below, which re-acquire it whenever their worker flag is off.
 fn enable_metadata() -> Result<()> {
-    // `metadata enable` is a host-only configuration step: it must run with the
-    // worker flag off, otherwise the request is routed to the resident runtime
-    // and refused. The flag is restored before the recalls below.
+    // `metadata enable` is a host-only configuration step: run it with the
+    // worker flag off so the host gate accepts it, and in direct mode so the
+    // profile change re-keys the isolated library in-process — the indirect
+    // path restarts a resident runtime, which a cargo test harness cannot
+    // materialize (the spawned child is this harness and readiness exits 101).
+    // The worker flag is restored before the recalls below.
+    let _direct = DirectGuard::enter();
     let _store = crate::build_local()?;
     let previous = crate::rpc::worker_active();
     crate::rpc::set_worker_active(false);
@@ -485,6 +519,109 @@ fn due_lists_open_promise_tasks_until_a_replacement_fulfills_them() -> Result<()
             "a superseded promise must leave the due list: {after:?}"
         );
         stop_runtime();
+        Ok(())
+    })
+}
+
+#[test]
+fn history_reports_both_sides_of_a_supersession() -> Result<()> {
+    with_isolated_session(|_| {
+        let _direct = DirectGuard::enter();
+        let (old_id, new_id) = seed_replacement(
+            "alcoholstance: never drink alcohol, zero tolerance",
+            "alcoholstance: now drink a little alcohol, previously zero tolerance",
+        )?;
+
+        // The replaced record reports its successor in its own stream.
+        let old_history = command(&["history", &old_id], 0)?;
+        let supersede = old_history
+            .details
+            .as_array()
+            .context("old history rows")?
+            .iter()
+            .find(|row| row["action"] == "supersede")
+            .cloned()
+            .context("old history must derive the supersession event")?;
+        assert_eq!(supersede["entry_id"], json!(old_id));
+        assert_eq!(supersede["content_head"], json!(new_id));
+        assert_eq!(supersede["derived"], json!(true));
+
+        // The replacement lists what it replaced in its own stream.
+        let new_history = command(&["history", &new_id], 0)?;
+        let supersedes = new_history
+            .details
+            .as_array()
+            .context("new history rows")?
+            .iter()
+            .find(|row| row["action"] == "supersedes")
+            .cloned()
+            .context("new history must list the replaced record")?;
+        assert_eq!(supersedes["entry_id"], json!(old_id));
+        assert_eq!(supersedes["derived"], json!(true));
+
+        // The whole-store stream shows the event once, on the replaced side.
+        let store_history = command(&["history"], 0)?;
+        let rows = store_history
+            .details
+            .as_array()
+            .context("store history rows")?;
+        let events: Vec<_> = rows
+            .iter()
+            .filter(|row| row["action"] == "supersede" && row["entry_id"] == json!(old_id))
+            .collect();
+        assert_eq!(events.len(), 1, "one event per supersession: {rows:?}");
+        Ok(())
+    })
+}
+
+#[test]
+fn diff_reads_the_previous_wording_into_the_replacement() -> Result<()> {
+    with_isolated_session(|_| {
+        let _direct = DirectGuard::enter();
+        let (old_id, new_id) = seed_replacement(
+            "alcoholstance: never drink alcohol, zero tolerance",
+            "alcoholstance: now drink a little alcohol, previously zero tolerance",
+        )?;
+
+        // One id: the supersession predecessor diffed into the replacement.
+        let diff = command(&["diff", &new_id], 0)?;
+        assert_eq!(diff.summary["kind"], json!("supersession"));
+        assert_eq!(diff.summary["from"], json!(old_id));
+        assert_eq!(diff.summary["to"], json!(new_id));
+        assert_eq!(diff.summary["identical"], json!(false));
+        let text = diff.details["diff"].as_str().context("diff text")?;
+        assert!(
+            text.lines()
+                .any(|line| line == "- alcoholstance: never drink alcohol, zero tolerance"),
+            "the old wording must appear as removed: {text}"
+        );
+        assert!(
+            text.lines().any(|line| line
+                == "+ alcoholstance: now drink a little alcohol, previously zero tolerance"),
+            "the new wording must appear as added: {text}"
+        );
+
+        // Two ids: the same pair addressed explicitly, from -> to.
+        let pair = command(&["diff", &old_id, &new_id], 0)?;
+        assert_eq!(pair.summary["kind"], json!("pair"));
+        assert_eq!(pair.summary["identical"], json!(false));
+
+        // A record with a single version reports there is nothing to compare.
+        let fresh = command(
+            &[
+                "remember",
+                "languagepreference: prefers plain statements",
+                "--title",
+                "language-style",
+                "--importance",
+                "important",
+                "--force",
+            ],
+            0,
+        )?;
+        let fresh_id = fresh.summary["id"].as_str().context("fresh id")?.to_owned();
+        let single = command(&["diff", &fresh_id], 0)?;
+        assert_eq!(single.summary["kind"], json!("single"));
         Ok(())
     })
 }
