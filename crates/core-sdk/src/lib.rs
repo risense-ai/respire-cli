@@ -546,6 +546,36 @@ mod ffi {
         }
     }
 
+    pub(super) fn worker_stdout() -> Result<std::fs::File> {
+        // Keep the IPC pipe private before any native library can write to stdout.
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsFd;
+            extern "C" { fn dup2(old: std::ffi::c_int, new: std::ffi::c_int) -> std::ffi::c_int; }
+            let protocol = std::io::stdout().as_fd().try_clone_to_owned()
+                .context("duplicate Core worker protocol output")?;
+            if unsafe { dup2(2, 1) } == -1 {
+                return Err(std::io::Error::last_os_error()).context("redirect Core worker stdout");
+            }
+            Ok(std::fs::File::from(protocol))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsHandle, AsRawHandle};
+            extern "C" { fn _dup2(old: std::ffi::c_int, new: std::ffi::c_int) -> std::ffi::c_int; }
+            extern "system" { fn SetStdHandle(kind: u32, handle: *mut std::ffi::c_void) -> i32; }
+            let protocol = std::io::stdout().as_handle().try_clone_to_owned()
+                .context("duplicate Core worker protocol output")?;
+            if unsafe { _dup2(2, 1) } == -1 {
+                bail!("redirect Core worker CRT stdout failed (_dup2)");
+            }
+            if unsafe { SetStdHandle((-11i32) as u32, std::io::stderr().as_raw_handle()) } == 0 {
+                return Err(std::io::Error::last_os_error()).context("redirect Core worker stdout");
+            }
+            Ok(std::fs::File::from(protocol))
+        }
+    }
+
     pub(super) fn abi_version() -> u32 {
         unsafe { rs_core_abi_version() }
     }

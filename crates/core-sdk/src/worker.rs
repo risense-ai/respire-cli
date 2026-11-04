@@ -631,7 +631,7 @@ type CallbackMap = Arc<Mutex<HashMap<u64, mpsc::Sender<Value>>>>;
 
 /// Hidden binary entry. No App, profile migration, store, or LibraryLock is opened.
 pub fn run() -> Result<()> {
-    let output = Arc::new(Mutex::new(std::io::stdout()));
+    let output = Arc::new(Mutex::new(crate::ffi::worker_stdout()?));
     let callbacks: CallbackMap = Arc::new(Mutex::new(HashMap::new()));
     let (ordinary_tx, ordinary_rx) = mpsc::channel::<Value>();
     let ordinary_rx = Arc::new(Mutex::new(ordinary_rx));
