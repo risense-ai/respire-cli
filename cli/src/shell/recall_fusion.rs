@@ -118,11 +118,7 @@ impl Form {
         self.message = t("正在保存设置", "Saving settings");
         std::thread::spawn(move || {
             let result = (|| {
-                retrieval_action(&[
-                    "agent-config",
-                    "--set",
-                    &format!("recall_fusion={value}"),
-                ])?;
+                retrieval_action(&["agent-config", "--set", &format!("recall_fusion={value}")])?;
                 let read_back = retrieval_action(&["agent-config"])?;
                 let receipt = &read_back["summary"]["recall_fusion_runtime"];
                 if receipt["configured"] != value {

@@ -162,7 +162,10 @@ fn main() -> Result<()> {
     std::env::set_var("RSRS_CPU_OWNED_ORT_FILE", &ort);
     if std::env::args().any(|arg| arg == "--diary-only") {
         let current = std::env::current_exe()?;
-        let exe = current.parent().and_then(std::path::Path::parent).context("native profile")?
+        let exe = current
+            .parent()
+            .and_then(std::path::Path::parent)
+            .context("native profile")?
             .join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
         println!("{}", diary_probe::run(&exe)?);
         return Ok(());
@@ -221,15 +224,28 @@ fn main() -> Result<()> {
     let query = MemoryQuery::new(text).limit(20);
     std::env::set_var("RSRS_RECALL_PROFILE", "calibrated");
     let snapshots = respire::memory::engine::snapshots(&keys, &store.all(false)?)?;
-    let calibrated: Value = respire::core_sdk::execute("query_business", json!({
-        "model":"m3","snapshots":snapshots,"query":query,"mode":"fast","provider":null
-    }))?;
-    anyhow::ensure!(calibrated["retrieval"]["cos_gate"] == json!(0.42f32)
-        && calibrated["retrieval"]["examined"].as_u64().is_some_and(|n| n > 0)
-        && !calibrated["items"].as_array().context("calibrated items")?.is_empty(),
-        "calibrated recall must expose actual gate diagnostics and retain a real-model hit");
+    let calibrated: Value = respire::core_sdk::execute(
+        "query_business",
+        json!({
+            "model":"m3","snapshots":snapshots,"query":query,"mode":"fast","provider":null
+        }),
+    )?;
+    anyhow::ensure!(
+        calibrated["retrieval"]["cos_gate"] == json!(0.42f32)
+            && calibrated["retrieval"]["examined"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+            && !calibrated["items"]
+                .as_array()
+                .context("calibrated items")?
+                .is_empty(),
+        "calibrated recall must expose actual gate diagnostics and retain a real-model hit"
+    );
     std::env::set_var("RSRS_ABLATE", "kw,recency,hot,tree");
-    anyhow::ensure!(!recall(&store, &keys, &query)?.is_empty(), "semantic-only ablation lost the real-model answer");
+    anyhow::ensure!(
+        !recall(&store, &keys, &query)?.is_empty(),
+        "semantic-only ablation lost the real-model answer"
+    );
     std::env::set_var("RSRS_ABLATE", "");
     std::env::set_var("RSRS_RECALL_PROFILE", "legacy");
     let baseline = recall(&store, &keys, &query)?;

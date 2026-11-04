@@ -143,7 +143,10 @@ impl Form {
         anyhow::ensure!(
             !model.is_empty(),
             "{}",
-            t("\u{6a21}\u{578b}\u{540d}\u{4e0d}\u{80fd}\u{4e3a}\u{7a7a}", "Model name is required")
+            t(
+                "\u{6a21}\u{578b}\u{540d}\u{4e0d}\u{80fd}\u{4e3a}\u{7a7a}",
+                "Model name is required"
+            )
         );
         anyhow::ensure!(
             !key.is_empty() || key_for(base).is_some(),
@@ -202,7 +205,10 @@ impl Form {
         }
         let mut lines: Vec<Line<'static>> = vec![choice(
             self.field == 3,
-            t("[ \u{4fdd}\u{5b58}\u{914d}\u{7f6e} ]", "[ Save configuration ]"),
+            t(
+                "[ \u{4fdd}\u{5b58}\u{914d}\u{7f6e} ]",
+                "[ Save configuration ]",
+            ),
         )];
         lines.push(line(t(
             "\u{5bc6}\u{94a5}\u{7559}\u{7a7a}\u{4fdd}\u{7559}\u{8be5}\u{5730}\u{5740}\u{5df2}\u{6709}\u{5bc6}\u{94a5}\u{ff1b}\u{65b0}\u{5bc6}\u{94a5}\u{5b58}\u{5165}\u{7cfb}\u{7edf}\u{51ed}\u{636e}\u{5e93}\u{3002}",
@@ -222,7 +228,10 @@ impl Form {
         if let Some((started, _)) = &self.saving {
             lines.push(line(format!(
                 "{} {}s",
-                t("\u{6b63}\u{5728}\u{4fdd}\u{5b58}\u{914d}\u{7f6e}", "Saving configuration"),
+                t(
+                    "\u{6b63}\u{5728}\u{4fdd}\u{5b58}\u{914d}\u{7f6e}",
+                    "Saving configuration"
+                ),
                 started.elapsed().as_secs()
             )));
         }

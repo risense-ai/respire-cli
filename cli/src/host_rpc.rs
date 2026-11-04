@@ -76,9 +76,16 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
         crate::login::origin(addr).context("invalid authentication server origin")?;
     }
     if request.method == "auth.recover" {
-        let present = |key: &str| request.params.get(key).is_some_and(|value| !value.is_empty());
-        ensure!(present("super") || (present("password") && present("secret")),
-            "recovery requires a super password or the legacy password and Account Secret");
+        let present = |key: &str| {
+            request
+                .params
+                .get(key)
+                .is_some_and(|value| !value.is_empty())
+        };
+        ensure!(
+            present("super") || (present("password") && present("secret")),
+            "recovery requires a super password or the legacy password and Account Secret"
+        );
     }
     if let Some(code) = request.params.get("totp") {
         ensure!(

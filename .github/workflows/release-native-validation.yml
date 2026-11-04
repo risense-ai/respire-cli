@@ -191,6 +191,7 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
+          "$exe" --runtime-internal --stop --json
       - name: Prepare isolated upgrade Python and the fixed Windows wheel key
         id: wheel-key
         shell: bash

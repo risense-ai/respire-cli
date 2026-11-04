@@ -28,7 +28,8 @@ pub fn timestamp_after(previous: Option<&str>) -> Result<String> {
     // Empty stamp on old records means "no version time yet".
     let stamp = if let Some(previous) = previous.filter(|value| !value.is_empty()) {
         let old = chrono::DateTime::parse_from_rfc3339(previous)?.with_timezone(&chrono::Utc);
-        let next = old.checked_add_signed(chrono::Duration::milliseconds(1))
+        let next = old
+            .checked_add_signed(chrono::Duration::milliseconds(1))
             .ok_or_else(|| anyhow::anyhow!("record timestamp is outside the advanceable range"))?;
         now.max(next)
     } else {
@@ -56,13 +57,23 @@ pub struct FetchReply {
 /// Conflict: same id, last-write-wins on updated_at.
 pub trait MemoryTransport {
     /// None denotes a legacy server; transport failures must not imply downgrade.
-    fn capabilities(&self) -> Result<Option<protocol::Capabilities>> { Ok(None) }
+    fn capabilities(&self) -> Result<Option<protocol::Capabilities>> {
+        Ok(None)
+    }
 
-    fn resolve_conflicts(&self,_request:&protocol::ResolveRequest)->Result<protocol::ResolveReply> {
+    fn resolve_conflicts(
+        &self,
+        _request: &protocol::ResolveRequest,
+    ) -> Result<protocol::ResolveReply> {
         anyhow::bail!("remote does not support conflict resolution")
     }
 
-    fn fetch_resolutions(&self,_epoch:&str,_after:i64,_until:Option<i64>)->Result<protocol::ResolutionPage> {
+    fn fetch_resolutions(
+        &self,
+        _epoch: &str,
+        _after: i64,
+        _until: Option<i64>,
+    ) -> Result<protocol::ResolutionPage> {
         anyhow::bail!("remote does not support conflict resolution")
     }
 
@@ -70,8 +81,13 @@ pub trait MemoryTransport {
         anyhow::bail!("remote does not support sync v2")
     }
 
-    fn pull_v2(&self, _epoch: &str, _after: i64, _until: Option<i64>, _snapshot: bool)
-        -> Result<protocol::Page> {
+    fn pull_v2(
+        &self,
+        _epoch: &str,
+        _after: i64,
+        _until: Option<i64>,
+        _snapshot: bool,
+    ) -> Result<protocol::Page> {
         anyhow::bail!("remote does not support sync v2")
     }
 

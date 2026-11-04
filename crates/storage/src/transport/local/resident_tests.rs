@@ -22,18 +22,25 @@ fn compound_edit_keeps_its_snapshot_while_another_writer_waits() -> anyhow::Resu
             Ok(())
         }));
         ready.recv_timeout(std::time::Duration::from_secs(2))?;
-        assert!(matches!(done.recv_timeout(std::time::Duration::from_millis(50)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+        assert!(matches!(
+            done.recv_timeout(std::time::Duration::from_millis(50)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
         latest.ciphertext = "compound-source".to_owned();
         latest.updated_at = store.edit_stamp(&latest.id)?;
         anyhow::ensure!(store.put(&latest)?, "compound source was not saved");
         Ok(())
     })?;
-    writer.ok_or_else(|| anyhow::anyhow!("writer was not started"))?.join()
+    writer
+        .ok_or_else(|| anyhow::anyhow!("writer was not started"))?
+        .join()
         .map_err(|_| anyhow::anyhow!("background writer panicked"))??;
     done.recv_timeout(std::time::Duration::from_secs(2))?;
     assert_eq!(store.all(false)?[0].ciphertext, "compound-source");
-    assert_eq!(store.meta_get("background-checkpoint")?.as_deref(), Some("ready"));
+    assert_eq!(
+        store.meta_get("background-checkpoint")?.as_deref(),
+        Some("ready")
+    );
     Ok(())
 }
 
@@ -51,7 +58,9 @@ fn stale_preparation_cannot_replace_a_concurrent_write() -> anyhow::Result<()> {
     assert!(second.put_checked(&latest, Some(&original.ciphertext))?);
     let mut stale = original.clone();
     stale.updated_at = first.edit_stamp(&original.id)?;
-    let error = first.put_checked(&stale, Some(&original.ciphertext)).err()
+    let error = first
+        .put_checked(&stale, Some(&original.ciphertext))
+        .err()
         .ok_or_else(|| anyhow::anyhow!("stale write unexpectedly succeeded"))?;
     assert!(error.downcast_ref::<MemorySourceChanged>().is_some());
     assert_eq!(first.all(false)?[0].ciphertext, latest.ciphertext);
@@ -92,12 +101,16 @@ fn diary_conflict_rolls_back_without_deleting_duplicates() -> anyhow::Result<()>
     newer.ciphertext = "concurrent-diary".to_owned();
     newer.updated_at = store.edit_stamp(&original.id)?;
     store.put_checked(&newer, Some(&original.ciphertext))?;
-    let error = store.put_diary_checked(&original, &original.ciphertext, &[&duplicate]).err()
+    let error = store
+        .put_diary_checked(&original, &original.ciphertext, &[&duplicate])
+        .err()
         .ok_or_else(|| anyhow::anyhow!("conflicting diary unexpectedly succeeded"))?;
     assert!(error.downcast_ref::<MemorySourceChanged>().is_some());
     let rows = store.all(false)?;
     assert_eq!(rows.len(), 2);
-    assert!(rows.iter().any(|row| row.id == "main" && row.ciphertext == newer.ciphertext));
+    assert!(rows
+        .iter()
+        .any(|row| row.id == "main" && row.ciphertext == newer.ciphertext));
     assert!(rows.iter().any(|row| row.id == "duplicate" && !row.deleted));
     Ok(())
 }

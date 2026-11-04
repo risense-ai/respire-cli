@@ -124,8 +124,18 @@ pub fn fetch_dist_tags() -> Option<(String, String)> {
         .ok()?;
     let value: serde_json::Value = resp.into_json().ok()?;
     let tags = value.get("dist-tags")?;
-    let latest = tags.get("latest").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
-    let dev = tags.get("dev").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+    let latest = tags
+        .get("latest")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let dev = tags
+        .get("dev")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     if latest.is_empty() && dev.is_empty() {
         return None;
     }
@@ -164,7 +174,10 @@ impl UpdateStatus {
         if self.outdated {
             format!("{} -> {}", self.current, self.latest)
         } else if is_newer(&self.current, &self.latest) {
-            format!("{} (ahead of published latest {})", self.current, self.latest)
+            format!(
+                "{} (ahead of published latest {})",
+                self.current, self.latest
+            )
         } else {
             format!("{} (up to date)", self.current)
         }
@@ -225,7 +238,10 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
 /// Convenience: one hint line when needed (Some only if outdated).
 /// `RSRS_UPDATE_HINT=0` silences it.
 pub fn hint(force: bool) -> Option<String> {
-    if matches!(respire_app::env::var("RSRS_UPDATE_HINT").as_deref(), Ok("0")) {
+    if matches!(
+        respire_app::env::var("RSRS_UPDATE_HINT").as_deref(),
+        Ok("0")
+    ) {
         return None;
     }
     check(force).filter(|s| s.outdated).map(|s| s.message())
@@ -267,11 +283,23 @@ mod tests {
         for (current, latest, expected) in [
             ("1.0.9", "1.0.10", "1.0.9 -> 1.0.10"),
             ("1.0.10", "1.0.10", "1.0.10 (up to date)"),
-            ("1.0.10", "1.0.9", "1.0.10 (ahead of published latest 1.0.9)"),
-            ("1.0.11-dev.6", "1.0.11-dev.5", "1.0.11-dev.6 (ahead of published latest 1.0.11-dev.5)"),
+            (
+                "1.0.10",
+                "1.0.9",
+                "1.0.10 (ahead of published latest 1.0.9)",
+            ),
+            (
+                "1.0.11-dev.6",
+                "1.0.11-dev.5",
+                "1.0.11-dev.6 (ahead of published latest 1.0.11-dev.5)",
+            ),
         ] {
-            let status = UpdateStatus { current: current.into(), latest: latest.into(),
-                outdated: is_newer(latest, current), cached: false };
+            let status = UpdateStatus {
+                current: current.into(),
+                latest: latest.into(),
+                outdated: is_newer(latest, current),
+                cached: false,
+            };
             assert_eq!(status.comparison(), expected);
         }
     }

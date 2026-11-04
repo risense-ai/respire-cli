@@ -68,7 +68,8 @@ impl LocalStore {
                 ))?;
             }
         }
-        self.connection.execute_batch(include_str!("sync_revision_schema.sql"))?;
+        self.connection
+            .execute_batch(include_str!("sync_revision_schema.sql"))?;
         self.connection.execute(
             "UPDATE sync_remote_heads AS h SET (wire,op_id,decode_error)=(
                 SELECT i.wire,i.op_id,i.decode_error FROM sync_inbox i
@@ -135,31 +136,42 @@ impl LocalStore {
     /// Run outside a transaction under the runtime's local write gate.
     pub fn maintain_sync_storage(&self) -> Result<()> {
         while self.prune_sync_history()? != 0 {}
-        let pages: i64 = self.connection.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let free: i64 = self.connection.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-        let page_size: i64 = self.connection.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+        let pages: i64 = self
+            .connection
+            .query_row("PRAGMA page_count", [], |r| r.get(0))?;
+        let free: i64 = self
+            .connection
+            .query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
+        let page_size: i64 = self
+            .connection
+            .query_row("PRAGMA page_size", [], |r| r.get(0))?;
         let vacuum = free * page_size >= 16 * 1024 * 1024 && free * 4 >= pages;
-        let checkpoint_pending = self.meta_get("sync_storage_checkpoint_pending")?.as_deref() == Some("1");
+        let checkpoint_pending =
+            self.meta_get("sync_storage_checkpoint_pending")?.as_deref() == Some("1");
         if !vacuum && !checkpoint_pending {
             return Ok(());
         }
         // A reader can arrive between VACUUM and its checkpoint; retry truncation even with no free pages.
         self.meta_set("sync_storage_checkpoint_pending", "1")?;
-        self.connection.busy_timeout(std::time::Duration::from_millis(250))?;
+        self.connection
+            .busy_timeout(std::time::Duration::from_millis(250))?;
         let compact = (|| -> rusqlite::Result<bool> {
-            let busy: i64 = self.connection.query_row(
-                "PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            let busy: i64 =
+                self.connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
             if busy != 0 {
                 return Ok(false);
             }
             if vacuum {
                 self.connection.execute_batch("VACUUM")?;
             }
-            let busy: i64 = self.connection.query_row(
-                "PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
+            let busy: i64 =
+                self.connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| r.get(0))?;
             Ok(busy == 0)
         })();
-        self.connection.busy_timeout(std::time::Duration::from_secs(30))?;
+        self.connection
+            .busy_timeout(std::time::Duration::from_secs(30))?;
         match compact {
             Ok(true) => self.meta_set("sync_storage_checkpoint_pending", "0"),
             Ok(false) => Ok(()),
@@ -483,7 +495,8 @@ impl LocalStore {
         // Paused/read-only libraries intentionally keep their old schema until normal service resumes.
         let current_heads: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sync_remote_heads') WHERE name='wire')",
-            [], |r| r.get(0),
+            [],
+            |r| r.get(0),
         )?;
         let incoming = if current_heads {
             "SELECT epoch,rev,status,op_id,wire FROM sync_inbox WHERE (?1 IS NULL OR id=?1)

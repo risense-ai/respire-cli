@@ -5,7 +5,9 @@ use crate::transport::MemoryTransport;
 use anyhow::Result;
 use rusqlite::{params, OptionalExtension};
 
-fn generation_key(model: &str) -> Result<String> { respire_core_sdk::generation_key(model) }
+fn generation_key(model: &str) -> Result<String> {
+    respire_core_sdk::generation_key(model)
+}
 
 #[derive(Debug)]
 pub struct IndexSourceChanged {
@@ -14,7 +16,11 @@ pub struct IndexSourceChanged {
 
 impl std::fmt::Display for IndexSourceChanged {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "index source changed during rebuild; rerun to resume ({} pending)", self.pending)
+        write!(
+            formatter,
+            "index source changed during rebuild; rerun to resume ({} pending)",
+            self.pending
+        )
     }
 }
 
@@ -35,8 +41,11 @@ impl LocalStore {
         )?;
         // Keep only the small ID lookup. Collecting every source ciphertext and
         // artifact first duplicates the entire encrypted catalog at peak.
-        let positions: std::collections::HashMap<String, usize> = out.iter()
-            .enumerate().map(|(index, memory)| (memory.id.clone(), index)).collect();
+        let positions: std::collections::HashMap<String, usize> = out
+            .iter()
+            .enumerate()
+            .map(|(index, memory)| (memory.id.clone(), index))
+            .collect();
         debug_assert_eq!(positions.len(), out.len(), "catalog IDs must be unique");
         let mut rows = stmt.query(params![self.active_generation_key()?])?;
         while let Some(row) = rows.next()? {
@@ -60,7 +69,8 @@ impl LocalStore {
     pub(super) fn store_artifact(&self, memory: &crate::StoredMemory, model: &str) -> Result<()> {
         let generation = generation_key(model)?;
         // The source guard also protects a newer artifact from an older prepared snapshot.
-        self.connection.execute_batch("SAVEPOINT core_artifact_publish")?;
+        self.connection
+            .execute_batch("SAVEPOINT core_artifact_publish")?;
         let result = (|| -> Result<()> {
             self.connection.execute(
                 "DELETE FROM core_artifacts WHERE memory_id=?1 AND (source<>?2 OR ?3=1)
@@ -77,9 +87,11 @@ impl LocalStore {
             Ok(())
         })();
         if result.is_err() {
-            self.connection.execute_batch("ROLLBACK TO core_artifact_publish")?;
+            self.connection
+                .execute_batch("ROLLBACK TO core_artifact_publish")?;
         }
-        self.connection.execute_batch("RELEASE core_artifact_publish")?;
+        self.connection
+            .execute_batch("RELEASE core_artifact_publish")?;
         result
     }
 
@@ -110,9 +122,13 @@ impl LocalStore {
             "SELECT EXISTS(SELECT 1 FROM memories m WHERE m.deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext))",
             params![generation_key(&model)?], |row| row.get(0))?;
-        if missing { return Ok(true); }
+        if missing {
+            return Ok(true);
+        }
         let mut statement = self.connection.prepare("SELECT a.artifact FROM core_artifacts a JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source WHERE a.model=?1 AND m.deleted=0")?;
-        let artifacts = statement.query_map([generation_key(model)?], |row| row.get::<_, Vec<u8>>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        let artifacts = statement
+            .query_map([generation_key(model)?], |row| row.get::<_, Vec<u8>>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(!respire_core_sdk::index_ready(&artifacts)?)
     }
 
@@ -146,12 +162,17 @@ impl LocalStore {
 
     /// Checkpoint a candidate generation without publishing an active model.
     pub fn build_index_with_progress<E: crate::memory::search::Embedder>(
-        &self, keys: &crate::memory::SessionKeys, embedder: &E, model: &str,
-        activate: bool, mut progress: impl FnMut(usize, usize) -> Result<()>,
+        &self,
+        keys: &crate::memory::SessionKeys,
+        embedder: &E,
+        model: &str,
+        activate: bool,
+        mut progress: impl FnMut(usize, usize) -> Result<()>,
     ) -> Result<usize> {
         progress(0, 0)?;
         let missing = self.index_missing(model)?;
-        if !missing && self.meta_get("retrieval_model")?.as_deref() == Some(model)
+        if !missing
+            && self.meta_get("retrieval_model")?.as_deref() == Some(model)
             && !self.index_pending(model)?
         {
             progress(0, 0)?;
@@ -167,7 +188,8 @@ impl LocalStore {
                  FROM memories m WHERE deleted=0 AND NOT EXISTS
                  (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)
                  ORDER BY dirty DESC,updated_at DESC")?;
-            let rows = statement.query_map([generation_key(model)?], Self::row_to_memory)?
+            let rows = statement
+                .query_map([generation_key(model)?], Self::row_to_memory)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         } else {
@@ -182,7 +204,9 @@ impl LocalStore {
                 "SELECT artifact FROM core_artifacts WHERE memory_id=?1 AND model=?2 AND source=?3",
                 params![stored.id, generation_key(model)?, stored.ciphertext], |r| r.get::<_, Vec<u8>>(0)).optional()?;
             if let Some(artifact) = artifact {
-                if respire_core_sdk::index_ready(&[artifact])? { continue; }
+                if respire_core_sdk::index_ready(&[artifact])? {
+                    continue;
+                }
             }
             let t_open = std::time::Instant::now();
             let entry = crate::memory::MemoryEngine::open(keys, stored)?;
@@ -191,7 +215,15 @@ impl LocalStore {
             let prepared = embedder.prepare(&entry)?;
             let prep_ms = t_prep.elapsed().as_millis();
             if std::env::var("RSRS_REBUILD_TRACE").as_deref() == Ok("1") {
-                eprintln!("[rebuild] {}/{} chars={} art={}B open={}ms prepare={}ms", index + 1, candidates.len(), entry.content.chars().count(), prepared.artifact.len(), open_ms, prep_ms);
+                eprintln!(
+                    "[rebuild] {}/{} chars={} art={}B open={}ms prepare={}ms",
+                    index + 1,
+                    candidates.len(),
+                    entry.content.chars().count(),
+                    prepared.artifact.len(),
+                    open_ms,
+                    prep_ms
+                );
             }
             progress(index, candidates.len())?;
             let mut derived = stored.clone();
@@ -200,7 +232,10 @@ impl LocalStore {
             completed += 1;
         }
         progress(candidates.len(), candidates.len())?;
-        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let missing: i64 = tx.query_row(
             "SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS
              (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)",
@@ -209,7 +244,10 @@ impl LocalStore {
             return Err(IndexSourceChanged { pending: missing }.into());
         }
         if activate {
-            tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", params![model])?;
+            tx.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)",
+                params![model],
+            )?;
         }
         tx.commit()?;
         Ok(completed)
@@ -217,38 +255,86 @@ impl LocalStore {
 
     pub fn retrieval_model(&self) -> Result<String> {
         let selection = self.active_selection()?;
-        Ok(selection.map(|s| s.model).unwrap_or_else(|| "m3".to_owned()))
+        Ok(selection
+            .map(|s| s.model)
+            .unwrap_or_else(|| "m3".to_owned()))
     }
 
     pub fn active_selection(&self) -> Result<Option<respire_core_sdk::profiles::Selection>> {
-        self.meta_get(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY)?.map(|v| serde_json::from_str(&v).map_err(Into::into)).transpose()
+        self.meta_get(respire_core_sdk::profiles::ACTIVE_SELECTION_KEY)?
+            .map(|v| serde_json::from_str(&v).map_err(Into::into))
+            .transpose()
     }
 
     pub fn active_generation_key(&self) -> Result<String> {
         match self.active_selection()? {
             Some(selection) => respire_core_sdk::profiles::generation_key_for_profile(&selection),
-            None => respire_core_sdk::execute("index_generation",serde_json::json!({"model":"m3","config":respire_core_sdk::legacy_effective_model_config()?})),
+            None => respire_core_sdk::execute(
+                "index_generation",
+                serde_json::json!({"model":"m3","config":respire_core_sdk::legacy_effective_model_config()?}),
+            ),
         }
     }
 
-    pub fn queue_selection(&self, selection: &respire_core_sdk::profiles::Selection, task_id: &str) -> Result<()> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.connection,rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_selection_v1',?1)",[serde_json::to_string(selection)?])?;
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_task_v1',?1)",[serde_json::to_string(&serde_json::json!({"id":task_id,"phase":"queued"}))?])?;
+    pub fn queue_selection(
+        &self,
+        selection: &respire_core_sdk::profiles::Selection,
+        task_id: &str,
+    ) -> Result<()> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_selection_v1',?1)",
+            [serde_json::to_string(selection)?],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('embedding_pending_task_v1',?1)",
+            [serde_json::to_string(
+                &serde_json::json!({"id":task_id,"phase":"queued"}),
+            )?],
+        )?;
         tx.commit()?;
         Ok(())
     }
 
     /// Only the library transaction publishes the complete immutable selection.
-    pub fn activate_selection(&self, selection: &respire_core_sdk::profiles::Selection, source_revision: &str) -> Result<()> {
-        anyhow::ensure!(!selection.generation.is_empty(),"candidate generation is missing");
-        let tx = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
-        let revision: String = tx.query_row("SELECT value FROM meta WHERE key='memory_revision_v1'", [], |r| r.get(0))?;
-        anyhow::ensure!(revision == source_revision, "library sources changed before model activation; resume the switch");
+    pub fn activate_selection(
+        &self,
+        selection: &respire_core_sdk::profiles::Selection,
+        source_revision: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !selection.generation.is_empty(),
+            "candidate generation is missing"
+        );
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        let revision: String = tx.query_row(
+            "SELECT value FROM meta WHERE key='memory_revision_v1'",
+            [],
+            |r| r.get(0),
+        )?;
+        anyhow::ensure!(
+            revision == source_revision,
+            "library sources changed before model activation; resume the switch"
+        );
         let missing: i64 = tx.query_row("SELECT COUNT(*) FROM memories m WHERE deleted=0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=m.id AND a.model=?1 AND a.source=m.ciphertext)",[&selection.generation],|row|row.get(0))?;
-        anyhow::ensure!(missing == 0,"candidate main index is incomplete");
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)", [respire_core_sdk::profiles::ACTIVE_SELECTION_KEY.to_owned(),serde_json::to_string(selection)?])?;
-        tx.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)", [&selection.model])?;
+        anyhow::ensure!(missing == 0, "candidate main index is incomplete");
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",
+            [
+                respire_core_sdk::profiles::ACTIVE_SELECTION_KEY.to_owned(),
+                serde_json::to_string(selection)?,
+            ],
+        )?;
+        tx.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('retrieval_model',?1)",
+            [&selection.model],
+        )?;
         tx.execute("DELETE FROM meta WHERE key IN ('embedding_pending_selection_v1','embedding_pending_task_v1')", [])?;
         tx.commit()?;
         Ok(())
@@ -278,14 +364,27 @@ mod copy_tests {
         missing.local_artifact.clear();
         store.put(&missing)?;
         let all = store.all(false)?;
-        assert_eq!(all.iter().map(|memory| &memory.id).collect::<std::collections::HashSet<_>>().len(), all.len());
+        assert_eq!(
+            all.iter()
+                .map(|memory| &memory.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            all.len()
+        );
         let mut actual = all.clone();
         let mut expected = all.clone();
-        for memory in actual.iter_mut().chain(expected.iter_mut()) { memory.local_artifact.clear(); }
+        for memory in actual.iter_mut().chain(expected.iter_mut()) {
+            memory.local_artifact.clear();
+        }
         let mut statement = store.connection.prepare("SELECT a.memory_id,a.source,a.artifact FROM core_artifacts a JOIN memories m ON m.id=a.memory_id AND m.ciphertext=a.source WHERE a.model=?1 AND m.deleted=0")?;
-        let artifacts = statement.query_map([generation_key("m3")?], |row| {
-            Ok(((row.get::<_, String>(0)?, row.get::<_, String>(1)?), row.get::<_, Vec<u8>>(2)?))
-        })?.collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+        let artifacts = statement
+            .query_map([generation_key("m3")?], |row| {
+                Ok((
+                    (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                    row.get::<_, Vec<u8>>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
         for memory in &mut expected {
             if let Some(artifact) = artifacts.get(&(memory.id.clone(), memory.ciphertext.clone())) {
                 memory.local_artifact = artifact.clone();
@@ -296,8 +395,19 @@ mod copy_tests {
         assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
         drop(statement);
         assert_eq!(all.len(), 4);
-        assert_eq!(all.iter().find(|m| m.id == "duplicate").ok_or_else(|| anyhow::anyhow!("duplicate fixture missing"))?.local_artifact, one.local_artifact);
-        assert!(all.iter().find(|m| m.id == "missing").ok_or_else(|| anyhow::anyhow!("missing fixture absent"))?.local_artifact.is_empty());
+        assert_eq!(
+            all.iter()
+                .find(|m| m.id == "duplicate")
+                .ok_or_else(|| anyhow::anyhow!("duplicate fixture missing"))?
+                .local_artifact,
+            one.local_artifact
+        );
+        assert!(all
+            .iter()
+            .find(|m| m.id == "missing")
+            .ok_or_else(|| anyhow::anyhow!("missing fixture absent"))?
+            .local_artifact
+            .is_empty());
         let mut stale = one.clone();
         stale.ciphertext = "older source".into();
         stale.local_artifact.clear();
@@ -307,14 +417,27 @@ mod copy_tests {
         subset[0].local_artifact.clear();
         store.attach_retrieval_index(&mut subset)?;
         assert_eq!(subset[0].local_artifact, two.local_artifact);
-        store.connection.execute("UPDATE core_artifacts SET model='other-generation' WHERE memory_id='one'", [])?;
-        store.connection.execute("UPDATE memories SET deleted=1 WHERE id='two'", [])?;
+        store.connection.execute(
+            "UPDATE core_artifacts SET model='other-generation' WHERE memory_id='one'",
+            [],
+        )?;
+        store
+            .connection
+            .execute("UPDATE memories SET deleted=1 WHERE id='two'", [])?;
         let all = store.all(true)?;
         assert_eq!(all.len(), 4);
-        assert!(all.iter().filter(|m| m.id != "duplicate").all(|m| m.local_artifact.is_empty()));
+        assert!(all
+            .iter()
+            .filter(|m| m.id != "duplicate")
+            .all(|m| m.local_artifact.is_empty()));
         store.attach_retrieval_index(&mut [])?;
-        store.connection.execute("UPDATE core_artifacts SET artifact='not-a-blob' WHERE memory_id='duplicate'", [])?;
-        assert!(store.attach_retrieval_index(std::slice::from_mut(&mut stale)).is_err());
+        store.connection.execute(
+            "UPDATE core_artifacts SET artifact='not-a-blob' WHERE memory_id='duplicate'",
+            [],
+        )?;
+        assert!(store
+            .attach_retrieval_index(std::slice::from_mut(&mut stale))
+            .is_err());
         assert!(store.all(false).is_err());
         store.connection.execute("DROP TABLE core_artifacts", [])?;
         assert!(store.attach_retrieval_index(&mut subset).is_err());

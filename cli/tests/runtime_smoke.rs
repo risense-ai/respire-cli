@@ -10,8 +10,11 @@ fn bin() -> &'static str {
 fn isolated_command() -> Command {
     let mut command = Command::new(bin());
     for (name, _) in std::env::vars_os() {
-        if name.to_str().is_some_and(|name| name.starts_with("RSRS_")
-            || name.starts_with("ONEMEMORY_") || name.starts_with("RESPIRE_")) {
+        if name.to_str().is_some_and(|name| {
+            name.starts_with("RSRS_")
+                || name.starts_with("ONEMEMORY_")
+                || name.starts_with("RESPIRE_")
+        }) {
             command.env_remove(name);
         }
     }
@@ -25,127 +28,204 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let library = home.path().join(".rsrs");
     std::fs::create_dir(&library)?;
     let config = library.join("client.json");
-    std::fs::write(&config, serde_json::to_vec(&json!({
-        "data_dir":library,"api_base":"https://fixture.invalid","custom":"preserve"
-    }))?)?;
+    std::fs::write(
+        &config,
+        serde_json::to_vec(&json!({
+            "data_dir":library,"api_base":"https://fixture.invalid","custom":"preserve"
+        }))?,
+    )?;
     let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     drop(listener);
     let invoke = |args: &[&str], expected: i32| -> Result<Value, Box<dyn std::error::Error>> {
-        let output = isolated_command().arg("--json").args(args)
-            .env("HOME",home.path()).env("USERPROFILE",home.path())
-            .env("RSRS_DATA_DIR",&library).env("RSRS_RPC_PORT",port.to_string())
-            .env("RSRS_NO_AUTOSYNC","1").env("RSRS_UPDATE_CHECK","0")
+        let output = isolated_command()
+            .arg("--json")
+            .args(args)
+            .env("HOME", home.path())
+            .env("USERPROFILE", home.path())
+            .env("RSRS_DATA_DIR", &library)
+            .env("RSRS_RPC_PORT", port.to_string())
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
-            .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
-            .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
+            .env_remove("RSRS_RPC_URL")
+            .env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART")
+            .env_remove("RSRS_RUNTIME_WORKER")
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
-        let value:Value=serde_json::from_str(stdout.trim())?;
+        let value: Value = serde_json::from_str(stdout.trim())?;
         // Headless systems can join successfully without an available OS keyring.
-        let keyring_warning = expected == 0 && args.first() == Some(&"space") && args.get(1) == Some(&"join")
-            && output.status.code() == Some(2) && value["status"] == "warn" && value["details"]["keyring"] == false;
-        if output.status.code()!=Some(expected) && !keyring_warning {
-            return Err(format!("owned space command {args:?} exited {:?}: {stdout} {}",output.status.code(),String::from_utf8_lossy(&output.stderr)).into());
+        let keyring_warning = expected == 0
+            && args.first() == Some(&"space")
+            && args.get(1) == Some(&"join")
+            && output.status.code() == Some(2)
+            && value["status"] == "warn"
+            && value["details"]["keyring"] == false;
+        if output.status.code() != Some(expected) && !keyring_warning {
+            return Err(format!(
+                "owned space command {args:?} exited {:?}: {stdout} {}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
         }
         Ok(value)
     };
     let health = |profile: &std::path::Path| -> Result<u64, Box<dyn std::error::Error>> {
-        let status:Value=ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
-            .timeout(Duration::from_secs(5)).call()?.into_json()?;
-        if status["data_dir"].as_str().map(std::path::Path::new)!=Some(profile)
-            || status["bin"]!=env!("CARGO_PKG_VERSION") {
+        let status: Value = ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
+            .timeout(Duration::from_secs(5))
+            .call()?
+            .into_json()?;
+        if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
+            || status["bin"] != env!("CARGO_PKG_VERSION")
+        {
             return Err(format!("runtime profile readback failed: {status}").into());
         }
-        status["pid"].as_u64().ok_or_else(|| "runtime PID missing".into())
+        status["pid"]
+            .as_u64()
+            .ok_or_else(|| "runtime PID missing".into())
     };
-    let result=(|| -> Result<(), Box<dyn std::error::Error>> {
-        invoke(&["space","list"],0)?;
-        let original_pid=health(&library)?;
-        let before=std::fs::read(&config)?;
-        for args in [vec!["space","join","BADCODE"],vec!["space","join","--code","BADCODE"]] {
-            let rejected=invoke(&args,2)?;
-            assert_eq!(rejected["summary"]["reason"],"invalid_input");
-            assert_eq!(rejected["details"]["error_type"],"user");
-            assert_eq!(health(&library)?,original_pid, "bad invite must not stop the current runtime");
-            assert_eq!(std::fs::read(&config)?,before);
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        invoke(&["space", "list"], 0)?;
+        let original_pid = health(&library)?;
+        let before = std::fs::read(&config)?;
+        for args in [
+            vec!["space", "join", "BADCODE"],
+            vec!["space", "join", "--code", "BADCODE"],
+        ] {
+            let rejected = invoke(&args, 2)?;
+            assert_eq!(rejected["summary"]["reason"], "invalid_input");
+            assert_eq!(rejected["details"]["error_type"], "user");
+            assert_eq!(
+                health(&library)?,
+                original_pid,
+                "bad invite must not stop the current runtime"
+            );
+            assert_eq!(std::fs::read(&config)?, before);
         }
-        for readonly in [false,true] {
-            let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
-            let name=if readonly {"joined-readonly"} else {"joined-writable"};
-            let user=format!("join-fixture-{}",uuid::Uuid::new_v4());
-            let payload=json!({"space":name,"addr":format!("http://{}",server.server_addr()),"user":user,"token":"synthetic-member-token","super":"synthetic-super","readonly":readonly});
-            let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter().map(|byte|format!("{byte:02x}")).collect::<String>());
-            let worker=std::thread::spawn(move || -> Result<(),String> {
-                let request=server.recv_timeout(Duration::from_secs(20)).map_err(|error|error.to_string())?.ok_or("join never fetched the vault")?;
-                if request.url()!="/api/self/vault" || !request.headers().iter().any(|header|header.field.equiv("Authorization") && header.value.as_str()=="Bearer synthetic-member-token") {
+        for readonly in [false, true] {
+            let server =
+                tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+            let name = if readonly {
+                "joined-readonly"
+            } else {
+                "joined-writable"
+            };
+            let user = format!("join-fixture-{}", uuid::Uuid::new_v4());
+            let payload = json!({"space":name,"addr":format!("http://{}",server.server_addr()),"user":user,"token":"synthetic-member-token","super":"synthetic-super","readonly":readonly});
+            let code = format!(
+                "1mem-invite:{}",
+                serde_json::to_vec(&payload)?
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            );
+            let worker = std::thread::spawn(move || -> Result<(), String> {
+                let request = server
+                    .recv_timeout(Duration::from_secs(20))
+                    .map_err(|error| error.to_string())?
+                    .ok_or("join never fetched the vault")?;
+                if request.url() != "/api/self/vault"
+                    || !request.headers().iter().any(|header| {
+                        header.field.equiv("Authorization")
+                            && header.value.as_str() == "Bearer synthetic-member-token"
+                    })
+                {
                     return Err("join did not authenticate its vault request".into());
                 }
                 request.respond(tiny_http::Response::from_string(json!({"version":4,"kdf_salt":"synthetic-salt","wrapped_urk":"synthetic-wrap","urk_nonce":"synthetic-nonce"}).to_string())).map_err(|error|error.to_string())
             });
-            let joined=invoke(&["space","join",&code],if readonly {2} else {0});
-            let served=worker.join().map_err(|_|"join fixture panicked")?;
+            let joined = invoke(&["space", "join", &code], if readonly { 2 } else { 0 });
+            let served = worker.join().map_err(|_| "join fixture panicked")?;
             respire_app::keystore::delete_super(&user);
-            served.map_err(|error|format!("join server: {error}"))?;
-            let joined=joined?;
-            assert_eq!(joined["status"],if readonly || joined["details"]["keyring"] == false {"warn"} else {"ok"});
-            assert_eq!(joined["details"]["readonly"],readonly);
-            assert_eq!(std::fs::read(&config)?,before);
-            assert_ne!(health(&library)?,original_pid);
-            let target=library.join("accounts").join(name);
-            let session:Value=serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
-            assert_eq!(session["user"],user);
+            served.map_err(|error| format!("join server: {error}"))?;
+            let joined = joined?;
+            assert_eq!(
+                joined["status"],
+                if readonly || joined["details"]["keyring"] == false {
+                    "warn"
+                } else {
+                    "ok"
+                }
+            );
+            assert_eq!(joined["details"]["readonly"], readonly);
+            assert_eq!(std::fs::read(&config)?, before);
+            assert_ne!(health(&library)?, original_pid);
+            let target = library.join("accounts").join(name);
+            let session: Value =
+                serde_json::from_slice(&std::fs::read(target.join("session.json"))?)?;
+            assert_eq!(session["user"], user);
             if readonly {
-                let agent:Value=serde_json::from_slice(&std::fs::read(target.join("agent.json"))?)?;
-                assert_eq!(agent["readonly_team"],true);
+                let agent: Value =
+                    serde_json::from_slice(&std::fs::read(target.join("agent.json"))?)?;
+                assert_eq!(agent["readonly_team"], true);
             }
-            let pid=health(&library)?;
-            invoke(&["space","join","--code",&code],2)?;
-            assert_eq!(health(&library)?,pid,"existing target must fail before stopping the runtime");
+            let pid = health(&library)?;
+            invoke(&["space", "join", "--code", &code], 2)?;
+            assert_eq!(
+                health(&library)?,
+                pid,
+                "existing target must fail before stopping the runtime"
+            );
         }
-        let server=tiny_http::Server::http("127.0.0.1:0").map_err(|error|error.to_string())?;
-        let payload=json!({"space":"rejected-join","addr":format!("http://{}",server.server_addr()),"user":"fixture-rejected","token":"revoked-token","super":"synthetic-super"});
-        let code=format!("1mem-invite:{}",serde_json::to_vec(&payload)?.iter().map(|byte|format!("{byte:02x}")).collect::<String>());
-        let worker=std::thread::spawn(move || -> Result<(),String> {
-            let request=server.recv_timeout(Duration::from_secs(20)).map_err(|error|error.to_string())?.ok_or("rejected join never fetched the vault")?;
-            request.respond(tiny_http::Response::empty(401)).map_err(|error|error.to_string())
+        let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
+        let payload = json!({"space":"rejected-join","addr":format!("http://{}",server.server_addr()),"user":"fixture-rejected","token":"revoked-token","super":"synthetic-super"});
+        let code = format!(
+            "1mem-invite:{}",
+            serde_json::to_vec(&payload)?
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        let worker = std::thread::spawn(move || -> Result<(), String> {
+            let request = server
+                .recv_timeout(Duration::from_secs(20))
+                .map_err(|error| error.to_string())?
+                .ok_or("rejected join never fetched the vault")?;
+            request
+                .respond(tiny_http::Response::empty(401))
+                .map_err(|error| error.to_string())
         });
-        let rejected=invoke(&["space","join",&code],1);
-        worker.join().map_err(|_|"rejected join fixture panicked")?.map_err(|error|format!("join server: {error}"))?;
-        assert_eq!(rejected?["details"]["error_type"],"runtime");
-        assert_eq!(std::fs::read(&config)?,before);
+        let rejected = invoke(&["space", "join", &code], 1);
+        worker
+            .join()
+            .map_err(|_| "rejected join fixture panicked")?
+            .map_err(|error| format!("join server: {error}"))?;
+        assert_eq!(rejected?["details"]["error_type"], "runtime");
+        assert_eq!(std::fs::read(&config)?, before);
         assert!(!library.join("accounts/rejected-join").exists());
         health(&library)?;
-        invoke(&["space","create","probe"],0)?;
-        let probe=library.join("accounts/probe");
+        invoke(&["space", "create", "probe"], 0)?;
+        let probe = library.join("accounts/probe");
         assert!(probe.join("space_owner.json").is_file());
-        assert_ne!(health(&probe)?,original_pid);
-        let before=std::fs::read(&config)?;
-        let blocked=invoke(&["space","remove","probe"],2)?;
-        assert_eq!(blocked["summary"]["reason"],"invalid_input");
-        assert_eq!(std::fs::read(&config)?,before);
-        let blocked=invoke(&["space","remove","probe","--yes"],2)?;
-        assert_eq!(blocked["details"]["error_type"],"user");
+        assert_ne!(health(&probe)?, original_pid);
+        let before = std::fs::read(&config)?;
+        let blocked = invoke(&["space", "remove", "probe"], 2)?;
+        assert_eq!(blocked["summary"]["reason"], "invalid_input");
+        assert_eq!(std::fs::read(&config)?, before);
+        let blocked = invoke(&["space", "remove", "probe", "--yes"], 2)?;
+        assert_eq!(blocked["details"]["error_type"], "user");
         assert!(probe.is_dir());
         health(&probe)?;
-        invoke(&["space","use","main"],0)?;
+        invoke(&["space", "use", "main"], 0)?;
         health(&library)?;
-        let before=std::fs::read(&config)?;
-        invoke(&["space","use","missing"],2)?;
-        assert_eq!(std::fs::read(&config)?,before);
+        let before = std::fs::read(&config)?;
+        invoke(&["space", "use", "missing"], 2)?;
+        assert_eq!(std::fs::read(&config)?, before);
         health(&library)?;
-        invoke(&["space","remove","probe","--yes"],0)?;
+        invoke(&["space", "remove", "probe", "--yes"], 0)?;
         assert!(!probe.exists());
         health(&library)?;
-        let preserved:Value=serde_json::from_slice(&std::fs::read(&config)?)?;
-        assert_eq!(preserved["api_base"],"https://fixture.invalid");
-        assert_eq!(preserved["custom"],"preserve");
+        let preserved: Value = serde_json::from_slice(&std::fs::read(&config)?)?;
+        assert_eq!(preserved["api_base"], "https://fixture.invalid");
+        assert_eq!(preserved["custom"], "preserve");
         Ok(())
     })();
-    let cleanup=invoke(&["--runtime-internal","--stop"],0);
+    let cleanup = invoke(&["--runtime-internal", "--stop"], 0);
     result?;
     cleanup?;
-    assert!(std::net::TcpStream::connect(("127.0.0.1",port)).is_err());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
     Ok(())
 }
 
@@ -153,12 +233,16 @@ fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Outpu
     isolated_command()
         .args(args)
         .env("RSRS_DATA_DIR", dir)
-        .env("HOME", dir).env("USERPROFILE", dir)
+        .env("HOME", dir)
+        .env("USERPROFILE", dir)
         .env("RSRS_RPC_PORT", port.to_string())
-        .env("RSRS_NO_AUTOSYNC", "1").env("RSRS_UPDATE_CHECK", "0")
+        .env("RSRS_NO_AUTOSYNC", "1")
+        .env("RSRS_UPDATE_CHECK", "0")
         .env("RSRS_CORE_TEST_MODE", "1")
-        .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
-        .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
+        .env_remove("RSRS_RPC_URL")
+        .env_remove("RSRS_CLIENT_ONLY")
+        .env_remove("RSRS_NO_AUTOSTART")
+        .env_remove("RSRS_RUNTIME_WORKER")
         .env_remove("RSRS_LANG")
         .output()
 }
@@ -166,7 +250,9 @@ fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Outpu
 #[test]
 fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
     let status = run(dir.path(), port, &["status", "--json"])?;
     let stdout = String::from_utf8(status.stdout)?;
     let stderr = String::from_utf8(status.stderr)?;
@@ -181,15 +267,37 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     // Exercise the actual packaged policy through this test's owned runtime.
     // The preview must preserve an existing user file and must not write it.
     let prompt = run(dir.path(), port, &["--client-only", "prompt", "--json"])?;
-    assert!(prompt.status.success(), "{}", String::from_utf8_lossy(&prompt.stdout));
+    assert!(
+        prompt.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prompt.stdout)
+    );
     let prompt: serde_json::Value = serde_json::from_slice(&prompt.stdout)?;
-    assert_eq!(prompt["summary"]["instructions"], respire_app::inject::INSTRUCTIONS_MD);
+    assert_eq!(
+        prompt["summary"]["instructions"],
+        respire_app::inject::INSTRUCTIONS_MD
+    );
     let codex = dir.path().join(".codex/AGENTS.md");
     std::fs::create_dir_all(codex.parent().unwrap())?;
     let owned = "Synthetic owned Codex instructions\n";
     std::fs::write(&codex, owned)?;
-    let preview = run(dir.path(), port, &["--client-only", "inject", "--id", "codex", "--preview", "--json"])?;
-    assert!(preview.status.success(), "{}", String::from_utf8_lossy(&preview.stdout));
+    let preview = run(
+        dir.path(),
+        port,
+        &[
+            "--client-only",
+            "inject",
+            "--id",
+            "codex",
+            "--preview",
+            "--json",
+        ],
+    )?;
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stdout)
+    );
     let preview: serde_json::Value = serde_json::from_slice(&preview.stdout)?;
     let preview_text = preview.to_string();
     assert!(preview_text.contains("Synthetic owned Codex instructions"));
@@ -211,7 +319,12 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
     let restarted = run(dir.path(), port, &["--json", "restart", "--timeout", "2"])?;
     if !restarted.status.success() {
-        return Err(format!("restart failed: {} {}", String::from_utf8_lossy(&restarted.stdout), String::from_utf8_lossy(&restarted.stderr)).into());
+        return Err(format!(
+            "restart failed: {} {}",
+            String::from_utf8_lossy(&restarted.stdout),
+            String::from_utf8_lossy(&restarted.stderr)
+        )
+        .into());
     }
     let restarted: serde_json::Value = serde_json::from_slice(&restarted.stdout)?;
     assert_eq!(restarted["command"], "restart");
@@ -313,16 +426,24 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                     json!({"salt":worker_authentication_salt.lock().map_err(|error| error.to_string())?.clone()})
                 }
                 "/api/self/password" => {
-                    if !request.headers().iter().any(|header| header.field.equiv("Authorization")
-                        && header.value.as_str() == "Bearer synthetic-grant-token") {
+                    if !request.headers().iter().any(|header| {
+                        header.field.equiv("Authorization")
+                            && header.value.as_str() == "Bearer synthetic-grant-token"
+                    }) {
                         return Err("password namespace update missing authorization".to_owned());
                     }
-                    let value: Value = serde_json::from_reader(request.as_reader()).map_err(|error| error.to_string())?;
+                    let value: Value = serde_json::from_reader(request.as_reader())
+                        .map_err(|error| error.to_string())?;
                     if value["salt"] != current_auth_salt
-                        || value["pass_hash"] != crypto::derive_pass_hash("fixture-password", &current_auth_salt).map_err(|error| error.to_string())? {
+                        || value["pass_hash"]
+                            != crypto::derive_pass_hash("fixture-password", &current_auth_salt)
+                                .map_err(|error| error.to_string())?
+                    {
                         return Err("migration changed the original login password".to_owned());
                     }
-                    *worker_authentication_salt.lock().map_err(|error| error.to_string())? = current_auth_salt.clone();
+                    *worker_authentication_salt
+                        .lock()
+                        .map_err(|error| error.to_string())? = current_auth_salt.clone();
                     json!({"ok":true})
                 }
                 "/oauth/device/code" => {
@@ -370,13 +491,17 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                         status = 503;
                         json!({"error":"synthetic outage after preflight"})
                     } else {
-                        let blobs = worker_blobs.lock().map_err(|error| error.to_string())?.clone();
+                        let blobs = worker_blobs
+                            .lock()
+                            .map_err(|error| error.to_string())?
+                            .clone();
                         let alive = blobs.iter().filter(|blob| blob["deleted"] != true).count();
                         json!({"cursor":blobs.len(),"total":blobs.len(),"alive":alive,"blobs":blobs})
                     }
                 }
                 "/push/batch" => {
-                    let value: Value = serde_json::from_reader(request.as_reader()).map_err(|error| error.to_string())?;
+                    let value: Value = serde_json::from_reader(request.as_reader())
+                        .map_err(|error| error.to_string())?;
                     let items = value["items"].as_array().ok_or("missing push items")?;
                     let mut blobs = worker_blobs.lock().map_err(|error| error.to_string())?;
                     for item in items {
@@ -384,7 +509,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
                         blob["user"] = json!("authorized");
                         if let Some(index) = blobs.iter().position(|old| old["id"] == blob["id"]) {
                             blobs[index] = blob;
-                        } else { blobs.push(blob); }
+                        } else {
+                            blobs.push(blob);
+                        }
                     }
                     json!({"replaced":vec![true;items.len()]})
                 }
@@ -406,7 +533,13 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .env("RSRS_DATA_DIR", &root)
             .env("RSRS_ADDR", "http://environment.invalid")
             .env("RSRS_RPC_PORT", runtime_port.to_string())
-            .env("RSRS_SUPER", args.windows(2).find(|pair| pair[0] == "--super").map(|pair| pair[1]).unwrap_or(&super_password))
+            .env(
+                "RSRS_SUPER",
+                args.windows(2)
+                    .find(|pair| pair[0] == "--super")
+                    .map(|pair| pair[1])
+                    .unwrap_or(&super_password),
+            )
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
@@ -422,34 +555,84 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         std::fs::write(original.join("session.json"), stale_session)?;
         for args in [
             vec!["--json", "login", "--oauth", "--no-open"],
-            vec!["--json", "login", "--interactive", "--user", "fixture", "--pass", "fixture-password"],
-            vec!["--json", "login", "--oauth", "--addr", "http://explicit.invalid", "--no-open"],
-            vec!["--json", "login", "--oauth", "--addr", &addr, "--dashboard", "http://name:fixture-secret@dashboard.invalid/?fixture-secret", "--no-open"],
+            vec![
+                "--json",
+                "login",
+                "--interactive",
+                "--user",
+                "fixture",
+                "--pass",
+                "fixture-password",
+            ],
+            vec![
+                "--json",
+                "login",
+                "--oauth",
+                "--addr",
+                "http://explicit.invalid",
+                "--no-open",
+            ],
+            vec![
+                "--json",
+                "login",
+                "--oauth",
+                "--addr",
+                &addr,
+                "--dashboard",
+                "http://name:fixture-secret@dashboard.invalid/?fixture-secret",
+                "--no-open",
+            ],
         ] {
             let output = execute(&args)?;
             assert_eq!(output.status.code(), Some(1));
             let reply: Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(reply["summary"]["reason"], "runtime_error");
             let text = reply.to_string();
-            assert!(text.contains("login requires HTTPS, except loopback fixtures"), "{text}");
-            let source = if args.contains(&"--dashboard") { "OAuth dashboard from --dashboard" }
-                else if args.contains(&"--addr") { "login server from --addr" }
-                else { "stored session.json addr" };
+            assert!(
+                text.contains("login requires HTTPS, except loopback fixtures"),
+                "{text}"
+            );
+            let source = if args.contains(&"--dashboard") {
+                "OAuth dashboard from --dashboard"
+            } else if args.contains(&"--addr") {
+                "login server from --addr"
+            } else {
+                "stored session.json addr"
+            };
             assert!(text.contains(source), "{text}");
             assert!(!text.contains("fixture-secret"), "{text}");
-            assert!(requests.lock().map_err(|error| error.to_string())?.is_empty());
+            assert!(requests
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_empty());
             assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
             assert_eq!(std::fs::read(original.join("session.json"))?, stale_session);
         }
-        for stored in [json!({"user":"original"}), json!({"user":"original","addr":""}), json!({"user":"original","addr":" \t"}), json!({"user":"original","addr":"https://self-hosted.invalid"})] {
+        for stored in [
+            json!({"user":"original"}),
+            json!({"user":"original","addr":""}),
+            json!({"user":"original","addr":" \t"}),
+            json!({"user":"original","addr":"https://self-hosted.invalid"}),
+        ] {
             let bytes = serde_json::to_vec(&stored)?;
             std::fs::write(original.join("session.json"), &bytes)?;
             // Dashboard validation stops before networking, proving login origin
             // resolution succeeded without contacting the official/custom server.
-            let output = execute(&["--json", "login", "--oauth", "--dashboard", "http://dashboard.invalid", "--no-open"])?;
+            let output = execute(&[
+                "--json",
+                "login",
+                "--oauth",
+                "--dashboard",
+                "http://dashboard.invalid",
+                "--no-open",
+            ])?;
             assert_eq!(output.status.code(), Some(1));
-            assert!(String::from_utf8_lossy(&output.stdout).contains("OAuth dashboard from --dashboard"));
-            assert!(requests.lock().map_err(|error| error.to_string())?.is_empty());
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .contains("OAuth dashboard from --dashboard"));
+            assert!(requests
+                .lock()
+                .map_err(|error| error.to_string())?
+                .is_empty());
             assert_eq!(std::fs::read(original.join("session.json"))?, bytes);
             assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
         }
@@ -457,19 +640,45 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         // An explicit loopback origin can override a stale server without changing
         // the account when authorization is denied. Other address settings are ignored.
         *mode.lock().map_err(|error| error.to_string())? = "access_denied".to_owned();
-        let output = execute(&["--json", "login", "--oauth", "--addr", &addr, "--dashboard", &addr, "--no-open"])?;
+        let output = execute(&[
+            "--json",
+            "login",
+            "--oauth",
+            "--addr",
+            &addr,
+            "--dashboard",
+            &addr,
+            "--no-open",
+        ])?;
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied"));
-        assert_eq!(*requests.lock().map_err(|error| error.to_string())?, vec!["/oauth/device/code", "/oauth/token"]);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied")
+        );
+        assert_eq!(
+            *requests.lock().map_err(|error| error.to_string())?,
+            vec!["/oauth/device/code", "/oauth/token"]
+        );
         assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
         assert_eq!(std::fs::read(original.join("session.json"))?, stale_session);
         // The stored loopback fixture also works without --addr.
         let loopback_session = serde_json::to_vec(&json!({"user":"original", "addr":addr}))?;
         std::fs::write(original.join("session.json"), &loopback_session)?;
-        let output = execute(&["--json", "login", "--oauth", "--dashboard", &addr, "--no-open"])?;
+        let output = execute(&[
+            "--json",
+            "login",
+            "--oauth",
+            "--dashboard",
+            &addr,
+            "--no-open",
+        ])?;
         assert_eq!(output.status.code(), Some(1));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied"));
-        assert_eq!(std::fs::read(original.join("session.json"))?, loopback_session);
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("browser authorization was denied")
+        );
+        assert_eq!(
+            std::fs::read(original.join("session.json"))?,
+            loopback_session
+        );
         assert_eq!(std::fs::read(root.join("client.json"))?, config_bytes);
         std::fs::write(original.join("session.json"), session_bytes)?;
         for reply in [
@@ -596,98 +805,241 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         }
 
         // Seed an encrypted cloud-only record, absent from this target's local store.
-        assert!(execute(&["--json", "remember", "Synthetic cloud peer body", "--title", "Cloud peer",
-            "--importance", "important", "--force"])?.status.success());
+        assert!(execute(&[
+            "--json",
+            "remember",
+            "Synthetic cloud peer body",
+            "--title",
+            "Cloud peer",
+            "--importance",
+            "important",
+            "--force"
+        ])?
+        .status
+        .success());
         let peer_store = LocalStore::open(&target.join("rsrs.db"))?;
         let peers = peer_store.all(false)?;
         let peer = peers.first().ok_or("cloud fixture row missing")?;
-        remote_blobs.lock().map_err(|error| error.to_string())?.push(serde_json::to_value(peer)?);
+        remote_blobs
+            .lock()
+            .map_err(|error| error.to_string())?
+            .push(serde_json::to_value(peer)?);
         drop(peer_store);
         assert!(execute(&["--runtime-internal", "--stop"])?.status.success());
         for name in ["rsrs.db", "rsrs.db-wal", "rsrs.db-shm"] {
             let path = target.join(name);
-            if path.is_file() { std::fs::remove_file(path)?; }
+            if path.is_file() {
+                std::fs::remove_file(path)?;
+            }
         }
 
         // A different server's source uses another URK, even with the same recovery code.
         let source_urk = [43_u8; 32];
         let source_salt = crypto::random_hex(16);
         let (source_nonce, source_wrap) = crypto::wrap_key(
-            &source_urk, &crypto::derive_kek_v4(&super_password, &source_salt)?)?;
-        let source_session = serde_json::to_vec(&json!({"user":"original","addr":"https://previous.invalid",
-            "vault_version":4,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}))?;
+            &source_urk,
+            &crypto::derive_kek_v4(&super_password, &source_salt)?,
+        )?;
+        let source_session = serde_json::to_vec(
+            &json!({"user":"original","addr":"https://previous.invalid",
+            "vault_version":4,"kdf_salt":source_salt,"wrapped_urk":source_wrap,"urk_nonce":source_nonce}),
+        )?;
         std::fs::write(original.join("session.json"), &source_session)?;
         let selected = execute(&["--json", "account", "use", "original"])?;
-        assert!(selected.status.success(), "{}", String::from_utf8_lossy(&selected.stdout));
-        let created = execute(&["--json", "remember", "Synthetic cross-server transfer body",
-            "--title", "Transfer fixture", "--importance", "important", "--force"])?;
-        assert!(created.status.success(), "{}", String::from_utf8_lossy(&created.stdout));
-        assert!(execute(&["--json", "remember", "Synthetic cloud peer body", "--title", "Source peer",
-            "--importance", "important", "--force"])?.status.success());
-        let transfer = ["--json", "login", "--oauth", "--addr", &addr, "--dashboard", &addr,
-            "--no-open", "--super", &super_password, "--migrate-local"];
+        assert!(
+            selected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&selected.stdout)
+        );
+        let created = execute(&[
+            "--json",
+            "remember",
+            "Synthetic cross-server transfer body",
+            "--title",
+            "Transfer fixture",
+            "--importance",
+            "important",
+            "--force",
+        ])?;
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stdout)
+        );
+        assert!(execute(&[
+            "--json",
+            "remember",
+            "Synthetic cloud peer body",
+            "--title",
+            "Source peer",
+            "--importance",
+            "important",
+            "--force"
+        ])?
+        .status
+        .success());
+        let transfer = [
+            "--json",
+            "login",
+            "--oauth",
+            "--addr",
+            &addr,
+            "--dashboard",
+            &addr,
+            "--no-open",
+            "--super",
+            &super_password,
+            "--migrate-local",
+        ];
         let source_config = std::fs::read(root.join("client.json"))?;
         *mode.lock().map_err(|error| error.to_string())? = "sync_unavailable".to_owned();
         let rejected = execute(&transfer)?;
         assert_eq!(rejected.status.code(), Some(1));
         assert!(String::from_utf8_lossy(&rejected.stdout).contains("before copying"));
         assert_eq!(std::fs::read(root.join("client.json"))?, source_config);
-        assert_eq!(std::fs::read(original.join("session.json"))?, source_session);
+        assert_eq!(
+            std::fs::read(original.join("session.json"))?,
+            source_session
+        );
         *mode.lock().map_err(|error| error.to_string())? = "authorized".to_owned();
         let copied = execute(&transfer)?;
-        assert_eq!(copied.status.code(), Some(2), "{} {}", String::from_utf8_lossy(&copied.stdout), String::from_utf8_lossy(&copied.stderr));
+        assert_eq!(
+            copied.status.code(),
+            Some(2),
+            "{} {}",
+            String::from_utf8_lossy(&copied.stdout),
+            String::from_utf8_lossy(&copied.stderr)
+        );
         let copied: Value = serde_json::from_slice(&copied.stdout)?;
         assert_eq!(copied["status"], "warn");
         assert_eq!(copied["summary"]["import"]["imported"], 1, "{copied}");
-        assert_eq!(copied["summary"]["import"]["duplicates"], 1, "cloud-only duplicate was not pulled before import");
+        assert_eq!(
+            copied["summary"]["import"]["duplicates"], 1,
+            "cloud-only duplicate was not pulled before import"
+        );
         assert_eq!(copied["summary"]["sync"]["status"], "fail");
         let db = LocalStore::open(&target.join("rsrs.db"))?;
         let rows = db.all(false)?;
         assert_eq!(rows.len(), 2);
         let cloud_snapshot = cloud.lock().map_err(|error| error.to_string())?.clone();
-        let keys = SessionKeys::unlock_v4(&super_password,
-            cloud_snapshot["kdf_salt"].as_str().ok_or("missing cloud salt")?,
-            cloud_snapshot["wrapped_urk"].as_str().ok_or("missing cloud wrap")?,
-            cloud_snapshot["urk_nonce"].as_str().ok_or("missing cloud nonce")?)?;
-        let entries = rows.iter().map(|row| respire_app::memory::MemoryEngine::open(&keys, row)).collect::<Result<Vec<_>, _>>()?;
-        assert!(entries.iter().any(|entry| entry.content == "Synthetic cross-server transfer body"));
-        assert!(entries.iter().any(|entry| entry.id == peer.id && entry.content == "Synthetic cloud peer body"));
+        let keys = SessionKeys::unlock_v4(
+            &super_password,
+            cloud_snapshot["kdf_salt"]
+                .as_str()
+                .ok_or("missing cloud salt")?,
+            cloud_snapshot["wrapped_urk"]
+                .as_str()
+                .ok_or("missing cloud wrap")?,
+            cloud_snapshot["urk_nonce"]
+                .as_str()
+                .ok_or("missing cloud nonce")?,
+        )?;
+        let entries = rows
+            .iter()
+            .map(|row| respire_app::memory::MemoryEngine::open(&keys, row))
+            .collect::<Result<Vec<_>, _>>()?;
+        assert!(entries
+            .iter()
+            .any(|entry| entry.content == "Synthetic cross-server transfer body"));
+        assert!(entries
+            .iter()
+            .any(|entry| entry.id == peer.id && entry.content == "Synthetic cloud peer body"));
         drop(db);
-        assert!(execute(&["--json", "account", "use", "original"])?.status.success());
+        assert!(execute(&["--json", "account", "use", "original"])?
+            .status
+            .success());
         let retry = execute(&transfer)?;
-        assert!(retry.status.success(), "{}", String::from_utf8_lossy(&retry.stdout));
+        assert!(
+            retry.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retry.stdout)
+        );
         let retry: Value = serde_json::from_slice(&retry.stdout)?;
         assert_eq!(retry["summary"]["import"]["imported"], 0, "{retry}");
         assert_eq!(retry["summary"]["import"]["duplicates"], 2);
-        assert_eq!(remote_blobs.lock().map_err(|error| error.to_string())?.len(), 2);
-        assert_eq!(std::fs::read(original.join("session.json"))?, source_session);
+        assert_eq!(
+            remote_blobs
+                .lock()
+                .map_err(|error| error.to_string())?
+                .len(),
+            2
+        );
+        assert_eq!(
+            std::fs::read(original.join("session.json"))?,
+            source_session
+        );
         let retained_session = std::fs::read(target.join("session.json"))?;
         let retained_config = std::fs::read(root.join("client.json"))?;
         let mismatch_salt = crypto::random_hex(16);
         let (mismatch_nonce, mismatch_wrap) = crypto::wrap_key(
-            &[44_u8; 32], &crypto::derive_kek_v4(&super_password, &mismatch_salt)?)?;
-        *cloud.lock().map_err(|error| error.to_string())? =
-            json!({"version":4,"kdf_salt":mismatch_salt,"wrapped_urk":mismatch_wrap,"urk_nonce":mismatch_nonce});
-        let rejected = execute(&["--json", "login", "--oauth", "--addr", &addr, "--dashboard", &addr,
-            "--no-open", "--super", &super_password])?;
-        assert_eq!(rejected.status.code(), Some(1), "same-identity key mismatch was accepted");
+            &[44_u8; 32],
+            &crypto::derive_kek_v4(&super_password, &mismatch_salt)?,
+        )?;
+        *cloud.lock().map_err(|error| error.to_string())? = json!({"version":4,"kdf_salt":mismatch_salt,"wrapped_urk":mismatch_wrap,"urk_nonce":mismatch_nonce});
+        let rejected = execute(&[
+            "--json",
+            "login",
+            "--oauth",
+            "--addr",
+            &addr,
+            "--dashboard",
+            &addr,
+            "--no-open",
+            "--super",
+            &super_password,
+        ])?;
+        assert_eq!(
+            rejected.status.code(),
+            Some(1),
+            "same-identity key mismatch was accepted"
+        );
         assert!(String::from_utf8_lossy(&rejected.stdout).contains("different key material"));
-        assert_eq!(std::fs::read(target.join("session.json"))?, retained_session);
+        assert_eq!(
+            std::fs::read(target.join("session.json"))?,
+            retained_session
+        );
         assert_eq!(std::fs::read(root.join("client.json"))?, retained_config);
         *cloud.lock().map_err(|error| error.to_string())? = cloud_snapshot;
         assert!(execute(&["--json", "logout", "--full"])?.status.success());
         assert!(!target.join("session.json").exists());
-        let recovered = execute(&["--json", "login", "--oauth", "--addr", &addr, "--dashboard", &addr,
-            "--no-open", "--super", &super_password])?;
-        assert!(recovered.status.success(), "{}", String::from_utf8_lossy(&recovered.stdout));
+        let recovered = execute(&[
+            "--json",
+            "login",
+            "--oauth",
+            "--addr",
+            &addr,
+            "--dashboard",
+            &addr,
+            "--no-open",
+            "--super",
+            &super_password,
+        ])?;
+        assert!(
+            recovered.status.success(),
+            "{}",
+            String::from_utf8_lossy(&recovered.stdout)
+        );
         let recovered: Value = serde_json::from_slice(&recovered.stdout)?;
-        assert_eq!(recovered["summary"]["dir"].as_str(), target.to_str(), "full logout selected a fresh library");
+        assert_eq!(
+            recovered["summary"]["dir"].as_str(),
+            target.to_str(),
+            "full logout selected a fresh library"
+        );
         for row in &rows {
             let read = execute(&["--json", "show", &row.id])?;
-            assert!(read.status.success(), "full logout lost local record: {}", String::from_utf8_lossy(&read.stdout));
+            assert!(
+                read.status.success(),
+                "full logout lost local record: {}",
+                String::from_utf8_lossy(&read.stdout)
+            );
         }
-        for row in &rows { assert!(execute(&["--json", "purge", &row.id])?.status.success()); }
-        remote_blobs.lock().map_err(|error| error.to_string())?.clear();
+        for row in &rows {
+            assert!(execute(&["--json", "purge", &row.id])?.status.success());
+        }
+        remote_blobs
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clear();
         assert!(execute(&["--runtime-internal", "--stop"])?.status.success());
         std::fs::write(original.join("session.json"), session_bytes)?;
 
@@ -699,8 +1051,16 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         std::fs::write(target.join("session.json"), serde_json::to_vec(&legacy)?)?;
         *cloud.lock().map_err(|error| error.to_string())? =
             json!({"version":2,"kdf_salt":salt,"wrapped_urk":wrapped,"urk_nonce":nonce});
-        let incomplete = execute(&["migrate", "--vault", "--pass=fixture-password", "--super", legacy_super])?;
-        if incomplete.status.success() || std::fs::read(target.join("session.json"))? != serde_json::to_vec(&legacy)? {
+        let incomplete = execute(&[
+            "migrate",
+            "--vault",
+            "--pass=fixture-password",
+            "--super",
+            legacy_super,
+        ])?;
+        if incomplete.status.success()
+            || std::fs::read(target.join("session.json"))? != serde_json::to_vec(&legacy)?
+        {
             return Err("vault-only operation bypassed full library migration".into());
         }
         // The real public library conversion is covered by migration_readiness_tests.
@@ -733,7 +1093,12 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             current["wrapped_urk"].as_str().ok_or("wrap missing")?,
             current["urk_nonce"].as_str().ok_or("nonce missing")?,
         )?;
-        if current["version"] != 2 || keys.urk != urk || !current["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX)) {
+        if current["version"] != 2
+            || keys.urk != urk
+            || !current["wrapped_urk"]
+                .as_str()
+                .is_some_and(|value| value.starts_with(crypto::RSRS_PREFIX))
+        {
             return Err("migration replaced the existing memory key".into());
         }
         let stopped = execute(&["--runtime-internal", "--stop"])?;
@@ -805,7 +1170,9 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
 #[test]
 fn no_command_without_tty_exits_2() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
     let output = run(dir.path(), port, &[])?;
     if output.status.code() != Some(2) {
         return Err(format!(
@@ -819,36 +1186,56 @@ fn no_command_without_tty_exits_2() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
-fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Result<(), Box<dyn std::error::Error>> {
+fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
+) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     let dir = tempfile::tempdir()?;
-    let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")?
+        .local_addr()?
+        .port();
     let server = tiny_http::Server::http("127.0.0.1:0").map_err(|error| error.to_string())?;
     let addr = format!("http://{}", server.server_addr());
     let worker = std::thread::spawn(move || -> Result<(), String> {
         for _ in 0..2 {
             // The json run waits for the runtime the human run autostarted; a
             // coverage-instrumented binary can need well over 30s to be ready.
-            let request = server.recv_timeout(Duration::from_secs(120)).map_err(|error| error.to_string())?.ok_or("doctor never probed the server")?;
-            if request.url() != "/health" { return Err("unexpected doctor request".into()); }
+            let request = server
+                .recv_timeout(Duration::from_secs(120))
+                .map_err(|error| error.to_string())?
+                .ok_or("doctor never probed the server")?;
+            if request.url() != "/health" {
+                return Err("unexpected doctor request".into());
+            }
             std::thread::sleep(Duration::from_millis(1500));
-            request.respond(tiny_http::Response::from_string("{}")) .map_err(|error| error.to_string())?;
+            request
+                .respond(tiny_http::Response::from_string("{}"))
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     });
     let command = |json: bool| {
         let mut command = isolated_command();
         command.args(["doctor", "--remote"]);
-        if json { command.arg("--json"); }
-        command.env("HOME", dir.path()).env("USERPROFILE", dir.path())
-            .env("RSRS_DATA_DIR", dir.path()).env("RSRS_RPC_PORT", port.to_string())
-            .env("RSRS_ADDR", &addr).env("RSRS_LANG", "en")
+        if json {
+            command.arg("--json");
+        }
+        command
+            .env("HOME", dir.path())
+            .env("USERPROFILE", dir.path())
+            .env("RSRS_DATA_DIR", dir.path())
+            .env("RSRS_RPC_PORT", port.to_string())
+            .env("RSRS_ADDR", &addr)
+            .env("RSRS_LANG", "en")
             .env("RSRS_TOKEN", "synthetic-probe-token")
-            .env("RSRS_NO_AUTOSYNC", "1").env("RSRS_UPDATE_CHECK", "0")
-            .env_remove("RSRS_RPC_URL").env_remove("RSRS_CLIENT_ONLY")
-            .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RUNTIME_WORKER")
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+            .env("RSRS_NO_AUTOSYNC", "1")
+            .env("RSRS_UPDATE_CHECK", "0")
+            .env_remove("RSRS_RPC_URL")
+            .env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART")
+            .env_remove("RSRS_RUNTIME_WORKER")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         command
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -857,7 +1244,9 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Resu
         let (sender, receiver) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
-                if sender.send(line).is_err() { break; }
+                if sender.send(line).is_err() {
+                    break;
+                }
             }
         });
         let mut saw_wait = false;
@@ -865,9 +1254,15 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Resu
         while let Ok(line) = receiver.recv_timeout(Duration::from_secs(60)) {
             let line = line?;
             phases.push(line.clone());
-            assert!(!line.contains('\u{1b}'), "redirected progress must be plain text");
+            assert!(
+                !line.contains('\u{1b}'),
+                "redirected progress must be plain text"
+            );
             if line.contains("Checking server connection; waiting for response") {
-                assert!(child.try_wait()?.is_none(), "progress arrived only after completion");
+                assert!(
+                    child.try_wait()?.is_none(),
+                    "progress arrived only after completion"
+                );
                 saw_wait = true;
                 break;
             }
@@ -875,13 +1270,21 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet() -> Resu
         let human = child.wait_with_output()?;
         reader.join().map_err(|_| "progress reader panicked")?;
         if !saw_wait {
-            return Err(format!("doctor never reported its real server wait; phases={phases:?}; stdout={}", String::from_utf8_lossy(&human.stdout)).into());
+            return Err(format!(
+                "doctor never reported its real server wait; phases={phases:?}; stdout={}",
+                String::from_utf8_lossy(&human.stdout)
+            )
+            .into());
         }
         assert!(String::from_utf8(human.stdout)?.contains("STATUS"));
         let json = command(true).output()?;
         let envelope: serde_json::Value = serde_json::from_slice(&json.stdout)?;
         assert_eq!(envelope["command"], "doctor");
-        assert!(json.stderr.is_empty(), "JSON emitted human progress: {}", String::from_utf8_lossy(&json.stderr));
+        assert!(
+            json.stderr.is_empty(),
+            "JSON emitted human progress: {}",
+            String::from_utf8_lossy(&json.stderr)
+        );
         Ok(())
     })();
     let cleanup = run(dir.path(), port, &["--runtime-internal", "--stop"]);

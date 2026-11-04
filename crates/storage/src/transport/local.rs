@@ -19,11 +19,11 @@ use crate::memory::model::StoredMemory;
 mod feedback;
 pub use feedback::FeedbackCounts;
 mod witness;
-pub use witness::{WitnessReport,witness_checkpoint_file,register_witness_functions};
+pub use witness::{register_witness_functions, witness_checkpoint_file, WitnessReport};
 mod conflicts;
 mod grants;
-mod retrieval;
 mod resident;
+mod retrieval;
 pub use resident::MemorySourceChanged;
 mod related;
 mod revision;
@@ -41,7 +41,7 @@ pub use sync::SyncVersionNotFound;
 /// good/bad=model self-grade (main post-train signal: useful / misleading).
 #[derive(serde::Serialize)]
 pub struct QueryLogRow {
-    pub request_id:Option<String>,
+    pub request_id: Option<String>,
     pub id: i64,
     pub ts: String,
     pub query: String,
@@ -87,11 +87,18 @@ pub struct LocalStore {
     connection: Connection,
 }
 
-fn json_column<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>, column: usize) -> rusqlite::Result<T> {
+fn json_column<T: serde::de::DeserializeOwned>(
+    row: &rusqlite::Row<'_>,
+    column: usize,
+) -> rusqlite::Result<T> {
     let text: String = row.get(column)?;
-    serde_json::from_str(&text).map_err(|error| rusqlite::Error::FromSqlConversionFailure(
-        column, rusqlite::types::Type::Text, Box::new(error),
-    ))
+    serde_json::from_str(&text).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            column,
+            rusqlite::types::Type::Text,
+            Box::new(error),
+        )
+    })
 }
 
 /// A local safety gate only; projections and history do not authenticate ciphertext.
@@ -154,7 +161,10 @@ impl LocalStore {
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
         .with_context(|| {
-            format!("failed to open initialized local memory db: {}", path.display())
+            format!(
+                "failed to open initialized local memory db: {}",
+                path.display()
+            )
         })?;
         witness::register_witness_functions(&connection)?;
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
@@ -172,7 +182,8 @@ impl LocalStore {
         let connection = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ).with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
+        )
+        .with_context(|| format!("failed to open read-only memory db: {}", path.display()))?;
         connection.busy_timeout(std::time::Duration::from_secs(30))?;
         witness::register_witness_functions(&connection)?;
         Ok(Self { connection })
@@ -187,20 +198,48 @@ impl LocalStore {
     /// source/import stamp. Keep the guard and write under the same write lock.
     /// Sync and ordinary user writes retain their existing LWW policy.
     pub fn put_session_import(&self, memory: &StoredMemory) -> Result<bool> {
-        let immediate = self.connection.is_autocommit().then(||
-            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+        let immediate = self
+            .connection
+            .is_autocommit()
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    &self.connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
         let protected: bool = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM memories WHERE id=?1 AND (dirty=1 OR deleted=1))",
-            params![memory.id], |row| row.get(0),
+            params![memory.id],
+            |row| row.get(0),
         )?;
-        let wrote = if protected { false } else { self.put_inner(memory, true)? };
-        if let Some(immediate) = immediate { immediate.commit()?; }
+        let wrote = if protected {
+            false
+        } else {
+            self.put_inner(memory, true)?
+        };
+        if let Some(immediate) = immediate {
+            immediate.commit()?;
+        }
         Ok(wrote)
     }
 
-    fn put_inner_policy(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
-        let immediate = self.connection.is_autocommit().then(||
-            rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)).transpose()?;
+    fn put_inner_policy(
+        &self,
+        memory: &StoredMemory,
+        dirty: bool,
+        authoritative: bool,
+    ) -> Result<bool> {
+        let immediate = self
+            .connection
+            .is_autocommit()
+            .then(|| {
+                rusqlite::Transaction::new_unchecked(
+                    &self.connection,
+                    rusqlite::TransactionBehavior::Immediate,
+                )
+            })
+            .transpose()?;
         self.connection
             .execute_batch("SAVEPOINT memory_with_chunks")?;
         let result = self.put_memory_and_chunks(memory, dirty, authoritative);
@@ -210,11 +249,20 @@ impl LocalStore {
         }
         self.connection
             .execute_batch("RELEASE memory_with_chunks")?;
-        if result.is_ok() { if let Some(immediate) = immediate { immediate.commit()?; } }
+        if result.is_ok() {
+            if let Some(immediate) = immediate {
+                immediate.commit()?;
+            }
+        }
         result
     }
 
-    fn put_memory_and_chunks(&self, memory: &StoredMemory, dirty: bool, authoritative: bool) -> Result<bool> {
+    fn put_memory_and_chunks(
+        &self,
+        memory: &StoredMemory,
+        dirty: bool,
+        authoritative: bool,
+    ) -> Result<bool> {
         // last-write-wins: same id and existing updated_at is newer → drop this write;
         // a tie (same updated_at) and local dirty=1 → also refuse — unpushed local edits (attach/delete) must not be overwritten by a sync loop
         // (hit 2026-09-08: after batch attach, sync reconcile pulled a same-stamp remote and wiped the unpushed attach).
@@ -234,10 +282,15 @@ impl LocalStore {
         }
         // Preserve legacy derived bytes only for an unchanged encrypted source.
         // New writers never provide or persist raw Core features.
-        let emb_blob = self.connection.query_row(
-            "SELECT embedding FROM memories WHERE id=?1 AND ciphertext=?2",
-            params![memory.id, memory.ciphertext], |row| row.get::<_, Option<Vec<u8>>>(0),
-        ).optional()?.flatten();
+        let emb_blob = self
+            .connection
+            .query_row(
+                "SELECT embedding FROM memories WHERE id=?1 AND ciphertext=?2",
+                params![memory.id, memory.ciphertext],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .optional()?
+            .flatten();
         memory.local_meta.validate()?;
         self.connection.execute(
             "INSERT INTO memories
@@ -296,7 +349,10 @@ impl LocalStore {
 
     /// Import already-sealed new rows: the whole batch commits or rolls back, so a partial backup cannot remain.
     pub fn import_batch(&self, memories: &[StoredMemory]) -> Result<()> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         for memory in memories {
             if !self.put_inner(memory, true)? {
                 anyhow::bail!("import conflict: {}", memory.id);
@@ -308,7 +364,10 @@ impl LocalStore {
 
     /// Keep a compound local edit atomic, including any reads used to plan it.
     pub fn write_transaction<T>(&self, edit: impl FnOnce() -> Result<T>) -> Result<T> {
-        let transaction = rusqlite::Transaction::new_unchecked(&self.connection, rusqlite::TransactionBehavior::Immediate)?;
+        let transaction = rusqlite::Transaction::new_unchecked(
+            &self.connection,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let result = edit()?;
         transaction.commit()?;
         Ok(result)
@@ -577,29 +636,48 @@ impl LocalStore {
     /// Returns ids that matched no candidate (caller warns).
     pub fn mark_verdict(&self, ids: &[String], good: bool) -> Result<Vec<String>> {
         let cutoff = chrono::Utc::now().timestamp() - 600;
-        let rows:Vec<(i64,String)>= {
-            let mut statement=self.connection.prepare("SELECT id,candidates FROM query_log WHERE ts_unix>=?1 ORDER BY id DESC LIMIT 20")?;
-            let rows=statement.query_map([cutoff],|row|Ok((row.get(0)?,row.get(1)?)))?;
+        let rows: Vec<(i64, String)> = {
+            let mut statement = self.connection.prepare(
+                "SELECT id,candidates FROM query_log WHERE ts_unix>=?1 ORDER BY id DESC LIMIT 20",
+            )?;
+            let rows = statement.query_map([cutoff], |row| Ok((row.get(0)?, row.get(1)?)))?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
         };
-        let mut unmatched=ids.to_vec();
-        for (row_id,encoded) in rows {
-            if unmatched.is_empty(){break;}
-            let candidates:Vec<String>=serde_json::from_str(&encoded)?;
-            let mut resolved=Vec::new();
-            unmatched.retain(|prefix|{
-                if let Some(id)=candidates.iter().find(|id|*id==prefix||id.starts_with(prefix.as_str())) {
-                    resolved.push(id.clone());false
-                }else{true}
+        let mut unmatched = ids.to_vec();
+        for (row_id, encoded) in rows {
+            if unmatched.is_empty() {
+                break;
+            }
+            let candidates: Vec<String> = serde_json::from_str(&encoded)?;
+            let mut resolved = Vec::new();
+            unmatched.retain(|prefix| {
+                if let Some(id) = candidates
+                    .iter()
+                    .find(|id| *id == prefix || id.starts_with(prefix.as_str()))
+                {
+                    resolved.push(id.clone());
+                    false
+                } else {
+                    true
+                }
             });
-            if resolved.is_empty(){continue;}
+            if resolved.is_empty() {
+                continue;
+            }
             // Legacy selection stays compatible while disabled, but every
             // accepted mark uses the same attributed event/mirror authority.
             // Assign old rows an identity; concurrent assignments retain the
             // first committed UUID rather than fabricating a second request.
-            self.connection.execute("UPDATE query_log SET request_id=COALESCE(request_id,?2) WHERE id=?1",params![row_id,uuid::Uuid::new_v4().to_string()])?;
-            let request_id:String=self.connection.query_row("SELECT request_id FROM query_log WHERE id=?1",[row_id],|row|row.get(0))?;
-            self.mark_query_feedback(&request_id,&resolved,good,"model")?;
+            self.connection.execute(
+                "UPDATE query_log SET request_id=COALESCE(request_id,?2) WHERE id=?1",
+                params![row_id, uuid::Uuid::new_v4().to_string()],
+            )?;
+            let request_id: String = self.connection.query_row(
+                "SELECT request_id FROM query_log WHERE id=?1",
+                [row_id],
+                |row| row.get(0),
+            )?;
+            self.mark_query_feedback(&request_id, &resolved, good, "model")?;
         }
         Ok(unmatched)
     }
@@ -651,7 +729,7 @@ impl LocalStore {
         )?;
         let it = stmt.query_map(params![limit as i64], |r| {
             Ok(QueryLogRow {
-                request_id:r.get(9)?,
+                request_id: r.get(9)?,
                 id: r.get(0)?,
                 ts: r.get(1)?,
                 query: r.get(2)?,
@@ -725,12 +803,7 @@ impl LocalStore {
         );
         self.connection.execute(
             "INSERT INTO skill_runs (skill_id, status, note, ts_unix) VALUES (?1,?2,?3,?4)",
-            params![
-                skill_id,
-                status,
-                note,
-                chrono::Utc::now().timestamp()
-            ],
+            params![skill_id, status, note, chrono::Utc::now().timestamp()],
         )?;
         Ok(())
     }
@@ -781,9 +854,9 @@ impl LocalStore {
     /// count toward it nor reset it.
     pub fn failing_skills(&self, streak: usize) -> Result<Vec<(String, i64)>> {
         anyhow::ensure!(streak > 0, "streak must be positive");
-        let mut stmt = self.connection.prepare(
-            "SELECT skill_id, status FROM skill_runs ORDER BY id DESC",
-        )?;
+        let mut stmt = self
+            .connection
+            .prepare("SELECT skill_id, status FROM skill_runs ORDER BY id DESC")?;
         let rows: Vec<(String, String)> = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -810,14 +883,31 @@ impl LocalStore {
         Ok(out)
     }
 
-    pub fn verify_sqlite_integrity(&self)->Result<()> {
-        let value:String=self.connection.query_row("PRAGMA quick_check",[],|row|row.get(0))?;
-        anyhow::ensure!(value=="ok","runtime library integrity check failed");Ok(())
+    pub fn verify_sqlite_integrity(&self) -> Result<()> {
+        let value: String = self
+            .connection
+            .query_row("PRAGMA quick_check", [], |row| row.get(0))?;
+        anyhow::ensure!(value == "ok", "runtime library integrity check failed");
+        Ok(())
     }
-    pub fn snapshot_quarantine_id(&self)->Result<Option<String>> {
-        let value:Option<String>=self.connection.query_row("SELECT value FROM meta WHERE key='snapshot_sync_quarantine_v1'",[],|row|row.get(0)).optional()?;
-        value.map(|value|{let parsed:serde_json::Value=serde_json::from_str(&value)?;
-            parsed["snapshot"].as_str().map(str::to_owned).ok_or_else(||anyhow::anyhow!("invalid snapshot quarantine identity"))}).transpose()
+    pub fn snapshot_quarantine_id(&self) -> Result<Option<String>> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM meta WHERE key='snapshot_sync_quarantine_v1'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        value
+            .map(|value| {
+                let parsed: serde_json::Value = serde_json::from_str(&value)?;
+                parsed["snapshot"]
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("invalid snapshot quarantine identity"))
+            })
+            .transpose()
     }
 
     /// Unlike legacy best-effort meta lookups, this safety gate propagates every
@@ -835,11 +925,14 @@ impl LocalStore {
     /// Missing is disabled; malformed values and database failures are errors.
     /// Enabling requires the external writer-upgrade and backup gates.
     pub fn memory_metadata_v1_enabled(&self) -> Result<bool> {
-        let value: Option<String> = self.connection.query_row(
-            "SELECT value FROM meta WHERE key = 'memory_metadata_v1_enabled'",
-            [],
-            |row| row.get(0),
-        ).optional()?;
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'memory_metadata_v1_enabled'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
         match value.as_deref() {
             None | Some("0") => Ok(false),
             Some("1") => Ok(true),
@@ -887,16 +980,16 @@ impl LocalStore {
 
     /// Persist a Core-owned index locator only if the encrypted source is current.
     /// Index work must never create a content version or an outgoing sync operation.
-    pub fn set_artifact(
-        &self,
-        id: &str,
-        artifact: &[u8],
-        source_ciphertext: &str,
-    ) -> Result<bool> {
+    pub fn set_artifact(&self, id: &str, artifact: &[u8], source_ciphertext: &str) -> Result<bool> {
         let n = self.connection.execute(
             "INSERT OR REPLACE INTO core_artifacts(memory_id,model,source,artifact)
              SELECT id,?2,ciphertext,?4 FROM memories WHERE id=?1 AND ciphertext=?3 AND deleted=0",
-            params![id, self.active_generation_key()?, source_ciphertext, artifact],
+            params![
+                id,
+                self.active_generation_key()?,
+                source_ciphertext,
+                artifact
+            ],
         )?;
         Ok(n > 0)
     }
@@ -1231,7 +1324,13 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         END;
         ",
     )?;
-    if !connection.prepare("PRAGMA table_info(query_log)")?.query_map([],|row|row.get::<_,String>(1))?.collect::<rusqlite::Result<Vec<_>>>()?.iter().any(|name|name=="request_id") {
+    if !connection
+        .prepare("PRAGMA table_info(query_log)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "request_id")
+    {
         connection.execute_batch("ALTER TABLE query_log ADD COLUMN request_id TEXT;")?;
     }
     connection.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS idx_query_request ON query_log(request_id) WHERE request_id IS NOT NULL;
@@ -1459,11 +1558,17 @@ mod tests {
              FROM memories WHERE id='id-1'", [], |row| row.get(0),
         )?;
         let outgoing_before = store.outgoing()?.len();
-        assert!(store.connection.execute(
-            "INSERT OR REPLACE INTO memories(id,ciphertext) VALUES('id-1','replacement')", [],
-        ).is_err());
+        assert!(store
+            .connection
+            .execute(
+                "INSERT OR REPLACE INTO memories(id,ciphertext) VALUES('id-1','replacement')",
+                [],
+            )
+            .is_err());
         assert_eq!(store.outgoing()?.len(), outgoing_before);
-        store.connection.execute("UPDATE memories SET dirty=0 WHERE id='id-1'", [])?;
+        store
+            .connection
+            .execute("UPDATE memories SET dirty=0 WHERE id='id-1'", [])?;
 
         // The actual put path, outbox trigger and review ledger share the outer transaction.
         let current_meta = store.all(true)?[0].local_meta.clone();
@@ -1476,16 +1581,21 @@ mod tests {
             assert!(store.put_inner(&changed, true)?);
             store.connection.execute(
                 "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
-                 VALUES('id-1','target-revision','reschedule','test','now')", [],
+                 VALUES('id-1','target-revision','reschedule','test','now')",
+                [],
             )?;
             anyhow::bail!("simulated review failure");
         });
         assert!(failed.is_err());
         assert_eq!(MemoryTransport::all(&store, false)?[0].ciphertext, "aabbcc");
         assert_eq!(store.outgoing()?.len(), outgoing_before);
-        assert_eq!(store.connection.query_row(
-            "SELECT COUNT(*) FROM review_history", [], |row| row.get::<_, i64>(0),
-        )?, 0);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM review_history", [], |row| row
+                    .get::<_, i64>(0),)?,
+            0
+        );
 
         // LWW: an older version does not overwrite
         let mut stale = sample("id-1");
@@ -1522,14 +1632,19 @@ mod tests {
             assert!(store.put_inner(&sample("id-2"), true)?);
             store.connection.execute(
                 "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
-                 VALUES('id-2','target-revision','reschedule','test','now')", [],
+                 VALUES('id-2','target-revision','reschedule','test','now')",
+                [],
             )?;
             Ok(())
         })?;
         assert_eq!(store.outgoing()?.len(), outgoing_before + 1);
-        assert_eq!(store.connection.query_row(
-            "SELECT COUNT(*) FROM review_history", [], |row| row.get::<_, i64>(0),
-        )?, 1);
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM review_history", [], |row| row
+                    .get::<_, i64>(0),)?,
+            1
+        );
         let history = store.review_history("id-2", 1)?;
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].entry_id, "id-2");
@@ -1545,44 +1660,67 @@ mod tests {
         reviewed.local_meta.memory_contract = 1;
         reviewed.local_meta.review_at = Some("2026-12-01T00:00:00.000Z".into());
         let review = ReviewHistoryRow {
-            seq: None, entry_id: reviewed.id.clone(),
+            seq: None,
+            entry_id: reviewed.id.clone(),
             record_revision: format!("sha256:{}", "a".repeat(64)),
-            action: "reschedule".into(), actor: r#"{"kind":"owner_client","id":"alice"}"#.into(),
+            action: "reschedule".into(),
+            actor: r#"{"kind":"owner_client","id":"alice"}"#.into(),
             happened_at: "2026-11-01T00:00:00.000Z".into(),
-            previous_verification: None, next_verification: None,
-            previous_review_at: None, next_review_at: reviewed.local_meta.review_at.clone(), reason: None,
+            previous_verification: None,
+            next_verification: None,
+            previous_review_at: None,
+            next_review_at: reviewed.local_meta.review_at.clone(),
+            reason: None,
         };
         store.connection.execute(
             "INSERT INTO core_artifacts(memory_id,model,source,artifact)
-             VALUES('id-2','review-rollback','aabbcc',x'0102')", [],
+             VALUES('id-2','review-rollback','aabbcc',x'0102')",
+            [],
         )?;
         let before_review = store.memory_revision()?;
         let outgoing_before = store.outgoing()?.len();
-        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &review)
+            .is_err());
         assert_eq!(store.memory_revision()?, before_review);
         store.meta_set("memory_metadata_v1_enabled", "1")?;
-        assert!(store.commit_review(&"0".repeat(32), &reviewed, &review).is_err());
+        assert!(store
+            .commit_review(&"0".repeat(32), &reviewed, &review)
+            .is_err());
         let mut invalid = review.clone();
         invalid.next_review_at = None;
-        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &invalid)
+            .is_err());
         invalid = review.clone();
         invalid.previous_review_at = Some("2026-10-01T00:00:00.000Z".into());
-        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &invalid)
+            .is_err());
         invalid = review.clone();
         invalid.action = "unsupported".into();
-        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &invalid)
+            .is_err());
         invalid.action = "revoke".into();
         invalid.reason = Some("  ".into());
-        assert!(store.commit_review(&before_review, &reviewed, &invalid).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &invalid)
+            .is_err());
         store.connection.execute_batch(
             "CREATE TEMP TRIGGER fail_review_history BEFORE INSERT ON review_history
              BEGIN SELECT RAISE(ABORT,'simulated review history write failure'); END;",
         )?;
-        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &review)
+            .is_err());
         assert_eq!(store.memory_revision()?, before_review);
         assert_eq!(store.outgoing()?.len(), outgoing_before);
         assert_eq!(store.review_history("id-2", 20)?.len(), 1);
-        let unchanged = store.all(false)?.into_iter().find(|row| row.id == "id-2")
+        let unchanged = store
+            .all(false)?
+            .into_iter()
+            .find(|row| row.id == "id-2")
             .ok_or_else(|| anyhow::anyhow!("missing review target"))?;
         assert_eq!(unchanged.ciphertext, "aabbcc");
         assert_eq!(unchanged.local_meta, Default::default());
@@ -1590,11 +1728,16 @@ mod tests {
             "SELECT artifact FROM core_artifacts WHERE memory_id='id-2' AND model='review-rollback'",
             [], |row| row.get::<_, Vec<u8>>(0),
         )?, vec![1, 2]);
-        store.connection.execute_batch("DROP TRIGGER fail_review_history;")?;
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_review_history;")?;
         store.commit_review(&before_review, &reviewed, &review)?;
         assert_ne!(store.memory_revision()?, before_review);
         assert_eq!(store.outgoing()?.len(), outgoing_before + 1);
-        let saved = store.all(false)?.into_iter().find(|row| row.id == "id-2")
+        let saved = store
+            .all(false)?
+            .into_iter()
+            .find(|row| row.id == "id-2")
             .ok_or_else(|| anyhow::anyhow!("missing saved review target"))?;
         assert_eq!(saved.ciphertext, reviewed.ciphertext);
         assert_eq!(saved.local_meta, reviewed.local_meta);
@@ -1604,25 +1747,35 @@ mod tests {
         assert_eq!(saved_history, vec![expected_history]);
         let after_review = store.memory_revision()?;
         let outgoing_after = store.outgoing()?.len();
-        assert!(store.commit_review(&before_review, &reviewed, &review).is_err());
+        assert!(store
+            .commit_review(&before_review, &reviewed, &review)
+            .is_err());
         let mut older = reviewed.clone();
         older.updated_at = "2026-10-01T00:00:00.000Z".into();
         older.ciphertext = "stale review payload".into();
         let mut next_review = review.clone();
         next_review.previous_review_at = review.next_review_at.clone();
-        assert!(store.commit_review(&after_review, &older, &next_review).is_err());
+        assert!(store
+            .commit_review(&after_review, &older, &next_review)
+            .is_err());
         assert_eq!(store.memory_revision()?, after_review);
         assert_eq!(store.outgoing()?.len(), outgoing_after);
         assert_eq!(store.review_history("id-2", 20)?.len(), 2);
         let (_, delta, _) = store.retrieval_delta(None)?;
-        assert!(delta.iter().any(|row| row.id == "id-2" && row.local_meta == reviewed.local_meta));
+        assert!(delta
+            .iter()
+            .any(|row| row.id == "id-2" && row.local_meta == reviewed.local_meta));
         let snapshot = store.review_snapshot()?;
         assert_eq!(snapshot.memory_revision, store.memory_revision()?);
-        assert!(snapshot.memories.iter().any(|row| row.id == "id-1" && row.deleted));
+        assert!(snapshot
+            .memories
+            .iter()
+            .any(|row| row.id == "id-1" && row.deleted));
         assert!(snapshot.unavailable_ids.is_empty());
         let head = serde_json::to_string(&reviewed)?;
         store.connection.execute(
-            "INSERT INTO sync_remote_heads(id,rev,wire) VALUES('id-2',1,?1)", [&head],
+            "INSERT INTO sync_remote_heads(id,rev,wire) VALUES('id-2',1,?1)",
+            [&head],
         )?;
         assert!(store.review_snapshot()?.unavailable_ids.is_empty());
         let mut pending = reviewed.clone();
@@ -1632,9 +1785,14 @@ mod tests {
             [serde_json::to_string(&pending)?],
         )?;
         assert_eq!(store.review_snapshot()?.unavailable_ids, vec!["id-2"]);
-        store.connection.execute("INSERT INTO sync_base(id,rev) VALUES('id-2',1)", [])?;
+        store
+            .connection
+            .execute("INSERT INTO sync_base(id,rev) VALUES('id-2',1)", [])?;
         assert!(store.review_snapshot()?.unavailable_ids.is_empty());
-        store.connection.execute("UPDATE sync_remote_heads SET decode_error='unavailable key' WHERE id='id-2'", [])?;
+        store.connection.execute(
+            "UPDATE sync_remote_heads SET decode_error='unavailable key' WHERE id='id-2'",
+            [],
+        )?;
         assert_eq!(store.review_snapshot()?.unavailable_ids, vec!["id-2"]);
         Ok(())
     }
@@ -1767,50 +1925,84 @@ mod tests {
         assert!(!store.has_memory_metadata()?);
         assert!(!store.memory_metadata_v1_enabled()?);
         for assignment in [
-            "memory_contract=1", "summary=''", "source_refs='[{\"id\":\"source\"}]'",
-            "valid_until='later'", "review_at='later'", "artifact='{}'", "verification='{}'",
-            "kind='hypothesis'", "kind='reflection'", "kind='self'",
+            "memory_contract=1",
+            "summary=''",
+            "source_refs='[{\"id\":\"source\"}]'",
+            "valid_until='later'",
+            "review_at='later'",
+            "artifact='{}'",
+            "verification='{}'",
+            "kind='hypothesis'",
+            "kind='reflection'",
+            "kind='self'",
         ] {
             store.meta_set("memory_metadata_v1_enabled", "1")?;
             let transaction = store.connection.unchecked_transaction()?;
-            store.connection.execute(&format!("UPDATE memories SET {assignment}"), [])?;
+            store
+                .connection
+                .execute(&format!("UPDATE memories SET {assignment}"), [])?;
             store.meta_set("memory_metadata_v1_enabled", "0")?;
-            assert!(store.has_memory_metadata()?, "undetected metadata: {assignment}");
+            assert!(
+                store.has_memory_metadata()?,
+                "undetected metadata: {assignment}"
+            );
             transaction.rollback()?;
             assert!(!store.has_memory_metadata()?);
         }
         store.connection.execute(
             "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at)
-             VALUES('deleted-entry','revision','reschedule','owner_client','now')", [],
+             VALUES('deleted-entry','revision','reschedule','owner_client','now')",
+            [],
         )?;
         assert!(store.has_memory_metadata()?);
         store.connection.execute("DELETE FROM review_history", [])?;
         assert!(!store.has_memory_metadata()?);
         store.meta_set("memory_metadata_v1_enabled", "0")?;
         assert!(!store.memory_metadata_v1_enabled()?);
-        assert!(store.connection.execute(
-            "UPDATE memories SET memory_contract=1 WHERE id='kept-id'", [],
-        ).is_err());
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE memories SET memory_contract=1 WHERE id='kept-id'",
+                [],
+            )
+            .is_err());
         store.meta_set("memory_metadata_v1_enabled", "invalid")?;
         assert!(store.memory_metadata_v1_enabled().is_err());
-        assert!(store.connection.execute(
-            "UPDATE memories SET review_at='later' WHERE id='kept-id'", [],
-        ).is_err());
+        assert!(store
+            .connection
+            .execute(
+                "UPDATE memories SET review_at='later' WHERE id='kept-id'",
+                [],
+            )
+            .is_err());
         store.meta_set("memory_metadata_v1_enabled", "1")?;
         assert!(store.memory_metadata_v1_enabled()?);
         let before = store.connection.query_row(
-            "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get::<_, String>(0),
+            "SELECT value FROM meta WHERE key='memory_revision_v1'",
+            [],
+            |row| row.get::<_, String>(0),
         )?;
-        store.connection.execute("UPDATE memories SET review_at='later' WHERE id='kept-id'", [])?;
-        assert_ne!(before, store.connection.query_row(
-            "SELECT value FROM meta WHERE key='memory_revision_v1'", [], |row| row.get::<_, String>(0),
-        )?);
+        store.connection.execute(
+            "UPDATE memories SET review_at='later' WHERE id='kept-id'",
+            [],
+        )?;
+        assert_ne!(
+            before,
+            store.connection.query_row(
+                "SELECT value FROM meta WHERE key='memory_revision_v1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )?
+        );
         store.meta_set("memory_metadata_v1_enabled", "0")?;
         assert!(!store.memory_metadata_v1_enabled()?);
-        store.connection.execute("UPDATE memories SET dirty=0 WHERE id='kept-id'", [])?;
-        assert!(store.connection.execute(
-            "UPDATE memories SET review_at=NULL WHERE id='kept-id'", [],
-        ).is_err());
+        store
+            .connection
+            .execute("UPDATE memories SET dirty=0 WHERE id='kept-id'", [])?;
+        assert!(store
+            .connection
+            .execute("UPDATE memories SET review_at=NULL WHERE id='kept-id'", [],)
+            .is_err());
         store.connection.execute("DROP TABLE review_history", [])?;
         assert!(store.has_memory_metadata().is_err());
         store.connection.execute("DROP TABLE meta", [])?;
@@ -1842,9 +2034,13 @@ mod tests {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         assert!(!columns.iter().any(|column| column == "embedding_enc"));
         assert!(!columns.iter().any(|column| column == "memory_contract"));
-        assert!(!connection.prepare(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='review_history'",
-        )?.exists([])?);
+        assert!(
+            !connection
+                .prepare(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='review_history'",
+                )?
+                .exists([])?
+        );
         let original: (String, String) =
             connection.query_row("SELECT ciphertext,nonce FROM memories", [], |row| {
                 Ok((row.get(0)?, row.get(1)?))
@@ -1965,14 +2161,21 @@ mod skill_run_tests {
     fn run_log_aggregates_ok_fail_and_latest() {
         let (_dir, store) = store();
         store.log_skill_run("skill-a", "ok", "").unwrap();
-        store.log_skill_run("skill-a", "fail", "command 3 exit 2").unwrap();
+        store
+            .log_skill_run("skill-a", "fail", "command 3 exit 2")
+            .unwrap();
         store.log_skill_run("skill-a", "ok", "").unwrap();
-        let stats = store.skill_run_stats(&["skill-a".into(), "skill-b".into()]).unwrap();
+        let stats = store
+            .skill_run_stats(&["skill-a".into(), "skill-b".into()])
+            .unwrap();
         let a = stats.get("skill-a").expect("skill-a stats");
         assert_eq!((a.ok, a.fail), (2, 1));
         assert_eq!(a.last_status, "ok");
         assert!(a.last_ts > 0);
-        assert!(!stats.contains_key("skill-b"), "unrun procedures stay absent");
+        assert!(
+            !stats.contains_key("skill-b"),
+            "unrun procedures stay absent"
+        );
     }
 
     #[test]

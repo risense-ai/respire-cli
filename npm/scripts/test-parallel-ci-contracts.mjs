@@ -91,12 +91,15 @@ test('source metadata optimization retains debug safety and only the CLI test-st
   assert.doesNotMatch(manifest,/\[profile\.(?:dev|test)\]\n[^[]*opt-level\s*=\s*[1-3]/);
   // Clap's Windows debug builder exceeds 2 MiB; only this test package uses opt-level=1.
   // See docs/ci-source-profile.md for measured frames and default-stack validation.
+  // The runtime split moved the clap derive into respire_commands, so both
+  // test packages carry the stack guard.
   const assertProfiles=value=>assert.deepEqual(value.split(/(?=^\[)/m)
     .filter(block=>block.startsWith('[profile.'))
     .map(block=>block.split('\n').map(line=>line.trim()).filter(line=>line&&!line.startsWith('#')).join('\n')),[
       '[profile.dev.package.sha2]\nopt-level = 3',
       '[profile.release]\nstrip = "debuginfo"\nlto = false\ncodegen-units = 1\npanic = "unwind"',
       '[profile.test.package.respire]\nopt-level = 1',
+      '[profile.test.package.respire_commands]\nopt-level = 1',
     ]);
   assertProfiles(manifest);
   for(const changed of [

@@ -153,7 +153,10 @@ pub fn build_body(session: &Session) -> String {
         ));
     }
 
-    body.push_str(&format!("\n\u{3010}Result\u{3011}Session updated at {}.", scrub(updated)));
+    body.push_str(&format!(
+        "\n\u{3010}Result\u{3011}Session updated at {}.",
+        scrub(updated)
+    ));
     if let Some(line) = usage_line(&session.usage) {
         body.push(' ');
         body.push_str(&line);
@@ -452,16 +455,21 @@ mod tests {
         let mut session = sample();
         session.platform = "hermes".into();
         session.first_user_message = "\u{4fdd}\u{7559}\u{7528}\u{6237}\u{4e2d}\u{6587}\u{4e0e}\u{3010}\u{524d}\u{56e0}\u{3011}\u{539f}\u{59cb}\u{5f15}\u{7528}".into();
-        session.last_user_message = "\u{4fdd}\u{7559}\u{6df7}\u{5408}\u{3010}Result\u{3011}\u{539f}\u{6587}".into();
+        session.last_user_message =
+            "\u{4fdd}\u{7559}\u{6df7}\u{5408}\u{3010}Result\u{3011}\u{539f}\u{6587}".into();
         let fingerprint = session.content_fingerprint();
         let entry = session_entry(&session, &ConvertOptions::default());
         assert_eq!(fingerprint, session.content_fingerprint());
         assert_eq!(entry.id, session_id(&session.key()));
         assert_eq!(entry.title, "Hermes session \u{4fdd}\u{7559}\u{7528}\u{6237}\u{4e2d}\u{6587}\u{4e0e}\u{3010}\u{524d}\u{56e0}\u{3011}\u{539f}\u{59cb}\u{5f15}\u{7528}");
-        assert!(entry.content.starts_with("\u{3010}Cause\u{3011}Hermes session"));
+        assert!(entry
+            .content
+            .starts_with("\u{3010}Cause\u{3011}Hermes session"));
         assert!(entry.content.contains("\n\u{3010}Action\u{3011}\u{4fdd}\u{7559}\u{7528}\u{6237}\u{4e2d}\u{6587}\u{4e0e}\u{3010}\u{524d}\u{56e0}\u{3011}\u{539f}\u{59cb}\u{5f15}\u{7528}"));
         assert!(entry.content.contains("\nLast request: \u{4fdd}\u{7559}\u{6df7}\u{5408}\u{3010}Result\u{3011}\u{539f}\u{6587}"));
-        assert!(entry.content.contains("\n\u{3010}Result\u{3011}Session updated at"));
+        assert!(entry
+            .content
+            .contains("\n\u{3010}Result\u{3011}Session updated at"));
         assert_eq!(entry.importance, "important");
         assert_eq!(scrub("\u{8bf4}\u{660e}\u{4e2d}\u{6587}\u{4fdd}\u{6301}\u{ff1b}\u{5bc6}\u{7801}\u{ff1a}fixture-secret"), "\u{8bf4}\u{660e}\u{4e2d}\u{6587}\u{4fdd}\u{6301}\u{ff1b}\u{5bc6}\u{7801}\u{ff1a} ***");
     }

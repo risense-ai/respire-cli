@@ -159,12 +159,16 @@ fn droid_session(path: &Path) -> Session {
                 sid = id.to_owned();
             }
             if cwd.is_none() {
-                cwd = data.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned);
+                cwd = data
+                    .get("cwd")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
             }
         }
         if let Some(message) = data.get("message").and_then(Value::as_object) {
             if message.get("role").and_then(Value::as_str) == Some("user") {
-                let prompt = without_system_reminders(message.get("content").unwrap_or(&Value::Null));
+                let prompt =
+                    without_system_reminders(message.get("content").unwrap_or(&Value::Null));
                 if !prompt.is_empty() {
                     if first_user.is_none() {
                         first_user = Some(prompt.clone());
@@ -180,7 +184,9 @@ fn droid_session(path: &Path) -> Session {
         .unwrap_or_default();
 
     let created_at = created.clone().or_else(|| scan_util::file_mtime_iso(path));
-    let updated_at = updated.or(created).or_else(|| scan_util::file_mtime_iso(path));
+    let updated_at = updated
+        .or(created)
+        .or_else(|| scan_util::file_mtime_iso(path));
 
     Session {
         platform: "droid".to_owned(),
@@ -238,7 +244,9 @@ fn amp_sessions(path: &Path) -> Vec<Session> {
     let messages = data.get("messages").map(json_maps).unwrap_or_default();
     let (first_user, last_user) = message_edges(&messages, &["user"]);
     let env = data.get("env").and_then(Value::as_object);
-    let initial = env.and_then(|env| env.get("initial")).and_then(Value::as_object);
+    let initial = env
+        .and_then(|env| env.get("initial"))
+        .and_then(Value::as_object);
     let tree = initial
         .and_then(|initial| initial.get("trees"))
         .and_then(Value::as_array)
@@ -256,7 +264,10 @@ fn amp_sessions(path: &Path) -> Vec<Session> {
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| file_stem(path)),
         path: path.display().to_string(),
-        cwd: file_uri_path(tree.and_then(|tree| tree.get("uri")).and_then(Value::as_str)),
+        cwd: file_uri_path(
+            tree.and_then(|tree| tree.get("uri"))
+                .and_then(Value::as_str),
+        ),
         created_at: data
             .get("created")
             .and_then(Value::as_i64)
@@ -643,10 +654,7 @@ fn aider_sessions(path: &Path) -> Vec<Session> {
         };
         let prompt = first_aider_prompt(body);
         let stamp = first_line.trim();
-        let sid = format!(
-            "{directory}-{}",
-            stamp.replace(':', "-").replace(' ', "-")
-        );
+        let sid = format!("{directory}-{}", stamp.replace(':', "-").replace(' ', "-"));
         sessions.push(Session {
             platform: "aider".to_owned(),
             id: sid,
@@ -684,7 +692,10 @@ fn scan_roots(defaults: Vec<PathBuf>, extra: &[PathBuf], children: &[&str]) -> V
 /// Walk `base` following a shallow `/`-separated glob pattern (final segment
 /// matches files, earlier segments match directories).
 fn glob_files(base: &Path, pattern: &str) -> Vec<PathBuf> {
-    let segments: Vec<&str> = pattern.split('/').filter(|segment| !segment.is_empty()).collect();
+    let segments: Vec<&str> = pattern
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect();
     let mut out = Vec::new();
     walk_glob(base, &segments, &mut out);
     out
@@ -729,8 +740,14 @@ fn message_edges(messages: &[&Map<String, Value>], role_keys: &[&str]) -> (Strin
     let mut first = String::new();
     let mut last = String::new();
     for message in messages {
-        let role = message.get("role").and_then(Value::as_str).unwrap_or_default();
-        let kind = message.get("type").and_then(Value::as_str).unwrap_or_default();
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let kind = message
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         if !role_keys.contains(&role) && !role_keys.contains(&kind) {
             continue;
         }
@@ -852,7 +869,9 @@ fn percent_decode(input: &str) -> String {
     let mut index = 0;
     while index < bytes.len() {
         if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex_value(bytes[index + 1]), hex_value(bytes[index + 2])) {
+            if let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+            {
                 out.push(high * 16 + low);
                 index += 3;
                 continue;

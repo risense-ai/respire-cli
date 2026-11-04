@@ -1,6 +1,9 @@
 //! Public ciphertext orchestration. Account keys never cross the Core ABI.
+use super::{
+    crypto,
+    model::{Kind, MemoryEntry, MemoryQuery, PayloadV2, StoredMemory},
+};
 use anyhow::{Context, Result};
-use super::{crypto, model::{Kind, MemoryEntry, MemoryQuery, PayloadV2, StoredMemory}};
 use respire_core_sdk::search::Embedder;
 pub use respire_core_sdk::RecalledWithContext;
 
@@ -31,9 +34,19 @@ impl SessionKeys {
     fn from_namespace(urk: [u8; 32], write_rsrs: bool) -> Result<Self> {
         let legacy_data_key = crypto::derive_subkey(&urk, b"onememory:data:v1")?;
         let rsrs_data_key = crypto::derive_subkey(&urk, b"rsrs:data:v1")?;
-        let data_key = if write_rsrs { rsrs_data_key } else { legacy_data_key };
-        let embedding_key = crypto::derive_subkey(&urk, if write_rsrs {
-            b"rsrs:embedding:v1" } else { b"onememory:embedding:v1" })?;
+        let data_key = if write_rsrs {
+            rsrs_data_key
+        } else {
+            legacy_data_key
+        };
+        let embedding_key = crypto::derive_subkey(
+            &urk,
+            if write_rsrs {
+                b"rsrs:embedding:v1"
+            } else {
+                b"onememory:embedding:v1"
+            },
+        )?;
         Ok(Self {
             urk,
             data_key,
@@ -46,30 +59,52 @@ impl SessionKeys {
 
     pub fn encrypt_content(&self, plaintext: &str) -> Result<(String, String)> {
         let (nonce, ciphertext) = crypto::encrypt_item(&self.data_key, plaintext)?;
-        Ok((nonce, if self.write_rsrs { format!("{}{ciphertext}", crypto::RSRS_PREFIX) } else { ciphertext }))
+        Ok((
+            nonce,
+            if self.write_rsrs {
+                format!("{}{ciphertext}", crypto::RSRS_PREFIX)
+            } else {
+                ciphertext
+            },
+        ))
     }
 
     pub fn decrypt_content(&self, ciphertext: &str, nonce: &str) -> Result<String> {
         if let Some(value) = ciphertext.strip_prefix(crypto::RSRS_PREFIX) {
             return crypto::decrypt_item(&self.rsrs_data_key, value, nonce);
         }
-        anyhow::ensure!(!ciphertext.starts_with("rsrs:"), "unsupported ciphertext namespace version");
+        anyhow::ensure!(
+            !ciphertext.starts_with("rsrs:"),
+            "unsupported ciphertext namespace version"
+        );
         crypto::decrypt_item(&self.legacy_data_key, ciphertext, nonce)
     }
 
     /// Re-encrypt the optional older vector payload without recomputing a model.
     pub fn migrate_embedding(&self, value: &str) -> Result<String> {
-        if value.is_empty() { return Ok(String::new()); }
+        if value.is_empty() {
+            return Ok(String::new());
+        }
         let current = value.strip_prefix(crypto::RSRS_PREFIX);
-        let (nonce, ciphertext) = current.unwrap_or(value).split_once(':')
+        let (nonce, ciphertext) = current
+            .unwrap_or(value)
+            .split_once(':')
             .context("encrypted embedding has an unsupported format")?;
-        let source = crypto::derive_subkey(&self.urk, if current.is_some() {
-            b"rsrs:embedding:v1" } else { b"onememory:embedding:v1" })?;
+        let source = crypto::derive_subkey(
+            &self.urk,
+            if current.is_some() {
+                b"rsrs:embedding:v1"
+            } else {
+                b"onememory:embedding:v1"
+            },
+        )?;
         let bytes = crypto::decrypt_bytes(&source, ciphertext, nonce)?;
         let target = crypto::derive_subkey(&self.urk, b"rsrs:embedding:v1")?;
         let (nonce, ciphertext) = crypto::encrypt_bytes(&target, &bytes)?;
-        anyhow::ensure!(crypto::decrypt_bytes(&target, &ciphertext, &nonce)? == bytes,
-            "migrated embedding did not round-trip");
+        anyhow::ensure!(
+            crypto::decrypt_bytes(&target, &ciphertext, &nonce)? == bytes,
+            "migrated embedding did not round-trip"
+        );
         Ok(format!("{}{nonce}:{ciphertext}", crypto::RSRS_PREFIX))
     }
 
@@ -82,8 +117,11 @@ impl SessionKeys {
         urk_nonce: &str,
     ) -> Result<Self> {
         let current = wrapped_urk.strip_prefix(crypto::RSRS_PREFIX);
-        let kek = if current.is_some() { crypto::derive_rsrs_password_kek(password, account_secret, kdf_salt)? }
-            else { crypto::derive_kek(password, account_secret, kdf_salt)? };
+        let kek = if current.is_some() {
+            crypto::derive_rsrs_password_kek(password, account_secret, kdf_salt)?
+        } else {
+            crypto::derive_kek(password, account_secret, kdf_salt)?
+        };
         let urk = crypto::unwrap_key(current.unwrap_or(wrapped_urk), urk_nonce, &kek)
             .context("URK unwrap failed: wrong password or recovery key")?;
         Self::from_namespace(urk, current.is_some())
@@ -112,8 +150,11 @@ impl SessionKeys {
         urk_nonce: &str,
     ) -> Result<Self> {
         let current = wrapped_urk.strip_prefix(crypto::RSRS_PREFIX);
-        let kek = if current.is_some() { crypto::derive_rsrs_vault_kek(super_pass, secret_key, kdf_salt)? }
-            else { crypto::derive_vault_kek(super_pass, secret_key, kdf_salt)? };
+        let kek = if current.is_some() {
+            crypto::derive_rsrs_vault_kek(super_pass, secret_key, kdf_salt)?
+        } else {
+            crypto::derive_vault_kek(super_pass, secret_key, kdf_salt)?
+        };
         let urk = crypto::unwrap_key(current.unwrap_or(wrapped_urk), urk_nonce, &kek)
             .context("URK unwrap failed: wrong master password or Secret Key")?;
         Self::from_namespace(urk, current.is_some())
@@ -127,8 +168,11 @@ impl SessionKeys {
         urk_nonce: &str,
     ) -> Result<Self> {
         let current = wrapped_urk.strip_prefix(crypto::RSRS_PREFIX);
-        let kek = if current.is_some() { crypto::derive_rsrs_kek(super_pass, kdf_salt)? }
-            else { crypto::derive_kek_v4(super_pass, kdf_salt)? };
+        let kek = if current.is_some() {
+            crypto::derive_rsrs_kek(super_pass, kdf_salt)?
+        } else {
+            crypto::derive_kek_v4(super_pass, kdf_salt)?
+        };
         let urk = crypto::unwrap_key(current.unwrap_or(wrapped_urk), urk_nonce, &kek)
             .context("URK unwrap failed: wrong super password")?;
         Self::from_namespace(urk, current.is_some())
@@ -137,7 +181,6 @@ impl SessionKeys {
 
 /// Memory engine — plaintext ↔ ciphertext orchestration.
 pub struct MemoryEngine;
-
 
 impl MemoryEngine {
     pub fn seal<E: Embedder>(
@@ -173,8 +216,12 @@ impl MemoryEngine {
         let (nonce, ciphertext) = keys.encrypt_content(&payload_json)?;
 
         let prepared = if respire_core_sdk::indexing_deferred() {
-            respire_core_sdk::Prepared { artifact:Vec::new() }
-        } else { embedder.prepare(entry)? };
+            respire_core_sdk::Prepared {
+                artifact: Vec::new(),
+            }
+        } else {
+            embedder.prepare(entry)?
+        };
 
         Ok(StoredMemory {
             id: entry.id.clone(),
@@ -257,8 +304,7 @@ impl MemoryEngine {
         if let Some(content) = content {
             object.insert("content".into(), serde_json::json!(content));
         }
-        let (nonce, ciphertext) =
-            keys.encrypt_content(&serde_json::to_string(&payload)?)?;
+        let (nonce, ciphertext) = keys.encrypt_content(&serde_json::to_string(&payload)?)?;
         stored.nonce = nonce;
         stored.ciphertext = ciphertext;
         stored.updated_at = stamp.to_owned();
@@ -271,10 +317,15 @@ impl MemoryEngine {
     }
 
     /// Change only encrypted relationships and retain the existing derived index.
-    pub fn reseal_edges(keys: &SessionKeys, stored: &StoredMemory, stamp: &str,
-        edit: impl FnOnce(&mut PayloadV2)) -> Result<StoredMemory> {
+    pub fn reseal_edges(
+        keys: &SessionKeys,
+        stored: &StoredMemory,
+        stamp: &str,
+        edit: impl FnOnce(&mut PayloadV2),
+    ) -> Result<StoredMemory> {
         let plaintext = keys.decrypt_content(&stored.ciphertext, &stored.nonce)?;
-        let mut payload: PayloadV2 = serde_json::from_str(&plaintext).context("payload parse failed")?;
+        let mut payload: PayloadV2 =
+            serde_json::from_str(&plaintext).context("payload parse failed")?;
         validate_metadata(&payload.kind, &payload.metadata, &payload.unknown_fields)?;
         let mut expected = payload.clone();
         edit(&mut payload);
@@ -282,10 +333,12 @@ impl MemoryEngine {
         expected.superseded_by = payload.superseded_by.clone();
         expected.see_also = payload.see_also.clone();
         expected.modified_by = payload.modified_by.clone();
-        anyhow::ensure!(serde_json::to_value(&payload)? == serde_json::to_value(&expected)?,
-            "relationship edit must not change embedding source metadata");
+        anyhow::ensure!(
+            serde_json::to_value(&payload)? == serde_json::to_value(&expected)?,
+            "relationship edit must not change embedding source metadata"
+        );
         payload.updated_at = stamp.to_owned();
-        let (nonce,ciphertext) = keys.encrypt_content(&serde_json::to_string(&payload)?)?;
+        let (nonce, ciphertext) = keys.encrypt_content(&serde_json::to_string(&payload)?)?;
         let mut result = stored.clone();
         result.nonce = nonce;
         result.ciphertext = ciphertext;
@@ -358,47 +411,69 @@ impl MemoryEngine {
     }
 
     pub fn recall_local<E: Embedder>(
-        keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
+        keys: &SessionKeys,
+        embedder: &E,
+        stored_list: &[StoredMemory],
+        query: &MemoryQuery,
     ) -> Result<Vec<MemoryEntry>> {
         let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "plain")
     }
 
     pub fn recall_local_scored<E: Embedder>(
-        keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
+        keys: &SessionKeys,
+        embedder: &E,
+        stored_list: &[StoredMemory],
+        query: &MemoryQuery,
     ) -> Result<Vec<(f32, MemoryEntry)>> {
         let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "scored")
     }
 
     pub fn remember_candidates<E: Embedder>(
-        keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
+        keys: &SessionKeys,
+        embedder: &E,
+        stored_list: &[StoredMemory],
+        query: &MemoryQuery,
     ) -> Result<respire_core_sdk::RememberCandidates> {
         let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::remember_candidates(embedder, &snapshots, query)
     }
 
     pub fn recall_local_contextual<E: Embedder>(
-        keys: &SessionKeys, embedder: &E, stored_list: &[StoredMemory], query: &MemoryQuery,
+        keys: &SessionKeys,
+        embedder: &E,
+        stored_list: &[StoredMemory],
+        query: &MemoryQuery,
     ) -> Result<Vec<RecalledWithContext>> {
         let snapshots = snapshots(keys, stored_list)?;
         respire_core_sdk::query(embedder, &snapshots, query, "contextual")
     }
 }
 
-pub fn reembed_embedding<E: Embedder>(keys: &SessionKeys, embedder: &E, stored: &StoredMemory) -> Result<(Vec<u8>, String)> {
+pub fn reembed_embedding<E: Embedder>(
+    keys: &SessionKeys,
+    embedder: &E,
+    stored: &StoredMemory,
+) -> Result<(Vec<u8>, String)> {
     let entry = MemoryEngine::open(keys, stored)?;
     let prepared = embedder.prepare(&entry)?;
     Ok((prepared.artifact, String::new()))
 }
 
-fn validate_metadata(kind: &str, metadata: &super::model::MemoryMeta,
-    unknown_fields: &super::model::ExtraFields) -> Result<()> {
+fn validate_metadata(
+    kind: &str,
+    metadata: &super::model::MemoryMeta,
+    unknown_fields: &super::model::ExtraFields,
+) -> Result<()> {
     super::model::metadata::validate_extra_fields(unknown_fields)?;
     metadata.validate()?;
     let kind = payload_kind(kind, metadata.memory_contract)?;
-    anyhow::ensure!(metadata.memory_contract != 0 || !matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote),
-        "invalid_metadata: new memory kinds require contract 1");
+    anyhow::ensure!(
+        metadata.memory_contract != 0
+            || !matches!(kind, Kind::Hypothesis | Kind::Reflection | Kind::SelfNote),
+        "invalid_metadata: new memory kinds require contract 1"
+    );
     Ok(())
 }
 
@@ -437,7 +512,8 @@ fn payload_kind(value: &str, memory_contract: u8) -> Result<Kind> {
     } else {
         value
     };
-    Kind::try_from_str(wire).ok_or_else(|| anyhow::anyhow!("unsupported_metadata: unknown memory kind"))
+    Kind::try_from_str(wire)
+        .ok_or_else(|| anyhow::anyhow!("unsupported_metadata: unknown memory kind"))
 }
 
 pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()> {
@@ -461,12 +537,25 @@ pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()
     Ok(())
 }
 
-pub fn snapshots(keys: &SessionKeys, stored: &[StoredMemory]) -> Result<Vec<respire_core_sdk::Snapshot>> {
-    if respire_core_sdk::resident_scope_active() { return Ok(Vec::new()); }
-    stored.iter().map(|memory| {
-        let entry = if memory.deleted { None } else {
-            Some(MemoryEngine::open(keys, memory).with_context(|| format!("decode snapshot {}", memory.id))?)
-        };
-        Ok(respire_core_sdk::Snapshot::new(memory, entry))
-    }).collect()
+pub fn snapshots(
+    keys: &SessionKeys,
+    stored: &[StoredMemory],
+) -> Result<Vec<respire_core_sdk::Snapshot>> {
+    if respire_core_sdk::resident_scope_active() {
+        return Ok(Vec::new());
+    }
+    stored
+        .iter()
+        .map(|memory| {
+            let entry = if memory.deleted {
+                None
+            } else {
+                Some(
+                    MemoryEngine::open(keys, memory)
+                        .with_context(|| format!("decode snapshot {}", memory.id))?,
+                )
+            };
+            Ok(respire_core_sdk::Snapshot::new(memory, entry))
+        })
+        .collect()
 }

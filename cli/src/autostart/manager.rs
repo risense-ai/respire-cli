@@ -262,9 +262,15 @@ fn control_hresult(text: &str) -> &str {
 fn control_xml_location(text: &str) -> &str {
     text.lines()
         .filter_map(|line| line.strip_prefix("rsrs-control-xml-location:"))
-        .filter(|value| value.split_once(',').is_some_and(|(line, column)| {
-            [line, column].into_iter().all(|part| !part.is_empty() && part.len() <= 8 && part.bytes().all(|byte| byte.is_ascii_digit()))
-        }))
+        .filter(|value| {
+            value.split_once(',').is_some_and(|(line, column)| {
+                [line, column].into_iter().all(|part| {
+                    !part.is_empty()
+                        && part.len() <= 8
+                        && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            })
+        })
         .last()
         .unwrap_or("unreported")
 }
@@ -447,10 +453,8 @@ fn verify_systemd_loaded(
     let expected = [
         executable,
         "runtime",
-        "run",
-        "--managed",
-        &config.id,
-        "--installation-root",
+        "supervise",
+        "--data-dir",
         config
             .installation
             .to_str()
@@ -544,8 +548,7 @@ pub(super) fn windows_argument(value: &str) -> Result<String> {
 
 fn arguments(config: &Registration) -> Result<String> {
     Ok(format!(
-        "runtime run --managed {} --installation-root {}",
-        windows_argument(&config.id)?,
+        "runtime supervise --data-dir {}",
         windows_argument(
             config
                 .installation
@@ -731,10 +734,8 @@ pub(super) fn inspect(config: &Registration) -> Result<State> {
             let expected = [
                 config.executable.to_str().context("non-UTF8 executable")?,
                 "runtime",
-                "run",
-                "--managed",
-                &config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config
                     .installation
                     .to_str()
@@ -1011,7 +1012,7 @@ pub(super) mod test_adapter {
                     match args.last().map(String::as_str) {
                         Some("DropInPaths") => ok(serde_json::json!({"data":if state.dropin {vec!["/tmp/unknown.conf"]}else{vec![]}}).to_string()),
                         Some("WorkingDirectory") => ok(serde_json::json!({"data":config.installation}).to_string()),
-                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","run","--managed",config.id,"--installation-root",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
+                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","supervise","--data-dir",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
                         _ => bail!("unexpected fake property"),
                     }
                 },
@@ -1033,10 +1034,8 @@ mod tests {
             [
                 config.executable,
                 "runtime",
-                "run",
-                "--managed",
-                config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config.installation
             ],
             false,
@@ -1237,7 +1236,10 @@ mod tests {
         anyhow::ensure!(control_hresult("rsrs-control-hresult:secret-material") == "unreported");
         anyhow::ensure!(control_xml_location("rsrs-control-xml-location:1,39") == "1,39");
         for unsafe_value in ["1,secret", "123456789,2", "1,2,3", ",2"] {
-            anyhow::ensure!(control_xml_location(&format!("rsrs-control-xml-location:{unsafe_value}")) == "unreported");
+            anyhow::ensure!(
+                control_xml_location(&format!("rsrs-control-xml-location:{unsafe_value}"))
+                    == "unreported"
+            );
         }
         #[cfg(target_os = "linux")]
         {
@@ -1255,8 +1257,10 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
-    fn scheduler_default_runlevel_requires_effective_limited_and_rejects_unknown_values() -> Result<()> {
-        let script = format!(r#"{}
+    fn scheduler_default_runlevel_requires_effective_limited_and_rejects_unknown_values(
+    ) -> Result<()> {
+        let script = format!(
+            r#"{}
 $cases=@(
  @{{xml='';value=0;allowed=$true}},@{{xml='LeastPrivilege';value=0;allowed=$true}},
  @{{xml='HighestAvailable';value=0;allowed=$false}},@{{xml='';value=1;allowed=$false}},
@@ -1264,7 +1268,9 @@ $cases=@(
  @{{xml='';value='0';allowed=$false}},@{{xml='';value=$false;allowed=$false}},
  @{{xml='unknown';value=0;allowed=$false}},@{{xml='LeastPrivilege';value=-1;allowed=$false}});
 foreach($case in $cases){{$accepted=$true;try{{RequireLimited $case.xml $case.value}}catch{{$accepted=$false}};if($accepted -ne $case.allowed){{throw 'Effective task run-level contract failed'}}}};
-[Console]::Out.WriteLine('limited-runlevel-contract:passed');"#,task_runlevel_guard());
+[Console]::Out.WriteLine('limited-runlevel-contract:passed');"#,
+            task_runlevel_guard()
+        );
         anyhow::ensure!(powershell(script)?.trim() == "limited-runlevel-contract:passed");
         Ok(())
     }
@@ -1283,15 +1289,23 @@ foreach($case in $cases){{$accepted=$true;try{{RequireLimited $case.xml $case.va
         let encoded = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
         // TASK_VALIDATE_ONLY=1 checks the identical payload without registering,
         // updating, enabling or running a task. Compare only the declaration.
-        let script = format!(r#"{guard};if($null -ne $t){{throw 'Validation fixture task already exists'}};
+        let script = format!(
+            r#"{guard};if($null -ne $t){{throw 'Validation fixture task already exists'}};
 $xml=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'));
 $utf8=$xml.Replace('<?xml version="1.0"?>','<?xml version="1.0" encoding="UTF-8"?>');
 try{{[void]$folder.RegisterTask({task},$utf8,1,{owner},$null,3,$null);[Console]::Out.WriteLine('utf8:valid')}}catch{{$failure=$_.Exception;while($null -ne $failure.InnerException){{$failure=$failure.InnerException}};[Console]::Out.WriteLine('utf8:hresult:'+$failure.HResult.ToString('X8'))}};
 [void]$folder.RegisterTask({task},$xml,1,{owner},$null,3,$null);[Console]::Out.WriteLine('neutral:valid');
 {guard};if($null -ne $t){{throw 'Validation-only unexpectedly created a task'}};
-"#,guard=task_guard(&config)?,task=ps_literal(&name(&config))?,owner=ps_literal(&config.owner)?);
+"#,
+            guard = task_guard(&config)?,
+            task = ps_literal(&name(&config))?,
+            owner = ps_literal(&config.owner)?
+        );
         let result = powershell(script)?;
-        anyhow::ensure!(result.lines().any(|line| line == "neutral:valid"), "encoding-neutral task XML did not validate");
+        anyhow::ensure!(
+            result.lines().any(|line| line == "neutral:valid"),
+            "encoding-neutral task XML did not validate"
+        );
         // Fixed protocol fields only; never print XML, paths or arbitrary COM errors.
         println!("Task Scheduler validation-only comparison: {result}");
         Ok(())

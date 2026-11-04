@@ -44,7 +44,10 @@ fn scan(opts: &ScanOptions) -> Vec<Session> {
     let roots = resolve_roots(&opts.roots);
     let mut paths = Vec::new();
     for root in &roots {
-        paths.extend(scan_util::files_in(&root.join("sessions").join("cli"), "*.json"));
+        paths.extend(scan_util::files_in(
+            &root.join("sessions").join("cli"),
+            "*.json",
+        ));
     }
     scan_util::recent(paths, scan_util::MAX_PLATFORM_FILES)
         .into_iter()
@@ -95,7 +98,10 @@ fn kiro_session(path: &Path) -> Option<Session> {
         platform: "kiro".to_owned(),
         id,
         path: path.display().to_string(),
-        cwd: data.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned),
+        cwd: data
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned),
         created_at: created.or_else(|| scan_util::file_mtime_iso(path)),
         updated_at: scan_util::file_mtime_iso(path),
         provider: Some("amazon-bedrock".to_owned()),
