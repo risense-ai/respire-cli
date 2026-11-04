@@ -318,6 +318,10 @@ pub struct StoredMemory {
     /// Local projection of metadata; the authoritative value stays encrypted.
     #[serde(skip)]
     pub local_meta: MemoryMeta,
+    /// Local projection of the `superseded_by` payload edge (empty = live).
+    /// Local filtering only: ciphertext stays authoritative, never uploaded.
+    #[serde(skip)]
+    pub local_superseded_by: String,
 }
 
 impl StoredMemory {
@@ -346,6 +350,7 @@ impl StoredMemory {
             local_chunks: Vec::new(),
             local_artifact: Vec::new(),
             local_meta: MemoryMeta::default(),
+            local_superseded_by: String::new(),
         }
     }
 }

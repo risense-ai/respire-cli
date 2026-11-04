@@ -464,6 +464,7 @@ fn test_blob(id: &str) -> StoredMemory {
         local_chunks: Vec::new(),
         local_artifact: Vec::new(),
         local_meta: Default::default(),
+        local_superseded_by: String::new(),
     }
 }
 

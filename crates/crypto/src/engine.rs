@@ -200,6 +200,7 @@ impl MemoryEngine {
             local_chunks: Vec::new(),
             local_artifact: prepared.artifact,
             local_meta: entry.metadata.clone(),
+            local_superseded_by: entry.superseded_by.clone(),
         })
     }
 
@@ -290,6 +291,9 @@ impl MemoryEngine {
         result.ciphertext = ciphertext;
         result.updated_at = stamp.to_owned();
         result.local_modified_by = payload.modified_by;
+        // Keep the plaintext edge projection aligned with the resealed payload
+        // so current-channel filtering sees supersession without decryption.
+        result.local_superseded_by = payload.superseded_by;
         result.local_meta = payload.metadata;
         Ok(result)
     }
@@ -313,6 +317,7 @@ impl MemoryEngine {
         out.nonce = nonce;
         out.updated_at = updated_at.to_owned();
         out.local_parent_id = new_parent.to_owned();
+        out.local_superseded_by = payload.superseded_by;
         out.local_meta = payload.metadata;
         Ok(out)
     }
@@ -451,6 +456,7 @@ pub fn hydrate_local(keys: &SessionKeys, stored: &mut StoredMemory) -> Result<()
     stored.local_importance = payload.importance;
     stored.local_device = payload.device;
     stored.local_modified_by = payload.modified_by;
+    stored.local_superseded_by = payload.superseded_by;
     stored.local_meta = payload.metadata;
     Ok(())
 }

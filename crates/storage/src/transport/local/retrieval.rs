@@ -163,7 +163,7 @@ impl LocalStore {
             let mut statement = self.connection.prepare(
                 "SELECT id,user,ciphertext,nonce,embedding_enc,updated_at,deleted,
                  kind,tags,title,project,computer,embedding,created_at,parent_id,content_head,recall_count,importance,device,modified_by,
-                 memory_contract,summary,source_refs,valid_until,review_at,COALESCE(artifact,'null'),COALESCE(verification,'null')
+                 memory_contract,summary,source_refs,valid_until,review_at,COALESCE(artifact,'null'),COALESCE(verification,'null'),superseded_by
                  FROM memories m WHERE deleted=0 AND NOT EXISTS
                  (SELECT 1 FROM core_artifacts r WHERE r.memory_id=m.id AND r.model=?1 AND r.source=m.ciphertext)
                  ORDER BY dirty DESC,updated_at DESC")?;

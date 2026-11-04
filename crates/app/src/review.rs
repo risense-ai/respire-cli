@@ -136,11 +136,21 @@ impl<'a> ReviewService<'a> {
 
     fn view(&self) -> Result<View> {
         let snapshot = self.store.review_snapshot()?;
-        let rows: Vec<_> = snapshot
+        let mut unavailable = snapshot.unavailable_ids;
+        // Empty-ciphertext tombstones have no readable body. Skipping them keeps
+        // review usable while still telling Core the head is unavailable.
+        let mut rows = Vec::new();
+        for row in snapshot
             .memories
             .into_iter()
             .filter(|row| row.user == self.owner)
-            .collect();
+        {
+            if row.ciphertext.trim().is_empty() || row.nonce.trim().is_empty() {
+                unavailable.push(row.id);
+                continue;
+            }
+            rows.push(row);
+        }
         let mut entries = HashMap::new();
         let mut snapshots = Vec::with_capacity(rows.len());
         for row in &rows {
@@ -176,12 +186,14 @@ impl<'a> ReviewService<'a> {
                     .to_owned();
             }
         }
+        unavailable.sort();
+        unavailable.dedup();
         Ok(View {
             revision: snapshot.memory_revision,
             rows,
             entries,
             snapshots,
-            unavailable: snapshot.unavailable_ids,
+            unavailable,
         })
     }
 

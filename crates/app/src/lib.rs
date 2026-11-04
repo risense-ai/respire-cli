@@ -28,6 +28,7 @@ pub mod read_heat;
 pub mod recall_fusion;
 pub mod session_import;
 pub mod resident;
+pub mod supersession;
 pub mod sync;
 pub mod taxonomy;
 pub mod transport;

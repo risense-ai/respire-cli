@@ -643,6 +643,12 @@ enum Command {
         #[command(flatten)]
         args: review::ReviewArgs,
     },
+    /// List open promises: important task records past their review time with no live replacement.
+    Due {
+        /// Maximum number of due promises to list, ordered by review time.
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
     /// Host-owned foreground runtime and opt-in current-user sign-in startup.
     Runtime {
         #[command(subcommand)]
@@ -754,6 +760,9 @@ enum Command {
         /// Recall intent: auto (keyword), howto (extra skill pass, keeps one procedure visible), fact (single pass)
         #[arg(long, value_parser = ["auto", "howto", "fact"], default_value = "auto")]
         intent: String,
+        /// Channel: auto (former cues in the query open the history walk), current (hide superseded/expired), former (always walk history)
+        #[arg(long, value_parser = ["auto", "current", "former"], default_value = "auto")]
+        when: String,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -2734,6 +2743,71 @@ fn run_run_log(id: &str, status: &str, note: &str) -> Result<()> {
     ))
 }
 
+/// Open promises: important task records past their review time with no live
+/// replacement. Distinct from `review --due`, which lists evidence-based
+/// governance dues; this is the promise ledger the writing rules create.
+fn run_due(limit: usize) -> Result<()> {
+    let session = build_session()?;
+    let store = build_local()?;
+    // Legacy rows learn their supersession edge from ciphertext once; after
+    // that an empty column means "no live replacement".
+    respire_app::supersession::ensure_projection(&session, &store)?;
+    let now = respire_app::review::now();
+    let mut due: Vec<(String, String, String)> = store
+        .all(false)?
+        .into_iter()
+        .filter(|row| {
+            row.local_importance == "important"
+                && row.local_kind == "task"
+                && row.local_superseded_by.is_empty()
+                && row
+                    .local_meta
+                    .review_at
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty() && value <= now.as_str())
+        })
+        .map(|row| {
+            let title = if row.local_title.is_empty() {
+                respire::service::short_id(&row.id)
+            } else {
+                row.local_title.clone()
+            };
+            (row.local_meta.review_at.unwrap_or_default(), row.id, title)
+        })
+        .collect();
+    due.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    due.truncate(limit);
+    let count = due.len();
+    let items = due
+        .iter()
+        .map(|(review_at, id, title)| {
+            OutputItem::new(
+                respire::service::short_id(id),
+                OutputStatus::Ok,
+                format!("{review_at} {title}"),
+            )
+        })
+        .collect::<Vec<_>>();
+    let details = due
+        .iter()
+        .map(|(review_at, id, title)| {
+            serde_json::json!({"id": id, "title": title, "review_at": review_at})
+        })
+        .collect::<Vec<_>>();
+    let mut result = ResultEnvelope::new(
+        "due",
+        if count == 0 {
+            OutputStatus::Skip
+        } else {
+            OutputStatus::Ok
+        },
+        serde_json::json!({"count": count, "limit": limit, "now": now}),
+        items,
+    );
+    result.details = serde_json::json!(details);
+    emit_result(result)
+}
+
 /// Whole-store health audit: orphans / illegal importance / duplicate titles / truncated titles / deep chains - a structured report for an AI to patch after.
 /// Query log: list recent queries and adoption/self-grade, or stats (--stats), or report a self-grade (mark).
 /// Post-training terms: candidates ≠ hits; chosen = model mark --good, rejected = mark --bad;
@@ -2986,7 +3060,30 @@ fn run_bench_run(
 
     let session = build_session()?;
     let store = build_local()?;
-    let (candidates, index_pending, resident) = respire::resident::recall_catalog(&session, &store)?;
+    // The current channel applies on eval too: a superseded gold standard gets
+    // reported below instead of quietly re-enabled (the frozen filter is untouched).
+    respire_app::supersession::ensure_projection(&session, &store)?;
+    let now = respire_app::review::now();
+    let (full_rows, index_pending, base_lease) = respire::resident::recall_catalog(&session, &store)?;
+    let removed = respire_app::supersession::removed_ids(&full_rows, &now);
+    let (candidates, resident) = if removed.is_empty() {
+        (Arc::clone(&full_rows), base_lease)
+    } else {
+        let removed_set: std::collections::HashSet<&str> = removed.iter().map(String::as_str).collect();
+        let kept: Vec<_> = full_rows
+            .iter()
+            .filter(|row| !removed_set.contains(row.id.as_str()))
+            .cloned()
+            .collect();
+        let child = respire::core_sdk::ResidentLease::publish(
+            uuid::Uuid::new_v4().to_string(),
+            Some(&base_lease),
+            &store.retrieval_model()?,
+            &[],
+            &removed,
+        )?;
+        (Arc::new(kept), child)
+    };
     let _resident_scope = resident.enter();
     let active_ids: std::collections::HashSet<String> =
         candidates.iter().map(|m| m.id.clone()).collect();
@@ -3108,6 +3205,19 @@ fn run_bench_run(
         ),
     ];
     if !missing.is_empty() {
+        // Distinguish "the current filter hid this gold standard" from "gone".
+        for expected in &mut missing {
+            if let Some(row) = full_rows.iter().find(|row| bench::id_match(&row.id, expected)) {
+                if !row.local_superseded_by.is_empty() {
+                    expected.push_str(&format!(
+                        " (superseded by {})",
+                        respire::service::short_id(&row.local_superseded_by)
+                    ));
+                } else {
+                    expected.push_str(" (expired)");
+                }
+            }
+        }
         status = OutputStatus::Warn;
         items.push(
             OutputItem::new(
@@ -7306,6 +7416,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             ))?;
             return Ok(());
         }
+        Some(Command::Due { limit }) => return run_due(*limit),
         Some(Command::QueryLog {
             limit,
             stats,
@@ -8187,6 +8298,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
             render_min_score,
             no_related,
             intent,
+            when,
         } => {
             anyhow::ensure!(render_budget_base64.is_none() || titles || brief, "render budget requires --titles or --brief");
             anyhow::ensure!(render_min_score.is_none() || render_budget_base64.is_some() || brief, "render minimum score requires a render budget");
@@ -8198,6 +8310,14 @@ fn run_local_inner(args: Cli) -> Result<()> {
             let (session,owner) = build_session_with_owner()?;
             let owner=owner.unwrap_or_else(||"local".to_owned());
             let store = build_local()?;
+            // P1 channels: the supersession projection must exist before the filter reads it.
+            respire_app::supersession::ensure_projection(&session,&store)?;
+            let now = respire_app::review::now();
+            let former_mode = match when.as_str() {
+                "former" => true,
+                "current" => false,
+                _ => respire_app::supersession::former_cue(&query),
+            };
             let review=respire_app::review::ReviewService::new(&session,&store,&owner)?;
             let source=review.recall_source()?;
             let metadata_aware=brief || source.has_metadata();
@@ -8205,17 +8325,32 @@ fn run_local_inner(args: Cli) -> Result<()> {
             // Legacy-only title budgets retain their original WP3a bytes.
             let brief_render=brief || (metadata_aware && render_budget.is_some());
             if metadata_aware {recall_select::require_metadata(brief_render,render_min_score)?;}
-            let (candidates,index_pending,resident)=if metadata_aware {
+            let (full_rows,index_pending,base_lease)=if metadata_aware {
                 let rows:Vec<_>=source.memories().iter().filter(|row|!row.deleted).cloned().collect();
                 let pending=rows.iter().filter(|row|row.local_artifact.is_empty()).count();
                 let lease=respire::core_sdk::ResidentLease::publish(uuid::Uuid::new_v4().to_string(),None,
                     &store.retrieval_model()?,source.snapshots(),&[])?;
-                (Arc::new(rows),pending,Some(lease))
+                (Arc::new(rows),pending,lease)
             } else {
                 let (rows,pending,lease)=respire::resident::recall_catalog(&session,&store)?;
-                (rows,pending,Some(lease))
+                (rows,pending,lease)
             };
-            let _resident_scope=resident.as_ref().map(|lease|lease.enter());
+            // Current channel: superseded/expired rows leave the view before Core
+            // scores them, so they can neither take limit slots nor absorb recall heat.
+            let removed = respire_app::supersession::removed_ids(&full_rows,&now);
+            let (candidates,resident)=if removed.is_empty() {
+                (Arc::clone(&full_rows),None)
+            } else {
+                let removed_set: std::collections::HashSet<&str> = removed.iter().map(String::as_str).collect();
+                let kept:Vec<_>=full_rows.iter().filter(|row|!removed_set.contains(row.id.as_str())).cloned().collect();
+                let child=respire::core_sdk::ResidentLease::publish(uuid::Uuid::new_v4().to_string(),
+                    Some(&base_lease),&store.retrieval_model()?,&[],&removed)?;
+                (Arc::new(kept),Some(child))
+            };
+            // Core always runs under a resident key: the child view when rows were
+            // removed, the base view otherwise. The lease outlives its scope.
+            let active_lease: &respire::core_sdk::ResidentLease = resident.as_deref().unwrap_or(&base_lease);
+            let mut resident_scope=Some(active_lease.enter());
             if index_pending > 0 { rpc::kick_index(); }
             if trace {
                 let preview = &candidates;
@@ -8239,17 +8374,47 @@ fn run_local_inner(args: Cli) -> Result<()> {
             }
             let core_intent = if metadata_aware || render_budget.is_some() {Some(intent.as_str())}else{None};
             // 3. small-to-big: hit body + ancestor bodies (budget is built-in; RSRS_ANCESTOR_BUDGET=0 turns it off)
-            let (mut ranked, recall_mode, selection_fallback, routing, retrieval, budget) = if metadata_aware {
-                recall_select::recall_metadata(&review,&source,embedder!(),&q,&store,render_budget,render_min_score,&intent,mode.as_deref())?
-            } else {
-                let (ranked,recall_mode,selection_fallback,routing,retrieval,budget)=match mode {
-                Some(mode) => {
-                    recall_select::recall_with_mode(&session, embedder!(), &candidates, &q, &store, render_budget, render_min_score, core_intent, &mode)?
+            // One query entry point so the former channel can re-run the identical
+            // request over the unfiltered base view when no live record answers.
+            let mut run_query = |rows: &[respire::StoredMemory],
+                                 layout: Option<respire::memory::model::RenderBudget>|
+             -> Result<(
+                Vec<respire::memory::engine::RecalledWithContext>,
+                String,
+                Option<String>,
+                respire::memory::model::RecallRouting,
+                serde_json::Value,
+                Option<serde_json::Value>,
+            )> {
+                if metadata_aware {
+                    recall_select::recall_metadata(&review,&source,embedder!(),&q,&store,layout,render_min_score,&intent,mode.as_deref())
+                } else {
+                    let (ranked,recall_mode,selection_fallback,routing,retrieval,receipt)=match mode.as_deref() {
+                        Some(mode) => recall_select::recall_with_mode(&session, embedder!(), rows, &q, &store, layout, render_min_score, core_intent, mode)?,
+                        None => recall_select::recall(&session, embedder!(), rows, &q, &store, layout, render_min_score, core_intent)?,
+                    };
+                    Ok((ranked,recall_mode,selection_fallback,routing,retrieval,receipt.map(serde_json::to_value).transpose()?))
                 }
-                None => recall_select::recall(&session, embedder!(), &candidates, &q, &store, render_budget, render_min_score, core_intent)?,
-                };
-                (ranked,recall_mode,selection_fallback,routing,retrieval,budget.map(serde_json::to_value).transpose()?)
             };
+            let (mut ranked, mut recall_mode, mut selection_fallback, mut routing, mut retrieval, mut budget) =
+                run_query(&candidates, render_budget.clone())?;
+            // Former channel step 3: with no live answer, superseded candidates
+            // compete under the same frozen scoring. Leave the filtered child
+            // view first — overwriting the slot directly would restore the wrong
+            // key, because enter() captures the previous slot value.
+            let mut used_fallback = false;
+            if former_mode && !removed.is_empty() && ranked.is_empty() {
+                drop(resident_scope.take());
+                // The base view must stay entered until the arm ends; insert()
+                // avoids reassigning a value only its drop would consume.
+                let _ = resident_scope.insert(base_lease.enter());
+                (ranked, recall_mode, selection_fallback, routing, retrieval, budget) =
+                    run_query(&full_rows, render_budget.clone())?;
+                used_fallback = true;
+            }
+            // Rows matching the active view: the child filter normally, the full
+            // base view when the former fallback re-ran the query unfiltered.
+            let view_rows: &[respire::StoredMemory] = if used_fallback { &full_rows } else { &candidates };
             // Procedural-memory routing (P1/P2): a how-to question gets a second,
             // skill-only pass; the union keeps one procedure inside the top three.
             // Facts keep Core's order and score; run history only ranks procedures.
@@ -8272,7 +8437,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 let (skills, _, _, _, _, _) = recall_select::recall_with_mode(
                     &session,
                     embedder!(),
-                    &candidates,
+                    view_rows,
                     &q_skill,
                     &store,
                     None,
@@ -8297,6 +8462,44 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     procedure_promoted = promoted;
                 }
             }
+            // Former channel step 2: the top live hit carries its replacement
+            // history (nearest hop first, at most three steps, host-side; the
+            // frozen Core ranking never sees this walk).
+            let mut chain_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            if former_mode && !ranked.is_empty() {
+                let top_live = ranked
+                    .iter()
+                    .find(|hit| respire_app::supersession::entry_is_current(&hit.entry, &now))
+                    .map(|hit| (hit.entry.id.clone(), hit.score));
+                if let Some((head, score)) = top_live {
+                    let present: std::collections::HashSet<String> =
+                        ranked.iter().map(|hit| hit.entry.id.clone()).collect();
+                    // Resident rows deliberately discard ciphertext; open from the store.
+                    let store_rows = store.all(false)?;
+                    for row in respire_app::supersession::supersession_chain(&store_rows, &head, 3) {
+                        if present.contains(&row.id) {
+                            continue;
+                        }
+                        // Chain rows bypass Core's query filters, so re-apply the
+                        // scope here: association seeds must stay authorized.
+                        let in_scope = q.project.as_ref().is_none_or(|p| &row.local_project == p)
+                            && q.computer.as_ref().is_none_or(|c| &row.local_computer == c)
+                            && q.kind.is_none_or(|k| row.local_kind == k.as_str());
+                        if !in_scope {
+                            continue;
+                        }
+                        let entry = MemoryEngine::open(&session, row)
+                            .map_err(|error| anyhow!("decode former record {}: {error}", row.id))?;
+                        if chain_ids.insert(entry.id.clone()) {
+                            ranked.push(respire::memory::engine::RecalledWithContext {
+                                score,
+                                entry,
+                                ancestors: Vec::new(),
+                            });
+                        }
+                    }
+                }
+            }
             let intent_label = if core_intent.is_some() {
                 retrieval["intent"].as_str().ok_or_else(|| anyhow::anyhow!("missing Core intent receipt"))?
             } else if r#type.is_some() {
@@ -8306,7 +8509,15 @@ fn run_local_inner(args: Cli) -> Result<()> {
             } else {
                 "fact"
             };
-            let hit_ids: Vec<String> = ranked.iter().map(|r| r.entry.id.clone()).collect();
+            // Association seeds must live in the authorized view: former-channel
+            // chain rows were appended host-side and may sit outside it.
+            let view_ids: std::collections::HashSet<&str> =
+                view_rows.iter().map(|row| row.id.as_str()).collect();
+            let hit_ids: Vec<String> = ranked
+                .iter()
+                .map(|r| r.entry.id.clone())
+                .filter(|id| view_ids.contains(id.as_str()))
+                .collect();
             let associations: respire::memory::model::RelatedResult = if metadata_aware {
                 Default::default()
             } else if budget.is_some() {
@@ -8393,8 +8604,24 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     )
                 })
                 .collect::<Vec<_>>();
+            // P1 channel labels on the title line; the JSON keys stay unchanged.
             for (hit,row) in ranked.iter().zip(items.iter_mut()) {
-                if associations.superseded.contains_key(&hit.entry.id) { row.value.push_str(" [superseded]"); }
+                if !hit.entry.superseded_by.is_empty() {
+                    // Former channel: this record has a live replacement.
+                    let next = full_rows.iter().find(|row| row.id == hit.entry.superseded_by)
+                        .map(|row| if row.local_title.is_empty() { respire::service::short_id(&row.id) } else { row.local_title.clone() })
+                        .unwrap_or_else(|| respire::service::short_id(&hit.entry.superseded_by));
+                    row.value.push_str(&format!(" [superseded by {next}]"));
+                } else if associations.superseded.contains_key(&hit.entry.id) {
+                    row.value.push_str(" [superseded]");
+                } else {
+                    // Current channel: point back at the record this one replaced.
+                    let olds: Vec<String> = full_rows.iter()
+                        .filter(|row| row.local_superseded_by == hit.entry.id)
+                        .map(|row| if row.local_title.is_empty() { respire::service::short_id(&row.id) } else { row.local_title.clone() })
+                        .collect();
+                    if !olds.is_empty() { row.value.push_str(&format!(" [supersedes {}]", olds.join("; "))); }
+                }
             }
             let mut result = ResultEnvelope::new(
                 "recall",
@@ -8424,14 +8651,28 @@ fn run_local_inner(args: Cli) -> Result<()> {
                     }))
                     .collect::<Vec<_>>())
             };
+            // Former-channel rows carry payload truth Core never ranked (chain
+            // additions, direct history hits): fill the null from the entry.
+            if let Some(details)=result.details.as_array_mut() {
+                for (detail,hit) in details.iter_mut().zip(ranked.iter()) {
+                    if detail["superseded_by"].is_null() && !hit.entry.superseded_by.is_empty() {
+                        detail["superseded_by"]=serde_json::json!(hit.entry.superseded_by);
+                    }
+                }
+            }
             if metadata_aware {
                 result.summary["metadata_aware"]=serde_json::json!(true);
                 result.summary["brief"]=serde_json::json!(brief_render);
                 result.summary["filtered_by_evidence"]=retrieval["filtered_by_evidence"].clone();
                 if let Some(details)=result.details.as_array_mut() {
                     for (detail,hit) in details.iter_mut().zip(ranked.iter()) {
-                        detail["evidence"]=retrieval["evidence"].as_array().and_then(|values|values.iter().find(|value|value["id"]==hit.entry.id))
-                            .ok_or_else(||anyhow!("Core omitted recall evidence"))?.clone();
+                        detail["evidence"]=if chain_ids.contains(&hit.entry.id) {
+                            // Chain rows were never ranked by Core, so no evidence receipt exists.
+                            serde_json::Value::Null
+                        } else {
+                            retrieval["evidence"].as_array().and_then(|values|values.iter().find(|value|value["id"]==hit.entry.id))
+                                .ok_or_else(||anyhow!("Core omitted recall evidence"))?.clone()
+                        };
                         detail["source_refs"]=serde_json::json!(hit.entry.metadata.source_refs);
                         detail["scope"]=serde_json::json!(hit.entry.metadata.verification.as_ref().map(|value|&value.scope));
                         detail["valid_until"]=serde_json::json!(hit.entry.metadata.valid_until);
@@ -9894,6 +10135,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Resort { .. }
         | Command::AgentConfig { .. }
         | Command::Prompt
+        | Command::Due { .. }
         | Command::QueryLog { .. }
         | Command::Bench { .. }
         | Command::RunLog { .. }
@@ -9972,6 +10214,7 @@ mod capture_tests {
     mod metadata_coverage;
     mod brief_coverage;
     mod review_coverage;
+    mod supersession_coverage;
 
     #[test]
     fn injected_chain_examples_follow_the_parser_contract() -> anyhow::Result<()> {

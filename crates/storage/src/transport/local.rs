@@ -243,8 +243,8 @@ impl LocalStore {
             "INSERT INTO memories
                 (id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, dirty, parent_id, content_head, recall_count, importance,
-                 device, modified_by, memory_contract, summary, source_refs, valid_until, review_at, artifact, verification)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                 device, modified_by, memory_contract, summary, source_refs, valid_until, review_at, artifact, verification, superseded_by)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
              ON CONFLICT(id) DO UPDATE SET
                 user=excluded.user, ciphertext=excluded.ciphertext, nonce=excluded.nonce,
                 embedding_enc=excluded.embedding_enc, updated_at=excluded.updated_at,
@@ -256,6 +256,7 @@ impl LocalStore {
                 memory_contract=excluded.memory_contract, summary=excluded.summary, source_refs=excluded.source_refs,
                 valid_until=excluded.valid_until, review_at=excluded.review_at,
                 artifact=excluded.artifact, verification=excluded.verification,
+                superseded_by=excluded.superseded_by,
                 recall_count=COALESCE((SELECT recall_count FROM memories WHERE id=excluded.id), excluded.recall_count)",
             params![
                 memory.id,
@@ -286,6 +287,7 @@ impl LocalStore {
                 memory.local_meta.review_at,
                 memory.local_meta.artifact.as_ref().map(serde_json::to_string).transpose()?,
                 memory.local_meta.verification.as_ref().map(serde_json::to_string).transpose()?,
+                memory.local_superseded_by,
             ],
         )?;
         self.store_artifact(memory, &self.retrieval_model()?)?;
@@ -376,6 +378,8 @@ impl LocalStore {
                 artifact: json_column(row, 25)?,
                 verification: json_column(row, 26)?,
             },
+            // Strict index: a SELECT that forgets the column must fail loudly.
+            local_superseded_by: row.get(27)?,
         })
     }
 
@@ -384,7 +388,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories WHERE dirty = 1",
         )?;
         let rows = statement.query_map([], Self::row_to_memory)?;
@@ -398,7 +402,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories WHERE deleted = 0 AND NOT EXISTS (SELECT 1 FROM core_artifacts a WHERE a.memory_id=memories.id AND a.source=memories.ciphertext AND a.model=?1)",
         )?;
         let rows = statement.query_map([self.active_generation_key()?], Self::row_to_memory)?;
@@ -421,7 +425,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories WHERE parent_id = ?1 AND deleted = 0 ORDER BY recall_count DESC, updated_at",
         )?;
         let rows = statement.query_map(params![parent_id], Self::row_to_memory)?;
@@ -434,7 +438,7 @@ impl LocalStore {
         let mut statement = self.connection.prepare(
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories WHERE parent_id = '' AND deleted = 0 ORDER BY recall_count DESC, updated_at",
         )?;
         let rows = statement.query_map([], Self::row_to_memory)?;
@@ -869,6 +873,18 @@ impl LocalStore {
         Ok(())
     }
 
+    /// Local-only projection of the supersession edge (ciphertext stays authoritative).
+    /// No dirty flag, no timestamp: this is an index refresh, not a content edit, so it
+    /// must never enter the sync outbox. The retrieval trigger still records the row so
+    /// the resident catalog picks the projection up on its next delta.
+    pub fn project_superseded(&self, id: &str, superseded_by: &str) -> Result<bool> {
+        let n = self.connection.execute(
+            "UPDATE memories SET superseded_by = ?2 WHERE id = ?1 AND superseded_by IS NOT ?2",
+            params![id, superseded_by],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Persist a Core-owned index locator only if the encrypted source is current.
     /// Index work must never create a content version or an outgoing sync operation.
     pub fn set_artifact(
@@ -1082,6 +1098,9 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         ("review_at", "TEXT"),
         ("artifact", "TEXT"),
         ("verification", "TEXT"),
+        // Local supersession projection: ciphertext stays authoritative; the column
+        // exists so current-channel recall can drop superseded rows without decryption.
+        ("superseded_by", "TEXT NOT NULL DEFAULT ''"),
     ] {
         if !cols.iter().any(|column| column == name) {
             connection.execute_batch(&format!(
@@ -1309,12 +1328,12 @@ impl MemoryTransport for LocalStore {
         let sql = if include_deleted {
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories"
         } else {
             "SELECT id, user, ciphertext, nonce, embedding_enc, updated_at, deleted,
                  kind, tags, title, project, computer, embedding, created_at, parent_id, content_head, recall_count, importance, device, modified_by,
-                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null')
+                 memory_contract, summary, source_refs, valid_until, review_at, COALESCE(artifact,'null'), COALESCE(verification,'null'), superseded_by
              FROM memories WHERE deleted = 0"
         };
         let mut statement = self.connection.prepare(sql)?;
@@ -1416,6 +1435,7 @@ mod tests {
             local_artifact: Vec::new(),
             local_modified_by: "test-dev".to_owned(),
             local_meta: Default::default(),
+            local_superseded_by: String::new(),
         }
     }
 
