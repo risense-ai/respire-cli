@@ -92,6 +92,12 @@ pub fn default_data_dir() -> PathBuf {
         .join(".rsrs")
 }
 
+/// Main profile root: `RSRS_DATA_DIR` when isolated, otherwise `~/.rsrs`.
+/// Returning to main must retain this override, not use the default home directly.
+pub fn main_data_dir() -> PathBuf {
+    env_root_dir().unwrap_or_else(default_data_dir)
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {

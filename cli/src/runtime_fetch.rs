@@ -297,7 +297,7 @@ pub fn valid_version(version: &str) -> bool {
 /// its obfuscated triple name (see [`TRIPLES`]); Linux follows the compiled
 /// ABI, with an explicit asset override available through `RSRS_RUNTIME_TRIPLE`.
 pub fn release_triple() -> Result<String> {
-    if let Ok(raw) = respire::env::var("RSRS_RUNTIME_TRIPLE") {
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_TRIPLE") {
         let trimmed = raw.trim();
         anyhow::ensure!(
             TRIPLES.contains(&trimmed),
@@ -325,7 +325,7 @@ pub fn release_triple() -> Result<String> {
 
 /// CLI installation root (`~/.rsrs` unless isolated).
 pub fn installation_root() -> PathBuf {
-    respire::service::main_data_dir()
+    respire_client_host::paths::main_data_dir()
 }
 
 /// Managed runtime directory: `<installation_root>/runtime/`.
@@ -519,7 +519,7 @@ pub enum ResolvedRuntime {
 /// verified), the portable layout next to this CLI binary, the legacy combined
 /// stable location, and finally [`download_and_install`].
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
-    if let Ok(raw) = respire::env::var("RSRS_RUNTIME_BIN") {
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_BIN") {
         let explicit = PathBuf::from(raw.trim());
         anyhow::ensure!(
             !explicit.as_os_str().is_empty(),
@@ -1553,7 +1553,7 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
     // are refused so every caller takes its local fallback (the in-process
     // shim) deterministically instead of touching the network.
     anyhow::ensure!(
-        !respire::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
+        !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
         "runtime downloads are disabled in core test mode"
     );
     let metadata_name = format!("runtime-build-{triple}.json");

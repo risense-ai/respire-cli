@@ -913,7 +913,7 @@ pub fn keygen() -> Result<(PathBuf, String)> {
 pub const DEFAULT_SERVER_ADDR: &str = "https://api.rsrs.rs";
 
 pub use crate::client_paths::{
-    default_data_dir, env_root_dir, expand_tilde, home_dir, internally_configured_root,
+    default_data_dir, env_root_dir, expand_tilde, home_dir, internally_configured_root, main_data_dir,
 };
 
 /// client.json path is special: it itself decides data_dir, so **usually** we always read the copy in the default dir
@@ -1046,13 +1046,6 @@ fn read_client_config_for_write() -> Result<serde_json::Value> {
 // ── data dir (client.json data_dir → RSRS_DATA_DIR → ~/.rsrs) ──
 // For tests and multi-lib maintenance: changing data_dir switches the whole library (db/session/lock follow).
 // Order: env var wins (one-shot override for CI/tests) → client.json data_dir → default ~/.rsrs.
-
-/// Main-profile dir: `RSRS_DATA_DIR` when isolated, else default `~/.rsrs`.
-/// **Every "back to main" path must use this**, not a hard `default_data_dir()` — otherwise an isolated instance
-/// switching back to main would land in the real user dir (hit 2026-09-20).
-pub fn main_data_dir() -> PathBuf {
-    env_root_dir().unwrap_or_else(default_data_dir)
-}
 
 /// Effective data dir. Empty/missing fall back to default — never panics.
 ///
