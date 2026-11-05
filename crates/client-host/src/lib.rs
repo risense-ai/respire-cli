@@ -4,3 +4,6 @@
 
 pub mod env;
 pub mod paths;
+mod version;
+
+pub use version::version_cmp;

@@ -26,7 +26,7 @@
 //! download version: `required` is the exact pinned version fetched by
 //! [`download_and_install`]; `accept` is a range such as `>=1.0.21-dev.1,<2.0.0`
 //! (comma-separated `>=min` / `<max` bounds, min inclusive, max exclusive,
-//! compared with the same numeric rules as `crate::net_rpc::version_cmp`) that
+//! compared with the same numeric rules as `respire_client_host::version_cmp`) that
 //! an already-installed runtime must satisfy to be reused instead of replaced.
 //! Runtime releases publish `runtime-build-<triple>.json` with
 //! `{"runtime_version","tag","triple","binary_sha256","binary_file","compat":{"min_cli","max_cli"}}`
@@ -158,7 +158,7 @@ impl AcceptRange {
         );
         if let (Some(min), Some(max)) = (range.min.as_deref(), range.max.as_deref()) {
             anyhow::ensure!(
-                crate::net_rpc::version_cmp(min, max) == std::cmp::Ordering::Less,
+                respire_client_host::version_cmp(min, max) == std::cmp::Ordering::Less,
                 "accept lower bound is not below its upper bound"
             );
         }
@@ -740,14 +740,14 @@ impl BuildMetadata {
             "release metadata has an invalid compat range"
         );
         anyhow::ensure!(
-            crate::net_rpc::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
+            respire_client_host::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
             "runtime {} requires CLI >= {}; upgrade the CLI first",
             self.runtime_version,
             self.compat.min_cli
         );
         anyhow::ensure!(
             self.compat.max_cli == "*"
-                || crate::net_rpc::version_cmp(cli, &self.compat.max_cli)
+                || respire_client_host::version_cmp(cli, &self.compat.max_cli)
                     == std::cmp::Ordering::Less,
             "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
             self.runtime_version,
@@ -1752,7 +1752,7 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
         });
     }
     // Newest first; equal comparisons keep a stable relative order.
-    installed.sort_by(|a, b| crate::net_rpc::version_cmp(&b.version, &a.version));
+    installed.sort_by(|a, b| respire_client_host::version_cmp(&b.version, &a.version));
     let current = read_manifest()?
         .map(|manifest| manifest.version)
         .or_else(|| installed.first().map(|entry| entry.version.clone()));

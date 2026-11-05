@@ -1570,6 +1570,7 @@ dependencies = [
  "rand",
  "ratatui",
  "respire_app",
+ "respire_client_host",
  "respire_commands",
  "respire_protocol",
  "respire_spawn",

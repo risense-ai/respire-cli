@@ -17,6 +17,7 @@ name = "rsrs"
 path = "src/main.rs"
 
 [dependencies]
+respire_client_host = { path = "../crates/client-host" }
 respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
 respire_commands = { path = "../crates/commands" }
 respire_spawn = { path = "../spawn" }

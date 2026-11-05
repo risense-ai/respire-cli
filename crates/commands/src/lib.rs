@@ -44,7 +44,6 @@ pub mod i18n;
 pub mod metadata;
 #[cfg(feature = "server")]
 pub mod model_install;
-#[cfg(feature = "server")]
 pub mod model_progress;
 #[cfg(feature = "server")]
 pub mod net_rpc;
