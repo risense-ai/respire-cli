@@ -14,6 +14,8 @@ pub use respire_core_sdk::env;
 #[cfg(test)]
 mod test_lock;
 
+mod client_paths;
+
 pub mod auth;
 pub mod diary;
 pub mod embedding;

@@ -1,0 +1,15 @@
+[package]
+name = "respire_client_host"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Pure client environment and profile path helpers"
+license-file = "../../LICENSE"
+publish = false
+
+[dependencies]
+anyhow = "1.0"
+dirs = "6.0"
+
+[lints.rust]
+unsafe_code = "forbid"

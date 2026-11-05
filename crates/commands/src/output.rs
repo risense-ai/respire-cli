@@ -60,7 +60,7 @@ pub struct ResultEnvelope {
     pub errors: Vec<String>,
     pub details: Value,
     #[serde(default)]
-    pub related: Vec<respire_app::memory::model::RelatedMemory>,
+    pub related: Vec<respire_protocol::RelatedMemory>,
 }
 
 impl ResultEnvelope {
@@ -134,7 +134,7 @@ impl ResultEnvelope {
             .collect::<Vec<_>>();
         rows.extend(self.related.iter().map(|related| {
             vec![
-                respire_app::service::short_id(&related.id),
+                related.id.chars().take(8).collect(),
                 status_label(Status::Ok).to_owned(),
                 related_value(related),
                 String::new(),
@@ -282,8 +282,8 @@ fn task_phase(phase: &str) -> String {
     .to_owned()
 }
 
-pub fn related_value(related: &respire_app::memory::model::RelatedMemory) -> String {
-    use respire_app::memory::model::RelationKind;
+pub fn related_value(related: &respire_protocol::RelatedMemory) -> String {
+    use respire_protocol::RelationKind;
     let label = match related.relation {
         RelationKind::NewVersion => "new version",
         RelationKind::OldVersion => "old version",
@@ -754,7 +754,7 @@ mod tests {
         let guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let prev = respire_app::env::var("RSRS_LANG").ok();
+        let prev = crate::env::var("RSRS_LANG").ok();
         std::env::set_var("RSRS_LANG", "en");
         (guard, prev)
     }

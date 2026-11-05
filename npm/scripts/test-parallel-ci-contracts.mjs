@@ -49,7 +49,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   });
   assert.deepEqual(exits,[23],'test failures must fail the coverage group');
 
-  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests\]/);
+  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
   assert.match(report,/for group in core runtime_smoke runtime_autostart/);
   assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 90/);
   assert.match(report,/exit "\$result"/);
@@ -60,12 +60,12 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert(readFileSync(new URL('../../scripts/test-dev-model-fixture.py',import.meta.url),'utf8').includes('from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest'));
 });
 test('fail-closed aggregate separates source success from explicit candidate evidence',()=>{
-  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests\]/);
+  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
   assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success/);
   const requested="inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != ''";
   assert(section('required-tests').includes(`(${requested})`));
   assert(complete.includes('CANDIDATE_REQUESTED: ${{ '+requested+' }}'));
-  const required=section('required-tests');
+  const required=section('required-tests'),frontend=section('commands-frontend');
   const condition=block=>block.match(/    if: \$\{\{ (.+) \}\}/)[1];
   assert(required.includes('node scripts/verify-required-tests.mjs --ci'));
   assert.doesNotMatch(required,/allow-missing/);
@@ -78,6 +78,7 @@ test('fail-closed aggregate separates source success from explicit candidate evi
     const context={inputs,always:()=>true};
     assert.equal(runInNewContext(condition(required),context),true,'any candidate input must run the verifier even in focused mode');
     assert.equal(runInNewContext(condition(complete),context),true,'candidate failures must reach the aggregate');
+    assert.equal(runInNewContext(condition(frontend),context),true,'any candidate input must run commands frontend even in focused mode');
     const env={...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:String(mode!==null)};
     const run=()=>runInNewContext(validator,{assert,process:{env}});
     if(mask===7&&mode===null)run();else assert.throws(run);
@@ -85,8 +86,10 @@ test('fail-closed aggregate separates source success from explicit candidate evi
   const absent={required_candidate_run_id:'',required_candidate_artifact_id:'',required_candidate_sha256:'',research_feedback_only:false,native_published_only:false,artifact_run:'',version_upgrade_only:false};
   assert.equal(runInNewContext(condition(required),{inputs:absent,always:()=>true}),false);
   assert.equal(runInNewContext(condition(complete),{inputs:absent,always:()=>true}),true);
+  assert.equal(runInNewContext(condition(frontend),{inputs:absent}),true);
   for(const mode of ['research_feedback_only','native_published_only','artifact_run','version_upgrade_only']){
     assert.equal(runInNewContext(condition(complete),{inputs:{...absent,[mode]:mode==='artifact_run'?'123':true},always:()=>true}),false);
+    assert.equal(runInNewContext(condition(frontend),{inputs:{...absent,[mode]:mode==='artifact_run'?'123':true}}),false);
   }
   for(const values of [['bad','456','a'.repeat(64)],['123','0','a'.repeat(64)],['123','456','bad']]){
     assert.throws(()=>runInNewContext(validator,{assert,process:{env:{...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:'false'}}}));
@@ -95,16 +98,16 @@ test('fail-closed aggregate separates source success from explicit candidate evi
   for(const candidate of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
     const result=execFileSync;
     let passed=true;
-    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
+    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
     assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${source}/${required}`);
   }
-  for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT'])for(const status of ['failure','cancelled','skipped']){
-    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
+  for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT','COMMANDS_RESULT'])for(const status of ['failure','cancelled','skipped']){
+    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
   }
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
   assert.match(complete,/REQUIRED_RESULT: \$\{\{ needs.required-tests.result \}\}/);
-  for(const name of ['coverage-tests','check-complete','workspace-tests','contract-checks'])assert.match(section(name),/!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only/);
+  for(const name of ['coverage-tests','check-complete','workspace-tests','contract-checks','commands-frontend'])assert.match(section(name),/!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only/);
 });
 
 

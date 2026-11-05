@@ -1629,6 +1629,7 @@ dependencies = [
  "flate2",
  "hex",
  "keyring",
+ "respire_client_host",
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol",
@@ -1647,6 +1648,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_client_host"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+]
+
+[[package]]
 name = "respire_commands"
 version = "1.0.0"
 dependencies = [
@@ -1657,6 +1666,7 @@ dependencies = [
  "clap",
  "hex",
  "respire_app",
+ "respire_client_host",
  "respire_protocol",
  "respire_spawn",
  "serde",
@@ -1683,6 +1693,7 @@ dependencies = [
  "hex",
  "libloading",
  "ort-sys",
+ "respire_client_host",
  "respire_protocol",
  "serde",
  "serde_json",

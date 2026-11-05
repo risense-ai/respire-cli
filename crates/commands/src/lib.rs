@@ -8,8 +8,8 @@
 //! and the machine-readable output contract (`output`).
 //!
 //! Boundaries:
-//! - depends on `respire_app` (app-core), `respire_protocol` and
-//!   `respire_spawn`, never on the `respire` CLI package;
+//! - default `server` enables app, transport and business modules;
+//! - without default features, parsing, output and pure DTO modules are exposed;
 //! - the CLI binary re-exports these modules so `crate::` paths keep working;
 //! - the runtime server face (`rpc_serve`, `runtime_http`, `admission`,
 //!   `network`) is shared with the standalone `rsrs-runtime` binary;
@@ -17,36 +17,63 @@
 //!
 //! Modules land with the individual extraction commits of the runtime split.
 
+pub(crate) use respire_client_host::env;
+
+#[cfg(not(feature = "server"))]
+use respire_client_host::paths as client_paths;
+
+#[cfg(feature = "server")]
 pub mod admission;
 pub mod app_version;
 pub mod autostart;
+#[cfg(feature = "server")]
 pub mod bench;
+#[cfg(feature = "server")]
 pub mod capture;
 pub mod classify;
 pub mod cli_def;
+#[cfg(feature = "server")]
 pub mod engine;
+#[cfg(feature = "server")]
 pub mod gates;
+#[cfg(feature = "server")]
 pub mod hooks;
+#[cfg(feature = "server")]
 pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
+#[cfg(feature = "server")]
 pub mod model_install;
+#[cfg(feature = "server")]
 pub mod model_progress;
+#[cfg(feature = "server")]
 pub mod net_rpc;
+#[cfg(feature = "server")]
 pub mod network;
 pub mod output;
+#[cfg(feature = "server")]
 pub mod output_emit;
+#[cfg(feature = "server")]
 pub mod output_state;
+#[cfg(feature = "server")]
 pub mod progress;
+#[cfg(feature = "server")]
 pub mod recall_select;
 pub mod review;
+#[cfg(feature = "server")]
 pub mod rpc_serve;
+#[cfg(feature = "server")]
 pub mod rpc_worker;
 pub mod runtime_error;
+#[cfg(feature = "server")]
 pub mod runtime_http;
+#[cfg(feature = "server")]
 pub mod runtime_policy;
+#[cfg(feature = "server")]
 pub mod skill;
+#[cfg(feature = "server")]
 pub mod sync_flow;
+#[cfg(feature = "server")]
 pub mod util;
 
 #[cfg(test)]

@@ -3,9 +3,12 @@
 
 pub const DEFAULT_MODEL: &str = "jev-latest";
 // Host credentials and network transport. Core owns classification policy.
+#[cfg(feature = "server")]
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+#[cfg(feature = "server")]
+use serde_json::json;
+use serde_json::Value;
 
 pub const DEFAULT_API_BASE: &str = "https://api.typesafe.ai/v1/systemone";
 // The clap default references the const in this module; the re-export line
@@ -88,6 +91,7 @@ pub struct BusinessResult {
     pub items: Vec<ItemResult>,
 }
 
+#[cfg(feature = "server")]
 pub fn execute(
     memories: &[respire_app::StoredMemory],
     backend: Option<&Backend>,
@@ -116,6 +120,7 @@ pub fn execute(
 
 /// Do not include credentials, endpoint query parameters, prompts or provider
 /// response bodies in errors crossing the SDK boundary.
+#[cfg(feature = "server")]
 pub fn call_api(backend: &Backend, request: &Value) -> Result<Value> {
     anyhow::ensure!(
         request["provider"].as_str() == Some(backend.name),
@@ -161,7 +166,7 @@ pub fn ds_endpoint(base: &str) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod transport_tests {
     use super::*;
 

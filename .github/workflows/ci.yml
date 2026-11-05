@@ -196,6 +196,53 @@ jobs:
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
+  commands-frontend:
+    if: ${{ (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') || (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - name: Reject commands source paths into business crates
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          root = Path.cwd()
+          forbidden = [(root / 'crates' / name).resolve() for name in ('core-sdk', 'app', 'app-domain', 'storage', 'crypto')]
+          forbidden.append((root / 'runtime').resolve())
+          pattern = re.compile(r'#\s*\[\s*(?:path\s*=|cfg_attr\b[^\]]*\bpath\s*=)\s*(?:r#*)?"([^"]+)"|\binclude\s*!\s*\(\s*(?:r#*)?"([^"]+)"')
+          for source in sorted((root / 'crates/commands').rglob('*.rs')):
+              text = source.read_text(encoding='utf-8')
+              for match in pattern.finditer(text):
+                  relative = match[1] or match[2]
+                  target = (source.parent / relative.replace('\\', '/')).resolve()
+                  if any(target.is_relative_to(directory) for directory in forbidden):
+                      line = text.count('\n', 0, match.start()) + 1
+                      raise SystemExit(f'{source.relative_to(root)}:{line}: forbidden source path {relative}')
+          PY
+      - name: Require a business-free commands dependency graph
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          cargo tree -p respire_commands --no-default-features --locked --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/commands-frontend-tree.txt"
+          cat "$RUNNER_TEMP/commands-frontend-tree.txt"
+          if grep -Eq '^(respire_app|respire_app_domain|respire_storage|respire_crypto|respire_core_sdk|respire_runtime)([[:space:]]|$)' "$RUNNER_TEMP/commands-frontend-tree.txt"; then
+            echo 'Commands frontend depends on a forbidden business package' >&2
+            exit 1
+          fi
+      - name: Test only the commands frontend library
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          cargo test -p respire_commands --no-default-features --lib --locked
+
   workspace-tests:
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
@@ -641,7 +688,7 @@ jobs:
 
   check-complete:
     if: ${{ always() && ((inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') || (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only)) }}
-    needs: [coverage-tests, workspace-tests, contract-checks, required-tests]
+    needs: [coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -684,8 +731,9 @@ jobs:
           WORKSPACE_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           REQUIRED_RESULT: ${{ needs.required-tests.result }}
+          COMMANDS_RESULT: ${{ needs.commands-frontend.result }}
           CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
-        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$COMMANDS_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
 
   contract-checks:
     # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK

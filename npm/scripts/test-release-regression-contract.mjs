@@ -55,7 +55,9 @@ test('both Linux ARM targets require native runners, every source feedback phase
   for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
   assert.match(alpine,/--network none/);assert.match(alpine,/--direct model probe --json/);
-  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.match(alpine,/sha256sum --check --status/);
+  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c -s/g)||[]).length,3);
+  assert.doesNotMatch(alpine,/--check|--status/);
+  assert.match(alpine,/--runtime-internal --stop --json/);
   assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model probe'),'mounted CPU artifact must be checked before inference');
   assert.match(alpine,/test -z "\$\{RSRS_CORE_TEST_MODE:-\}"/);assert.doesNotMatch(alpine,/-e (?:GH_TOKEN|GITHUB_TOKEN|CORE_SDK_READ_TOKEN|RSRS_CORE_TEST_MODE)/);
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];

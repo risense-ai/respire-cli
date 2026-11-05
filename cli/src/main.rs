@@ -1731,13 +1731,13 @@ fn run(args: Cli) -> Result<()> {
         Some(Command::Remember {
             metadata, r#type, ..
         }) => {
-            metadata.patch().is_some()
+            metadata.has_patch()
                 || r#type
                     .as_deref()
                     .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
         }
         Some(Command::Update { metadata, kind, .. }) => {
-            metadata.patch().is_some()
+            metadata.has_patch()
                 || kind
                     .as_deref()
                     .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))

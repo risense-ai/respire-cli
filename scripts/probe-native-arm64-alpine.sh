@@ -19,7 +19,7 @@ if [ -z "$cpu" ]; then
 fi
 cpu="$(realpath "$cpu")"
 test -f "$cpu"
-echo '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '"$cpu" | sha256sum --check --status
+echo '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '"$cpu" | sha256sum -c -s
 runtime="$(realpath "${5:?pass verified musl Runtime binary}")"
 runtime_sha256="${6:?pass verified Runtime digest}"
 runtime_version="${7:?pass verified Runtime version}"
@@ -28,7 +28,7 @@ test "$runtime" != "$binary"
 test "$(basename "$runtime")" = rsrs-runtime
 [[ "$runtime_sha256" =~ ^[0-9a-f]{64}$ ]]
 [[ "$runtime_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
-echo "$runtime_sha256  $runtime" | sha256sum --check --status
+echo "$runtime_sha256  $runtime" | sha256sum -c -s
 bundle="$(dirname "$runtime")"
 test -f "$bundle/core-runtime.json"
 mkdir -p "$profile"
@@ -49,7 +49,7 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     test -r /models/tokenizer.json
     test -r /models/onnx/model_quantized.onnx
     test -r /runtime/core-runtime.json
-    echo "$NATIVE_RUNTIME_SHA256  /runtime/rsrs-runtime" | sha256sum --check --status
+    echo "$NATIVE_RUNTIME_SHA256  /runtime/rsrs-runtime" | sha256sum -c -s
     case "$(/runtime/rsrs-runtime --version)" in
       *" $NATIVE_RUNTIME_VERSION") ;;
       *) echo "Runtime version differs from verified installation" >&2; exit 1 ;;
