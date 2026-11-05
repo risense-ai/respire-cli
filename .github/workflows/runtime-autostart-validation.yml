@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/runtime-autostart-validation.yml'
+      - 'runtime-pin.json'
       - 'scripts/test-runtime-autostart.py'
       - 'cli/src/autostart.rs'
       - 'cli/src/autostart/**'
@@ -90,6 +91,35 @@ jobs:
           cargo test --locked -p respire_spawn --target "$SDK_TARGET" --target-dir target/autostart-validation
           cargo test --locked -p respire --bin rsrs autostart:: --target "$SDK_TARGET" --target-dir target/autostart-validation -- --test-threads=1 --show-output
           cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
+      - name: Prepare official pinned standalone Runtime for supervision validation
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+          EXE_SUFFIX: ${{ matrix.suffix }}
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/autostart-validation', process.env.SDK_TARGET, 'debug', `rsrs${process.env.EXE_SUFFIX}`);
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const runtime = join(root, 'runtime', pin.required, `rsrs-runtime${process.env.EXE_SUFFIX}`);
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          NODE
       - name: Fetch immutable previous public native version without install scripts
         shell: bash
         env:

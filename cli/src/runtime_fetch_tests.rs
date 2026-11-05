@@ -111,14 +111,24 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
 #[test]
 fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     let pin = pinned()?;
-    anyhow::ensure!(pin.required == "1.0.21-dev.1", "unexpected pin {pin:?}");
-    anyhow::ensure!(pin.accept.contains("1.0.21-dev.1"));
+    anyhow::ensure!(pin.required == "1.0.21-dev.5", "unexpected pin {pin:?}");
+    anyhow::ensure!(pin.accept.contains("1.0.21-dev.5"));
+    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.4"));
+    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.3"));
+    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.2"));
+    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.1"));
     anyhow::ensure!(pin.accept.contains("1.0.21"));
     anyhow::ensure!(pin.accept.contains("1.9.9"));
     anyhow::ensure!(!pin.accept.contains("1.0.20"));
     anyhow::ensure!(!pin.accept.contains("2.0.0"));
     anyhow::ensure!(!pin.accept.contains("2.1.0-dev.1"));
-    anyhow::ensure!(version_in_accept("1.0.21-dev.1") && !version_in_accept("0.9.0"));
+    anyhow::ensure!(
+        version_in_accept("1.0.21-dev.5")
+            && !version_in_accept("1.0.21-dev.4")
+            && !version_in_accept("1.0.21-dev.3")
+            && !version_in_accept("1.0.21-dev.2")
+            && !version_in_accept("0.9.0")
+    );
     Ok(())
 }
 
@@ -304,24 +314,186 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
     };
-    let _env = env_scope(&["RSRS_DATA_DIR"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_RUNTIME_BIN", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
-    let (archive, hash) = release_fixture(&triple)?;
+    std::env::remove_var("RSRS_RUNTIME_BIN");
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    let binary_name = release_binary_name(&triple);
+    let binary_bytes = b"synthetic runtime bytes, never executed";
+    let resource_bytes = b"synthetic SDK resource";
+    let hash = sha256_hex(binary_bytes);
+    let resource_hash = sha256_hex(resource_bytes);
+    let core = serde_json::json!({
+        "schema_version": 1, "target": triple,
+        "files": [{"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash}],
+    }).to_string();
+    let archive = gz(&tar_bytes(&[
+        (&binary_name, b'0', 0o700, binary_bytes),
+        (CORE_MANIFEST_FILE, b'0', 0o600, core.as_bytes()),
+        ("lib/provider.bin", b'0', 0o600, resource_bytes),
+    ]))?;
     let archive_path = dir.path().join("runtime.tar.gz");
+    let metadata_path = dir.path().join(format!("runtime-build-{triple}.json"));
+    let metadata = serde_json::json!({
+        "schema_version": 2, "runtime_version": "1.0.21-dev.1", "tag": "v1.0.21-dev.1",
+        "target_triple": triple, "archive_file": format!("rsrs-runtime-{triple}.tar.gz"),
+        "archive_sha256": sha256_hex(&archive), "binary_file": binary_name, "binary_sha256": hash,
+        "source_commit": "0".repeat(40), "compat": {"min_cli": "1.0.0", "max_cli": "*"},
+        "protocol_range": {"minimum": 1, "maximum": 1},
+        "capabilities": {"business_executor": "1", "mcp_server": "1"},
+        "files": [
+            {"path": binary_name, "size": binary_bytes.len(), "sha256": hash},
+            {"path": CORE_MANIFEST_FILE, "size": core.len(), "sha256": sha256_hex(core.as_bytes())},
+            {"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash},
+        ],
+    });
     fs::write(&archive_path, &archive)?;
+    anyhow::ensure!(
+        install_from_file(&archive_path, "1.0.21-dev.1").is_err(),
+        "offline metadata is mandatory"
+    );
+    anyhow::ensure!(read_manifest()?.is_none());
+    fs::write(&metadata_path, metadata.to_string())?;
     let binary = install_from_file(&archive_path, "1.0.21-dev.1")?;
     anyhow::ensure!(binary.is_file());
     let manifest = read_manifest()?.context("manifest missing after install")?;
-    anyhow::ensure!(manifest.version == "1.0.21-dev.1");
-    anyhow::ensure!(manifest.sha256 == hash);
+    anyhow::ensure!(manifest.version == "1.0.21-dev.1" && manifest.sha256 == hash);
+    let proof = manifest.release.as_ref().context("release proof missing")?;
+    anyhow::ensure!(proof.metadata_json == metadata.to_string());
+    anyhow::ensure!(proof.metadata_sha256 == sha256_hex(metadata.to_string().as_bytes()));
     anyhow::ensure!(managed_runtime_path()?.context("managed path missing")? == binary);
-    // Side installs of older and newer versions; only current + newest survive.
+    anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
+    let resource = binary
+        .parent()
+        .context("binary has no parent")?
+        .join("lib/provider.bin");
+    anyhow::ensure!(fs::read(&resource)? == resource_bytes);
+    // Reuse must authenticate the original metadata, not a replacement local
+    // manifest that agrees with damaged resource bytes.
+    let core_path = binary
+        .parent()
+        .context("binary has no parent")?
+        .join(CORE_MANIFEST_FILE);
+    fs::write(&resource, b"damaged resource")?;
+    let changed_core = serde_json::json!({
+        "schema_version": 1, "target": triple,
+        "files": [{"path": "lib/provider.bin", "sha256": sha256_hex(b"damaged resource")}],
+    });
+    fs::write(&core_path, changed_core.to_string())?;
+    let error = managed_runtime_path()
+        .err()
+        .context("damaged resources were accepted")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    anyhow::ensure!(format!("{error:#}").contains("repair required"));
+    let error = resolve_runtime_bin()
+        .err()
+        .context("discovery ignored managed corruption")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    anyhow::ensure!(format!("{error:#}").contains("repair required"));
+    let error = download_and_install(Some("1.0.21-dev.1"), None)
+        .err()
+        .context("cached install ignored damaged resources")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    fs::write(&core_path, &core)?;
+    fs::write(&resource, resource_bytes)?;
+    fs::remove_file(&resource)?;
+    anyhow::ensure!(managed_runtime_path().is_err());
+    fs::write(&resource, resource_bytes)?;
+    let extra = resource.with_file_name("unlisted-provider.bin");
+    fs::write(&extra, b"unlisted resource")?;
+    anyhow::ensure!(managed_runtime_path().is_err());
+    fs::remove_file(&extra)?;
+
+    let mut changed = manifest.clone();
+    changed
+        .release
+        .as_mut()
+        .context("release proof missing")?
+        .metadata_json
+        .push(' ');
+    publish_manifest(&changed)?;
+    anyhow::ensure!(managed_runtime_path().is_err());
+    changed = manifest.clone();
+    changed.sha256 = "0".repeat(64);
+    publish_manifest(&changed)?;
+    anyhow::ensure!(managed_runtime_path().is_err());
+    for (field, value) in [
+        ("runtime_version", serde_json::json!("9.0.0")),
+        ("target_triple", serde_json::json!("other-target")),
+    ] {
+        let mut rebound = metadata.clone();
+        rebound[field] = value;
+        changed = manifest.clone();
+        let proof = changed.release.as_mut().context("release proof missing")?;
+        proof.metadata_json = rebound.to_string();
+        proof.metadata_sha256 = sha256_hex(proof.metadata_json.as_bytes());
+        publish_manifest(&changed)?;
+        anyhow::ensure!(
+            managed_runtime_path().is_err(),
+            "rebound {field} was accepted"
+        );
+    }
+    let mut incomplete = metadata.clone();
+    incomplete["files"]
+        .as_array_mut()
+        .context("release files missing")?
+        .retain(|file| file["path"] != CORE_MANIFEST_FILE);
+    let incomplete_metadata: BuildMetadata = serde_json::from_value(incomplete.clone())?;
+    anyhow::ensure!(
+        ManagedManifest::from_release(&incomplete_metadata, incomplete.to_string().as_bytes())
+            .is_err(),
+        "release proof must authenticate the Core manifest"
+    );
+    changed = manifest.clone();
+    changed.release = None;
+    publish_manifest(&changed)?;
+    let error = resolve_runtime_bin()
+        .err()
+        .context("legacy selection silently fell back")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    anyhow::ensure!(format!("{error:#}").contains("repair required"));
+    let error = download_and_install(Some("1.0.21-dev.1"), None)
+        .err()
+        .context("cached install accepted a legacy selection without proof")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    // An explicit trusted reinstall can establish proof for a legacy selection.
+    anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1")? == binary);
+    anyhow::ensure!(read_manifest()?
+        .context("repaired selection missing")?
+        .release
+        .is_some());
+    anyhow::ensure!(managed_runtime_path()?.context("repaired path missing")? == binary);
+    // Failed archive, binary and resource checks must preserve the selected payload.
+    for field in ["archive_sha256", "binary_sha256", "resource_sha256"] {
+        let mut invalid = metadata.clone();
+        if field == "resource_sha256" {
+            invalid["files"][2]["sha256"] = serde_json::json!("0".repeat(64));
+        } else {
+            invalid[field] = serde_json::json!("0".repeat(64));
+            if field == "binary_sha256" {
+                invalid["files"][0]["sha256"] = invalid[field].clone();
+            }
+        }
+        fs::write(&metadata_path, invalid.to_string())?;
+        anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1").is_err());
+        anyhow::ensure!(
+            read_manifest()?
+                .context("selection lost after rejected install")?
+                .sha256
+                == hash
+        );
+        anyhow::ensure!(fs::read(&resource)? == resource_bytes);
+    }
+    fs::write(&metadata_path, metadata.to_string())?;
     for version in ["1.0.20", "1.0.19", "1.0.21"] {
         let side = version_dir(version);
         fs::create_dir_all(&side)?;
         fs::write(side.join(RUNTIME_BINARY), b"synthetic side runtime")?;
     }
+    // Reinstallation retains older payloads; cleanup is an explicit management action.
+    anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1")? == binary);
+    anyhow::ensure!(list_installed()?.len() == 4);
     let removed = clean_old()?;
     anyhow::ensure!(
         removed == vec!["1.0.20".to_owned(), "1.0.19".to_owned()],
@@ -329,7 +501,6 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     );
     let listed = list_installed()?;
     anyhow::ensure!(listed.len() == 2, "unexpected inventory: {listed:?}");
-    anyhow::ensure!(listed.iter().all(|entry| entry.version != "1.0.20"));
     anyhow::ensure!(
         listed
             .iter()
@@ -337,11 +508,21 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
             .context("current missing")?
             .current
     );
-    // Reinstalling an identical build is a no-op and removes nothing.
-    let again = install_from_file(&archive_path, "1.0.21-dev.1")?;
-    anyhow::ensure!(again == binary);
     anyhow::ensure!(clean_old()?.is_empty());
-    anyhow::ensure!(read_manifest()?.context("manifest disappeared")?.sha256 == hash);
+    Ok(())
+}
+
+#[test]
+fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_RUNTIME_BIN"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    // An explicit selection still precedes managed discovery; no executable is run.
+    fs::write(manifest_path(), b"invalid managed selection")?;
+    let explicit = dir.path().join(RUNTIME_BINARY);
+    fs::write(&explicit, b"synthetic explicit runtime")?;
+    std::env::set_var("RSRS_RUNTIME_BIN", &explicit);
+    anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(explicit));
     Ok(())
 }
 
@@ -360,29 +541,27 @@ fn mirror_override_builds_fallback_origins() -> Result<()> {
     let _env = env_scope(&["RSRS_MIRROR", "RSRS_DATA_DIR"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
-    // Origins are host-level prefixes: release_asset appends the repo path,
-    // tag and asset name itself.
     let official = RELEASE_BASE.to_owned();
+    let approved = vec![format!("{MIRROR_PREFIX}/{official}"), official.clone()];
+    anyhow::ensure!(download_origins(Some(MIRROR_PREFIX))? == approved);
     anyhow::ensure!(
-        download_origins(Some("https://mirror.example"))?
-            == vec![
-                format!("https://mirror.example/{official}"),
-                official.clone()
-            ]
+        download_origins(Some(MIRROR_PREFIX.trim_start_matches("https://")))? == approved
     );
-    anyhow::ensure!(
-        download_origins(Some("mirror.example"))?
-            == vec![
-                format!("https://mirror.example/{official}"),
-                official.clone()
-            ],
-        "bare mirror hosts must default to https"
-    );
-    anyhow::ensure!(
-        download_origins(Some("https://user:secret@mirror.example")).is_err(),
-        "credentials were accepted in a mirror origin"
-    );
-    anyhow::ensure!(download_origins(Some("https://mirror.example/path")).is_err());
+    anyhow::ensure!(download_origins(Some(RELEASE_BASE))? == vec![official.clone()]);
+    for origin in [
+        "https://mirror.example",
+        "mirror.example",
+        "http://gh-proxy.com",
+        "https://user:secret@gh-proxy.com",
+        "https://gh-proxy.com/path",
+        "https://gh-proxy.com?query=1",
+        "https://gh-proxy.com#fragment",
+    ] {
+        anyhow::ensure!(
+            download_origins(Some(origin)).is_err(),
+            "unapproved origin accepted: {origin}"
+        );
+    }
     std::env::remove_var("RSRS_MIRROR");
     anyhow::ensure!(
         download_origins(None)? == vec![official.clone(), format!("{MIRROR_PREFIX}/{official}")]
@@ -397,25 +576,35 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
         Err(_) => return Ok(()),
     };
     let base = serde_json::json!({
-        "runtime_version": "1.0.21-dev.1",
-        "tag": "v1.0.21-dev.1",
-        "triple": triple,
-        "sha256": sha256_hex(b"archive"),
-        "binary_file": release_binary_name(&triple),
-        "compat": {"min_cli": "1.0.0", "max_cli": "*"},
+        "schema_version": 1,
+        "runtime_version": "1.0.21-dev.1", "tag": "v1.0.21-dev.1", "triple": triple,
+        "sha256": sha256_hex(b"archive"), "binary_sha256": sha256_hex(b"binary"),
+        "binary_file": release_binary_name(&triple), "compat": {"min_cli": "1.0.0", "max_cli": "*"},
     });
     let metadata: BuildMetadata = serde_json::from_value(base.clone())?;
     metadata.validate("1.0.21-dev.1", &triple)?;
-    // The binary_sha256 field is accepted as an alias for sha256.
+    anyhow::ensure!(
+        ManagedManifest::from_release(&metadata, base.to_string().as_bytes()).is_err(),
+        "legacy metadata must not become complete managed release proof"
+    );
     let mut alias = base.clone();
-    alias["sha256"] = serde_json::json!("");
-    alias["binary_sha256"] = serde_json::json!(sha256_hex(b"archive"));
-    let alias: BuildMetadata = serde_json::from_value(alias)?;
-    alias.validate("1.0.21-dev.1", &triple)?;
+    alias["archive_sha256"] = alias["sha256"].clone();
+    let equal_alias: BuildMetadata = serde_json::from_value(alias.clone())?;
+    equal_alias.validate("1.0.21-dev.1", &triple)?;
+    alias
+        .as_object_mut()
+        .context("metadata is not an object")?
+        .remove("sha256");
+    let canonical: BuildMetadata = serde_json::from_value(alias)?;
+    canonical.validate("1.0.21-dev.1", &triple)?;
+    anyhow::ensure!(canonical.archive_sha256()? != canonical.binary_sha256()?);
     for (field, value) in [
         ("runtime_version", serde_json::json!("1.0.22")),
+        ("tag", serde_json::json!("v1.0.22")),
         ("triple", serde_json::json!("x86_64-unknown-freebsd")),
+        ("target_triple", serde_json::json!("other-target")),
         ("sha256", serde_json::json!("zz")),
+        ("binary_sha256", serde_json::json!("")),
         ("binary_file", serde_json::json!("../escape")),
         ("binary_file", serde_json::json!(RUNTIME_BINARY)),
         (
@@ -435,10 +624,16 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
             "invalid metadata accepted: {field}"
         );
     }
-    // Conflicting checksum fields never install.
     let mut conflicting = base.clone();
-    conflicting["binary_sha256"] = serde_json::json!(sha256_hex(b"other"));
+    conflicting["archive_sha256"] = serde_json::json!(sha256_hex(b"other archive"));
     let conflicting: BuildMetadata = serde_json::from_value(conflicting)?;
     anyhow::ensure!(conflicting.validate("1.0.21-dev.1", &triple).is_err());
+    let mut missing = base;
+    missing
+        .as_object_mut()
+        .context("metadata is not an object")?
+        .remove("binary_sha256");
+    let missing: BuildMetadata = serde_json::from_value(missing)?;
+    anyhow::ensure!(missing.validate("1.0.21-dev.1", &triple).is_err());
     Ok(())
 }

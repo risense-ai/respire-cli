@@ -132,9 +132,10 @@ fn main() -> Result<()> {
     let model_dir = std::path::PathBuf::from(
         respire::env::var_os("RSRS_M3_DIR").context("prepared model directory")?,
     );
-    let ort = respire::env::var_os("RSRS_CPU_OWNED_ORT_FILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| respire::memory::bge::cpu_ort_path(&model_dir));
+    let ort = match respire::env::var_os("RSRS_CPU_OWNED_ORT_FILE") {
+        Some(path) => std::path::PathBuf::from(path),
+        None => respire::memory::bge::cpu_ort_path(&model_dir)?,
+    };
     let ort = std::fs::canonicalize(ort)
         .context("prepared CPU model is missing from the original installation profile")?;
     anyhow::ensure!(

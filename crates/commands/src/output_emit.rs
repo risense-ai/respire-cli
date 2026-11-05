@@ -39,7 +39,11 @@ pub fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
         .downcast_ref::<respire_app::input_error::InputError>()
         .is_some();
     let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
-        Some(runtime_error::RuntimeError::OutcomeUnknown { request_id, .. }) => Some(request_id),
+        Some(runtime_error::RuntimeError::OutcomeUnknown {
+            request_id,
+            operation,
+            ..
+        }) => Some((request_id, operation)),
         _ => None,
     };
     let mut envelope = ResultEnvelope::new(
@@ -50,8 +54,16 @@ pub fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     );
     envelope.errors.push(format!("{error:#}"));
     envelope.details = serde_json::json!({"error_type": if input { "user" } else { "runtime" }});
-    if let Some(id) = unknown {
-        envelope.details = serde_json::json!({"error_type":"outcome_unknown","request_id":id,"replayed":false,"result_method":"runtime.result"});
+    if let Some((request_id, operation)) = unknown {
+        envelope.details = serde_json::json!({
+            "error_type":"outcome_unknown",
+            "request_id":request_id,
+            "operation_id":operation.operation_id,
+            "idempotency_key":operation.idempotency_key,
+            "scope":operation.scope,
+            "replayed":false,
+            "result_method":"runtime.result"
+        });
     }
     (envelope, if input { 2 } else { 1 })
 }

@@ -24,7 +24,7 @@ struct Output {
 
 /// Creation identity only: never persist a controller command line, which may
 /// contain login material. None means that the controller has exited.
-pub(super) fn process_birth(pid: u32) -> Result<Option<String>> {
+pub(crate) fn process_birth(pid: u32) -> Result<Option<String>> {
     #[cfg(target_os = "linux")]
     {
         let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {

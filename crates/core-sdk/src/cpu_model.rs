@@ -58,18 +58,18 @@ fn mode(
     anyhow::ensure!(!requested || !profiling, "CPU owned ORT does not support profiling; unset the explicit owned setting to profile legacy CPU");
     Ok(requested)
 }
-pub fn cpu_ort_cache_path() -> PathBuf {
-    crate::bge::default_user_model_dir()
+pub fn cpu_ort_cache_path() -> Result<PathBuf> {
+    Ok(crate::bge::default_user_model_dir()?
         .join("onnx")
-        .join(CPU_ORT_NAME)
+        .join(CPU_ORT_NAME))
 }
-pub fn cpu_ort_path(directory: &Path) -> PathBuf {
-    let cached = cpu_ort_cache_path();
-    if cached.is_file() {
+pub fn cpu_ort_path(directory: &Path) -> Result<PathBuf> {
+    let cached = cpu_ort_cache_path()?;
+    Ok(if cached.is_file() {
         cached
     } else {
         directory.join("onnx").join(CPU_ORT_NAME)
-    }
+    })
 }
 struct Validated {
     path: PathBuf,
@@ -88,7 +88,7 @@ pub fn invalidate_cpu_ort_validation() -> Result<()> {
     Ok(())
 }
 pub fn cpu_ort_present(directory: &Path) -> Result<bool> {
-    validated_path(cpu_ort_path(directory))
+    validated_path(cpu_ort_path(directory)?)
 }
 fn validated_path(path: PathBuf) -> Result<bool> {
     let metadata = match std::fs::metadata(&path) {

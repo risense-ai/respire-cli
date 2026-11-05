@@ -30,6 +30,18 @@ on:
         description: Exact artifact version
         required: false
         type: string
+      required_candidate_run_id:
+        description: Same-source run containing the frozen candidate and original CLI SDK archive
+        required: false
+        type: string
+      required_candidate_artifact_id:
+        description: Exact same-repository input artifact ID containing candidate.json and sdk.tar.gz
+        required: false
+        type: string
+      required_candidate_sha256:
+        description: SHA-256 of the exact frozen candidate.json bytes; all three candidate inputs are required together
+        required: false
+        type: string
   push:
     branches: [main, 'fix/prompt-*']
     tags: ['v*']
@@ -44,7 +56,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   platform-build:
-    # Release builds all eight targets. Keep the separate compile matrix manual.
+    # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
@@ -61,8 +73,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -244,6 +254,9 @@ jobs:
           if-no-files-found: error
 
   coverage-tests:
+    permissions:
+      contents: read
+      actions: read
     outputs:
       rust_cache_key: ${{ steps.rust-key.outputs.key }}
       rust_cache_hit: ${{ steps.rust-build.outputs.cache-hit }}
@@ -259,6 +272,9 @@ jobs:
       # Several existing tests change process-global data-dir/language variables.
       # Their own parallel-request checks still create concurrent client threads.
       RSRS_CORE_TEST_MODE: '1'
+      REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+      REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+      REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
       RUST_TEST_THREADS: '1'
       RUST_MIN_STACK: '16777216'
       # Keep backtrace file:line, assertions and overflow checks; omit full
@@ -281,6 +297,47 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Validate candidate evidence inputs
+        if: matrix.group == 'core'
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const values = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].map(key => process.env[key] ?? '');
+          if (values.some(Boolean)) {
+            assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
+            assert.ok(values.every(Boolean), 'Supply all three candidate evidence inputs together');
+            assert.match(values[0], /^[1-9][0-9]*$/);
+            assert.match(values[1], /^[1-9][0-9]*$/);
+            assert.match(values[2], /^[a-f0-9]{64}$/);
+          }
+          NODE
+      - name: Verify candidate input artifact origin
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const env = process.env;
+          const response = await fetch(`${env.GITHUB_API_URL}/repos/${env.GITHUB_REPOSITORY}/actions/artifacts/${env.REQUIRED_CANDIDATE_ARTIFACT_ID}`, {
+            headers: {authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json'}, redirect: 'error',
+          });
+          assert.ok(response.ok, 'Cannot verify candidate input artifact');
+          const artifact = await response.json();
+          assert.equal(String(artifact.id), env.REQUIRED_CANDIDATE_ARTIFACT_ID);
+          assert.equal(artifact.expired, false);
+          assert.equal(String(artifact.workflow_run?.id), env.REQUIRED_CANDIDATE_RUN_ID);
+          assert.equal(artifact.workflow_run?.head_sha, env.GITHUB_SHA);
+          NODE
+      - name: Download frozen candidate and original SDK bytes
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.required_candidate_run_id }}
+          artifact-ids: ${{ inputs.required_candidate_artifact_id }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/required-tests-candidate-input
       - name: Resolve the pinned SDK dependency cache
         id: sdk-cache-2
         shell: bash
@@ -325,12 +382,64 @@ jobs:
         run: |
           node scripts/rust-ci-cache.mjs restore coverage
           cargo llvm-cov clean --profraw-only
+      - name: Bind candidate and actual SDK bytes before source execution
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        run: node scripts/produce-required-tests.mjs prepare
+      - name: Prepare official pinned standalone Runtime for lifecycle tests
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
+        shell: bash
+        env:
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          cargo build --locked -p respire --bin rsrs
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/debug/rsrs');
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          NODE
+      - name: Verify or install the real business test model using the official installer
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/diary-model-install
+          RSRS_M3_DIR: ${{ runner.temp }}/diary-real-model
+          RSRS_ENGINE: cpu
+          RSRS_NO_AUTOSYNC: '1'
+          RSRS_UPDATE_CHECK: '0'
+        run: |
+          set -euo pipefail
+          target/debug/rsrs --json model install-m3
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          from dev_model_fixture import share_cpu_container
+          share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
+          PY
+          printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$RSRS_M3_DIR" >> "$GITHUB_ENV"
       - name: Run this group's instrumented tests
+        id: source-tests
         env:
           COVERAGE_GROUP: ${{ matrix.group }}
         run: |
           node --input-type=module <<'NODE'
           import {execFileSync, spawnSync} from 'node:child_process';
+          import {captureCoverage} from './scripts/produce-required-tests.mjs';
           const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
           const tests = metadata.packages.find(p => p.name === 'respire').targets.filter(t => t.kind.includes('test')).map(t => t.name);
           const isolated = ['runtime_smoke', 'runtime_autostart'];
@@ -341,10 +450,41 @@ jobs:
           const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report'];
           if (group === 'core') args.push('--lib', '--bins', '--examples');
           for (const name of selected) args.push('--test', name);
+          if (group === 'core') {
+            const candidateKeys = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'];
+            if (candidateKeys.every(key => process.env[key] === '')) {
+              for (const key of candidateKeys) delete process.env[key];
+            }
+            process.exit(captureCoverage(args));
+          }
           const result = spawnSync('cargo', args, {stdio: 'inherit'});
           if (result.error) throw result.error;
           process.exit(result.status ?? 1);
           NODE
+      # Keep failed command output too; raw source logs are not candidate/G1 reports.
+      - name: Preserve core source test output
+        id: required-raw
+        if: ${{ always() && !cancelled() && matrix.group == 'core' && (steps.source-tests.outcome == 'success' || steps.source-tests.outcome == 'failure') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-raw-cli-core-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/required-tests-raw-cli-core
+          retention-days: 1
+          if-no-files-found: error
+      - name: Produce candidate-bound source reports
+        id: required-source-reports
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != '' && steps.source-tests.outcome == 'success'
+        env:
+          REQUIRED_RAW_ARTIFACT_ID: ${{ steps.required-raw.outputs.artifact-id }}
+        run: node scripts/produce-required-tests.mjs produce
+      - name: Preserve candidate-bound source reports
+        if: matrix.group == 'core' && steps.required-source-reports.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/required-tests-report-cli
+          retention-days: 1
+          if-no-files-found: error
       - name: Archive current-run coverage counters and executable mappings
         env:
           COVERAGE_GROUP: ${{ matrix.group }}
@@ -423,9 +563,55 @@ jobs:
           path: .rust-ci-cache
           key: ${{ env.BUILD_KEY }}
 
-  check-complete:
-    if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+  required-tests:
+    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     needs: [coverage-tests, workspace-tests, contract-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+      REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+      REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+      FOCUSED_MODE: ${{ inputs.research_feedback_only || inputs.native_published_only || inputs.artifact_run != '' || inputs.version_upgrade_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate candidate evidence inputs
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const values = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].map(key => process.env[key] ?? '');
+          assert.notEqual(process.env.FOCUSED_MODE, 'true', 'Candidate evidence cannot be combined with focused CI modes');
+          if (values.some(Boolean)) {
+            assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
+            assert.ok(values.every(Boolean), 'Supply all three candidate evidence inputs together');
+            assert.match(values[0], /^[1-9][0-9]*$/);
+            assert.match(values[1], /^[1-9][0-9]*$/);
+            assert.match(values[2], /^[a-f0-9]{64}$/);
+          }
+          NODE
+      # A separate producer uploads raw execution evidence first, then this report bundle.
+      # No report producer is implied by a source-test or syntax-check job.
+      - name: Download this exact attempt's required execution reports
+        uses: actions/download-artifact@v4
+        with:
+          name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .verification/required-tests
+      - name: Require every Stage 1 test and matrix leg
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/verify-required-tests.mjs --ci
+
+  check-complete:
+    if: ${{ always() && ((inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') || (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only)) }}
+    needs: [coverage-tests, workspace-tests, contract-checks, required-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -467,7 +653,9 @@ jobs:
           SOURCE_RESULT: ${{ needs.coverage-tests.result }}
           WORKSPACE_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
-        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success
+          REQUIRED_RESULT: ${{ needs.required-tests.result }}
+          CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
 
   contract-checks:
     # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK
@@ -486,6 +674,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Verify the frozen Runtime control contract
+        run: node scripts/verify-runtime-control-contract.mjs
+      - name: Reject invalid required-gate evidence
+        run: node scripts/test-required-tests.mjs
       - run: node --check npm/scripts/pack.mjs
       - run: node --check npm/scripts/release-notes.mjs
       - run: node npm/scripts/check-manifest.mjs

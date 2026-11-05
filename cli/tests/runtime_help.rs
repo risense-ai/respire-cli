@@ -1,9 +1,27 @@
 //! Hidden runtime help must be usable before host/profile setup, including in a sandbox.
+use clap::Parser;
+use respire_commands::{
+    autostart::RuntimeCommand,
+    cli_def::{Cli, Command as CliCommand},
+};
 use serde_json::Value;
 use std::process::Command;
 
 #[test]
 fn runtime_help_is_static_without_a_profile_or_lifecycle_action() -> anyhow::Result<()> {
+    let context = r#"{"scope":{"account_id":"account-1","instance_id":"instance-1","generation":7},"operation_id":"operation-1","idempotency_key":"key-1"}"#;
+    let parsed = Cli::try_parse_from(["rsrs", "runtime", "result", "--context", context])?;
+    let Some(CliCommand::Runtime {
+        command: RuntimeCommand::Result { context: parsed },
+    }) = parsed.command
+    else {
+        anyhow::bail!("runtime result did not parse as a context query");
+    };
+    assert_eq!(
+        serde_json::to_value(parsed)?,
+        serde_json::from_str::<Value>(context)?
+    );
+
     let root = tempfile::tempdir()?;
     for flags in [
         vec!["--runtime-internal", "--help"],
@@ -40,6 +58,20 @@ fn runtime_help_is_static_without_a_profile_or_lifecycle_action() -> anyhow::Res
 
 #[test]
 fn help_cannot_swallow_a_stop_or_unknown_argument() -> anyhow::Result<()> {
+    assert!(Cli::try_parse_from(["rsrs", "runtime", "result"]).is_err());
+    for context in [
+        "not-json",
+        "{}",
+        r#"{"scope":{"account_id":"a","instance_id":"i","generation":1},"operation_id":"o","idempotency_key":"k","extra":true}"#,
+        r#"{"scope":{"account_id":"a","instance_id":"i","generation":1,"extra":true},"operation_id":"o","idempotency_key":"k"}"#,
+        r#"{"scope":{"account_id":"a","instance_id":"i","generation":"1"},"operation_id":"o","idempotency_key":"k"}"#,
+    ] {
+        assert!(
+            Cli::try_parse_from(["rsrs", "runtime", "result", "--context", context]).is_err(),
+            "accepted invalid operation context: {context}"
+        );
+    }
+
     let root = tempfile::tempdir()?;
     for extra in ["--stop", "--unknown-flag"] {
         let output = Command::new(env!("CARGO_BIN_EXE_rsrs"))

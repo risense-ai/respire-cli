@@ -16,7 +16,13 @@ pub use metadata::{
 
 pub mod runtime;
 pub use runtime::{
-    AssetRequirement, AssetsStatus, RuntimeBuildMeta, RuntimeCompat, RuntimeIdentity,
+    BackendLoadBackend, BackendLoadCpuNodeFallback, BackendLoadEngine, BackendLoadEvidence,
+    BackendLoadModule, BackendLoadModuleIdentitySource, BackendLoadNodeAssignment,
+    BackendLoadRuntime, BackendLoadRuntimeKind, BackendLoadSdkPin, BackendLoadState, BackendLoadStatus,
+    AssetRequirement, AssetState, AssetsStatus, ProtocolRange, RpcRequest, RpcResponse, RuntimeBuildFile,
+    RuntimeBuildMeta,
+    RuntimeBuildMetaError, RuntimeCompat, RuntimeIdentity, RuntimeRequestScope, RuntimeStopOutcome, RuntimeStopReceipt,
+    RuntimeUnfinishedOperation, RuntimeUnfinishedOutcome,
 };
 
 pub const VERSION_TAG: &str = env!("CARGO_PKG_VERSION");

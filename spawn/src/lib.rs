@@ -17,6 +17,11 @@ mod supervisor_job;
 #[cfg(windows)]
 pub use supervisor_job::confine_supervisor_tree;
 
+#[cfg(target_os = "linux")]
+mod linux_process_identity;
+#[cfg(target_os = "linux")]
+pub use linux_process_identity::{terminate_runtime, ProcessIdentity};
+
 #[cfg(windows)]
 mod process_identity;
 #[cfg(windows)]

@@ -233,8 +233,15 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Keep the validated parent publication tarballs alongside the existing evidence.
-  assert.equal(uploads, 51, 'preserve active evidence, registered consumer, verified platform copies, import proof and release dependency cache');
+  // Intel dev.5 import is deferred; all seven current imports and source reports remain.
+  assert.equal(uploads, 52, 'preserve seven-platform publication evidence and both source-report uploads');
+  const release = readFileSync(new URL('release.yml', root), 'utf8');
+  const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
+  const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
+  assert.deepEqual(imported.sort(), manifest.targets.map(target => target.triple).sort());
+  const ci = readFileSync(new URL('ci.yml', root), 'utf8');
+  assert.match(ci, /name: required-tests-raw-cli-core-/);
+  assert.match(ci, /name: required-tests-report-/);
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);

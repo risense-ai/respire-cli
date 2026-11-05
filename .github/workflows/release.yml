@@ -206,6 +206,8 @@ jobs:
             channel='dev';
             version=cp.execFileSync('node',['npm/scripts/next-dev-version.mjs'],{encoding:'utf8'}).trim();
           }
+          // Stable promotion stays closed until complete G1 verification is implemented and authorized.
+          if(['latest','stable'].includes(channel)) throw new Error('Stable publication is disabled: complete G1 evidence is not verified');
           const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
           if(process.env.REUSE_VALIDATION==='true'&&(process.env.PRIOR_VERIFIED!=='true'||
              version!=='1.0.11-dev.13'||channel!=='dev'||sha!=='d8314480e10a27767544f781083e35c8e85657f0')) throw new Error('Approved regression reuse applies only to DEV13');
@@ -311,8 +313,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -821,15 +821,6 @@ jobs:
             imported-assets/rsrs-x86_64-unknown-linux-musl
             imported-assets/rsrs-x86_64-unknown-linux-musl-runtime.tar.gz
             imported-assets/cli-build-x86_64-unknown-linux-musl.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-x86_64-apple-darwin
-          path: |
-            imported-assets/rsrs-x86_64-apple-darwin
-            imported-assets/rsrs-x86_64-apple-darwin-runtime.tar.gz
-            imported-assets/cli-build-x86_64-apple-darwin.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

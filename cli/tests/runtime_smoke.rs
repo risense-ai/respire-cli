@@ -1,4 +1,6 @@
-//! Smoke the local runtime without touching the user library.
+//! CLI lifecycle regressions against an independent Runtime with synthetic data.
+//! Supply RSRS_RUNTIME_BIN or stage rsrs-runtime beside the Cargo CLI binary.
+//! Passing these checks alone is not release artifact or G1 evidence.
 
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -7,7 +9,19 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
 }
 
-fn isolated_command() -> Command {
+fn runtime_bin() -> std::path::PathBuf {
+    std::env::var_os("RSRS_RUNTIME_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(bin()).with_file_name(if cfg!(windows) {
+                "rsrs-runtime.exe"
+            } else {
+                "rsrs-runtime"
+            })
+        })
+}
+
+fn isolated_command(models: Option<&std::path::Path>) -> Command {
     let mut command = Command::new(bin());
     for (name, _) in std::env::vars_os() {
         if name.to_str().is_some_and(|name| {
@@ -17,6 +31,10 @@ fn isolated_command() -> Command {
         }) {
             command.env_remove(name);
         }
+    }
+    command.env("RSRS_RUNTIME_BIN", runtime_bin());
+    if let Some(models) = models {
+        command.env("RSRS_M3_DIR", models).env("RSRS_ENGINE", "cpu");
     }
     command
 }
@@ -38,7 +56,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let port = listener.local_addr()?.port();
     drop(listener);
     let invoke = |args: &[&str], expected: i32| -> Result<Value, Box<dyn std::error::Error>> {
-        let output = isolated_command()
+        let output = isolated_command(None)
             .arg("--json")
             .args(args)
             .env("HOME", home.path())
@@ -77,18 +95,27 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             .timeout(Duration::from_secs(5))
             .call()?
             .into_json()?;
+        let executable = status["exe"].as_str().ok_or("Runtime executable missing")?;
         if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
-            || status["bin"] != env!("CARGO_PKG_VERSION")
+            || std::path::Path::new(executable).canonicalize()? != runtime_bin().canonicalize()?
         {
             return Err(format!("runtime profile readback failed: {status}").into());
         }
+        // Exercise request scope without autostart masking a missed restart.
+        invoke(&["--client-only", "status"], 0)?;
         status["pid"]
             .as_u64()
             .ok_or_else(|| "runtime PID missing".into())
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        invoke(&["space", "list"], 0)?;
+        invoke(&["status"], 0)?;
         let original_pid = health(&library)?;
+        invoke(&["space", "list"], 0)?;
+        assert_eq!(
+            health(&library)?,
+            original_pid,
+            "listing host profiles must preserve the owned runtime"
+        );
         let before = std::fs::read(&config)?;
         for args in [
             vec!["space", "join", "BADCODE"],
@@ -230,7 +257,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
 }
 
 fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Output> {
-    isolated_command()
+    isolated_command(None)
         .args(args)
         .env("RSRS_DATA_DIR", dir)
         .env("HOME", dir)
@@ -264,7 +291,18 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("status envelope command was {}", value["command"]).into());
     }
 
-    // Exercise the actual packaged policy through this test's owned runtime.
+    let health_url = format!("http://127.0.0.1:{port}/api/health");
+    let owned_runtime: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let executable = owned_runtime["exe"]
+        .as_str()
+        .ok_or("Runtime executable missing")?;
+    assert_eq!(
+        std::path::Path::new(executable).canonicalize()?,
+        runtime_bin().canonicalize()?,
+        "status must use the independent Runtime"
+    );
+
+    // Static policy and host preview must work alongside the owned Runtime.
     // The preview must preserve an existing user file and must not write it.
     let prompt = run(dir.path(), port, &["--client-only", "prompt", "--json"])?;
     assert!(
@@ -278,7 +316,7 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         respire_app::inject::INSTRUCTIONS_MD
     );
     let codex = dir.path().join(".codex/AGENTS.md");
-    std::fs::create_dir_all(codex.parent().unwrap())?;
+    std::fs::create_dir_all(codex.parent().ok_or("Codex instructions parent missing")?)?;
     let owned = "Synthetic owned Codex instructions\n";
     std::fs::write(&codex, owned)?;
     let preview = run(
@@ -315,8 +353,11 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let health_url = format!("http://127.0.0.1:{port}/api/health");
     let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    assert_eq!(
+        before["pid"], owned_runtime["pid"],
+        "static policy and preview must not replace the owned Runtime"
+    );
     let restarted = run(dir.path(), port, &["--json", "restart", "--timeout", "2"])?;
     if !restarted.status.success() {
         return Err(format!(
@@ -364,6 +405,20 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Arc, Mutex,
     };
 
+    let models = std::path::PathBuf::from(
+        std::env::var_os("RSRS_CORE_TEST_MODEL_DIR")
+            .ok_or("supply RSRS_CORE_TEST_MODEL_DIR with the verified real CPU model fixture")?,
+    )
+    .canonicalize()?;
+    for file in [
+        "tokenizer.json",
+        "onnx/model_quantized.onnx",
+        "onnx/model_quantized.cpu-v1.ort",
+    ] {
+        if !models.join(file).is_file() {
+            return Err(format!("model fixture missing {file} at {}", models.display()).into());
+        }
+    }
     let home = tempfile::tempdir()?;
     let root = home.path().join(".rsrs");
     let original = root.join("accounts/original");
@@ -526,7 +581,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Ok(())
     });
     let execute = |args: &[&str]| -> std::io::Result<Output> {
-        isolated_command()
+        let output = isolated_command(Some(&models))
             .args(args)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
@@ -548,7 +603,15 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .env_remove("RSRS_RUNTIME_WORKER")
             .env_remove("RSRS_RPC_TOKEN")
             .env_remove("RSRS_LANG")
-            .output()
+            .output()?;
+        // The test harness retains these synthetic replies when any later assertion fails.
+        eprintln!(
+            "authorization fixture: status={}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output)
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
@@ -1215,7 +1278,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
         Ok(())
     });
     let command = |json: bool| {
-        let mut command = isolated_command();
+        let mut command = isolated_command(None);
         command.args(["doctor", "--remote"]);
         if json {
             command.arg("--json");
@@ -1228,6 +1291,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
             .env("RSRS_ADDR", &addr)
             .env("RSRS_LANG", "en")
             .env("RSRS_TOKEN", "synthetic-probe-token")
+            .env("RSRS_CORE_TEST_MODE", "1")
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env_remove("RSRS_RPC_URL")

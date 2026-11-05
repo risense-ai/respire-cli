@@ -9,14 +9,16 @@ compiler target alone does not establish product support.
 | --- | --- | --- | --- |
 | Windows x64 | `x86_64-pc-windows-msvc` | Existing; `windows-latest` | Pinned SDK and DirectML |
 | Windows ARM64 | `aarch64-pc-windows-msvc` | Added; native `windows-11-arm`, DEV first | Pinned SDK and ARM64 DirectML |
-| macOS Intel | `x86_64-apple-darwin` | Native `macos-15-intel`; macOS 13.4+ | ORT API 20; bundled ORT 1.20.1 |
+| macOS Intel | `x86_64-apple-darwin` | Deferred for CLI 1.0.21-dev.5; historical macOS 13.4+ packages remain available | ORT API 20; bundled ORT 1.20.1 |
 | macOS ARM64 | `aarch64-apple-darwin` | Existing; native `macos-latest` | Pinned CPU SDK |
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
 | Linux ARM64 GNU | `aarch64-unknown-linux-gnu` | Existing; native `ubuntu-24.04-arm` | Pinned CPU SDK |
 | Linux ARM64 musl | `aarch64-unknown-linux-musl` | Existing; native Ubuntu and Alpine | Pinned static CPU SDK |
 
-Both SDK locks pin the same eight SDKs, including
+The current CLI release manifest contains seven targets. Historical Intel launcher
+selection remains supported, but no Intel dev.5 optional dependency or release
+asset is generated. Both SDK locks still pin the same eight SDKs, including
 manifest and archive SHA-256. CPU inference is linked into Core; an empty list
 of shared runtime files on Unix does not mean inference is missing. Windows
 ships the matching DirectML DLL. Redistribution notices remain mandatory.

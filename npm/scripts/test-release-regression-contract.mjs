@@ -8,10 +8,37 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt} from './release-regression-contract.mjs';
 import {requireRegressions} from './cleanup-release-artifacts.mjs';
+import {verifyBinary} from './verify-binary.mjs';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
 const job=name=>({name,status:'completed',conclusion:'success'});
 const inventory=()=>[...contract.native.map(t=>job(`native-regression / Native (${t})`)),...contract.cloud.map(t=>job(`cloud-sweep (runner, ${t})`)),...contract.migration.map(t=>job(`Native migration (${t})`)),...contract.migration_gate.map(t=>job(`Migration gate (${t})`)),job('api-smoke'),job('publish')];
+test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',()=>{
+  const alias='aarch64-apple-darwin',entry=manifest.targets.find(t=>t.triple===alias);
+  assert.deepEqual(entry.os,['darwin']);assert.deepEqual(entry.cpu,['arm64']);
+  const root=mkdtempSync(path.join(tmpdir(),'verify-binary-alias-')),file=path.join(root,'image');
+  const macho=(magic,cpu)=>{const bytes=Buffer.alloc(64);bytes.writeUInt32LE(magic,0);bytes.writeUInt32LE(cpu,4);return bytes};
+  const elf=Buffer.alloc(64);elf.set([0x7f,0x45,0x4c,0x46,2,1]);elf.writeUInt16LE(183,18);
+  const pe=Buffer.alloc(128);pe.write('MZ');pe.writeUInt32LE(64,0x3c);pe.write('PE\0\0',64);pe.writeUInt16LE(0xaa64,68);pe.writeUInt16LE(0x20b,88);
+  try{
+    for(const target of [alias,['aarch64','apple','darwin'].join('-')]){
+      writeFileSync(file,macho(0xfeedfacf,0x100000c));assert.doesNotThrow(()=>verifyBinary(file,target));
+    }
+    for(const [label,bytes,target] of [
+      ['x64 CPU',macho(0xfeedfacf,0x1000007),alias],
+      ['ARM32 CPU',macho(0xfeedfacf,12),alias],
+      ['32-bit Mach-O',macho(0xfeedface,0x100000c),alias],
+      ['fat Mach-O',macho(0xcafebabe,0x100000c),alias],
+      ['wrong endian',macho(0xcffaedfe,0x100000c),alias],
+      ['ELF',elf,alias],['PE',pe,alias],
+      ['near alias',macho(0xfeedfacf,0x100000c),alias+'-other'],
+      ['unknown target',macho(0xfeedfacf,0x100000c),'foreign-target'],
+      ['x64 target',macho(0xfeedfacf,0x100000c),'x86_64-apple-darwin'],
+    ]){
+      writeFileSync(file,bytes);assert.throws(()=>verifyBinary(file,target),/Unsupported binary target|Binary header does not match/,label);
+    }
+  }finally{rmSync(root,{recursive:true,force:true})}
+});
 test('both Linux ARM targets require native runners, every source feedback phase and background install proof',()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
   for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
@@ -109,6 +136,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
 });
 
 test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
+  assert.equal(manifest.targets.length,7,'dev.5 releases seven platforms; SDK/G1 inventories remain separate');
+  assert(!manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'||t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));
   assert.equal(critical.native.length,manifest.targets.length);assert.equal(critical.cloud.length,0);assert.equal(critical.migration.length,0);assert.equal(critical.migration_gate.length,0);assert.equal(critical.api,true);
@@ -145,6 +174,11 @@ test('only explicit inactive full matrices are ignored by critical and never ent
 test('workflow defaults critical, retains mandatory profile gates and dispatches nonpublishing daily full',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const native=readFileSync(new URL('../../.github/workflows/release-native-validation.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
+  assert(guard,'stable planning must fail closed before any reservation or output');
+  for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
+  runInNewContext(guard,{channel:'dev'});
+  assert(release.indexOf(guard)<release.indexOf("if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true')"));
   const daily=readFileSync(new URL('../../.github/workflows/release-full-regression.yml',import.meta.url),'utf8');
   assert.match(release,/validation_profile:[\s\S]*?default: critical/);assert.match(release,/REQUIRE_FULL:.*inputs.full_regression_before_publish/);
   assert.match(release,/process.env.REQUIRE_FULL==='true'\?'full':requested/);

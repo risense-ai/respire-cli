@@ -79,7 +79,7 @@ pub fn registry() -> Result<Registry> {
     let m3_revision = "4de13258303883538bd53b696b452bf8099f0858";
     let small_revision = "75c43b069aac4d136ba6bc1122f995fedcfd2781";
     for (id, repo, revision, dims, directory, size, hash, tokenizer_size, tokenizer_hash, prefix) in [
-        ("m3", "Xenova/bge-m3", m3_revision, 1024, crate::core_sdk::bge::m3_model_dir(), 569694530, "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d", 17082821, "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", ""),
+        ("m3", "Xenova/bge-m3", m3_revision, 1024, crate::core_sdk::bge::m3_model_dir()?, 569694530, "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d", 17082821, "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790", ""),
         ("bge-small-zh-v1.5", "Xenova/bge-small-zh-v1.5", small_revision, 512, root.join("bge-small-zh-v1.5"), 24010842, "15b717c382bcb518ba457b93ea6850ede7f4f1cd8937454aa06972366cd19bcc", 439125, "48cea5d44424912a6fd1ea647bf4fe50b55ab8b1e5879c3275f80e339e8fae26", "\u{4e3a}\u{8fd9}\u{4e2a}\u{53e5}\u{5b50}\u{751f}\u{6210}\u{8868}\u{793a}\u{4ee5}\u{7528}\u{4e8e}\u{68c0}\u{7d22}\u{76f8}\u{5173}\u{6587}\u{7ae0}\u{ff1a}"),
     ] {
         registry.models.insert(id.to_owned(), ModelProfile { id:id.to_owned(),

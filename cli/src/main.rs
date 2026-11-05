@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod autostart;
 mod classify_config;
+mod doctor;
 mod host_rpc;
 mod login;
 mod mcp;
@@ -36,7 +37,7 @@ use respire_commands::runtime_http;
 // re-binds the module names so existing `crate::` paths keep resolving.
 use respire_commands::app_version;
 use respire_commands::cli_def::{
-    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
+    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
     SessionCommand, SnapshotCmd,
 };
 pub(crate) use respire_commands::engine::{
@@ -92,6 +93,30 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
     match args.command.as_ref() {
+        Some(command @ Command::Extract { .. }) => {
+            match respire_commands::engine::extract_uses_tui(command) {
+                Ok(true) => Some(run_extract_tui()),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        }
+        Some(Command::AgentConfig { set: None }) => Some(
+            runtime_policy::require_host("agent configuration read")
+                .and_then(|()| respire_commands::engine::run_agent_config(None)),
+        ),
+        Some(Command::Session { command }) => Some(run_session(command)),
+        Some(Command::SuperReset { super_pass }) => Some(run_super_reset(super_pass.as_deref())),
+        Some(Command::Plugin { command }) => Some(run_plugin(command)),
+        Some(Command::Passport) if !runtime_policy::client_only() => Some(run_passport()),
+        Some(Command::Prompt) => {
+            let text = respire::inject::INSTRUCTIONS_MD;
+            Some(emit_result(ResultEnvelope::new(
+                "prompt",
+                OutputStatus::Ok,
+                serde_json::json!({"instructions":text}),
+                vec![OutputItem::new("instructions", OutputStatus::Ok, text)],
+            )))
+        }
         Some(Command::Keygen { pass, force }) => Some(run_keygen(pass.as_deref(), *force)),
 
         Some(Command::Inject {
@@ -242,6 +267,201 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             super_pass.as_deref(),
         )),
         _ => None,
+    }
+}
+
+fn run_extract_tui() -> Result<()> {
+    runtime_policy::require_host("extract source picker")?;
+    anyhow::ensure!(
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        "extract --tui needs a real terminal (stdin/stdout must both be tty)"
+    );
+    // Finish host lifecycle work before the UI enters raw terminal mode.
+    rpc::ensure_daemon()?;
+    respire::extract_tui::run()
+}
+
+fn run_passport() -> Result<()> {
+    runtime_policy::require_host("passport agent inventory")?;
+    let mut args = vec!["passport".to_owned()];
+    if let Some(id) = progress::remote_id() {
+        args.extend(["--progress-id".to_owned(), id]);
+    }
+    let mut result: ResultEnvelope = serde_json::from_value(rpc::query_json(args)?)?;
+    if result.command == "memory"
+        && result.summary["mode"] == "off"
+        && result.summary["skipped"] == true
+    {
+        return emit_result(result);
+    }
+    anyhow::ensure!(
+        result.command == "passport",
+        "Runtime did not return a passport result"
+    );
+    let summary = result
+        .summary
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Runtime passport summary missing"))?;
+    let agents = match respire::inject::targets() {
+        Ok(targets) => {
+            let count = targets
+                .iter()
+                .filter(|target| matches!(target.state, "fresh" | "stale"))
+                .count();
+            summary.insert("agents".into(), serde_json::json!(count));
+            OutputItem::new("agents", OutputStatus::Ok, count.to_string())
+        }
+        Err(error) => {
+            summary.insert("agents".into(), serde_json::Value::Null);
+            let message = format!("host agent inventory: {error:#}");
+            result.errors.push(message.clone());
+            result.status = OutputStatus::Fail;
+            OutputItem::new("agents", OutputStatus::Fail, message)
+        }
+    };
+    if let Some(row) = result.items.iter_mut().find(|row| row.name == "agents") {
+        *row = agents;
+    } else {
+        result.items.push(agents);
+    }
+    emit_result(result)
+}
+
+fn run_super_reset(super_pass: Option<&str>) -> Result<()> {
+    runtime_policy::require_host("super password rotation")?;
+    respire::service::ensure_writable()?;
+    let mut issued = None;
+    rpc::change_profile(|| {
+        issued = Some(auth::super_reset(None, super_pass)?);
+        Ok(())
+    })?;
+    let new_super = issued.ok_or_else(|| anyhow!("super reset returned no issued password"))?;
+    emit_result(ResultEnvelope::new(
+        "super-reset",
+        OutputStatus::Ok,
+        serde_json::json!({"ok":true,"super":new_super}),
+        vec![OutputItem::new("password", OutputStatus::Ok, "issued")],
+    ))
+}
+
+fn run_session(command: &SessionCommand) -> Result<()> {
+    runtime_policy::require_host("session identity management")?;
+    let revoke = match command {
+        SessionCommand::List => None,
+        SessionCommand::Revoke { id } => {
+            respire::service::ensure_writable()?;
+            Some(id.as_str())
+        }
+    };
+    let action = if revoke.is_some() { "revoke" } else { "list" };
+    let details = auth::sessions(revoke)?;
+    let rows = details.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let items = rows
+        .iter()
+        .map(|row| {
+            OutputItem::new(
+                row["id"]
+                    .as_str()
+                    .or_else(|| row["session_id"].as_str())
+                    .unwrap_or("session"),
+                OutputStatus::Ok,
+                row.to_string(),
+            )
+        })
+        .collect();
+    let mut result = ResultEnvelope::new(
+        "session",
+        OutputStatus::Ok,
+        serde_json::json!({"action":action,"count":rows.len()}),
+        items,
+    );
+    result.details = details;
+    emit_result(result)
+}
+
+fn run_plugin(command: &PluginCommand) -> Result<()> {
+    runtime_policy::require_host("plugin management")?;
+    use respire_commands::hooks;
+    match command {
+        PluginCommand::List => {
+            let cfg = hooks::read_config();
+            let path = hooks::config_path();
+            let mut items = Vec::new();
+            for (event, hooks) in &cfg.hooks {
+                for hook in hooks {
+                    let policy = if hook.on_error.is_empty() {
+                        "default"
+                    } else {
+                        &hook.on_error
+                    };
+                    items.push(OutputItem::new(
+                        event,
+                        OutputStatus::Ok,
+                        format!("{} timeout={}ms on_error={policy}", hook.cmd, hook.timeout_ms),
+                    ));
+                }
+            }
+            if items.is_empty() {
+                items.push(OutputItem::new(
+                    "hooks",
+                    OutputStatus::Skip,
+                    format!("none configured; file={}", path.display()),
+                ));
+            }
+            let mut result = ResultEnvelope::new(
+                "plugin-list",
+                if cfg.hooks.is_empty() {
+                    OutputStatus::Skip
+                } else {
+                    OutputStatus::Ok
+                },
+                serde_json::json!({
+                    "config_path": path.to_string_lossy(),
+                    "events": hooks::EVENT_NAMES,
+                    "count": cfg.hooks.values().map(Vec::len).sum::<usize>(),
+                }),
+                items,
+            );
+            result.details = serde_json::to_value(&cfg.hooks)?;
+            result.actions.push("plugin test <EVENT> --payload <JSON>".into());
+            emit_result(result)
+        }
+        PluginCommand::Test { event, payload } => {
+            let event = hooks::HookEvent::parse(event).ok_or_else(|| {
+                anyhow!(
+                    "unknown event \"{event}\"; available: {}",
+                    hooks::EVENT_NAMES.join(" / ")
+                )
+            })?;
+            let data = serde_json::from_str(payload)
+                .map_err(|error| anyhow!("--payload is not JSON: {error}"))?;
+            let verdict = hooks::fire(event, data);
+            let status = if verdict.blocked {
+                OutputStatus::Warn
+            } else {
+                OutputStatus::Ok
+            };
+            let mut result = ResultEnvelope::new(
+                "plugin-test",
+                status,
+                serde_json::json!({"event":event.as_str(),"blocked":verdict.blocked,"warning_count":verdict.warnings.len()}),
+                vec![OutputItem::new(
+                    "event",
+                    status,
+                    if verdict.blocked {
+                        format!("{} blocked: {}", event.as_str(), verdict.reason)
+                    } else {
+                        format!("{} allowed", event.as_str())
+                    },
+                )],
+            );
+            result.details = serde_json::json!({"event":event.as_str(),"blocked":verdict.blocked,"reason":verdict.reason,"warnings":verdict.warnings});
+            if verdict.blocked {
+                result.actions.push("review plugin policy".into());
+            }
+            emit_result(result)
+        }
     }
 }
 
@@ -1108,7 +1328,7 @@ fn install_cli_host_hooks() -> bool {
             foreground_progress: Some(rpc::foreground_progress),
             runtime_brief: Some(rpc::runtime_brief),
             host_command: Some(host_command),
-            extract_tui_run: Some(respire::extract_tui::run),
+            extract_tui_run: Some(run_extract_tui),
             runtime_is_up: Some(rpc::runtime_is_up),
             change_profile: Some(|change| rpc::change_profile(|| change())),
             managed_id: Some(|| autostart::managed_id()),
@@ -1170,12 +1390,13 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
-    if std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
+    let roots_requested = std::env::args_os().any(|arg| arg == "--roots");
+    if !roots_requested && std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
         set_json_mode(true);
         if std::env::args_os().any(|arg| arg == "--client-only") {
             std::env::set_var("RSRS_CLIENT_ONLY", "1");
         }
-        return match host_rpc::serve() {
+        return match respire::service::validate_client_config().and_then(|()| host_rpc::serve()) {
             Ok(code) => code,
             Err(error) => {
                 let (envelope, code) = command_failure(&error);
@@ -1186,7 +1407,7 @@ fn main_body() -> i32 {
             }
         };
     }
-    if std::env::args_os()
+    if !roots_requested && std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--core-worker-internal")
     {
@@ -1209,9 +1430,23 @@ fn main_body() -> i32 {
     // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.
     let result = match preprocess_args() {
+        Preparsed::Roots { data_dir } => {
+            if let Some(dir) = data_dir {
+                std::env::remove_var("RSRS_DEFAULT_DATA_DIR");
+                std::env::set_var("RSRS_DATA_DIR", dir);
+            }
+            respire::service::resolved_roots().and_then(|roots| {
+                emit_result(ResultEnvelope::new(
+                    "roots",
+                    OutputStatus::Ok,
+                    serde_json::to_value(roots)?,
+                    Vec::new(),
+                ))
+            })
+        }
         Preparsed::Version { json } => {
             set_json_mode(json);
-            prepare_command_runtime().and_then(|()| crate::app_version::emit(json))
+            crate::app_version::emit(json)
         }
         Preparsed::RuntimeHelp { json } => {
             set_json_mode(json);
@@ -1233,6 +1468,7 @@ fn main_body() -> i32 {
                             Command::MemoryRevision
                                 | Command::Capabilities
                                 | Command::Runtime { .. }
+                                | Command::Doctor { .. }
                         )
                     ) =>
                 {
@@ -1267,6 +1503,7 @@ fn main_body() -> i32 {
 
 /// Normal command bootstrap, intentionally omitted by the read-only revision probe.
 fn prepare_command_runtime() -> Result<()> {
+    respire::service::validate_client_config()?;
     if !runtime_policy::client_only() {
         respire::migration::ensure_default_home()
             .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
@@ -1275,6 +1512,9 @@ fn prepare_command_runtime() -> Result<()> {
 }
 
 enum Preparsed {
+    Roots {
+        data_dir: Option<String>,
+    },
     RuntimeHelp {
         json: bool,
     },
@@ -1330,6 +1570,27 @@ fn preprocess_args() -> Preparsed {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let direct = args.iter().any(|arg| arg == "--direct");
     args.retain(|arg| arg != "--direct" && arg != "--client-only");
+    if args.iter().any(|arg| arg == "--roots") {
+        let mut data_dir = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--roots" | "--json" => {}
+                "--data-dir" if data_dir.is_none() => {
+                    index += 1;
+                    match args.get(index).filter(|value| {
+                        !value.trim().is_empty() && !value.starts_with("--")
+                    }) {
+                        Some(value) => data_dir = Some(value.clone()),
+                        None => return Preparsed::Invalid("--roots requires a nonempty --data-dir".to_owned()),
+                    }
+                }
+                _ => return Preparsed::Invalid("use --roots [--data-dir PATH] [--json] without a command".to_owned()),
+            }
+            index += 1;
+        }
+        return Preparsed::Roots { data_dir };
+    }
     if let Some(json) = is_short_v_version(&args) {
         return Preparsed::Version { json };
     }
@@ -1443,6 +1704,20 @@ fn run(args: Cli) -> Result<()> {
     // in-process capture callers reach run() without main(), so wire them
     // idempotently here too (the first installation always wins).
     let _ = install_cli_host_hooks();
+    if let Some(Command::Doctor {
+        remote,
+        check_update,
+        fix,
+    }) = args.command.as_ref()
+    {
+        if !rpc::worker_active() {
+            set_json_mode(
+                args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+            );
+            let _progress = progress::Scope::start(args.progress_id.clone(), !json_mode(), true);
+            return doctor::run(*remote, *check_update, *fix);
+        }
+    }
     if let Some(Command::Runtime { command }) = args.command.as_ref() {
         return autostart::execute(command);
     }
@@ -1879,15 +2154,24 @@ fn run(args: Cli) -> Result<()> {
     let host_auth_change = HOST_RPC_OUTPUT.get()
         && matches!(
             args.command.as_ref(),
-            Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. })
+            Some(Command::Register { .. } | Command::Fivekeys { .. })
         );
-    if !DIRECT_MODE.load(Ordering::Relaxed)
-        && (changes_profile(args.command.as_ref()) || host_auth_change)
+    // Only these asset/configuration handlers run locally, after Runtime drains.
+    // Business commands continue to use Runtime RPC, including with --direct.
+    let host_asset_change = matches!(
+        args.command.as_ref(),
+        Some(Command::Model {
+            action: ModelAction::InstallM3 { .. } | ModelAction::UninstallM3
+        } | Command::AgentConfig { set: Some(_) })
+    );
+    if host_asset_change
+        || (!DIRECT_MODE.load(Ordering::Relaxed)
+            && (changes_profile(args.command.as_ref()) || host_auth_change))
     {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);
-        let switched = rpc::change_profile(|| {
+        let change = || {
             run_local(args)?;
             if CAPTURED.with(|slot| {
                 slot.borrow()
@@ -1902,13 +2186,23 @@ fn run(args: Cli) -> Result<()> {
                 );
             }
             Ok(())
-        });
+        };
+        let switched = if host_asset_change {
+            rpc::change_host_assets(change)
+        } else {
+            rpc::change_profile(change)
+        };
         DEFER_PROFILE_OUTPUT.set(false);
         OUTPUT_EMITTED.set(false);
         OUTPUT_EXIT_CODE.set(0);
         let result = CAPTURED.with(|slot| slot.borrow_mut().take());
         switched?;
         return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
+    }
+    // Profile mutations must finish the host drain/restart transaction above.
+    // Other host commands never belong to Runtime business RPC.
+    if let Some(outcome) = host_command(&args) {
+        return outcome;
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
         // Deprecated downgrade: --direct used to bypass the resident runtime.

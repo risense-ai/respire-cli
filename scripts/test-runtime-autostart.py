@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Actual native foreground lifecycle in a disposable home; no OS registration.
 
-The executable is the only input. No credentials, user data or inherited Respire
-configuration are passed to it. Real sign-in service adapters require a separate
-platform acceptance run; passing this script does not claim that acceptance.
+The CLI and an extracted independent Runtime bundle are inputs. No credentials,
+user data or inherited Respire configuration are passed to them. Real sign-in
+service adapters require a separate platform acceptance run; passing this script
+does not claim that acceptance.
 """
 import argparse
 import json
 import os
 from pathlib import Path
 import socket
+import runpy
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -19,6 +22,9 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--runtime-binary", type=Path, help="Independent Runtime in its extracted bundle; defaults to RSRS_RUNTIME_BIN or the CLI's sibling rsrs-runtime")
+    parser.add_argument("--runtime-archive", type=Path, default=os.environ.get("RSRS_RUNTIME_ARCHIVE"), help="Release archive with adjacent trusted runtime-build-<triple>.json")
+    parser.add_argument("--runtime-version", default=os.environ.get("RSRS_RUNTIME_VERSION"))
     parser.add_argument("--register", action="store_true", help="Exercise a disposable current-user OS registration on an ephemeral GitHub runner")
     parser.add_argument("--previous-binary", type=Path, help="Pinned official DEV.6 native executable for upgrade acceptance")
     args = parser.parse_args()
@@ -27,8 +33,27 @@ def main():
     if args.register and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"):
         parser.error("OS registration acceptance is limited to an ephemeral GitHub-hosted runner")
     binary = str(args.binary.resolve(strict=True))
+    runtime_name = "rsrs-runtime.exe" if os.name == "nt" else "rsrs-runtime"
+    selected_runtime = args.runtime_binary or os.environ.get("RSRS_RUNTIME_BIN")
+    if args.runtime_archive and (selected_runtime or not args.runtime_version):
+        parser.error("Runtime archive requires a version and cannot be combined with a Runtime binary")
+    if args.runtime_version and not args.runtime_archive:
+        parser.error("Runtime version requires a Runtime archive")
+    runtime_binary = None if args.runtime_archive else Path(selected_runtime or Path(binary).with_name(runtime_name)).absolute()
+    if runtime_binary is not None and not runtime_binary.is_file():
+        parser.error("independent Runtime candidate missing; supply --runtime-binary/RSRS_RUNTIME_BIN or --runtime-archive with --runtime-version")
+    if runtime_binary is not None and os.path.samefile(binary, runtime_binary):
+        parser.error("independent Runtime required; the CLI cannot be its Runtime candidate")
+
+    prepare_bundle = runpy.run_path(str(Path(__file__).with_name("runtime-acceptance-bundle.py")))["stage_runtime"]
+
+    def stage_runtime(directory):
+        return prepare_bundle(binary, runtime_binary, directory,
+                              args.runtime_archive if runtime_binary is None else None,
+                              args.runtime_version if runtime_binary is None else None)
+
     with tempfile.TemporaryDirectory(prefix="respire-autostart-") as temporary:
-        base = Path(temporary)
+        base = Path(temporary).resolve(strict=True)
         home = base / "home"
         home.mkdir()
         root = base / ('data spaces % $ " \\' if os.name == "posix" else "data spaces % and $")
@@ -52,6 +77,8 @@ def main():
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root),
                    RSRS_BIN_DIR=str(base / "bin"), RSRS_RPC_PORT=str(port),
                    RSRS_CORE_TEST_MODE="1", RSRS_NO_AUTOSYNC="1", RSRS_UPDATE_CHECK="0")
+        runtime_binary = stage_runtime(base / "bin")
+        env["RSRS_RUNTIME_BIN"] = str(base / "bin" / runtime_name)
 
         restart_stages={"restart_probe","restart_managed","restart_identity","restart_stop","restart_start","restart_ready"}
         def read_restart_stages():
@@ -84,9 +111,10 @@ def main():
         with (base / "foreground.log").open("w+") as log:
             child = subprocess.Popen([binary, "runtime", "run"], env=env,
                                      stdout=log, stderr=log)
+            foreground_stopped = False
+            health = None
             try:
                 deadline = time.monotonic() + 30
-                health = None
                 while time.monotonic() < deadline:
                     if child.poll() is not None:
                         log.seek(0)
@@ -102,22 +130,54 @@ def main():
                         pass
                     time.sleep(0.1)
                 assert health and health["store_ready"], "store never became ready"
-                assert health["pid"] == child.pid and health["managed_id"] is None
+                assert health["pid"] != child.pid and health["managed_id"] is None
+                assert os.path.samefile(health["exe"], env["RSRS_RUNTIME_BIN"])
                 assert Path(health["installation_root"]).resolve() == root.resolve()
-                # No inherited RUST_MIN_STACK: the actual dispatch thread must
-                # support context-query parsing without terminating its host.
-                query=command("--client-only","config")
-                assert query.returncode == 0, f"foreground context RPC failed: {query.stdout} {query.stderr}"
-                assert json.loads(query.stdout)["summary"]["autosync"] is False
-                assert child.poll() is None, "context RPC terminated the foreground host"
+                # Status runs inside Runtime and reports its own environment's
+                # autosync switch without needing keys or an inference model.
+                query=command("--client-only","status")
+                assert query.returncode == 0, f"foreground status RPC failed: {query.stdout} {query.stderr}"
+                status_reply=json.loads(query.stdout)
+                assert status_reply["command"] == "status" and status_reply["summary"]["autosync"] is False
+                assert child.poll() is None, "status RPC terminated the foreground host"
                 stopped = command("runtime", "stop")
                 assert stopped.returncode == 0, stopped.stderr
+                foreground_stopped = True
                 assert child.wait(timeout=20) == 0
                 assert not (root / "runtime/autostart/registration.json").exists()
+            except Exception:
+                print("isolated foreground diagnostic", json.dumps({
+                    "temporary": temporary,
+                    "base": str(base),
+                    "root": str(root),
+                    "foreground_returncode": child.poll(),
+                    "foreground_log": log.name,
+                }), file=sys.stderr, flush=True)
+                raise
             finally:
-                if child.poll() is None:
-                    child.terminate()
-                    child.wait(timeout=20)
+                primary_error = sys.exc_info()[1]
+                try:
+                    # No observed Runtime means there is no verified HTTP owner
+                    # to clean up; retain the original foreground startup error.
+                    if not foreground_stopped and health is not None:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
+                            cleanup_health=json.load(response)
+                        assert cleanup_health["server"] == "respire" and cleanup_health["managed_id"] is None
+                        assert os.path.samefile(cleanup_health["exe"], env["RSRS_RUNTIME_BIN"])
+                        assert Path(cleanup_health["installation_root"]).resolve() == root.resolve()
+                        assert Path(cleanup_health["data_dir"]).resolve() == root.resolve()
+                        for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
+                            assert cleanup_health[key] == health[key], f"foreground owner changed before cleanup: {key}"
+                        # Host stop verifies native birth identity, waits for the real
+                        # Runtime to exit and validates its final drained receipt.
+                        cleanup=command("runtime", "stop")
+                        assert cleanup.returncode == 0, f"foreground Runtime cleanup failed: {cleanup.stdout} {cleanup.stderr}"
+                    if child.poll() is None:
+                        assert child.wait(timeout=20) == 0, "foreground CLI did not exit after Runtime stopped"
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
         print("PASS: read-only default-off status, client-only denial, actual foreground store readiness and owned stop")
         # A fresh off-mode installation must restart without opening/creating a
         # library. Its detached child is always stopped before leaving the test.
@@ -125,6 +185,8 @@ def main():
         off_root.mkdir()
         (off_root / "client.json").write_text(json.dumps({"service_mode":"off"}))
         off_env = dict(env, RSRS_DATA_DIR=str(off_root), RSRS_BIN_DIR=str(base/"off-bin"))
+        stage_runtime(base / "off-bin")
+        off_env["RSRS_RUNTIME_BIN"] = str(base / "off-bin" / runtime_name)
         try:
             for argv in [("runtime","start"),("runtime","stop")]*3+[("runtime","restart")]:
                 result = subprocess.run([binary,"--json",*argv],env=off_env,capture_output=True,text=True,timeout=45)
@@ -153,26 +215,46 @@ def main():
                 try:
                     image=ctypes.create_unicode_buffer(32768);length=wintypes.DWORD(len(image))
                     assert kernel.QueryFullProcessImageNameW(owned,0,image,ctypes.byref(length))
-                    assert os.path.samefile(image.value,Path(off_env["RSRS_BIN_DIR"])/"rsrs.exe")
+                    assert os.path.samefile(image.value,off_env["RSRS_RUNTIME_BIN"])
                     assert kernel.WaitForSingleObject(owned,0)==258
+                    endpoint=off_root/"runtime/endpoint.json"
+                    endpoint_before=endpoint.read_bytes()
                     assert ntdll.NtSuspendProcess(owned)>=0
                     suspended=True
+                    rejected=subprocess.run([binary,"--json","runtime","restart"],env=off_env,capture_output=True,text=True,timeout=45)
+                    assert rejected.returncode!=0, "restart accepted an owner without health/drain proof"
+                    assert "owner health is unavailable" in " ".join(json.loads(rejected.stdout)["errors"]), rejected.stdout
+                    assert kernel.WaitForSingleObject(owned,0)==258, "restart terminated the suspended owner"
+                    assert endpoint.read_bytes()==endpoint_before, "rejected restart changed the endpoint owner"
+                    assert not (off_root/"runtime/autostart/registration.json").exists()
+                    assert ntdll.NtResumeProcess(owned)>=0, "owned fixture could not be resumed"
+                    suspended=False
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                        resumed=json.load(response)
+                    for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
+                        assert resumed[key]==frozen[key], f"suspended owner was replaced: {key}"
                     recovered=subprocess.run([binary,"--json","runtime","restart"],env=off_env,capture_output=True,text=True,timeout=45)
-                    assert recovered.returncode==0, f"suspended owner recovery: {recovered.stdout} {recovered.stderr}"
+                    assert recovered.returncode==0, f"resumed owner restart: {recovered.stdout} {recovered.stderr}"
                     envelope=json.loads(recovered.stdout)
                     assert envelope["command"]=="runtime.restart" and envelope["status"]=="ok", envelope
                     summary=envelope["summary"]
-                    assert summary["forced"] is True and summary["stopped_pid"]==frozen["pid"] and summary["pid"]!=frozen["pid"]
-                    assert kernel.WaitForSingleObject(owned,15000)==0, "the inspected suspended process survived forced recovery"
+                    assert summary["forced"] is False and summary["stopped_pid"]==frozen["pid"] and summary["pid"]!=frozen["pid"]
+                    assert kernel.WaitForSingleObject(owned,15000)==0, "the inspected process survived normal drain"
                     assert not (off_root/"rsrs.db").exists() and not (off_root/"onememory.db").exists()
-                    print("PASS: actual suspended unmanaged Windows runtime recovered with verified native identity, no WMI, and no database")
+                    print("PASS: suspended Windows owner refused without replacement; resumed owner normally drained/restarted, no WMI or database")
                 finally:
                     if suspended and kernel.WaitForSingleObject(owned,0)==258:
                         assert ntdll.NtResumeProcess(owned)>=0, "owned failed fixture could not be resumed"
                     kernel.CloseHandle(owned)
         finally:
-            result = subprocess.run([binary,"--json","runtime","stop"],env=off_env,capture_output=True,text=True,timeout=45)
-            assert result.returncode == 0, f"off-mode child cleanup failed: {result.stdout} {result.stderr}"
+            primary_error=sys.exc_info()[1]
+            try:
+                result = subprocess.run([binary,"--json","runtime","stop"],env=off_env,capture_output=True,text=True,timeout=45)
+                assert result.returncode == 0, f"off-mode child cleanup failed: {result.stdout} {result.stderr}"
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                print(f"off-mode cleanup also failed: {cleanup_error}",file=sys.stderr)
         print("PASS: fresh memory-off start/stop/restart without a database")
         if args.register:
             if os.name == "posix" and os.uname().sysname == "Linux":
@@ -220,20 +302,20 @@ def main():
                 kernel.WaitForSingleObject.argtypes=[wintypes.HANDLE,wintypes.DWORD];kernel.WaitForSingleObject.restype=wintypes.DWORD
                 kernel.CloseHandle.argtypes=[wintypes.HANDLE];kernel.CloseHandle.restype=wintypes.BOOL
                 handles=[]
-                def checked_process(pid):
+                def checked_process(pid, executable):
                     assert pid not in (0,os.getpid())
                     handle=kernel.OpenProcess(0x101001,False,pid) # terminate + limited query + synchronize
                     assert handle, "cannot open the owned native fixture process"
                     handles.append(handle)
                     image=ctypes.create_unicode_buffer(32768);size=wintypes.DWORD(len(image))
                     assert kernel.GetProcessId(handle)==pid and kernel.QueryFullProcessImageNameW(handle,0,image,ctypes.byref(size))
-                    assert os.path.samefile(image.value,current["exe"]), "fixture process has a foreign executable"
+                    assert os.path.samefile(image.value,executable), "fixture process has a foreign executable"
                     values=[wintypes.FILETIME() for _ in range(4)]
                     assert kernel.GetProcessTimes(handle,*[ctypes.byref(value) for value in values])
                     assert kernel.WaitForSingleObject(handle,0)==258, "fixture process already exited"
                     return handle,(values[0].dwHighDateTime<<32)|values[0].dwLowDateTime
                 try:
-                    child,child_birth=checked_process(current["pid"])
+                    child,child_birth=checked_process(current["pid"], Path(expected["executable"]).parent/runtime_name)
                     class ProcessEntry(ctypes.Structure):
                         _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),
                             ("th32ProcessID",wintypes.DWORD),("th32DefaultHeapID",ctypes.c_size_t),
@@ -263,7 +345,7 @@ def main():
                         kernel.CloseHandle(snapshot)
                     assert parent_pid is not None, "owned child absent from process snapshot"
                     assert parent_pid != current["pid"]
-                    parent,parent_birth=checked_process(parent_pid)
+                    parent,parent_birth=checked_process(parent_pid,expected["executable"])
                     assert parent_birth <= child_birth, "supervisor PID was reused after the owned child started"
                     yield {"kernel":kernel,"parent":parent,"child":child,"parent_pid":parent_pid,"child_pid":current["pid"],"parent_birth":parent_birth,"child_birth":child_birth,"data_dir":current["data_dir"],"store_ready":current.get("store_ready",False)}
                 finally:
@@ -356,22 +438,62 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     assert version.returncode == 0 and "1.0.17-dev.6" in version.stdout, "unexpected previous native version"
                     upgrade_root=base/"previous-version-upgrade"
                     upgrade_env=dict(env,RSRS_DATA_DIR=str(upgrade_root),RSRS_BIN_DIR=str(upgrade_root/"bin"))
+                    stage_runtime(upgrade_root / "bin")
+                    upgrade_env["RSRS_RUNTIME_BIN"] = str(upgrade_root / "bin" / runtime_name)
                     def upgrade_call(executable,*argv):
-                        return subprocess.run([str(executable),"--json",*argv],env=upgrade_env,capture_output=True,text=True,timeout=45)
+                        call_env = dict(upgrade_env)
+                        if executable == previous:
+                            call_env.pop("RSRS_RUNTIME_BIN", None)
+                        return subprocess.run([str(executable),"--json",*argv],env=call_env,capture_output=True,text=True,timeout=45)
                     def require_upgrade(*argv):
                         result=upgrade_call(binary,*argv)
                         assert result.returncode == 0, f"upgrade {argv}: {result.stdout} {result.stderr}"
                         return json.loads(result.stdout)["summary"]
+                    stable=upgrade_root/"bin"/("rsrs.exe" if os.name=="nt" else "rsrs")
+                    legacy_running=False
+                    old_health=None
+                    def stop_legacy_owner():
+                        nonlocal legacy_running
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                            current=json.load(response)
+                        assert current["pid"]==old_health["pid"] and current["bin"]=="1.0.17-dev.6"
+                        assert Path(current["data_dir"]).resolve()==upgrade_root.resolve()
+                        assert os.path.samefile(current["exe"],stable)
+                        assert hashlib.sha256(stable.read_bytes()).digest()==hashlib.sha256(previous.read_bytes()).digest()
+                        endpoint=upgrade_root/"runtime/endpoint.json"
+                        assert not endpoint.is_symlink() and endpoint.stat().st_size<=65536
+                        endpoint_before=endpoint.read_bytes()
+                        recorded=json.loads(endpoint_before)
+                        assert recorded["pid"]==current["pid"] and recorded["bin"]==current["bin"]
+                        assert recorded["url"]==f"http://127.0.0.1:{port}"
+                        stopped=upgrade_call(previous,"--runtime-internal","--stop")
+                        assert stopped.returncode==0, f"legacy owner stop failed: {stopped.stdout} {stopped.stderr}"
+                        # DEV.6 waits for native exit/lock release but leaves its endpoint.
+                        assert not endpoint.is_symlink() and endpoint.read_bytes()==endpoint_before
+                        endpoint.unlink()
+                        legacy_running=False
                     try:
                         old=upgrade_call(previous,"status")
                         assert old.returncode in (0,2), f"previous native startup failed: {old.stdout} {old.stderr}"
                         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
                             old_health=json.load(response)
                         assert old_health["bin"] == "1.0.17-dev.6"
-                        upgraded=require_upgrade("runtime","autostart","enable")
+                        assert Path(old_health["data_dir"]).resolve()==upgrade_root.resolve()
+                        assert os.path.samefile(old_health["exe"],stable)
+                        assert hashlib.sha256(stable.read_bytes()).digest()==hashlib.sha256(previous.read_bytes()).digest()
+                        legacy_running=True
+                        # Legacy health cannot authorize a new registration's owner.
+                        denied=upgrade_call(binary,"runtime","autostart","enable")
+                        assert denied.returncode!=0, "legacy owner was adopted without registration identity"
+                        assert "runtime identity/profile does not match" in " ".join(json.loads(denied.stdout)["errors"]), denied.stdout
+                        stop_legacy_owner()
+                        require_upgrade("runtime","autostart","remove","--stop")
+                        handoff_runtime=upgrade_root/"handoff-runtime"
+                        stage_runtime(handoff_runtime)
+                        shutil.copytree(handoff_runtime,upgrade_root/"bin",dirs_exist_ok=True)
+                        upgraded=require_upgrade("runtime","autostart","enable","--now")
                         assert upgraded["enabled"] and upgraded["runtime"]["running"]
                         assert upgraded["runtime"]["version"] == health["bin"] and upgraded["runtime"]["pid"] != old_health["pid"]
-                        stable=upgrade_root/"bin"/("rsrs.exe" if os.name=="nt" else "rsrs")
                         fingerprint=hashlib.sha256(stable.read_bytes()).digest()
                         legacy=upgrade_call(previous,"status")
                         # A compatible old client may remain read-only; it must
@@ -396,15 +518,28 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                                 assert source.is_file() and not destination.is_symlink()
                                 destination.parent.mkdir(parents=True,exist_ok=True)
                                 shutil.copy2(source,destination)
+                        # Old CLI SDK sidecars must not replace the new Runtime's
+                        # verified dependencies during this stopped upgrade fixture.
+                        restored_runtime = upgrade_root / "restored-runtime"
+                        stage_runtime(restored_runtime)
+                        shutil.copytree(restored_runtime, upgrade_root / "bin", dirs_exist_ok=True)
                         require_upgrade("runtime","start")
                         disabled_upgrade=require_upgrade("runtime","status")
                         assert disabled_upgrade["enabled"] is False and disabled_upgrade["runtime"]["version"] == health["bin"]
                         require_upgrade("runtime","stop")
-                        print("PASS: actual DEV.6 handoff, live legacy-client no-replacement, and disabled-state preservation across native upgrade")
+                        print("PASS: DEV.6 takeover refused, explicit legacy stop then native upgrade, live legacy-client no-replacement, disabled-state preservation")
                     finally:
-                        stopped=upgrade_call(binary,"runtime","stop")
-                        removed=upgrade_call(binary,"runtime","autostart","remove","--stop")
-                        assert stopped.returncode == 0 and removed.returncode == 0, f"previous-version fixture cleanup failed: stop={stopped.stdout} {stopped.stderr}; remove={removed.stdout} {removed.stderr}"
+                        primary_error=sys.exc_info()[1]
+                        try:
+                            if legacy_running:
+                                stop_legacy_owner()
+                            stopped=upgrade_call(binary,"runtime","stop")
+                            removed=upgrade_call(binary,"runtime","autostart","remove","--stop")
+                            assert stopped.returncode == 0 and removed.returncode == 0, f"previous-version fixture cleanup failed: stop={stopped.stdout} {stopped.stderr}; remove={removed.stdout} {removed.stderr}"
+                        except Exception as cleanup_error:
+                            if primary_error is None:
+                                raise
+                            print(f"previous-version cleanup also failed: {cleanup_error}",file=sys.stderr)
 
                 failure_root=base/"failed-installation"
                 blocked=base/"blocked-native-directory"
@@ -427,10 +562,11 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 # Observe the managed child's captured opt-out through the
                 # existing client-only RPC, with the caller deliberately set
                 # to the opposite value. No sync or network write is requested.
-                config_reply=subprocess.run([binary,"--json","--client-only","config"],
+                status_reply=subprocess.run([binary,"--json","--client-only","status"],
                     env=dict(env,RSRS_NO_AUTOSYNC="0"),capture_output=True,text=True,timeout=45)
-                assert config_reply.returncode == 0, f"managed config query failed: {config_reply.stdout} {config_reply.stderr}"
-                assert json.loads(config_reply.stdout)["summary"]["autosync"] is False, "managed runtime lost explicit no-autosync opt-out"
+                assert status_reply.returncode == 0, f"managed status query failed: {status_reply.stdout} {status_reply.stderr}"
+                runtime_status=json.loads(status_reply.stdout)
+                assert runtime_status["command"] == "status" and runtime_status["summary"]["autosync"] is False, "managed runtime lost explicit no-autosync opt-out"
                 print("PASS: managed child retains no-autosync opt-out independently of caller environment")
                 unchanged_config = config_path.read_bytes()
                 with socket.socket() as other_socket:
@@ -552,6 +688,13 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     if phase != "Starting":
                         run("runtime", "stop")
                     config = json.loads(registration.read_text())
+                    if phase == "Starting":
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
+                            maintenance_health=json.load(response)
+                        assert Path(maintenance_health["installation_root"]).resolve() == root.resolve()
+                        assert maintenance_health["managed_id"] == config["id"]
+                        maintenance_scope={key: maintenance_health[key] for key in ("account_id", "instance_id", "generation")}
+                        assert maintenance_health["v"] == 1 and all(maintenance_scope.values())
                     stopped_flag = config["manually_stopped"]
                     config["maintenance"] = True
                     registration.write_text(json.dumps(config))
@@ -573,7 +716,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     if phase == "Starting":
                         for method in ("model.prepare", "index.prepare"):
                             request = urllib.request.Request(f"http://127.0.0.1:{port}/api/rpc",
-                                data=json.dumps({"v":1,"id":str(uuid.uuid4()),"method":method,"args":[]}).encode(),
+                                data=json.dumps({"v":1,"id":str(uuid.uuid4()),"method":method,"args":[],"scope":maintenance_scope}).encode(),
                                 headers={"Content-Type":"application/json"})
                             with urllib.request.urlopen(request,timeout=5) as response:
                                 reply=json.load(response)
@@ -624,9 +767,15 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
             finally:
                 # The CLI revalidates exact owner/action/files before cleanup;
                 # never delete unknown OS tasks/units merely to make a test pass.
-                cleanup = command("runtime", "autostart", "remove", "--stop")
-                assert cleanup.returncode == 0, f"Owned registration cleanup failed: {cleanup.stderr} {cleanup.stdout}"
-                collect_managed_profiles()
+                primary_error=sys.exc_info()[1]
+                try:
+                    cleanup = command("runtime", "autostart", "remove", "--stop")
+                    assert cleanup.returncode == 0, f"Owned registration cleanup failed: {cleanup.stderr} {cleanup.stdout}"
+                    collect_managed_profiles()
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    print(f"owned registration cleanup also failed: {cleanup_error}",file=sys.stderr)
 
 
 
