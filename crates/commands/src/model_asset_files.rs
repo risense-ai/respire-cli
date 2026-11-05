@@ -4,12 +4,87 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::model_download::{download_with_fallback, DownloadTimeouts};
+use crate::model_download::{download_with_fallback, remove_download_parts, DownloadTimeouts};
 
 /// HuggingFace repo (where the ONNX actually lives, not the BAAI source repo).
 pub const MODEL_REPO: &str = "Xenova/bge-m3";
 /// Verified revision (this commit's tokenizer/onnx hashes match the local read-only model).
 pub const MODEL_REVISION: &str = "4de13258303883538bd53b696b452bf8099f0858";
+
+/// Publish the baseline as a batch; selection and final loader readiness stay with the caller.
+pub(super) fn install_baseline_into(
+    files: &[(&str, &str, Option<u64>)],
+    dest: &Path,
+    origins: &[String],
+) -> Result<bool> {
+    std::fs::create_dir_all(&dest)?;
+    // A pinned revision allows cancellation, restart and mirror changes to reuse
+    // partial bytes without exposing an incomplete file to the model loader.
+    let tmp = dest.join(format!(".download-{MODEL_REVISION}"));
+    std::fs::create_dir_all(tmp.join("onnx"))?;
+    let mut skipped = true;
+    for &(name, sha, expected_size) in files {
+        if crate::model_download::file_valid(&dest.join(name), sha, expected_size)? {
+            continue;
+        }
+        if crate::model_download::file_valid(&tmp.join(name), sha, expected_size)? {
+            skipped = false;
+            continue;
+        }
+        let sources = origins
+            .iter()
+            .map(|origin| file_url(origin, name))
+            .collect::<Vec<_>>();
+        download_with_fallback(
+            &sources,
+            &tmp.join(name),
+            sha,
+            name.ends_with(".onnx"),
+            DownloadTimeouts::default(),
+            expected_size,
+        )?;
+        skipped = false;
+    }
+    // Publish only after every required replacement has passed the pinned checksum.
+    std::fs::create_dir_all(dest.join("onnx"))?;
+    for &(name, _, _) in files {
+        if tmp.join(name).is_file() {
+            replace_file(&tmp.join(name), &dest.join(name))?;
+        }
+    }
+    std::fs::remove_dir_all(&tmp)?;
+    Ok(skipped)
+}
+
+/// Return only after publication, so the caller can invalidate SDK validation before notices.
+pub(super) fn install_cpu_container_into(
+    partial: &Path,
+    dest: &Path,
+    sources: &[String],
+    expected: &str,
+    size: u64,
+    expected_size: Option<u64>,
+) -> Result<Option<String>> {
+    let downloaded_from = if !crate::model_download::file_valid(partial, expected, expected_size)? {
+        Some(download_with_fallback(
+            sources,
+            partial,
+            expected,
+            true,
+            DownloadTimeouts::default(),
+            expected_size,
+        )?)
+    } else {
+        None
+    };
+    anyhow::ensure!(
+        partial.metadata()?.len() == size,
+        "CPU model size mismatch"
+    );
+    remove_download_parts(partial)?;
+    replace_file(partial, dest)?;
+    Ok(downloaded_from)
+}
 
 pub(super) fn install_variant_into(
     variant_name: &str,

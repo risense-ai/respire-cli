@@ -11,6 +11,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod support;
+
 struct Fixture {
     runtime: Option<std::process::Child>,
     runtime_bin: std::path::PathBuf,
@@ -502,11 +504,13 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
 #[test]
 fn queued_direct_resume_rechecks_maintenance_after_library_ownership_wait() -> Result<()> {
     let mut fixture = Fixture::new()?;
+    // Host control requires the official managed installation, not the serve override.
+    support::install_runtime_fixture(fixture.root.path())?;
     let (ok, created) = fixture.run(&["--direct", "--json", "snapshot", "create"])?;
     assert!(ok);
     let id = created["details"]["id"].as_str().context("snapshot id")?;
     let (ok, revision) = fixture.run(&["--direct", "--json", "memory-revision"])?;
-    assert!(ok);
+    anyhow::ensure!(ok, "host control revision failed: {}", revision["errors"]);
     let token = revision["summary"]["revision"]
         .as_str()
         .context("revision token")?;

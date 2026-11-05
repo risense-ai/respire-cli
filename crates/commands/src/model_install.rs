@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::model_download::{download_with_fallback, remove_download_parts, DownloadTimeouts};
+#[cfg(test)]
 use crate::model_asset_files::{file_url, replace_file};
 use crate::model_progress;
 use respire_app::memory::bge::{expand_home, model_files_present};
@@ -199,42 +199,8 @@ fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
         ("tokenizer.json", TOKENIZER_SHA256),
         ("onnx/model_quantized.onnx", ONNX_SHA256),
     ];
-    std::fs::create_dir_all(&dest)?;
-    // A pinned revision allows cancellation, restart and mirror changes to reuse
-    // partial bytes without exposing an incomplete file to the model loader.
-    let tmp = dest.join(format!(".download-{MODEL_REVISION}"));
-    std::fs::create_dir_all(tmp.join("onnx"))?;
-    let mut skipped = true;
-    for (name, sha) in files {
-        if file_valid(&dest.join(name), sha)? {
-            continue;
-        }
-        if file_valid(&tmp.join(name), sha)? {
-            skipped = false;
-            continue;
-        }
-        let sources = origins
-            .iter()
-            .map(|origin| file_url(origin, name))
-            .collect::<Vec<_>>();
-        download_with_fallback(
-            &sources,
-            &tmp.join(name),
-            sha,
-            name.ends_with(".onnx"),
-            DownloadTimeouts::default(),
-            pinned_size(sha),
-        )?;
-        skipped = false;
-    }
-    // Publish only after every required replacement has passed the pinned checksum.
-    std::fs::create_dir_all(dest.join("onnx"))?;
-    for (name, _) in files {
-        if tmp.join(name).is_file() {
-            replace_file(&tmp.join(name), &dest.join(name))?;
-        }
-    }
-    std::fs::remove_dir_all(&tmp)?;
+    let files = files.map(|(name, sha)| (name, sha, pinned_size(sha)));
+    let skipped = crate::model_asset_files::install_baseline_into(&files, &dest, &origins)?;
     anyhow::ensure!(
         model_files_present(&dest) && m3_model_valid(&dest.join("onnx/model_quantized.onnx"))?,
         "BGE-M3 quantized install is incomplete"
@@ -266,24 +232,14 @@ fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
     std::fs::create_dir_all(parent)?;
     let partial = parent.join(format!(".download-{}.ort", bge::CPU_ORT_REVISION));
     let sources = cpu_ort_sources()?;
-    let downloaded_from = if !file_valid(&partial, bge::CPU_ORT_SHA256)? {
-        Some(download_with_fallback(
-            &sources,
-            &partial,
-            bge::CPU_ORT_SHA256,
-            true,
-            DownloadTimeouts::default(),
-            pinned_size(bge::CPU_ORT_SHA256),
-        )?)
-    } else {
-        None
-    };
-    anyhow::ensure!(
-        partial.metadata()?.len() == bge::CPU_ORT_SIZE,
-        "CPU model size mismatch"
-    );
-    remove_download_parts(&partial)?;
-    replace_file(&partial, &dest)?;
+    let downloaded_from = crate::model_asset_files::install_cpu_container_into(
+        &partial,
+        &dest,
+        &sources,
+        bge::CPU_ORT_SHA256,
+        bge::CPU_ORT_SIZE,
+        pinned_size(bge::CPU_ORT_SHA256),
+    )?;
     bge::invalidate_cpu_ort_validation()?;
     std::fs::write(
         parent.join("CPU-MODEL-SOURCE.json"),

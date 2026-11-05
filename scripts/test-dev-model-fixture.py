@@ -21,11 +21,25 @@ class NativeModelCacheTests(unittest.TestCase):
     def test_public_pins_match_existing_consumers_and_key_covers_every_input(self):
         root = Path(__file__).parents[1]
         installer = (root / "crates/commands/src/model_install.rs").read_text(encoding="utf-8")
+        assets = (root / "crates/commands/src/model_asset_files.rs").read_text(encoding="utf-8")
         cpu = (root / "crates/core-sdk/src/cpu_model.rs").read_text(encoding="utf-8")
         fixture = (root / "scripts/test-real-m3-account-switch.py").read_text(encoding="utf-8")
-        self.assertIn(model_cache.REVISION, installer)
+        self.assertIn(f'pub const MODEL_REVISION: &str = "{model_cache.REVISION}";', assets)
+        self.assertIn('pub const MODEL_REPO: &str = "Xenova/bge-m3";', assets)
+        self.assertIn('pub use crate::model_asset_files::{MODEL_REPO, MODEL_REVISION};', installer)
+        self.assertIn('use crate::model_asset_files::{file_url, replace_file};', installer)
+        self.assertNotIn('const MODEL_REVISION:', installer)
+        self.assertNotIn('const MODEL_REPO:', installer)
+        self.assertIn('install_variant_into(variant, &dest, &origins)', installer)
+        self.assertRegex(installer, (
+            r"crate::model_asset_files::install_variant_into\(\s*"
+            r"variant.name,\s*&file,\s*variant.sha256,\s*variant.size,\s*"
+            r"pinned_size\(variant.sha256\),\s*dest,\s*origins,?\s*\)"
+        ))
         for name, digest in model_cache.FILES.items():
             self.assertIn(digest, cpu if name.endswith(".ort") else fixture)
+            if name in ("tokenizer.json", "onnx/model_quantized.onnx"):
+                self.assertIn(digest, installer)
         self.assertEqual(len(model_cache.FILES), 4)
         key = model_cache.cache_key()
         self.assertRegex(key, r"^native-model-v1-[a-f0-9]{64}$")
