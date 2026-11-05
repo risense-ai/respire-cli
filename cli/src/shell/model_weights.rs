@@ -1,8 +1,14 @@
 //! Draft-only model picker. All writes/downloads go through existing commands.
 use super::{choice, line, t, KeyCode, Line, Value};
-use respire::memory::onnx::MODEL_VARIANTS;
+use anyhow::{Context, Result};
 
 const ENGINES: &[&str] = &["cpu", "gpu", "npu"];
+#[derive(serde::Deserialize)]
+struct Variant {
+    name: String,
+    size: u64,
+}
+
 pub(super) enum Action {
     Save,
     Install,
@@ -12,26 +18,39 @@ pub(super) struct Form {
     pub cursor: usize,
     engine: usize,
     variant: usize,
+    variants: Vec<Variant>,
 }
 impl Form {
-    pub(super) fn new(settings: &Value) -> Self {
-        Self {
+    pub(super) fn new(settings: &Value) -> Result<Self> {
+        let variants: Vec<Variant> = serde_json::from_value(settings["variants"].clone())
+            .context("Runtime model engine returned invalid variants")?;
+        anyhow::ensure!(!variants.is_empty(), "Runtime model engine returned no variants");
+        anyhow::ensure!(
+            variants.iter().all(|variant| !variant.name.trim().is_empty() && variant.size > 0),
+            "Runtime model engine returned an invalid variant name or size"
+        );
+        let variant = variants
+            .iter()
+            .position(|variant| Some(variant.name.as_str()) == settings["model"].as_str())
+            .context("Runtime selected model is absent from its variant inventory")?;
+        Ok(Self {
             cursor: 0,
             engine: ENGINES
                 .iter()
                 .position(|e| Some(*e) == settings["engine"].as_str())
                 .unwrap_or(0),
-            variant: MODEL_VARIANTS
-                .iter()
-                .position(|v| Some(v.name) == settings["model"].as_str())
-                .unwrap_or(0),
-        }
+            variant,
+            variants,
+        })
     }
-    pub(super) fn selection(&self) -> (&'static str, &'static str) {
-        (ENGINES[self.engine], MODEL_VARIANTS[self.variant].name)
+    pub(super) fn selection(&self) -> (&'static str, &str) {
+        (ENGINES[self.engine], &self.variants[self.variant].name)
+    }
+    pub(super) fn selected_size(&self) -> u64 {
+        self.variants[self.variant].size
     }
     pub(super) fn key(&mut self, key: KeyCode) -> Option<Action> {
-        let count = MODEL_VARIANTS.len() + 4;
+        let count = self.variants.len() + 4;
         match key {
             KeyCode::Esc | KeyCode::Char('0') => return Some(Action::Back),
             KeyCode::Up => self.cursor = (self.cursor + count - 1) % count,
@@ -41,9 +60,9 @@ impl Form {
             }
             KeyCode::Right if self.cursor == 0 => self.engine = (self.engine + 1) % ENGINES.len(),
             KeyCode::Enter if self.cursor == 0 => self.engine = (self.engine + 1) % ENGINES.len(),
-            KeyCode::Enter if self.cursor <= MODEL_VARIANTS.len() => self.variant = self.cursor - 1,
-            KeyCode::Enter if self.cursor == MODEL_VARIANTS.len() + 1 => return Some(Action::Save),
-            KeyCode::Enter if self.cursor == MODEL_VARIANTS.len() + 2 => {
+            KeyCode::Enter if self.cursor <= self.variants.len() => self.variant = self.cursor - 1,
+            KeyCode::Enter if self.cursor == self.variants.len() + 1 => return Some(Action::Save),
+            KeyCode::Enter if self.cursor == self.variants.len() + 2 => {
                 return Some(Action::Install)
             }
             KeyCode::Enter => return Some(Action::Back),
@@ -91,8 +110,8 @@ impl Form {
                 ),
             ),
         ];
-        for (index, variant) in MODEL_VARIANTS.iter().enumerate() {
-            let state = if Self::present(settings, variant.name) {
+        for (index, variant) in self.variants.iter().enumerate() {
+            let state = if Self::present(settings, &variant.name) {
                 t(
                     "\u{5df2}\u{4e0b}\u{8f7d}\u{ff1b}\u{52a0}\u{8f7d}\u{524d}\u{6821}\u{9a8c}",
                     "downloaded; validated before loading",
@@ -118,15 +137,15 @@ impl Form {
             ));
         }
         rows.push(choice(
-            self.cursor == MODEL_VARIANTS.len() + 1,
+            self.cursor == self.variants.len() + 1,
             t(
                 "\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}",
                 "Validate and load selected weights",
             ),
         ));
-        rows.push(choice(self.cursor == MODEL_VARIANTS.len() + 2, t("\u{9884}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff08}\u{4e0d}\u{5207}\u{6362}\u{ff09}\u{2026}", "Download selected weights (keep current model)\u{2026}")));
+        rows.push(choice(self.cursor == self.variants.len() + 2, t("\u{9884}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff08}\u{4e0d}\u{5207}\u{6362}\u{ff09}\u{2026}", "Download selected weights (keep current model)\u{2026}")));
         rows.push(choice(
-            self.cursor == MODEL_VARIANTS.len() + 3,
+            self.cursor == self.variants.len() + 3,
             t(
                 "\u{8fd4}\u{56de}\u{ff08}\u{653e}\u{5f03}\u{8349}\u{7a3f}\u{ff09}",
                 "Back (discard draft)",
@@ -144,26 +163,57 @@ impl Form {
 mod tests {
     use super::*;
     #[test]
-    fn drafts_preserve_weights_on_engine_changes_and_cancel_without_an_action() {
-        let settings = serde_json::json!({"engine":"cpu","model":"fp16"});
-        let mut form = Form::new(&settings);
+    fn drafts_preserve_weights_on_engine_changes_and_cancel_without_an_action() -> Result<()> {
+        let settings = serde_json::json!({"engine":"cpu","model":"runtime-fp16",
+            "variants":[{"name":"runtime-fp16","size":7340032,"state":"present"}]});
+        let mut form = Form::new(&settings)?;
         form.key(KeyCode::Right);
-        assert_eq!(form.selection(), ("gpu", "fp16"));
+        assert_eq!(form.selection(), ("gpu", "runtime-fp16"));
+        assert_eq!(form.selected_size(), 7340032);
         assert!(matches!(form.key(KeyCode::Esc), Some(Action::Back)));
         assert_eq!(settings["engine"], "cpu");
-        assert_eq!(Form::new(&settings).selection(), ("cpu", "fp16"));
+        assert_eq!(Form::new(&settings)?.selection(), ("cpu", "runtime-fp16"));
+        Ok(())
     }
     #[test]
-    fn all_variants_are_selectable_without_saving_or_downloading() {
-        let mut form = Form::new(&serde_json::json!({"engine":"npu","model":"quantized"}));
-        for (index, variant) in MODEL_VARIANTS.iter().enumerate() {
+    fn all_variants_are_selectable_without_saving_or_downloading() -> Result<()> {
+        let settings = serde_json::json!({"engine":"npu","model":"runtime-q8","variants":[
+            {"name":"runtime-q4","size":3145728,"state":"invalid_size"},
+            {"name":"runtime-q8","size":1048576,"state":"present"},
+            {"name":"runtime-fp16","size":7340032,"state":"missing"}
+        ]});
+        let mut form = Form::new(&settings)?;
+        assert_eq!(form.selection(), ("npu", "runtime-q8"));
+        for (index, name) in ["runtime-q4", "runtime-q8", "runtime-fp16"].into_iter().enumerate() {
             form.cursor = index + 1;
             assert!(form.key(KeyCode::Enter).is_none());
-            assert_eq!(form.selection(), ("npu", variant.name));
+            assert_eq!(form.selection(), ("npu", name));
         }
+        let before = form.lines(&settings).iter().map(ToString::to_string).collect::<String>();
+        assert!(before.contains("runtime-fp16") && before.contains("7 MiB"));
+        let mut live = settings.clone();
+        live["variants"][2]["state"] = serde_json::json!("present");
+        assert!(Form::present(&live, "runtime-fp16"));
+        let after = form.lines(&live).iter().map(ToString::to_string).collect::<String>();
+        assert_ne!(before, after);
+        assert_eq!(form.selection(), ("npu", "runtime-fp16"));
         assert!(!Form::present(
             &serde_json::json!({"variants":[{"name":"q4f16","state":"invalid_size"}]}),
             "q4f16"
         ));
+        for variants in [
+            Value::Null,
+            serde_json::json!([]),
+            serde_json::json!([{"name":"runtime-q8","size":"invalid"}]),
+            serde_json::json!([{"name":"","size":1048576}]),
+            serde_json::json!([{"name":"runtime-q8","size":0}]),
+        ] {
+            let mut invalid = settings.clone();
+            invalid["variants"] = variants;
+            assert!(Form::new(&invalid).is_err());
+        }
+        live["model"] = serde_json::json!("absent-from-runtime-inventory");
+        assert!(Form::new(&live).is_err());
+        Ok(())
     }
 }

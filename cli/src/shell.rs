@@ -1215,7 +1215,10 @@ fn model_key(app: &mut App, code: KeyCode) {
                         ask(app, t("\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{4efb}\u{52a1}\u{5e76}\u{4ece}\u{6240}\u{9009}\u{4e0b}\u{8f7d}\u{6e90}\u{91cd}\u{65b0}\u{4e0b}\u{8f7d}\u{672a}\u{5b8c}\u{6210}\u{6587}\u{4ef6}\u{ff1f}", "Cancel the current task and redownload unfinished files from the selected source?"), ConfirmKind::RestartM3(id, selected_model_mirror()));
                     }
                     Some(7) => app.overlay = Overlay::RecallTest(recall_test::Form::new("benchmark")),
-                    Some(8) => app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings)),
+                    Some(8) => match model_weights::Form::new(&app.live.model_settings) {
+                        Ok(form) => app.overlay = Overlay::ModelWeights(form),
+                        Err(error) => app.set_notice(format!("{error:#}")),
+                    },
                     Some(9) => match recall_fusion::Form::new() {
                         Ok(form) => app.overlay = Overlay::RecallFusion(form),
                         Err(error) => app.set_notice(error),
@@ -1234,26 +1237,26 @@ fn model_weights_key(app: &mut App, code: KeyCode) {
     };
     let action = form.key(code);
     let (engine, variant) = form.selection();
+    let variant = variant.to_owned();
+    let size = form.selected_size();
     match action {
         Some(model_weights::Action::Back) => app.overlay = Overlay::None,
         Some(model_weights::Action::Save) => {
             if !model_engines().contains(&engine) {
                 app.set_notice(t("\u{6b64}\u{7cfb}\u{7edf}\u{4e0d}\u{652f}\u{6301}\u{8be5}\u{5f15}\u{64ce}\u{ff1b}\u{8bf7}\u{9009}\u{62e9} CPU", "This OS does not support that engine; choose CPU"));
-            } else if !model_weights::Form::present(&app.live.model_settings, variant) {
+            } else if !model_weights::Form::present(&app.live.model_settings, &variant) {
                 app.set_notice(t("\u{8bf7}\u{5148}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff1b}\u{4e0d}\u{4f1a}\u{81ea}\u{52a8}\u{4e0b}\u{8f7d}\u{6216}\u{4fdd}\u{5b58}", "Download the selected weights first; nothing was downloaded or saved"));
             } else {
                 ask(app, t(&format!("\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d} {engine} / {variant}\u{ff1f}\u{8bd5}\u{63a8}\u{7406}\u{6210}\u{529f}\u{540e}\u{4fdd}\u{5b58}\u{ff1b}\u{4e0d}\u{4f1a}\u{4e0b}\u{8f7d}\u{3002}"),
                     &format!("Validate and load {engine} / {variant}? Save only after trial inference succeeds; no download.")),
-                    ConfirmKind::Weights(engine.to_owned(), variant.to_owned()));
+                    ConfirmKind::Weights(engine.to_owned(), variant));
             }
         }
         Some(model_weights::Action::Install) => {
-            if let Ok(selected) = respire::memory::onnx::parse_variant(variant) {
-                let mib = selected.size as f64 / 1048576.0;
-                ask(app, t(&format!("\u{4e0b}\u{8f7d} {variant}\u{ff08}{mib:.0} MiB\u{ff09}\u{ff1f}\u{57fa}\u{7840}\u{6a21}\u{578b}\u{53ca} CPU \u{5bb9}\u{5668}\u{53ef}\u{80fd}\u{53e6}\u{9700}\u{5404} 543 MiB\u{ff0c}tokenizer \u{7ea6} 17 MiB\u{ff1b}\u{5df2}\u{9a8c}\u{8bc1}\u{6587}\u{4ef6}\u{8df3}\u{8fc7}\u{3002}\u{53ea}\u{4e0b}\u{8f7d}\u{ff0c}\u{4e0d}\u{4fdd}\u{5b58}\u{9009}\u{62e9}\u{3002}"),
+            let mib = size as f64 / 1048576.0;
+            ask(app, t(&format!("\u{4e0b}\u{8f7d} {variant}\u{ff08}{mib:.0} MiB\u{ff09}\u{ff1f}\u{57fa}\u{7840}\u{6a21}\u{578b}\u{53ca} CPU \u{5bb9}\u{5668}\u{53ef}\u{80fd}\u{53e6}\u{9700}\u{5404} 543 MiB\u{ff0c}tokenizer \u{7ea6} 17 MiB\u{ff1b}\u{5df2}\u{9a8c}\u{8bc1}\u{6587}\u{4ef6}\u{8df3}\u{8fc7}\u{3002}\u{53ea}\u{4e0b}\u{8f7d}\u{ff0c}\u{4e0d}\u{4fdd}\u{5b58}\u{9009}\u{62e9}\u{3002}"),
                     &format!("Download {variant} ({mib:.0} MiB)? Baseline and CPU container may each need another 543 MiB plus a 17 MiB tokenizer; verified files are skipped. Downloads only; selection is not saved.")),
-                    ConfirmKind::InstallVariant(engine.to_owned(), variant.to_owned()));
-            }
+                    ConfirmKind::InstallVariant(engine.to_owned(), variant));
         }
         None => {}
     }
@@ -2734,9 +2737,14 @@ mod model_menu_tests {
         let mut app = App::new(shared);
         app.live.connected = true;
         app.page = Page::Model;
-        let mut form =
-            model_weights::Form::new(&serde_json::json!({"engine":"cpu","model":"quantized"}));
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 1;
+        let variants = (0..12).map(|index| serde_json::json!({
+            "name":format!("runtime-{index}"),"size":7340032,"state":"present"
+        })).collect::<Vec<_>>();
+        let count = variants.len();
+        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-0",
+            "variants":variants});
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = count + 1;
         app.overlay = Overlay::ModelWeights(form);
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = Terminal::new(backend)?;
@@ -2798,20 +2806,20 @@ mod model_menu_tests {
         let shared = Arc::new(Mutex::new(Live::empty()));
         let mut app = App::new(shared);
         app.live.connected = true;
-        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"fp16", "variants":[]});
-        app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings));
+        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-only",
+            "variants":[{"name":"runtime-only","size":7340032,"state":"missing"}]});
+        app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings)?);
         assert!(!handle(&mut app, KeyCode::Esc));
         assert!(matches!(app.overlay, Overlay::None));
-        let mut form = model_weights::Form::new(&app.live.model_settings);
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 1;
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = 2;
         app.overlay = Overlay::ModelWeights(form);
         model_weights_key(&mut app, KeyCode::Enter);
         assert!(
             matches!(app.overlay, Overlay::ModelWeights(_)),
             "missing weights must not be saved"
         );
-        app.live.model_settings["variants"] =
-            serde_json::json!([{"name":"fp16","state":"present"}]);
+        app.live.model_settings["variants"][0]["state"] = serde_json::json!("present");
         model_weights_key(&mut app, KeyCode::Enter);
         assert!(matches!(
             app.overlay,
@@ -2823,8 +2831,8 @@ mod model_menu_tests {
         ));
         confirm_key(&mut app, KeyCode::Enter);
         assert!(matches!(app.overlay, Overlay::None));
-        let mut form = model_weights::Form::new(&app.live.model_settings);
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 2;
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = 3;
         app.overlay = Overlay::ModelWeights(form);
         model_weights_key(&mut app, KeyCode::Enter);
         let Overlay::Confirm {
@@ -2836,7 +2844,8 @@ mod model_menu_tests {
             anyhow::bail!("download must require confirmation defaulting to cancel");
         };
         assert_eq!(engine, "cpu");
-        assert_eq!(name, "fp16");
+        assert_eq!(name, "runtime-only");
+        assert!(text.contains("7 MiB"));
         assert!(text.contains("543 MiB"));
         confirm_key(&mut app, KeyCode::Enter);
         assert!(app
@@ -2844,7 +2853,7 @@ mod model_menu_tests {
             .lock()
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .is_none());
-        assert_eq!(app.live.model_settings["model"], "fp16");
+        assert_eq!(app.live.model_settings["model"], "runtime-only");
         Ok(())
     }
 
@@ -2944,6 +2953,11 @@ mod model_menu_tests {
             assert!(matches!(&app.overlay, Overlay::RecallTest(_)));
             app.overlay = Overlay::None;
             app.cursor += 1;
+            app.live.model_settings = Value::Null;
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(app.overlay, Overlay::None));
+            app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-only",
+                "variants":[{"name":"runtime-only","size":7340032,"state":"present"}]});
             model_key(&mut app, KeyCode::Enter);
             assert!(matches!(app.overlay, Overlay::ModelWeights(_)));
             app.overlay = Overlay::None;

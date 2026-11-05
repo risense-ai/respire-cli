@@ -11,6 +11,282 @@ pub const MODEL_REPO: &str = "Xenova/bge-m3";
 /// Verified revision (this commit's tokenizer/onnx hashes match the local read-only model).
 pub const MODEL_REVISION: &str = "4de13258303883538bd53b696b452bf8099f0858";
 
+/// Execute a plan received through authenticated Runtime control, never an arbitrary URL list.
+/// The caller owns and serializes the local roots; roots must not come from the remote plan.
+/// This proves files only;
+/// Runtime must subsequently invalidate its validation cache and prove fresh backend loading.
+pub fn prepare_model_assets(
+    plan: &respire_protocol::AssetsStatus,
+    allowed_roots: &[PathBuf],
+) -> Result<()> {
+    use respire_protocol::AssetState;
+    anyhow::ensure!(
+        !plan.complete
+            && plan.backend_load.is_none()
+            && !plan.assets.is_empty()
+            && plan.missing == plan.assets,
+        "expected a file installation plan, not readiness status"
+    );
+    anyhow::ensure!(
+        !allowed_roots.is_empty(),
+        "trusted local model roots are required"
+    );
+    for root in allowed_roots {
+        check_model_path(root)?;
+    }
+    let mut pending = Vec::new();
+    let mut claimed = std::collections::BTreeSet::new();
+    // Validate the entire plan before creating directories or transferring any bytes.
+    for asset in &plan.assets {
+        anyhow::ensure!(
+            asset.state == AssetState::Missing
+                && asset.reason.is_none()
+                && asset.actual_size.is_none()
+                && asset.actual_sha256.is_none(),
+            "asset {} requires Runtime preparation: {}",
+            asset.name,
+            asset.reason.as_deref().unwrap_or("invalid plan state")
+        );
+        anyhow::ensure!(
+            matches!(
+                asset.name.as_str(),
+                "bge-m3-tokenizer"
+                    | "bge-m3-baseline"
+                    | "bge-m3-model"
+                    | "bge-m3-cpu-ort"
+                    | "profile-tokenizer"
+                    | "profile-weights"
+            ),
+            "unsupported model preparation resource {}",
+            asset.name
+        );
+        let hash = asset
+            .sha256
+            .as_deref()
+            .context("model asset SHA-256 missing")?;
+        anyhow::ensure!(
+            hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()),
+            "model asset requires a fixed SHA-256"
+        );
+        anyhow::ensure!(
+            asset.expected_size.is_some_and(|size| size > 0),
+            "model asset size missing"
+        );
+        let target = PathBuf::from(asset.path.as_deref().context("model asset path missing")?);
+        check_model_path(&target)?;
+        let relative = allowed_roots
+            .iter()
+            .find_map(|root| target.strip_prefix(root).ok())
+            .context("model destination is outside trusted local roots")?;
+        anyhow::ensure!(
+            !relative.as_os_str().is_empty()
+                && relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_))),
+            "model destination must be a relative file below a trusted root"
+        );
+        let filename = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("model file name missing")?;
+        anyhow::ensure!(
+            filename
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                && !filename.starts_with('.'),
+            "invalid model file name"
+        );
+        check_plan_source(asset, filename)?;
+        let staged = target.with_file_name(format!(".{hash}-{filename}.partial"));
+        let parts = staged.with_extension("onnx.parts");
+        for path in [&target, &staged, &parts] {
+            check_model_path(path)?;
+            let key = path
+                .to_str()
+                .context("model path is not Unicode")?
+                .to_owned();
+            #[cfg(windows)]
+            let key = key.to_ascii_lowercase();
+            anyhow::ensure!(claimed.insert(key), "model plan has overlapping paths");
+        }
+        for index in 0..4 {
+            check_model_path(&parts.join(index.to_string()))?;
+        }
+        pending.push((target, staged, asset));
+    }
+    let _operation = crate::model_progress::Operation::begin_download()?;
+    for (target, staged, asset) in &pending {
+        let hash = asset
+            .sha256
+            .as_deref()
+            .context("model asset SHA-256 missing")?;
+        if crate::model_download::file_valid(target, hash, asset.expected_size)? {
+            continue;
+        }
+        crate::model_progress::check()?;
+        let parent = staged.parent().context("model staging parent missing")?;
+        std::fs::create_dir_all(parent)?;
+        check_model_path(staged)?;
+        if !crate::model_download::file_valid(staged, hash, asset.expected_size)? {
+            let parts = staged.with_extension("onnx.parts");
+            check_model_path(&parts)?;
+            for index in 0..4 {
+                check_model_path(&parts.join(index.to_string()))?;
+            }
+            download_with_fallback(
+                &[asset.suggested_source.clone()],
+                staged,
+                hash,
+                matches!(
+                    target.extension().and_then(|ext| ext.to_str()),
+                    Some("onnx" | "ort" | "safetensors")
+                ),
+                DownloadTimeouts::default(),
+                asset.expected_size,
+            )?;
+        }
+        anyhow::ensure!(
+            crate::model_download::file_valid(staged, hash, asset.expected_size)?,
+            "prepared model asset failed size or SHA-256 validation"
+        );
+    }
+    // Never publish the first replacement until every required download verifies.
+    for (target, staged, asset) in &pending {
+        crate::model_progress::check()?;
+        check_model_path(target)?;
+        check_model_path(staged)?;
+        let hash = asset
+            .sha256
+            .as_deref()
+            .context("model asset SHA-256 missing")?;
+        if crate::model_download::file_valid(target, hash, asset.expected_size)? {
+            check_model_path(&staged.with_extension("onnx.parts"))?;
+            remove_download_parts(staged)?;
+            match std::fs::remove_file(staged) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            continue;
+        }
+        anyhow::ensure!(
+            crate::model_download::file_valid(staged, hash, asset.expected_size)?,
+            "staged model asset changed before publication"
+        );
+        check_model_path(&staged.with_extension("onnx.parts"))?;
+        remove_download_parts(staged)?;
+        replace_file(staged, target)?;
+    }
+    for (target, _, asset) in &pending {
+        anyhow::ensure!(
+            crate::model_download::file_valid(
+                target,
+                asset
+                    .sha256
+                    .as_deref()
+                    .context("model asset SHA-256 missing")?,
+                asset.expected_size
+            )?,
+            "model file preparation is incomplete"
+        );
+    }
+    Ok(())
+}
+
+fn check_plan_source(asset: &respire_protocol::AssetRequirement, filename: &str) -> Result<()> {
+    // Accept only these canonical official layouts. Do not enable the server-only URL dependency
+    // or turn profile metadata into a general-purpose URL download surface.
+    let source = &asset.suggested_source;
+    let cpu = asset.name == "bge-m3-cpu-ort";
+    let prefix = if cpu {
+        "https://github.com/risense-ai/respire-cli/releases/download/"
+    } else {
+        "https://huggingface.co/"
+    };
+    let relative = source
+        .strip_prefix(prefix)
+        .context("model source must use its official HTTPS origin")?;
+    let path: Vec<_> = relative.split('/').collect();
+    anyhow::ensure!(
+        path.iter().all(|part| !part.is_empty()
+            && *part != "."
+            && *part != ".."
+            && part
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))),
+        "model source must be canonical, without credentials, query, fragment or encoded paths"
+    );
+    let version = asset
+        .version
+        .as_deref()
+        .context("model source revision missing")?;
+    if cpu {
+        anyhow::ensure!(
+            !version.is_empty() && path.len() == 2 && path[1] == filename,
+            "CPU container must use its official pinned release"
+        );
+    } else {
+        anyhow::ensure!(
+            path.len() >= 5
+                && path[2] == "resolve"
+                && path[3] == version
+                && path.last().copied() == Some(filename)
+                && version.len() == 40
+                && version.bytes().all(|c| c.is_ascii_hexdigit()),
+            "model source requires its official immutable revision and matching file name"
+        );
+    }
+    Ok(())
+}
+
+fn check_model_path(path: &Path) -> Result<()> {
+    use std::path::Component;
+    anyhow::ensure!(
+        path.is_absolute() && path.to_str().is_some(),
+        "model path must be absolute Unicode"
+    );
+    let mut prefix = PathBuf::new();
+    for component in path.components() {
+        anyhow::ensure!(
+            !matches!(component, Component::ParentDir | Component::CurDir),
+            "model paths must not contain dot components"
+        );
+        if let Component::Normal(name) = component {
+            let name = name
+                .to_str()
+                .context("model path component is not Unicode")?;
+            anyhow::ensure!(
+                !name.contains([':', '\\']) && !name.ends_with(['.', ' ']),
+                "ambiguous model path component"
+            );
+        }
+        prefix.push(component.as_os_str());
+        // A Windows drive/UNC prefix is not a path until its root component is appended.
+        if matches!(component, Component::Prefix(_)) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "model paths must not follow symlinks"
+                );
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    anyhow::ensure!(
+                        metadata.file_attributes() & 0x400 == 0,
+                        "model paths must not follow reparse points"
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
 /// Publish the baseline as a batch; selection and final loader readiness stay with the caller.
 pub(super) fn install_baseline_into(
     files: &[(&str, &str, Option<u64>)],
@@ -194,6 +470,119 @@ mod tests {
             b"abc"
         );
         assert!(!staging.join("onnx/model_fp16.onnx").exists());
+
+        use respire_protocol::{AssetRequirement, AssetState, AssetsStatus};
+        // Canonicalize the fixture root, not a plan-supplied path: macOS temp roots may be links.
+        let root = dir.path().canonicalize()?;
+        let asset = AssetRequirement {
+            name: "bge-m3-model".to_owned(),
+            version: Some(MODEL_REVISION.to_owned()),
+            sha256: Some(sha256.to_owned()),
+            suggested_source: file_url("https://huggingface.co", file),
+            state: AssetState::Missing,
+            path: Some(
+                root.join(file)
+                    .to_str()
+                    .context("fixture path is not Unicode")?
+                    .to_owned(),
+            ),
+            expected_size: Some(size),
+            actual_size: None,
+            actual_sha256: None,
+            reason: None,
+        };
+        let plan = AssetsStatus::installation_plan(vec![asset.clone()]);
+        assert!(!plan.complete);
+        assert!(plan.backend_load.is_none());
+        assert_eq!(plan.missing, plan.assets);
+        // The real official artifact cannot match this three-byte pin: downloading would fail.
+        prepare_model_assets(&plan, std::slice::from_ref(&root))?;
+        assert_eq!(std::fs::read(root.join(file))?, b"abc");
+
+        for (case, expected_error) in [
+            ("outside", "outside trusted local roots"),
+            ("duplicate", "overlapping paths"),
+            ("http", "official HTTPS origin"),
+            ("sha", "fixed SHA-256"),
+            ("sha-nonhex", "fixed SHA-256"),
+            ("missing-size", "size missing"),
+            ("zero-size", "size missing"),
+        ] {
+            let destination = root.join(format!("rejected-{case}"));
+            let mut rejected = asset.clone();
+            rejected.path = Some(
+                destination
+                    .join(file)
+                    .to_str()
+                    .context("fixture path is not Unicode")?
+                    .to_owned(),
+            );
+            let allowed = if case == "outside" {
+                root.join("allowed")
+            } else {
+                destination.clone()
+            };
+            match case {
+                "http" => {
+                    rejected.suggested_source =
+                        rejected.suggested_source.replacen("https://", "http://", 1)
+                }
+                "sha" => rejected.sha256 = Some("not-a-sha256".to_owned()),
+                "sha-nonhex" => rejected.sha256 = Some("z".repeat(64)),
+                "missing-size" => rejected.expected_size = None,
+                "zero-size" => rejected.expected_size = Some(0),
+                _ => {}
+            }
+            let assets = if case == "duplicate" {
+                vec![rejected.clone(), rejected]
+            } else {
+                vec![rejected]
+            };
+            let error = prepare_model_assets(&AssetsStatus::installation_plan(assets), &[allowed])
+                .err()
+                .ok_or_else(|| anyhow!("invalid {case} plan was accepted"))?;
+            assert!(
+                error.to_string().contains(expected_error),
+                "{case}: {error:#}"
+            );
+            assert!(
+                !destination.exists(),
+                "{case} rejection must precede directory creation"
+            );
+        }
+        // Keep all built-in profile source layouts executable; no network is used here.
+        for (repo, revision, weights) in [
+            ("Xenova/bge-m3", MODEL_REVISION, "onnx/model_quantized.onnx"),
+            (
+                "Xenova/bge-small-zh-v1.5",
+                "75c43b069aac4d136ba6bc1122f995fedcfd2781",
+                "onnx/model_quantized.onnx",
+            ),
+            (
+                "mlx-community/bge-m3-mlx-fp16",
+                "a37eddded9a6a1273a87fb8b0da0d1cdbd98aeec",
+                "model.safetensors",
+            ),
+        ] {
+            for resource in ["tokenizer.json", weights] {
+                let mut builtin = asset.clone();
+                builtin.name = if resource == "tokenizer.json" {
+                    "profile-tokenizer"
+                } else {
+                    "profile-weights"
+                }
+                .to_owned();
+                builtin.version = Some(revision.to_owned());
+                builtin.suggested_source =
+                    format!("https://huggingface.co/{repo}/resolve/{revision}/{resource}");
+                let filename = resource
+                    .rsplit('/')
+                    .next()
+                    .context("fixture file name missing")?;
+                check_plan_source(&builtin, filename)?;
+            }
+        }
+        assert_eq!(std::fs::read(root.join(file))?, b"abc");
         Ok(())
     }
 }
