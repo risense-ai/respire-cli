@@ -431,7 +431,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     registered_cli = Path(json.loads(config_path.read_text())["executable"])
                     cli_name = "rsrs.exe" if os.name == "nt" else "rsrs"
                     assert os.path.samefile(registered_cli, Path(env["RSRS_BIN_DIR"]) / cli_name)
-                    assert bundle_helpers["digest"](registered_cli) == bundle_helpers["digest"](binary)
+                    assert bundle_helpers["digest"](registered_cli) == bundle_helpers["digest"](Path(binary))
                     result = subprocess.run([str(registered_cli), "--json", *argv], env=env,
                                             capture_output=True, text=True, timeout=45)
                 else:
