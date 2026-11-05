@@ -2,7 +2,12 @@
    Never installs startup on a user's computer. Intended for the manual hosted CI job.
    No account, keyring, model download, password, elevation or persistent credential.
 #>
-param([Parameter(Mandatory = $true)][string]$Executable)
+param(
+    [Parameter(Mandatory = $true)][string]$Executable,
+    [string]$RuntimeExecutable = $env:RSRS_RUNTIME_BIN,
+    [string]$RuntimeArchive = $env:RSRS_RUNTIME_ARCHIVE,
+    [string]$RuntimeVersion = $env:RSRS_RUNTIME_VERSION
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:STARTUP_TEST_HOSTED -ne 'true') {
     throw 'This fixture runs only in the explicitly selected GitHub-hosted Windows CI job'
@@ -12,6 +17,14 @@ if (-not [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Syst
 }
 $nativeExecutable = (Get-Item -LiteralPath $Executable -ErrorAction Stop).FullName
 if ([IO.Path]::GetExtension($nativeExecutable) -ne '.exe') { throw 'Expected a native CLI executable' }
+if ($RuntimeArchive -and ($RuntimeExecutable -or -not $RuntimeVersion)) {
+    throw 'Runtime archive requires a version and cannot be combined with a Runtime executable'
+}
+if ($RuntimeVersion -and -not $RuntimeArchive) { throw 'Runtime version requires a Runtime archive' }
+if (-not $RuntimeArchive -and [string]::IsNullOrWhiteSpace($RuntimeExecutable)) {
+    $RuntimeExecutable = Join-Path ([IO.Path]::GetDirectoryName($nativeExecutable)) 'rsrs-runtime.exe'
+}
+$runtimeCandidate = if ($RuntimeArchive) { $null } else { (Get-Item -LiteralPath $RuntimeExecutable -ErrorAction Stop).FullName }
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('respire-startup-ci-' + [guid]::NewGuid().ToString('N'))
 $fixtureHome = Join-Path $fixtureRoot 'home'
 $profileRoot = Join-Path $fixtureHome '.rsrs'
@@ -28,15 +41,21 @@ $startupAction = $null
 $primaryFailure = $null
 $validationPassed = $false
 $utf8 = [Text.UTF8Encoding]::new($false)
-New-Item -ItemType Directory -Path $selectedProfile -Force | Out-Null
-[IO.File]::WriteAllText((Join-Path $profileRoot 'client.json'),
-    (@{data_dir = $selectedProfile; service_mode = 'off'} | ConvertTo-Json -Compress), $utf8)
-$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
-$listener.Start()
-$runtimePort = $listener.LocalEndpoint.Port
-$listener.Stop()
-$healthUrl = "http://127.0.0.1:$runtimePort/api/health"
 function Literal([string]$Value) { return "'" + $Value.Replace("'", "''") + "'" }
+function NormalizeFixturePath([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { throw 'Fixture path is missing' }
+    # Match the drive/UNC namespace handling in autostart::manager::windows_task_path.
+    if ($Value.StartsWith('\\?\UNC\', [StringComparison]::OrdinalIgnoreCase)) {
+        $Value = '\\' + $Value.Substring(8)
+    } elseif ($Value.StartsWith('\\?\', [StringComparison]::OrdinalIgnoreCase)) {
+        $Value = $Value.Substring(4)
+        if ($Value -notmatch '^[A-Za-z]:\\') { throw 'Unsupported Windows fixture path namespace' }
+    }
+    return [IO.Path]::GetFullPath($Value)
+}
+function FixturePathEquals([string]$Actual, [string]$Expected) {
+    return [StringComparer]::OrdinalIgnoreCase.Equals((NormalizeFixturePath $Actual), (NormalizeFixturePath $Expected))
+}
 function EnvironmentPrefix {
     return @"
 Get-ChildItem Env: | Where-Object { `$_.Name -match '^(RSRS_|RESPIRE_|ONEMEMORY_)' } | Remove-Item
@@ -44,6 +63,8 @@ Get-ChildItem Env: | Where-Object { `$_.Name -match '^(RSRS_|RESPIRE_|ONEMEMORY_
 `$env:USERPROFILE = $(Literal $fixtureHome)
 `$env:RSRS_DATA_DIR = $(Literal $profileRoot)
 `$env:RSRS_BIN_DIR = $(Literal $nativeDirectory)
+`$env:RSRS_RUNTIME_BIN = $(Literal $fixtureRuntime)
+`$env:RSRS_CORE_TEST_MODE = '1'
 `$env:RSRS_RPC_PORT = '$runtimePort'
 `$env:RSRS_NO_AUTOSYNC = '1'
 `$env:RSRS_UPDATE_CHECK = '0'
@@ -79,8 +100,7 @@ function TaskOwnershipChecks($TaskObject) {
     $triggerSid = if ($triggers.Count -eq 1) { ResolveTaskSid $triggers[0].UserId } else { '' }
     $actionPathMatches = $false
     if ($actions.Count -eq 1 -and -not [string]::IsNullOrWhiteSpace($actions[0].Execute)) {
-        $actionPathMatches = [StringComparer]::OrdinalIgnoreCase.Equals(
-            [IO.Path]::GetFullPath($actions[0].Execute), [IO.Path]::GetFullPath($powershell))
+        $actionPathMatches = FixturePathEquals $actions[0].Execute $powershell
     }
     return [ordered]@{
         principal_sid = $principalSid -eq $identity.User.Value
@@ -111,6 +131,19 @@ function RemoveFixtureTask {
     if ($null -ne (FindFixtureTask)) { throw 'Fixture task remained after removal' }
 }
 try {
+    New-Item -ItemType Directory -Path $selectedProfile -Force | Out-Null
+    $bundlePreparation = Join-Path $PSScriptRoot 'runtime-acceptance-bundle.py'
+    $candidateArguments = if ($RuntimeArchive) { @('--archive', $RuntimeArchive, '--version', $RuntimeVersion) } else { @('--runtime-binary', $runtimeCandidate) }
+    & python -I -B $bundlePreparation --binary $nativeExecutable --destination $nativeDirectory @candidateArguments
+    if ($LASTEXITCODE -ne 0) { throw 'Independent Runtime bundle preparation failed; no startup task registered' }
+    $fixtureRuntime = Join-Path $nativeDirectory 'rsrs-runtime.exe'
+    [IO.File]::WriteAllText((Join-Path $profileRoot 'client.json'),
+        (@{data_dir = $selectedProfile; service_mode = 'off'} | ConvertTo-Json -Compress), $utf8)
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $runtimePort = $listener.LocalEndpoint.Port
+    $listener.Stop()
+    $healthUrl = "http://127.0.0.1:$runtimePort/api/health"
     if ($null -ne (FindFixtureTask)) { throw 'Refusing to replace an existing task' }
     $startupCode = (EnvironmentPrefix) + "`n& " + (Literal $nativeExecutable) +
         ' status --json | Out-File -Encoding utf8 -LiteralPath ' + (Literal $statusFile) + "`nexit `$LASTEXITCODE"
@@ -150,8 +183,11 @@ try {
     $status = $null
     while ([DateTime]::UtcNow -lt $deadline) {
         try { $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 100; continue }
-        if ($health.server -ne 'respire' -or [IO.Path]::GetFullPath($health.data_dir) -ne [IO.Path]::GetFullPath($selectedProfile)) {
+        if ($health.server -ne 'respire' -or -not (FixturePathEquals $health.data_dir $selectedProfile)) {
             throw 'Fixture port belongs to another runtime/profile; no lifecycle request sent'
+        }
+        if (-not (FixturePathEquals $health.exe $fixtureRuntime)) {
+            throw 'Fixture health does not identify the selected independent Runtime'
         }
         $runtimeOwned = $true
         if (Test-Path -LiteralPath $statusFile) {
@@ -181,7 +217,8 @@ try {
     if ($runtimeOwned) {
         try {
             $current = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
-            if ($current.server -eq 'respire' -and [IO.Path]::GetFullPath($current.data_dir) -eq [IO.Path]::GetFullPath($selectedProfile)) {
+            if ($current.server -eq 'respire' -and (FixturePathEquals $current.data_dir $selectedProfile) -and
+                (FixturePathEquals $current.exe $fixtureRuntime)) {
                 $cleanupStop = InvokeFixture '--runtime-internal --stop --json'
                 if ($cleanupStop.exit -eq 0) { $runtimeOwned = $false; $runtimeStopped = $true }
             }

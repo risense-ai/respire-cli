@@ -407,6 +407,35 @@ jobs:
       - name: Bind candidate and actual SDK bytes before source execution
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         run: node scripts/produce-required-tests.mjs prepare
+      - name: Prepare official pinned standalone Runtime for lifecycle tests
+        if: matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
+        shell: bash
+        env:
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          cargo build --locked -p respire --bin rsrs
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/debug/rsrs');
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          NODE
       - name: Run this group's instrumented tests
         id: source-tests
         env:
@@ -444,7 +473,7 @@ jobs:
         with:
           name: required-tests-raw-cli-core-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/required-tests-raw-cli-core
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
       - name: Produce candidate-bound source reports
         id: required-source-reports
@@ -458,7 +487,7 @@ jobs:
         with:
           name: required-tests-report-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/required-tests-report-cli
-          retention-days: 7
+          retention-days: 1
           if-no-files-found: error
       - name: Archive current-run coverage counters and executable mappings
         env:

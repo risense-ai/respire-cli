@@ -233,8 +233,11 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Keep the validated parent publication tarballs alongside the existing evidence.
-  assert.equal(uploads, 51, 'preserve active evidence, registered consumer, verified platform copies, import proof and release dependency cache');
+  // Include the raw source log and candidate-bound reports without dropping existing evidence.
+  assert.equal(uploads, 53, 'preserve publication evidence and both source-report uploads');
+  const ci = readFileSync(new URL('ci.yml', root), 'utf8');
+  assert.match(ci, /name: required-tests-raw-cli-core-/);
+  assert.match(ci, /name: required-tests-report-/);
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);

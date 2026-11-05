@@ -1,11 +1,24 @@
-//! Explicit legacy CLI shim regressions with synthetic data.
-//! These checks are not independent Runtime artifact or G1 evidence.
+//! CLI lifecycle regressions against an independent Runtime with synthetic data.
+//! Supply RSRS_RUNTIME_BIN or stage rsrs-runtime beside the Cargo CLI binary.
+//! Passing these checks alone is not release artifact or G1 evidence.
 
 use std::process::{Command, Output};
 use std::time::Duration;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
+}
+
+fn runtime_bin() -> std::path::PathBuf {
+    std::env::var_os("RSRS_RUNTIME_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(bin()).with_file_name(if cfg!(windows) {
+                "rsrs-runtime.exe"
+            } else {
+                "rsrs-runtime"
+            })
+        })
 }
 
 fn isolated_command() -> Command {
@@ -19,8 +32,7 @@ fn isolated_command() -> Command {
             command.env_remove(name);
         }
     }
-    // The legacy suite explicitly selects its CLI shim; ordinary startup has no fallback.
-    command.env("RSRS_RUNTIME_BIN", bin());
+    command.env("RSRS_RUNTIME_BIN", runtime_bin());
     command
 }
 
@@ -80,8 +92,9 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
             .timeout(Duration::from_secs(5))
             .call()?
             .into_json()?;
+        let executable = status["exe"].as_str().ok_or("Runtime executable missing")?;
         if status["data_dir"].as_str().map(std::path::Path::new) != Some(profile)
-            || status["bin"] != env!("CARGO_PKG_VERSION")
+            || std::path::Path::new(executable).canonicalize()? != runtime_bin().canonicalize()?
         {
             return Err(format!("runtime profile readback failed: {status}").into());
         }
@@ -281,7 +294,7 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         respire_app::inject::INSTRUCTIONS_MD
     );
     let codex = dir.path().join(".codex/AGENTS.md");
-    std::fs::create_dir_all(codex.parent().unwrap())?;
+    std::fs::create_dir_all(codex.parent().ok_or("Codex instructions parent missing")?)?;
     let owned = "Synthetic owned Codex instructions\n";
     std::fs::write(&codex, owned)?;
     let preview = run(
@@ -1231,6 +1244,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
             .env("RSRS_ADDR", &addr)
             .env("RSRS_LANG", "en")
             .env("RSRS_TOKEN", "synthetic-probe-token")
+            .env("RSRS_CORE_TEST_MODE", "1")
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env_remove("RSRS_RPC_URL")
