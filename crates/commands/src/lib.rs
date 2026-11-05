@@ -21,6 +21,7 @@ pub mod admission;
 pub mod app_version;
 pub mod autostart;
 pub mod bench;
+pub mod capture;
 pub mod classify;
 pub mod cli_def;
 pub mod engine;

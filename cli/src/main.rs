@@ -246,78 +246,11 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
 }
 
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
-    CAPTURED.with(|slot| *slot.borrow_mut() = None);
-    OUTPUT_EMITTED.with(|flag| flag.set(false));
-    OUTPUT_EXIT_CODE.with(|flag| flag.set(0));
-    let parsed = Cli::try_parse_from(
-        std::iter::once(std::ffi::OsString::from("rsrs"))
-            .chain(args.iter().cloned().map(std::ffi::OsString::from)),
-    );
-    let defer_index = parsed.as_ref().is_ok_and(|cli| {
-        matches!(
-            cli.command.as_ref(),
-            Some(
-                Command::Remember { .. }
-                    | Command::Update { .. }
-                    | Command::Import { .. }
-                    | Command::Attach { .. }
-                    | Command::Restore { .. }
-            )
-        )
-    });
-    let _deferred = defer_index.then(respire::core_sdk::defer_indexing);
-    let ran = match parsed {
-        Ok(cli) => match run(cli) {
-            Err(error)
-                if !HOST_RPC_OUTPUT.get()
-                    && error
-                        .downcast_ref::<respire::transport::local::MemorySourceChanged>()
-                        .is_some() =>
-            {
-                Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.iter().cloned()))
-                    .map_err(anyhow::Error::from)
-                    .and_then(run)
-            }
-            result => result,
-        },
-        Err(error) => {
-            let code = error.exit_code();
-            let mut envelope = ResultEnvelope::new(
-                "cli",
-                if code == 0 {
-                    OutputStatus::Ok
-                } else {
-                    OutputStatus::Fail
-                },
-                serde_json::json!({"reason": "parse"}),
-                Vec::new(),
-            );
-            if code != 0 {
-                envelope = parse_failure(&error);
-            }
-            CAPTURED.with(|slot| *slot.borrow_mut() = Some(envelope));
-            mark_emitted();
-            set_exit_code(code);
-            Ok(())
-        }
-    };
-    if let Err(error) = ran {
-        if !output_emitted() {
-            let (envelope, code) = command_failure(&error);
-            CAPTURED.with(|slot| *slot.borrow_mut() = Some(envelope));
-            set_exit_code(code);
-        }
-    }
-    let mut envelope = CAPTURED
-        .with(|slot| slot.borrow_mut().take())
-        .unwrap_or_else(|| {
-            ResultEnvelope::new("cli", OutputStatus::Ok, serde_json::json!({}), Vec::new())
-        });
-    envelope.ensure_failure_diagnostics();
-    Captured {
-        exit: exit_code(),
-        envelope,
-    }
+    // Shared capture contract (parse, defer indexing, MemorySourceChanged
+    // retry, envelope collection) lives in respire_commands::capture; this
+    // host only swaps in its richer run() so login/migrate keep working in
+    // the shim process.
+    respire_commands::capture::capture_exec(args, run)
 }
 
 struct LogoutOutcome {
