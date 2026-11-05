@@ -1928,12 +1928,18 @@ fn run(args: Cli) -> Result<()> {
         if rpc::worker_active() {
             return run_memory_revision();
         }
-        if DIRECT_MODE.load(Ordering::Relaxed) {
-            runtime_policy::require_host("direct memory revision read")?;
-            return run_memory_revision();
+        if !DIRECT_MODE.load(Ordering::Relaxed) && runtime_policy::client_only() {
+            return rpc::call_existing_from_argv();
         }
-        // No runtime creation, profile takeover, or retry of a failed request.
-        return rpc::call_existing_from_argv();
+        runtime_policy::require_host("memory revision control")?;
+        let result = autostart::control_memory_revision()?;
+        // Keep private control evidence out of the public CLI output shape.
+        return emit_result(ResultEnvelope::new(
+            "memory-revision",
+            OutputStatus::Ok,
+            result.summary,
+            Vec::new(),
+        ));
     }
     // Host-only migration and repair dispatch must obey the memory gate too.
     if respire::service::off_mode() && matches!(args.command.as_ref(), Some(Command::Review { .. }))
@@ -2627,6 +2633,14 @@ mod capture_tests {
         assert_eq!(after.envelope.summary, before.envelope.summary);
         assert!(!dir.path().join("session.json").exists());
         assert!(!dir.path().join("model").exists());
+        crate::rpc::set_worker_active(false);
+        let control = capture_run(vec!["memory-revision".into(), "--json".into()]);
+        assert_eq!(control.exit, 1);
+        assert!(matches!(control.envelope.status, OutputStatus::Fail));
+        assert!(control.envelope.errors.iter().any(|error| {
+            error.contains("host control requires an installed managed Runtime")
+        }));
+        assert!(!dir.path().join("runtime").exists());
         Ok(())
     }
 

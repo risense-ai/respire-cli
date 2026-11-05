@@ -356,19 +356,15 @@ fn validate_control_response(
             && response.web_url.is_none(),
         "host control response identity mismatch"
     );
-    anyhow::ensure!(
-        response.ok && response.exit == 0 && response.error.is_none() && response.code.is_none(),
-        "host control memory revision failed"
-    );
+    if let Some(data_dir) = &response.data_dir {
+        anyhow::ensure!(
+            Path::new(data_dir).canonicalize()? == profile,
+            "host control data directory mismatch"
+        );
+    }
     let envelope = response
         .envelope
         .context("missing host control result envelope")?;
-    anyhow::ensure!(
-        envelope.command == "memory-revision"
-            && matches!(envelope.status, Status::Ok)
-            && envelope.errors.is_empty(),
-        "invalid host control result envelope"
-    );
     let mut ready = envelope
         .items
         .iter()
@@ -380,6 +376,31 @@ fn validate_control_response(
             && ready.next().is_none(),
         "host control authorization was not confirmed"
     );
+    // Only the authenticated handler's post-authorization DB failure carries diagnostics.
+    if !response.ok
+        && response.exit == 2
+        && response.code.as_deref() == Some("revision_unavailable")
+        && envelope.command == "memory-revision"
+        && matches!(envelope.status, Status::Fail)
+    {
+        if let Some(diagnostic) = response
+            .error
+            .as_deref()
+            .filter(|message| !message.is_empty() && message.len() <= HOST_CONTROL_MAX_FRAME_BYTES)
+        {
+            anyhow::bail!("Runtime memory revision unavailable: {diagnostic}");
+        }
+    }
+    anyhow::ensure!(
+        response.ok && response.exit == 0 && response.error.is_none() && response.code.is_none(),
+        "host control memory revision failed"
+    );
+    anyhow::ensure!(
+        envelope.command == "memory-revision"
+            && matches!(envelope.status, Status::Ok)
+            && envelope.errors.is_empty(),
+        "invalid host control result envelope"
+    );
     let actual_profile = envelope.summary["profile"]
         .as_str()
         .context("missing host control profile")?;
@@ -390,12 +411,6 @@ fn validate_control_response(
                 .is_some_and(|value| !value.is_empty()),
         "host control revision profile or value is invalid"
     );
-    if let Some(data_dir) = response.data_dir {
-        anyhow::ensure!(
-            Path::new(&data_dir).canonicalize()? == profile,
-            "host control data directory mismatch"
-        );
-    }
     Ok(envelope)
 }
 
@@ -557,13 +572,61 @@ mod tests {
                 "true",
             ));
         assert!(validate_control_response(duplicate_ready, &request, &profile, pid).is_err());
-        let mut scoped = response;
+        let mut scoped = response.clone();
         scoped.scope = Some(respire_protocol::RuntimeRequestScope {
             account_id: "foreign-account".to_owned(),
             instance_id: "foreign-instance".to_owned(),
             generation: 0,
         });
         assert!(validate_control_response(scoped, &request, &profile, pid).is_err());
+
+        let diagnostic = "both rsrs.db and onememory.db exist; choose one database";
+        let mut unavailable = response;
+        unavailable.ok = false;
+        unavailable.exit = 2;
+        unavailable.code = Some("revision_unavailable".to_owned());
+        unavailable.error = Some(diagnostic.to_owned());
+        unavailable.envelope = Some(ResultEnvelope::new(
+            "memory-revision",
+            Status::Fail,
+            json!({}),
+            vec![respire_commands::output::Item::new(
+                "control_ready",
+                Status::Ok,
+                "true",
+            )],
+        ));
+        let error = validate_control_response(unavailable.clone(), &request, &profile, pid)
+            .err()
+            .context("DB failure must return its diagnostic")?
+            .to_string();
+        assert!(error.contains(diagnostic));
+        let mut foreign_failure = unavailable.clone();
+        foreign_failure.pid = Some(pid + 1);
+        let error = validate_control_response(foreign_failure, &request, &profile, pid)
+            .err()
+            .context("foreign Runtime must be rejected")?
+            .to_string();
+        assert!(!error.contains(diagnostic));
+        let mut unready = unavailable.clone();
+        unready
+            .envelope
+            .as_mut()
+            .context("fixture envelope missing")?
+            .items
+            .clear();
+        let error = validate_control_response(unready, &request, &profile, pid)
+            .err()
+            .context("unconfirmed control must remain redacted")?
+            .to_string();
+        assert!(!error.contains(diagnostic));
+        unavailable.code = Some("unauthorized".to_owned());
+        unavailable.error = Some("private grant/session fixture marker".to_owned());
+        let error = validate_control_response(unavailable, &request, &profile, pid)
+            .err()
+            .context("authorization failure must remain redacted")?
+            .to_string();
+        assert!(!error.contains("private grant/session fixture marker"));
 
         assert!(!control_exit_confirmed(pid, Ok(false), false, None)?);
         assert!(control_exit_confirmed(pid, Ok(true), false, None)?);
