@@ -1722,6 +1722,7 @@ name = "respire_runtime"
 version = "1.0.21-dev.1"
 dependencies = [
  "anyhow",
+ "respire_app",
  "respire_commands",
  "respire_protocol",
  "respire_spawn",

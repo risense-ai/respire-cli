@@ -11,6 +11,7 @@
 //! | `--json runtime stop` / `runtime stop` / `--stop` | ask the resident runtime to stop |
 //! | `--status`                              | probe the resident runtime health          |
 //! | `--version`                             | print the binary version                   |
+//! | `--core-worker-internal`                | run the owned Core worker loop (spawned by this host's own `current_exe`, mirroring the CLI entry) |
 //!
 //! Unknown arguments print an error and exit with code 2. The boot token is
 //! consumed with `respire_spawn` semantics: `RSRS_RUNTIME_BOOT_TOKEN` is read
@@ -35,6 +36,24 @@ fn main() -> ExitCode {
     // and it must never leak into child processes.
     let boot_token = consume_boot_token();
     let _ = boot_token;
+    // The owned Core worker is spawned as `current_exe --core-worker-internal`
+    // (crates/core-sdk worker.rs), so this host must recognise the entry the
+    // same way the CLI does; otherwise every write/embed command dies with
+    // "Core worker retired: IPC closed" as the child exits on an unknown
+    // argument.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == "--core-worker-internal")
+    {
+        return match respire_app::core_sdk::worker::run() {
+            Ok(()) => ExitCode::from(0),
+            Err(error) => {
+                eprintln!("Core worker stopped: {error:#}");
+                ExitCode::from(1)
+            }
+        };
+    }
+    install_runtime_host_hooks();
     match run() {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
@@ -42,6 +61,20 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// This binary is a host: its dispatch face executes argv through the shared
+/// engine instead of tripping the conservative "host-managed engine" refusal
+/// that guards processes with no installed executor. The CLI binary installs
+/// its richer `run()`-based wiring instead; first installation wins.
+fn install_runtime_host_hooks() {
+    let _ = respire_commands::host_hooks::install(respire_commands::host_hooks::HostHooks {
+        capture_run: Some(respire_commands::capture::capture_run),
+        ..Default::default()
+    });
+    respire_commands::rpc_worker::install_recall_stats_enqueue(
+        respire_commands::rpc_serve::enqueue_recall_stats_local,
+    );
 }
 
 fn consume_boot_token() -> Option<String> {
