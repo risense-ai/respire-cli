@@ -1,6 +1,7 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, hmac, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
-from native_fixture_process import FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run
+from native_fixture_process import (FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
+    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 parser=argparse.ArgumentParser()
@@ -16,7 +17,9 @@ architecture.add_argument('--expect-supervised-worker',action='store_true',help=
 parser.add_argument('--resident-stress',action='store_true',help='Exercise concurrent recall, short writes, lightweight reads and background indexing')
 parser.add_argument('--expect-background-threads',type=int,choices=range(1,17),help='Verify the actual loaded worker foreground/background policy')
 parser.add_argument('--seed-binary',help='Create both libraries with this published older binary, then upgrade its running runtime')
+add_runtime_arguments(parser)
 args=parser.parse_args()
+runtime_config=args
 faulthandler.enable()
 # A cloud container's PID 1 may not reap orphans. Adopt workers after a forced
 # host termination so this fixture can verify and reap their actual exit.
@@ -35,6 +38,7 @@ import cryptography, importlib.metadata, psutil
 },indent=2),encoding='utf-8')
 CACHE=pathlib.Path(args.model_dir).resolve()
 BINARIES=[pathlib.Path(path).resolve() for path in args.binary]
+runtime_inputs(args,BINARIES)
 MODEL_HASHES={'model_quantized.onnx':'0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d',
     'model_fp16.onnx':'4f1a646a3d4f39985589e9991a717044ede8278617fe55e3d246838bc05055e9'}
 def verify_model(cache,model):
@@ -47,6 +51,7 @@ if args.seed_binary:
     if args.model_file=='model_quantized.onnx': verify_model(LEGACY_CACHE,'model_quantized.onnx')
 reports = []
 for binary in BINARIES:
+    if args.runtime_binary: args.runtime_identity_receipts=[]
     root = BASE / ('account-return-real-' + str(time.time_ns()))
     if os.name == 'posix':
         # Keep fixture paths short and isolated from the CI report
@@ -55,7 +60,10 @@ for binary in BINARIES:
         root = pathlib.Path.cwd() / ('rsrs-up-' + secrets.token_hex(6))
     main = root / '.rsrs'
     alternate = main / 'accounts/alternate'
-    alternate.mkdir(parents=True)
+    root.mkdir(mode=0o700)
+    main.mkdir(mode=0o700)
+    (main / 'accounts').mkdir(mode=0o700)
+    alternate.mkdir(mode=0o700)
     entropy = secrets.token_bytes(18)
     code = 'A3-' + '-'.join(entropy.hex().upper()[i:i+6] for i in range(0,36,6))
     for profile in [main, alternate]:
@@ -65,13 +73,17 @@ for binary in BINARIES:
         (profile/'session.json').write_bytes(session)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0)); port = listener.getsockname()[1]
-    env = os.environ.copy()
+    env = {key: value for key, value in os.environ.items()
+           if key not in ('GH_TOKEN', 'GITHUB_TOKEN')}
     for suffix in ['CLIENT_ONLY','NO_AUTOSTART','RUNTIME_WORKER','CORE_TEST_MODE','RPC_TOKEN','ENGINE','ADDR','TOKEN','JSON','ORT_DEBUG']:
         for prefix in ['RSRS_', 'ONEMEMORY_', 'RESPIRE_']:
             env.pop(prefix + suffix,None)
     env.update(HOME=str(root), USERPROFILE=str(root), RSRS_DATA_DIR=str(main), RSRS_RPC_PORT=str(port),
         RSRS_SUPER=code,RSRS_NO_AUTOSYNC='1',RSRS_UPDATE_CHECK='0',RSRS_M3_DIR=str(CACHE))
+    env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
+    if args.runtime_binary: env['LC_ALL']='C'
     seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
+    if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())
     # Historical artifacts predate RSRS_*; keep their inputs explicit and
     # isolated instead of accidentally testing the operator's default library.
     for key, value in list(seed_env.items()):
@@ -82,6 +94,9 @@ for binary in BINARIES:
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
         envelope=json.loads(result.stdout)
         envelope['_fixture_timing']=result.fixture_timing
+        command=next((word for word in args if not word.startswith('-')),None)
+        if runtime_config.runtime_binary and result.returncode==0 and command in ('model','remember','recall','show','doctor','status'):
+            observe_runtime()
         return envelope
     def wait_index_ready(timeout=180):
         deadline = time.monotonic() + timeout
@@ -101,9 +116,20 @@ for binary in BINARIES:
                 'SELECT * FROM sync_outbox ORDER BY seq','SELECT * FROM core_artifacts ORDER BY memory_id,model']]
         artifacts = sorted((path.name,hashlib.sha256(path.read_bytes()).hexdigest()) for path in (profile/'core-index').iterdir())
         return (rows,artifacts,(profile/'session.json').read_bytes())
+    def observe_runtime(health=None):
+        if health is None:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                health=json.load(response)
+        profile=pathlib.Path(json.loads((main/'client.json').read_text())['data_dir']) if (main/'client.json').exists() else main
+        verify_runtime_health(runtime_config,health,main,profile)
+        return health
     old_runtime=None
     old_rpc_checked=False
     old_rpc_authenticated=False
+    legacy_client_rejected=False
+    source_rpc_checked=False
+    legacy_handoff_actor=None
+    live_owner_restart_rejected=False
     public_config={'addr':'https://fixture.invalid','autosync':False,'custom':'preserve-upgrade-fixture'}
     def select(profile):
         (main/'client.json').write_text(json.dumps({**public_config,'data_dir':str(profile)}),encoding='utf-8')
@@ -111,11 +137,14 @@ for binary in BINARIES:
     inspector=None
     def checked_worker(health):
         global inspector
+        if args.runtime_binary: observe_runtime(health)
         if sys.platform=='win32':
             if inspector is None:
                 inspector=WorkerInspector(root/'boundary-inspector')
             identity=inspector.inspect({'host_pid':health['pid'],
-                'worker_pid':health['inference']['worker_pid'],'binary':str(binary)})
+                'worker_pid':health['inference']['worker_pid'],'binary':str(binary),
+                'runtime_binary':str(args.runtime_binary) if args.runtime_binary else None,
+                'process_start_id':health.get('process_start_id')})
             if identity not in worker_identities: worker_identities.append(identity)
             return identity
         import psutil
@@ -165,7 +194,7 @@ for binary in BINARIES:
         select(main)
         if args.seed_binary:
             log=(root/'old-runtime.log').open('wb')
-            web_help=subprocess.check_output([args.seed_binary,'web','--help'],text=True,encoding='utf-8',timeout=30)
+            web_help=subprocess.check_output([args.seed_binary,'web','--help'],env=seed_env,text=True,encoding='utf-8',timeout=30)
             runtime_args=['web','--internal','--no-open','--port',str(port)] if '--port' in web_help else ['--runtime-internal']
             old_runtime=subprocess.Popen([str(pathlib.Path(args.seed_binary).resolve()),*runtime_args],env=seed_env,stdout=log,stderr=log)
             log.close()
@@ -182,18 +211,67 @@ for binary in BINARIES:
                     break
                 except OSError: time.sleep(.1)
             else: raise RuntimeError('published old runtime did not become ready')
-            # The new client must exercise the old HTTP RPC, not only health/stop.
-            # Client-only status is read-only and cannot take over the old runtime.
+            # Legacy clients exercise old RPC; scoped clients must reject missing identity.
+            # Client-only status cannot take over the old runtime in either case.
             original_token=token.read_bytes() if token.is_file() else None
-            old_status=run('--client-only','status')
-            assert old_status.get('status')=='ok','new client could not read the old runtime through HTTP RPC'
+            legacy_records={path:(path.read_bytes() if path.is_file() else None) for path in
+                [main/'runtime/endpoint.json',token,main/'client.json',main/'inference.json',
+                 main/'runtime/autostart/registration.json']}
+            legacy_data={str(profile):snapshot(profile) for profile in [main,alternate]}
+            old_owner=psutil.Process(old_runtime.pid)
+            old_birth=old_owner.create_time()
+            old_start=process_start_id(old_runtime.pid)
+            assert pathlib.Path(old_owner.exe()).resolve()==pathlib.Path(args.seed_binary).resolve()
+            if args.runtime_binary:
+                # This request proves the historical source protocol, not current-client compatibility.
+                source_id=secrets.token_hex(16)
+                source_request=urllib.request.Request(f'http://127.0.0.1:{port}/api/rpc',
+                    json.dumps({'v':1,'id':source_id,'method':'cli.exec','args':['--json','status']}).encode(),
+                    {**headers,'Content-Type':'application/json'})
+                with urllib.request.urlopen(source_request,timeout=45) as response:
+                    source_reply=json.load(response)
+                assert type(source_reply.get('v')) is int and source_reply['v']==1
+                assert source_reply.get('id')==source_id and source_reply.get('ok') is True
+                assert type(source_reply.get('exit')) is int and source_reply['exit']==0
+                assert source_reply.get('pid')==old_runtime.pid and source_reply.get('bin')==health['bin']
+                assert pathlib.Path(source_reply.get('data_dir','')).resolve()==main.resolve()
+                source_envelope=source_reply.get('envelope',{})
+                assert source_envelope.get('command')=='status' and source_envelope.get('status')=='ok'
+                assert source_envelope.get('summary',{}).get('unlocked') is True
+                source_rpc_checked=True
+            old_status=run('--client-only','status',allow_failure=bool(args.runtime_binary))
+            if args.runtime_binary:
+                assert old_status.get('status')=='fail','current client accepted incomplete legacy identity'
+                diagnostic=' '.join(old_status.get('errors',[])).lower()
+                assert 'scope' in diagnostic or 'health shape' in diagnostic,'legacy rejection did not identify missing identity'
+                assert psutil.Process(old_runtime.pid).create_time()==old_birth and old_runtime.poll() is None
+                assert process_start_id(old_runtime.pid)==old_start
+                assert all((path.read_bytes() if path.is_file() else None)==before for path,before in legacy_records.items())
+                assert {str(profile):snapshot(profile) for profile in [main,alternate]}==legacy_data
+                legacy_client_rejected=True
+            else:
+                assert old_status.get('status')=='ok','new client could not read the old runtime through HTTP RPC'
             assert old_runtime.poll() is None,'client-only RPC replaced or stopped the old runtime'
             request=urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers=headers)
             with urllib.request.urlopen(request,timeout=2) as response: after_rpc=json.load(response)
             assert after_rpc['pid']==old_runtime.pid,'client-only RPC changed runtime ownership'
             assert (token.read_bytes() if token.is_file() else None)==original_token,'client-only RPC changed the old token file'
-            old_rpc_checked=True
-            old_rpc_authenticated=bool(original_token and original_token.strip())
+            old_rpc_checked=not bool(args.runtime_binary)
+            old_rpc_authenticated=old_rpc_checked and bool(original_token and original_token.strip())
+            if args.runtime_binary:
+                # Test setup owns this historical child. This is not product takeover evidence.
+                old_children=[(child.pid,child.create_time()) for child in old_owner.children(recursive=True)]
+                assert process_start_id(old_runtime.pid)==old_start
+                old_runtime.terminate()
+                old_runtime.wait(timeout=15)
+                confirm_workers_exited([(old_runtime.pid,old_birth),*old_children])
+                for path in [main/'runtime/endpoint.json',token]:
+                    before=legacy_records[path]
+                    if path.exists():
+                        assert before is not None and path.read_bytes()==before
+                        path.unlink()
+                old_runtime=None
+                legacy_handoff_actor='fixture'
         statuses=[]
         visited=set()
         generation_changes={}
@@ -293,7 +371,10 @@ for binary in BINARIES:
             with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2) as response:
                 health = json.load(response)
             owned = psutil.Process(health['pid'])
-            assert '--runtime-internal' in owned.cmdline(), 'stress must target its owned runtime'
+            if args.runtime_binary:
+                observe_runtime(health)
+            else:
+                assert '--runtime-internal' in owned.cmdline(), 'stress must target its owned runtime'
             resource_members=None
             resource_members_checked=None
             def total_memory(refresh_members=True):
@@ -496,25 +577,64 @@ for binary in BINARIES:
                 health=json.load(response)
             owned=psutil.Process(health['pid'])
             retired_workers=[checked_worker(health)] if args.expect_supervised_worker else []
-            assert pathlib.Path(owned.exe()).name.lower() in ['rsrs','rsrs.exe']
-            assert '--runtime-internal' in owned.cmdline(),'only the isolated runtime may be suspended'
+            if args.runtime_binary:
+                observe_runtime(health)
+                assert pathlib.Path(owned.exe()).resolve()==args.runtime_binary
+            else:
+                assert pathlib.Path(owned.exe()).name.lower() in ['rsrs','rsrs.exe']
+                assert '--runtime-internal' in owned.cmdline(),'only the isolated runtime may be suspended'
             before_restart={str(profile):snapshot(profile) for profile in [main,alternate]}
             config_before=(main/'client.json').read_bytes()
+            endpoint_before=(main/'runtime/endpoint.json').read_bytes()
+            token_path=main/'runtime/token'
+            token_before=token_path.read_bytes() if token_path.is_file() else None
+            registration_path=main/'runtime/autostart/registration.json'
+            registration_before=registration_path.read_bytes() if registration_path.is_file() else None
+            owned_birth=owned.create_time()
             try:
                 owned.suspend()
-                restarted=run('restart','--timeout','1')
+                restarted=run('restart','--timeout','1',allow_failure=bool(args.runtime_binary))
+                if args.runtime_binary:
+                    assert restarted.get('status')=='fail','restart replaced a suspended live owner'
+                    assert psutil.Process(owned.pid).create_time()==owned_birth and owned.is_running()
+                    assert process_start_id(owned.pid)==health['process_start_id']
+                    assert (main/'client.json').read_bytes()==config_before
+                    assert (main/'runtime/endpoint.json').read_bytes()==endpoint_before
+                    assert (token_path.read_bytes() if token_path.is_file() else None)==token_before
+                    assert (registration_path.read_bytes() if registration_path.is_file() else None)==registration_before
             finally:
-                if owned.is_running():
+                if owned.is_running() and owned.create_time()==owned_birth:
+                    if args.runtime_binary: assert process_start_id(owned.pid)==health['process_start_id']
                     owned.resume()
-            assert restarted['summary']['forced'] is True,restarted
+            if args.runtime_binary:
+                assert {str(profile):snapshot(profile) for profile in [main,alternate]}==before_restart
+                resumed=observe_runtime()
+                assert (resumed['pid'],resumed['process_start_id'],resumed['instance_id'])==(
+                    health['pid'],health['process_start_id'],health['instance_id'])
+                live_owner_restart_rejected=True
+                restarted=run('restart','--timeout','10')
+                assert restarted['summary']['forced'] is False,restarted
+            else:
+                assert restarted['summary']['forced'] is True,restarted
             assert restarted['summary']['stopped_pid']==health['pid'],restarted
             assert restarted['summary']['pid']!=health['pid'],restarted
             confirm_workers_exited(retired_workers)
+            if args.runtime_binary:
+                confirm_workers_exited([(owned.pid,owned_birth)])
+                replacement=observe_runtime()
+                assert replacement['pid']==restarted['summary']['pid']
+                assert (replacement['pid'],replacement['process_start_id'])!=(health['pid'],health['process_start_id'])
+                assert replacement['instance_id']!=health['instance_id']
+                assert replacement['image_sha256']==health['image_sha256']==args.runtime_sha256
             assert pathlib.Path(restarted['summary']['data_dir'])==main,restarted
             assert (main/'client.json').read_bytes()==config_before,'restart changed the account or API configuration'
             assert {str(profile):snapshot(profile) for profile in [main,alternate]}==before_restart,'restart changed source, key, sync or compatible index'
             run('model','probe','--model','m3')
             assert run('recall','Real account return fixture','--titles').get('items')
+            if args.runtime_binary:
+                ready=observe_runtime()
+                assert (ready['pid'],ready['process_start_id'],ready['instance_id'])==(
+                    replacement['pid'],replacement['process_start_id'],replacement['instance_id'])
             if args.expect_supervised_worker:
                 with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
                     checked_worker(json.load(response))
@@ -523,8 +643,15 @@ for binary in BINARIES:
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
             'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,'source_and_keys_unchanged':True,
-            'compatible_index_reused':True,'resident_stress':stress,'forced_restart_checked':restart_checked,'old_rpc_checked':old_rpc_checked,
-            'old_rpc_authenticated':old_rpc_authenticated,'initial_generation_changes':generation_changes,'fixture':str(root)})
+            'compatible_index_reused':True,'resident_stress':stress,
+            'upgrade_contract':'standalone-v1' if args.runtime_binary else 'legacy-shim-v1',
+            'source_rpc_checked':source_rpc_checked,'legacy_handoff_actor':legacy_handoff_actor,
+            'live_owner_restart_rejected':live_owner_restart_rejected,
+            'forced_restart_checked':restart_checked and not bool(args.runtime_binary),
+            'safe_restart_checked':restart_checked and bool(args.runtime_binary),
+            'legacy_client_rejected':legacy_client_rejected,'old_rpc_checked':old_rpc_checked,
+            'old_rpc_authenticated':old_rpc_authenticated,'initial_generation_changes':generation_changes,'fixture':str(root),
+            **runtime_report(args,True)})
         print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
     except Exception as error:
         reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000]})
@@ -549,6 +676,9 @@ for binary in BINARIES:
         if cleanup_errors:
             reports[-1]['passed']=False
             reports[-1]['cleanup_errors']=cleanup_errors
+        reports[-1].update(runtime_report(args,reports[-1]['passed']))
+        if args.runtime_binary and not reports[-1]['standalone_runtime_evidence']:
+            reports[-1]['passed']=False
         (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
         if cleanup_errors: raise RuntimeError('fixture cleanup failed: '+str(cleanup_errors))
 (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')

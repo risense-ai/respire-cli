@@ -2,6 +2,7 @@
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
 from published_upgrade_policy import platform_applicability, select_upgrade_sources
+from native_fixture_process import add_runtime_arguments, runtime_inputs
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',required=True)
@@ -10,7 +11,10 @@ parser.add_argument('--model-dir',required=True)
 parser.add_argument('--legacy-model-dir',required=True)
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
+add_runtime_arguments(parser)
 args=parser.parse_args()
+runtime_inputs(args,[args.binary])
+upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
 def command(*values):
     executable=shutil.which(values[0])
@@ -45,6 +49,7 @@ if args.profile=='full' and 'v1.0.10' not in formal_sources:
     additional_draft_baselines.append(baseline['tag_name'])
 assert sources,'no upgrade source versions discovered'
 report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
+        'upgrade_contract':upgrade_contract,
         'profile':args.profile,'selected_sources':[],'full_coverage':False,'all_published_sources_covered':False,
         'published_formal_sources':formal_sources,
         'additional_draft_baselines':additional_draft_baselines,
@@ -89,16 +94,38 @@ def verify_upgrade(source):
     old=folder/('rsrs'+extension)
     shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
     result=folder/'results'
+    runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
+                   '--runtime-version',args.runtime_version] if args.runtime_binary else [])
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
         '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
     assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
-        'source_and_keys_unchanged','compatible_index_reused','forced_restart_checked','old_rpc_checked',
+        'source_and_keys_unchanged','compatible_index_reused',
     ]),'required real upgrade checks missing or failed'
+    assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
+    if upgrade_contract=='standalone-v1':
+        assert all(check.get(name) is True for name in [
+            'source_rpc_checked','legacy_client_rejected','live_owner_restart_rejected','safe_restart_checked',
+            'standalone_runtime_evidence',
+        ]),'required standalone upgrade checks missing or failed'
+        assert all(check.get(name) is False for name in [
+            'old_rpc_checked','forced_restart_checked',
+        ]),'standalone upgrade must not claim unsafe legacy behavior'
+        assert check.get('legacy_handoff_actor')=='fixture','legacy seed handoff was not fixture-owned'
+        assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'
+        assert check.get('runtime_binary_sha256')==args.runtime_sha256,'upgrade Runtime digest differs'
+        assert check.get('runtime_version')==args.runtime_version,'upgrade Runtime version differs'
+        receipts=check.get('runtime_identity_receipts')
+        assert isinstance(receipts,list) and receipts and all(isinstance(item,dict) for item in receipts),\
+            'upgrade Runtime identity receipts missing'
+    else:
+        assert all(check.get(name) is True for name in [
+            'forced_restart_checked','old_rpc_checked',
+        ]),'required legacy shim upgrade checks missing or failed'
     assert check.get('binary_sha256')==report['candidate_sha256'],'candidate changed during upgrade validation'
     assert check.get('engine')=='cpu','upgrade did not verify real CPU inference'
     sequence=check.get('sequence')
@@ -107,7 +134,8 @@ def verify_upgrade(source):
         rows=step.get('model_rows')
         assert isinstance(rows,dict) and set(rows)=={'embedder','model index'} and all(
             row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
-    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')}
+    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
+            'report':str(result/'real-account-return-verification.json')}
 
 try:
     selected=select_upgrade_sources(sources,args.target,args.profile)

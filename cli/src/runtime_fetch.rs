@@ -294,8 +294,8 @@ pub fn valid_version(version: &str) -> bool {
 }
 
 /// Release asset triple for the running platform. The darwin-amd64 asset keeps
-/// its obfuscated triple name (see [`TRIPLES`]); Linux defaults to the gnu
-/// ABI and can be redirected to a musl asset with `RSRS_RUNTIME_TRIPLE`.
+/// its obfuscated triple name (see [`TRIPLES`]); Linux follows the compiled
+/// ABI, with an explicit asset override available through `RSRS_RUNTIME_TRIPLE`.
 pub fn release_triple() -> Result<String> {
     if let Ok(raw) = respire::env::var("RSRS_RUNTIME_TRIPLE") {
         let trimmed = raw.trim();
@@ -310,6 +310,8 @@ pub fn release_triple() -> Result<String> {
         ("windows", "aarch64") => "aarch64-pc-windows-msvc",
         ("macos", "aarch64") => "aarch64-apple-darwin",
         ("macos", "x86_64") => DARWIN_AMD64_RELEASE_TRIPLE,
+        ("linux", "x86_64") if cfg!(target_env = "musl") => "x86_64-unknown-linux-musl",
+        ("linux", "aarch64") if cfg!(target_env = "musl") => "aarch64-unknown-linux-musl",
         ("linux", "x86_64") => "x86_64-unknown-linux-gnu",
         ("linux", "aarch64") => "aarch64-unknown-linux-gnu",
         _ => bail!("no published rsrs-runtime asset for this platform"),

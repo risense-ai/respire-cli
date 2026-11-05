@@ -9,6 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt} from './release-regression-contract.mjs';
 import {requireRegressions} from './cleanup-release-artifacts.mjs';
 import {verifyBinary} from './verify-binary.mjs';
+import {createHash} from 'node:crypto';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
 const job=name=>({name,status:'completed',conclusion:'success'});
@@ -60,6 +61,59 @@ test('both Linux ARM targets require native runners, every source feedback phase
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
   assert.match(background,/runs-on: ubuntu-24.04-arm/);assert.match(background,/VERIFY_ARM64: 'true'/);
   assert.match(background,/publication-arm64-verified-/);assert.doesNotMatch(background,/id-token:|contents: write|actions: write|npm publish|concurrency:/);
+  const native=text('release-native-validation.yml').replace(/\r\n/g,'\n');
+  const step=name=>native.split('      - name: '+name+'\n')[1]?.split('\n      - ')[0];
+  const install=step('Install and verify the official pinned standalone Runtime');
+  assert.match(install,/id: pinned-runtime/);assert.doesNotMatch(install,/^        if:/m);
+  assert(native.indexOf('id: pinned-runtime')<native.indexOf('      - name: Install and probe BGE CPU inference'));
+  const script=install.split("<<'NODE'\n")[1].split('\n          NODE')[0].replace(/^          /gm,'').replace(/^import .*;\n/gm,'');
+  for(const platform of ['linux','win32']) {
+    const p=platform==='win32'?path.win32:path.posix, root=platform==='win32'?'C:\\runner\\native-runtime':'/runner/native-runtime';
+    const image=Buffer.from('synthetic installed Runtime; never executed'), version='1.0.21-dev.5';
+    const digest=createHash('sha256').update(image).digest('hex'), metadata=JSON.stringify({triple:'synthetic-target',runtime_version:version});
+    const simulate=change=>{
+      const selected={version,sha256:digest,release:{metadata_json:metadata,metadata_sha256:createHash('sha256').update(metadata).digest('hex')}};
+      const state={selected,status:0,sameImage:false,hosted:'true'};change?.(state);
+      const tokenSentinel='fixture-only-value';
+      const output=[],calls=[],env={GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:state.hosted,CLI_TARGET:'synthetic-target',RUNNER_TEMP:p.dirname(root),GITHUB_OUTPUT:'fixture-output',GH_TOKEN:tokenSentinel,GITHUB_TOKEN:tokenSentinel};
+      runInNewContext(script,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
+        mkdirSync:()=>{},mkdtempSync:()=>root,statSync:()=>({isFile:()=>true}),
+        realpathSync:file=>state.sameImage?'same-image':file,
+        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'runtime.json')?JSON.stringify(selected):image,
+        appendFileSync:(_file,line)=>output.push(line),
+        spawnSync:(cli,args,options)=>{calls.push({cli,args:[...args],env:options.env});return {status:state.status}}});
+      assert.equal(calls.length,1);assert.deepEqual(calls[0].args,['--json','runtime','install']);
+      for(const token of ['GH_TOKEN','GITHUB_TOKEN']){assert.equal(calls[0].env[token],undefined);assert.equal(env[token],tokenSentinel);}
+      assert.equal(calls[0].env.RSRS_DATA_DIR,root);assert.equal(calls[0].env.HOME,p.join(root,'home'));
+      assert.equal(calls[0].env.RSRS_RUNTIME_TRIPLE,'synthetic-target');
+      assert.deepEqual(output,[`path=${p.join(root,'runtime',version,'rsrs-runtime'+(platform==='win32'?'.exe':''))}\n`,`sha256=${digest}\n`,`version=${version}\n`]);
+    };
+    simulate();
+    for(const change of [s=>s.status=1,s=>s.selected.version='1.0.21-dev.4',s=>s.selected.sha256='a'.repeat(64),
+      s=>s.selected.release=null,s=>s.selected.release.metadata_sha256='b'.repeat(64),s=>s.sameImage=true,s=>s.hosted='false',
+      s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])assert.throws(()=>simulate(change));
+  }
+  for(const name of ['Require every upgrade selected by the native validation profile','Verify resident foreground and background inference under concurrent CLI load']) {
+    const consumer=step(name);
+    for(const [key,output] of [['BIN','path'],['SHA256','sha256'],['VERSION','version']])assert(consumer.includes(`NATIVE_RUNTIME_${key}: \u0024{{ steps.pinned-runtime.outputs.${output} }}`));
+    assert.match(consumer,/test -n "\$NATIVE_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
+    assert.match(consumer,/--runtime-binary "\$NATIVE_RUNTIME_BIN" --runtime-sha256 "\$NATIVE_RUNTIME_SHA256" --runtime-version "\$NATIVE_RUNTIME_VERSION"/);
+  }
+  assert.match(step('Require every upgrade selected by the native validation profile'),/GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.doesNotMatch(native,/RSRS_ARTIFACT_SOURCE: published-assets|RSRS_PUBLISHED_ASSETS_SHA256:|RSRS_PUBLISHED_BUNDLE_SHA256:/);
+  const account=readFileSync(new URL('../../scripts/test-real-m3-account-switch.py',import.meta.url),'utf8');
+  assert.match(account,/if key not in \('GH_TOKEN', 'GITHUB_TOKEN'\)/);
+  assert.match(account,/web_help=subprocess\.check_output\(\[args.seed_binary,'web','--help'\],env=seed_env,/);
+  const probe=step('Install and probe BGE CPU inference');
+  assert.match(probe,/RSRS_RUNTIME_BIN: \$\{\{ steps.pinned-runtime.outputs.path \}\}/);
+  assert.match(probe,/RSRS_RUNTIME_TRIPLE: \$\{\{ matrix.target \}\}/);
+  assert.match(probe,/unset GH_TOKEN GITHUB_TOKEN/);
+  assert.match(probe,/test -n "\$RSRS_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
+  assert.match(probe,/probe-native-arm64-alpine.sh[^\n]+"\$RSRS_RUNTIME_BIN" "\$NATIVE_RUNTIME_SHA256" "\$NATIVE_RUNTIME_VERSION"/);
+  assert.match(alpine,/-v "\$bundle:\/runtime:ro"/);assert.match(alpine,/-e RSRS_RUNTIME_BIN=\/runtime\/rsrs-runtime/);
+  assert.match(alpine,/-e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl/);
+  assert.match(alpine,/\$NATIVE_RUNTIME_SHA256  \/runtime\/rsrs-runtime/);
+  assert.match(alpine,/case "\$\(\/runtime\/rsrs-runtime --version\)"/);
 });
 test('new full gate requires every native, cloud, migration fixture, join and API success',()=>{
   validateRegressionContract(contract,manifest);assert.equal(contract.native.length,manifest.targets.length);assert.equal(contract.cloud.length,manifest.targets.length-1);assert.equal(contract.migration.length,3);assert.equal(contract.migration_gate.length,3);
@@ -113,6 +167,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     const bin=path.join(root,'bin'),models=path.join(root,'models with spaces'),data=path.join(root,'host profile'),capture=path.join(root,'docker.json');
     mkdirSync(bin);mkdirSync(path.join(models,'onnx'),{recursive:true});mkdirSync(path.join(data,'models/bge-m3/onnx'),{recursive:true});
     const exe=path.join(root,'rsrs'),cached=path.join(data,'models/bge-m3/onnx/model_quantized.cpu-v1.ort'),local=path.join(models,'onnx/model_quantized.cpu-v1.ort'),custom=path.join(root,'explicit cpu.ort');
+    const bundle=path.join(root,'complete musl runtime'),runtime=path.join(bundle,'rsrs-runtime');mkdirSync(bundle);
+    writeFileSync(runtime,'fixture');writeFileSync(path.join(bundle,'core-runtime.json'),'fixture');
     for(const file of [exe,cached,custom,path.join(models,'tokenizer.json'),path.join(models,'onnx/model_quantized.onnx')])writeFileSync(file,'fixture');
     const stub=(name,body)=>writeFileSync(path.join(bin,name),body,{mode:0o755});
     stub('uname','#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n');
@@ -121,10 +177,13 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     stub('docker','#!'+process.execPath+'\nrequire("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
     const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,RUNNER_ARCH:'ARM64',RSRS_DATA_DIR:data,RSRS_CPU_OWNED_ORT_FILE:'',CAPTURE:capture};
-    const run=extra=>spawnSync('bash',[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile')],{env:{...env,...extra},encoding:'utf8'});
+    const run=extra=>spawnSync('bash',[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile'),runtime,'a'.repeat(64),'1.0.21-dev.5'],{env:{...env,...extra},encoding:'utf8'});
     for(const [extra,selected] of [[{},cached],[{RSRS_CPU_OWNED_ORT_FILE:custom},custom]]){
       const result=run(extra);assert.equal(result.status,0,result.stderr);const args=JSON.parse(readFileSync(capture));
       assert(args.includes(selected+':/cpu-model.ort:ro'));assert(args.includes(models+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
+      assert(args.includes(bundle+':/runtime:ro'));assert(args.includes('RSRS_RUNTIME_BIN=/runtime/rsrs-runtime'));
+      assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
+      assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
     rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(local+':/cpu-model.ort:ro'));rmSync(capture);
@@ -132,6 +191,7 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     rmSync(local);assert.notEqual(run({}).status,0);assert(!existsSync(capture));
     // Explicit missing override must not silently fall back to another model.
     writeFileSync(local,'fixture');assert.notEqual(run({RSRS_CPU_OWNED_ORT_FILE:path.join(root,'missing.ort')}).status,0);assert(!existsSync(capture));
+    rmSync(path.join(bundle,'core-runtime.json'));assert.notEqual(run({}).status,0);assert(!existsSync(capture));
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 

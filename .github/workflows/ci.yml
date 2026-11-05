@@ -145,15 +145,45 @@ jobs:
         if: contains(matrix.target, '-musl')
         env:
           RSRS_ENGINE: cpu
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
           RSRS_DATA_DIR: ${{ runner.temp }}/musl-probe
           RSRS_M3_DIR: ${{ runner.temp }}/musl-probe/model
         run: |
           set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
           exe=target/ci/${{ matrix.target }}/release/rsrs
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
+          "$exe" --json runtime install
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
-          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
+          CLI_FIXTURE_BINARY="$exe" node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          const root = realpathSync(process.env.RSRS_DATA_DIR);
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          assert.equal(selected.version, pin.required);
+          assert.match(selected.sha256, /^[0-9a-f]{64}$/);
+          assert.ok(selected.release, 'Official Runtime release proof is required');
+          assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.schema_version, 2);
+          assert.equal(metadata.triple ?? metadata.target_triple, process.env.RSRS_RUNTIME_TRIPLE);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.equal(metadata.binary_sha256, selected.sha256);
+          const runtime = realpathSync(join(root, 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
+          assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          const result = spawnSync('bash', ['scripts/probe-native-arm64-alpine.sh', process.env.RSRS_RUNTIME_TRIPLE,
+            process.env.CLI_FIXTURE_BINARY, process.env.RSRS_M3_DIR, join(process.env.RUNNER_TEMP, 'arm-alpine-probe'),
+            runtime, selected.sha256, selected.version], {env: process.env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Offline Alpine probe failed');
+          NODE
       - name: Verify glibc CPU inference
         if: contains(matrix.target, '-gnu')
         env:
