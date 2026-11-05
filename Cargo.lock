@@ -1655,6 +1655,7 @@ dependencies = [
  "anyhow",
  "dirs",
  "rusqlite",
+ "serde_json",
  "tempfile",
 ]
 

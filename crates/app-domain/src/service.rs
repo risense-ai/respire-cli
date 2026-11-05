@@ -989,58 +989,8 @@ fn client_config_lock() -> Result<std::fs::File> {
 
 fn read_client_config_for_write() -> Result<serde_json::Value> {
     crate::memory::bge::m3_model_dir()?;
-    let path = client_config_path();
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::json!({}))
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("cannot read client config {}", path.display()))
-        }
-    };
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("client config {} contains invalid JSON", path.display()))?;
-    anyhow::ensure!(
-        value.is_object(),
-        "client config {} must contain a JSON object",
-        path.display()
-    );
-    for key in [
-        "lang",
-        "data_dir",
-        "addr",
-        "api_base",
-        "service_mode",
-        "engine",
-        "model",
-    ] {
-        if let Some(field) = value.get(key) {
-            anyhow::ensure!(
-                field.is_string(),
-                "client config {} has invalid type for {key}",
-                path.display()
-            );
-        }
-    }
-    for key in ["autosync", "cure_auto"] {
-        if let Some(field) = value.get(key) {
-            anyhow::ensure!(
-                field.is_boolean(),
-                "client config {} has invalid type for {key}",
-                path.display()
-            );
-        }
-    }
-    if let Some(field) = value.get("rpc_parallelism") {
-        anyhow::ensure!(
-            field.as_u64().is_some_and(|value| value <= u32::MAX as u64),
-            "client config {} has invalid rpc_parallelism",
-            path.display()
-        );
-    }
-    Ok(value)
+    Ok(respire_client_host::config::read_client_config(&client_config_path())?
+        .unwrap_or_else(|| serde_json::json!({})))
 }
 
 // ── data dir (client.json data_dir → RSRS_DATA_DIR → ~/.rsrs) ──
@@ -3839,6 +3789,32 @@ mod tests {
             }
             assert_eq!(std::fs::read(iso.path().join("client.json"))?, config_before);
         }
+
+        let path = client_config_path();
+        let original = std::fs::read(&path)?;
+        std::fs::remove_file(&path)?;
+        assert!(respire_client_host::config::read_client_config(&path)?.is_none());
+        assert_eq!(read_client_config_for_write()?, serde_json::json!({}));
+        for invalid in [
+            "", "{", "null", "[]", r#"{"lang":7}"#, r#"{"data_dir":false}"#,
+            r#"{"addr":null}"#, r#"{"api_base":[]}"#, r#"{"service_mode":7}"#,
+            r#"{"engine":false}"#, r#"{"model":{}}"#, r#"{"autosync":"true"}"#,
+            r#"{"cure_auto":1}"#, r#"{"rpc_parallelism":-1}"#,
+            r#"{"rpc_parallelism":4294967296}"#, r#"{"rpc_parallelism":1.5}"#,
+        ] {
+            std::fs::write(&path, invalid)?;
+            assert!(respire_client_host::config::read_client_config(&path).is_err());
+            assert!(validate_client_config().is_err());
+            assert_eq!(std::fs::read(&path)?, invalid.as_bytes());
+        }
+        std::fs::write(&path, [0xff])?;
+        assert!(validate_client_config().is_err());
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(respire_client_host::config::read_client_config(&path).is_err());
+        assert!(validate_client_config().is_err());
+        std::fs::remove_dir(&path)?;
+        std::fs::write(&path, original)?;
         assert_eq!(
             std::fs::read(&real_client).ok(),
             before,

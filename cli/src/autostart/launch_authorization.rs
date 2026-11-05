@@ -1,5 +1,7 @@
 //! Local launch-grant producer. The inherited token identifies one private grant.
-use super::super::{lifecycle, private_write, read_registration};
+use super::super::{
+    lifecycle, private_write, read_registration, recovery::account_identity_source,
+};
 use anyhow::{Context, Result};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -57,12 +59,7 @@ pub(super) fn spawn(
     let expires_at_ms = issued_at_ms
         .checked_add(60_000)
         .context("launch expiry overflow")?;
-    let account = respire::service::session_user_of_dir(&profile);
-    let account_source = if account.is_empty() {
-        profile.display().to_string()
-    } else {
-        account
-    };
+    let account_source = account_identity_source(&profile)?;
     let grant = json!({
         "schema_version": 1,
         "protocol_version": respire_commands::rpc_worker::PROTOCOL_V,
@@ -191,6 +188,23 @@ mod tests {
         fs::write(&config, serde_json::to_vec(&json!({"data_dir": account}))?)?;
         let (_, profile) = prepare_launch_roots()?;
         assert_eq!(profile, account.canonicalize()?);
+
+        assert_eq!(
+            account_identity_source(&profile)?,
+            profile.display().to_string()
+        );
+        let session = profile.join("session.json");
+        fs::write(&session, br#"{"user":"Fixture-Account"}"#)?;
+        assert_eq!(account_identity_source(&profile)?, "Fixture-Account");
+        for invalid in ["{", "{}", r#"{"user":42}"#, r#"{"user":""}"#] {
+            fs::write(&session, invalid)?;
+            assert!(account_identity_source(&profile).is_err());
+            assert_eq!(fs::read_to_string(&session)?, invalid);
+        }
+        fs::remove_file(&session)?;
+        fs::create_dir(&session)?;
+        assert!(account_identity_source(&profile).is_err());
+        fs::remove_dir(&session)?;
 
         for invalid in ["{", r#"{"data_dir":42}"#] {
             fs::write(&config, invalid)?;

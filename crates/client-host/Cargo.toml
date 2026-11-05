@@ -13,6 +13,7 @@ locks = ["dep:rusqlite"]
 [dependencies]
 anyhow = "1.0"
 dirs = "6.0"
+serde_json = "1.0"
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]

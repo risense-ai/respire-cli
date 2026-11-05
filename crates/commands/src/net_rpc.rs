@@ -129,14 +129,8 @@ fn read_token() -> Result<Option<String>> {
 }
 
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(RuntimeError::TokenUnreadable(format!("{}: {error}", path.display())).into())
-        }
-    }
+    respire_client_host::credential::read_token_file(path)
+        .map_err(|error| RuntimeError::TokenUnreadable(format!("{error:#}")).into())
 }
 
 fn check_connection() -> Result<()> {
@@ -1583,6 +1577,26 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+
+        let fixture = dir.path().join("token-reader");
+        assert!(read_token_file(&fixture).map_err(|e| e.to_string())?.is_none());
+        for invalid in [b"".as_slice(), b" \t\r\n".as_slice(), &[0xff]] {
+            std::fs::write(&fixture, invalid).map_err(|e| e.to_string())?;
+            let error = read_token_file(&fixture).err().ok_or("invalid token accepted")?;
+            assert!(matches!(
+                error.downcast_ref::<RuntimeError>(), Some(RuntimeError::TokenUnreadable(_))
+            ));
+            assert_eq!(std::fs::read(&fixture).map_err(|e| e.to_string())?, invalid);
+        }
+        std::fs::write(&fixture, "  file-token\r\n").map_err(|e| e.to_string())?;
+        assert_eq!(
+            read_token_file(&fixture).map_err(|e| e.to_string())?.as_deref(),
+            Some("file-token")
+        );
+        std::fs::remove_file(&fixture).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&fixture).map_err(|e| e.to_string())?;
+        assert!(read_token_file(&fixture).is_err());
+        std::fs::remove_dir(&fixture).map_err(|e| e.to_string())?;
         let prev_data = respire_app::env::var("RSRS_DATA_DIR").ok();
         let prev_tok = respire_app::env::var("RSRS_RPC_TOKEN").ok();
         std::env::remove_var("RSRS_RPC_TOKEN");
