@@ -1155,14 +1155,14 @@ mod tests {
             &missing.path().join("session.json")
         )?.is_none());
         assert!(respire_client_host::identity::session_user_of_dir(missing.path())?.is_none());
-        for invalid in ["", "{", "null", "[]", r#"{"user":7}"#, r#"{"user":null}"#] {
+        for invalid in ["", "{", "null", "[]"] {
             std::fs::write(&path, invalid)?;
             assert!(read_session_json().is_err());
             assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());
             assert_eq!(std::fs::read(&path)?, invalid.as_bytes());
         }
         // Key initialization can store an object without an account, but it cannot authorize a launch.
-        for local in ["{}", r#"{"user":""}"#] {
+        for local in ["{}", r#"{"user":""}"#, r#"{"user":7}"#, r#"{"user":null}"#] {
             std::fs::write(&path, local)?;
             assert!(read_session_json()?.is_object());
             assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());

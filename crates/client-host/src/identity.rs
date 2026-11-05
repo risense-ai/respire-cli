@@ -22,13 +22,6 @@ pub fn read_session_json(path: &Path) -> Result<Option<Value>> {
         "session {} must contain a JSON object",
         path.display()
     );
-    if let Some(user) = value.get("user") {
-        anyhow::ensure!(
-            user.is_string(),
-            "session {} has invalid type for user",
-            path.display()
-        );
-    }
     Ok(Some(value))
 }
 
