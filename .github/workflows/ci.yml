@@ -414,12 +414,6 @@ jobs:
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
-      - name: Restore pinned real CPU model files for diary fixtures
-        if: matrix.group == 'core'
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/diary-real-model
-          key: diary-real-model-v1-0826f8c1-7ff152e9-6710678b
       - name: Verify or install the real diary model using the official installer
         if: matrix.group == 'core'
         env:
@@ -431,6 +425,12 @@ jobs:
         run: |
           set -euo pipefail
           target/debug/rsrs --json model install-m3
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          from dev_model_fixture import share_cpu_container
+          share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
+          PY
           printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$RSRS_M3_DIR" >> "$GITHUB_ENV"
       - name: Run this group's instrumented tests
         id: source-tests

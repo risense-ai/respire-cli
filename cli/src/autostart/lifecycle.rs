@@ -651,12 +651,21 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
 
 fn start_explicit_locked() -> Result<()> {
     let root = respire::service::main_data_dir();
-    let Some(config) = read_registration(&root)?.filter(|config| config.enabled) else {
+    let Some(mut config) = read_registration(&root)? else {
         return crate::rpc::ensure_daemon_locked();
     };
     owned(&config)?;
     manager::inspect(&config)?;
     check_direct_access()?;
+    if !config.enabled {
+        ensure_control_endpoint(&config)?;
+        // Explicit start clears the stop flag without re-enabling sign-in startup.
+        if config.manually_stopped {
+            config.manually_stopped = false;
+            save(&mut config)?;
+        }
+        return crate::rpc::ensure_daemon_locked();
+    }
     if !config.manually_stopped {
         if let Some(health) = crate::rpc::probe_runtime()? {
             if health.managed_id.as_deref() == Some(config.id.as_str())
