@@ -312,13 +312,17 @@ pub(crate) fn control_offline_read(kind: HostOfflineRead) -> Result<ResultEnvelo
         |response, pid| {
             anyhow::ensure!(response.v == request.v && response.id == request.id && response.pid == Some(pid)
                 && response.bin == "rsrs-runtime" && response.scope.is_none() && response.web_url.is_none()
-                && response.operation_id.is_none() && response.idempotency_key.is_none()
-                && response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none(),
+                && response.operation_id.is_none() && response.idempotency_key.is_none(),
                 "invalid fixed offline read response");
             if let Some(directory) = &response.data_dir {
                 anyhow::ensure!(metadata_status_path(Path::new(directory))? == profile, "offline read profile mismatch");
             }
+            if !response.ok {
+                return offline_read_rejection(&response, kind);
+            }
             let envelope = response.envelope.context("offline read envelope missing")?;
+            anyhow::ensure!(response.exit == 0 && response.code.is_none() && response.error.is_none(),
+                "invalid fixed offline read response");
             anyhow::ensure!(envelope.command == kind.command() && matches!(envelope.status, Status::Ok)
                 && envelope.errors.is_empty() && envelope.actions.is_empty() && envelope.related.is_empty()
                 && envelope.items.len() >= 2, "invalid offline read envelope");
@@ -368,4 +372,31 @@ pub(crate) fn control_offline_read(kind: HostOfflineRead) -> Result<ResultEnvelo
     // Preserve the existing public output; readiness belongs only to the private response.
     envelope.items.truncate(envelope.items.len() - 2);
     Ok(envelope)
+}
+
+
+pub(super) fn offline_read_rejection(response: &RpcResponse<ResultEnvelope>, kind: HostOfflineRead) -> Result<ResultEnvelope> {
+    let envelope = response.envelope.as_ref().context("offline read envelope missing")?;
+    anyhow::ensure!(response.exit == 2 && envelope.command == kind.command()
+        && matches!(envelope.status, Status::Fail) && envelope.summary == serde_json::json!({})
+        && envelope.details.is_null() && envelope.actions.is_empty() && envelope.related.is_empty()
+        && envelope.errors.len() == 1 && response.error.as_ref() == envelope.errors.first()
+        && envelope.items.len() == 2
+        && envelope.items[0].name == "control_ready" && envelope.items[0].value == "false"
+        && matches!(envelope.items[0].status, Status::Fail)
+        && envelope.items[1].name == "store_ready" && envelope.items[1].value == "false"
+        && matches!(envelope.items[1].status, Status::Skip),
+        "invalid fixed offline read rejection");
+    // Only local fixed messages cross this boundary, never the Runtime diagnostic.
+    let (code, message) = match response.code.as_deref() {
+        Some("unauthorized") => ("unauthorized", "offline read launch or parent authorization failed"),
+        Some("scope_mismatch") => ("scope_mismatch", "offline read binding changed or does not match"),
+        Some("snapshot_preflight_blocked") if kind == HostOfflineRead::SnapshotPreflight =>
+            ("snapshot_preflight_blocked", "snapshot validation blocked access; inspect snapshot recovery"),
+        Some("offline_read_unavailable") if kind != HostOfflineRead::SnapshotPreflight =>
+            ("offline_read_unavailable", "offline configuration read is unavailable"),
+        Some("control_unavailable") => ("control_unavailable", "offline read controller is unavailable"),
+        _ => anyhow::bail!("invalid fixed offline read rejection code"),
+    };
+    anyhow::bail!("Runtime rejected fixed offline read ({code}): {message}");
 }

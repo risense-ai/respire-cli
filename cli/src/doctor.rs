@@ -634,6 +634,12 @@ mod tests {
                 ),
             ] {
                 let mut result = diagnostic(status);
+                // Session diagnostics moved from the host to the Runtime response.
+                result.items.push(Item::new(
+                    "session",
+                    Status::Ok,
+                    "five-keys complete, can unlock",
+                ));
                 result.errors = errors;
                 with_runtime(vec![("cli.exec", reply(result))], || {
                     run(false, false, false)?;

@@ -21,6 +21,25 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/process.exit\(result.status \?\? 1\)/);
+  const business=readFileSync(new URL('../../scripts/run-runtime-business-tests.sh',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.match(business,/^set -euo pipefail$/m);
+  assert(business.includes('coverage_dir="$PWD/target/llvm-cov-target"'));
+  assert(business.includes('CARGO_LLVM_COV_TARGET_DIR="$coverage_dir" cargo llvm-cov show-env --sh'));
+  assert(business.includes('source "$RUNNER_TEMP/cli-coverage.env"'));
+  assert(business.includes('if [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" != *instrument-coverage* ]]; then'));
+  assert(business.includes('if [[ "${__CARGO_LLVM_COV_RUSTC_WRAPPER:-}" != 1 || -z "${RUSTC_WRAPPER:-}" || "${__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS:-}" != *instrument-coverage* ]]; then'));
+  assert(business.includes('if [[ "${LLVM_PROFILE_FILE:-}" != "$coverage_dir/"* ]]; then'));
+  assert.equal((business.match(/^ {2,4}exit 1$/gm)||[]).length,2,'instrumentation and profile guards must fail closed');
+  for(const binding of ['export RSRS_CLI_BIN="$coverage_dir/debug/rsrs"','export RSRS_CLI_SOURCE_DIR="$PWD"',
+    'export RSRS_CLI_SOURCE_SHA="$(git rev-parse HEAD)"','test -x "$RSRS_CLI_BIN"'])assert(business.includes(binding),binding);
+  const before='original_cli="$(sha256sum "$RSRS_CLI_BIN")"',after='test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"';
+  const invoke='"$RSRS_RUNTIME_TEST_RUNNER" "$module::" --test-threads=1';
+  assert(business.indexOf(before)>=0&&business.indexOf(before)<business.indexOf(invoke));
+  assert(business.indexOf(after)>business.indexOf(invoke),'the same instrumented CLI must retain its hash');
+  assert(business.includes('for module in $RUNTIME_BUSINESS_MODULES; do'));
+  assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')>business.indexOf(before));
+  assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')<business.indexOf(invoke));
+  assert.doesNotMatch(business,/cargo\s+(?:build|test|run|metadata)\b|cargo\s+llvm-cov\s+(?:run|test)\b/);
   const imports=new Set(["import assert from 'node:assert/strict';",
     "import {execFileSync, spawnSync} from 'node:child_process';",
     "import {readFileSync} from 'node:fs';",
@@ -50,7 +69,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       },
       spawnSync:(command,args,options)=>{
         if(command==='cargo')calls.push(args);
-        else {assert.equal(command,'bash');harness.push(options.env.RUNTIME_BUSINESS_MODULES);}
+        else {assert.equal(command,'bash');assert.deepEqual(Array.from(args),['scripts/run-runtime-business-tests.sh']);harness.push(options.env.RUNTIME_BUSINESS_MODULES);}
         return {status:0};
       },
       captureCoverage:args=>{calls.push(args);return 0;},

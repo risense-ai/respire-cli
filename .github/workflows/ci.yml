@@ -623,22 +623,7 @@ jobs:
           for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
             assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count, `Missing migrated ${module} assertions`);
           }
-          const result = spawnSync('bash', ['-euo', 'pipefail', '-c', `
-            cargo llvm-cov show-env --export-prefix > "$RUNNER_TEMP/cli-coverage.env"
-            source "$RUNNER_TEMP/cli-coverage.env"
-            [[ "\${RUSTFLAGS:-}\${CARGO_ENCODED_RUSTFLAGS:-}" == *instrument-coverage* ]]
-            [[ "$LLVM_PROFILE_FILE" == "$PWD/target/llvm-cov-target/"* ]]
-            export RSRS_CLI_BIN="$PWD/target/llvm-cov-target/debug/rsrs"
-            export RSRS_CLI_SOURCE_DIR="$PWD"
-            export RSRS_CLI_SOURCE_SHA="$(git rev-parse HEAD)"
-            test -x "$RSRS_CLI_BIN"
-            original_cli="$(sha256sum "$RSRS_CLI_BIN")"
-            unset GH_TOKEN GITHUB_TOKEN
-            for module in $RUNTIME_BUSINESS_MODULES; do
-              "$RSRS_RUNTIME_TEST_RUNNER" "$module::" --test-threads=1
-            done
-            test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
-          `], {stdio: 'inherit', env: {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'}});
+          const result = spawnSync('bash', ['scripts/run-runtime-business-tests.sh'], {stdio: 'inherit', env: {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'}});
           if (result.error) throw result.error;
           process.exit(result.status ?? 1);
           NODE
