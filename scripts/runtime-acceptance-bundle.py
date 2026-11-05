@@ -18,7 +18,7 @@ import tempfile
 
 def regular_file(root, name):
     parts = name.split("/")
-    if not re.fullmatch(r"[A-Za-z0-9_./-]+", name) or any(
+    if not re.fullmatch(r"[A-Za-z0-9_./+-]+", name) or any(
         part in ("", ".", "..") for part in parts
     ):
         raise ValueError(f"unsafe Runtime bundle path: {name}")

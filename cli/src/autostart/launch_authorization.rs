@@ -15,9 +15,8 @@ pub(super) fn spawn(
     arguments: &[OsString],
     managed_id: Option<&str>,
 ) -> Result<(Child, String)> {
-    let root = respire::service::main_data_dir().canonicalize()?;
-    let profile = respire::service::data_dir().canonicalize()?;
     let binary = binary.canonicalize()?;
+    let (root, profile) = prepare_launch_roots()?;
     let maintenance = lifecycle::launch_maintenance_binding(&profile, managed_id)?;
     let registration = read_registration(&root)?;
     if let Some(config) = &registration {
@@ -104,6 +103,17 @@ pub(super) fn spawn(
     }
 }
 
+fn prepare_launch_roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
+    // Resolve strict configuration and reject parent traversal before creating roots.
+    let roots = respire::service::resolved_roots()?;
+    fs::create_dir_all(&roots.installation_root)?;
+    fs::create_dir_all(&roots.account_data_root)?;
+    Ok((
+        roots.installation_root.canonicalize()?,
+        roots.account_data_root.canonicalize()?,
+    ))
+}
+
 fn launch_port(arguments: &[OsString]) -> Result<u16> {
     let mut found = None;
     let mut arguments = arguments.iter();
@@ -143,6 +153,68 @@ fn hash_file(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_roots_validate_before_creating_fresh_profiles() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+        struct Restore(Vec<(&'static str, Option<OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = ["RSRS_DATA_DIR", "RSRS_M3_DIR"];
+        let _restore = Restore(
+            keys.into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+        );
+        let temporary = tempfile::tempdir()?;
+        let root = temporary.path().join("fresh installation");
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_M3_DIR", temporary.path().join("models"));
+        assert!(!root.exists());
+        let (installation, profile) = prepare_launch_roots()?;
+        assert_eq!(installation, root.canonicalize()?);
+        assert_eq!(profile, installation);
+        assert!(!root.join("runtime").exists());
+
+        let account = root.join("accounts/fresh profile");
+        let config = root.join("client.json");
+        fs::write(&config, serde_json::to_vec(&json!({"data_dir": account}))?)?;
+        let (_, profile) = prepare_launch_roots()?;
+        assert_eq!(profile, account.canonicalize()?);
+
+        for invalid in ["{", r#"{"data_dir":42}"#] {
+            fs::write(&config, invalid)?;
+            assert!(prepare_launch_roots().is_err());
+            assert_eq!(fs::read_to_string(&config)?, invalid);
+        }
+        let missing_account = root.join("must remain absent");
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({"data_dir": missing_account.join("../escape")}))?,
+        )?;
+        assert!(prepare_launch_roots().is_err());
+        assert!(!missing_account.exists() && !root.join("escape").exists());
+        let missing = temporary.path().join("must remain absent");
+        let unsafe_root = missing.join("..").join("escape");
+        std::env::set_var("RSRS_DATA_DIR", &unsafe_root);
+        assert!(prepare_launch_roots().is_err());
+        assert!(!missing.exists() && !temporary.path().join("escape").exists());
+        for invalid in ["", " "] {
+            std::env::set_var("RSRS_DATA_DIR", invalid);
+            assert!(prepare_launch_roots().is_err());
+        }
+        Ok(())
+    }
 
     #[test]
     fn explicit_launch_port_is_exact_and_unambiguous() -> Result<()> {

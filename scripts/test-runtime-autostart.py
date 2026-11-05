@@ -13,6 +13,7 @@ from pathlib import Path
 import socket
 import runpy
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -145,22 +146,29 @@ def main():
                 assert child.wait(timeout=20) == 0
                 assert not (root / "runtime/autostart/registration.json").exists()
             finally:
-                if not foreground_stopped:
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
-                        cleanup_health=json.load(response)
-                    assert cleanup_health["server"] == "respire" and cleanup_health["managed_id"] is None
-                    assert os.path.samefile(cleanup_health["exe"], env["RSRS_RUNTIME_BIN"])
-                    assert Path(cleanup_health["installation_root"]).resolve() == root.resolve()
-                    assert Path(cleanup_health["data_dir"]).resolve() == root.resolve()
-                    if health is not None:
+                primary_error = sys.exc_info()[1]
+                try:
+                    # No observed Runtime means there is no verified HTTP owner
+                    # to clean up; retain the original foreground startup error.
+                    if not foreground_stopped and health is not None:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
+                            cleanup_health=json.load(response)
+                        assert cleanup_health["server"] == "respire" and cleanup_health["managed_id"] is None
+                        assert os.path.samefile(cleanup_health["exe"], env["RSRS_RUNTIME_BIN"])
+                        assert Path(cleanup_health["installation_root"]).resolve() == root.resolve()
+                        assert Path(cleanup_health["data_dir"]).resolve() == root.resolve()
                         for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
                             assert cleanup_health[key] == health[key], f"foreground owner changed before cleanup: {key}"
-                    # Host stop verifies native birth identity, waits for the real
-                    # Runtime to exit and validates its final drained receipt.
-                    cleanup=command("runtime", "stop")
-                    assert cleanup.returncode == 0, f"foreground Runtime cleanup failed: {cleanup.stdout} {cleanup.stderr}"
-                if child.poll() is None:
-                    assert child.wait(timeout=20) == 0, "foreground CLI did not exit after Runtime stopped"
+                        # Host stop verifies native birth identity, waits for the real
+                        # Runtime to exit and validates its final drained receipt.
+                        cleanup=command("runtime", "stop")
+                        assert cleanup.returncode == 0, f"foreground Runtime cleanup failed: {cleanup.stdout} {cleanup.stderr}"
+                    if child.poll() is None:
+                        assert child.wait(timeout=20) == 0, "foreground CLI did not exit after Runtime stopped"
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
         print("PASS: read-only default-off status, client-only denial, actual foreground store readiness and owned stop")
         # A fresh off-mode installation must restart without opening/creating a
         # library. Its detached child is always stopped before leaving the test.
