@@ -20,6 +20,7 @@ path = "src/main.rs"
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
 respire_app = { package = "respire_app", path = "../crates/app", default-features = false }
 respire_commands = { path = "../crates/commands" }
+respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.5" }
 respire_spawn = { path = "../spawn" }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -51,7 +52,6 @@ base64 = "0.22"
 signal-hook = "0.3"
 
 [dev-dependencies]
-respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.5" }
 tempfile = "3.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
