@@ -207,7 +207,10 @@ pub(crate) fn prepare_model_locked(
     let evidence = backend
         .evidence
         .as_ref()
-        .context("Runtime did not return fresh backend evidence")?;
+        .with_context(|| format!(
+            "Runtime did not return fresh backend evidence (state={:?}, reason={:?}, incomplete_assets={})",
+            backend.state, backend.reason, verified.missing.len()
+        ))?;
     anyhow::ensure!(
         verified.complete
             && verified.missing.is_empty()

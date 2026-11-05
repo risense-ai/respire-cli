@@ -426,7 +426,16 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     print("isolated launchd override diagnostic",json.dumps({"label":label,"entries":[line[:160] for line in matching]}))
 
             def run(*argv):
-                result = command(*argv)
+                if argv[:1] == ("config",):
+                    # Host maintenance must use the exact registered controller image.
+                    registered_cli = Path(json.loads(config_path.read_text())["executable"])
+                    cli_name = "rsrs.exe" if os.name == "nt" else "rsrs"
+                    assert os.path.samefile(registered_cli, Path(env["RSRS_BIN_DIR"]) / cli_name)
+                    assert bundle_helpers["digest"](registered_cli) == bundle_helpers["digest"](binary)
+                    result = subprocess.run([str(registered_cli), "--json", *argv], env=env,
+                                            capture_output=True, text=True, timeout=45)
+                else:
+                    result = command(*argv)
                 if result.returncode != 0:
                     diagnose_registration()
                 assert result.returncode == 0, f"{argv}: {result.stderr} {result.stdout}"
