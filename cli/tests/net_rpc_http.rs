@@ -1,5 +1,6 @@
 //! HTTP RPC against the hidden `rsrs --runtime-internal` host entry.
-//! This explicitly selects the legacy CLI shim, not independent Runtime G1 acceptance.
+//! Legacy transport checks explicitly select the CLI shim. Scoped client checks
+//! use RSRS_RUNTIME_BIN; neither fixture substitutes for Runtime G1 acceptance.
 //! Isolated DATA_DIR + ephemeral port. Safe for GitHub Actions.
 //! Do not bind the developer machine's default 15169.
 
@@ -13,9 +14,39 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
 }
 
+fn runtime_bin() -> Result<std::path::PathBuf, String> {
+    let runtime = std::env::var_os("RSRS_RUNTIME_BIN")
+        .ok_or("supply RSRS_RUNTIME_BIN with the official standalone Runtime fixture")?;
+    let runtime = std::path::PathBuf::from(runtime)
+        .canonicalize()
+        .map_err(|err| err.to_string())?;
+    if runtime == std::path::Path::new(bin()).canonicalize().map_err(|err| err.to_string())? {
+        return Err("CLI shim cannot substitute for the standalone Runtime fixture".into());
+    }
+    Ok(runtime)
+}
+
 fn pick_port() -> Result<u16, String> {
     let listener = TcpListener::bind("127.0.0.1:0").map_err(|err| err.to_string())?;
     Ok(listener.local_addr().map_err(|err| err.to_string())?.port())
+}
+
+fn fixture_health(root: &std::path::Path) -> serde_json::Value {
+    serde_json::json!({"server":"respire","bin":"http-fixture","pid":1,"v":1,
+        "installation_root":root,"account_id":"fixture-account",
+        "instance_id":"fixture-instance","generation":1})
+}
+
+fn check_fixture_operation(body: &serde_json::Value) -> Result<(), String> {
+    if body["scope"] != serde_json::json!({"account_id":"fixture-account",
+        "instance_id":"fixture-instance","generation":1})
+        || body["operation_id"].as_str().is_none_or(str::is_empty)
+        || body["operation_id"] != body["idempotency_key"]
+        || body["operation_id"] == body["id"]
+    {
+        return Err(format!("unbound fixture request: {body}"));
+    }
+    Ok(())
 }
 
 struct Runtime {
@@ -44,6 +75,14 @@ fn start_internal_runtime_with_legacy_path(
     mode: &str,
     legacy_path: bool,
 ) -> Result<Runtime, String> {
+    start_runtime(mode, legacy_path, false)
+}
+
+fn start_scoped_runtime() -> Result<Runtime, String> {
+    start_runtime("normal", false, true)
+}
+
+fn start_runtime(mode: &str, legacy_path: bool, standalone: bool) -> Result<Runtime, String> {
     let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
     fs::write(
         dir.path().join("client.json"),
@@ -63,13 +102,17 @@ fn start_internal_runtime_with_legacy_path(
     let port = pick_port()?;
     let stderr_path = dir.path().join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
-    let mut child = Command::new(bin())
-        .args([
-            "--runtime-internal",
-            "--no-open",
-            "--port",
-            &port.to_string(),
-        ])
+    let mut command = if standalone {
+        let mut command = Command::new(runtime_bin()?);
+        command.arg("serve");
+        command
+    } else {
+        let mut command = Command::new(bin());
+        command.args(["--runtime-internal", "--no-open"]);
+        command
+    };
+    let mut child = command
+        .args(["--port", &port.to_string()])
         .env("RSRS_DATA_DIR", dir.path())
         .env("RSRS_RPC_PORT", port.to_string())
         .env("RSRS_BIN_DIR", dir.path().join("bin"))
@@ -111,7 +154,7 @@ fn start_internal_runtime_with_legacy_path(
 
 #[test]
 fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
-    let mut rt = start_internal_runtime_with_legacy_path("normal", true)?;
+    let mut rt = start_runtime("normal", true, true)?;
     let health = || -> Result<serde_json::Value, String> {
         ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
             .timeout(Duration::from_secs(3))
@@ -128,10 +171,9 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
         b"preserve"
     );
     // Starting another host for the same profile must retain the TCP owner.
-    let mut duplicate = Command::new(bin())
+    let mut duplicate = Command::new(runtime_bin()?)
         .args([
-            "--runtime-internal",
-            "--no-open",
+            "serve",
             "--port",
             &rt.port.to_string(),
         ])
@@ -179,10 +221,9 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
         }
         let other_port = pick_port()?;
-        let mut other = Command::new(bin())
+        let mut other = Command::new(runtime_bin()?)
             .args([
-                "--runtime-internal",
-                "--no-open",
+                "serve",
                 "--port",
                 &other_port.to_string(),
             ])
@@ -227,9 +268,12 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
             .map_err(|err| err.to_string())?;
         assert_eq!(health()?["pid"].as_u64(), Some(owner));
     }
+    let identity = health()?;
     let response: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
         .timeout(Duration::from_secs(10))
-        .send_json(serde_json::json!({"v":1,"id":"tcp-only-status","method":"cli.exec","args":["status","--json"]}))
+        .send_json(serde_json::json!({"v":1,"id":"tcp-only-status","method":"cli.exec","args":["status","--json"],
+            "operation_id":"tcp-only-operation","idempotency_key":"tcp-only-operation",
+            "scope":{"account_id":identity["account_id"],"instance_id":identity["instance_id"],"generation":identity["generation"]}}))
         .map_err(|err| err.to_string())?.into_json().map_err(|err| err.to_string())?;
     assert_eq!(response["ok"], true, "{response}");
     let stop = Command::new(bin())
@@ -242,7 +286,8 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     assert!(
         stop.status.success(),
-        "{}",
+        "{} {}",
+        String::from_utf8_lossy(&stop.stdout),
         String::from_utf8_lossy(&stop.stderr)
     );
     let started = Instant::now();
@@ -390,6 +435,7 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests(
     let port = server.server_addr().to_ip().ok_or("no server port")?.port();
     let done = Arc::new(AtomicBool::new(false));
     let finished = Arc::clone(&done);
+    let health_body = fixture_health(dir.path());
     let worker = thread::spawn(move || -> Result<Vec<String>, String> {
         let mut paths = Vec::new();
         while !finished.load(Ordering::Acquire) {
@@ -407,11 +453,15 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests(
             }
             paths.push(request.url().to_owned());
             let response = if request.url() == "/api/health" {
-                serde_json::json!({"server":"respire","bin":"1.0.9","pid":1,"v":1})
+                health_body.clone()
             } else {
                 let body: serde_json::Value = serde_json::from_reader(request.as_reader())
                     .map_err(|error| error.to_string())?;
-                serde_json::json!({"v":1,"id":body["id"],"ok":true,"exit":0,"bin":"1.0.9",
+                if body["method"] == "cli.exec" {
+                    check_fixture_operation(&body)?;
+                }
+                serde_json::json!({"v":1,"id":body["id"],"ok":true,"exit":0,"bin":"http-fixture",
+                    "operation_id":body["operation_id"],"idempotency_key":body["idempotency_key"],"scope":body["scope"],
                     "envelope":{"command":"status","status":"ok","summary":{},"items":[],"actions":[],"errors":[],"details":null,"related":[]}})
             };
             request
@@ -449,7 +499,7 @@ fn client_sends_existing_token_on_initial_health_and_rpc_requests(
     Ok(())
 }
 
-/// New clients normalize old hosts' display-only failures without reclassifying exits.
+/// Legacy display envelopes still normalize under the current scoped transport.
 #[test]
 fn client_normalizes_legacy_failure_envelopes_and_preserves_remote_semantics(
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -471,11 +521,19 @@ fn client_normalizes_legacy_failure_envelopes_and_preserves_remote_semantics(
             .ok_or("no fixture port")?
             .port();
         let original_errors = errors.clone();
+        let health_body = fixture_health(dir.path());
         let worker = thread::spawn(move || -> Result<(), String> {
-            let mut request = server
-                .recv_timeout(Duration::from_secs(10))
-                .map_err(|error| error.to_string())?
-                .ok_or("legacy fixture received no request")?;
+            let mut request = loop {
+                let request = server
+                    .recv_timeout(Duration::from_secs(10))
+                    .map_err(|error| error.to_string())?
+                    .ok_or("legacy fixture received no request")?;
+                if request.url() != "/api/health" {
+                    break request;
+                }
+                request.respond(tiny_http::Response::from_string(health_body.to_string()))
+                    .map_err(|error| error.to_string())?;
+            };
             if request.url() != "/api/rpc" {
                 return Err("unexpected legacy fixture request".into());
             }
@@ -484,7 +542,9 @@ fn client_normalizes_legacy_failure_envelopes_and_preserves_remote_semantics(
             if body["method"] != "cli.exec" {
                 return Err("unexpected legacy fixture method".into());
             }
-            let response = serde_json::json!({"v":1,"id":body["id"],"ok":exit==0,"exit":exit,"bin":"1.0.9",
+            check_fixture_operation(&body)?;
+            let response = serde_json::json!({"v":1,"id":body["id"],"ok":exit==0,"exit":exit,"bin":"http-fixture",
+                "operation_id":body["operation_id"],"idempotency_key":body["idempotency_key"],"scope":body["scope"],
                 "envelope":{"command":"show","status":status,"summary":{"reason":reason},
                     "items":[{"name":"entry","status":"fail","value":"not found"}],
                     "actions":[],"errors":errors,"details":{"error_type":"legacy_fixture"},"related":[]}});
@@ -624,21 +684,31 @@ fn health_without_token_reports_bin() -> Result<(), String> {
 
 #[test]
 fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
-    let rt = start_internal_runtime()?;
+    let rt = start_scoped_runtime()?;
+    let health: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
+        .call().map_err(|err| err.to_string())?
+        .into_json().map_err(|err| err.to_string())?;
     let url = format!("http://127.0.0.1:{}/api/rpc", rt.port);
     let body = serde_json::json!({
         "v": 1,
         "id": "ci-status",
+        "operation_id": "ci-status-operation",
+        "idempotency_key": "ci-status-operation",
+        "scope": {"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]},
         "method": "cli.exec",
         "args": ["--json", "status"]
     });
     let resp = ureq::post(&url)
-        .send_json(body)
+        .send_json(body.clone())
         .map_err(|err| err.to_string())?;
     let parsed: serde_json::Value = resp.into_json().map_err(|err| err.to_string())?;
     if parsed["ok"] != true {
         return Err(format!("rpc {parsed}"));
     }
+    assert_eq!(parsed["id"], body["id"]);
+    assert_eq!(parsed["operation_id"], body["operation_id"]);
+    assert_eq!(parsed["idempotency_key"], body["idempotency_key"]);
+    assert_eq!(parsed["scope"], body["scope"]);
     if parsed["envelope"]["command"] != "status" {
         return Err(format!("envelope {parsed}"));
     }
@@ -657,7 +727,8 @@ fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
         .map_err(|err| err.to_string())?;
     if !output.status.success() {
         return Err(format!(
-            "client-only status failed: {}",
+            "client-only status failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         ));
     }
@@ -824,7 +895,7 @@ fn non_reading_peer_and_pipelined_responses_do_not_block_other_connections(
 
 #[test]
 fn rpc_memory_revision_is_read_only_and_model_free() -> Result<(), String> {
-    let rt = start_internal_runtime()?;
+    let rt = start_scoped_runtime()?;
     let mut baseline = None;
     for args in [
         vec!["memory-revision", "--json"],
