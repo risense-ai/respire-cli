@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, Context, Result};
 
 use crate::model_download::{download_with_fallback, remove_download_parts, DownloadTimeouts};
+use crate::model_asset_files::{file_url, replace_file};
 use crate::model_progress;
 use respire_app::memory::bge::{expand_home, model_files_present};
 
@@ -38,10 +39,7 @@ pub fn install_engines() -> Result<Vec<String>> {
     }
 }
 
-/// HuggingFace repo (where the ONNX actually lives, not the BAAI source repo).
-pub const MODEL_REPO: &str = "Xenova/bge-m3";
-/// Verified revision (this commit's tokenizer/onnx hashes match the local read-only model).
-pub const MODEL_REVISION: &str = "4de13258303883538bd53b696b452bf8099f0858";
+pub use crate::model_asset_files::{MODEL_REPO, MODEL_REVISION};
 const ONNX_SHA256: &str = "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d";
 const TOKENIZER_SHA256: &str = "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790";
 
@@ -153,41 +151,15 @@ fn install_variant_into(
     origins: &[String],
 ) -> Result<()> {
     let file = respire_app::memory::onnx::variant_file_name(variant.name);
-    std::fs::create_dir_all(&dest)?;
-    let tmp = variant_staging_dir(&dest);
-    std::fs::create_dir_all(tmp.join("onnx"))?;
-    let dest_path = dest.join(&file);
-    let tmp_path = tmp.join(&file);
-    if !variant_file_valid(&dest_path, variant)? {
-        // A verified leftover from an earlier attempt is published without
-        // re-downloading; only an unverified destination downloads.
-        if !variant_file_valid(&tmp_path, variant)? {
-            let sources = origins
-                .iter()
-                .map(|origin| file_url(origin, &file))
-                .collect::<Vec<_>>();
-            download_with_fallback(
-                &sources,
-                &tmp_path,
-                variant.sha256,
-                true,
-                DownloadTimeouts::default(),
-                pinned_size(variant.sha256),
-            )?;
-        }
-        std::fs::create_dir_all(dest.join("onnx"))?;
-        anyhow::ensure!(
-            variant_file_valid(&tmp_path, variant)?,
-            "downloaded variant size or checksum mismatch"
-        );
-        replace_file(&tmp_path, &dest_path)?;
-    }
-    anyhow::ensure!(
-        variant_file_valid(&dest_path, variant)?,
-        "BGE-M3 {} install is incomplete",
-        variant.name
-    );
-    Ok(())
+    crate::model_asset_files::install_variant_into(
+        variant.name,
+        &file,
+        variant.sha256,
+        variant.size,
+        pinned_size(variant.sha256),
+        dest,
+        origins,
+    )
 }
 
 /// Used by the runtime's reserved background operation after a source change.
@@ -484,40 +456,8 @@ fn cpu_ort_sources_from_setting(setting: &str) -> Result<Vec<String>> {
     }
 }
 
-fn file_url(origin: &str, rel: &str) -> String {
-    format!(
-        "{}/{}/resolve/{}/{}",
-        origin.trim_end_matches('/'),
-        MODEL_REPO,
-        MODEL_REVISION,
-        rel
-    )
-}
-
-fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    if to.exists() {
-        std::fs::remove_file(to)
-            .with_context(|| format!("cannot replace invalid file {}", to.display()))?;
-    }
-    std::fs::rename(from, to).with_context(|| format!("failed to place {}", to.display()))
-}
-
 fn m3_model_valid(path: &Path) -> Result<bool> {
     file_valid(path, ONNX_SHA256)
-}
-
-fn variant_staging_dir(dest: &Path) -> PathBuf {
-    dest.join(format!(".variants-{MODEL_REVISION}"))
-}
-
-fn variant_file_valid(
-    path: &Path,
-    variant: respire_app::memory::onnx::ModelVariant,
-) -> Result<bool> {
-    if !path.is_file() || path.metadata()?.len() != variant.size {
-        return Ok(false);
-    }
-    file_valid(path, variant.sha256)
 }
 
 fn pinned_size(expected: &str) -> Option<u64> {
@@ -607,33 +547,6 @@ mod tests {
         assert!(message.contains("model_fp16.onnx"), "{message}");
         assert!(message.contains("--model fp16"), "{message}");
         assert!(!message.contains("model_quantized.cpu-v1.ort"), "{message}");
-        Ok(())
-    }
-
-    #[test]
-    fn verified_variant_survives_base_cleanup_and_publishes_without_network() -> Result<()> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .map_err(|error| anyhow!("{error}"))?;
-        let dir = tempfile::tempdir()?;
-        let variant = respire_app::memory::onnx::ModelVariant {
-            name: "fp16",
-            size: 3,
-            sha256: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        };
-        let staging = variant_staging_dir(dir.path());
-        std::fs::create_dir_all(staging.join("onnx"))?;
-        std::fs::write(staging.join("onnx/model_fp16.onnx"), b"abc")?;
-        let base_staging = dir.path().join(format!(".download-{MODEL_REVISION}"));
-        std::fs::create_dir_all(&base_staging)?;
-        std::fs::remove_dir_all(base_staging)?;
-        install_variant_into(variant, dir.path(), &[])?;
-        install_variant_into(variant, dir.path(), &[])?;
-        assert_eq!(
-            std::fs::read(dir.path().join("onnx/model_fp16.onnx"))?,
-            b"abc"
-        );
-        assert!(!staging.join("onnx/model_fp16.onnx").exists());
         Ok(())
     }
 

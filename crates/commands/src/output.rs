@@ -722,6 +722,62 @@ mod tests {
             result.ensure_failure_diagnostics();
             assert!(result.errors.is_empty());
         }
+
+        let input = anyhow::Error::new(respire_client_host::input_error::InputError(
+            "fixture invalid input".to_owned(),
+        ))
+        .context("fixture input context");
+        let (failure, exit) = crate::output_emit::command_failure(&input);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 2);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"invalid_input"}));
+        assert_eq!(failure.details, serde_json::json!({"error_type":"user"}));
+        assert_eq!(failure.errors, [format!("{input:#}")]);
+
+        let runtime = anyhow::anyhow!("fixture runtime failure");
+        let (failure, exit) = crate::output_emit::command_failure(&runtime);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 1);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"runtime_error"}));
+        assert_eq!(failure.details, serde_json::json!({"error_type":"runtime"}));
+        assert_eq!(failure.errors, [format!("{runtime:#}")]);
+
+        let operation = crate::runtime_error::OperationContext {
+            scope: respire_protocol::RuntimeRequestScope {
+                account_id: "fixture-account".to_owned(),
+                instance_id: "fixture-instance".to_owned(),
+                generation: 7,
+            },
+            operation_id: "fixture-operation".to_owned(),
+            idempotency_key: "fixture-idempotency-key".to_owned(),
+        };
+        let unknown = anyhow::Error::new(crate::runtime_error::RuntimeError::OutcomeUnknown {
+            request_id: "fixture-request".to_owned(),
+            operation,
+            detail: "fixture response timeout".to_owned(),
+        })
+        .context("fixture transport context");
+        let (failure, exit) = crate::output_emit::command_failure(&unknown);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 1);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"request_outcome_unknown"}));
+        assert_eq!(failure.details, serde_json::json!({
+            "error_type":"outcome_unknown",
+            "request_id":"fixture-request",
+            "operation_id":"fixture-operation",
+            "idempotency_key":"fixture-idempotency-key",
+            "scope":{"account_id":"fixture-account","instance_id":"fixture-instance","generation":7},
+            "replayed":false,
+            "result_method":"runtime.result"
+        }));
+        assert_eq!(failure.errors, [format!("{unknown:#}")]);
+
+        for (status, expected) in [
+            (Status::Ok, 0), (Status::Skip, 0), (Status::Warn, 2),
+            (Status::Pending, 2), (Status::Fail, 1),
+        ] {
+            assert_eq!(crate::output_state::status_exit_code(status), expected);
+        }
     }
 
     #[test]

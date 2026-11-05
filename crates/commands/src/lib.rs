@@ -42,6 +42,7 @@ pub mod hooks;
 pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
+pub mod model_asset_files;
 pub mod model_download;
 #[cfg(feature = "server")]
 pub mod model_install;

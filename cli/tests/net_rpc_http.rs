@@ -10,6 +10,8 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+mod support;
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_rsrs")
 }
@@ -896,6 +898,7 @@ fn non_reading_peer_and_pipelined_responses_do_not_block_other_connections(
 #[test]
 fn rpc_memory_revision_is_read_only_and_model_free() -> Result<(), String> {
     let rt = start_scoped_runtime()?;
+    support::install_runtime_fixture(rt.dir.path()).map_err(|err| format!("{err:#}"))?;
     let mut baseline = None;
     for args in [
         vec!["memory-revision", "--json"],
@@ -907,6 +910,10 @@ fn rpc_memory_revision_is_read_only_and_model_free() -> Result<(), String> {
             .env("RSRS_DATA_DIR", rt.dir.path())
             .env("RSRS_RPC_PORT", rt.port.to_string())
             .env_remove("RSRS_RPC_TOKEN")
+            .env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_RUNTIME_BIN")
+            .env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
             .env("RSRS_JSON", "1")
             .output()
             .map_err(|err| err.to_string())?;
