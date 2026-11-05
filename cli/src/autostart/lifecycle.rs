@@ -288,6 +288,31 @@ impl Maintenance {
         Ok(())
     }
 
+    /// Bind the stopped owner's actual Paused marker without authorizing serving.
+    pub(crate) fn auth_launch_binding(&mut self, profile: &Path) -> Result<Option<Value>> {
+        let (root, selected) = respire_client_host::config::control_roots()?;
+        let root = root.canonicalize()?;
+        anyhow::ensure!(selected.canonicalize()? == profile,
+            "auth maintenance profile differs from the selected profile");
+        if let Some(config) = self.config.as_ref() {
+            owned(config)?;
+            anyhow::ensure!(config.installation == root, "auth maintenance installation changed");
+            let actual = marker(&root)?.context("auth maintenance marker is missing")?;
+            let held = self.marker.as_ref().context("auth maintenance ownership is missing")?;
+            anyhow::ensure!(actual.phase == Phase::Paused && held.phase == Phase::Paused
+                && actual.id == held.id && actual.token == held.token
+                && actual.owner_pid == std::process::id()
+                && current_boot_token().as_deref() == Some(held.token.as_str())
+                && hash(&fs::read(marker_path(&root))?) == self.marker_digest.as_deref()
+                    .context("auth maintenance digest is missing")?,
+                "auth maintenance owner or phase changed");
+            self.marker.as_mut().context("auth maintenance ownership is missing")?
+                .expected_profile = Some(profile.to_path_buf());
+            self.mark(Phase::Paused)?;
+        }
+        maintenance_binding(profile, None, true)
+    }
+
     pub(crate) fn drain_runtime(&self, health: &crate::net_rpc::Health) -> Result<()> {
         let Some(config) = self.config.as_ref() else {
             return crate::rpc::drain_occupant(health, Duration::from_secs(60));
@@ -401,6 +426,10 @@ pub(crate) fn authorize_detached_boot_locked() -> Result<()> {
 
 /// Export only an authorization binding; never forward the reusable maintenance token.
 pub(super) fn launch_maintenance_binding(profile: &Path, managed_id: Option<&str>) -> Result<Option<Value>> {
+    maintenance_binding(profile, managed_id, false)
+}
+
+fn maintenance_binding(profile: &Path, managed_id: Option<&str>, auth: bool) -> Result<Option<Value>> {
     let root = respire::service::main_data_dir();
     let Some(value) = marker(&root)? else {
         return Ok(None);
@@ -422,7 +451,8 @@ pub(super) fn launch_maintenance_binding(profile: &Path, managed_id: Option<&str
     anyhow::ensure!(
         serde_json::to_vec(&observed)? == serde_json::to_vec(&value)?
             && (managed_authorized || current_boot_token().as_deref() == Some(value.token.as_str()))
-            && matches!(value.phase, Phase::Starting | Phase::Verified)
+            && if auth { value.phase == Phase::Paused }
+                else { matches!(value.phase, Phase::Starting | Phase::Verified) }
             && value.expected_profile.as_deref() == Some(profile)
             && value.expected_version == env!("CARGO_PKG_VERSION")
             && controller_alive(&value)?,
@@ -1538,6 +1568,17 @@ mod tests {
             anyhow::ensure!(background_paused() && check_direct_access().is_err());
             ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
             check_direct_access()?;
+            let profile = dir.path().canonicalize()?;
+            if phase == Phase::Paused {
+                let binding = maintenance_binding(&profile, None, true)?
+                    .context("paused auth binding missing")?;
+                anyhow::ensure!(binding["marker_sha256"] == hash(&fs::read(&path)?));
+                anyhow::ensure!(launch_maintenance_binding(&profile, None).is_err());
+                anyhow::ensure!(maintenance_binding(&profile.join("foreign"), None, true).is_err());
+            } else {
+                anyhow::ensure!(maintenance_binding(&profile, None, true).is_err());
+                anyhow::ensure!(launch_maintenance_binding(&profile, None)?.is_some());
+            }
             // Owning the controller token never authorizes background threads.
             anyhow::ensure!(background_paused());
             std::env::set_var("RSRS_RUNTIME_BOOT_TOKEN", &value.token);

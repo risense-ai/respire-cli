@@ -43,6 +43,60 @@ pub fn session_user_of_dir(dir: &Path) -> Result<Option<String>> {
     }
 }
 
+/// Auth-only claims; an Unbound candidate is not authorized until Runtime checks
+/// its original transaction receipt and the persistent credential backend.
+#[derive(Clone, PartialEq, Eq)]
+pub enum AuthSessionIdentity {
+    Absent,
+    Unbound { operation_id: String, session_sha256: String },
+    Bound { account_id: String, session_sha256: String },
+}
+
+/// Hash the original file bytes, not a reserialized session. No keys are unlocked.
+pub fn auth_session_identity(
+    dir: &Path,
+    sha256: impl Fn(&[u8]) -> String,
+) -> Result<AuthSessionIdentity> {
+    let path = dir.join("session.json");
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(AuthSessionIdentity::Absent);
+        }
+        Err(error) => return Err(error).context("auth session identity is unavailable"),
+        Ok(_) => {}
+    }
+    let bytes = read_identity_record(&path)?;
+    let session: Value = serde_json::from_slice(&bytes).context("invalid auth session JSON")?;
+    let object = session.as_object().context("auth session must be an object")?;
+    if let Some(user) = object.get("user") {
+        let user = user.as_str().filter(|user| !user.is_empty())
+            .context("bound auth session needs a nonempty user")?;
+        return Ok(AuthSessionIdentity::Bound {
+            account_id: sha256(user.as_bytes()),
+            session_sha256: sha256(&bytes),
+        });
+    }
+    let fields = ["kdf_salt", "wrapped_urk", "urk_nonce", "keyring_account",
+        "keyring_backend", "auth_operation_id"];
+    anyhow::ensure!(object.len() == 7 && session["vault_version"] == 4
+        && fields.iter().all(|field| session[*field].as_str().is_some_and(|value| !value.is_empty())),
+        "unbound auth session must be an exact keygen candidate");
+    anyhow::ensure!(session["keyring_backend"] != "kernel",
+        "unbound auth requires a persistent credential backend");
+    let operation_id = session["auth_operation_id"].as_str()
+        .context("unbound auth operation ID is missing")?;
+    let id = operation_id.as_bytes();
+    anyhow::ensure!(id.len() == 36 && id[14] == b'4' && b"89ab".contains(&id[19])
+        && id.iter().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) { *byte == b'-' }
+            else { byte.is_ascii_digit() || (b'a'..=b'f').contains(byte) }
+        }), "unbound auth operation ID must be a canonical random UUID");
+    Ok(AuthSessionIdentity::Unbound {
+        operation_id: operation_id.to_owned(),
+        session_sha256: sha256(&bytes),
+    })
+}
+
 // Keep the launch/recovery record boundary, including checking every ancestor.
 fn read_identity_record(path: &Path) -> Result<Vec<u8>> {
     for ancestor in path.ancestors() {

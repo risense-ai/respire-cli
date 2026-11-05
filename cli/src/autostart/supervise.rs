@@ -13,6 +13,9 @@ use super::{lifecycle, read_registration, Registration};
 
 #[path = "launch_authorization.rs"]
 mod launch_authorization;
+pub(crate) use launch_authorization::control::{
+    auth_keygen_locked, auth_result_locked, AuthOutcomeUnknown,
+};
 
 /// Delay between a failed child attempt and the next start.
 const RESTART_DELAY: Duration = Duration::from_secs(60);

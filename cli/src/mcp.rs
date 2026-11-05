@@ -1,12 +1,13 @@
 //! MCP server: stdio JSON-RPC and HTTP/SSE helpers used by the authenticated runtime.
 //!
-//! Tool calls go through the resident runtime (`rpc::query_json`). This process
-//! never `spawn`s another `rsrs` to re-invoke the CLI. `current_exe` is only
+//! Stdio tool calls use Runtime RPC; Runtime HTTP handlers keep their local queue.
+//! Neither path spawns another `rsrs` to re-invoke the CLI. `current_exe` is only
 //! used to copy the native binary into `<data_dir>/bin`. Spec: 2025-03-26.
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 
 use crate::rpc;
@@ -805,6 +806,23 @@ fn ensure_envelope(value: &serde_json::Value) -> Result<(), String> {
 }
 
 fn invoke_cli(args: Vec<String>) -> Result<serde_json::Value, String> {
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("--json".to_owned());
+    full.extend(args);
+    // The stdio frontend must not enter the Runtime's in-process job queue.
+    let response = rpc::call_method("cli.exec", full, true).map_err(|err| err.to_string())?;
+    if let Some(mut envelope) = response.envelope {
+        envelope.ensure_failure_diagnostics();
+        return serde_json::to_value(envelope)
+            .context("runtime envelope could not be encoded")
+            .map_err(|err| err.to_string());
+    }
+    Err(response
+        .error
+        .unwrap_or_else(|| "runtime returned an empty response".to_owned()))
+}
+
+fn invoke_runtime_cli(args: Vec<String>) -> Result<serde_json::Value, String> {
     rpc::query_json(args).map_err(|err| err.to_string())
 }
 
@@ -909,7 +927,7 @@ fn handle_rpc_with(
 
 fn handle_rpc_live(req: &serde_json::Value) -> Option<serde_json::Value> {
     match ToolPolicy::from_env() {
-        Ok(policy) => handle_rpc_with(req, &invoke_cli, &policy, ServiceAccess::current()),
+        Ok(policy) => handle_rpc_with(req, &invoke_runtime_cli, &policy, ServiceAccess::current()),
         Err(message) => req.get("id").map(|id| {
             serde_json::json!({
                 "jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}
@@ -1149,10 +1167,38 @@ mod tests {
     #[test]
     fn source_does_not_reinvoke_cli_binary() -> Result<(), String> {
         let src = include_str!("mcp.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let (prod, _) = src
+            .split_once("\nmod tests {")
+            .ok_or("missing MCP test-module boundary")?;
         if prod.contains("spawnSync") || prod.contains("std::process::Command") {
             return Err("production mcp.rs must not spawn a CLI process".to_owned());
         }
+        let section = |start: &str, end: &str| -> Result<String, String> {
+            prod.split_once(start)
+                .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
+                .map(|body| body.split_whitespace().collect())
+                .ok_or_else(|| format!("missing MCP source section: {start}"))
+        };
+        let stdio = section("fn invoke_cli(", "fn invoke_runtime_cli(")?;
+        let runtime = section("fn invoke_runtime_cli(", "fn call_tool(")?;
+        let http = section("fn handle_rpc_live(", "#[cfg(test)]")?;
+        let serve = section("pub fn serve(", "#[cfg(test)]")?;
+        assert!(stdio.contains("rpc::call_method(\"cli.exec\",full,true)"));
+        assert!(!stdio.contains("rpc::query_json(") && !stdio.contains("execute_json("));
+        assert!(serve.contains(
+            "handle_rpc_with(&req,&invoke_cli,&policy,ServiceAccess::current())"
+        ));
+        assert!(!serve.contains("&invoke_runtime_cli"));
+        assert!(http.contains(
+            "handle_rpc_with(req,&invoke_runtime_cli,&policy,ServiceAccess::current())"
+        ));
+        assert!(!http.contains("&invoke_cli,"));
+        assert!(runtime.contains("rpc::query_json(args)"));
+        assert!(
+            !runtime.contains("rpc::call_method(")
+                && !runtime.contains("net_rpc::")
+                && !runtime.contains("invoke_cli(")
+        );
         Ok(())
     }
 

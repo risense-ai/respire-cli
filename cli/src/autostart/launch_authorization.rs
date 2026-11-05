@@ -3,6 +3,9 @@ use super::super::{
     lifecycle, private_write, read_registration, recovery::account_identity_source,
 };
 use anyhow::{Context, Result};
+
+#[path = "control.rs"]
+pub(crate) mod control;
 use respire_commands::output::{ResultEnvelope, Status};
 use respire_protocol::{
     ControlBinding, HostControlLaunchGrant, HostControlOperation, HostControlParams, RpcRequest,
@@ -57,6 +60,19 @@ fn prepare_grant(
     port: u16,
 ) -> Result<(serde_json::Value, String)> {
     let maintenance = lifecycle::launch_maintenance_binding(profile, managed_id)?;
+    let account_id = hash(account_identity_source(profile)?.as_bytes());
+    prepare_grant_for_identity(binary, root, profile, managed_id, port, &account_id, maintenance)
+}
+
+fn prepare_grant_for_identity(
+    binary: &Path,
+    root: &Path,
+    profile: &Path,
+    managed_id: Option<&str>,
+    port: u16,
+    account_id: &str,
+    maintenance: Option<serde_json::Value>,
+) -> Result<(serde_json::Value, String)> {
     let registration = read_registration(root)?;
     if let Some(config) = &registration {
         lifecycle::owned(config)?;
@@ -95,16 +111,15 @@ fn prepare_grant(
     let expires_at_ms = issued_at_ms
         .checked_add(60_000)
         .context("launch expiry overflow")?;
-    let account_source = account_identity_source(profile)?;
     let grant = json!({
         "schema_version": 1,
-        "protocol_version": respire_commands::rpc_worker::PROTOCOL_V,
+        "protocol_version": respire_commands::rpc_client::PROTOCOL_V,
         "nonce": nonce,
         "instance_id": nonce,
         "installation_root": root,
         "installation_id": hash(root.display().to_string().as_bytes()),
         "profile": profile,
-        "account_id": hash(account_source.as_bytes()),
+        "account_id": account_id,
         // Phase one starts a fresh worker; this is not a persistent owner generation.
         "sync_generation": 0,
         "image_path": binary,
@@ -134,9 +149,9 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
             && hash_file(&binary)?.eq_ignore_ascii_case(&manifest.sha256),
         "host control Runtime version or image does not match the managed manifest"
     );
-    let roots = respire::service::resolved_roots()?;
-    let root = roots.installation_root.canonicalize()?;
-    let profile = roots.account_data_root.canonicalize()?;
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
     let registration = read_registration(&root)?;
     let managed_id = registration
         .as_ref()
@@ -173,7 +188,7 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
         },
     };
     let request = RpcRequest {
-        v: respire_commands::rpc_worker::PROTOCOL_V,
+        v: respire_commands::rpc_client::PROTOCOL_V,
         id: uuid::Uuid::new_v4().to_string(),
         method: HostControlOperation::MemoryRevision.method().to_owned(),
         args: vec![serde_json::to_string(&params)?],
@@ -184,6 +199,18 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
         queue_wait_ms: None,
         lifecycle: None,
     };
+    exchange_control(&binary, &grant, &request, deadline, |response, pid| {
+        validate_control_response(response, &request, &profile, pid)
+    })
+}
+
+fn exchange_control(
+    binary: &Path,
+    grant: &HostControlLaunchGrant,
+    request: &RpcRequest,
+    deadline: Instant,
+    validate: impl FnOnce(RpcResponse<ResultEnvelope>, u32) -> Result<ResultEnvelope>,
+) -> Result<ResultEnvelope> {
     let mut frames = Vec::new();
     for bytes in [serde_json::to_vec(&grant)?, serde_json::to_vec(&request)?] {
         anyhow::ensure!(
@@ -257,7 +284,9 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
             Instant::now() < deadline,
             "host control response deadline exceeded"
         );
-        let envelope = validate_control_response(response?, &request, &profile, child.id())?;
+        let response = response?;
+        let expected_exit = response.exit;
+        let envelope = validate(response, child.id())?;
         loop {
             anyhow::ensure!(
                 Instant::now() < deadline,
@@ -265,8 +294,8 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
             );
             if let Some(status) = child.try_wait()? {
                 anyhow::ensure!(
-                    status.success(),
-                    "host control Runtime exited unsuccessfully"
+                    status.code() == Some(expected_exit),
+                    "host control Runtime exit does not match its response"
                 );
                 return Ok(envelope);
             }
@@ -416,12 +445,12 @@ fn validate_control_response(
 
 fn prepare_launch_roots() -> Result<(std::path::PathBuf, std::path::PathBuf)> {
     // Resolve strict configuration and reject parent traversal before creating roots.
-    let roots = respire::service::resolved_roots()?;
-    fs::create_dir_all(&roots.installation_root)?;
-    fs::create_dir_all(&roots.account_data_root)?;
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(&profile)?;
     Ok((
-        roots.installation_root.canonicalize()?,
-        roots.account_data_root.canonicalize()?,
+        root.canonicalize()?,
+        profile.canonicalize()?,
     ))
 }
 
@@ -492,6 +521,9 @@ mod tests {
         std::env::set_var("RSRS_DATA_DIR", &root);
         std::env::set_var("RSRS_M3_DIR", temporary.path().join("models"));
         assert!(!root.exists());
+        let read_roots = respire_client_host::config::control_roots()?;
+        assert_eq!(read_roots, (std::path::absolute(&root)?, std::path::absolute(&root)?));
+        assert!(!root.exists());
         let (installation, profile) = prepare_launch_roots()?;
         assert_eq!(installation, root.canonicalize()?);
         assert_eq!(profile, installation);
@@ -499,6 +531,10 @@ mod tests {
 
         let account = root.join("accounts/fresh profile");
         let config = root.join("client.json");
+        let outside = temporary.path().join("outside installation");
+        fs::write(&config, serde_json::to_vec(&json!({"data_dir": outside}))?)?;
+        assert_eq!(respire_client_host::config::control_roots()?.1, std::path::absolute(&root)?);
+        assert!(!outside.exists());
         fs::write(&config, serde_json::to_vec(&json!({"data_dir": account}))?)?;
         let (_, profile) = prepare_launch_roots()?;
         assert_eq!(profile, account.canonicalize()?);
@@ -515,13 +551,85 @@ mod tests {
             assert!(account_identity_source(&profile).is_err());
             assert_eq!(fs::read_to_string(&session)?, invalid);
         }
+        use respire_client_host::identity::{auth_session_identity, AuthSessionIdentity};
+        fs::remove_file(&session)?;
+        assert!(matches!(auth_session_identity(&profile, hash)?, AuthSessionIdentity::Absent));
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let candidate = serde_json::to_vec_pretty(&json!({
+            "vault_version": 4, "kdf_salt": "fixture-salt", "wrapped_urk": "fixture-wrap",
+            "urk_nonce": "fixture-nonce", "keyring_account": "fixture-alias",
+            "keyring_backend": "native", "auth_operation_id": operation_id,
+        }))?;
+        fs::write(&session, &candidate)?;
+        assert!(matches!(auth_session_identity(&profile, hash)?,
+            AuthSessionIdentity::Unbound { operation_id: id, session_sha256 }
+                if id == operation_id && session_sha256 == hash(&candidate)));
+        assert!(account_identity_source(&profile).is_err());
+        for invalid in ["{}", "{", r#"{"user":null}"#, r#"{"user":""}"#] {
+            fs::write(&session, invalid)?;
+            assert!(auth_session_identity(&profile, hash).is_err());
+        }
+        fs::write(&session, br#"{"user":"Fixture-Account"}"#)?;
+        assert!(matches!(auth_session_identity(&profile, hash)?,
+            AuthSessionIdentity::Bound { account_id, session_sha256 }
+                if account_id == hash(b"Fixture-Account")
+                    && session_sha256 == hash(br#"{"user":"Fixture-Account"}"#)));
+        fs::write(&session, &candidate)?;
+        let auth_request: RpcRequest = serde_json::from_value(json!({
+            "v": respire_commands::rpc_client::PROTOCOL_V,
+            "id": uuid::Uuid::new_v4().to_string(),
+            "method": respire_protocol::HOST_AUTH_KEYGEN_METHOD,
+            "operation_id": operation_id, "idempotency_key": operation_id,
+        }))?;
+        let auth_pid = 4243;
+        let auth_response: RpcResponse<ResultEnvelope> = serde_json::from_value(json!({
+            "v": auth_request.v, "id": auth_request.id,
+            "operation_id": operation_id, "idempotency_key": operation_id,
+            "bin": "rsrs-runtime", "pid": auth_pid, "ok": true, "exit": 0,
+            "envelope": ResultEnvelope::new("keygen", Status::Ok,
+                json!({"operation_id": operation_id, "outcome": "committed",
+                    "session_sha256": hash(&candidate), "path": session,
+                    "super_password": "synthetic-private-code"}),
+                vec![respire_commands::output::Item::new("control_ready", Status::Ok, "true"),
+                    respire_commands::output::Item::new("store_ready", Status::Skip, "false")]),
+        }))?;
+        assert!(control::validate_auth_response(auth_response.clone(), &auth_request, &profile, auth_pid).is_ok());
+        for missing in [serde_json::Value::Null, json!("")] {
+            let mut invalid = auth_response.clone();
+            invalid.envelope.as_mut().context("auth fixture envelope missing")?
+                .summary["super_password"] = missing;
+            assert!(control::validate_auth_response(invalid, &auth_request, &profile, auth_pid).is_err());
+        }
+        let mut missing = auth_response.clone();
+        missing.envelope.as_mut().context("auth fixture envelope missing")?
+            .summary.as_object_mut().context("auth fixture summary missing")?
+            .remove("super_password");
+        assert!(control::validate_auth_response(missing, &auth_request, &profile, auth_pid).is_err());
+        let mut foreign = auth_response.clone();
+        foreign.operation_id = Some(uuid::Uuid::new_v4().to_string());
+        assert!(control::validate_auth_response(foreign, &auth_request, &profile, auth_pid).is_err());
+        let mut rolled_back = auth_response.clone();
+        rolled_back.ok = false;
+        rolled_back.exit = 2;
+        rolled_back.code = Some("auth_not_committed".to_owned());
+        let envelope = rolled_back.envelope.as_mut().context("auth fixture envelope missing")?;
+        envelope.status = Status::Fail;
+        envelope.summary["outcome"] = json!("rolled_back");
+        envelope.summary["session_sha256"] = serde_json::Value::Null;
+        envelope.summary["super_password"] = serde_json::Value::Null;
+        assert!(control::validate_auth_response(rolled_back, &auth_request, &profile, auth_pid).is_ok());
+        let mut unknown = auth_response;
+        unknown.ok = false;
+        unknown.exit = 2;
+        unknown.code = Some("control_outcome_unknown".to_owned());
+        assert!(control::validate_auth_response(unknown, &auth_request, &profile, auth_pid).is_err());
         fs::remove_file(&session)?;
         fs::create_dir(&session)?;
         assert!(account_identity_source(&profile).is_err());
         fs::remove_dir(&session)?;
 
         let request: RpcRequest = serde_json::from_value(json!({
-            "v": respire_commands::rpc_worker::PROTOCOL_V,
+            "v": respire_commands::rpc_client::PROTOCOL_V,
             "id": uuid::Uuid::new_v4().to_string(),
             "method": HostControlOperation::MemoryRevision.method(),
         }))?;

@@ -279,7 +279,13 @@ fn run_extract_tui() -> Result<()> {
     );
     // Finish host lifecycle work before the UI enters raw terminal mode.
     rpc::ensure_daemon()?;
-    respire::extract_tui::run()
+    respire::extract_tui::run(|full| {
+        let response = rpc::call_method("cli.exec", full, false)?;
+        anyhow::ensure!(response.ok && response.exit == 0,
+            "extract sources failed: {}",
+            response.error.as_deref().unwrap_or("Runtime source query failed"));
+        response.envelope.context("extract sources: Runtime response missing envelope")
+    })
 }
 
 fn run_passport() -> Result<()> {
@@ -2388,6 +2394,17 @@ mod capture_tests {
             Some(super::Command::MemoryRevision)
         ));
         assert!(!super::is_write_command(&super::Command::MemoryRevision));
+        for (args, writes) in [
+            (&["rsrs", "extract", "--targets"][..], false),
+            (&["rsrs", "extract", "--targets", "--all"][..], false),
+            (&["rsrs", "extract", "--id", "codex"][..], true),
+        ] {
+            let parsed = super::Cli::try_parse_from(args.iter().copied())?;
+            let extract = parsed.command.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("extract command missing"))?;
+            assert_eq!(super::is_write_command(extract), writes);
+            assert_eq!(super::is_off_allowed(extract), !writes);
+        }
         assert!(!super::is_write_command(&super::Command::Taxonomy {
             list: true,
             ensure: None
