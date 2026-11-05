@@ -46,7 +46,6 @@ pub mod model_download;
 #[cfg(feature = "server")]
 pub mod model_install;
 pub mod model_progress;
-#[cfg(feature = "server")]
 pub mod net_rpc;
 #[cfg(feature = "server")]
 pub mod network;
@@ -60,6 +59,7 @@ pub mod progress;
 #[cfg(feature = "server")]
 pub mod recall_select;
 pub mod review;
+pub mod rpc_client;
 #[cfg(feature = "server")]
 pub mod rpc_serve;
 #[cfg(feature = "server")]
@@ -67,7 +67,6 @@ pub mod rpc_worker;
 pub mod runtime_error;
 #[cfg(feature = "server")]
 pub mod runtime_http;
-#[cfg(feature = "server")]
 pub mod runtime_policy;
 #[cfg(feature = "server")]
 pub mod skill;

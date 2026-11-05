@@ -118,7 +118,7 @@ fn read_token() -> Result<Option<String>> {
         return Ok(Some(token));
     }
     read_token_file(
-        &respire_app::service::data_dir()
+        &respire_client_host::paths::legacy_token_data_dir()
             .join("runtime")
             .join("token"),
     )
@@ -475,7 +475,7 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
 
 pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequestScope> {
     anyhow::ensure!(
-        health.v == crate::rpc_worker::PROTOCOL_V
+        health.v == crate::rpc_client::PROTOCOL_V
             && !health.account_id.is_empty()
             && !health.instance_id.is_empty()
             && health.generation > 0
@@ -524,7 +524,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     }
     // Native inference stays inside the runtime. Tracking IDs are values, not
     // command words, and longer write budgets never authorize a request replay.
-    let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
+    let command: Vec<_> = crate::rpc_client::command_words(args).take(2).collect();
     if matches!(
         command.as_slice(),
         ["model", "install" | "install-m3" | "activate"]
@@ -584,7 +584,7 @@ fn rpc_request(
         }
     };
     let body = json!({
-        "v": crate::rpc_worker::PROTOCOL_V,
+        "v": crate::rpc_client::PROTOCOL_V,
         "id": request_id.clone(),
         "operation_id": operation_id,
         "idempotency_key": idempotency_key,
@@ -639,7 +639,7 @@ fn validate_rpc_response(
         let header: respire_protocol::RpcResponse<crate::output::ResultEnvelope> =
             serde_json::from_value(response.clone()).context("malformed runtime RPC response")?;
         anyhow::ensure!(
-            header.v == crate::rpc_worker::PROTOCOL_V
+            header.v == crate::rpc_client::PROTOCOL_V
                 && header.id == request_id
                 && header.code.as_deref() != Some("protocol_version_mismatch"),
             "runtime RPC response request ID or protocol version mismatch"
@@ -1388,14 +1388,17 @@ mod tests {
                         "ambiguous transport failure was not marked outcome_unknown: {error}"
                     ),
                 };
-                let (failure, _) = crate::output_emit::command_failure(&error);
-                anyhow::ensure!(
-                    failure.details["scope"] == serde_json::to_value(&operation.scope)?
-                        && failure.details["operation_id"] == operation.operation_id
-                        && failure.details["idempotency_key"] == operation.idempotency_key
-                        && failure.details["replayed"] == false,
-                    "outcome_unknown output lost the original operation context"
-                );
+                #[cfg(feature = "server")]
+                {
+                    let (failure, _) = crate::output_emit::command_failure(&error);
+                    anyhow::ensure!(
+                        failure.details["scope"] == serde_json::to_value(&operation.scope)?
+                            && failure.details["operation_id"] == operation.operation_id
+                            && failure.details["idempotency_key"] == operation.idempotency_key
+                            && failure.details["replayed"] == false,
+                        "outcome_unknown output lost the original operation context"
+                    );
+                }
                 anyhow::ensure!(
                     rpc_method("runtime.result", vec![operation.operation_id.clone()]).is_err(),
                     "result query without original context must fail before contacting runtime"

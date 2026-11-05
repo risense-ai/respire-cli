@@ -139,6 +139,14 @@ pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
     }
 }
 
+/// Legacy token lookup retains the service's permissive config-read behavior.
+pub fn legacy_token_data_dir() -> PathBuf {
+    let config = std::fs::read_to_string(client_config_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    data_dir_from_config(config.as_ref())
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {
