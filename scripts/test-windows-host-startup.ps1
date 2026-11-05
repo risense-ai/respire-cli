@@ -1,6 +1,7 @@
-<# Actual Windows Task Scheduler sign-in action against a disposable off-mode profile.
+<# Manually invoke a Windows Task Scheduler sign-in action against a disposable off-mode profile.
    Never installs startup on a user's computer. Intended for the manual hosted CI job.
    No account, keyring, model download, password, elevation or persistent credential.
+   Does not exercise an actual logon or establish G1 acceptance.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Executable,
@@ -146,7 +147,7 @@ try {
     $healthUrl = "http://127.0.0.1:$runtimePort/api/health"
     if ($null -ne (FindFixtureTask)) { throw 'Refusing to replace an existing task' }
     $startupCode = (EnvironmentPrefix) + "`n& " + (Literal $nativeExecutable) +
-        ' status --json | Out-File -Encoding utf8 -LiteralPath ' + (Literal $statusFile) + "`nexit `$LASTEXITCODE"
+        ' runtime start --json | Out-File -Encoding utf8 -LiteralPath ' + (Literal $statusFile) + "`nexit `$LASTEXITCODE"
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($startupCode))
     $startupAction = New-ScheduledTaskAction -Execute $powershell -Argument "-NoProfile -NonInteractive -EncodedCommand $encoded"
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.User.Value
@@ -196,8 +197,19 @@ try {
         }
         Start-Sleep -Milliseconds 100
     }
-    if (-not $runtimeOwned -or $null -eq $status) { throw 'Scheduled host startup did not become ready' }
-    if ($status.command -ne 'status' -or $status.status -notin @('ok', 'skip')) { throw 'Scheduled host command did not complete successfully' }
+    if (-not $runtimeOwned -or $null -eq $status) {
+        try {
+            $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\' -ErrorAction Stop
+            Write-Output (@{stage = 'startup-timeout'; runtime_identity_verified = $runtimeOwned;
+                result_file_exists = (Test-Path -LiteralPath $statusFile); result_parsed = ($null -ne $status);
+                task_state = [string](FindFixtureTask).State; last_task_result = [long]$taskInfo.LastTaskResult} | ConvertTo-Json -Compress)
+        } catch { Write-Warning 'Startup task diagnostics unavailable; original timeout retained' }
+        throw 'Scheduled host startup did not become ready'
+    }
+    if ($status.command -ne 'runtime.start' -or $status.status -ne 'ok' -or
+        $status.summary.runtime.running -ne $true -or $status.summary.runtime.pid -ne $health.pid) {
+        throw 'Scheduled host start did not verify the observed runtime owner'
+    }
     $runtimePid = $health.pid
     $denied = InvokeFixture '--client-only --runtime-internal --stop --json'
     if ($denied.exit -eq 0 -or ($denied.output | ConvertFrom-Json).status -ne 'fail') { throw 'Client-only lifecycle command was accepted' }
@@ -236,5 +248,6 @@ if ($validationPassed) {
     Write-Output (@{result = 'PASS'; profile = 'isolated synthetic off-mode'; sign_in_trigger = $true;
         limited_interactive_principal = $true; host_startup = $true; client_only_stop_denied = $true;
         task_removed = $true; runtime_stopped = $true; encoded_command_case_guard = $true;
+        task_action_invocation = 'manual'; real_logon_tested = $false; g1_acceptance = $false;
         physical_reboot_tested = $false} | ConvertTo-Json -Compress)
 }

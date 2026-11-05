@@ -233,8 +233,12 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Include the raw source log and candidate-bound reports without dropping existing evidence.
-  assert.equal(uploads, 53, 'preserve publication evidence and both source-report uploads');
+  // Intel dev.5 import is deferred; all seven current imports and source reports remain.
+  assert.equal(uploads, 52, 'preserve seven-platform publication evidence and both source-report uploads');
+  const release = readFileSync(new URL('release.yml', root), 'utf8');
+  const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
+  const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
+  assert.deepEqual(imported.sort(), manifest.targets.map(target => target.triple).sort());
   const ci = readFileSync(new URL('ci.yml', root), 'utf8');
   assert.match(ci, /name: required-tests-raw-cli-core-/);
   assert.match(ci, /name: required-tests-report-/);

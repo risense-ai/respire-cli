@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod autostart;
 mod classify_config;
+mod doctor;
 mod host_rpc;
 mod login;
 mod mcp;
@@ -92,6 +93,15 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
     match args.command.as_ref() {
+        Some(Command::Prompt) => {
+            let text = respire::inject::INSTRUCTIONS_MD;
+            Some(emit_result(ResultEnvelope::new(
+                "prompt",
+                OutputStatus::Ok,
+                serde_json::json!({"instructions":text}),
+                vec![OutputItem::new("instructions", OutputStatus::Ok, text)],
+            )))
+        }
         Some(Command::Keygen { pass, force }) => Some(run_keygen(pass.as_deref(), *force)),
 
         Some(Command::Inject {
@@ -1315,6 +1325,7 @@ fn main_body() -> i32 {
                             Command::MemoryRevision
                                 | Command::Capabilities
                                 | Command::Runtime { .. }
+                                | Command::Doctor { .. }
                         )
                     ) =>
                 {
@@ -1550,6 +1561,20 @@ fn run(args: Cli) -> Result<()> {
     // in-process capture callers reach run() without main(), so wire them
     // idempotently here too (the first installation always wins).
     let _ = install_cli_host_hooks();
+    if let Some(Command::Doctor {
+        remote,
+        check_update,
+        fix,
+    }) = args.command.as_ref()
+    {
+        if !rpc::worker_active() {
+            set_json_mode(
+                args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+            );
+            let _progress = progress::Scope::start(args.progress_id.clone(), !json_mode(), true);
+            return doctor::run(*remote, *check_update, *fix);
+        }
+    }
     if let Some(Command::Runtime { command }) = args.command.as_ref() {
         return autostart::execute(command);
     }
@@ -1907,11 +1932,6 @@ fn run(args: Cli) -> Result<()> {
     if rpc::worker_active() {
         return run_local(args);
     }
-    // Identity and device ownership never belong to Runtime RPC. Run these
-    // host commands locally, even when a resident Runtime is already installed.
-    if let Some(outcome) = host_command(&args) {
-        return outcome;
-    }
     if let Some(Command::Restart { timeout }) = args.command.as_ref() {
         let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
         return emit_result(ResultEnvelope::new(
@@ -2035,6 +2055,11 @@ fn run(args: Cli) -> Result<()> {
         let result = CAPTURED.with(|slot| slot.borrow_mut().take());
         switched?;
         return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
+    }
+    // Profile mutations must finish the host drain/restart transaction above.
+    // Other host commands never belong to Runtime business RPC.
+    if let Some(outcome) = host_command(&args) {
+        return outcome;
     }
     if DIRECT_MODE.load(Ordering::Relaxed) {
         // Deprecated downgrade: --direct used to bypass the resident runtime.

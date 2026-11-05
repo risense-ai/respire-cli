@@ -1,5 +1,21 @@
 # G1 execution evidence v2
 
+Ordinary source CI does not request a frozen candidate and therefore skips only
+the candidate-specific `required-tests` job. Its workspace tests, three coverage
+groups, 90% coverage threshold and independent contracts must still pass. If any
+candidate input is supplied, report verification is mandatory; partial inputs,
+missing reports, failed verification or a skipped verifier fail the aggregate.
+Candidate inputs cannot be combined with research, published-native, artifact or
+version-upgrade focused modes. The strict verifier and its required registry
+entries remain mandatory; no missing-report exception is permitted.
+A successful source CI run is not G1 acceptance. CLI 1.0.21-dev.5 defers Intel
+macOS and releases seven platforms. Historical candidates used eight targets;
+current release acceptance uses seven, with Intel macOS deferred. This scope
+change does not certify a candidate or complete G1; real current-scope execution
+evidence is still required. Release planning rejects `latest` and `stable`
+channels until complete G1 verification is implemented and separately authorized.
+DEV publication retains its exact-source CI and seven real native gates.
+
 This format is a contract, not a frozen candidate or an execution result.
 Candidate schema 1 and required-execution/v1 reports are rejected. The registry
 itself stays schema 1; every entry uses `report_schema: required-execution/v2`.

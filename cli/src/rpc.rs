@@ -887,14 +887,18 @@ fn wait_daemon_ready(
     executable: &std::path::Path,
     instance_id: Option<&str>,
 ) -> Result<()> {
+    let off_mode = respire::service::off_mode();
+    let mut last_store_ready = None;
     let deadline = Instant::now() + START_WAIT * START_POLLS as u32;
     while Instant::now() < deadline {
         std::thread::sleep(START_WAIT);
         if let Some(status) = child.try_wait()? {
-            bail!("host runtime exited before readiness: {status}");
+            bail!("host runtime exited before readiness: {status} (off_mode={off_mode}, last_store_ready={last_store_ready:?})");
         }
         if let Some(health) = probe_runtime()? {
-            if !health.store_ready {
+            last_store_ready = Some(health.store_ready);
+            // Off mode deliberately leaves the store closed; owner checks still apply.
+            if !health.store_ready && !off_mode {
                 continue;
             }
             let birth = crate::autostart::process_birth(child.id())?
@@ -928,7 +932,7 @@ fn wait_daemon_ready(
             return Ok(());
         }
     }
-    bail!("host runtime did not become ready")
+    bail!("host runtime did not become ready (off_mode={off_mode}, last_store_ready={last_store_ready:?})")
 }
 
 #[cfg(test)]

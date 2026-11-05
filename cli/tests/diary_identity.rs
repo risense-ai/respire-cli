@@ -1,11 +1,14 @@
 //! Actual client-only commands against a fresh synthetic runtime and local library.
 //! No real account, keyring, model download, or remote memory service is used.
-//! The CLI shim is explicitly selected; this suite is not standalone G1 evidence.
+//! Supply RSRS_RUNTIME_BIN or a neighboring standalone Runtime bundle.
+//! These synthetic business regressions alone are not standalone G1 evidence.
 use anyhow::Context;
 use respire::memory::{crypto, search::HashingEmbedder};
 use respire::transport::local::LocalStore;
 use respire::{MemoryEngine, MemoryEntry, MemoryTransport, SessionKeys, StoredMemory};
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output};
 use std::time::Duration;
 
@@ -15,12 +18,33 @@ struct Fixture {
     secret: String,
     keys: SessionKeys,
     child: Option<Child>,
+    runtime: PathBuf,
+    runtime_owner: RefCell<Option<Value>>,
     extra_env: Vec<(&'static str, String)>,
 }
 
 impl Fixture {
     /// Create an isolated local vault containing only deterministic synthetic keys.
     fn new() -> anyhow::Result<Self> {
+        let runtime = std::env::var_os("RSRS_RUNTIME_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_BIN_EXE_rsrs")).with_file_name(if cfg!(windows) {
+                    "rsrs-runtime.exe"
+                } else {
+                    "rsrs-runtime"
+                })
+            });
+        anyhow::ensure!(
+            runtime.is_file(),
+            "standalone Runtime fixture missing at {}; supply RSRS_RUNTIME_BIN with its dependency bundle",
+            runtime.display()
+        );
+        let runtime = runtime.canonicalize()?;
+        anyhow::ensure!(
+            runtime != Path::new(env!("CARGO_BIN_EXE_rsrs")).canonicalize()?,
+            "CLI shim cannot substitute for the standalone Runtime fixture"
+        );
         let home = tempfile::tempdir()?;
         std::fs::create_dir(home.path().join("data"))?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
@@ -49,6 +73,8 @@ impl Fixture {
             secret,
             keys: SessionKeys::from_urk(urk)?,
             child: None,
+            runtime,
+            runtime_owner: RefCell::new(None),
             extra_env: Vec::new(),
         })
     }
@@ -79,7 +105,7 @@ impl Fixture {
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
-            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
+            .env("RSRS_RUNTIME_BIN", &self.runtime)
             .env("RSRS_RPC_PARALLELISM", "2")
             .env("RSRS_LANG", "en")
             .env("TZ", "UTC")
@@ -92,8 +118,13 @@ impl Fixture {
 
     /// Start an owned runtime and verify its process and profile before use.
     fn start(&mut self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.child.is_none(),
+            "fixture already has a runtime launcher"
+        );
+        *self.runtime_owner.borrow_mut() = None;
         self.child = Some(
-            self.command(&["--runtime-internal"])
+            self.command(&["runtime", "run"])
                 .stdout(std::fs::File::create(
                     self.home.path().join("runtime.stdout"),
                 )?)
@@ -131,11 +162,78 @@ impl Fixture {
             return Ok(false);
         };
         let health: Value = response.into_json()?;
+        if health["store_ready"] != true {
+            return Ok(false);
+        }
+        let profile = self.home.path().join("data").canonicalize()?;
+        let path_matches = |field: &str, expected: &Path| -> anyhow::Result<bool> {
+            let actual = health[field]
+                .as_str()
+                .context("runtime health path missing")?;
+            Ok(Path::new(actual).canonicalize()? == expected)
+        };
         anyhow::ensure!(
-            health["pid"].as_u64() == Some(u64::from(child.id()))
-                && health["data_dir"].as_str() == self.home.path().join("data").to_str(),
+            health["pid"]
+                .as_u64()
+                .is_some_and(|pid| pid > 0 && pid != u64::from(child.id()))
+                && path_matches("exe", &self.runtime)?
+                && path_matches("image_path", &self.runtime)?
+                && path_matches("data_dir", &profile)?
+                && path_matches("installation_root", &profile)?
+                && health["generation"]
+                    .as_u64()
+                    .is_some_and(|generation| generation > 0)
+                && health["account_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+                && health["process_start_id"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty()),
             "fixture port belongs to a different process or profile; no command submitted"
         );
+        let instance = health["instance_id"]
+            .as_str()
+            .context("runtime instance missing")?;
+        let nonce = uuid::Uuid::parse_str(instance)?;
+        anyhow::ensure!(
+            nonce.get_version_num() == 4 && nonce.to_string() == instance,
+            "runtime launch instance is invalid"
+        );
+        let claim: Value = serde_json::from_slice(&std::fs::read(
+            profile
+                .join("runtime/autostart/launch")
+                .join(format!("launch-{instance}.claimed")),
+        )?)?;
+        let birth = claim["process_start_id"]
+            .as_str()
+            .context("launch claim birth missing")?;
+        let prefix = if cfg!(windows) {
+            "windows-filetime-"
+        } else if cfg!(target_os = "linux") {
+            "linux-starttime-"
+        } else {
+            "darwin-lstart-"
+        };
+        anyhow::ensure!(
+            claim["pid"] == health["pid"]
+                && health["process_start_id"] == format!("{prefix}{birth}"),
+            "runtime does not match the consumed launch grant"
+        );
+        let identity = json!({
+            "pid": health["pid"], "instance_id": health["instance_id"],
+            "process_start_id": health["process_start_id"], "image_sha256": health["image_sha256"],
+            "installation_id": health["installation_id"], "account_id": health["account_id"],
+            "generation": health["generation"],
+        });
+        let mut owner = self.runtime_owner.borrow_mut();
+        if let Some(expected) = owner.as_ref() {
+            anyhow::ensure!(
+                *expected == identity,
+                "fixture runtime owner changed; no command submitted"
+            );
+        } else {
+            *owner = Some(identity);
+        }
         Ok(true)
     }
 
@@ -270,7 +368,7 @@ impl Fixture {
         let owned = self.owns_runtime().unwrap_or(false);
         if let Some(mut child) = self.child.take() {
             if owned {
-                let _ = self.command(&["--runtime-internal", "--stop"]).output();
+                let _ = self.command(&["runtime", "stop"]).output();
             }
             for _ in 0..100 {
                 if child.try_wait().ok().flatten().is_some() {
@@ -499,8 +597,7 @@ fn missing_entry_and_usage_failures_have_machine_diagnostics() -> anyhow::Result
                 .contains("not found"));
         }
     }
-    // Direct reads require the owned runtime to release its library lock first.
-    fixture.stop();
+    // --direct forwards through RPC; keep the verified standalone owner alive.
     let output = fixture
         .command(&["--direct", "--json", "show", "no-such-id"])
         .output()?;

@@ -12,7 +12,7 @@ accepted deletion synchronizes, the same tombstone IDs and deletion flags must
 remain with empty ciphertext, nonce and encrypted embedding, matching Server
 1.0.1. Active records still require independent decryption after a fresh login.
 
-New releases target Windows x64 and ARM64, Linux x64 and ARM64 (GNU and musl), and macOS ARM64 and Intel x64.
+CLI 1.0.21-dev.5 targets Windows x64 and ARM64, Linux x64 and ARM64 (GNU and musl), and macOS ARM64. Intel macOS is deferred for this release; it has no dev.5 package or asset requirement.
 Windows ARM64 builds and migration checks require native ARM64 runners. Historical
 published assets remain available. Intel macOS uses ORT API 20 and bundled ORT 1.20.1, with macOS 13.4 as the minimum supported version. Intel releases before 1.0.20 have no upgrade baseline; first-platform reports identify that absence explicitly while real CPU inference remains mandatory.
 The paired Core SDK still validates its own eight-target compatibility contract.
@@ -21,11 +21,11 @@ All eight CLI SDK pins bind the same reviewed SDK version and its per-target dig
 
 Normal DEV and stable publication use the `critical` validation profile. It
 requires exact-source workspace tests, CLI 90% coverage and packaging/workflow/
-fixture contracts across all three source CI lanes, eight Release builds, and
-eight native startup/real CPU inference/latest applicable formal-stable upgrade
+fixture contracts across all three source CI lanes, seven Release builds, and
+seven native startup/real CPU inference/latest applicable formal-stable upgrade
 checks. API regression, pinned SDK digests, and consistent artifacts for all
-nine npm packages remain required: eight scoped platform packages and the
-`rsrs-cli` launcher. The parent Release submits only the eight platform packages;
+eight npm packages remain required: seven scoped platform packages and the
+`rsrs-cli` launcher. The parent Release submits only the seven platform packages;
 `npm-alias.yml` submits the exact launcher tarball validated by the parent using
 its existing package-specific Trusted Publisher. Parent acceptance binds the
 launcher digest separately, without claiming its npm acceptance. Byte, source, dependency, receipt and immutable-version fence
@@ -46,7 +46,7 @@ regression success; use the dispatched run's actual full results and receipts.
 `rsrs-cli` is the primary public npm install entry. Protocol 2 separates two
 states; neither state can substitute for the other:
 
-- **accepted**: all eight platform packages and the direct `rsrs-cli` launcher
+- **accepted**: all seven platform packages and the direct `rsrs-cli` launcher
   have explicit successful npm submission acknowledgements, or their existing
   exact public bytes have been confirmed. Local pack SHA-512/SHA-1, package
   versions and exact dependencies remain mandatory. The launcher follows the
@@ -98,7 +98,7 @@ and validation before it. Report those earlier stages separately when they ran
 before a manual release trigger; a promotion-only result does not prove this
 end-to-end target.
 
-Normal direct-launcher success requires all eight exact-package npm acknowledgements: exit code
+Normal direct-launcher success requires all seven exact-package npm acknowledgements: exit code
 zero, no spawn error and no signal. It does not wait for the npm web page, search,
 registry/install-index propagation or public installation. GitHub Release
 finalization and the independent public verifier retain their own results and
@@ -284,7 +284,7 @@ alone cannot replace the base report, and base success cannot replace migration.
 Linux supplements and their model/outbox dependencies keep their ordering.
 
 New accepted/prepared receipts bind the selected validation profile and its
-exact required inventory. Critical requires eight native startup/CPU/latest
+exact required inventory. Critical requires seven native startup/CPU/latest
 upgrade lanes and API; full requires seven historical/resident lanes, six cloud
 sweeps, three native migration fixtures, three joins and API. Both retain all
 seven builds and exact-source CI. Publication and cleanup validate every
@@ -446,16 +446,16 @@ Both Linux ARM64 targets build and run on `ubuntu-24.04-arm`. Their exact SDK
 cache entries stay pinned to SDK `1.0.2-dev.14` in `sdk/core-sdk.lock.json`; source consumers have
 read-only exact-hit caches and no private SDK token. Both targets participate
 in model/runtime/diary feedback, native upgrades and full-profile cloud sweeps. Full gates
-require eight native jobs, seven cloud jobs, three native migration jobs, three joins
+require seven native jobs, six cloud jobs, three native migration jobs, three joins
 and the API job. An ARM failure or missing result prevents full validation.
 
-Eight targets produce 24 Release assets and nine npm packages for a direct
-launcher source: eight platform packages and `rsrs-cli`. Historical source
+Seven targets produce 21 Release assets and eight npm packages for a direct
+launcher source: seven platform packages and `rsrs-cli`. Historical source
 manifests retain their scoped umbrella and separate alias. The npm launcher defaults ARM64 Linux to static musl;
 `RSRS_LIBC=glibc` explicitly selects GNU. Independent background verification
 runs native ARM public installations for both routes, checks their exact binary
 hashes, version and executable startup, and records a separate ARM proof.
-Cleanup requires this proof for current eight-target sources as well as the existing
+Cleanup requires this proof for current seven-target sources as well as the existing
 GNU x64 proof; neither npm acceptance nor another architecture's installation
 substitutes for it. Historical sources retain their own committed platform
 inventory.

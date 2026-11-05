@@ -109,6 +109,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
 });
 
 test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
+  assert.equal(manifest.targets.length,7,'dev.5 releases seven platforms; SDK/G1 inventories remain separate');
+  assert(!manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'||t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));
   assert.equal(critical.native.length,manifest.targets.length);assert.equal(critical.cloud.length,0);assert.equal(critical.migration.length,0);assert.equal(critical.migration_gate.length,0);assert.equal(critical.api,true);
@@ -145,6 +147,11 @@ test('only explicit inactive full matrices are ignored by critical and never ent
 test('workflow defaults critical, retains mandatory profile gates and dispatches nonpublishing daily full',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const native=readFileSync(new URL('../../.github/workflows/release-native-validation.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
+  assert(guard,'stable planning must fail closed before any reservation or output');
+  for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
+  runInNewContext(guard,{channel:'dev'});
+  assert(release.indexOf(guard)<release.indexOf("if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true')"));
   const daily=readFileSync(new URL('../../.github/workflows/release-full-regression.yml',import.meta.url),'utf8');
   assert.match(release,/validation_profile:[\s\S]*?default: critical/);assert.match(release,/REQUIRE_FULL:.*inputs.full_regression_before_publish/);
   assert.match(release,/process.env.REQUIRE_FULL==='true'\?'full':requested/);

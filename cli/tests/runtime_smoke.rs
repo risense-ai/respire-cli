@@ -98,13 +98,21 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
         {
             return Err(format!("runtime profile readback failed: {status}").into());
         }
+        // Exercise request scope without autostart masking a missed restart.
+        invoke(&["--client-only", "status"], 0)?;
         status["pid"]
             .as_u64()
             .ok_or_else(|| "runtime PID missing".into())
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-        invoke(&["space", "list"], 0)?;
+        invoke(&["status"], 0)?;
         let original_pid = health(&library)?;
+        invoke(&["space", "list"], 0)?;
+        assert_eq!(
+            health(&library)?,
+            original_pid,
+            "listing host profiles must preserve the owned runtime"
+        );
         let before = std::fs::read(&config)?;
         for args in [
             vec!["space", "join", "BADCODE"],
@@ -280,7 +288,18 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("status envelope command was {}", value["command"]).into());
     }
 
-    // Exercise the actual packaged policy through this test's owned runtime.
+    let health_url = format!("http://127.0.0.1:{port}/api/health");
+    let owned_runtime: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let executable = owned_runtime["exe"]
+        .as_str()
+        .ok_or("Runtime executable missing")?;
+    assert_eq!(
+        std::path::Path::new(executable).canonicalize()?,
+        runtime_bin().canonicalize()?,
+        "status must use the independent Runtime"
+    );
+
+    // Static policy and host preview must work alongside the owned Runtime.
     // The preview must preserve an existing user file and must not write it.
     let prompt = run(dir.path(), port, &["--client-only", "prompt", "--json"])?;
     assert!(
@@ -331,8 +350,11 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let health_url = format!("http://127.0.0.1:{port}/api/health");
     let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    assert_eq!(
+        before["pid"], owned_runtime["pid"],
+        "static policy and preview must not replace the owned Runtime"
+    );
     let restarted = run(dir.path(), port, &["--json", "restart", "--timeout", "2"])?;
     if !restarted.status.success() {
         return Err(format!(

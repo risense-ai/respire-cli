@@ -537,6 +537,14 @@ fn host_command(args: &[&str]) -> Result<Value, String> {
         command.creation_flags(0x0800_0000);
     }
     let output = command.output().map_err(|error| error.to_string())?;
+    // Diagnostic failures are display rows, not a reason to hide the report.
+    if args == ["doctor"] {
+        if let Ok(value) = serde_json::from_slice::<Value>(&output.stdout) {
+            if value["command"] == "doctor" {
+                return Ok(value);
+            }
+        }
+    }
     if !output.status.success() {
         if let Ok(value) = serde_json::from_slice(&output.stdout) {
             if let Err(error) = checked_result(value) {
@@ -662,7 +670,7 @@ fn refresh_details_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
             }
         }
 
-        if let Ok(envelope) = rpc(&["doctor"]) {
+        if let Ok(envelope) = host_command(&["doctor"]) {
             if let Ok(envelope) = serde_json::from_value::<crate::output::ResultEnvelope>(envelope)
             {
                 next.doctor = envelope
@@ -984,9 +992,9 @@ fn inject_key(app: &mut App, code: KeyCode) {
         let mut errors = Vec::new();
         for (id, remove) in &ids {
             let result = if *remove {
-                rpc(&["inject", "--remove", "--id", id])
+                host_command(&["inject", "--remove", "--id", id])
             } else {
-                rpc(&["inject", "--id", id])
+                host_command(&["inject", "--id", id])
             }
             .and_then(inject_result);
             match result {
@@ -1024,7 +1032,7 @@ fn inject_result(envelope: Value) -> Result<Value, String> {
 }
 
 fn read_inject_rows() -> Result<Vec<InjectRow>, String> {
-    let envelope = inject_result(rpc(&["inject", "--targets"])?)?;
+    let envelope = inject_result(host_command(&["inject", "--targets"])?)?;
     let rows = envelope["details"]
         .as_array()
         .ok_or("Missing inject targets")?;
@@ -1761,7 +1769,7 @@ fn edit_key(app: &mut App, code: KeyCode) -> bool {
                 "Saving the server address",
             ));
             std::thread::spawn(move || {
-                let message = match rpc(&["config", "--addr", &value]) {
+                let message = match host_command(&["config", "--addr", &value]) {
                     Ok(_) => t(
                         "\u{670d}\u{52a1}\u{5668}\u{5730}\u{5740}\u{5df2}\u{4fdd}\u{5b58}",
                         "Server address saved",

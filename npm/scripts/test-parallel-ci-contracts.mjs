@@ -59,9 +59,48 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   for(const script of ['test-private-sdk-download.mjs','test-sdk-ci-cache.mjs','test-stage-core-runtime.mjs','test-dev-smoke-gate.py','test-dev-api-contract.py','test-dev-model-fixture.py','test-dev-fixture-tty.py','test-dev-witness-fixture.py','test-reembed-progress-contract.ps1'])assert(contracts.includes(script),script);
   assert(readFileSync(new URL('../../scripts/test-dev-model-fixture.py',import.meta.url),'utf8').includes('from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest'));
 });
-test('fail-closed aggregate requires both successful lanes, including failure and unexpected skips',()=>{
+test('fail-closed aggregate separates source success from explicit candidate evidence',()=>{
   const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests\]/);
-  assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success && test "\$REQUIRED_RESULT" = success/);
+  assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success/);
+  const requested="inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != ''";
+  assert(section('required-tests').includes(`(${requested})`));
+  assert(complete.includes('CANDIDATE_REQUESTED: ${{ '+requested+' }}'));
+  const required=section('required-tests');
+  const condition=block=>block.match(/    if: \$\{\{ (.+) \}\}/)[1];
+  assert(required.includes('node scripts/verify-required-tests.mjs --ci'));
+  assert.doesNotMatch(required,/allow-missing/);
+  const validator=required.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0].replace("          import assert from 'node:assert/strict';",'');
+  const keys=['required_candidate_run_id','required_candidate_artifact_id','required_candidate_sha256'];
+  const envKeys=['REQUIRED_CANDIDATE_RUN_ID','REQUIRED_CANDIDATE_ARTIFACT_ID','REQUIRED_CANDIDATE_SHA256'];
+  for(let mask=1;mask<8;mask++)for(const mode of [null,'research_feedback_only','native_published_only','artifact_run','version_upgrade_only']){
+    const values=['123','456','a'.repeat(64)].map((v,i)=>mask&(1<<i)?v:'');
+    const inputs=Object.fromEntries([...keys.map((k,i)=>[k,values[i]]),...['research_feedback_only','native_published_only','version_upgrade_only'].map(k=>[k,k===mode]),['artifact_run',mode==='artifact_run'?'123':'']]);
+    const context={inputs,always:()=>true};
+    assert.equal(runInNewContext(condition(required),context),true,'any candidate input must run the verifier even in focused mode');
+    assert.equal(runInNewContext(condition(complete),context),true,'candidate failures must reach the aggregate');
+    const env={...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:String(mode!==null)};
+    const run=()=>runInNewContext(validator,{assert,process:{env}});
+    if(mask===7&&mode===null)run();else assert.throws(run);
+  }
+  const absent={required_candidate_run_id:'',required_candidate_artifact_id:'',required_candidate_sha256:'',research_feedback_only:false,native_published_only:false,artifact_run:'',version_upgrade_only:false};
+  assert.equal(runInNewContext(condition(required),{inputs:absent,always:()=>true}),false);
+  assert.equal(runInNewContext(condition(complete),{inputs:absent,always:()=>true}),true);
+  for(const mode of ['research_feedback_only','native_published_only','artifact_run','version_upgrade_only']){
+    assert.equal(runInNewContext(condition(complete),{inputs:{...absent,[mode]:mode==='artifact_run'?'123':true},always:()=>true}),false);
+  }
+  for(const values of [['bad','456','a'.repeat(64)],['123','0','a'.repeat(64)],['123','456','bad']]){
+    assert.throws(()=>runInNewContext(validator,{assert,process:{env:{...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:'false'}}}));
+  }
+  const command=complete.split('        run: ').at(-1).trim();
+  for(const candidate of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
+    const result=execFileSync;
+    let passed=true;
+    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
+    assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${source}/${required}`);
+  }
+  for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT'])for(const status of ['failure','cancelled','skipped']){
+    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
+  }
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
   assert.match(complete,/REQUIRED_RESULT: \$\{\{ needs.required-tests.result \}\}/);

@@ -56,7 +56,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   platform-build:
-    # Release builds all eight targets. Keep the separate compile matrix manual.
+    # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Compile (${{ matrix.target }})
     strategy:
@@ -73,8 +73,6 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: macos-15
-            target: x86_64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           - os: windows-11-arm
@@ -98,26 +96,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
-      - name: Configure Intel macOS cross compilation on Apple silicon
-        if: matrix.target == 'x86_64-apple-darwin'
-        shell: bash
-        run: |
-          set -euo pipefail
-          test "$RUNNER_ARCH" = 'ARM64'
-          test "$(uname -s)" = 'Darwin'
-          test "$(sysctl -n hw.optional.arm64)" = '1'
-          sdk="$(xcrun --sdk macosx --show-sdk-path)"
-          cc="$(xcrun --find clang)"
-          cxx="$(xcrun --find clang++)"
-          ar="$(xcrun --find ar)"
-          {
-            echo "SDKROOT=$sdk"
-            echo "CC_x86_64_apple_darwin=$cc"
-            echo "CXX_x86_64_apple_darwin=$cxx"
-            echo "AR_x86_64_apple_darwin=$ar"
-            echo "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER=$cc"
-            echo 'MACOSX_DEPLOYMENT_TARGET=13.4'
-          } >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -408,7 +386,7 @@ jobs:
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         run: node scripts/produce-required-tests.mjs prepare
       - name: Prepare official pinned standalone Runtime for lifecycle tests
-        if: matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
         shell: bash
         env:
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
@@ -568,13 +546,18 @@ jobs:
           key: ${{ env.BUILD_KEY }}
 
   required-tests:
-    if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ always() && (inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     needs: [coverage-tests, workspace-tests, contract-checks]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
       actions: read
+    env:
+      REQUIRED_CANDIDATE_RUN_ID: ${{ inputs.required_candidate_run_id }}
+      REQUIRED_CANDIDATE_ARTIFACT_ID: ${{ inputs.required_candidate_artifact_id }}
+      REQUIRED_CANDIDATE_SHA256: ${{ inputs.required_candidate_sha256 }}
+      FOCUSED_MODE: ${{ inputs.research_feedback_only || inputs.native_published_only || inputs.artifact_run != '' || inputs.version_upgrade_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -582,6 +565,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Validate candidate evidence inputs
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const values = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'].map(key => process.env[key] ?? '');
+          assert.notEqual(process.env.FOCUSED_MODE, 'true', 'Candidate evidence cannot be combined with focused CI modes');
+          if (values.some(Boolean)) {
+            assert.equal(process.env.GITHUB_EVENT_NAME, 'workflow_dispatch');
+            assert.ok(values.every(Boolean), 'Supply all three candidate evidence inputs together');
+            assert.match(values[0], /^[1-9][0-9]*$/);
+            assert.match(values[1], /^[1-9][0-9]*$/);
+            assert.match(values[2], /^[a-f0-9]{64}$/);
+          }
+          NODE
       # A separate producer uploads raw execution evidence first, then this report bundle.
       # No report producer is implied by a source-test or syntax-check job.
       - name: Download this exact attempt's required execution reports
@@ -595,7 +592,7 @@ jobs:
         run: node scripts/verify-required-tests.mjs --ci
 
   check-complete:
-    if: ${{ always() && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    if: ${{ always() && ((inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') || (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only)) }}
     needs: [coverage-tests, workspace-tests, contract-checks, required-tests]
     runs-on: ubuntu-latest
     permissions:
@@ -639,7 +636,8 @@ jobs:
           WORKSPACE_RESULT: ${{ needs.workspace-tests.result }}
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           REQUIRED_RESULT: ${{ needs.required-tests.result }}
-        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$REQUIRED_RESULT" = success
+          CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
 
   contract-checks:
     # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK

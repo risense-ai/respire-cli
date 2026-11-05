@@ -53,12 +53,6 @@
       ]
     },
     {
-      "triple": "x86_64-apple-darwin",
-      "pkg": "@rsrsai/macos-x64",
-      "os": ["darwin"],
-      "cpu": ["x64"]
-    },
-    {
       "triple": "aarch64-apple-darwin",
       "pkg": "@rsrsai/macos-arm64",
       "os": [
