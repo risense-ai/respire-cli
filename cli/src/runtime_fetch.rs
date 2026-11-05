@@ -1452,8 +1452,8 @@ fn place_managed_binary(stage: &Path, binary_file: &str) -> Result<()> {
 // Install transactions
 // ---------------------------------------------------------------------------
 
-fn install_lock() -> Result<respire::lock::LibraryLock> {
-    respire::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
+fn install_lock() -> Result<respire_client_host::lock::LibraryLock> {
+    respire_client_host::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
         .context("another process is installing the runtime")
 }
 

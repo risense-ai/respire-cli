@@ -7,9 +7,16 @@ description = "Pure client environment and profile path helpers"
 license-file = "../../LICENSE"
 publish = false
 
+[features]
+locks = ["dep:rusqlite"]
+
 [dependencies]
 anyhow = "1.0"
 dirs = "6.0"
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.15"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -14,7 +14,7 @@ native-fault-tests = ["respire_core_sdk/native-fault-tests"]
 cpu-owned-ort-experiment = ["respire_core_sdk/cpu-owned-ort-experiment"]
 
 [dependencies]
-respire_client_host = { path = "../client-host" }
+respire_client_host = { path = "../client-host", features = ["locks"] }
 # WP-3 note: respire_spawn is kept only for snapshot.rs durable file publication.
 # The split plan wants spawn to stay in the CLI repository; snapshot writes need the
 # durable primitives, so the dependency is carried until durable IO is decoupled.
