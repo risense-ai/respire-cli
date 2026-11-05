@@ -1048,7 +1048,7 @@ mod runtime_resolution_tests {
             let account = respire::service::session_user_of_dir(&profile);
             let account = if account.is_empty() { profile.display().to_string() } else { account };
             let digest = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
-            let version = crate::runtime_fetch::pinned()?.required;
+            let version = &crate::runtime_fetch::pinned()?.required;
             let birth_prefix = if cfg!(windows) { "windows-filetime-" }
                 else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
             let launch = root.join("runtime/autostart/launch");
