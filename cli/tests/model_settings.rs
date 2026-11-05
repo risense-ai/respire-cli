@@ -5,6 +5,16 @@ use std::process::{Command, Output};
 
 #[test]
 fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
+    let runtime = std::path::PathBuf::from(
+        std::env::var_os("RSRS_RUNTIME_BIN")
+            .context("supply RSRS_RUNTIME_BIN with the official standalone Runtime fixture")?,
+    )
+    .canonicalize()?;
+    anyhow::ensure!(runtime.is_file(), "standalone Runtime fixture missing");
+    anyhow::ensure!(
+        runtime != std::path::Path::new(env!("CARGO_BIN_EXE_rsrs")).canonicalize()?,
+        "CLI shim cannot substitute for the standalone Runtime fixture"
+    );
     let profile = tempfile::tempdir()?;
     let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
         .local_addr()?
@@ -28,6 +38,7 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
             .env("USERPROFILE", profile.path())
             .env("XDG_CONFIG_HOME", profile.path().join("config"))
             .env("XDG_DATA_HOME", profile.path().join("share"))
+            .env("RSRS_RUNTIME_BIN", &runtime)
             .env("RSRS_DATA_DIR", profile.path().join("data"))
             .env("RSRS_M3_DIR", profile.path().join("models"))
             .env("RSRS_RPC_PORT", port.to_string())
@@ -36,7 +47,15 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
             .env("RSRS_LANG", "en")
             .env("RSRS_MIRROR", "http://127.0.0.1:9")
             .env("RSRS_CPU_ORT_MIRROR", "http://127.0.0.1:9");
-        Ok(command.output()?)
+        let output = command.output()?;
+        // Keep the actual JSON even when status checks or parsing fail below.
+        eprintln!(
+            "model settings {args:?}: status={}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output)
     };
     for variant in respire::memory::onnx::MODEL_VARIANTS {
         let saved = run(&["model", "engine", "cpu", "--model", variant.name])?;

@@ -671,8 +671,8 @@ pub fn run_tree_deepen(
     Ok(())
 }
 
-/// TUI/non-TUI dispatch for `extract`, kept out of `run_local_inner` to bound its stack frame.
-pub fn run_extract_command(command: &Command) -> Result<()> {
+/// Classify host UI dispatch without executing extraction business.
+pub fn extract_uses_tui(command: &Command) -> Result<bool> {
     let Command::Extract {
         targets,
         tui,
@@ -691,7 +691,7 @@ pub fn run_extract_command(command: &Command) -> Result<()> {
         force,
     } = command
     else {
-        return Ok(());
+        return Ok(false);
     };
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stdout());
@@ -714,11 +714,35 @@ pub fn run_extract_command(command: &Command) -> Result<()> {
                  or --json; drop --tui to apply them."
             );
         }
+        return Ok(true);
+    }
+    Ok(bare && interactive)
+}
+
+/// TUI/non-TUI dispatch for `extract`, kept out of `run_local_inner` to bound its stack frame.
+pub fn run_extract_command(command: &Command) -> Result<()> {
+    if extract_uses_tui(command)? {
         return crate::host_hooks::extract_tui_run();
     }
-    if bare && interactive {
-        return crate::host_hooks::extract_tui_run();
-    }
+    let Command::Extract {
+        targets,
+        id,
+        dry_run,
+        since,
+        limit,
+        cwd,
+        model,
+        session,
+        kind,
+        importance,
+        parent,
+        include_subagents,
+        force,
+        ..
+    } = command
+    else {
+        return Ok(());
+    };
     run_extract(
         *targets,
         id.as_deref(),

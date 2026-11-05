@@ -21,7 +21,7 @@ fn runtime_bin() -> std::path::PathBuf {
         })
 }
 
-fn isolated_command() -> Command {
+fn isolated_command(models: Option<&std::path::Path>) -> Command {
     let mut command = Command::new(bin());
     for (name, _) in std::env::vars_os() {
         if name.to_str().is_some_and(|name| {
@@ -33,6 +33,9 @@ fn isolated_command() -> Command {
         }
     }
     command.env("RSRS_RUNTIME_BIN", runtime_bin());
+    if let Some(models) = models {
+        command.env("RSRS_M3_DIR", models).env("RSRS_ENGINE", "cpu");
+    }
     command
 }
 
@@ -53,7 +56,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
     let port = listener.local_addr()?.port();
     drop(listener);
     let invoke = |args: &[&str], expected: i32| -> Result<Value, Box<dyn std::error::Error>> {
-        let output = isolated_command()
+        let output = isolated_command(None)
             .arg("--json")
             .args(args)
             .env("HOME", home.path())
@@ -254,7 +257,7 @@ fn spaces_coordinate_with_the_owned_runtime() -> Result<(), Box<dyn std::error::
 }
 
 fn run(dir: &std::path::Path, port: u16, args: &[&str]) -> std::io::Result<Output> {
-    isolated_command()
+    isolated_command(None)
         .args(args)
         .env("RSRS_DATA_DIR", dir)
         .env("HOME", dir)
@@ -402,6 +405,20 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Arc, Mutex,
     };
 
+    let models = std::path::PathBuf::from(
+        std::env::var_os("RSRS_CORE_TEST_MODEL_DIR")
+            .ok_or("supply RSRS_CORE_TEST_MODEL_DIR with the verified real CPU model fixture")?,
+    )
+    .canonicalize()?;
+    for file in [
+        "tokenizer.json",
+        "onnx/model_quantized.onnx",
+        "onnx/model_quantized.cpu-v1.ort",
+    ] {
+        if !models.join(file).is_file() {
+            return Err(format!("model fixture missing {file} at {}", models.display()).into());
+        }
+    }
     let home = tempfile::tempdir()?;
     let root = home.path().join(".rsrs");
     let original = root.join("accounts/original");
@@ -564,7 +581,7 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
         Ok(())
     });
     let execute = |args: &[&str]| -> std::io::Result<Output> {
-        isolated_command()
+        let output = isolated_command(Some(&models))
             .args(args)
             .env("HOME", home.path())
             .env("USERPROFILE", home.path())
@@ -586,7 +603,15 @@ fn authorization_preserves_and_commits_profiles() -> Result<(), Box<dyn std::err
             .env_remove("RSRS_RUNTIME_WORKER")
             .env_remove("RSRS_RPC_TOKEN")
             .env_remove("RSRS_LANG")
-            .output()
+            .output()?;
+        // The test harness retains these synthetic replies when any later assertion fails.
+        eprintln!(
+            "authorization fixture: status={}\nstdout={}\nstderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(output)
     };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let stale_session = br#"{"user":"original","addr":"http://legacy.invalid"}"#;
@@ -1253,7 +1278,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
         Ok(())
     });
     let command = |json: bool| {
-        let mut command = isolated_command();
+        let mut command = isolated_command(None);
         command.args(["doctor", "--remote"]);
         if json {
             command.arg("--json");

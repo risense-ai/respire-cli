@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::io::stdout;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -177,66 +177,55 @@ impl App {
 
 fn spawn_worker(ids: Vec<String>, sender: Sender<Work>) {
     std::thread::spawn(move || {
-        let options = session_import::ScanOptions::default();
-        let mut sessions = Vec::new();
-        for id in &ids {
-            let _ = sender.send(Work::Progress(format!("scanning {id}"), 0, 0));
-            if let Some(scanner) = session_import::find_scanner(id) {
-                let mut found = scanner.scan(&options);
-                found.retain(|session| options.matches(session));
-                sessions.extend(found);
+        let result = (|| -> Result<u64> {
+            let mut imported = 0;
+            for (index, id) in ids.iter().enumerate() {
+                let _ = sender.send(Work::Progress(
+                    format!("extracting {id}"),
+                    index,
+                    ids.len(),
+                ));
+                // Only the picker runs here; scanning, cursor and writes stay in Runtime.
+                let response = crate::net_rpc::rpc_exec(vec![
+                    "--json".to_owned(),
+                    "extract".to_owned(),
+                    "--id".to_owned(),
+                    id.clone(),
+                ])
+                .with_context(|| format!("extract {id}"))?;
+                anyhow::ensure!(
+                    response["ok"] == true && response["exit"] == 0,
+                    "extract {id} failed: {response}"
+                );
+                let envelope: crate::output::ResultEnvelope =
+                    serde_json::from_value(response["envelope"].clone()).with_context(|| {
+                        format!("extract {id}: invalid Runtime envelope: {response}")
+                    })?;
+                anyhow::ensure!(
+                    envelope.command == "extract"
+                        && matches!(
+                            envelope.status,
+                            crate::output::Status::Ok | crate::output::Status::Skip
+                        ),
+                    "extract {id} did not complete: {response}"
+                );
+                imported += envelope.summary["imported"]
+                    .as_u64()
+                    .with_context(|| format!("extract {id}: missing imported count: {response}"))?;
+                let _ = sender.send(Work::Progress(
+                    format!("{id}: {}", envelope.summary),
+                    index + 1,
+                    ids.len(),
+                ));
             }
-        }
-        let sessions = session_import::dedupe(sessions);
-        let cursor = session_import::Cursor::load();
-        let fresh: Vec<_> = sessions
-            .into_iter()
-            .filter(|session| !cursor.is_imported(session))
-            .collect();
-        let pending = session_import::cap_per_platform(fresh, options.limit);
-        if pending.is_empty() {
-            let _ = sender.send(Work::Done("no new sessions to import".to_owned()));
-            return;
-        }
-
-        let convert = session_import::ConvertOptions {
-            kind: crate::Kind::Context,
-            importance: "important".to_owned(),
-            parent: String::new(),
-            user: crate::service::current_user(),
-            device: crate::service::device_tag(),
-            project: String::new(),
-        };
-        let mut entries: Vec<_> = pending
-            .iter()
-            .map(|session| session_import::session_entry(session, &convert))
-            .collect();
-        let mut cursor = cursor;
-        let result = session_import::import_entries(
-            &mut entries,
-            "",
-            |done, total| {
-                let _ = sender.send(Work::Progress("storing memories".to_owned(), done, total));
-            },
-            |start, completed| {
-                for (offset, ok) in completed.iter().enumerate() {
-                    if *ok {
-                        cursor.mark(&pending[start + offset]);
-                    }
-                }
-                cursor.save()?;
-                Ok(())
-            },
-        );
+            Ok(imported)
+        })();
         match result {
-            Ok(outcome) => {
-                let _ = sender.send(Work::Done(format!(
-                    "imported {} memory(ies)",
-                    outcome.imported
-                )));
+            Ok(imported) => {
+                let _ = sender.send(Work::Done(format!("imported {imported} memory(ies)")));
             }
             Err(error) => {
-                let _ = sender.send(Work::Failed(format!("{error}")));
+                let _ = sender.send(Work::Failed(format!("{error:#}")));
             }
         }
     });

@@ -93,6 +93,13 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
     match args.command.as_ref() {
+        Some(command @ Command::Extract { .. }) => {
+            match respire_commands::engine::extract_uses_tui(command) {
+                Ok(true) => Some(run_extract_tui()),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            }
+        }
         Some(Command::AgentConfig { set: None }) => Some(
             runtime_policy::require_host("agent configuration read")
                 .and_then(|()| respire_commands::engine::run_agent_config(None)),
@@ -261,6 +268,18 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+fn run_extract_tui() -> Result<()> {
+    runtime_policy::require_host("extract source picker")?;
+    anyhow::ensure!(
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        "extract --tui needs a real terminal (stdin/stdout must both be tty)"
+    );
+    // Finish host lifecycle work before the UI enters raw terminal mode.
+    rpc::ensure_daemon()?;
+    respire::extract_tui::run()
 }
 
 fn run_passport() -> Result<()> {
@@ -1376,7 +1395,7 @@ fn install_cli_host_hooks() -> bool {
             foreground_progress: Some(rpc::foreground_progress),
             runtime_brief: Some(rpc::runtime_brief),
             host_command: Some(host_command),
-            extract_tui_run: Some(respire::extract_tui::run),
+            extract_tui_run: Some(run_extract_tui),
             runtime_is_up: Some(rpc::runtime_is_up),
             change_profile: Some(|change| rpc::change_profile(|| change())),
             managed_id: Some(|| autostart::managed_id()),

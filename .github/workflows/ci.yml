@@ -414,8 +414,8 @@ jobs:
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
-      - name: Verify or install the real diary model using the official installer
-        if: matrix.group == 'core'
+      - name: Verify or install the real business test model using the official installer
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
         env:
           RSRS_DATA_DIR: ${{ runner.temp }}/diary-model-install
           RSRS_M3_DIR: ${{ runner.temp }}/diary-real-model
