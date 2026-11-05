@@ -139,7 +139,7 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
-/// Restart only after the authenticated owner proves a complete normal drain.
+/// Restart after an authenticated drain, or complete evidence of an exited owner.
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
@@ -147,11 +147,16 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     let health = probe_runtime().context(
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
     )?;
-    anyhow::ensure!(
-        health.is_some() || !endpoint_path().exists(),
-        "runtime restart blocked: recorded owner has no verifiable health/drain receipt; repair is required, no replacement started"
-    );
+    let stale = if health.is_none() && endpoint_path().try_exists()? {
+        Some(crate::autostart::StaleOwner::prepare_locked()
+            .context("runtime restart blocked: stale owner could not be verified")?)
+    } else {
+        None
+    };
     let mut maintenance = crate::autostart::restart_maintenance_locked()?;
+    if let Some(stale) = stale {
+        stale.remove_endpoint_locked()?;
+    }
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
     if crate::autostart::managed_enabled()?
@@ -1016,7 +1021,99 @@ mod runtime_resolution_tests {
         })
         .is_err());
         anyhow::ensure!(!changed && endpoint.exists() && !config_path.exists());
-        std::fs::remove_file(endpoint)?;
+        let endpoint_before = std::fs::read(&endpoint)?;
+        let error = restart_runtime(Duration::from_secs(1))
+            .err()
+            .context("restart accepted an owner without persisted recovery evidence")?;
+        anyhow::ensure!(
+            format!("{error:#}").contains("endpoint and launch claim do not retain that evidence"),
+            "restart did not report the missing recovery evidence: {error:#}"
+        );
+        anyhow::ensure!(
+            std::fs::read(&endpoint)? == endpoint_before
+                && !config_path.exists()
+                && !directory.path().join("bin").exists(),
+            "rejected restart changed stale ownership or started materialization"
+        );
+        std::fs::remove_file(&endpoint)?;
+        {
+            use sha2::{Digest, Sha256};
+            let _takeover = crate::runtime_policy::takeover_lock()?;
+            let image = directory.path().join("recovery-runtime");
+            std::fs::write(&image, b"isolated recovery image")?;
+            let image = image.canonicalize()?;
+            std::env::set_var("RSRS_RUNTIME_BIN", &image);
+            let root = directory.path().canonicalize()?;
+            let profile = respire::service::data_dir().canonicalize()?;
+            let account = respire::service::session_user_of_dir(&profile);
+            let account = if account.is_empty() { profile.display().to_string() } else { account };
+            let digest = |bytes: &[u8]| hex::encode(Sha256::digest(bytes));
+            let version = crate::runtime_fetch::pinned()?.required;
+            let birth_prefix = if cfg!(windows) { "windows-filetime-" }
+                else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+            let launch = root.join("runtime/autostart/launch");
+            std::fs::create_dir_all(&launch)?;
+            for mode in ["normal", "readonly", "off"] {
+                std::fs::write(&config_path, serde_json::to_vec(&json!({"service_mode":mode}))?)?;
+                let instance = uuid::Uuid::new_v4().to_string();
+                let grant = serde_json::to_string(&json!({
+                    "schema_version":1, "protocol_version":PROTOCOL_V,
+                    "nonce":instance, "instance_id":instance,
+                    "installation_root":root, "installation_id":digest(root.display().to_string().as_bytes()),
+                    "profile":profile, "account_id":digest(account.as_bytes()), "sync_generation":0,
+                    "image_path":image, "image_sha256":digest(b"isolated recovery image"),
+                    "supervisor_pid":u32::MAX-1, "supervisor_birth":"456", "managed_id":null,
+                    "registration_sha256":null, "maintenance":null,
+                    "port":crate::net_rpc::rpc_port(), "issued_at_ms":1, "expires_at_ms":2,
+                }))?;
+                let receipt = serde_json::to_vec(&json!({
+                    "schema_version":2, "protocol_version":PROTOCOL_V, "state":"consumed",
+                    "grant_json":grant, "grant_sha256":digest(grant.as_bytes()), "registration_json":null,
+                    "pid":u32::MAX, "process_start_id":"123",
+                }))?;
+                let claim = launch.join(format!("launch-{instance}.claimed"));
+                std::fs::write(&claim, &receipt)?;
+                let record = json!({
+                    "schema_version":2, "server":"respire", "v":PROTOCOL_V, "bin":version,
+                    "runtime_version":version, "url":crate::net_rpc::rpc_base_url(),
+                    "pid":u32::MAX, "process_start_id":format!("{birth_prefix}123"),
+                    "instance_id":instance, "installation_root":root, "data_dir":profile,
+                    "installation_id":digest(root.display().to_string().as_bytes()),
+                    "account_id":digest(account.as_bytes()), "generation":7,
+                    "exe":image, "image_path":image, "image_sha256":digest(b"isolated recovery image"),
+                    "managed_id":null, "launch_receipt_sha256":digest(&receipt),
+                });
+                for (field, invalid) in [
+                    ("generation", json!(0)), ("account_id", json!("foreign-account")),
+                    ("image_sha256", json!("f".repeat(64))), ("process_start_id", json!("reused-pid")),
+                    ("launch_receipt_sha256", json!("f".repeat(64))), ("pid", json!(std::process::id())),
+                ] {
+                    let mut changed = record.clone();
+                    changed[field] = invalid;
+                    let bytes = serde_json::to_vec(&changed)?;
+                    std::fs::write(&endpoint, &bytes)?;
+                    anyhow::ensure!(crate::autostart::StaleOwner::prepare_locked().is_err(), "accepted changed {field} in {mode}");
+                    anyhow::ensure!(std::fs::read(&endpoint)? == bytes && std::fs::read(&claim)? == receipt);
+                }
+                let bytes = serde_json::to_vec(&record)?;
+                std::fs::write(&endpoint, &bytes)?;
+                let session = profile.join("session.json");
+                std::fs::write(&session, b"invalid account metadata")?;
+                anyhow::ensure!(crate::autostart::StaleOwner::prepare_locked().is_err(),
+                    "unreadable account identity became an anonymous profile in {mode}");
+                anyhow::ensure!(std::fs::read(&endpoint)? == bytes && std::fs::read(&claim)? == receipt);
+                std::fs::remove_file(session)?;
+                let stale = crate::autostart::StaleOwner::prepare_locked()?;
+                std::fs::write(&endpoint, b"changed after verification")?;
+                anyhow::ensure!(stale.remove_endpoint_locked().is_err());
+                anyhow::ensure!(endpoint.exists() && std::fs::read(&claim)? == receipt);
+                std::fs::write(&endpoint, &bytes)?;
+                crate::autostart::StaleOwner::prepare_locked()?.remove_endpoint_locked()?;
+                anyhow::ensure!(!endpoint.exists() && std::fs::read(&claim)? == receipt
+                    && !root.join("rsrs.db").exists(), "recovery touched the store or consumed tombstone in {mode}");
+            }
+            std::fs::remove_file(&config_path)?;
+        }
         std::env::remove_var("RSRS_RUNTIME_BIN");
         let cli = std::env::current_exe()?;
         let health: crate::net_rpc::Health = serde_json::from_value(json!({

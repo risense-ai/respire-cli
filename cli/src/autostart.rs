@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod lifecycle;
+mod recovery;
+pub(crate) use recovery::StaleOwner;
 mod manager;
 pub(crate) use manager::process_birth;
 mod supervise;

@@ -81,7 +81,7 @@ fn save(config: &mut Registration) -> Result<()> {
     result
 }
 
-fn ensure_control_endpoint(config: &Registration) -> Result<()> {
+pub(super) fn ensure_control_endpoint(config: &Registration) -> Result<()> {
     let registered = config
         .environment
         .get("RSRS_RPC_PORT")
@@ -462,7 +462,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
     Ok(Some(executable))
 }
 
-fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
+pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf> {
     let root = config.installation.canonicalize()?;
     let registered_root = PathBuf::from(
         config
@@ -492,6 +492,12 @@ fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) 
         .canonicalize()
         .context("selected Runtime is unavailable")?;
     anyhow::ensure!(runtime.is_file(), "selected Runtime is not a file");
+    Ok(runtime)
+}
+
+fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
+    let root = config.installation.canonicalize()?;
+    let runtime = registered_runtime_image(config)?;
     anyhow::ensure!(
         runtime != config.executable.canonicalize()?
             && runtime != std::env::current_exe()?.canonicalize()?
