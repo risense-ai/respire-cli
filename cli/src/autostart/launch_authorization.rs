@@ -590,7 +590,11 @@ mod tests {
         std::env::set_var("RSRS_M3_DIR", temporary.path().join("models"));
         assert!(!root.exists());
         let read_roots = respire_client_host::config::control_roots()?;
-        assert_eq!(read_roots, (std::path::absolute(&root)?, std::path::absolute(&root)?));
+        #[cfg(target_os = "macos")]
+        let expected_root = temporary.path().canonicalize()?.join("fresh installation");
+        #[cfg(not(target_os = "macos"))]
+        let expected_root = std::path::absolute(&root)?;
+        assert_eq!(read_roots, (expected_root.clone(), expected_root.clone()));
         assert!(!root.exists());
         let (installation, profile) = prepare_launch_roots()?;
         assert_eq!(installation, root.canonicalize()?);
@@ -601,7 +605,7 @@ mod tests {
         let config = root.join("client.json");
         let outside = temporary.path().join("outside installation");
         fs::write(&config, serde_json::to_vec(&json!({"data_dir": outside}))?)?;
-        assert_eq!(respire_client_host::config::control_roots()?.1, std::path::absolute(&root)?);
+        assert_eq!(respire_client_host::config::control_roots()?.1, expected_root);
         assert!(!outside.exists());
         fs::write(&config, serde_json::to_vec(&json!({"data_dir": account}))?)?;
         let (_, profile) = prepare_launch_roots()?;

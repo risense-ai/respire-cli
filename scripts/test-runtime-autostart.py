@@ -45,12 +45,15 @@ def main():
     if runtime_binary is not None and os.path.samefile(binary, runtime_binary):
         parser.error("independent Runtime required; the CLI cannot be its Runtime candidate")
 
-    prepare_bundle = runpy.run_path(str(Path(__file__).with_name("runtime-acceptance-bundle.py")))["stage_runtime"]
+    bundle_helpers = runpy.run_path(str(Path(__file__).with_name("runtime-acceptance-bundle.py")))
+    prepare_bundle = bundle_helpers["stage_runtime"]
+    copy_managed_installation = bundle_helpers["copy_managed_installation"]
 
-    def stage_runtime(directory):
+    def stage_runtime(directory, installation_root=None):
         return prepare_bundle(binary, runtime_binary, directory,
                               args.runtime_archive if runtime_binary is None else None,
-                              args.runtime_version if runtime_binary is None else None)
+                              args.runtime_version if runtime_binary is None else None,
+                              installation_root=installation_root)
 
     with tempfile.TemporaryDirectory(prefix="respire-autostart-") as temporary:
         base = Path(temporary).resolve(strict=True)
@@ -77,7 +80,8 @@ def main():
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root),
                    RSRS_BIN_DIR=str(base / "bin"), RSRS_RPC_PORT=str(port),
                    RSRS_CORE_TEST_MODE="1", RSRS_NO_AUTOSYNC="1", RSRS_UPDATE_CHECK="0")
-        runtime_binary = stage_runtime(base / "bin")
+        managed_fixture = base / "managed-installation"
+        runtime_binary = stage_runtime(base / "bin", managed_fixture if args.register else None)
         env["RSRS_RUNTIME_BIN"] = str(base / "bin" / runtime_name)
 
         restart_stages={"restart_probe","restart_managed","restart_identity","restart_stop","restart_start","restart_ready"}
@@ -315,7 +319,8 @@ def main():
                     assert kernel.WaitForSingleObject(handle,0)==258, "fixture process already exited"
                     return handle,(values[0].dwHighDateTime<<32)|values[0].dwLowDateTime
                 try:
-                    child,child_birth=checked_process(current["pid"], Path(expected["executable"]).parent/runtime_name)
+                    runtime_image = managed_runtime_binary if expected_root == root else Path(expected["executable"]).parent/runtime_name
+                    child,child_birth=checked_process(current["pid"], runtime_image)
                     class ProcessEntry(ctypes.Structure):
                         _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),
                             ("th32ProcessID",wintypes.DWORD),("th32DefaultHeapID",ctypes.c_size_t),
@@ -550,6 +555,8 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 cleaned=subprocess.run([binary,"--json","runtime","autostart","remove","--stop"],env=failure_env,capture_output=True,text=True,timeout=45)
                 assert cleaned.returncode == 0 and not (failure_root/"runtime/autostart/maintenance.json").exists(), f"explicit failed-install cleanup did not recover: {cleaned.stdout} {cleaned.stderr}"
                 print("PASS: failed native installation retains a fence and explicit remove --stop safely clears it")
+                managed_runtime_binary = copy_managed_installation(managed_fixture, root)
+                env["RSRS_RUNTIME_BIN"] = str(managed_runtime_binary)
                 enabled = run("runtime", "autostart", "enable")
                 assert enabled["enabled"] is True and enabled["registered"] is True, enabled
                 assert enabled["runtime"]["running"] is False, "enable without --now unexpectedly starts runtime"

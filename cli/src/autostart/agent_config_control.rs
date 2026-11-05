@@ -9,8 +9,11 @@ use respire_protocol::{ControlBinding, HostControlLaunchGrant, RpcRequest};
 pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("agent configuration changes")?;
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(), "agent config must own maintenance");
-    let (key, raw_value) = kv.split_once('=').context("format must be key=value (e.g. diary_mode=verbose)")?;
+    let (key, raw_value) = kv.split_once('=').ok_or_else(|| respire_client_host::input_error::InputError(
+        "format must be key=value (e.g. diary_mode=verbose)".into()))?;
     let intent = AgentConfigIntent { key: key.into(), raw_value: raw_value.into() };
+    intent.apply(&serde_json::json!({})).map_err(|message|
+        respire_client_host::input_error::InputError(message.into()))?;
     let takeover = crate::runtime_policy::takeover_lock()?;
     if crate::runtime_fetch::read_manifest()?.is_none() {
         crate::runtime_fetch::download_and_install(None, None)?;

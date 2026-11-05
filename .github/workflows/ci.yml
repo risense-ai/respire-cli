@@ -519,6 +519,7 @@ jobs:
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         run: node scripts/produce-required-tests.mjs prepare
       - name: Prepare official pinned standalone Runtime for lifecycle tests
+        id: official-runtime-fixture
         if: matrix.group == 'core' || matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
         shell: bash
         env:
@@ -546,11 +547,12 @@ jobs:
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          appendFileSync(process.env.GITHUB_OUTPUT, `root=${root}\n`);
           NODE
       - name: Verify or install the real business test model using the official installer
         if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
         env:
-          RSRS_DATA_DIR: ${{ runner.temp }}/diary-model-install
+          RSRS_DATA_DIR: ${{ steps.official-runtime-fixture.outputs.root }}
           RSRS_M3_DIR: ${{ runner.temp }}/diary-real-model
           RSRS_ENGINE: cpu
           RSRS_NO_AUTOSYNC: '1'
