@@ -129,7 +129,7 @@ pub(crate) fn validate(engine: Engine, variant: ModelVariant) -> Result<()> {
     )?;
     if bge::cpu_owned_mode(engine)? {
         verify(
-            &bge::cpu_ort_path(&directory),
+            &bge::cpu_ort_path(&directory)?,
             bge::CPU_ORT_SIZE,
             bge::CPU_ORT_SHA256,
         )?;

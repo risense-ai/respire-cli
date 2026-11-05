@@ -1,4 +1,5 @@
-//! Smoke the local runtime without touching the user library.
+//! Explicit legacy CLI shim regressions with synthetic data.
+//! These checks are not independent Runtime artifact or G1 evidence.
 
 use std::process::{Command, Output};
 use std::time::Duration;
@@ -18,6 +19,8 @@ fn isolated_command() -> Command {
             command.env_remove(name);
         }
     }
+    // The legacy suite explicitly selects its CLI shim; ordinary startup has no fallback.
+    command.env("RSRS_RUNTIME_BIN", bin());
     command
 }
 

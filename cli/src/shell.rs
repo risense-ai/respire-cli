@@ -73,6 +73,7 @@ enum Overlay {
     ModelMirror(text_input::Input),
     ModelWeights(model_weights::Form),
     SavingWeights,
+    HostModel,
     RecallTest(recall_test::Form),
     ModelTask(model_task::Task),
     Confirm {
@@ -198,7 +199,7 @@ pub fn run() -> Result<()> {
         if let Ok(mut slot) = app.outcome.lock() {
             if let Some(message) = slot.take() {
                 // An older background action must not dismiss an in-flight save.
-                if !matches!(app.overlay, Overlay::SavingWeights) {
+                if !matches!(app.overlay, Overlay::SavingWeights | Overlay::HostModel) {
                     app.overlay = Overlay::None;
                     app.set_notice(message);
                 }
@@ -476,6 +477,10 @@ fn rpc(args: &[&str]) -> Result<Value, String> {
 }
 
 fn retrieval_action(args: &[&str]) -> Result<Value, String> {
+    // Shared by the mirror, recall API and fusion forms; writes are host-owned.
+    if matches!(args, ["agent-config", "--set", _]) {
+        return host_command(args);
+    }
     checked_result(rpc(args)?)
 }
 
@@ -508,13 +513,13 @@ fn switch_account(name: &str) -> Result<String, String> {
     let expected_dir = switched["summary"]["dir"]
         .as_str()
         .ok_or_else(|| "Profile switch did not return its directory".to_owned())?;
-    let accounts = checked_result(rpc(&["account", "list"])?)?;
+    let accounts = host_command(&["account", "list"])?;
     let actual = accounts["details"]["accounts"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["current"] == true))
-        .ok_or_else(|| "Runtime did not report its current account".to_owned())?;
+        .ok_or_else(|| "Host did not report its current account".to_owned())?;
     if actual["name"] != name || actual["dir"] != expected_dir {
-        return Err("Runtime account does not match the requested profile".to_owned());
+        return Err("Host account does not match the requested profile".to_owned());
     }
     Ok(t(
         "\u{5df2}\u{5207}\u{6362}\u{8d26}\u{6237}",
@@ -634,7 +639,7 @@ fn refresh_details_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
             Ok(guard) => guard.clone(),
             Err(_) => return,
         };
-        if let Ok(envelope) = rpc(&["account", "list"]) {
+        if let Ok(envelope) = host_command(&["account", "list"]) {
             if let Some(rows) = envelope["details"]["accounts"].as_array() {
                 next.accounts.clear();
                 for row in rows {
@@ -697,7 +702,7 @@ fn refresh_details_loop(stop: Arc<AtomicBool>, shared: Arc<Mutex<Live>>) {
 }
 
 fn handle(app: &mut App, code: KeyCode) -> bool {
-    if matches!(app.overlay, Overlay::SavingWeights) {
+    if matches!(app.overlay, Overlay::SavingWeights | Overlay::HostModel) {
         return false;
     }
     if matches!(app.overlay, Overlay::ModelWeights(_)) {
@@ -1108,8 +1113,11 @@ fn cancel_model(id: &str) -> Result<(), String> {
     }
     let started = Instant::now();
     let mut cancellation_accepted = false;
+    let mut cancel_sent = false;
     loop {
-        let progress = crate::rpc::model_control(id, true).map_err(|error| error.to_string())?;
+        let progress = crate::rpc::model_control(id, !cancel_sent)
+            .map_err(|error| error.to_string())?;
+        cancel_sent = true;
         if progress["stale"] == true {
             // The original task finished after accepting cancellation. A newly
             // scheduled task must not be cancelled or reported as its failure.
@@ -1426,18 +1434,16 @@ fn confirm_key(app: &mut App, code: KeyCode) -> bool {
 }
 
 fn run_confirm(app: &mut App, kind: ConfirmKind) {
-    let task = matches!(
+    let host_model = matches!(
         &kind,
-        ConfirmKind::InstallM3 | ConfirmKind::InstallVariant(_, _)
-    )
-    .then(model_task::Task::start);
-    let cancel = task.as_ref().map(|task| Arc::clone(&task.cancel));
-    let task_id = task
-        .as_ref()
-        .map(|task| task.id.clone())
-        .unwrap_or_default();
-    if let Some(task) = task {
-        app.overlay = Overlay::ModelTask(task);
+        ConfirmKind::InstallM3
+            | ConfirmKind::InstallVariant(_, _)
+            | ConfirmKind::UninstallM3
+            | ConfirmKind::InstallEngines
+            | ConfirmKind::RestartM3(_, _)
+    );
+    if host_model {
+        app.overlay = Overlay::HostModel;
     }
     let label = match &kind {
         ConfirmKind::Switch(name) => t(
@@ -1470,26 +1476,12 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
     }
     app.set_notice(label);
     let shared = Arc::clone(&app.shared);
-    let slot = Arc::clone(if changing_model {
+    let slot = Arc::clone(if changing_model || host_model {
         &app.model_outcome
     } else {
         &app.outcome
     });
     std::thread::spawn(move || {
-        let model_action = |action: &[&str]| {
-            if cancel
-                .as_ref()
-                .is_some_and(|flag| flag.load(Ordering::Acquire))
-            {
-                return Err(t(
-                    "\u{5df2}\u{53d6}\u{6d88}\u{ff0c}\u{5f53}\u{524d}\u{7d22}\u{5f15}\u{4fdd}\u{6301}\u{4e0d}\u{53d8}",
-                    "Cancelled; current index unchanged",
-                ));
-            }
-            let mut args = action.to_vec();
-            args.extend(["--model-task-id", &task_id]);
-            retrieval_action(&args)
-        };
         let result = match kind {
             ConfirmKind::Switch(name) => {
                 switch_account(&name)
@@ -1497,19 +1489,19 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             ConfirmKind::Migrate(id, account) => host_command(&["migrate", "--source", &id, "--account", &account])
                 .map(|_| t("\u{8fc1}\u{79fb}\u{5b8c}\u{6210}\u{ff1b}\u{53ef}\u{5728}\u{8d26}\u{6237}\u{9875}\u{9762}\u{5207}\u{6362}", "Migration complete; select it on the Accounts page")),
             ConfirmKind::Sync => rpc(&["sync"]).map(|value| sync_notice(&value)),
-            ConfirmKind::InstallM3 => model_action(&["model", "install-m3", "--mirror", &selected_model_mirror()])
+            ConfirmKind::InstallM3 => host_command(&["model", "install-m3", "--mirror", &selected_model_mirror()])
                 .map(|_| t("BGE-M3 \u{5904}\u{7406}\u{7ed3}\u{675f}", "BGE-M3 step finished")),
             ConfirmKind::CancelModel(id) => cancel_model(&id)
                 .map(|_| t("\u{5df2}\u{53d6}\u{6d88}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "Model task cancelled")),
             ConfirmKind::RestartM3(id, mirror) => cancel_model(&id)
-                .and_then(|_| crate::rpc::prepare_model(&mirror).map_err(|error| error.to_string()))
-                .map(|_| t("\u{5df2}\u{91cd}\u{65b0}\u{5b89}\u{6392}\u{4e0b}\u{8f7d}\u{ff1b}\u{53ef}\u{5728}\u{6a21}\u{578b}\u{9875}\u{9762}\u{67e5}\u{770b}\u{8fdb}\u{5ea6}", "Download rescheduled; progress is shown on the Models page")),
+                .and_then(|_| host_command(&["model", "install-m3", "--mirror", &mirror]))
+                .map(|_| t("BGE-M3 \u{5b89}\u{88c5}\u{5b8c}\u{6210}", "BGE-M3 installation complete")),
             ConfirmKind::UninstallM3 => {
-                rpc(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 \u{5df2}\u{5378}\u{8f7d}", "BGE-M3 uninstalled"))
+                host_command(&["model", "uninstall-m3"]).map(|_| t("BGE-M3 \u{5df2}\u{5378}\u{8f7d}", "BGE-M3 uninstalled"))
             }
             ConfirmKind::Engine(engine) => save_model_settings(&shared, &engine, None),
             ConfirmKind::Weights(engine, variant) => save_model_settings(&shared, &engine, Some(&variant)),
-            ConfirmKind::InstallVariant(engine, variant) => model_action(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
+            ConfirmKind::InstallVariant(engine, variant) => host_command(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
                 "--mirror", &selected_model_mirror()]).map(|_| t(
                     "\u{9884}\u{4e0b}\u{8f7d}\u{5b8c}\u{6210}\u{ff1b}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{672a}\u{5207}\u{6362}\u{ff0c}\u{53ef}\u{7ee7}\u{7eed}\u{4e0b}\u{8f7d}\u{5176}\u{4ed6}\u{6743}\u{91cd}\u{6216}\u{9009}\u{62e9}\u{52a0}\u{8f7d}", "Download complete; current model unchanged. Download more weights or select Load.")),
             ConfirmKind::RecallMode(mode) => {
@@ -1535,7 +1527,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             ConfirmKind::Workspace(mode) => set_workspace(&mode),
             ConfirmKind::Autosync(on) => {
                 let flag = if on { "true" } else { "false" };
-                rpc(&["config", "--autosync", flag]).map(|_| t("\u{81ea}\u{52a8}\u{540c}\u{6b65}\u{5df2}\u{4fdd}\u{5b58}", "Auto-sync saved"))
+                host_command(&["config", "--autosync", flag]).map(|_| t("\u{81ea}\u{52a8}\u{540c}\u{6b65}\u{5df2}\u{4fdd}\u{5b58}", "Auto-sync saved"))
             }
             ConfirmKind::Update(tool, spec) => run_package_update(&tool, &spec),
         };
@@ -1553,7 +1545,7 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
 }
 
 fn set_workspace(mode: &str) -> Result<String, String> {
-    rpc(&["agent-config", "--set", &format!("workspace_mode={mode}")])?;
+    host_command(&["agent-config", "--set", &format!("workspace_mode={mode}")])?;
     Ok(t(
         "\u{5de5}\u{4f5c}\u{6a21}\u{5f0f}\u{5df2}\u{4fdd}\u{5b58}",
         "Service mode saved",
@@ -1887,7 +1879,9 @@ fn draw(frame: &mut Frame, app: &App) {
     {
         draw_inject(frame, app, chunks[0]);
     }
-    let foot = if matches!(app.overlay, Overlay::ModelTask(_)) {
+    let foot = if matches!(app.overlay, Overlay::HostModel) {
+        t("\u{7b49}\u{5f85}\u{5bbf}\u{4e3b}\u{7ed3}\u{679c}\u{ff1b}\u{4e0d}\u{652f}\u{6301}\u{53d6}\u{6d88}", "Waiting for host result; cancellation unavailable")
+    } else if matches!(app.overlay, Overlay::ModelTask(_)) {
         t(
             "Esc / C \u{53d6}\u{6d88}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{4efb}\u{52a1}",
             "Esc / C cancels the model task",
@@ -2971,6 +2965,10 @@ fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
         Overlay::None => None,
         Overlay::ModelWeights(form) => Some(form.lines(&app.live.model_settings)),
         Overlay::RecallFusion(form) => Some(form.lines()),
+        Overlay::HostModel => Some(vec![
+            line(t("\u{7b49}\u{5f85}\u{5bbf}\u{4e3b}\u{5b50}\u{8fdb}\u{7a0b}\u{8fd4}\u{56de}\u{7ed3}\u{679c}", "Waiting for the host subprocess result")),
+            line(t("\u{5b9e}\u{65f6}\u{8fdb}\u{5ea6}\u{4e0d}\u{53ef}\u{7528}\u{ff1b}\u{6b64}\u{5904}\u{4e0d}\u{652f}\u{6301}\u{53d6}\u{6d88}", "Live progress unavailable; cancellation is not supported here")),
+        ]),
         Overlay::SavingWeights => Some(vec![
             line(match app.live.model_progress["phase"].as_str() {
                 Some("verify") => t("\u{6b63}\u{5728}\u{6821}\u{9a8c}\u{56fa}\u{5b9a}\u{5927}\u{5c0f}\u{3001}SHA-256 \u{548c}\u{6a21}\u{578b}\u{8eab}\u{4efd}", "Validating pinned size, SHA-256 and model identity"),

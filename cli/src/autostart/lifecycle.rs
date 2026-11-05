@@ -386,6 +386,44 @@ pub(crate) fn authorize_detached_boot_locked() -> Result<()> {
     private_write(&path, &serde_json::to_vec(&value)?, Some(&hash(&previous)))
 }
 
+/// Export only an authorization binding; never forward the reusable maintenance token.
+pub(super) fn launch_maintenance_binding(profile: &Path, managed_id: Option<&str>) -> Result<Option<Value>> {
+    let root = respire::service::main_data_dir();
+    let Some(value) = marker(&root)? else {
+        return Ok(None);
+    };
+    let bytes = fs::read(marker_path(&root))?;
+    let observed: Marker = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("invalid runtime maintenance authorization"))?;
+    let managed_authorized = if let Some(id) = managed_id {
+        let config = read_registration(&root)?.context("managed launch registration is missing")?;
+        owned(&config)?;
+        anyhow::ensure!(
+            std::env::current_exe()?.canonicalize()? == config.executable.canonicalize()?,
+            "managed launch controller differs from the registered CLI"
+        );
+        config.id == id && value.id == id && config.enabled && !config.manually_stopped
+    } else {
+        false
+    };
+    anyhow::ensure!(
+        serde_json::to_vec(&observed)? == serde_json::to_vec(&value)?
+            && (managed_authorized || current_boot_token().as_deref() == Some(value.token.as_str()))
+            && matches!(value.phase, Phase::Starting | Phase::Verified)
+            && value.expected_profile.as_deref() == Some(profile)
+            && value.expected_version == env!("CARGO_PKG_VERSION")
+            && controller_alive(&value)?,
+        "runtime maintenance does not authorize the selected launch"
+    );
+    Ok(Some(json!({
+        "marker_sha256": hash(&bytes),
+        "coordinator_id": value.id,
+        "controller_pid": value.owner_pid,
+        "controller_birth": value.owner_birth,
+        "issuer_cli_version": value.expected_version,
+    })))
+}
+
 pub(crate) fn background_paused() -> bool {
     // Malformed/unreadable control state also fences background mutations.
     !matches!(marker(&respire::service::main_data_dir()), Ok(None))
@@ -424,51 +462,95 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
     Ok(Some(executable))
 }
 
+fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
+    let root = config.installation.canonicalize()?;
+    let registered_root = PathBuf::from(
+        config
+            .environment
+            .get("RSRS_DATA_DIR")
+            .context("registered runtime root is missing")?,
+    );
+    anyhow::ensure!(
+        registered_root.canonicalize()? == root
+            && respire::service::main_data_dir().canonicalize()? == root,
+        "registered runtime root belongs to another installation"
+    );
+    // The registered supervisor clears runtime overrides before selecting its child.
+    let accepted = crate::runtime_fetch::read_manifest()?
+        .is_some_and(|manifest| crate::runtime_fetch::version_in_accept(&manifest.version));
+    let runtime =
+        if let Some(managed) = crate::runtime_fetch::managed_runtime_path()?.filter(|_| accepted) {
+            managed
+        } else {
+            config
+                .executable
+                .parent()
+                .context("supervisor executable parent missing")?
+                .join(crate::runtime_fetch::RUNTIME_BINARY)
+        };
+    let runtime = runtime
+        .canonicalize()
+        .context("selected Runtime is unavailable")?;
+    anyhow::ensure!(runtime.is_file(), "selected Runtime is not a file");
+    anyhow::ensure!(
+        runtime != config.executable.canonicalize()?
+            && runtime != std::env::current_exe()?.canonicalize()?
+            && crate::mcp::exe_matches_dest(&health.exe, &runtime)
+            && crate::mcp::exe_matches_dest(&health.image_path, &runtime)
+            && !health.data_dir.is_empty()
+            && Path::new(&health.data_dir).canonicalize()? == respire::service::data_dir().canonicalize()?
+            && !health.installation_root.is_empty()
+            && Path::new(&health.installation_root).canonicalize()? == root
+            && health.installation_id == hash(root.display().to_string().as_bytes())
+            && health.managed_id.as_deref() == Some(config.id.as_str())
+            && health.pid > 0,
+        "runtime identity/profile does not match this startup registration; no lifecycle action taken"
+    );
+    let birth =
+        manager::process_birth(health.pid)?.context("owned runtime process already exited")?;
+    let prefix = if cfg!(windows) {
+        "windows-filetime-"
+    } else if cfg!(target_os = "linux") {
+        "linux-starttime-"
+    } else {
+        "darwin-lstart-"
+    };
+    anyhow::ensure!(
+        health.process_start_id == format!("{prefix}{birth}"),
+        "owned runtime process birth does not match health"
+    );
+    Ok(birth)
+}
+
 fn raw_stop_owned(config: &Registration) -> Result<()> {
+    owned(config)?;
     ensure_control_endpoint(config)?;
-    manager::inspect(config)?;
-    if let Some(health) = crate::rpc::probe_runtime()? {
+    let manager_state = manager::inspect(config)?;
+    // A closed listener can still belong to a draining child in the supervisor's job.
+    let Some(health) = crate::rpc::probe_runtime()
+        .context("owned runtime health is unavailable; manager stop is blocked")?
+    else {
         anyhow::ensure!(
-            crate::mcp::exe_matches_dest(&health.exe, &config.executable)
-                && !health.data_dir.is_empty()
-                && crate::mcp::same_path(
-                    Path::new(&health.data_dir),
-                    &respire::service::data_dir()
-                ),
-            "runtime identity/profile does not match this installation; no lifecycle action taken"
+            !manager_state.running && !crate::rpc::endpoint_path().exists(),
+            "owned runtime has no verifiable health/drain proof; manager stop is blocked"
         );
-        crate::rpc::stop_occupant(health.pid)?;
-    }
+        return Ok(());
+    };
+    verify_owned_runtime(config, &health)?;
+    crate::rpc::drain_occupant(&health, Duration::from_secs(60))?;
     manager::stop(config)
 }
 
 fn wait_ready(config: &Registration) -> Result<()> {
+    owned(config)?;
+    manager::inspect(config)?;
     let deadline = Instant::now() + Duration::from_secs(90);
     while Instant::now() < deadline {
         if let Some(health) = crate::rpc::probe_runtime()? {
+            verify_owned_runtime(config, &health)?;
             anyhow::ensure!(
-                (crate::runtime_fetch::version_in_accept(&health.runtime_version)
-                    // Legacy combined binaries and the split-transition shim
-                    // both report this CLI's exact train.
-                    || health.bin == env!("CARGO_PKG_VERSION"))
-                    && (crate::mcp::exe_matches_dest(&health.exe, &config.executable)
-                        || crate::runtime_fetch::managed_runtime_path()
-                            .ok()
-                            .flatten()
-                            .is_some_and(|managed| crate::mcp::exe_matches_dest(
-                                &health.exe,
-                                &managed
-                            )))
-                    && !health.data_dir.is_empty()
-                    && crate::mcp::same_path(
-                        Path::new(&health.data_dir),
-                        &respire::service::data_dir()
-                    ),
-                "managed runtime version/executable/profile mismatch"
-            );
-            anyhow::ensure!(
-                health.managed_id.as_deref() == Some(config.id.as_str()),
-                "runtime is not owned by this startup registration"
+                crate::runtime_fetch::version_in_accept(&health.runtime_version),
+                "managed runtime version mismatch"
             );
             if health.store_ready || respire::service::off_mode() {
                 return Ok(());
@@ -484,7 +566,6 @@ fn start_candidate(guard: &mut Maintenance) -> Result<()> {
         .config
         .as_ref()
         .context("managed registration missing")?;
-    raw_stop_owned(config)?;
     anyhow::ensure!(
         config.executable == crate::mcp::stable_bin_path(),
         "service executable differs from host configuration; explicitly reconfigure startup first"
@@ -544,7 +625,10 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
             marker_digest: Some(digest),
             completed: true,
         };
-        let result = start_candidate(&mut borrowed);
+        let result = (|| {
+            raw_stop_owned(borrowed.config.as_ref().context("registration missing")?)?;
+            start_candidate(&mut borrowed)
+        })();
         // This borrowed guard does not own completion or its caller's token.
         borrowed.config = None;
         result?;
@@ -559,6 +643,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         }
     }
     let mut guard = Maintenance::begin(config, false)?;
+    raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
     start_candidate(&mut guard)?;
     guard.finish()?;
     Ok(true)
@@ -591,6 +676,7 @@ fn start_explicit_locked() -> Result<()> {
     config.manually_stopped = false;
     save(config)?;
     reset_attempts(config)?;
+    raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
     start_candidate(&mut guard)?;
     guard.finish()
 }
@@ -861,6 +947,31 @@ fn emit(command: &str, summary: Value) -> Result<()> {
 }
 
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
+    if let RuntimeCommand::Result { context } = command {
+        let response: crate::rpc::RpcResponse =
+            serde_json::from_value(crate::net_rpc::rpc_result(context)?)
+                .context("invalid runtime.result response")?;
+        if let Some(code @ ("scope_required" | "scope_mismatch")) = response.code.as_deref() {
+            bail!(
+                "{code}: {}",
+                response
+                    .error
+                    .as_deref()
+                    .unwrap_or("runtime.result scope rejected")
+            );
+        }
+        if let Some(envelope) = response.envelope {
+            crate::emit_result(envelope)?;
+            crate::set_exit_code(response.exit);
+            return Ok(());
+        }
+        bail!(
+            "{}",
+            response
+                .error
+                .unwrap_or_else(|| "runtime.result returned an empty response".to_owned())
+        );
+    }
     if matches!(
         command,
         RuntimeCommand::Status
@@ -886,8 +997,13 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             *supervised_child,
         ),
         RuntimeCommand::Stop => {
+            let stopped = crate::rpc::probe_runtime()?;
             crate::rpc::stop_if_running()?;
-            emit("runtime.stop", json!({"state":"stopped"}))
+            let result = match stopped {
+                Some(health) => crate::net_rpc::final_stop_receipt(&health, None)?,
+                None => json!({"state":"stopped", "already_stopped":true}),
+            };
+            emit("runtime.stop", result)
         }
         RuntimeCommand::Restart => {
             let value = crate::rpc::restart_runtime(Duration::from_secs(10))?;
@@ -1457,10 +1573,15 @@ mod tests {
             }
         }
         let _restore = Restore(
-            ["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT"]
-                .into_iter()
-                .map(|key| (key, std::env::var_os(key)))
-                .collect(),
+            [
+                "RSRS_DATA_DIR",
+                "RSRS_BIN_DIR",
+                "RSRS_RPC_PORT",
+                "RSRS_RUNTIME_BIN",
+            ]
+            .into_iter()
+            .map(|key| (key, std::env::var_os(key)))
+            .collect(),
         );
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
@@ -1478,10 +1599,65 @@ mod tests {
             "RSRS_RPC_PORT".into(),
             crate::net_rpc::rpc_port().to_string(),
         );
+        config
+            .environment
+            .insert("RSRS_DATA_DIR".into(), root.display().to_string());
+        config.environment.insert(
+            "RSRS_BIN_DIR".into(),
+            root.join("bin").display().to_string(),
+        );
+        fs::create_dir_all(root.join("bin"))?;
+        fs::write(&config.executable, b"synthetic supervisor; never executed")?;
+        let runtime = root.join("bin").join(crate::runtime_fetch::RUNTIME_BINARY);
+        fs::write(&runtime, b"synthetic runtime; never executed")?;
+        std::env::remove_var("RSRS_RUNTIME_BIN");
+        let birth =
+            manager::process_birth(std::process::id())?.context("test process birth missing")?;
+        let health = json!({
+            "server": "respire", "bin": env!("CARGO_PKG_VERSION"),
+            "pid": std::process::id(), "v": crate::rpc::PROTOCOL_V,
+            "exe": runtime, "image_path": runtime, "data_dir": root,
+            "installation_root": root, "installation_id": hash(root.display().to_string().as_bytes()),
+            "managed_id": config.id, "process_start_id": format!("linux-starttime-{birth}")
+        });
+        verify_owned_runtime(&config, &serde_json::from_value(health.clone())?)?;
+        for (field, foreign) in [
+            ("exe", json!(config.executable)),
+            ("image_path", json!(config.executable)),
+            ("data_dir", json!(config.user_home)),
+            ("installation_root", json!(config.user_home)),
+            ("installation_id", json!("foreign-installation")),
+            ("managed_id", json!("foreign-registration")),
+            ("process_start_id", json!("linux-starttime-reused")),
+            ("pid", json!(0)),
+        ] {
+            let mut changed = health.clone();
+            changed[field] = foreign;
+            anyhow::ensure!(
+                verify_owned_runtime(&config, &serde_json::from_value(changed)?).is_err()
+            );
+        }
         config.enabled = true;
         let (_scope, state) = manager::test_adapter::install(&config);
         manager::install(&mut config)?;
         save(&mut config)?;
+        let cold_changes = state.borrow().changes.clone();
+        raw_stop_owned(&config)?;
+        anyhow::ensure!(
+            !state.borrow().running && state.borrow().changes == cold_changes,
+            "cold start attempted to stop an absent owner"
+        );
+        let endpoint = crate::rpc::endpoint_path();
+        fs::create_dir_all(endpoint.parent().context("test endpoint parent missing")?)?;
+        anyhow::ensure!(!endpoint.exists());
+        fs::write(&endpoint, br#"{"v":1,"pid":0}"#)?;
+        anyhow::ensure!(
+            raw_stop_owned(&config).is_err()
+                && endpoint.exists()
+                && state.borrow().changes == cold_changes,
+            "unverified stopped owner was reclaimed"
+        );
+        fs::remove_file(endpoint)?;
         for phase in [Phase::Paused, Phase::Starting, Phase::Verified] {
             let current = read_registration(&root)?.context("test registration missing")?;
             let mut interrupted = Maintenance::begin(current, false)?;
@@ -1509,7 +1685,20 @@ mod tests {
             recovered.finish()?;
             anyhow::ensure!(marker(&root)?.is_none() && !background_paused());
         }
-        anyhow::ensure!(stop_managed_locked()?);
+        state.borrow_mut().running = true;
+        let changes = state.borrow().changes.clone();
+        let blocked = stop_managed_locked()
+            .err()
+            .context("missing health permitted manager stop")?;
+        anyhow::ensure!(format!("{blocked:#}").contains("manager stop is blocked"));
+        anyhow::ensure!(state.borrow().running && state.borrow().changes == changes);
+        anyhow::ensure!(background_paused());
+        state.borrow_mut().running = false;
+        let mut recovered = restart_maintenance_locked()?;
+        recovered.finish()?;
+        let mut stopped = read_registration(&root)?.context("test registration missing")?;
+        stopped.manually_stopped = true;
+        save(&mut stopped)?;
         anyhow::ensure!(
             read_registration(&root)?
                 .context("test registration missing")?
@@ -1557,8 +1746,8 @@ mod tests {
             .err()
             .context("backend registration failure was not returned")?;
         anyhow::ensure!(
-            format!("{failed:#}").contains("systemctl current-user operation failed"),
-            "fixture did not reach backend registration failure"
+            format!("{failed:#}").contains("manager stop is blocked"),
+            "missing health did not block before backend registration"
         );
         anyhow::ensure!(
             marker(&root)?.is_some()
@@ -1567,13 +1756,18 @@ mod tests {
                     .enabled
         );
         state.borrow_mut().fail = None;
-        disable(true, true)?;
+        let changes = state.borrow().changes.clone();
+        let blocked = disable(true, true)
+            .err()
+            .context("missing health permitted removal")?;
+        anyhow::ensure!(format!("{blocked:#}").contains("manager stop is blocked"));
         anyhow::ensure!(
-            marker(&root)?.is_none()
-                && !manager::inspect(
-                    &read_registration(&root)?.context("removed registration missing")?
+            marker(&root)?.is_some()
+                && manager::inspect(
+                    &read_registration(&root)?.context("preserved registration missing")?
                 )?
                 .registered
+                && state.borrow().changes == changes
         );
         Ok(())
     }

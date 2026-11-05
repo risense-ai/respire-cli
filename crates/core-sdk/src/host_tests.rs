@@ -170,7 +170,12 @@ fn user_variants_take_precedence_over_packaged_baselines() {
         user.clone(),
         vec![legacy.clone()],
         Some(packaged.clone()),
+        false,
     );
+    let isolated = crate::bge::model_directory_candidates(
+        user.clone(), vec![legacy.clone()], Some(packaged.clone()), true,
+    );
+    assert_eq!(isolated, vec![user.clone()]);
     assert_eq!(&candidates[..3], &[user, legacy, packaged]);
     assert_eq!(
         candidates.last(),

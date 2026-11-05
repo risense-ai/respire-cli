@@ -4069,6 +4069,7 @@ pub fn run_metadata_host(command: &metadata::Command) -> Result<()> {
 }
 
 pub fn run_local(args: Cli) -> Result<()> {
+    respire_app::service::validate_client_config()?;
     set_json_mode(
         args.json || respire_app::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
     );

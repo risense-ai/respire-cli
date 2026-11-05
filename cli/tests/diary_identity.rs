@@ -1,5 +1,6 @@
 //! Actual client-only commands against a fresh synthetic runtime and local library.
 //! No real account, keyring, model download, or remote memory service is used.
+//! The CLI shim is explicitly selected; this suite is not standalone G1 evidence.
 use anyhow::Context;
 use respire::memory::{crypto, search::HashingEmbedder};
 use respire::transport::local::LocalStore;
@@ -78,6 +79,7 @@ impl Fixture {
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
+            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
             .env("RSRS_RPC_PARALLELISM", "2")
             .env("RSRS_LANG", "en")
             .env("TZ", "UTC")

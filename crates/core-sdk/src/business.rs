@@ -682,36 +682,50 @@ pub mod bge {
         CPU_ORT_SIZE, CPU_ORT_URL,
     };
     // Installation paths are public infrastructure and use the Respire profile.
-    pub fn default_user_model_dir() -> PathBuf {
-        crate::env::var("RSRS_DATA_DIR")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .map(|value| expand_home(value.trim()).join("models/bge-m3"))
-            .unwrap_or_else(|| expand_home("~/.rsrs/models/bge-m3"))
+    fn model_dir_setting(name: &str) -> Result<Option<PathBuf>> {
+        match crate::env::var(name) {
+            Ok(value) => {
+                anyhow::ensure!(!value.trim().is_empty(), "{name} must not be empty or whitespace");
+                Ok(Some(expand_home(value.trim())))
+            }
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{name} must contain valid Unicode"),
+        }
     }
-    pub fn m3_model_dir() -> PathBuf {
-        crate::env::var("RSRS_M3_DIR")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .map(|s| expand_home(s.trim()))
-            .unwrap_or_else(default_user_model_dir)
+
+    pub fn default_user_model_dir() -> Result<PathBuf> {
+        let root = model_dir_setting("RSRS_DATA_DIR")?;
+        // CPU cache callers must reject an invalid model override too.
+        model_dir_setting("RSRS_M3_DIR")?;
+        Ok(root.map(|root| root.join("models/bge-m3"))
+            .unwrap_or_else(|| expand_home("~/.rsrs/models/bge-m3")))
     }
+
+    pub fn m3_model_dir() -> Result<PathBuf> {
+        // Validate the isolation root even when a model override is present.
+        let default = default_user_model_dir()?;
+        Ok(model_dir_setting("RSRS_M3_DIR")?.unwrap_or(default))
+    }
+
     pub fn model_files_present(dir: &Path) -> bool {
         dir.join("tokenizer.json").is_file() && dir.join("onnx/model_quantized.onnx").is_file()
     }
+
     pub fn resolve_model_dir() -> Result<PathBuf> {
-        let directory = discovered_model_dir();
+        let directory = discovered_model_dir()?;
         anyhow::ensure!(model_files_present(&directory), "BGE-M3 quantized files missing in {}; need tokenizer.json and onnx/model_quantized.onnx; run rsrs model install-m3 or set RSRS_M3_DIR",directory.display());
         Ok(directory)
     }
 
-    pub(crate) fn discovered_model_dir() -> PathBuf {
-        let user = m3_model_dir();
-        if crate::env::var("RSRS_M3_DIR").is_ok_and(|value| !value.trim().is_empty()) {
-            return user;
+    /// Find a model without requiring baseline files, so inventories can report missing assets.
+    pub fn discovered_model_dir() -> Result<PathBuf> {
+        let user = m3_model_dir()?;
+        if crate::env::var_os("RSRS_M3_DIR").is_some() {
+            return Ok(user);
         }
+        let isolated = crate::env::var_os("RSRS_DATA_DIR").is_some();
         let mut legacy = Vec::new();
-        if crate::env::var_os("RSRS_DATA_DIR").is_none() {
+        if !isolated {
             if let Some(home) = dirs::home_dir() {
                 legacy.extend([
                     home.join(".respire/models/bge-m3"),
@@ -722,22 +736,24 @@ pub mod bge {
         let packaged = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|parent| parent.join("models/bge-m3")));
-        model_directory_candidates(user.clone(), legacy, packaged)
+        Ok(model_directory_candidates(user.clone(), legacy, packaged, isolated)
             .into_iter()
             .find(|directory| model_files_present(directory))
-            .unwrap_or(user)
+            .unwrap_or(user))
     }
+
     pub(crate) fn model_directory_candidates(
         user: PathBuf,
         legacy: Vec<PathBuf>,
         packaged: Option<PathBuf>,
+        isolated: bool,
     ) -> Vec<PathBuf> {
-        // Installers write the user model first. Packaged/system models remain
-        // fallbacks, so an installed variant cannot be shadowed by a baseline.
         let mut candidates = vec![user];
-        candidates.extend(legacy);
-        candidates.extend(packaged);
-        candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        if !isolated {
+            candidates.extend(legacy);
+            candidates.extend(packaged);
+            candidates.push(PathBuf::from("/usr/lib/respire/models/bge-m3"));
+        }
         candidates
     }
     pub fn expand_home(value: &str) -> PathBuf {

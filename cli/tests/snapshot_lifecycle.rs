@@ -1,4 +1,5 @@
 //! Public snapshot commands with an isolated synthetic vault, not user data.
+//! Explicit CLI shim compatibility regression, not standalone Runtime acceptance.
 use anyhow::{Context, Result};
 use respire::memory::{crypto, search::HashingEmbedder};
 use respire::transport::local::LocalStore;
@@ -87,6 +88,7 @@ impl Fixture {
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
+            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
             .spawn()?;
         let began = Instant::now();
         loop {
@@ -161,6 +163,7 @@ impl Fixture {
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
+            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
             .env("RSRS_LANG", "en")
             .env("RSRS_MIRROR", "http://127.0.0.1:9")
             .env("RSRS_CPU_ORT_MIRROR", "http://127.0.0.1:9");

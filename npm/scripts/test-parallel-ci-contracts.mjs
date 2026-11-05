@@ -21,19 +21,22 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/process.exit\(result.status \?\? 1\)/);
-  const program=source.split("node --input-type=module <<'NODE'\n")[1].split('\n          NODE')[0]
-    .replace("import {execFileSync, spawnSync} from 'node:child_process';",'');
+  const program=source.split("node --input-type=module <<'NODE'\n").slice(1)
+    .map(block=>block.split('\n          NODE')[0]).find(block=>block.includes("const metadata = JSON.parse(execFileSync('cargo'"))
+    .replace("import {execFileSync, spawnSync} from 'node:child_process';",'')
+    .replace("import {captureCoverage} from './scripts/produce-required-tests.mjs';",'');
   const metadata=JSON.parse(execFileSync('cargo',['metadata','--locked','--no-deps','--format-version','1'],{encoding:'utf8'}));
   const targets=metadata.packages.find(p=>p.name==='respire').targets;
   const allTests=targets.filter(t=>t.kind.includes('test')).map(t=>t.name);
   const selected=[];
   for(const group of ['core','runtime_smoke','runtime_autostart']){
     const calls=[],exits=[];
-    runInNewContext(program,{
+    assert.throws(()=>runInNewContext(program,{
       execFileSync:()=>JSON.stringify(metadata),
       spawnSync:(_command,args)=>{calls.push(args);return {status:0};},
-      process:{env:{COVERAGE_GROUP:group},exit:status=>exits.push(status)},
-    });
+      captureCoverage:args=>{calls.push(args);return 0;},
+      process:{env:{COVERAGE_GROUP:group},exit:status=>{exits.push(status);throw exits;}},
+    }),error=>error===exits);
     assert.deepEqual(exits,[0]);assert.equal(calls.length,1);
     for(let i=0;i<calls[0].length;i++)if(calls[0][i]==='--test')selected.push(calls[0][i+1]);
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
@@ -46,7 +49,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   });
   assert.deepEqual(exits,[23],'test failures must fail the coverage group');
 
-  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks\]/);
+  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests\]/);
   assert.match(report,/for group in core runtime_smoke runtime_autostart/);
   assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 90/);
   assert.match(report,/exit "\$result"/);
@@ -57,10 +60,11 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert(readFileSync(new URL('../../scripts/test-dev-model-fixture.py',import.meta.url),'utf8').includes('from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest'));
 });
 test('fail-closed aggregate requires both successful lanes, including failure and unexpected skips',()=>{
-  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks\]/);
-  assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success/);
+  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests\]/);
+  assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success && test "\$REQUIRED_RESULT" = success/);
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
+  assert.match(complete,/REQUIRED_RESULT: \$\{\{ needs.required-tests.result \}\}/);
   for(const name of ['coverage-tests','check-complete','workspace-tests','contract-checks'])assert.match(section(name),/!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only/);
 });
 

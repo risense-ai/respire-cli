@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "owner": "cli",
+  "areas": [
+    "release-assets"
+  ],
+  "tests": [
+    {
+      "id": "cli.release-metadata-dual-digest",
+      "area": "release-assets",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "coverage": "source-test",
+      "required_targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "cli/src/runtime_fetch_tests.rs",
+          "test": "offline_install_publishes_manifest_and_retains_one_rollback",
+          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::offline_install_publishes_manifest_and_retains_one_rollback --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "schema 2 dual digest and complete payload; synthetic archive, not published assets"
+        },
+        {
+          "file": "cli/src/runtime_fetch_tests.rs",
+          "test": "metadata_validation_rejects_cross_purpose_documents",
+          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "legacy/canonical aliases, conflicts and independent digests"
+        }
+      ],
+      "evidence": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "coverage-tests",
+        "job_name": "Coverage (core)",
+        "command_fragment": "if (group === 'core') args.push('--lib', '--bins', '--examples');"
+      },
+      "execution_note": "Source tests are implemented; no final-candidate execution report is claimed. Synthetic installer fixtures do not satisfy real release-asset acceptance.",
+      "required_cases": [
+        "offline_install_publishes_manifest_and_retains_one_rollback",
+        "metadata_validation_rejects_cross_purpose_documents"
+      ]
+    },
+    {
+      "id": "cli.release-metadata-legacy-mapping",
+      "area": "release-assets",
+      "status": "implemented",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2",
+      "coverage": "source-test",
+      "required_targets": [
+        "x86_64-unknown-linux-gnu"
+      ],
+      "source_suite": [
+        {
+          "file": "cli/src/runtime_fetch_tests.rs",
+          "test": "metadata_validation_rejects_cross_purpose_documents",
+          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
+          "coverage": "source-test",
+          "scope": "legacy/canonical aliases, conflicts and independent digests"
+        }
+      ],
+      "evidence": {
+        "workflow": ".github/workflows/ci.yml",
+        "job": "coverage-tests",
+        "job_name": "Coverage (core)",
+        "command_fragment": "if (group === 'core') args.push('--lib', '--bins', '--examples');"
+      },
+      "execution_note": "Source tests are implemented; no final-candidate execution report is claimed. Synthetic installer fixtures do not satisfy real release-asset acceptance.",
+      "required_cases": [
+        "metadata_validation_rejects_cross_purpose_documents"
+      ]
+    },
+    {
+      "id": "cli.release-assets-eight-target-matrix",
+      "area": "release-assets",
+      "status": "missing",
+      "reason": "Real published/candidate archives for all eight frozen release targets have no actual-asset execution report; source metadata/installer fixtures are insufficient.",
+      "introduced_in_stage": 1,
+      "required_at_gate": [
+        "G1",
+        "G2"
+      ],
+      "report_schema": "required-execution/v2"
+    }
+  ]
+}

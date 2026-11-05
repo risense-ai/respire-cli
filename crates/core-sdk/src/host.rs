@@ -309,7 +309,7 @@ fn legacy_model(directory: &std::path::Path) -> Result<LegacyModel> {
     })
 }
 pub fn legacy_effective_model_config() -> Result<Value> {
-    let selected = legacy_model(&crate::bge::discovered_model_dir())?;
+    let selected = legacy_model(&crate::bge::discovered_model_dir()?)?;
     let weights = if selected.cpu_owned {
         crate::bge::CPU_ORT_SHA256
     } else {
@@ -339,9 +339,10 @@ pub(crate) fn initialize_model(core: &mut crate::Core) -> Result<()> {
     let cpu_owned_experiment = selected.cpu_owned;
     let fallback_note = selected.fallback_note;
     let model_path = if cpu_owned_experiment {
-        crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::bge::cpu_ort_path(&directory))
+        match crate::env::var_os("RSRS_CPU_OWNED_ORT_FILE") {
+            Some(path) => std::path::PathBuf::from(path),
+            None => crate::bge::cpu_ort_path(&directory)?,
+        }
     } else {
         directory.join(crate::onnx::variant_file_name(variant.name))
     };

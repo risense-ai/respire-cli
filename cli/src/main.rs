@@ -1237,12 +1237,13 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
-    if std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
+    let roots_requested = std::env::args_os().any(|arg| arg == "--roots");
+    if !roots_requested && std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
         set_json_mode(true);
         if std::env::args_os().any(|arg| arg == "--client-only") {
             std::env::set_var("RSRS_CLIENT_ONLY", "1");
         }
-        return match host_rpc::serve() {
+        return match respire::service::validate_client_config().and_then(|()| host_rpc::serve()) {
             Ok(code) => code,
             Err(error) => {
                 let (envelope, code) = command_failure(&error);
@@ -1253,7 +1254,7 @@ fn main_body() -> i32 {
             }
         };
     }
-    if std::env::args_os()
+    if !roots_requested && std::env::args_os()
         .nth(1)
         .is_some_and(|arg| arg == "--core-worker-internal")
     {
@@ -1276,9 +1277,23 @@ fn main_body() -> i32 {
     // The hidden runtime entry and `--direct` are peeled off before clap: the command enum is large enough that
     // extra derived fields overflow the debug main thread.
     let result = match preprocess_args() {
+        Preparsed::Roots { data_dir } => {
+            if let Some(dir) = data_dir {
+                std::env::remove_var("RSRS_DEFAULT_DATA_DIR");
+                std::env::set_var("RSRS_DATA_DIR", dir);
+            }
+            respire::service::resolved_roots().and_then(|roots| {
+                emit_result(ResultEnvelope::new(
+                    "roots",
+                    OutputStatus::Ok,
+                    serde_json::to_value(roots)?,
+                    Vec::new(),
+                ))
+            })
+        }
         Preparsed::Version { json } => {
             set_json_mode(json);
-            prepare_command_runtime().and_then(|()| crate::app_version::emit(json))
+            crate::app_version::emit(json)
         }
         Preparsed::RuntimeHelp { json } => {
             set_json_mode(json);
@@ -1334,6 +1349,7 @@ fn main_body() -> i32 {
 
 /// Normal command bootstrap, intentionally omitted by the read-only revision probe.
 fn prepare_command_runtime() -> Result<()> {
+    respire::service::validate_client_config()?;
     if !runtime_policy::client_only() {
         respire::migration::ensure_default_home()
             .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
@@ -1342,6 +1358,9 @@ fn prepare_command_runtime() -> Result<()> {
 }
 
 enum Preparsed {
+    Roots {
+        data_dir: Option<String>,
+    },
     RuntimeHelp {
         json: bool,
     },
@@ -1397,6 +1416,27 @@ fn preprocess_args() -> Preparsed {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let direct = args.iter().any(|arg| arg == "--direct");
     args.retain(|arg| arg != "--direct" && arg != "--client-only");
+    if args.iter().any(|arg| arg == "--roots") {
+        let mut data_dir = None;
+        let mut index = 0;
+        while index < args.len() {
+            match args[index].as_str() {
+                "--roots" | "--json" => {}
+                "--data-dir" if data_dir.is_none() => {
+                    index += 1;
+                    match args.get(index).filter(|value| {
+                        !value.trim().is_empty() && !value.starts_with("--")
+                    }) {
+                        Some(value) => data_dir = Some(value.clone()),
+                        None => return Preparsed::Invalid("--roots requires a nonempty --data-dir".to_owned()),
+                    }
+                }
+                _ => return Preparsed::Invalid("use --roots [--data-dir PATH] [--json] without a command".to_owned()),
+            }
+            index += 1;
+        }
+        return Preparsed::Roots { data_dir };
+    }
     if let Some(json) = is_short_v_version(&args) {
         return Preparsed::Version { json };
     }
@@ -1867,6 +1907,11 @@ fn run(args: Cli) -> Result<()> {
     if rpc::worker_active() {
         return run_local(args);
     }
+    // Identity and device ownership never belong to Runtime RPC. Run these
+    // host commands locally, even when a resident Runtime is already installed.
+    if let Some(outcome) = host_command(&args) {
+        return outcome;
+    }
     if let Some(Command::Restart { timeout }) = args.command.as_ref() {
         let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
         return emit_result(ResultEnvelope::new(
@@ -1948,8 +1993,17 @@ fn run(args: Cli) -> Result<()> {
             args.command.as_ref(),
             Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. })
         );
-    if !DIRECT_MODE.load(Ordering::Relaxed)
-        && (changes_profile(args.command.as_ref()) || host_auth_change)
+    // Only these asset/configuration handlers run locally, after Runtime drains.
+    // Business commands continue to use Runtime RPC, including with --direct.
+    let host_asset_change = matches!(
+        args.command.as_ref(),
+        Some(Command::Model {
+            action: ModelAction::InstallM3 { .. } | ModelAction::UninstallM3
+        } | Command::AgentConfig { set: Some(_) })
+    );
+    if host_asset_change
+        || (!DIRECT_MODE.load(Ordering::Relaxed)
+            && (changes_profile(args.command.as_ref()) || host_auth_change))
     {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);

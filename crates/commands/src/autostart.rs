@@ -26,6 +26,11 @@ pub enum RuntimeCommand {
     Restart,
     /// Inspect the existing host without creating a profile or starting it.
     Status,
+    /// Query an operation using its original context without starting a runtime.
+    Result {
+        #[arg(long, value_name = "JSON", value_parser = parse_operation_context)]
+        context: crate::runtime_error::OperationContext,
+    },
     /// Manage opt-in current-user sign-in startup; never installs a system service.
     Autostart {
         #[command(subcommand)]
@@ -55,6 +60,10 @@ pub enum RuntimeCommand {
         #[arg(long, value_name = "DIR")]
         data_dir: PathBuf,
     },
+}
+
+fn parse_operation_context(value: &str) -> Result<crate::runtime_error::OperationContext, String> {
+    serde_json::from_str(value).map_err(|error| format!("invalid operation context JSON: {error}"))
 }
 
 #[derive(Debug, Subcommand)]

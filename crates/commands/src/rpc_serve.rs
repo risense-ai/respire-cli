@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use respire_protocol::{AssetsStatus, RuntimeCompat, RuntimeIdentity};
+use respire_protocol::{RuntimeCompat, RuntimeIdentity};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -960,25 +960,12 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             Err(error) => error_response(&request, "model_control_failed", &error.to_string()),
         },
         "runtime.status" => status_response(&request),
-        "assets.status" => {
-            // Host assets (models, ORT, providers.json) are installed by the
-            // CLI before the runtime starts, so this train reports a complete
-            // inventory. TODO(P4): report model_install::variant_inventory()
-            // here once the runtime owns asset verification.
-            let status = AssetsStatus {
-                complete: true,
-                missing: Vec::new(),
-            };
-            let mut response = status_response(&request);
-            response.envelope = Some(ResultEnvelope::new(
-                "assets.status",
-                OutputStatus::Ok,
-                serde_json::to_value(status)
-                    .unwrap_or_else(|_| json!({"complete":true,"missing":[]})),
-                Vec::new(),
-            ));
-            response
-        }
+        // The legacy CLI shim cannot attest Runtime assets.
+        "assets.status" => error_response(
+            &request,
+            "runtime_required",
+            "asset verification requires the independent Runtime",
+        ),
         "cli.progress" => {
             let mut response = status_response(&request);
             let mut summary =

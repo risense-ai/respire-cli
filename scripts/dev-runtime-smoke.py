@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Exact-artifact runtime/dashboard checks on an ephemeral GitHub-hosted Linux runner.
+"""Explicit CLI shim/dashboard checks on an ephemeral GitHub-hosted Linux runner.
 
 Uses a fresh owned HOME, models and development account. Reports never contain
 credentials, command arguments, plaintext responses or raw subprocess logs.
+This legacy compatibility suite is not independent Runtime or G1 evidence.
 """
 import argparse
 import hashlib
@@ -57,6 +58,7 @@ class Smoke:
         self.password = '-' + secrets.token_urlsafe(32)
         self.report = {'source_sha': args.source_sha, 'workflow_sha': os.environ.get('GITHUB_SHA'),
                        'version': args.version, 'binary_sha256': args.binary_sha256,
+                       'runtime_mode': 'explicit_cli_shim', 'standalone_runtime_evidence': False,
                        'status': 'failed', 'passed': False, 'cases': {}, 'required_cases': REQUIRED,
                        'missing_cases': REQUIRED[:], 'cloud_cleanup': {'passed': False, 'remaining_users': []}}
 
@@ -182,6 +184,7 @@ class Smoke:
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         TMPDIR=str(self.root / 'tmp'), RSRS_DATA_DIR=str(self.root),
                         RSRS_BIN_DIR=str(self.root / 'bin'), RSRS_ENGINE='cpu',
+                        RSRS_RUNTIME_BIN=str(self.args.binary.resolve()),
                         RSRS_LANG='en', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0',
                         RSRS_M3_DIR=str(self.root / 'models/bge-m3'),
                         )

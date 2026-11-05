@@ -1,4 +1,5 @@
 //! HTTP RPC against the hidden `rsrs --runtime-internal` host entry.
+//! This explicitly selects the legacy CLI shim, not independent Runtime G1 acceptance.
 //! Isolated DATA_DIR + ephemeral port. Safe for GitHub Actions.
 //! Do not bind the developer machine's default 15169.
 

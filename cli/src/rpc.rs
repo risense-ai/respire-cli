@@ -139,143 +139,44 @@ pub fn stop_if_running() -> Result<()> {
     Ok(())
 }
 
-/// Explicit host recovery also handles a runtime whose HTTP listener is stuck.
+/// Restart only after the authenticated owner proves a complete normal drain.
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
-    let mut maintenance = crate::autostart::restart_maintenance_locked()?;
-    crate::progress::phase(
-        "\u{68c0}\u{67e5} runtime \u{8fdb}\u{7a0b}",
-        "Checking runtime process",
+    // An unavailable health response is not permission to discover or kill a PID.
+    let health = probe_runtime().context(
+        "runtime restart blocked: owner health is unavailable; no process was forced to exit",
+    )?;
+    anyhow::ensure!(
+        health.is_some() || !endpoint_path().exists(),
+        "runtime restart blocked: recorded owner has no verifiable health/drain receipt; repair is required, no replacement started"
     );
+    let mut maintenance = crate::autostart::restart_maintenance_locked()?;
     crate::autostart::restart_stage("restart_probe");
-    let health = match probe_runtime() {
-        Ok(health) => health,
-        Err(error)
-            if matches!(
-                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                Some(crate::runtime_error::RuntimeError::Transport(_))
-            ) =>
-        {
-            None
-        }
-        Err(error) => return Err(error),
-    };
+    let stopped_pid = health.as_ref().map(|value| value.pid);
     if crate::autostart::managed_enabled()?
         && health
             .as_ref()
             .is_some_and(|value| !value.inference_stalled())
     {
-        // The active maintenance guard forces the managed coordinator to drain
-        // the authenticated, exact registered executable/profile and stop its
-        // service owner before replacement. Do not route this healthy owner
-        // through legacy unresponsive-process discovery (including WMI).
         crate::autostart::restart_stage("restart_managed");
-        let stopped_pid = health.as_ref().map(|value| value.pid);
         ensure_daemon_locked()?;
-        let ready = crate::net_rpc::health()?;
-        if !respire::service::off_mode() {
-            verify_open_store(&respire::service::data_dir())?;
-        }
-        maintenance.finish()?;
-        crate::autostart::restart_stage("restart_ready");
-        return Ok(
-            json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
-            "forced":false, "data_dir":ready.data_dir, "version":ready.bin}),
-        );
-    }
-    let listener = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
-    let pid = health
-        .as_ref()
-        .map(|health| health.pid)
-        .or(listener)
-        .or_else(|| endpoint_pid().filter(|pid| crate::net_rpc::pid_is_respire(*pid)));
-    let mut forced = false;
-    if let Some(pid) = pid {
-        anyhow::ensure!(
-            pid != std::process::id() && crate::net_rpc::pid_is_respire(pid),
-            "cannot verify runtime process {pid}; restart refused"
-        );
-        anyhow::ensure!(
-            listener.is_none() || listener == Some(pid),
-            "runtime port owner changed"
-        );
-        crate::autostart::restart_stage("restart_identity");
-        let identity = crate::net_rpc::runtime_process_identity(pid)?;
-        if health.is_none() {
-            anyhow::ensure!(
-                endpoint_pid() == Some(pid),
-                "unresponsive process does not match this runtime endpoint"
-            );
-        }
-        crate::progress::phase("\u{8bf7}\u{6c42}\u{4f18}\u{96c5}\u{9000}\u{51fa}\u{ff1b}\u{7b49}\u{5f85}\u{8fdb}\u{7a0b}\u{91ca}\u{653e}", "Requesting graceful shutdown; waiting for process exit");
-        crate::autostart::restart_stage("restart_stop");
-        let deadline = Instant::now() + timeout;
-        if crate::net_rpc::port_is_open() {
-            match crate::net_rpc::request_stop_with_timeout(timeout.min(Duration::from_secs(2))) {
-                Ok(()) => {}
-                Err(error)
-                    if matches!(
-                        error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                        Some(
-                            crate::runtime_error::RuntimeError::Transport(_)
-                                | crate::runtime_error::RuntimeError::Unavailable
-                        )
-                    ) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        while Instant::now() < deadline && crate::net_rpc::process_is_running(pid)? {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        if crate::net_rpc::process_is_running(pid)? {
-            let owner = crate::net_rpc::pid_listening_on(crate::net_rpc::rpc_port());
-            anyhow::ensure!(
-                owner.is_none() || owner == Some(pid),
-                "runtime port owner changed before recovery"
-            );
-            crate::progress::phase(
-                "\u{9000}\u{51fa}\u{8d85}\u{65f6}\u{ff1b}\u{7ec8}\u{6b62} runtime \u{8fdb}\u{7a0b}",
-                "Shutdown timed out; terminating runtime process",
-            );
-            crate::net_rpc::kill_runtime(pid, &identity)?;
-            forced = true;
-        }
-        crate::net_rpc::wait_until_exited(pid)?;
-        crate::net_rpc::wait_until_down()?;
-        let data_dir = health
-            .as_ref()
-            .map(|health| PathBuf::from(&health.data_dir))
-            .unwrap_or_else(respire::service::data_dir);
-        crate::progress::phase(
-            "\u{7b49}\u{5f85}\u{6570}\u{636e}\u{5e93}\u{9501}\u{91ca}\u{653e}",
-            "Waiting for database lock release",
-        );
-        let released = respire::lock::LibraryLock::acquire(&data_dir, Duration::from_secs(15))?;
-        drop(released);
-        if endpoint_pid() == Some(pid) && endpoint_path().exists() {
-            std::fs::remove_file(endpoint_path())?;
-        }
     } else {
-        anyhow::ensure!(
-            !crate::net_rpc::port_is_open(),
-            "cannot identify the process occupying the runtime port"
-        );
+        if let Some(health) = health.as_ref() {
+            crate::autostart::restart_stage("restart_stop");
+            drain_occupant(health, timeout)?;
+        }
+        crate::autostart::restart_stage("restart_start");
+        ensure_daemon_locked()?;
     }
-    crate::progress::phase(
-        "\u{542f}\u{52a8} runtime\u{ff1b}\u{7b49}\u{5f85}\u{5c31}\u{7eea}",
-        "Starting runtime; waiting for readiness",
-    );
-    crate::autostart::restart_stage("restart_start");
-    ensure_daemon_locked()?;
     let ready = crate::net_rpc::health()?;
     if !respire::service::off_mode() {
         verify_open_store(&respire::service::data_dir())?;
     }
     maintenance.finish()?;
     crate::autostart::restart_stage("restart_ready");
-    Ok(json!({"state":"ready", "stopped_pid":pid, "pid":ready.pid,
-        "forced":forced, "data_dir":ready.data_dir, "version":ready.bin}))
+    Ok(json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
+        "forced":false, "data_dir":ready.data_dir, "version":ready.bin}))
 }
 
 /// Host profile changes release the old library before starting its successor.
@@ -461,11 +362,6 @@ pub fn change_profile_with_verification(
 }
 
 pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
-    // Split-transition shim: when this CLI exe ends up serving in-process (no
-    // managed runtime installed and none fetchable), health and replies must
-    // report this binary's train so client version gates keep matching. A real
-    // rsrs-runtime child publishes its own identity inside its own process.
-    let _ = respire_commands::rpc_serve::publish_shim_identity(env!("CARGO_PKG_VERSION"));
     if flags.status {
         return match call_method("runtime.status", Vec::new(), false) {
             Ok(response) => {
@@ -515,40 +411,33 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
         println!("runtime=stopped");
         return Ok(());
     }
-    // Serving in-process is deprecated: forward to the managed runtime binary
-    // for one release train, then drop this entry entirely. Environments with
-    // no managed runtime installed (fresh test envs, offline hosts) fall back
-    // to in-process serving until this entry is removed.
     crate::runtime_policy::require_host("runtime startup")?;
-    eprintln!("deprecated: forward to the managed runtime; removal in an upcoming release train");
-    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
-        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
-        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) => {
-            // First-launch migration: the pinned managed runtime is not on disk
-            // yet; install it before starting it. Offline hosts cannot fetch it
-            // and fall through to in-process serving below.
-            match crate::runtime_fetch::download_and_install(None, None) {
-                Ok(path) => path,
-                Err(_) => return respire_commands::rpc_serve::serve(flags),
-            }
-        }
-        Err(_) => return respire_commands::rpc_serve::serve(flags),
-    };
+    if std::env::args_os().any(|argument| argument == "--runtime-internal")
+        || explicit_cli_runtime(&std::env::current_exe()?)?
+    {
+        eprintln!("explicit compatibility mode: serving the legacy CLI shim");
+        let _ = respire_commands::rpc_serve::publish_shim_identity(env!("CARGO_PKG_VERSION"));
+        return respire_commands::rpc_serve::serve(flags);
+    }
+    let executable = resolve_runtime_executable()?;
     let mut arguments: Vec<std::ffi::OsString> = vec![
         "serve".into(),
         "--data-dir".into(),
-        respire::service::data_dir().into_os_string(),
+        respire::service::main_data_dir().into_os_string(),
+        "--host".into(),
+        flags.host.into(),
     ];
     if let Some(port) = flags.port {
         arguments.push("--port".into());
         arguments.push(port.to_string().into());
     }
-    let mut child = respire_spawn::spawn_binary_with_boot_token(
-        &executable,
-        &arguments,
-        crate::autostart::lifecycle_boot_token().as_deref(),
-    )
-    .context("failed to start host runtime")?;
+    let managed_id = crate::autostart::managed_id();
+    if managed_id.is_some() {
+        arguments.push("--supervised".into());
+    }
+    let (mut child, _instance_id) =
+        crate::autostart::spawn_authorized_runtime(&executable, &arguments, managed_id)
+            .context("failed to start host runtime")?;
     // The forwarding host stays alive for the serving process's whole lifetime
     // and passes its exit code through unchanged.
     let status = child
@@ -556,6 +445,38 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
         .context("failed to wait for the host runtime")?;
     crate::set_exit_code(status.code().unwrap_or(1));
     Ok(())
+}
+
+/// Only an explicit override to this CLI opts into a compatibility shim.
+pub(crate) fn explicit_cli_runtime(executable: &std::path::Path) -> Result<bool> {
+    let Some(selected) = respire::env::var("RSRS_RUNTIME_BIN")
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| !path.as_os_str().is_empty())
+    else {
+        return Ok(false);
+    };
+    Ok(crate::mcp::same_path(executable, &selected)
+        && crate::mcp::same_path(executable, &std::env::current_exe()?))
+}
+
+/// Resolution and installation failures stay errors, including typed repair errors.
+/// Neither detached, foreground nor supervised startup synthesizes a shim plan.
+pub(crate) fn resolve_runtime_executable() -> Result<PathBuf> {
+    let executable = match crate::runtime_fetch::resolve_runtime_bin()? {
+        crate::runtime_fetch::ResolvedRuntime::Ready(path) => path,
+        crate::runtime_fetch::ResolvedRuntime::LegacyCombined(legacy) => {
+            crate::runtime_fetch::download_and_install(None, None).with_context(|| {
+                format!("independent Runtime installation required; legacy CLI at {} cannot serve automatically", legacy.display())
+            })?
+        }
+    };
+    anyhow::ensure!(
+        !crate::mcp::same_path(&executable, &std::env::current_exe()?)
+            || explicit_cli_runtime(&executable)?,
+        "CLI image cannot substitute for the independent Runtime; repair the selected Runtime"
+    );
+    Ok(executable)
 }
 
 fn render_response(response: RpcResponse, json: bool) -> Result<()> {
@@ -614,13 +535,39 @@ pub(crate) fn call_method_outcome(
 }
 
 pub(crate) fn model_control(task_id: &str, cancel: bool) -> Result<Value> {
-    let args = vec![task_id.to_owned(), cancel.to_string()];
-    let response = call_method("model.control", args, false)?;
+    let (method, args) = if cancel {
+        ("model.control", vec![task_id.to_owned(), "true".to_owned()])
+    } else {
+        ("model.progress", Vec::new())
+    };
+    let response = call_method(method, args, false)?;
     anyhow::ensure!(response.ok, "{}", response.error.unwrap_or_default());
-    response
+    let summary = response
         .envelope
         .map(|envelope| envelope.summary)
-        .ok_or_else(|| anyhow::anyhow!("runtime did not return model progress"))
+        .ok_or_else(|| anyhow::anyhow!("runtime did not return model progress"))?;
+    let progress = if cancel {
+        summary
+    } else {
+        summary["operation"].clone()
+    };
+    model_progress_for_task(progress, task_id, cancel)
+}
+
+fn model_progress_for_task(progress: Value, task_id: &str, cancel: bool) -> Result<Value> {
+    anyhow::ensure!(
+        progress.get("active").and_then(Value::as_bool).is_some(),
+        "runtime returned invalid model progress"
+    );
+    if progress["active"] == true && progress["id"].as_str() != Some(task_id) {
+        // Keep the stale contract without exposing a different task's progress.
+        anyhow::ensure!(
+            !cancel || progress["stale"] == true,
+            "runtime returned a foreign model task"
+        );
+        return Ok(serde_json::json!({"active":true,"stale":true}));
+    }
+    Ok(progress)
 }
 
 pub(crate) fn prepare_model(mirror: &str) -> Result<()> {
@@ -758,28 +705,29 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
         .ok()
         .map(|raw| std::path::PathBuf::from(raw.trim()))
         .filter(|path| !path.as_os_str().is_empty());
-    let managed = crate::runtime_fetch::managed_runtime_path()?;
-    // Split-transition shim track: with neither an override nor a managed
-    // runtime installed, only this CLI exe serving in-process (health
-    // reporting this binary's train) is an acceptable owner; it keeps
-    // offline hosts and isolated test environments working for the release
-    // train the shim exists for.
-    let shim = override_bin.is_none()
-        && managed.is_none()
-        && health.bin == env!("CARGO_PKG_VERSION")
-        && std::env::current_exe()
-            .map(|exe| crate::mcp::exe_matches_dest(&health.exe, &exe))
-            .unwrap_or(false);
+    let managed = if override_bin.is_none() {
+        crate::runtime_fetch::managed_runtime_path()?
+    } else {
+        None
+    };
+    let portable = std::env::current_exe()?
+        .parent()
+        .map(|directory| directory.join(crate::runtime_fetch::RUNTIME_BINARY))
+        .filter(|path| path.is_file());
+    let Some(expected) = override_bin.or(managed).or(portable) else {
+        return Ok(false);
+    };
+    if crate::mcp::exe_matches_dest(&health.exe, &std::env::current_exe()?) {
+        return Ok(false);
+    }
     Ok(!health.data_dir.is_empty()
         && crate::mcp::same_path(
             std::path::Path::new(&health.data_dir),
             &respire::service::data_dir(),
         )
         && crate::autostart::may_reuse_runtime(health)?
-        && (crate::runtime_fetch::version_in_accept(&health.runtime_version) || shim)
-        && override_bin
-            .or(managed)
-            .is_none_or(|expected| crate::mcp::exe_matches_dest(&health.exe, &expected))
+        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+        && crate::mcp::exe_matches_dest(&health.exe, &expected)
         && !health.inference_stalled())
 }
 
@@ -788,10 +736,16 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         return Ok(());
     }
     crate::autostart::check_direct_access()?;
-    if let Some(health) = probe_runtime()? {
-        if runtime_acceptable(&health)? {
+    let current = probe_runtime()?;
+    if let Some(health) = &current {
+        if runtime_acceptable(health)? {
             return Ok(());
         }
+    }
+    // Resolve before stopping the resident owner: a missing or damaged release
+    // must fail without replacing it with a CLI shim.
+    let executable = resolve_runtime_executable()?;
+    if let Some(health) = current {
         if health.inference_stalled() {
             anyhow::ensure!(
                 crate::net_rpc::pid_is_respire(health.pid),
@@ -801,52 +755,33 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         }
         stop_occupant(health.pid)?;
     }
-    let self_exe = std::env::current_exe().ok();
-    let mut fallback_shim = false;
-    let executable = match crate::runtime_fetch::resolve_runtime_bin() {
-        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(path)) => path,
-        Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(_)) | Err(_) => {
-            // First-launch migration: the old owner was stopped above; bring
-            // the pinned managed runtime down before starting the new one.
-            // Offline hosts and isolated test environments cannot fetch it
-            // and fall back to this CLI exe serving in-process (the
-            // --runtime-internal shim) for the transition train.
-            match crate::runtime_fetch::download_and_install(None, None) {
-                Ok(path) => path,
-                Err(download_error) => {
-                    let executable = crate::mcp::materialize_bin().map_err(|error| {
-                        anyhow::anyhow!("no runtime binary resolved ({download_error:#}); local fallback install failed: {error}")
-                    })?;
-                    fallback_shim = true;
-                    executable
-                }
-            }
-        }
-    };
     crate::autostart::authorize_detached_boot_locked()?;
-    let shim = fallback_shim
-        || self_exe
-        .as_ref()
-        .is_some_and(|exe| crate::mcp::same_path(exe, &executable));
+    let shim = explicit_cli_runtime(&executable)?;
     let arguments: Vec<std::ffi::OsString> = if shim {
-        // The shim child reuses this binary's --runtime-internal entry, whose
-        // own fallback serves in-process; the data directory and port arrive
-        // through the inherited environment.
+        // Compatibility is an explicit override, never a download-error path.
         vec!["--runtime-internal".into()]
     } else {
         vec![
             "serve".into(),
             "--data-dir".into(),
-            respire::service::data_dir().into_os_string(),
+            respire::service::main_data_dir().into_os_string(),
         ]
     };
-    let mut child = respire_spawn::spawn_binary_with_boot_token(
-        &executable,
-        &arguments,
-        crate::autostart::lifecycle_boot_token().as_deref(),
-    )
-    .context("failed to start host runtime")?;
-    let result = wait_daemon_ready(&mut child, &executable);
+    let (mut child, instance_id) = if shim {
+        let child = respire_spawn::spawn_binary_with_boot_token(
+            &executable,
+            &arguments,
+            crate::autostart::lifecycle_boot_token().as_deref(),
+        )
+        .context("failed to start compatibility runtime")?;
+        (child, None)
+    } else {
+        let (child, instance_id) =
+            crate::autostart::spawn_authorized_runtime(&executable, &arguments, None)
+                .context("failed to start host runtime")?;
+        (child, Some(instance_id))
+    };
+    let result = wait_daemon_ready(&mut child, &executable, instance_id.as_deref());
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
         child
@@ -859,59 +794,72 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     result
 }
 
-// A shutdown can finish before its HTTP acknowledgement is flushed. Never
-// replay the request: accept only an independently confirmed stopped owner.
-fn confirm_stop_outcome(request: Result<()>, confirm: impl FnOnce() -> Result<()>) -> Result<()> {
-    match request {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            if matches!(
-                error.downcast_ref::<crate::runtime_error::RuntimeError>(),
-                Some(crate::runtime_error::RuntimeError::Transport(_))
-            ) && confirm().is_ok()
-            {
-                Ok(())
-            } else {
-                Err(error)
-            }
-        }
-    }
-}
-
 pub(crate) fn stop_occupant(pid: u32) -> Result<()> {
     let health = crate::net_rpc::health()?;
     anyhow::ensure!(health.pid == pid, "runtime owner changed before shutdown");
-    confirm_stop_outcome(crate::net_rpc::request_stop(), || {
-        crate::net_rpc::wait_until_exited(pid)?;
-        crate::net_rpc::wait_until_down()
-    })?;
-    if crate::autostart::lifecycle_boot_token().is_some() {
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while Instant::now() < deadline && crate::net_rpc::process_is_running(pid)? {
-            std::thread::sleep(Duration::from_millis(100));
+    drain_occupant(&health, Duration::from_secs(60))
+}
+
+pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration) -> Result<()> {
+    let pid = health.pid;
+    anyhow::ensure!(
+        crate::mcp::same_path(
+            std::path::Path::new(&health.data_dir),
+            &respire::service::data_dir(),
+        ) && crate::mcp::same_path(
+            std::path::Path::new(&health.installation_root),
+            &respire::service::main_data_dir(),
+        ),
+        "runtime restart blocked: owner roots do not match this installation"
+    );
+    let birth = crate::autostart::process_birth(pid)?.context("runtime process already exited")?;
+    let prefix = if cfg!(windows) {
+        "windows-filetime-"
+    } else if cfg!(target_os = "linux") {
+        "linux-starttime-"
+    } else {
+        "darwin-lstart-"
+    };
+    anyhow::ensure!(
+        health.process_start_id == format!("{prefix}{birth}"),
+        "runtime process start identity does not match health"
+    );
+    let operation_id = crate::net_rpc::request_stop_for(health, Duration::from_secs(120))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        if crate::autostart::process_birth(pid)?.as_deref() != Some(birth.as_str()) {
+            break;
         }
-        anyhow::ensure!(!crate::net_rpc::process_is_running(pid)?, "managed runtime did not drain; maintenance remains paused without forcing database shutdown");
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "runtime drain is still pending; no process was forced to exit"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
-    if crate::net_rpc::wait_until_down().is_err() {
-        // Reauthenticate before escalation; a different owner may have bound.
-        if let Some(health) = probe_runtime()? {
-            anyhow::ensure!(health.pid == pid, "runtime owner changed during shutdown");
-            crate::net_rpc::kill_pid(pid);
-            crate::net_rpc::wait_until_down()?;
-        }
-    }
-    crate::net_rpc::wait_until_exited(pid)?;
-    // Prove lock.db has been released before a successor opens the library.
+    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))?;
+    crate::net_rpc::wait_until_down()?;
     let released = respire::lock::LibraryLock::acquire(
         std::path::Path::new(&health.data_dir),
         Duration::from_secs(15),
     )
     .context("stopped runtime has not released its library lock")?;
+    // Keep the library lock until the verified dead owner's locator is removed.
+    if endpoint_path().exists() {
+        anyhow::ensure!(
+            endpoint_pid() == Some(pid) && crate::autostart::process_birth(pid)?.is_none(),
+            "runtime endpoint owner changed after drain; record was not removed"
+        );
+        std::fs::remove_file(endpoint_path())?;
+    }
     drop(released);
     Ok(())
 }
 
-fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Path) -> Result<()> {
+fn wait_daemon_ready(
+    child: &mut std::process::Child,
+    executable: &std::path::Path,
+    instance_id: Option<&str>,
+) -> Result<()> {
     let deadline = Instant::now() + START_WAIT * START_POLLS as u32;
     while Instant::now() < deadline {
         std::thread::sleep(START_WAIT);
@@ -919,15 +867,35 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
             bail!("host runtime exited before readiness: {status}");
         }
         if let Some(health) = probe_runtime()? {
+            if !health.store_ready {
+                continue;
+            }
+            let birth = crate::autostart::process_birth(child.id())?
+                .context("starting runtime process exited")?;
+            let birth_prefix = if cfg!(windows) {
+                "windows-filetime-"
+            } else if cfg!(target_os = "linux") {
+                "linux-starttime-"
+            } else {
+                "darwin-lstart-"
+            };
             anyhow::ensure!(
                 health.pid == child.id()
+                    && health.process_start_id == format!("{birth_prefix}{birth}")
+                    && health.v == PROTOCOL_V
+                    && health.generation > 0
+                    && !health.account_id.is_empty()
+                    && instance_id.is_none_or(|expected| health.instance_id == expected)
                     && crate::mcp::exe_matches_dest(&health.exe, executable)
-                    // Legacy combined binaries carry this CLI's exact version;
-                    // the standalone runtime reports its own train, accepted
-                    // through the pinned version window instead.
-                    && (health.bin == env!("CARGO_PKG_VERSION")
+                    && ((instance_id.is_none()
+                        && explicit_cli_runtime(executable)?
+                        && health.bin == env!("CARGO_PKG_VERSION"))
                         || crate::runtime_fetch::version_in_accept(&health.runtime_version))
-                    && !health.data_dir.is_empty() && crate::mcp::same_path(std::path::Path::new(&health.data_dir), &respire::service::data_dir()),
+                    && !health.data_dir.is_empty()
+                    && crate::mcp::same_path(
+                        std::path::Path::new(&health.data_dir),
+                        &respire::service::data_dir()
+                    ),
                 "runtime owner changed during startup"
             );
             return Ok(());
@@ -939,6 +907,91 @@ fn wait_daemon_ready(child: &mut std::process::Child, executable: &std::path::Pa
 #[cfg(test)]
 #[path = "rpc_dispatch_tests.rs"]
 mod dispatch_tests;
+
+#[cfg(test)]
+mod runtime_resolution_tests {
+    use super::*;
+
+    #[test]
+    fn startup_errors_propagate_and_cli_cannot_pass_as_runtime() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("test environment lock poisoned: {error}"))?;
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = [
+            "RSRS_DATA_DIR",
+            "RSRS_BIN_DIR",
+            "RSRS_CORE_TEST_MODE",
+            "RSRS_RUNTIME_BIN",
+            "ONEMEMORY_RUNTIME_BIN",
+            "RESPIRE_RUNTIME_BIN",
+        ];
+        let _restore = Restore(
+            keys.iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect(),
+        );
+        let directory = tempfile::tempdir()?;
+        std::env::set_var("RSRS_DATA_DIR", directory.path());
+        std::env::set_var("RSRS_BIN_DIR", directory.path().join("bin"));
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+        for key in &keys[3..] {
+            std::env::remove_var(key);
+        }
+        let cli = std::env::current_exe()?;
+        let health: crate::net_rpc::Health = serde_json::from_value(json!({
+            "server": "rsrs", "bin": env!("CARGO_PKG_VERSION"), "pid": 42, "v": PROTOCOL_V,
+            "exe": cli, "data_dir": respire::service::data_dir(),
+            "runtime_version": crate::runtime_fetch::pinned()?.required,
+            "store_ready": true,
+        }))?;
+        anyhow::ensure!(
+            !runtime_acceptable(&health)?,
+            "unselected CLI passed as a Runtime"
+        );
+
+        // Invalid explicit selections fail without a download or materialized shim.
+        std::env::set_var("RSRS_RUNTIME_BIN", directory.path().join("missing-runtime"));
+        anyhow::ensure!(resolve_runtime_executable().is_err());
+        anyhow::ensure!(!directory.path().join("bin").exists());
+        std::env::remove_var("RSRS_RUNTIME_BIN");
+        std::fs::write(
+            crate::runtime_fetch::manifest_path(),
+            serde_json::to_vec(&json!({
+                "version": crate::runtime_fetch::pinned()?.required, "sha256": "1".repeat(64),
+            }))?,
+        )?;
+        let error = resolve_runtime_executable()
+            .err()
+            .context("legacy proof was accepted")?;
+        anyhow::ensure!(error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>());
+        let error = runtime_acceptable(&health)
+            .err()
+            .context("legacy proof was accepted during runtime reuse")?;
+        anyhow::ensure!(error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>());
+        std::fs::remove_file(crate::runtime_fetch::manifest_path())?;
+
+        // This deliberate override preserves the legacy regression mode.
+        std::env::set_var("RSRS_RUNTIME_BIN", &cli);
+        anyhow::ensure!(explicit_cli_runtime(&cli)?);
+        anyhow::ensure!(resolve_runtime_executable()? == cli);
+        anyhow::ensure!(
+            !runtime_acceptable(&health)?,
+            "CLI override passed as a Runtime"
+        );
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -982,45 +1035,62 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_transport_requires_confirmed_exit_without_replay() {
-        use crate::runtime_error::RuntimeError;
-        assert!(confirm_stop_outcome(
-            Err(RuntimeError::Transport("lost ack".into()).into()),
-            || Ok(())
-        )
-        .is_ok());
-        let rejected = confirm_stop_outcome(
-            Err(RuntimeError::Transport("original lost ack".into()).into()),
-            || anyhow::bail!("still alive"),
-        );
-        assert!(rejected.is_err_and(|error| error.to_string().contains("original lost ack")));
-        for error in [
-            RuntimeError::Unauthorized,
-            RuntimeError::Unavailable,
-            RuntimeError::TokenUnreadable("synthetic".into()),
-            RuntimeError::OutcomeUnknown {
-                request_id: "synthetic".into(),
-                detail: "unknown".into(),
-            },
+    fn shutdown_requires_a_matching_final_receipt() -> Result<()> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../contracts/runtime-control/fixtures");
+        let fixture: Value =
+            serde_json::from_slice(&std::fs::read(root.join("positive/health-identity.json"))?)?;
+        let mut identity = fixture["payload"].clone();
+        identity["server"] = json!("respire");
+        identity["bin"] = json!("rsrs-runtime");
+        identity["v"] = json!(1);
+        let health: crate::net_rpc::Health = serde_json::from_value(identity)?;
+        let fixture: Value = serde_json::from_slice(&std::fs::read(
+            root.join("positive/stop-final-drained.json"),
+        )?)?;
+        let receipt = fixture["payload"].clone();
+        let operation = receipt["operation_id"]
+            .as_str()
+            .context("fixture stop operation")?;
+        crate::net_rpc::validate_final_stop_receipt(&health, Some(operation), &receipt)?;
+        for (key, invalid) in [
+            ("schema_version", json!(2)),
+            ("protocol_version", json!(2)),
+            ("operation_id", json!("other-operation")),
+            ("installation_id", json!("other-installation")),
+            ("instance_id", json!("other-instance")),
+            ("pid", json!(999)),
+            ("process_start_id", json!("reused-pid")),
+            ("image_path", json!("other-runtime")),
+            ("image_sha256", json!("other-digest")),
+            ("runtime_version", json!("other-version")),
+            ("account_id", json!("other-account")),
+            ("generation", json!(8)),
+            ("state", json!("forced_timeout")),
+            ("unfinished", Value::Null),
         ] {
-            let mut called = false;
-            assert!(confirm_stop_outcome(Err(error.into()), || {
-                called = true;
-                Ok(())
-            })
-            .is_err());
+            let mut invalid_receipt = receipt.clone();
+            invalid_receipt[key] = invalid;
             assert!(
-                !called,
-                "non-transport failures must never become a successful stop"
+                crate::net_rpc::validate_final_stop_receipt(
+                    &health,
+                    Some(operation),
+                    &invalid_receipt
+                )
+                .is_err(),
+                "accepted mismatched {key}"
             );
         }
-        let mut called = false;
-        assert!(confirm_stop_outcome(Ok(()), || {
-            called = true;
-            Ok(())
-        })
-        .is_ok());
-        assert!(!called);
+        let incomplete: Value = serde_json::from_slice(&std::fs::read(
+            root.join("negative/stop-final-unfinished.json"),
+        )?)?;
+        assert!(crate::net_rpc::validate_final_stop_receipt(
+            &health,
+            Some(operation),
+            &incomplete["payload"]
+        )
+        .is_err());
+        Ok(())
     }
 
     fn req(method: &str, id: &str) -> RpcRequest {
@@ -1219,6 +1289,10 @@ mod tests {
         assert_eq!(status.web_url.as_deref(), Some(current_url().as_str()));
         let again = dispatch(req("runtime.status", "status-1"), &tx);
         assert_eq!(again.id, "status-1");
+        let assets = dispatch(req("assets.status", "assets-1"), &tx);
+        assert!(!assets.ok);
+        assert_eq!(assets.code.as_deref(), Some("runtime_required"));
+        assert!(assets.envelope.is_none());
         let unknown = dispatch(req("nope", "unknown-1"), &tx);
         assert_eq!(unknown.code.as_deref(), Some("protocol_version_mismatch"));
         assert!(unknown.error.unwrap_or_default().contains("unknown method"));
@@ -1833,4 +1907,17 @@ mod tests {
         }
         result
     }
+    #[test]
+    fn progress_queries_keep_stale_without_exposing_another_task() -> Result<()> {
+        let stale = serde_json::json!({"active":true,"stale":true});
+        assert_eq!(model_progress_for_task(stale.clone(), "original", true)?, stale);
+        let foreign = serde_json::json!({"active":true,"id":"other","phase":"private-progress"});
+        assert_eq!(model_progress_for_task(foreign.clone(), "original", false)?, stale);
+        assert!(model_progress_for_task(foreign, "original", true).is_err());
+        let own = serde_json::json!({"active":true,"id":"original","cancelled":true});
+        assert_eq!(model_progress_for_task(own.clone(), "original", true)?, own);
+        assert!(model_progress_for_task(serde_json::Value::Null, "original", false).is_err());
+        Ok(())
+    }
+
 }

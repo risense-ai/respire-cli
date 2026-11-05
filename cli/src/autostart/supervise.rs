@@ -11,6 +11,9 @@ use anyhow::{Context, Result};
 
 use super::{lifecycle, read_registration, Registration};
 
+#[path = "launch_authorization.rs"]
+mod launch_authorization;
+
 /// Delay between a failed child attempt and the next start.
 const RESTART_DELAY: Duration = Duration::from_secs(60);
 /// Child uptime after which the consecutive-failure counter resets.
@@ -28,6 +31,16 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     let config = read_registration(&root)?
         .context("no startup registration for this installation; enable runtime autostart first")?;
     lifecycle::owned(&config)?;
+    let registered_root = PathBuf::from(
+        config
+            .environment
+            .get("RSRS_DATA_DIR")
+            .context("registered runtime root is missing")?,
+    );
+    anyhow::ensure!(
+        registered_root.canonicalize()? == root,
+        "registered runtime root belongs to another installation"
+    );
     // Align this process with the registration environment before resolving
     // the runtime, exactly like the managed foreground run does.
     for (key, _) in std::env::vars_os() {
@@ -40,7 +53,6 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     for (key, value) in &config.environment {
         std::env::set_var(key, value);
     }
-    std::env::set_var("RSRS_DATA_DIR", &root);
     // The registered task is the foreground owner. A kill-on-close job keeps a
     // dead supervisor from orphaning the runtime child (Windows 8+ nested jobs
     // preserve the enclosing Task Scheduler job).
@@ -64,59 +76,29 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             return Ok(());
         }
         let started = Instant::now();
-        let plan = match resolve_child_plan() {
-            Ok(plan) => plan,
+        let binary = match resolve_child_plan() {
+            Ok(binary) => binary,
             Err(error) => {
                 eprintln!("runtime resolution failed: {error:#}");
+                if error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>() {
+                    lifecycle::record_supervise_event(&config, "exit_error");
+                    return Err(error);
+                }
                 if !failure_backoff(&config, &root, &mut failures, Duration::ZERO)? {
-                    return Ok(());
+                    return Err(error);
                 }
                 continue;
             }
         };
         lifecycle::record_supervise_event(&config, "starting");
-        let outcome = match plan {
-            ChildPlan::Runtime(binary) => {
-                let arguments: Vec<std::ffi::OsString> = vec![
-                    std::ffi::OsString::from("serve"),
-                    std::ffi::OsString::from("--data-dir"),
-                    root.clone().into_os_string(),
-                    std::ffi::OsString::from("--supervised"),
-                ];
-                respire_spawn::spawn_binary_with_boot_token(
-                    &binary,
-                    &arguments,
-                    lifecycle::current_boot_token().as_deref(),
-                )
-                .map(|mut child| wait_child(&mut child, &stopped))
-            }
-            ChildPlan::Shim => {
-                // Split-transition shim: offline hosts and isolated test
-                // environments cannot fetch the pinned runtime. Run this same
-                // binary through the managed foreground entry in a child; it
-                // serves in-process, reports the managed identity and keeps
-                // the supervised ownership contract intact.
-                let mut command = std::process::Command::new(&config.executable);
-                command
-                    .args([
-                        "runtime",
-                        "run",
-                        "--managed",
-                        &config.id,
-                        "--installation-root",
-                    ])
-                    .arg(&root);
-                #[cfg(windows)]
-                command.arg("--supervised-child");
-                command
-                    .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null());
-                respire_spawn::spawn_host_control(&mut command)
-                    .map(|mut child| wait_child(&mut child, &stopped))
-            }
-        };
+        let arguments: Vec<std::ffi::OsString> = vec![
+            std::ffi::OsString::from("serve"),
+            std::ffi::OsString::from("--data-dir"),
+            registered_root.clone().into_os_string(),
+            std::ffi::OsString::from("--supervised"),
+        ];
+        let outcome = spawn_authorized_runtime(&binary, &arguments, Some(&config.id))
+            .map(|(mut child, _instance_id)| wait_child(&mut child, &stopped));
         let uptime = started.elapsed();
         match outcome {
             // Signalled shutdown: the supervisor exits without retrying.
@@ -146,6 +128,15 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     }
 }
 
+/// Both detached and supervised children use the same single-use startup grant.
+pub(crate) fn spawn_authorized_runtime(
+    binary: &Path,
+    arguments: &[std::ffi::OsString],
+    managed_id: Option<&str>,
+) -> Result<(std::process::Child, String)> {
+    launch_authorization::spawn(binary, arguments, managed_id)
+}
+
 /// Wait for the child, honoring a signal flag. `Ok(None)` means the supervisor
 /// was signalled and the child has been stopped.
 fn wait_child(
@@ -167,33 +158,15 @@ fn wait_child(
     }
 }
 
-/// How the supervisor starts the next runtime child.
-enum ChildPlan {
-    /// A resolved `rsrs-runtime` executable spawned with serve arguments.
-    Runtime(PathBuf),
-    /// This CLI exe serving in-process through the managed foreground entry
-    /// (offline/test fallback during the split transition).
-    Shim,
-}
-
-/// Resolve the managed runtime binary, migrating away from a legacy combined
-/// layout by installing the pinned release on the fly; hosts that cannot
-/// fetch it fall back to the in-process shim child.
-fn resolve_child_plan() -> Result<ChildPlan> {
-    let resolved = crate::runtime_fetch::resolve_runtime_bin();
-    if let Ok(crate::runtime_fetch::ResolvedRuntime::LegacyCombined(legacy)) = &resolved {
-        eprintln!(
-            "legacy combined runtime found at {}; installing the pinned managed runtime",
-            legacy.display()
-        );
-    }
-    match resolved {
-        Ok(crate::runtime_fetch::ResolvedRuntime::Ready(binary)) => Ok(ChildPlan::Runtime(binary)),
-        _ => match crate::runtime_fetch::download_and_install(None, None) {
-            Ok(binary) => Ok(ChildPlan::Runtime(binary)),
-            Err(_) => Ok(ChildPlan::Shim),
-        },
-    }
+/// The supervisor only starts independent Runtime images. Legacy compatibility
+/// remains available through the explicit CLI foreground entry.
+fn resolve_child_plan() -> Result<PathBuf> {
+    let binary = crate::rpc::resolve_runtime_executable()?;
+    anyhow::ensure!(
+        !crate::rpc::explicit_cli_runtime(&binary)?,
+        "supervision requires the independent Runtime; use --runtime-internal explicitly for legacy CLI compatibility"
+    );
+    Ok(binary)
 }
 
 /// Record the failure, keep the restart budget bounded and sleep out the retry
@@ -251,6 +224,35 @@ fn supervise_retry(failures: &mut u8, uptime: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn supervisor_never_turns_resolution_failure_into_a_shim() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("test environment lock poisoned: {error}"))?;
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("RSRS_RUNTIME_BIN", value),
+                    None => std::env::remove_var("RSRS_RUNTIME_BIN"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RSRS_RUNTIME_BIN"));
+        let directory = tempfile::tempdir()?;
+        std::env::set_var("RSRS_RUNTIME_BIN", directory.path().join("missing-runtime"));
+        anyhow::ensure!(resolve_child_plan().is_err());
+
+        // A file override is a selection fixture only; this test executes no binary.
+        let binary = directory.path().join("synthetic-runtime");
+        std::fs::write(&binary, b"synthetic runtime selection")?;
+        std::env::set_var("RSRS_RUNTIME_BIN", &binary);
+        anyhow::ensure!(resolve_child_plan()? == binary);
+        std::env::set_var("RSRS_RUNTIME_BIN", std::env::current_exe()?);
+        anyhow::ensure!(resolve_child_plan().is_err());
+        Ok(())
+    }
 
     #[test]
     fn supervisor_retries_are_bounded_and_reset_only_after_stability() {

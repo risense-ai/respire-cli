@@ -94,11 +94,12 @@ pub fn mirror_from_env() -> Option<String> {
         })
 }
 
-pub fn install_target_dir(explicit: Option<&str>) -> PathBuf {
-    explicit
+pub fn install_target_dir(explicit: Option<&str>) -> Result<PathBuf> {
+    let default = respire_app::memory::bge::m3_model_dir()?;
+    Ok(explicit
         .filter(|s| !s.trim().is_empty())
         .map(|s| expand_home(s.trim()))
-        .unwrap_or_else(respire_app::memory::bge::m3_model_dir)
+        .unwrap_or(default))
 }
 
 pub fn install_m3(mirror: Option<&str>) -> Result<InstallReport> {
@@ -109,8 +110,7 @@ pub fn install_m3(mirror: Option<&str>) -> Result<InstallReport> {
 /// Cheap runtime inventory for settings UIs. Presence/size is not a checksum or
 /// provider compatibility claim; inference and the installer still verify hashes.
 pub fn variant_inventory() -> Result<serde_json::Value> {
-    let directory =
-        respire_app::memory::bge::resolve_model_dir().unwrap_or_else(|_| install_target_dir(None));
+    let directory = respire_app::memory::bge::discovered_model_dir()?;
     let baseline = model_files_present(&directory);
     respire_app::memory::onnx::MODEL_VARIANTS
         .iter()
@@ -144,7 +144,7 @@ pub fn install_variant(variant_name: &str, mirror: Option<&str>) -> Result<()> {
     use respire_app::memory::onnx::parse_variant;
     let _operation = model_progress::Operation::begin_download()?;
     let variant = parse_variant(variant_name)?;
-    let dest = install_target_dir(None);
+    let dest = install_target_dir(None)?;
     let origins = model_origins(mirror)?;
     install_variant_into(variant, &dest, &origins)
 }
@@ -199,10 +199,9 @@ pub fn prepare_m3_from_mirror(mirror: &str) -> Result<()> {
 /// Called with the background index operation already reserved. Preparing files
 /// must not try to reserve that operation a second time or acquire a library lock.
 pub fn prepare_m3_for_index() -> Result<()> {
-    let user = install_target_dir(None);
-    let explicit = respire_app::env::var("RSRS_M3_DIR")
-        .ok()
-        .is_some_and(|value| !value.trim().is_empty());
+    let user = install_target_dir(None)?;
+    let explicit = respire_app::env::var_os("RSRS_M3_DIR").is_some()
+        || respire_app::env::var_os("RSRS_DATA_DIR").is_some();
     let mut candidates = vec![user];
     if !explicit {
         if let Some(parent) = std::env::current_exe()?.parent() {
@@ -223,7 +222,7 @@ pub fn prepare_m3_for_index() -> Result<()> {
 }
 
 fn install_m3_inner(mirror: Option<&str>) -> Result<InstallReport> {
-    let dest = install_target_dir(None);
+    let dest = install_target_dir(None)?;
     let origins = model_origins(mirror)?;
     let files = [
         ("tokenizer.json", TOKENIZER_SHA256),
@@ -283,11 +282,11 @@ fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
     if !bge::cpu_owned_mode(respire_app::memory::onnx::configured_engine()?)? {
         return Ok(true);
     }
-    if file_valid(&bge::cpu_ort_path(directory), bge::CPU_ORT_SHA256)? {
+    if file_valid(&bge::cpu_ort_path(directory)?, bge::CPU_ORT_SHA256)? {
         return Ok(true);
     }
     // Legacy packaged/system model directories may be read-only. Upgrade into the user cache.
-    let dest = bge::cpu_ort_cache_path();
+    let dest = bge::cpu_ort_cache_path()?;
     if file_valid(&dest, bge::CPU_ORT_SHA256)? {
         return Ok(true);
     }
@@ -327,13 +326,12 @@ fn prepare_cpu_ort(directory: &Path) -> Result<bool> {
 }
 
 pub fn cpu_model_preparation_needed() -> Result<bool> {
+    let directory = respire_app::memory::bge::discovered_model_dir()?;
     if !respire_app::memory::bge::cpu_owned_mode(respire_app::memory::onnx::configured_engine()?)? {
         return Ok(false);
     }
-    Ok(match respire_app::memory::bge::resolve_model_dir() {
-        Ok(directory) => !respire_app::memory::bge::cpu_ort_present(&directory)?,
-        Err(_) => true,
-    })
+    Ok(!model_files_present(&directory)
+        || !respire_app::memory::bge::cpu_ort_present(&directory)?)
 }
 
 pub struct UninstallReport {
@@ -365,7 +363,7 @@ fn remove_model_dir(path: &Path) -> Result<bool> {
 /// Delete the BGE-M3 files at the install target and drop the in-process session.
 pub fn uninstall_m3() -> Result<UninstallReport> {
     respire_app::memory::onnx::reset_sessions()?;
-    let dest = install_target_dir(None);
+    let dest = install_target_dir(None)?;
     let removed = remove_model_dir(&dest)?;
     Ok(UninstallReport { dir: dest, removed })
 }
@@ -1784,11 +1782,11 @@ mod tests {
         let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let explicit = install_target_dir(Some("D:/models/bge"));
+        let explicit = install_target_dir(Some("D:/models/bge"))?;
         assert!(explicit.ends_with("bge") || explicit.to_string_lossy().contains("models"));
         let saved = std::env::var("RSRS_M3_DIR").ok();
         std::env::set_var("RSRS_M3_DIR", "/tmp/om-model-test");
-        let from_env = install_target_dir(None);
+        let from_env = install_target_dir(None)?;
         assert!(from_env.to_string_lossy().contains("om-model-test"));
         match saved {
             Some(v) => std::env::set_var("RSRS_M3_DIR", v),

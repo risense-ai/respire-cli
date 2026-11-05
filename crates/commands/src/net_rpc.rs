@@ -9,7 +9,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::runtime_error::RuntimeError;
+use crate::runtime_error::{OperationContext, RuntimeError};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,6 +42,20 @@ pub struct Health {
     pub snapshot_restore_id: Option<String>,
     #[serde(default)]
     pub installation_root: String,
+    #[serde(default)]
+    pub installation_id: String,
+    #[serde(default)]
+    pub instance_id: String,
+    #[serde(default)]
+    pub process_start_id: String,
+    #[serde(default)]
+    pub image_path: String,
+    #[serde(default)]
+    pub image_sha256: String,
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub generation: u64,
     #[serde(default)]
     pub managed_id: Option<String>,
     #[serde(default)]
@@ -352,15 +366,130 @@ pub fn request_stop() -> Result<()> {
 }
 
 pub fn request_stop_with_timeout(timeout: Duration) -> Result<()> {
+    request_stop_operation(timeout).map(|_| ())
+}
+
+pub fn request_stop_operation(timeout: Duration) -> Result<String> {
+    request_stop_for(&health()?, timeout)
+}
+
+pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<String> {
     crate::runtime_policy::require_host("runtime shutdown")?;
+    anyhow::ensure!(
+        !health.installation_id.is_empty()
+            && !health.instance_id.is_empty()
+            && !health.account_id.is_empty()
+            && health.generation > 0,
+        "runtime stop identity is incomplete"
+    );
+    let expected = json!({
+        "installation_id": health.installation_id,
+        "instance_id": health.instance_id,
+        "account_id": health.account_id,
+        "generation": health.generation,
+    })
+    .to_string();
     let url = format!("{}/api/runtime/stop", rpc_base_url());
-    send_loopback(
+    let response = send_loopback(
         agent()
             .post(&url)
             .timeout(timeout)
             .set("X-Respire-Lifecycle", "coordinator-v1"),
-        |request| request.send_string("{}"),
+        |request| request.send_string(&expected),
     )?;
+    let receipt: Value = response
+        .into_json()
+        .context("invalid stop acknowledgement")?;
+    anyhow::ensure!(
+        receipt["ok"] == true
+            && receipt["state"] == "accepted"
+            && receipt["request_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty()),
+        "runtime did not accept a traceable stop operation"
+    );
+    receipt["operation_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+        .context("stop acknowledgement lacks operation ID")
+}
+
+pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result<Value> {
+    anyhow::ensure!(
+        !health.instance_id.is_empty()
+            && health.instance_id.len() <= 128
+            && health
+                .instance_id
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_'),
+        "invalid runtime stop instance ID"
+    );
+    let root = respire_app::service::main_data_dir();
+    anyhow::ensure!(
+        !health.installation_root.is_empty()
+            && fs::canonicalize(&health.installation_root)? == fs::canonicalize(&root)?,
+        "stopped runtime belongs to another installation"
+    );
+    let path = root
+        .join("runtime")
+        .join(format!("stop-{}.json", health.instance_id));
+    let file = fs::File::open(&path).context("final runtime stop receipt is missing")?;
+    let metadata = file.metadata()?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= 1024 * 1024,
+        "invalid stop receipt file"
+    );
+    let mut data = Vec::new();
+    use std::io::Read;
+    file.take(1024 * 1024 + 1).read_to_end(&mut data)?;
+    anyhow::ensure!(data.len() <= 1024 * 1024, "stop receipt exceeds 1 MiB");
+    let receipt: Value = serde_json::from_slice(&data).context("invalid final stop receipt")?;
+    validate_final_stop_receipt(health, operation_id, &receipt)?;
+    Ok(receipt)
+}
+
+pub fn validate_final_stop_receipt(
+    health: &Health,
+    operation_id: Option<&str>,
+    receipt: &Value,
+) -> Result<()> {
+    let expected = serde_json::to_value(health)?;
+    for key in [
+        "installation_id",
+        "instance_id",
+        "process_start_id",
+        "image_path",
+        "image_sha256",
+        "runtime_version",
+        "account_id",
+    ] {
+        anyhow::ensure!(
+            expected[key]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+                && receipt[key] == expected[key],
+            "stop receipt identity mismatch: {key}"
+        );
+    }
+    anyhow::ensure!(
+        health.pid > 0
+            && health.generation > 0
+            && receipt["schema_version"] == 1
+            && receipt["protocol_version"] == health.v
+            && receipt["pid"] == health.pid
+            && receipt["generation"] == health.generation
+            && receipt["operation_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+            && operation_id.is_none_or(|id| receipt["operation_id"] == id),
+        "stop receipt does not match the stopped instance and operation"
+    );
+    anyhow::ensure!(
+        receipt["state"] == "drained"
+            && receipt["unfinished"].as_array().is_some_and(Vec::is_empty),
+        "runtime stopped without a proven complete drain"
+    );
     Ok(())
 }
 
@@ -370,6 +499,45 @@ pub fn rpc_exec(args: Vec<String>) -> Result<Value> {
 
 pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
     rpc_method_with_timeout(method, args, None)
+}
+
+pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequestScope> {
+    anyhow::ensure!(
+        health.v == crate::rpc_worker::PROTOCOL_V
+            && !health.account_id.is_empty()
+            && !health.instance_id.is_empty()
+            && health.generation > 0
+            && !health.installation_root.is_empty(),
+        "runtime request scope is incomplete or incompatible"
+    );
+    anyhow::ensure!(
+        fs::canonicalize(&health.installation_root)?
+            == fs::canonicalize(respire_app::service::main_data_dir())?,
+        "runtime request belongs to another installation"
+    );
+    Ok(respire_protocol::RuntimeRequestScope {
+        account_id: health.account_id.clone(),
+        instance_id: health.instance_id.clone(),
+        generation: health.generation,
+    })
+}
+
+/// Inspect the original operation without refreshing health or replaying it.
+pub fn rpc_result(operation: &OperationContext) -> Result<Value> {
+    anyhow::ensure!(
+        !operation.scope.account_id.is_empty()
+            && !operation.scope.instance_id.is_empty()
+            && operation.scope.generation > 0
+            && !operation.operation_id.is_empty()
+            && !operation.idempotency_key.is_empty(),
+        "runtime result requires the complete original operation context"
+    );
+    rpc_request(
+        "runtime.result",
+        vec![operation.operation_id.clone()],
+        Some(operation),
+        None,
+    )
 }
 
 fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) -> Duration {
@@ -403,13 +571,52 @@ pub(crate) fn rpc_method_with_timeout(
     args: Vec<String>,
     test_timeout: Option<Duration>,
 ) -> Result<Value> {
-    if method != "cli.progress" {
-        check_connection()?;
-    }
+    anyhow::ensure!(
+        method != "runtime.result",
+        "runtime.result requires rpc_result with the original operation context"
+    );
+    let operation = if matches!(
+        method,
+        "cli.progress" | "runtime.status" | "assets.status" | "model.catalog" | "model.progress"
+    ) {
+        None
+    } else {
+        let scope = request_scope(&health()?)?;
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        Some(OperationContext {
+            scope,
+            idempotency_key: operation_id.clone(),
+            operation_id,
+        })
+    };
+    rpc_request(method, args, operation.as_ref(), test_timeout)
+}
+
+fn rpc_request(
+    method: &str,
+    args: Vec<String>,
+    operation: Option<&OperationContext>,
+    test_timeout: Option<Duration>,
+) -> Result<Value> {
     let url = format!("{}/api/rpc", rpc_base_url());
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let (operation_id, idempotency_key, scope) = match operation {
+        Some(operation) => (
+            operation.operation_id.clone(),
+            operation.idempotency_key.clone(),
+            Some(&operation.scope),
+        ),
+        None => {
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            (operation_id.clone(), operation_id, None)
+        }
+    };
     let body = json!({
         "v": crate::rpc_worker::PROTOCOL_V,
-        "id": uuid::Uuid::new_v4().to_string(),
+        "id": request_id.clone(),
+        "operation_id": operation_id,
+        "idempotency_key": idempotency_key,
+        "scope": scope,
         "method": method,
         "args": args,
         "lifecycle": if method == "runtime.stop" { Some("coordinator-v1") } else { None },
@@ -419,32 +626,135 @@ pub(crate) fn rpc_method_with_timeout(
         request.send_json(body.clone())
     })
     .map_err(|error| {
-        if method == "cli.exec"
-            && matches!(
+        if let Some(operation) = operation.filter(|_| method != "runtime.result") {
+            if matches!(
                 error.downcast_ref::<RuntimeError>(),
                 Some(RuntimeError::Transport(_))
-            )
-        {
-            RuntimeError::OutcomeUnknown {
-                request_id: body["id"].as_str().unwrap_or_default().to_owned(),
-                detail: error.to_string(),
+            ) {
+                return RuntimeError::OutcomeUnknown {
+                    request_id: request_id.clone(),
+                    operation: operation.clone(),
+                    detail: error.to_string(),
+                }
+                .into();
             }
-            .into()
-        } else {
-            error
         }
+        error
     })?;
     let parsed: Value = resp.into_json().map_err(|error| {
-        if method == "cli.exec" {
+        if let Some(operation) = operation.filter(|_| method != "runtime.result") {
             anyhow::Error::from(RuntimeError::OutcomeUnknown {
-                request_id: body["id"].as_str().unwrap_or_default().to_owned(),
+                request_id: request_id.clone(),
+                operation: operation.clone(),
                 detail: format!("runtime reply unavailable: {error}"),
             })
         } else {
             anyhow::anyhow!("runtime rpc is not JSON: {error}")
         }
     })?;
-    Ok(parsed)
+    validate_rpc_response(&body, parsed, operation)
+}
+
+fn validate_rpc_response(
+    request: &Value,
+    response: Value,
+    operation: Option<&OperationContext>,
+) -> Result<Value> {
+    let request_id = request["id"]
+        .as_str()
+        .context("missing original RPC request ID")?;
+    let checked = (|| -> Result<()> {
+        let header: respire_protocol::RpcResponse<crate::output::ResultEnvelope> =
+            serde_json::from_value(response.clone()).context("malformed runtime RPC response")?;
+        anyhow::ensure!(
+            header.v == crate::rpc_worker::PROTOCOL_V
+                && header.id == request_id
+                && header.code.as_deref() != Some("protocol_version_mismatch"),
+            "runtime RPC response request ID or protocol version mismatch"
+        );
+        anyhow::ensure!(
+            header.exit >= 0 && header.ok == (header.exit == 0),
+            "runtime RPC response ok/exit mismatch"
+        );
+        let Some(operation) = operation else {
+            return Ok(());
+        };
+        for key in ["operation_id", "idempotency_key"] {
+            if let Some(value) = response.get(key) {
+                anyhow::ensure!(
+                    value == &request[key],
+                    "runtime RPC response {key} mismatch"
+                );
+            }
+        }
+        if matches!(
+            header.code.as_deref(),
+            Some("scope_required" | "scope_mismatch")
+        ) {
+            // Admission rejection can omit scope or report the current one; never rebind to it.
+            anyhow::ensure!(
+                !header.ok
+                    && header.exit > 0
+                    && header
+                        .envelope
+                        .as_ref()
+                        .is_none_or(|envelope| matches!(envelope.status, crate::output::Status::Fail)),
+                "runtime scope rejection must remain an explicit failure"
+            );
+            if let Some(scope) = response.get("scope").filter(|scope| !scope.is_null()) {
+                serde_json::from_value::<respire_protocol::RuntimeRequestScope>(scope.clone())
+                    .context("malformed runtime scope rejection")?;
+            }
+            return Ok(());
+        }
+        let receipt = if request["method"] == "runtime.result" {
+            &response["envelope"]["summary"]
+        } else {
+            &response
+        };
+        anyhow::ensure!(
+            receipt["operation_id"].as_str() == Some(operation.operation_id.as_str()),
+            "runtime RPC response operation ID is missing or foreign"
+        );
+        let scope: respire_protocol::RuntimeRequestScope =
+            serde_json::from_value(receipt["scope"].clone())
+                .context("runtime RPC response scope is missing or malformed")?;
+        anyhow::ensure!(
+            scope == operation.scope,
+            "runtime RPC response scope mismatch"
+        );
+        if let Some(key) = receipt.get("idempotency_key") {
+            anyhow::ensure!(
+                key.as_str() == Some(operation.idempotency_key.as_str()),
+                "runtime RPC receipt idempotency key mismatch"
+            );
+        }
+        if request["method"] == "runtime.result" {
+            anyhow::ensure!(
+                receipt["request_id"].as_str() == Some(request_id),
+                "runtime result receipt request ID mismatch"
+            );
+            if let Some(scope) = response.get("scope") {
+                anyhow::ensure!(
+                    scope == &receipt["scope"],
+                    "runtime result outer scope mismatch"
+                );
+            }
+        }
+        Ok(())
+    })();
+    checked.map_err(|error| {
+        if let Some(operation) = operation.filter(|_| request["method"] != "runtime.result") {
+            anyhow::Error::from(RuntimeError::OutcomeUnknown {
+                request_id: request_id.to_owned(),
+                operation: operation.clone(),
+                detail: format!("unverified runtime reply: {error:#}"),
+            })
+        } else {
+            anyhow::anyhow!("unverified runtime reply: {error:#}")
+        }
+    })?;
+    Ok(response)
 }
 
 pub fn wait_until_down() -> Result<()> {
@@ -659,7 +969,18 @@ pub fn kill_runtime(pid: u32, identity: &RuntimeProcessIdentity) -> Result<()> {
         };
         respire_spawn::terminate_runtime(pid, &expected)?;
     }
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
+    {
+        let expected = respire_spawn::ProcessIdentity {
+            birth: identity
+                .started_at
+                .parse()
+                .context("invalid verified process creation time")?,
+            executable: std::path::PathBuf::from(&identity.executable),
+        };
+        respire_spawn::terminate_runtime(pid, &expected)?;
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
     {
         let status = std::process::Command::new("kill")
             .args(["-KILL", &pid.to_string()])
@@ -769,92 +1090,340 @@ mod tests {
     #[test]
     fn response_after_client_deadline_reports_unknown_and_can_be_inspected_without_replay(
     ) -> Result<()> {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../contracts/runtime-control/fixtures/positive/operation-result-completed.json"
+        ))?;
+        let receipt = &fixture["payload"];
+        let operation = OperationContext {
+            scope: serde_json::from_value(receipt["scope"].clone())?,
+            operation_id: receipt["operation_id"]
+                .as_str()
+                .context("fixture operation ID")?
+                .to_owned(),
+            idempotency_key: receipt["idempotency_key"]
+                .as_str()
+                .context("fixture idempotency key")?
+                .to_owned(),
+        };
+        let request = json!({"v":1,"id":"request-submit-1","method":"model.configure",
+            "operation_id":operation.operation_id,"idempotency_key":operation.idempotency_key,"scope":operation.scope});
+        let response = json!({"v":1,"id":request["id"],"ok":true,"exit":0,
+            "operation_id":operation.operation_id,"idempotency_key":operation.idempotency_key,"scope":operation.scope});
+        assert_eq!(
+            validate_rpc_response(&request, response.clone(), Some(&operation))?,
+            response
+        );
+        for (pointer, value) in [
+            ("/id", json!("foreign-request")),
+            ("/id", Value::Null),
+            ("/v", json!(2)),
+            ("/v", json!("1")),
+            ("/ok", json!("true")),
+            ("/exit", Value::Null),
+            ("/exit", json!(-1)),
+            ("/exit", json!(1)),
+            ("/operation_id", json!("foreign-operation")),
+            ("/operation_id", Value::Null),
+            ("/idempotency_key", json!("foreign-key")),
+            ("/scope", Value::Null),
+            ("/scope", json!({})),
+            ("/scope/account_id", json!("foreign-account")),
+            ("/scope/instance_id", json!("foreign-instance")),
+            ("/scope/generation", json!(8)),
+            ("/scope/generation", json!("7")),
+        ] {
+            let mut invalid = response.clone();
+            *invalid.pointer_mut(pointer).context("mutation pointer")? = value;
+            let error = validate_rpc_response(&request, invalid, Some(&operation))
+                .err()
+                .context("unbound write response was accepted")?;
+            assert!(matches!(error.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::OutcomeUnknown { request_id, operation: original, .. })
+                    if request_id == "request-submit-1" && original == &operation));
+        }
+        for key in ["id", "v", "ok", "exit", "operation_id", "scope"] {
+            let mut invalid = response.clone();
+            invalid
+                .as_object_mut()
+                .context("response object")?
+                .remove(key);
+            assert!(
+                matches!(validate_rpc_response(&request, invalid, Some(&operation))
+                .err().context("missing response field accepted")?.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::OutcomeUnknown { operation: original, .. }) if original == &operation)
+            );
+        }
+        let mut extra = response.clone();
+        extra["scope"]["extra"] = json!(true);
+        assert!(validate_rpc_response(&request, extra, Some(&operation)).is_err());
+        for code in ["scope_required", "scope_mismatch"] {
+            let mut rejection = json!({"v":1,"id":request["id"],"ok":false,"exit":1,
+                "code":code,"error":"scope rejected before admission"});
+            assert_eq!(
+                validate_rpc_response(&request, rejection.clone(), Some(&operation))?,
+                rejection
+            );
+            rejection["scope"] = json!({"account_id":"current-account","instance_id":"current-instance","generation":8});
+            assert_eq!(
+                validate_rpc_response(&request, rejection.clone(), Some(&operation))?,
+                rejection
+            );
+            for (key, value) in [
+                ("id", json!("foreign-request")),
+                ("v", json!(2)),
+                ("exit", json!(0)),
+                ("exit", json!(-1)),
+                ("scope", json!({})),
+                ("operation_id", json!("foreign-operation")),
+            ] {
+                let mut invalid = rejection.clone();
+                invalid[key] = value;
+                assert!(
+                    matches!(validate_rpc_response(&request, invalid, Some(&operation))
+                    .err().context("malformed scope rejection accepted")?.downcast_ref::<RuntimeError>(),
+                    Some(RuntimeError::OutcomeUnknown { operation: original, .. }) if original == &operation)
+                );
+            }
+            rejection["ok"] = json!(true);
+            assert!(validate_rpc_response(&request, rejection, Some(&operation)).is_err());
+        }
+        let mut query = request.clone();
+        query["id"] = receipt["request_id"].clone();
+        query["method"] = json!("runtime.result");
+        let envelope = crate::output::ResultEnvelope::new(
+            "runtime.result",
+            crate::output::Status::Ok,
+            receipt.clone(),
+            Vec::new(),
+        );
+        let result = json!({"v":1,"id":query["id"],"ok":true,"exit":0,"envelope":envelope});
+        for state in ["pending", "completed", "failed", "aborted", "unknown"] {
+            let mut result = result.clone();
+            result["envelope"]["summary"]["result"] = json!(state);
+            assert_eq!(
+                validate_rpc_response(&query, result.clone(), Some(&operation))?,
+                result
+            );
+        }
+        for (pointer, value) in [
+            ("/id", json!("foreign-query")),
+            ("/v", json!(2)),
+            ("/envelope/summary/request_id", json!("foreign-query")),
+            ("/envelope/summary/operation_id", json!("foreign-operation")),
+            ("/envelope/summary/idempotency_key", json!("foreign-key")),
+            ("/envelope/summary/scope", Value::Null),
+            (
+                "/envelope/summary/scope/account_id",
+                json!("foreign-account"),
+            ),
+            (
+                "/envelope/summary/scope/instance_id",
+                json!("foreign-instance"),
+            ),
+            ("/envelope/summary/scope/generation", json!(8)),
+        ] {
+            let mut invalid = result.clone();
+            *invalid
+                .pointer_mut(pointer)
+                .context("result mutation pointer")? = value;
+            let error = validate_rpc_response(&query, invalid, Some(&operation))
+                .err()
+                .context("foreign result was accepted")?;
+            assert!(!matches!(
+                error.downcast_ref::<RuntimeError>(),
+                Some(RuntimeError::OutcomeUnknown { .. })
+            ));
+        }
+        for (key, value) in [
+            ("scope", json!({})),
+            ("operation_id", json!("foreign-operation")),
+        ] {
+            let mut invalid = result.clone();
+            invalid[key] = value;
+            assert!(validate_rpc_response(&query, invalid, Some(&operation)).is_err());
+        }
+        for key in ["request_id", "operation_id", "scope"] {
+            let mut invalid = result.clone();
+            invalid["envelope"]["summary"]
+                .as_object_mut()
+                .context("result receipt object")?
+                .remove(key);
+            assert!(validate_rpc_response(&query, invalid, Some(&operation)).is_err());
+        }
+        for code in ["scope_required", "scope_mismatch"] {
+            let rejection = json!({"v":1,"id":query["id"],"ok":false,"exit":1,"code":code,"error":"scope rejected"});
+            assert_eq!(
+                validate_rpc_response(&query, rejection.clone(), Some(&operation))?,
+                rejection
+            );
+        }
+        let mut read = request.clone();
+        read["method"] = json!("model.catalog");
+        let read_response = json!({"v":1,"id":read["id"],"ok":true,"exit":0});
+        assert_eq!(
+            validate_rpc_response(&read, read_response.clone(), None)?,
+            read_response
+        );
+        let mut foreign = read_response;
+        foreign["id"] = json!("foreign-read");
+        assert!(validate_rpc_response(&read, foreign, None).is_err());
         let _guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let directory = tempfile::tempdir()?;
-        let server =
-            tiny_http::Server::http("127.0.0.1:0").map_err(|error| anyhow::anyhow!("{error}"))?;
-        let port = server
-            .server_addr()
-            .to_ip()
-            .ok_or_else(|| anyhow::anyhow!("missing test address"))?
-            .port();
-        let previous: Vec<_> = ["RSRS_RPC_PORT", "RSRS_DATA_DIR", "RSRS_RPC_TOKEN"]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect();
-        std::env::set_var("RSRS_RPC_PORT", port.to_string());
-        std::env::set_var("RSRS_DATA_DIR", directory.path());
-        std::env::remove_var("RSRS_RPC_TOKEN");
-        let actor = std::thread::spawn(move || -> Result<String> {
-            let mut request = server
-                .recv_timeout(Duration::from_secs(2))?
-                .ok_or_else(|| anyhow::anyhow!("write never arrived"))?;
-            let mut body = String::new();
-            request.as_reader().read_to_string(&mut body)?;
-            let write: Value = serde_json::from_str(&body)?;
-            anyhow::ensure!(write["method"] == "cli.exec", "unexpected first request");
-            let id = write["id"]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("missing write ID"))?
-                .to_owned();
-            // Simulated committed write returns after the shortened client deadline.
-            std::thread::sleep(Duration::from_millis(150));
-            let _ = request.respond(tiny_http::Response::from_string(
-                json!({"v":1,"id":id,"ok":true}).to_string(),
-            ));
-            let mut inspect = server
-                .recv_timeout(Duration::from_secs(2))?
-                .ok_or_else(|| anyhow::anyhow!("result inspection never arrived"))?;
-            body.clear();
-            inspect.as_reader().read_to_string(&mut body)?;
-            let query: Value = serde_json::from_str(&body)?;
-            anyhow::ensure!(
-                query["method"] == "runtime.result" && query["args"][0] == id,
-                "client replayed or inspected the wrong write"
-            );
-            inspect.respond(tiny_http::Response::from_string(json!({"v":1,"id":query["id"],"ok":true,"envelope":{"summary":{"state":"completed","request_id":id,"response":{"ok":true,"committed":true}}}}).to_string()))?;
-            Ok(id)
-        });
-        let result = (|| -> Result<()> {
-            let error = rpc_method_with_timeout(
-                "cli.exec",
-                vec!["remember".into(), "synthetic write".into()],
-                Some(Duration::from_millis(50)),
-            )
-            .err()
-            .ok_or_else(|| {
-                anyhow::anyhow!("delayed write unexpectedly completed within deadline")
-            })?;
-            let id = match error.downcast_ref::<RuntimeError>() {
-                Some(RuntimeError::OutcomeUnknown { request_id, .. }) => request_id.clone(),
-                _ => anyhow::bail!(
-                    "ambiguous transport failure was not marked outcome_unknown: {error}"
-                ),
-            };
-            let inspected = rpc_method_with_timeout(
-                "runtime.result",
-                vec![id.clone()],
-                Some(Duration::from_secs(2)),
-            )?;
-            anyhow::ensure!(
-                inspected["envelope"]["summary"]["state"] == "completed",
-                "inspection failed: {inspected}"
-            );
-            let seen = actor
-                .join()
-                .map_err(|_| anyhow::anyhow!("test transport actor panicked"))??;
-            anyhow::ensure!(seen == id, "request ID changed");
-            Ok(())
-        })();
-        for (key, value) in previous {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
+        for method in [
+            "cli.exec",
+            "model.control",
+            "model.prepare",
+            "index.prepare",
+            "model.configure",
+            "model.switch",
+            "model.resume",
+        ] {
+            let directory = tempfile::tempdir()?;
+            let server = tiny_http::Server::http("127.0.0.1:0")
+                .map_err(|error| anyhow::anyhow!("{error}"))?;
+            let port = server
+                .server_addr()
+                .to_ip()
+                .ok_or_else(|| anyhow::anyhow!("missing test address"))?
+                .port();
+            let previous: Vec<_> = ["RSRS_RPC_PORT", "RSRS_DATA_DIR", "RSRS_RPC_TOKEN"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            std::env::set_var("RSRS_RPC_PORT", port.to_string());
+            std::env::set_var("RSRS_DATA_DIR", directory.path());
+            std::env::remove_var("RSRS_RPC_TOKEN");
+            let test_root = directory.path().to_path_buf();
+            let actor = std::thread::spawn(move || -> Result<String> {
+                fn receive_rpc(
+                    server: &tiny_http::Server,
+                    root: &std::path::Path,
+                ) -> Result<tiny_http::Request> {
+                    loop {
+                        let request = server
+                            .recv_timeout(Duration::from_secs(2))?
+                            .ok_or_else(|| anyhow::anyhow!("RPC never arrived"))?;
+                        if request.url() == "/api/health" {
+                            request.respond(tiny_http::Response::from_string(json!({
+                            "server":"respire", "bin":"fixture", "pid":4321, "v":1,
+                            "installation_root":root, "account_id":"account-1", "instance_id":"instance-1", "generation":7,
+                        }).to_string()))?;
+                        } else {
+                            return Ok(request);
+                        }
+                    }
+                }
+                let mut request = receive_rpc(&server, &test_root)?;
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body)?;
+                let write: Value = serde_json::from_str(&body)?;
+                anyhow::ensure!(write["method"] == method, "unexpected first request");
+                anyhow::ensure!(
+                    write["id"].is_string()
+                        && write["operation_id"].is_string()
+                        && write["id"] != write["operation_id"],
+                    "request and operation identities must be distinct"
+                );
+                let id = write["id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing write ID"))?
+                    .to_owned();
+                let operation_id = write["operation_id"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("missing operation ID"))?
+                    .to_owned();
+                // Simulated committed write returns after the shortened client deadline.
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = request.respond(tiny_http::Response::from_string(
+                    json!({"v":1,"id":id,"ok":true}).to_string(),
+                ));
+                let mut inspect = server
+                    .recv_timeout(Duration::from_secs(2))?
+                    .ok_or_else(|| anyhow::anyhow!("result query never arrived"))?;
+                anyhow::ensure!(
+                    inspect.url() == "/api/rpc",
+                    "result query must not refresh health"
+                );
+                body.clear();
+                inspect.as_reader().read_to_string(&mut body)?;
+                let query: Value = serde_json::from_str(&body)?;
+                anyhow::ensure!(
+                    write["scope"]
+                        == json!({"account_id":"account-1","instance_id":"instance-1","generation":7})
+                        && query["scope"] == write["scope"],
+                    "request scope changed or was omitted"
+                );
+                anyhow::ensure!(
+                    query["method"] == "runtime.result"
+                        && query["args"][0] == operation_id
+                        && query["operation_id"] == write["operation_id"]
+                        && query["idempotency_key"] == write["idempotency_key"]
+                        && query["id"] != write["id"],
+                    "client replayed or inspected the wrong write"
+                );
+                let envelope = crate::output::ResultEnvelope::new(
+                    "runtime.result",
+                    crate::output::Status::Ok,
+                    json!({"state":"completed","request_id":query["id"],"operation_id":operation_id,
+                        "scope":query["scope"],"idempotency_key":query["idempotency_key"],
+                        "response":{"ok":true,"committed":true,"id":id}}),
+                    Vec::new(),
+                );
+                inspect.respond(tiny_http::Response::from_string(
+                    json!({"v":1,"id":query["id"],"ok":true,"exit":0,"envelope":envelope})
+                        .to_string(),
+                ))?;
+                Ok(operation_id)
+            });
+            let result = (|| -> Result<()> {
+                let error = rpc_method_with_timeout(
+                    method,
+                    vec!["remember".into(), "synthetic write".into()],
+                    Some(Duration::from_millis(50)),
+                )
+                .err()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("delayed write unexpectedly completed within deadline")
+                })?;
+                let operation = match error.downcast_ref::<RuntimeError>() {
+                    Some(RuntimeError::OutcomeUnknown { operation, .. }) => operation.clone(),
+                    _ => anyhow::bail!(
+                        "ambiguous transport failure was not marked outcome_unknown: {error}"
+                    ),
+                };
+                let (failure, _) = crate::output_emit::command_failure(&error);
+                anyhow::ensure!(
+                    failure.details["scope"] == serde_json::to_value(&operation.scope)?
+                        && failure.details["operation_id"] == operation.operation_id
+                        && failure.details["idempotency_key"] == operation.idempotency_key
+                        && failure.details["replayed"] == false,
+                    "outcome_unknown output lost the original operation context"
+                );
+                anyhow::ensure!(
+                    rpc_method("runtime.result", vec![operation.operation_id.clone()]).is_err(),
+                    "result query without original context must fail before contacting runtime"
+                );
+                let inspected = rpc_result(&operation)?;
+                anyhow::ensure!(
+                    inspected["envelope"]["summary"]["state"] == "completed",
+                    "inspection failed: {inspected}"
+                );
+                let seen = actor
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("test transport actor panicked"))??;
+                anyhow::ensure!(seen == operation.operation_id, "operation ID changed");
+                Ok(())
+            })();
+            for (key, value) in previous {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
             }
+            result?;
         }
-        result
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
