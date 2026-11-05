@@ -1,6 +1,5 @@
-//! HTTP RPC against the hidden `rsrs --runtime-internal` host entry.
-//! Legacy transport checks explicitly select the CLI shim. Scoped client checks
-//! use RSRS_RUNTIME_BIN; neither fixture substitutes for Runtime G1 acceptance.
+//! HTTP RPC against the official standalone `rsrs-runtime` fixture.
+//! The CLI remains a client; neither fixture substitutes for Runtime G1 acceptance.
 //! Isolated DATA_DIR + ephemeral port. Safe for GitHub Actions.
 //! Do not bind the developer machine's default 15169.
 
@@ -56,6 +55,65 @@ struct Runtime {
     dir: tempfile::TempDir,
     port: u16,
     stderr_path: std::path::PathBuf,
+    identity: serde_json::Value,
+}
+
+impl Runtime {
+    fn check_health(&self, health: &serde_json::Value) {
+        for field in ["pid", "bin", "runtime_version", "installation_id", "installation_root",
+            "account_id", "instance_id", "generation", "process_start_id", "image_path", "image_sha256"] {
+            assert_eq!(health[field], self.identity[field], "Runtime identity changed: {field}");
+        }
+        assert_eq!(health["pid"], self.child.id());
+    }
+
+    fn rpc_body(&self, id: &str, args: &[&str]) -> serde_json::Value {
+        let operation = uuid::Uuid::new_v4().to_string();
+        serde_json::json!({"v":1,"id":id,"method":"cli.exec","args":args,
+            "operation_id":operation,"idempotency_key":operation,
+            "scope":{"account_id":self.identity["account_id"],
+                "instance_id":self.identity["instance_id"],"generation":self.identity["generation"]}})
+    }
+
+    fn rpc(&self, id: &str, args: &[&str], timeout: Duration) -> Result<serde_json::Value, String> {
+        let body = self.rpc_body(id, args);
+        let reply: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", self.port))
+            .timeout(timeout).send_json(body.clone()).map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())?;
+        for field in ["id", "operation_id", "idempotency_key", "scope"] {
+            assert_eq!(reply[field], body[field], "unbound RPC reply: {field}");
+        }
+        assert_ne!(reply["code"], "scope_required", "{reply}");
+        assert_ne!(reply["code"], "scope_mismatch", "{reply}");
+        assert_eq!(reply["pid"], self.identity["pid"]);
+        assert_eq!(reply["bin"], self.identity["bin"]);
+        Ok(reply)
+    }
+
+    fn verify_stop_receipt(&self, operation: Option<&str>) -> Result<(), String> {
+        let instance = self.identity["instance_id"].as_str().ok_or("Runtime instance missing")?;
+        let receipt = fs::read(self.dir.path().join("runtime").join(format!("stop-{instance}.json")))
+            .map_err(|err| err.to_string())?;
+        let receipt = serde_json::from_slice(&receipt).map_err(|err| err.to_string())?;
+        let health = serde_json::from_value(self.identity.clone()).map_err(|err| err.to_string())?;
+        respire_commands::net_rpc::validate_final_stop_receipt(&health, operation, &receipt)
+            .map_err(|err| err.to_string())
+    }
+
+    fn stop(&self) -> Result<String, String> {
+        let expected = serde_json::json!({"installation_id":self.identity["installation_id"],
+            "account_id":self.identity["account_id"],"instance_id":self.identity["instance_id"],
+            "generation":self.identity["generation"]});
+        let receipt: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/runtime/stop", self.port))
+            .timeout(Duration::from_secs(2)).set("X-Respire-Lifecycle", "coordinator-v1")
+            .send_json(expected).map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())?;
+        assert_eq!(receipt["ok"], true, "{receipt}");
+        assert_eq!(receipt["state"], "accepted", "{receipt}");
+        assert!(receipt["request_id"].as_str().is_some_and(|id| !id.is_empty()));
+        receipt["operation_id"].as_str().filter(|id| !id.is_empty())
+            .map(str::to_owned).ok_or_else(|| "stop operation ID missing".into())
+    }
 }
 
 impl Drop for Runtime {
@@ -77,14 +135,14 @@ fn start_internal_runtime_with_legacy_path(
     mode: &str,
     legacy_path: bool,
 ) -> Result<Runtime, String> {
-    start_runtime(mode, legacy_path, false)
+    start_runtime(mode, legacy_path)
 }
 
 fn start_scoped_runtime() -> Result<Runtime, String> {
-    start_runtime("normal", false, true)
+    start_runtime("normal", false)
 }
 
-fn start_runtime(mode: &str, legacy_path: bool, standalone: bool) -> Result<Runtime, String> {
+fn start_runtime(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
     let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
     fs::write(
         dir.path().join("client.json"),
@@ -104,16 +162,27 @@ fn start_runtime(mode: &str, legacy_path: bool, standalone: bool) -> Result<Runt
     let port = pick_port()?;
     let stderr_path = dir.path().join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
-    let mut command = if standalone {
-        let mut command = Command::new(runtime_bin()?);
-        command.arg("serve");
-        command
-    } else {
-        let mut command = Command::new(bin());
-        command.args(["--runtime-internal", "--no-open"]);
-        command
-    };
-    let mut child = command
+    let runtime = runtime_bin()?;
+    let version = Command::new(&runtime).arg("--version").output().map_err(|err| err.to_string())?;
+    if !version.status.success() {
+        return Err("standalone Runtime version query failed".into());
+    }
+    let version_text = String::from_utf8(version.stdout).map_err(|err| err.to_string())?;
+    let version = version_text.trim().strip_prefix("rsrs-runtime ")
+        .filter(|version| !version.is_empty()).ok_or("unexpected standalone Runtime version identity")?;
+    use sha2::Digest;
+    use std::io::Read;
+    let mut image = fs::File::open(&runtime).map_err(|err| err.to_string())?;
+    let mut digest = sha2::Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = image.read(&mut buffer).map_err(|err| err.to_string())?;
+        if count == 0 { break; }
+        digest.update(&buffer[..count]);
+    }
+    let image_sha256 = format!("{:x}", digest.finalize());
+    let mut child = Command::new(&runtime)
+        .arg("serve")
         .args(["--port", &port.to_string()])
         .env("RSRS_DATA_DIR", dir.path())
         .env("RSRS_RPC_PORT", port.to_string())
@@ -134,12 +203,29 @@ fn start_runtime(mode: &str, legacy_path: bool, standalone: bool) -> Result<Runt
     while start.elapsed() < Duration::from_secs(20) {
         match ureq::get(&health_url).call() {
             Ok(resp) if resp.status() == 200 => {
-                return Ok(Runtime {
-                    child,
-                    dir,
-                    port,
-                    stderr_path,
-                });
+                let identity = match resp.into_json::<serde_json::Value>() {
+                    Ok(identity) => identity,
+                    Err(err) => { last = err.to_string(); continue; }
+                };
+                let rt = Runtime { child, dir, port, stderr_path, identity };
+                let health = &rt.identity;
+                if health["server"] != "respire" || health["v"] != 1
+                    || health["pid"] != rt.child.id() || health["bin"] != version
+                    || health["runtime_version"] != version || health["image_sha256"] != image_sha256
+                    || health["generation"].as_u64().is_none_or(|generation| generation == 0)
+                    || ["installation_id", "account_id", "instance_id", "process_start_id"].iter()
+                        .any(|field| health[*field].as_str().is_none_or(str::is_empty))
+                {
+                    return Err("standalone Runtime health identity does not match the owned fixture".into());
+                }
+                for field in ["exe", "image_path"] {
+                    let path = health[field].as_str().ok_or("Runtime image path missing")?;
+                    assert_eq!(fs::canonicalize(path).map_err(|err| err.to_string())?, runtime);
+                }
+                let root = health["installation_root"].as_str().ok_or("Runtime installation root missing")?;
+                assert_eq!(fs::canonicalize(root).map_err(|err| err.to_string())?,
+                    fs::canonicalize(rt.dir.path()).map_err(|err| err.to_string())?);
+                return Ok(rt);
             }
             Ok(resp) => last = format!("status {}", resp.status()),
             Err(err) => last = err.to_string(),
@@ -156,7 +242,7 @@ fn start_runtime(mode: &str, legacy_path: bool, standalone: bool) -> Result<Runt
 
 #[test]
 fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
-    let mut rt = start_runtime("normal", true, true)?;
+    let mut rt = start_runtime("normal", true)?;
     let health = || -> Result<serde_json::Value, String> {
         ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
             .timeout(Duration::from_secs(3))
@@ -270,13 +356,8 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
             .map_err(|err| err.to_string())?;
         assert_eq!(health()?["pid"].as_u64(), Some(owner));
     }
-    let identity = health()?;
-    let response: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
-        .timeout(Duration::from_secs(10))
-        .send_json(serde_json::json!({"v":1,"id":"tcp-only-status","method":"cli.exec","args":["status","--json"],
-            "operation_id":"tcp-only-operation","idempotency_key":"tcp-only-operation",
-            "scope":{"account_id":identity["account_id"],"instance_id":identity["instance_id"],"generation":identity["generation"]}}))
-        .map_err(|err| err.to_string())?.into_json().map_err(|err| err.to_string())?;
+    rt.check_health(&health()?);
+    let response = rt.rpc("tcp-only-status", &["status", "--json"], Duration::from_secs(10))?;
     assert_eq!(response["ok"], true, "{response}");
     let stop = Command::new(bin())
         .args(["--runtime-internal", "--stop", "--json"])
@@ -316,12 +397,8 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
 #[test]
 fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(), String> {
     let rt = start_internal_runtime_with_mode("off")?;
-    let execute = |args: &[&str]| -> Result<serde_json::Value, String> {
-        ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
-            .timeout(Duration::from_secs(20))
-            .send_json(serde_json::json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),"method":"cli.exec","args":args}))
-            .map_err(|err| err.to_string())?
-            .into_json().map_err(|err| err.to_string())
+    let execute = |args: &[&str]| {
+        rt.rpc(&uuid::Uuid::new_v4().to_string(), args, Duration::from_secs(20))
     };
     for args in [
         vec!["--json", "recall", "synthetic query"],
@@ -636,9 +713,7 @@ fn health_without_token_reports_bin() -> Result<(), String> {
     if body["server"] != "respire" {
         return Err(format!("server {body}"));
     }
-    if body["bin"] != env!("CARGO_PKG_VERSION") {
-        return Err(format!("bin {body}"));
-    }
+    rt.check_health(&body);
     if body["pid"].as_u64().unwrap_or(0) == 0 {
         return Err(format!("pid {body}"));
     }
@@ -687,22 +762,25 @@ fn health_without_token_reports_bin() -> Result<(), String> {
 #[test]
 fn rpc_cli_exec_status_returns_envelope() -> Result<(), String> {
     let rt = start_scoped_runtime()?;
-    let health: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
-        .call().map_err(|err| err.to_string())?
-        .into_json().map_err(|err| err.to_string())?;
     let url = format!("http://127.0.0.1:{}/api/rpc", rt.port);
-    let body = serde_json::json!({
-        "v": 1,
-        "id": "ci-status",
-        "operation_id": "ci-status-operation",
-        "idempotency_key": "ci-status-operation",
-        "scope": {"account_id":health["account_id"],"instance_id":health["instance_id"],"generation":health["generation"]},
-        "method": "cli.exec",
-        "args": ["--json", "status"]
-    });
-    let resp = ureq::post(&url)
-        .send_json(body.clone())
-        .map_err(|err| err.to_string())?;
+    for code in ["scope_required", "scope_mismatch"] {
+        let mut invalid = rt.rpc_body(code, &["--json", "status"]);
+        if code == "scope_required" {
+            invalid["scope"] = serde_json::Value::Null;
+        } else {
+            invalid["scope"]["instance_id"] = serde_json::json!("foreign-runtime-instance");
+        }
+        let rejected: serde_json::Value = ureq::post(&url)
+            .send_json(invalid.clone()).map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())?;
+        assert_eq!(rejected["ok"], false, "{rejected}");
+        assert_eq!(rejected["code"], code, "{rejected}");
+        assert_eq!(rejected["id"], invalid["id"]);
+        assert_eq!(rejected["pid"], rt.identity["pid"]);
+    }
+    let body = rt.rpc_body("ci-status", &["--json", "status"]);
+    let resp = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
+        .send_json(body.clone()).map_err(|err| err.to_string())?;
     let parsed: serde_json::Value = resp.into_json().map_err(|err| err.to_string())?;
     if parsed["ok"] != true {
         return Err(format!("rpc {parsed}"));
@@ -749,18 +827,17 @@ fn parallel_status_requests_all_complete() -> Result<(), String> {
     let mut handles = Vec::new();
     for index in 0..8 {
         let url = url.clone();
+        let body = rt.rpc_body(&format!("queue-{index}"), &["--json", "status"]);
         handles.push(thread::spawn(move || {
-            let body = serde_json::json!({
-                "v": 1,
-                "id": format!("queue-{index}"),
-                "method": "cli.exec",
-                "args": ["--json", "status"]
-            });
+
             let resp = ureq::post(&url)
                 .timeout(Duration::from_secs(20))
-                .send_json(body)
+                .send_json(body.clone())
                 .map_err(|err| err.to_string())?;
             let parsed: serde_json::Value = resp.into_json().map_err(|err| err.to_string())?;
+            for field in ["id", "operation_id", "idempotency_key", "scope"] {
+                assert_eq!(parsed[field], body[field], "unbound parallel reply: {field}");
+            }
             if parsed["ok"] != true {
                 return Err(format!("rpc {parsed}"));
             }
@@ -780,20 +857,36 @@ fn parallel_status_requests_all_complete() -> Result<(), String> {
 
 #[test]
 fn stop_closes_listen_port() -> Result<(), String> {
-    let rt = start_internal_runtime()?;
+    let mut rt = start_internal_runtime()?;
     let url = format!("http://127.0.0.1:{}/api/runtime/stop", rt.port);
-    let _ = ureq::post(&url)
-        .send_string("{}")
-        .map_err(|err| err.to_string())?;
+    let mut foreign = serde_json::json!({"installation_id":rt.identity["installation_id"],
+        "account_id":rt.identity["account_id"],"instance_id":rt.identity["instance_id"],
+        "generation":rt.identity["generation"]});
+    foreign["instance_id"] = serde_json::json!("foreign-runtime-instance");
+    for invalid in [serde_json::json!({}), foreign] {
+        match ureq::post(&url).set("X-Respire-Lifecycle", "coordinator-v1").send_json(invalid) {
+            Err(ureq::Error::Status(409, response)) => {
+                let rejected: serde_json::Value = response.into_json().map_err(|err| err.to_string())?;
+                assert_eq!(rejected["error"], "stop_identity_mismatch");
+            }
+            other => return Err(format!("unbound stop was not rejected: {other:?}")),
+        }
+        let health: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
+            .call().map_err(|err| err.to_string())?.into_json().map_err(|err| err.to_string())?;
+        rt.check_health(&health);
+        assert!(rt.child.try_wait().map_err(|err| err.to_string())?.is_none());
+    }
+    let operation = rt.stop()?;
     let start = Instant::now();
     let addr = format!("127.0.0.1:{}", rt.port);
     while start.elapsed() < Duration::from_secs(12) {
-        if std::net::TcpStream::connect(&addr).is_err() {
-            return Ok(());
+        if rt.child.try_wait().map_err(|err| err.to_string())?.is_some()
+            && std::net::TcpStream::connect(&addr).is_err() {
+            return rt.verify_stop_receipt(Some(&operation));
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("port still open after stop".into())
+    Err("runtime process or listen port remained after stop".into())
 }
 
 #[test]
@@ -813,13 +906,10 @@ fn incomplete_control_body_does_not_block_health_rpc_or_stop(
         .timeout(Duration::from_secs(2))
         .call()?
         .into_json()?;
-    assert_eq!(health["pid"], rt.child.id());
-    let reply: serde_json::Value = ureq::post(&format!("{base}/api/rpc")).timeout(Duration::from_secs(2))
-        .send_json(serde_json::json!({"v":1,"id":"incomplete-body-next","method":"cli.exec","args":["--json","status"]}))?.into_json()?;
+    rt.check_health(&health);
+    let reply = rt.rpc("incomplete-body-next", &["--json", "status"], Duration::from_secs(2))?;
     assert_eq!(reply["ok"], true, "{reply}");
-    ureq::post(&format!("{base}/api/runtime/stop"))
-        .timeout(Duration::from_secs(2))
-        .send_string("{}")?;
+    let operation = rt.stop()?;
     let until = Instant::now() + Duration::from_secs(12);
     while rt.child.try_wait()?.is_none() {
         assert!(
@@ -828,6 +918,8 @@ fn incomplete_control_body_does_not_block_health_rpc_or_stop(
         );
         thread::sleep(Duration::from_millis(50));
     }
+    assert!(std::net::TcpStream::connect(("127.0.0.1", rt.port)).is_err());
+    rt.verify_stop_receipt(Some(&operation))?;
     Ok(())
 }
 
@@ -853,17 +945,15 @@ fn non_reading_peer_and_pipelined_responses_do_not_block_other_connections(
             .timeout(Duration::from_secs(2))
             .call()?
             .into_json()?;
-        assert_eq!(health["pid"], rt.child.id());
+        rt.check_health(&health);
     }
-    let reply: serde_json::Value = ureq::post(&format!("{base}/api/rpc")).timeout(Duration::from_secs(2))
-        .send_json(serde_json::json!({"v":1,"id":"non-reading-next","method":"cli.exec","args":["--json","status"]}))?.into_json()?;
+    let reply = rt.rpc("non-reading-next", &["--json", "status"], Duration::from_secs(2))?;
     assert_eq!(reply["ok"], true, "{reply}");
     drop(stalled);
     let mut pipeline = std::net::TcpStream::connect(("127.0.0.1", rt.port))?;
     pipeline.set_read_timeout(Some(Duration::from_secs(5)))?;
     for (id, deadline) in [("pipeline-a", None), ("pipeline-b", Some(0u64))] {
-        let mut body =
-            serde_json::json!({"v":1,"id":id,"method":"cli.exec","args":["--json","status"]});
+        let mut body = rt.rpc_body(id, &["--json", "status"]);
         if let Some(deadline) = deadline {
             body["queue_wait_ms"] = serde_json::json!(deadline);
         }
@@ -958,10 +1048,7 @@ fn rpc_memory_revision_does_not_initialize_after_off_start(
         r#"{"service_mode":"normal"}"#,
     )?;
     for index in 0..3 {
-        let reply: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{}/api/rpc", rt.port))
-            .timeout(Duration::from_secs(3))
-            .send_json(serde_json::json!({"v":1,"id":format!("revision-off-start-{index}"),"method":"cli.exec","args":["--json","memory-revision"]}))?
-            .into_json()?;
+        let reply = rt.rpc(&format!("revision-off-start-{index}"), &["--json", "memory-revision"], Duration::from_secs(3))?;
         assert_eq!(
             reply["ok"], false,
             "probe created an absent library: {reply}"
@@ -1001,10 +1088,7 @@ fn rpc_memory_revision_does_not_schedule_background_work() -> Result<(), Box<dyn
         b"synthetic ambiguous path",
     )?;
     for index in 0..3 {
-        let reply: serde_json::Value = ureq::post(&format!("{base}/api/rpc"))
-            .timeout(Duration::from_secs(3))
-            .send_json(serde_json::json!({"v":1,"id":format!("revision-no-index-{index}"),"method":"cli.exec","args":["--json","memory-revision"]}))?
-            .into_json()?;
+        let reply = rt.rpc(&format!("revision-no-index-{index}"), &["--json", "memory-revision"], Duration::from_secs(3))?;
         assert_eq!(reply["ok"], false);
         thread::sleep(Duration::from_millis(100));
         let health: serde_json::Value = ureq::get(&format!("{base}/api/health"))
