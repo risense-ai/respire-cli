@@ -1,15 +1,6 @@
 //! Invalid command input is distinct from storage, network and engine failures.
 
-#[derive(Debug)]
-pub struct InputError(pub String);
-
-impl std::fmt::Display for InputError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for InputError {}
+pub use respire_client_host::input_error::InputError;
 
 /// Validate a user-selected output directory without reclassifying write or storage failures.
 pub fn validate_output_parent(path: &std::path::Path) -> anyhow::Result<()> {

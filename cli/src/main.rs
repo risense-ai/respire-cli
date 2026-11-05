@@ -2636,7 +2636,7 @@ mod capture_tests {
         crate::rpc::set_worker_active(false);
         let control = capture_run(vec!["memory-revision".into(), "--json".into()]);
         assert_eq!(control.exit, 1);
-        assert!(matches!(control.envelope.status, OutputStatus::Fail));
+        assert!(matches!(control.envelope.status, crate::OutputStatus::Fail));
         assert!(control.envelope.errors.iter().any(|error| {
             error.contains("host control requires an installed managed Runtime")
         }));

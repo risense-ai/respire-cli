@@ -50,9 +50,7 @@ pub mod net_rpc;
 #[cfg(feature = "server")]
 pub mod network;
 pub mod output;
-#[cfg(feature = "server")]
 pub mod output_emit;
-#[cfg(feature = "server")]
 pub mod output_state;
 #[cfg(feature = "server")]
 pub mod progress;

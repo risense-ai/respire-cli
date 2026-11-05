@@ -36,7 +36,7 @@ pub fn progress_enabled() -> bool {
     if json_mode() {
         return false;
     }
-    if respire_app::env::var("RSRS_PROGRESS")
+    if respire_client_host::env::var("RSRS_PROGRESS")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
