@@ -11,6 +11,8 @@ use std::process::{Command, Stdio};
 mod confinement;
 pub mod durable;
 pub use confinement::is_restricted;
+mod control;
+pub use control::spawn_control_helper;
 
 #[cfg(windows)]
 mod supervisor_job;

@@ -15,7 +15,7 @@ pub(crate) use recovery::StaleOwner;
 mod manager;
 pub(crate) use manager::process_birth;
 mod supervise;
-pub(crate) use supervise::spawn_authorized_runtime;
+pub(crate) use supervise::{control_memory_revision, spawn_authorized_runtime};
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,

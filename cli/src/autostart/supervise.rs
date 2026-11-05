@@ -137,6 +137,10 @@ pub(crate) fn spawn_authorized_runtime(
     launch_authorization::spawn(binary, arguments, managed_id)
 }
 
+pub(crate) fn control_memory_revision() -> Result<respire_commands::output::ResultEnvelope> {
+    launch_authorization::control_memory_revision()
+}
+
 /// Wait for the child, honoring a signal flag. `Ok(None)` means the supervisor
 /// was signalled and the child has been stopped.
 fn wait_child(
