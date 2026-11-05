@@ -529,6 +529,13 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
 #[test]
 fn release_triple_override_is_validated() -> Result<()> {
     let _env = env_scope(&["RSRS_RUNTIME_TRIPLE"])?;
+    std::env::remove_var("RSRS_RUNTIME_TRIPLE");
+    if cfg!(target_os = "linux") && matches!(std::env::consts::ARCH, "x86_64" | "aarch64") {
+        let abi = if cfg!(target_env = "musl") { "musl" } else { "gnu" };
+        anyhow::ensure!(
+            release_triple()? == format!("{}-unknown-linux-{abi}", std::env::consts::ARCH)
+        );
+    }
     std::env::set_var("RSRS_RUNTIME_TRIPLE", "aarch64-unknown-linux-musl");
     anyhow::ensure!(release_triple()? == "aarch64-unknown-linux-musl");
     std::env::set_var("RSRS_RUNTIME_TRIPLE", "not-a-triple");

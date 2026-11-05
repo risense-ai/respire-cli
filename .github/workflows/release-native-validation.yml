@@ -149,6 +149,50 @@ jobs:
           CLI_SHA: ${{ inputs.ref }}
           CLI_VERSION: ${{ inputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli target/ci/${{ matrix.target }}/release
+      - name: Install and verify the official pinned standalone Runtime
+        id: pinned-runtime
+        shell: bash
+        env:
+          CLI_TARGET: ${{ matrix.target }}
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true');
+          const extension = process.platform === 'win32' ? '.exe' : '';
+          const cli = resolve('target/ci', process.env.CLI_TARGET, 'release', 'rsrs' + extension);
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'native-official-runtime-'));
+          const home = join(root, 'home'); mkdirSync(home);
+          const env = {...process.env, RSRS_DATA_DIR: root, HOME: home, USERPROFILE: home, RSRS_RUNTIME_TRIPLE: process.env.CLI_TARGET,
+            RSRS_UPDATE_CHECK: '0', RSRS_NO_AUTOSYNC: '1'};
+          for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'RSRS_CORE_TEST_MODE', 'RSRS_RUNTIME_BIN']) delete env[key];
+          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          assert.equal(selected.version, pin.required);
+          assert.match(selected.sha256, /^[0-9a-f]{64}$/);
+          assert.ok(selected.release, 'Official Runtime release proof is required');
+          assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.triple ?? metadata.target_triple, process.env.CLI_TARGET);
+          assert.equal(metadata.runtime_version, pin.required);
+          const runtime = realpathSync(join(root, 'runtime', pin.required, 'rsrs-runtime' + extension));
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(runtime, realpathSync(cli), 'CLI cannot substitute for standalone Runtime');
+          assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          for (const [key, value] of Object.entries({path: runtime, sha256: selected.sha256, version: selected.version})) {
+            assert.ok(!/[\r\n]/.test(value));
+            appendFileSync(process.env.GITHUB_OUTPUT, `${key}=${value}\n`);
+          }
+          NODE
       - name: Key the four fixed public model inputs
         id: model-key
         shell: bash
@@ -180,15 +224,21 @@ jobs:
           RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
           RSRS_NO_AUTOSYNC: '1'
           RSRS_UPDATE_CHECK: '0'
+          RSRS_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
+          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          test -n "$RSRS_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           exe=target/ci/${{ matrix.target }}/release/rsrs
           if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
-          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe"
+          bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
       - name: Prepare isolated upgrade Python and the fixed Windows wheel key
         id: wheel-key
@@ -234,6 +284,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
+          NATIVE_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
           py="$RUNNER_TEMP/upgrade-python/bin/python"
@@ -256,13 +310,20 @@ jobs:
               --output native-legacy-model/onnx/model_fp16.onnx
           fi
           "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
+          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --legacy-model-dir native-legacy-model \
             --output-dir "$RUNNER_TEMP/published-upgrades" --profile '${{ inputs.validation_profile }}'
       - name: Verify resident foreground and background inference under concurrent CLI load
         if: inputs.validation_profile == 'full'
         shell: bash
+        env:
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
+          NATIVE_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
           py="$RUNNER_TEMP/upgrade-python/bin/python"
@@ -271,8 +332,10 @@ jobs:
             py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
             exe="$exe.exe"
           fi
+          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           "$py" scripts/test-native-fixture-process.py --output-dir "$RUNNER_TEMP/native-fixture-bounds"
           RSRS_INTRA_THREADS=2 "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
+            --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --output-dir "$RUNNER_TEMP/resident-concurrency" --expect-supervised-worker --resident-stress --expect-background-threads 2
       - uses: actions/upload-artifact@v4

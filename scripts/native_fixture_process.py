@@ -4,6 +4,7 @@ The inspector preserves boundary assertions in a disposable process: a hung
 psutil native call must fail acceptance rather than hang its Python controller.
 """
 import json
+import hashlib
 import os
 import pathlib
 import subprocess
@@ -12,6 +13,196 @@ import tempfile
 import threading
 import time
 import traceback
+import secrets
+
+
+def add_runtime_arguments(parser):
+    parser.add_argument('--runtime-binary', default=os.environ.get('RSRS_RUNTIME_BIN'))
+    parser.add_argument('--runtime-sha256', default=os.environ.get('RSRS_PUBLISHED_RUNTIME_SHA256'))
+    parser.add_argument('--runtime-version', default=os.environ.get('RSRS_PUBLISHED_RUNTIME_VERSION'))
+
+
+def runtime_inputs(args, cli_binaries):
+    values = (args.runtime_binary, args.runtime_sha256, args.runtime_version)
+    published = os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets'
+    if not published and not any(values[1:]):
+        args.runtime_binary = None
+        return
+    if not all(values):
+        raise ValueError('complete standalone Runtime path, digest and version required')
+    if published and (os.environ.get('GITHUB_ACTIONS') != 'true'
+                      or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'):
+        raise ValueError('published Runtime fixtures require a dedicated GitHub-hosted runner')
+    args.runtime_binary = pathlib.Path(args.runtime_binary).resolve(strict=True)
+    if any(args.runtime_binary.samefile(path) for path in cli_binaries):
+        raise ValueError('CLI shim cannot substitute for standalone Runtime')
+    args.runtime_sha256 = args.runtime_sha256.lower()
+    if len(args.runtime_sha256) != 64 or any(c not in '0123456789abcdef' for c in args.runtime_sha256):
+        raise ValueError('invalid Runtime image digest')
+    with args.runtime_binary.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != args.runtime_sha256:
+            raise ValueError('Runtime image digest mismatch')
+    for key in ('RSRS_PUBLISHED_ASSETS_SHA256', 'RSRS_PUBLISHED_BUNDLE_SHA256'):
+        value = os.environ.get(key, '')
+        if published and (len(value) != 64 or any(c not in '0123456789abcdef' for c in value)):
+            raise ValueError('published Runtime provenance missing: ' + key)
+    args.runtime_identity_receipts = []
+
+
+def process_start_id(pid):
+    if sys.platform.startswith('linux'):
+        raw = pathlib.Path('/proc', str(pid), 'stat').read_text()
+        fields = raw[raw.rindex(')') + 2:].split()
+        if fields[0] == 'Z':
+            raise ProcessLookupError('Runtime owner is a zombie')
+        return 'linux-starttime-' + fields[19]
+    if sys.platform == 'win32':
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+        kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if not handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            times = [wintypes.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(value) for value in times)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            exit_code = wintypes.DWORD()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if exit_code.value != 259:  # STILL_ACTIVE
+                raise ProcessLookupError('Runtime owner exited')
+            return 'windows-filetime-' + str((times[0].dwHighDateTime << 32) | times[0].dwLowDateTime)
+        finally:
+            kernel.CloseHandle(handle)
+    if sys.platform == 'darwin':
+        value = captured_run(['ps', '-p', str(pid), '-o', 'lstart='],
+                             env={**os.environ, 'LC_ALL': 'C'}, timeout=5)
+        if value.returncode or not value.stdout.strip():
+            raise ProcessLookupError('Runtime birth unavailable')
+        return 'darwin-lstart-' + value.stdout.decode().strip()
+    raise RuntimeError('authoritative Runtime birth unsupported on this platform')
+
+
+def verify_runtime_health(args, health, root, profile, pid=None):
+    import psutil
+    root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
+    if not profile.is_relative_to(root):
+        raise AssertionError('Runtime profile escaped the owned fixture installation')
+    if os.name == 'posix' and (root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
+        raise AssertionError('Runtime fixture installation must be private and owned')
+    owner = psutil.Process(health['pid'])
+    birth, created = process_start_id(owner.pid), owner.create_time()
+    image = pathlib.Path(owner.exe()).resolve(strict=True)
+    session_path = profile / 'session.json'
+    session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
+    account_source = session.get('user') or health.get('data_dir', '')
+    if (type(health.get('v')) is not int or health['v'] != 1 or (pid is not None and owner.pid != pid)
+            or image != args.runtime_binary
+            or pathlib.Path(health.get('exe', '')).resolve() != image
+            or pathlib.Path(health.get('image_path', '')).resolve() != image
+            or health.get('process_start_id') != birth
+            or health.get('runtime_version') != args.runtime_version
+            or health.get('bin') != args.runtime_version
+            or pathlib.Path(health.get('installation_root', '')).resolve() != root
+            or health.get('installation_id') != hashlib.sha256(health.get('installation_root', '').encode()).hexdigest()
+            or pathlib.Path(health.get('data_dir', '')).resolve() != profile
+            or health.get('account_id') != hashlib.sha256(account_source.encode()).hexdigest()
+            or not isinstance(health.get('instance_id'), str) or not health['instance_id']
+            or not isinstance(health.get('generation'), int)
+            or isinstance(health.get('generation'), bool) or health['generation'] <= 0):
+        raise AssertionError('standalone Runtime process/health/scope mismatch')
+    identity = (owner.pid, birth, health['instance_id'], health['account_id'], health['generation'])
+    previous = next((item for item in args.runtime_identity_receipts
+                     if item['_identity'] == identity), None)
+    def file_identity(stat):
+        # Windows stat/fstat expose different legacy ctime semantics in Python 3.12.
+        timestamp = stat.st_birthtime_ns if sys.platform == 'win32' else stat.st_ctime_ns
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, timestamp)
+    # procfs binds the open file to the live Linux process image. Other platforms
+    # prove a stable OS path/birth and the opened disk file, not loaded memory bytes.
+    source = pathlib.Path('/proc', str(owner.pid), 'exe') if sys.platform.startswith('linux') else image
+    with source.open('rb') as stream:
+        opened = os.fstat(stream.fileno())
+        opened_identity = file_identity(opened)
+        if opened_identity != file_identity(image.stat()):
+            raise AssertionError('OS image and verified Runtime disk file differ')
+        if previous is None:
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+        else:
+            if previous['_file_identity'] != opened_identity:
+                raise AssertionError('Runtime disk file changed after verification')
+            digest = previous['image_sha256']
+        if (file_identity(os.fstat(stream.fileno())) != opened_identity
+                or file_identity(image.stat()) != opened_identity):
+            raise AssertionError('Runtime image file changed during digest inspection')
+        if digest != args.runtime_sha256 or health.get('image_sha256') != digest:
+            raise AssertionError('standalone Runtime disk image digest mismatch')
+        # New psutil objects force independent post-inspection OS queries.
+        if (process_start_id(owner.pid) != birth or psutil.Process(owner.pid).create_time() != created
+                or pathlib.Path(psutil.Process(owner.pid).exe()).resolve(strict=True) != image):
+            raise AssertionError('Runtime OS identity changed during inspection')
+    if previous is None:
+        receipt = {key: health[key] for key in ('installation_root', 'data_dir', 'account_id',
+                   'instance_id', 'generation', 'process_start_id')}
+        receipt.update(exe=str(image), os_image_path=str(image), image_sha256=digest,
+                       disk_file_digest=digest, file_identity=list(opened_identity),
+                       file_identity_fields=['device', 'inode', 'size', 'mtime_ns',
+                                             'birthtime_ns' if sys.platform == 'win32' else 'ctime_ns'],
+                       image_evidence=('linux_proc_exe_handle' if sys.platform.startswith('linux') else
+                                       'stable_os_path_birth_and_open_disk_file'),
+                       loaded_memory_digest=False, pid=owner.pid, create_time=created,
+                       protocol_v=health['v'], runtime_version=args.runtime_version,
+                       manifest_sha256=os.environ.get('RSRS_PUBLISHED_ASSETS_SHA256'),
+                       bundle_sha256=os.environ.get('RSRS_PUBLISHED_BUNDLE_SHA256'),
+                       provenance_evidence='upstream_verified_digest_references',
+                       _identity=identity, _file_identity=opened_identity)
+    else:
+        receipt = previous
+    if previous is None:
+        args.runtime_identity_receipts.append(receipt)
+    return {key: value for key, value in receipt.items() if not key.startswith('_')}
+
+
+def runtime_report(args, passed):
+    receipts = [{key: value for key, value in item.items() if not key.startswith('_')}
+                for item in getattr(args, 'runtime_identity_receipts', [])]
+    return {'runtime_mode': 'standalone_runtime' if args.runtime_binary else 'explicit_cli_shim',
+            'standalone_runtime_evidence': bool(args.runtime_binary and passed and receipts),
+            'runtime_binary_sha256': args.runtime_sha256 if args.runtime_binary else None,
+            'runtime_version': args.runtime_version if args.runtime_binary else None,
+            'runtime_identity_receipts': receipts}
+
+
+def scoped_rpc_request(health, args, method='cli.exec'):
+    scope = {key: health[key] for key in ('account_id', 'instance_id', 'generation')}
+    if (type(health.get('v')) is not int or health['v'] != 1
+            or not all(isinstance(scope[key], str) and scope[key]
+            for key in ('account_id', 'instance_id'))
+            or not isinstance(scope['generation'], int) or isinstance(scope['generation'], bool)
+            or scope['generation'] <= 0):
+        raise AssertionError('RPC requires complete health scope')
+    operation = secrets.token_hex(16)
+    return {'v': 1, 'id': secrets.token_hex(16), 'operation_id': operation,
+            'idempotency_key': operation, 'scope': scope, 'method': method, 'args': args}
+
+
+def verify_rpc_receipt(request, response):
+    scope = response.get('scope')
+    if (type(response.get('v')) is not int or not isinstance(scope, dict)
+            or type(scope.get('generation')) is not int):
+        raise AssertionError('RPC receipt protocol/scope type mismatch')
+    for key in ('v', 'id', 'operation_id', 'idempotency_key', 'scope'):
+        if response.get(key) != request[key]:
+            raise AssertionError('RPC receipt mismatch: ' + key)
+    if (not isinstance(response.get('exit'), int) or isinstance(response['exit'], bool)
+            or response['exit'] < 0 or response.get('ok') is not (response['exit'] == 0)):
+        raise AssertionError('RPC receipt ok/exit mismatch')
 
 
 class FixtureCancelled(Exception):
@@ -123,7 +314,11 @@ def inspect_worker(request, phase):
     import psutil
     phase('children')
     host = psutil.Process(request['host_pid'])
-    assert '--runtime-internal' in host.cmdline(), 'inspection must target the fixture runtime'
+    if request.get('runtime_binary'):
+        assert pathlib.Path(host.exe()).resolve() == pathlib.Path(request['runtime_binary']).resolve()
+        assert process_start_id(host.pid) == request['process_start_id']
+    else:
+        assert '--runtime-internal' in host.cmdline(), 'inspection must target the fixture runtime'
     children = [child for child in host.children(recursive=True)
                 if not (sys.platform == 'win32' and child.name().lower() == 'conhost.exe')]
     assert len(children) == 1, 'expected exactly one supervised Core worker'
