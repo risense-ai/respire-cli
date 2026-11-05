@@ -53,7 +53,7 @@ def main():
                               args.runtime_version if runtime_binary is None else None)
 
     with tempfile.TemporaryDirectory(prefix="respire-autostart-") as temporary:
-        base = Path(temporary)
+        base = Path(temporary).resolve(strict=True)
         home = base / "home"
         home.mkdir()
         root = base / ('data spaces % $ " \\' if os.name == "posix" else "data spaces % and $")
@@ -145,6 +145,15 @@ def main():
                 foreground_stopped = True
                 assert child.wait(timeout=20) == 0
                 assert not (root / "runtime/autostart/registration.json").exists()
+            except Exception:
+                print("isolated foreground diagnostic", json.dumps({
+                    "temporary": temporary,
+                    "base": str(base),
+                    "root": str(root),
+                    "foreground_returncode": child.poll(),
+                    "foreground_log": log.name,
+                }), file=sys.stderr, flush=True)
+                raise
             finally:
                 primary_error = sys.exc_info()[1]
                 try:
