@@ -927,13 +927,7 @@ pub use crate::client_paths::{
 /// data_dir is decided by the env var (in-tree first), not this file.
 /// Host profile transactions preserve the complete configuration on failure.
 pub fn client_config_path() -> PathBuf {
-    if let Some(root) = env_root_dir() {
-        return root.join("client.json");
-    }
-    home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".rsrs")
-        .join("client.json")
+    respire_client_host::paths::client_config_path()
 }
 
 fn read_client_config() -> Option<serde_json::Value> {
@@ -1011,21 +1005,7 @@ pub fn data_dir() -> PathBuf {
 }
 
 fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
-    let env_root = env_root_dir();
-    let from_config = config
-        .and_then(|d| {
-            d["data_dir"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .map(|v| expand_tilde(&v));
-    match (env_root, from_config) {
-        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
-        (Some(root), _) => root,
-        (None, Some(cfg)) => cfg,
-        (None, None) => default_data_dir(),
-    }
+    respire_client_host::paths::data_dir_from_config(config)
 }
 
 #[derive(serde::Serialize)]

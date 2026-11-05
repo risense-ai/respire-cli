@@ -1654,6 +1654,8 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "dirs",
+ "hex",
+ "rand",
  "rusqlite",
  "serde_json",
  "tempfile",
@@ -1726,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.5"
 dependencies = [
  "anyhow",
  "serde",

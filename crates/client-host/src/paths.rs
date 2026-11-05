@@ -109,6 +109,36 @@ pub fn bin_dir() -> PathBuf {
     main_data_dir().join("bin")
 }
 
+/// Device configuration stays in the installation root, not the active account.
+pub fn client_config_path() -> PathBuf {
+    if let Some(root) = env_root_dir() {
+        return root.join("client.json");
+    }
+    home_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(".rsrs")
+        .join("client.json")
+}
+
+/// Preserve account selection within an explicit installation root.
+pub fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
+    let env_root = env_root_dir();
+    let from_config = config
+        .and_then(|d| {
+            d["data_dir"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(ToOwned::to_owned)
+        })
+        .map(|v| expand_tilde(&v));
+    match (env_root, from_config) {
+        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
+        (Some(root), _) => root,
+        (None, Some(cfg)) => cfg,
+        (None, None) => default_data_dir(),
+    }
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {

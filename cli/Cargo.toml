@@ -51,7 +51,7 @@ base64 = "0.22"
 signal-hook = "0.3"
 
 [dev-dependencies]
-respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.4" }
+respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.5" }
 tempfile = "3.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
