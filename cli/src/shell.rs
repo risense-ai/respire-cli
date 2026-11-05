@@ -477,8 +477,8 @@ fn rpc(args: &[&str]) -> Result<Value, String> {
 }
 
 fn retrieval_action(args: &[&str]) -> Result<Value, String> {
-    // Shared by the mirror, recall API and fusion forms; writes are host-owned.
-    if matches!(args, ["agent-config", "--set", _]) {
+    // Configuration reads and writes are host-owned, including fusion read-back.
+    if matches!(args, ["agent-config"] | ["agent-config", "--set", _]) {
         return host_command(args);
     }
     checked_result(rpc(args)?)

@@ -37,7 +37,7 @@ use respire_commands::runtime_http;
 // re-binds the module names so existing `crate::` paths keep resolving.
 use respire_commands::app_version;
 use respire_commands::cli_def::{
-    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, QueryLogCmd,
+    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
     SessionCommand, SnapshotCmd,
 };
 pub(crate) use respire_commands::engine::{
@@ -93,6 +93,14 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 
 pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
     match args.command.as_ref() {
+        Some(Command::AgentConfig { set: None }) => Some(
+            runtime_policy::require_host("agent configuration read")
+                .and_then(|()| respire_commands::engine::run_agent_config(None)),
+        ),
+        Some(Command::Session { command }) => Some(run_session(command)),
+        Some(Command::SuperReset { super_pass }) => Some(run_super_reset(super_pass.as_deref())),
+        Some(Command::Plugin { command }) => Some(run_plugin(command)),
+        Some(Command::Passport) if !runtime_policy::client_only() => Some(run_passport()),
         Some(Command::Prompt) => {
             let text = respire::inject::INSTRUCTIONS_MD;
             Some(emit_result(ResultEnvelope::new(
@@ -252,6 +260,189 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             super_pass.as_deref(),
         )),
         _ => None,
+    }
+}
+
+fn run_passport() -> Result<()> {
+    runtime_policy::require_host("passport agent inventory")?;
+    let mut args = vec!["passport".to_owned()];
+    if let Some(id) = progress::remote_id() {
+        args.extend(["--progress-id".to_owned(), id]);
+    }
+    let mut result: ResultEnvelope = serde_json::from_value(rpc::query_json(args)?)?;
+    if result.command == "memory"
+        && result.summary["mode"] == "off"
+        && result.summary["skipped"] == true
+    {
+        return emit_result(result);
+    }
+    anyhow::ensure!(
+        result.command == "passport",
+        "Runtime did not return a passport result"
+    );
+    let summary = result
+        .summary
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("Runtime passport summary missing"))?;
+    let agents = match respire::inject::targets() {
+        Ok(targets) => {
+            let count = targets
+                .iter()
+                .filter(|target| matches!(target.state, "fresh" | "stale"))
+                .count();
+            summary.insert("agents".into(), serde_json::json!(count));
+            OutputItem::new("agents", OutputStatus::Ok, count.to_string())
+        }
+        Err(error) => {
+            summary.insert("agents".into(), serde_json::Value::Null);
+            let message = format!("host agent inventory: {error:#}");
+            result.errors.push(message.clone());
+            result.status = OutputStatus::Fail;
+            OutputItem::new("agents", OutputStatus::Fail, message)
+        }
+    };
+    if let Some(row) = result.items.iter_mut().find(|row| row.name == "agents") {
+        *row = agents;
+    } else {
+        result.items.push(agents);
+    }
+    emit_result(result)
+}
+
+fn run_super_reset(super_pass: Option<&str>) -> Result<()> {
+    runtime_policy::require_host("super password rotation")?;
+    respire::service::ensure_writable()?;
+    let mut issued = None;
+    rpc::change_profile(|| {
+        issued = Some(auth::super_reset(None, super_pass)?);
+        Ok(())
+    })?;
+    let new_super = issued.ok_or_else(|| anyhow!("super reset returned no issued password"))?;
+    emit_result(ResultEnvelope::new(
+        "super-reset",
+        OutputStatus::Ok,
+        serde_json::json!({"ok":true,"super":new_super}),
+        vec![OutputItem::new("password", OutputStatus::Ok, "issued")],
+    ))
+}
+
+fn run_session(command: &SessionCommand) -> Result<()> {
+    runtime_policy::require_host("session identity management")?;
+    let revoke = match command {
+        SessionCommand::List => None,
+        SessionCommand::Revoke { id } => {
+            respire::service::ensure_writable()?;
+            Some(id.as_str())
+        }
+    };
+    let action = if revoke.is_some() { "revoke" } else { "list" };
+    let details = auth::sessions(revoke)?;
+    let rows = details.as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let items = rows
+        .iter()
+        .map(|row| {
+            OutputItem::new(
+                row["id"]
+                    .as_str()
+                    .or_else(|| row["session_id"].as_str())
+                    .unwrap_or("session"),
+                OutputStatus::Ok,
+                row.to_string(),
+            )
+        })
+        .collect();
+    let mut result = ResultEnvelope::new(
+        "session",
+        OutputStatus::Ok,
+        serde_json::json!({"action":action,"count":rows.len()}),
+        items,
+    );
+    result.details = details;
+    emit_result(result)
+}
+
+fn run_plugin(command: &PluginCommand) -> Result<()> {
+    runtime_policy::require_host("plugin management")?;
+    use respire_commands::hooks;
+    match command {
+        PluginCommand::List => {
+            let cfg = hooks::read_config();
+            let path = hooks::config_path();
+            let mut items = Vec::new();
+            for (event, hooks) in &cfg.hooks {
+                for hook in hooks {
+                    let policy = if hook.on_error.is_empty() {
+                        "default"
+                    } else {
+                        &hook.on_error
+                    };
+                    items.push(OutputItem::new(
+                        event,
+                        OutputStatus::Ok,
+                        format!("{} timeout={}ms on_error={policy}", hook.cmd, hook.timeout_ms),
+                    ));
+                }
+            }
+            if items.is_empty() {
+                items.push(OutputItem::new(
+                    "hooks",
+                    OutputStatus::Skip,
+                    format!("none configured; file={}", path.display()),
+                ));
+            }
+            let mut result = ResultEnvelope::new(
+                "plugin-list",
+                if cfg.hooks.is_empty() {
+                    OutputStatus::Skip
+                } else {
+                    OutputStatus::Ok
+                },
+                serde_json::json!({
+                    "config_path": path.to_string_lossy(),
+                    "events": hooks::EVENT_NAMES,
+                    "count": cfg.hooks.values().map(Vec::len).sum::<usize>(),
+                }),
+                items,
+            );
+            result.details = serde_json::to_value(&cfg.hooks)?;
+            result.actions.push("plugin test <EVENT> --payload <JSON>".into());
+            emit_result(result)
+        }
+        PluginCommand::Test { event, payload } => {
+            let event = hooks::HookEvent::parse(event).ok_or_else(|| {
+                anyhow!(
+                    "unknown event \"{event}\"; available: {}",
+                    hooks::EVENT_NAMES.join(" / ")
+                )
+            })?;
+            let data = serde_json::from_str(payload)
+                .map_err(|error| anyhow!("--payload is not JSON: {error}"))?;
+            let verdict = hooks::fire(event, data);
+            let status = if verdict.blocked {
+                OutputStatus::Warn
+            } else {
+                OutputStatus::Ok
+            };
+            let mut result = ResultEnvelope::new(
+                "plugin-test",
+                status,
+                serde_json::json!({"event":event.as_str(),"blocked":verdict.blocked,"warning_count":verdict.warnings.len()}),
+                vec![OutputItem::new(
+                    "event",
+                    status,
+                    if verdict.blocked {
+                        format!("{} blocked: {}", event.as_str(), verdict.reason)
+                    } else {
+                        format!("{} allowed", event.as_str())
+                    },
+                )],
+            );
+            result.details = serde_json::json!({"event":event.as_str(),"blocked":verdict.blocked,"reason":verdict.reason,"warnings":verdict.warnings});
+            if verdict.blocked {
+                result.actions.push("review plugin policy".into());
+            }
+            emit_result(result)
+        }
     }
 }
 
@@ -2011,7 +2202,7 @@ fn run(args: Cli) -> Result<()> {
     let host_auth_change = HOST_RPC_OUTPUT.get()
         && matches!(
             args.command.as_ref(),
-            Some(Command::Register { .. } | Command::Fivekeys { .. } | Command::SuperReset { .. })
+            Some(Command::Register { .. } | Command::Fivekeys { .. })
         );
     // Only these asset/configuration handlers run locally, after Runtime drains.
     // Business commands continue to use Runtime RPC, including with --direct.

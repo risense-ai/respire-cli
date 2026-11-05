@@ -1,6 +1,7 @@
 //! Host-owned login: browser or password/TOTP authorization, then verified profile commit.
 use anyhow::{anyhow, ensure, Context, Result};
 use serde_json::{json, Value};
+use sha2::Digest;
 use std::cell::RefCell;
 use std::time::{Duration, Instant};
 
@@ -361,27 +362,31 @@ fn commit_verified(
         },
         || prepared.borrow_mut().rollback(),
         || {
-            let actual =
-                crate::rpc::query_existing_json(vec!["account".to_owned(), "list".to_owned()])?;
-            ensure!(
-                actual["status"] == "ok",
-                "runtime account verification failed"
-            );
-            let accounts = actual["details"]["accounts"]
-                .as_array()
-                .context("runtime account list missing accounts")?;
-            let current = accounts
-                .iter()
-                .find(|account| account["current"].as_bool() == Some(true))
-                .context("runtime did not report a selected account")?;
+            let health = crate::net_rpc::health()?;
+            crate::net_rpc::request_scope(&health)?;
             let expected = prepared.borrow();
-            let current_directory = current["dir"]
-                .as_str()
-                .context("runtime did not report the selected directory")?;
+            let account_id = format!("{:x}", sha2::Sha256::digest(expected.user.as_bytes()));
+            let birth = crate::autostart::process_birth(health.pid)?
+                .context("authorized account Runtime process disappeared")?;
+            let prefix = if cfg!(windows) {
+                "windows-filetime-"
+            } else if cfg!(target_os = "linux") {
+                "linux-starttime-"
+            } else {
+                "darwin-lstart-"
+            };
+            let executable = crate::rpc::resolve_runtime_executable()?;
+            let process = crate::net_rpc::runtime_process_identity(health.pid)?;
             ensure!(
-                current["user"].as_str() == Some(expected.user.as_str())
-                    && std::path::Path::new(current_directory) == expected.directory.as_path(),
-                "runtime account or directory differs from the authorized account"
+                health.account_id == account_id
+                    && std::path::Path::new(&health.data_dir).canonicalize()?
+                        == expected.directory.canonicalize()?
+                    && health.process_start_id == format!("{prefix}{birth}")
+                    && crate::mcp::exe_matches_dest(&health.exe, &executable)
+                    && crate::mcp::exe_matches_dest(&process.executable, &executable)
+                    && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+                    && (health.store_ready || respire::service::off_mode()),
+                "runtime identity, account or directory differs from the authorized account"
             );
             expected.finish_migration(addr, authorization)?;
             expected.complete()?;

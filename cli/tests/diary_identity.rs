@@ -1,6 +1,7 @@
 //! Actual client-only commands against a fresh synthetic runtime and local library.
 //! No real account, keyring, model download, or remote memory service is used.
 //! Supply RSRS_RUNTIME_BIN or a neighboring standalone Runtime bundle.
+//! RSRS_CORE_TEST_MODEL_DIR must contain the separately verified real CPU model.
 //! These synthetic business regressions alone are not standalone G1 evidence.
 use anyhow::Context;
 use respire::memory::{crypto, search::HashingEmbedder};
@@ -19,6 +20,7 @@ struct Fixture {
     keys: SessionKeys,
     child: Option<Child>,
     runtime: PathBuf,
+    models: PathBuf,
     runtime_owner: RefCell<Option<Value>>,
     extra_env: Vec<(&'static str, String)>,
 }
@@ -45,6 +47,18 @@ impl Fixture {
             runtime != Path::new(env!("CARGO_BIN_EXE_rsrs")).canonicalize()?,
             "CLI shim cannot substitute for the standalone Runtime fixture"
         );
+        let models = PathBuf::from(
+            std::env::var_os("RSRS_CORE_TEST_MODEL_DIR")
+                .context("supply RSRS_CORE_TEST_MODEL_DIR with the verified real CPU model fixture")?,
+        )
+        .canonicalize()?;
+        for file in [
+            "tokenizer.json",
+            "onnx/model_quantized.onnx",
+            "onnx/model_quantized.cpu-v1.ort",
+        ] {
+            anyhow::ensure!(models.join(file).is_file(), "model fixture missing {file}");
+        }
         let home = tempfile::tempdir()?;
         std::fs::create_dir(home.path().join("data"))?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
@@ -74,6 +88,7 @@ impl Fixture {
             keys: SessionKeys::from_urk(urk)?,
             child: None,
             runtime,
+            models,
             runtime_owner: RefCell::new(None),
             extra_env: Vec::new(),
         })
@@ -106,6 +121,7 @@ impl Fixture {
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
             .env("RSRS_RUNTIME_BIN", &self.runtime)
+            .env("RSRS_M3_DIR", &self.models)
             .env("RSRS_RPC_PARALLELISM", "2")
             .env("RSRS_LANG", "en")
             .env("TZ", "UTC")

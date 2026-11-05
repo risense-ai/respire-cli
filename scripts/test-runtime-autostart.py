@@ -208,24 +208,44 @@ def main():
                     assert kernel.QueryFullProcessImageNameW(owned,0,image,ctypes.byref(length))
                     assert os.path.samefile(image.value,off_env["RSRS_RUNTIME_BIN"])
                     assert kernel.WaitForSingleObject(owned,0)==258
+                    endpoint=off_root/"runtime/endpoint.json"
+                    endpoint_before=endpoint.read_bytes()
                     assert ntdll.NtSuspendProcess(owned)>=0
                     suspended=True
+                    rejected=subprocess.run([binary,"--json","runtime","restart"],env=off_env,capture_output=True,text=True,timeout=45)
+                    assert rejected.returncode!=0, "restart accepted an owner without health/drain proof"
+                    assert "owner health is unavailable" in " ".join(json.loads(rejected.stdout)["errors"]), rejected.stdout
+                    assert kernel.WaitForSingleObject(owned,0)==258, "restart terminated the suspended owner"
+                    assert endpoint.read_bytes()==endpoint_before, "rejected restart changed the endpoint owner"
+                    assert not (off_root/"runtime/autostart/registration.json").exists()
+                    assert ntdll.NtResumeProcess(owned)>=0, "owned fixture could not be resumed"
+                    suspended=False
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                        resumed=json.load(response)
+                    for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
+                        assert resumed[key]==frozen[key], f"suspended owner was replaced: {key}"
                     recovered=subprocess.run([binary,"--json","runtime","restart"],env=off_env,capture_output=True,text=True,timeout=45)
-                    assert recovered.returncode==0, f"suspended owner recovery: {recovered.stdout} {recovered.stderr}"
+                    assert recovered.returncode==0, f"resumed owner restart: {recovered.stdout} {recovered.stderr}"
                     envelope=json.loads(recovered.stdout)
                     assert envelope["command"]=="runtime.restart" and envelope["status"]=="ok", envelope
                     summary=envelope["summary"]
-                    assert summary["forced"] is True and summary["stopped_pid"]==frozen["pid"] and summary["pid"]!=frozen["pid"]
-                    assert kernel.WaitForSingleObject(owned,15000)==0, "the inspected suspended process survived forced recovery"
+                    assert summary["forced"] is False and summary["stopped_pid"]==frozen["pid"] and summary["pid"]!=frozen["pid"]
+                    assert kernel.WaitForSingleObject(owned,15000)==0, "the inspected process survived normal drain"
                     assert not (off_root/"rsrs.db").exists() and not (off_root/"onememory.db").exists()
-                    print("PASS: actual suspended unmanaged Windows runtime recovered with verified native identity, no WMI, and no database")
+                    print("PASS: suspended Windows owner refused without replacement; resumed owner normally drained/restarted, no WMI or database")
                 finally:
                     if suspended and kernel.WaitForSingleObject(owned,0)==258:
                         assert ntdll.NtResumeProcess(owned)>=0, "owned failed fixture could not be resumed"
                     kernel.CloseHandle(owned)
         finally:
-            result = subprocess.run([binary,"--json","runtime","stop"],env=off_env,capture_output=True,text=True,timeout=45)
-            assert result.returncode == 0, f"off-mode child cleanup failed: {result.stdout} {result.stderr}"
+            primary_error=sys.exc_info()[1]
+            try:
+                result = subprocess.run([binary,"--json","runtime","stop"],env=off_env,capture_output=True,text=True,timeout=45)
+                assert result.returncode == 0, f"off-mode child cleanup failed: {result.stdout} {result.stderr}"
+            except Exception as cleanup_error:
+                if primary_error is None:
+                    raise
+                print(f"off-mode cleanup also failed: {cleanup_error}",file=sys.stderr)
         print("PASS: fresh memory-off start/stop/restart without a database")
         if args.register:
             if os.name == "posix" and os.uname().sysname == "Linux":
@@ -420,16 +440,51 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         result=upgrade_call(binary,*argv)
                         assert result.returncode == 0, f"upgrade {argv}: {result.stdout} {result.stderr}"
                         return json.loads(result.stdout)["summary"]
+                    stable=upgrade_root/"bin"/("rsrs.exe" if os.name=="nt" else "rsrs")
+                    legacy_running=False
+                    old_health=None
+                    def stop_legacy_owner():
+                        nonlocal legacy_running
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                            current=json.load(response)
+                        assert current["pid"]==old_health["pid"] and current["bin"]=="1.0.17-dev.6"
+                        assert Path(current["data_dir"]).resolve()==upgrade_root.resolve()
+                        assert os.path.samefile(current["exe"],stable)
+                        assert hashlib.sha256(stable.read_bytes()).digest()==hashlib.sha256(previous.read_bytes()).digest()
+                        endpoint=upgrade_root/"runtime/endpoint.json"
+                        assert not endpoint.is_symlink() and endpoint.stat().st_size<=65536
+                        endpoint_before=endpoint.read_bytes()
+                        recorded=json.loads(endpoint_before)
+                        assert recorded["pid"]==current["pid"] and recorded["bin"]==current["bin"]
+                        assert recorded["url"]==f"http://127.0.0.1:{port}"
+                        stopped=upgrade_call(previous,"--runtime-internal","--stop")
+                        assert stopped.returncode==0, f"legacy owner stop failed: {stopped.stdout} {stopped.stderr}"
+                        # DEV.6 waits for native exit/lock release but leaves its endpoint.
+                        assert not endpoint.is_symlink() and endpoint.read_bytes()==endpoint_before
+                        endpoint.unlink()
+                        legacy_running=False
                     try:
                         old=upgrade_call(previous,"status")
                         assert old.returncode in (0,2), f"previous native startup failed: {old.stdout} {old.stderr}"
                         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
                             old_health=json.load(response)
                         assert old_health["bin"] == "1.0.17-dev.6"
-                        upgraded=require_upgrade("runtime","autostart","enable")
+                        assert Path(old_health["data_dir"]).resolve()==upgrade_root.resolve()
+                        assert os.path.samefile(old_health["exe"],stable)
+                        assert hashlib.sha256(stable.read_bytes()).digest()==hashlib.sha256(previous.read_bytes()).digest()
+                        legacy_running=True
+                        # Legacy health cannot authorize a new registration's owner.
+                        denied=upgrade_call(binary,"runtime","autostart","enable")
+                        assert denied.returncode!=0, "legacy owner was adopted without registration identity"
+                        assert "runtime identity/profile does not match" in " ".join(json.loads(denied.stdout)["errors"]), denied.stdout
+                        stop_legacy_owner()
+                        require_upgrade("runtime","autostart","remove","--stop")
+                        handoff_runtime=upgrade_root/"handoff-runtime"
+                        stage_runtime(handoff_runtime)
+                        shutil.copytree(handoff_runtime,upgrade_root/"bin",dirs_exist_ok=True)
+                        upgraded=require_upgrade("runtime","autostart","enable","--now")
                         assert upgraded["enabled"] and upgraded["runtime"]["running"]
                         assert upgraded["runtime"]["version"] == health["bin"] and upgraded["runtime"]["pid"] != old_health["pid"]
-                        stable=upgrade_root/"bin"/("rsrs.exe" if os.name=="nt" else "rsrs")
                         fingerprint=hashlib.sha256(stable.read_bytes()).digest()
                         legacy=upgrade_call(previous,"status")
                         # A compatible old client may remain read-only; it must
@@ -463,11 +518,19 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         disabled_upgrade=require_upgrade("runtime","status")
                         assert disabled_upgrade["enabled"] is False and disabled_upgrade["runtime"]["version"] == health["bin"]
                         require_upgrade("runtime","stop")
-                        print("PASS: actual DEV.6 handoff, live legacy-client no-replacement, and disabled-state preservation across native upgrade")
+                        print("PASS: DEV.6 takeover refused, explicit legacy stop then native upgrade, live legacy-client no-replacement, disabled-state preservation")
                     finally:
-                        stopped=upgrade_call(binary,"runtime","stop")
-                        removed=upgrade_call(binary,"runtime","autostart","remove","--stop")
-                        assert stopped.returncode == 0 and removed.returncode == 0, f"previous-version fixture cleanup failed: stop={stopped.stdout} {stopped.stderr}; remove={removed.stdout} {removed.stderr}"
+                        primary_error=sys.exc_info()[1]
+                        try:
+                            if legacy_running:
+                                stop_legacy_owner()
+                            stopped=upgrade_call(binary,"runtime","stop")
+                            removed=upgrade_call(binary,"runtime","autostart","remove","--stop")
+                            assert stopped.returncode == 0 and removed.returncode == 0, f"previous-version fixture cleanup failed: stop={stopped.stdout} {stopped.stderr}; remove={removed.stdout} {removed.stderr}"
+                        except Exception as cleanup_error:
+                            if primary_error is None:
+                                raise
+                            print(f"previous-version cleanup also failed: {cleanup_error}",file=sys.stderr)
 
                 failure_root=base/"failed-installation"
                 blocked=base/"blocked-native-directory"
@@ -695,9 +758,15 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
             finally:
                 # The CLI revalidates exact owner/action/files before cleanup;
                 # never delete unknown OS tasks/units merely to make a test pass.
-                cleanup = command("runtime", "autostart", "remove", "--stop")
-                assert cleanup.returncode == 0, f"Owned registration cleanup failed: {cleanup.stderr} {cleanup.stdout}"
-                collect_managed_profiles()
+                primary_error=sys.exc_info()[1]
+                try:
+                    cleanup = command("runtime", "autostart", "remove", "--stop")
+                    assert cleanup.returncode == 0, f"Owned registration cleanup failed: {cleanup.stderr} {cleanup.stdout}"
+                    collect_managed_profiles()
+                except Exception as cleanup_error:
+                    if primary_error is None:
+                        raise
+                    print(f"owned registration cleanup also failed: {cleanup_error}",file=sys.stderr)
 
 
 
