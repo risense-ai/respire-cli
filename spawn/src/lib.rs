@@ -79,7 +79,10 @@ pub fn spawn_binary_with_boot_token(
     token: Option<&str>,
 ) -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
-    command.env_remove("RSRS_RUNTIME_BOOT_TOKEN");
+    command
+        .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN");
     if let Some(token) = token {
         command.env("RSRS_RUNTIME_BOOT_TOKEN", token);
     }

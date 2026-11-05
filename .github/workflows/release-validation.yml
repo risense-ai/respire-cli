@@ -133,33 +133,6 @@ jobs:
       - name: Validate release manifests
         run: |
           node npm/scripts/check-manifest.mjs
-          node scripts/check-sdk-release.mjs
-      - name: Resolve the pinned SDK dependency cache
-        id: sdk-cache-1
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-1-restore
-        if: steps.sdk-cache-1.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
-          key: ${{ steps.sdk-cache-1.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: steps.sdk-cache-1.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: node scripts/fetch-core-sdk.mjs ${{ matrix.target }}
       - name: Match the Apple MLX deployment baseline
         if: matrix.target == 'aarch64-apple-darwin'
         shell: bash
@@ -174,9 +147,6 @@ jobs:
         env:
           RELEASE_DEPENDENCY_CACHE: '1'
         run: bash scripts/build-linux-musl.sh ${{ matrix.target }}
-      - name: Stage Core runtime and notices
-        if: ${{ !contains(matrix.target, '-musl') }}
-        run: node scripts/stage-core-runtime.mjs target/ci/${{ matrix.target }}/release
       - name: Verify the native executable
         shell: bash
         run: |
@@ -205,7 +175,7 @@ jobs:
           "$exe" --direct model install-m3 --json
           "$exe" --direct model probe --json
           "$exe" --runtime-internal --stop --json
-      - name: Prepare versioned binary and runtime artifacts
+      - name: Prepare versioned CLI artifacts
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
@@ -270,7 +240,7 @@ jobs:
           merge-multiple: true
       - name: Pin the publication npm pack tool
         run: npm install --global npm@11.5.1
-      - name: Assemble all four native packages
+      - name: Assemble all platform packages
         shell: bash
         run: |
           set -euo pipefail

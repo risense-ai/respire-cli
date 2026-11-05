@@ -8,6 +8,8 @@
 
 use std::cell::Cell;
 
+pub static DIRECT_MODE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 use crate::output::{ResultEnvelope, Status as OutputStatus};
 
 thread_local! {

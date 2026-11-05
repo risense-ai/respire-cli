@@ -14,6 +14,7 @@ import {regressionContract} from './release-regression-contract.mjs';
 import {createPreparation,preparationLink} from './release-preparation.mjs';
 import {importedAnchor} from './prepared-import.mjs';
 const m=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url))); m.npmScope = '@rsrsai/cli'; // Historical receipt layout.
+delete m.artifactLayout;
 const copy=structuredClone;
 const hash='a'.repeat(64), sha='b'.repeat(40), version='1.2.3-dev.4';
 const source={repository:'risense-ai/respire-cli',workflow:'.github/workflows/release.yml',run_id:'100',run_attempt:'1',sha,version,channel:'dev',release_id:300};

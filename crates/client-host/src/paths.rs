@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 
 /// Expand `~` (`~/` and Windows `~\` both count) — **the only impl**; do not rewrite elsewhere.
 ///
@@ -154,4 +154,32 @@ pub fn home_dir() -> Result<PathBuf> {
         }
     }
     dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))
+}
+
+/// Configure the current home before parsing. Legacy import is always explicit.
+pub fn ensure_default_home() -> Result<()> {
+    if ["RSRS_CLIENT_ONLY", "RSRS_NO_AUTOSTART"]
+        .iter()
+        .any(|name| {
+            crate::env::var(name).ok().is_some_and(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on" | "yes"
+                )
+            })
+        })
+    {
+        return Ok(());
+    }
+    if let Ok(value) = crate::env::var("RSRS_DATA_DIR") {
+        if !value.trim().is_empty() && !internally_configured_root(value.trim()) {
+            return Ok(());
+        }
+    }
+    let home = home_dir().context("cannot locate the user home")?;
+    let root = home.join(".rsrs");
+    // Set both markers before starting any independent Runtime child.
+    std::env::set_var("RSRS_DATA_DIR", &root);
+    std::env::set_var(DEFAULT_ENV, &root);
+    Ok(())
 }

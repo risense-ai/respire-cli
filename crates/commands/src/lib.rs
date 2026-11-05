@@ -8,8 +8,9 @@
 //! and the machine-readable output contract (`output`).
 //!
 //! Boundaries:
-//! - default `server` enables app, transport and business modules;
-//! - without default features, parsing, output and pure DTO modules are exposed;
+//! - defaults expose parsing, output, client transport and pure DTO modules;
+//! - explicit `server` enables app, transport and business implementations;
+//! - server dependencies stay optional; frontend consumers must not enable `server`;
 //! - the CLI binary re-exports these modules so `crate::` paths keep working;
 //! - the runtime server face (`rpc_serve`, `runtime_http`, `admission`,
 //!   `network`) is shared with the standalone `rsrs-runtime` binary;
@@ -25,20 +26,17 @@ use respire_client_host::paths as client_paths;
 #[cfg(feature = "server")]
 pub mod admission;
 pub mod app_version;
+pub mod capabilities;
 pub mod autostart;
 #[cfg(feature = "server")]
 pub mod bench;
-#[cfg(feature = "server")]
 pub mod capture;
 pub mod classify;
 pub mod cli_def;
 #[cfg(feature = "server")]
 pub mod engine;
-#[cfg(feature = "server")]
 pub mod gates;
-#[cfg(feature = "server")]
 pub mod hooks;
-#[cfg(feature = "server")]
 pub mod host_hooks;
 pub mod i18n;
 pub mod metadata;
@@ -53,7 +51,6 @@ pub mod network;
 pub mod output;
 pub mod output_emit;
 pub mod output_state;
-#[cfg(feature = "server")]
 pub mod progress;
 #[cfg(feature = "server")]
 pub mod recall_select;

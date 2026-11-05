@@ -12,7 +12,7 @@ const sha='a'.repeat(40),workflowSha='c'.repeat(40),hash='b'.repeat(64),version=
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const script=name=>fileURLToPath(new URL('../'+name,import.meta.url));
 const requireValue=(ok,message)=>{if(!ok)throw Error(message);};
-export function preparedConsumerFlow({arm64=false}={}){
+export function preparedConsumerFlow({arm64=false,frontend=false}={}){
   const root=mkdtempSync(join(tmpdir(),'prepared-consumer-flow-'));
   try{
     const bin=join(root,'bin'),assets=join(root,'assets'),packs=join(root,'packs'),stateFile=join(root,'state.json');
@@ -21,12 +21,17 @@ export function preparedConsumerFlow({arm64=false}={}){
     if(arm64)triples.push('aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl');
     const migration=triples.filter(t=>t.includes('windows')||t.includes('apple-darwin'));
     const manifest={cliVersion:'1.0.16',npmScope:'@rsrsai/cli',targets:triples.map((triple,i)=>({triple,pkg:`@rsrsai/platform-${i}`}))};
+    if(frontend)manifest.artifactLayout='cli-frontend-v2';
     for(const t of manifest.targets){
       const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`;
       const b=Buffer.from('binary '+t.triple),r=Buffer.from('runtime '+t.triple);
-      writeFileSync(join(assets,binary),b);writeFileSync(join(assets,runtime),r);
-      writeFileSync(join(assets,`cli-build-${t.triple}.json`),JSON.stringify({schema_version:1,git_sha:sha,version,target:t.triple,
-        binary_file:binary,runtime_file:runtime,binary_sha256:digest(b),runtime_sha256:digest(r)}));
+      writeFileSync(join(assets,binary),b);
+      if(!frontend)writeFileSync(join(assets,runtime),r);
+      writeFileSync(join(assets,`cli-build-${t.triple}.json`),JSON.stringify(frontend
+        ? {schema_version:2,artifact_layout:manifest.artifactLayout,git_sha:sha,version,target:t.triple,
+          binary_file:binary,binary_size:b.length,binary_sha256:digest(b),producer:{run_id:'700',run_attempt:1}}
+        : {schema_version:1,git_sha:sha,version,target:t.triple,
+          binary_file:binary,runtime_file:runtime,binary_sha256:digest(b),runtime_sha256:digest(r)}));
     }
     const packages=[...manifest.targets.map(t=>t.pkg),manifest.npmScope].map((name,i)=>{
       const file=`pack-${i}.tgz`,bytes=Buffer.from('synthetic pack '+name);writeFileSync(join(packs,file),bytes);
@@ -38,7 +43,8 @@ export function preparedConsumerFlow({arm64=false}={}){
     const base={path:'.github/workflows/release.yml',event:'workflow_dispatch',head_branch:'main',head_repository:{full_name:'risense-ai/respire-cli'}};
     const job=name=>({name,status:'completed',conclusion:'success',started_at:old(5),completed_at:old(3)});
     const state={sha,version,inputs:{'Cargo.lock':'synthetic locked inputs','rust-toolchain.toml':'[toolchain]\nchannel="1.95.0"',
-      'sdk/core-sdk.lock.json':JSON.stringify(lock),'crates/core-sdk/core-sdk.lock.json':JSON.stringify(lock),
+      ...(frontend?{'runtime-pin.json':JSON.stringify({required:'1.0.0-dev.6'})}:
+        {'sdk/core-sdk.lock.json':JSON.stringify(lock),'crates/core-sdk/core-sdk.lock.json':JSON.stringify(lock)}),
       '.github/workflows/release.yml':'synthetic trusted Release',
       '.github/workflows/release-validation.yml':'synthetic trusted builds and packaging',
       '.github/workflows/release-native-validation.yml':'synthetic trusted native models',

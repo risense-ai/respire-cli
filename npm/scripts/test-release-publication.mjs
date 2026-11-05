@@ -10,6 +10,7 @@ import {execFile, execFileSync} from 'node:child_process';
 import {waitForPublicInstall, publicInstallArgs, publicInstallPlatform, PUBLICATION_MAX_BUFFER, publicationCommand, scopedPublisherFinished, selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
 
 const m = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url))); m.npmScope = '@rsrsai/cli'; // Historical receipt layout.
+delete m.artifactLayout;
 const integrity = 'sha512-' + createHash('sha512').update('synthetic package').digest('base64');
 const hash = 'a'.repeat(64), sha = 'b'.repeat(40), version = '1.2.3-dev.4';
 const source = {repository: 'risense-ai/respire-cli', workflow: '.github/workflows/release.yml', run_id: '100', run_attempt: '2', sha, version, channel: 'dev', release_id: 300};
@@ -84,6 +85,12 @@ test('exact scoped packages, draft and installed alias produce a complete barrie
   assertDraft(release, scoped); validateAlias(alias, scoped, aliasRun, jobs);
   assert.equal(readyName(source), 'scoped-ready-100-2');
   assert.equal(aliasName(source, aliasRun), 'alias-ready-100-2-400-3');
+  const frontend={...m,artifactLayout:'cli-frontend-v2'},receipt=copy(scoped);
+  receipt.assets=receipt.assets.filter(a=>!a.name.endsWith('-runtime.tar.gz'));
+  validateScoped(receipt,frontend);
+  assert.throws(()=>validateScoped(scoped,frontend));
+  assert.throws(()=>validateScoped(receipt,m));
+  assert.throws(()=>validateScoped(receipt,{...frontend,artifactLayout:'unknown'}));
 });
 test('selected source may differ from the dispatch workflow head SHA', () => {
   assert.notEqual(sourceRun.head_sha, source.sha);

@@ -9,11 +9,11 @@ repository = "https://github.com/risense-ai/respire-cli"
 publish = false
 
 [features]
-default = ["server"]
+# Frontend consumers must not opt into the Runtime's app/SDK dependency graph.
+default = []
 server = [
     "dep:respire_app",
     "dep:base64",
-    "dep:chrono",
     "dep:url",
     "dep:tiny_http",
     "dep:axum",
@@ -31,7 +31,7 @@ respire_protocol = { path = "../protocol" }
 respire_spawn = { path = "../../spawn" }
 anyhow = "1.0"
 base64 = { version = "0.22", optional = true }
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }

@@ -17,6 +17,11 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+mod snapshot_control;
+pub(crate) use snapshot_control::{snapshot_recover_control, snapshot_restore_control};
+// Runtime snapshot authority must use this limit; its generic reader caps at 64 KiB.
+pub(super) const MAINTENANCE_MARKER_MAX_BYTES: usize = 16 * 1024;
+
 static MANAGED_ID: OnceLock<String> = OnceLock::new();
 static CREDENTIAL_STATE: AtomicU8 = AtomicU8::new(0);
 thread_local! {
@@ -25,7 +30,7 @@ thread_local! {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-enum Phase {
+pub(super) enum Phase {
     Paused,
     Starting,
     Verified,
@@ -41,12 +46,16 @@ struct Marker {
     expected_version: String,
     owner_pid: u32,
     owner_birth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    snapshot: Option<snapshot_control::SnapshotMarkerBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent_config: Option<Value>,
 }
 
 fn marker_path(root: &Path) -> PathBuf {
     control_path(root).with_file_name("maintenance.json")
 }
-fn marker(root: &Path) -> Result<Option<Marker>> {
+fn marker_bytes(root: &Path) -> Result<Option<Vec<u8>>> {
     let path = marker_path(root);
     let meta = match fs::symlink_metadata(&path) {
         Ok(v) => v,
@@ -54,10 +63,19 @@ fn marker(root: &Path) -> Result<Option<Marker>> {
         Err(e) => return Err(e.into()),
     };
     anyhow::ensure!(
-        meta.is_file() && !meta.file_type().is_symlink() && meta.len() <= 4096,
+        meta.is_file() && !meta.file_type().is_symlink()
+            && meta.len() <= MAINTENANCE_MARKER_MAX_BYTES as u64,
         "invalid runtime maintenance marker"
     );
-    let value: Marker = serde_json::from_slice(&fs::read(path)?)?;
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)?.take(MAINTENANCE_MARKER_MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES, "runtime maintenance marker too large");
+    Ok(Some(bytes))
+}
+fn marker(root: &Path) -> Result<Option<Marker>> {
+    let Some(bytes) = marker_bytes(root)? else { return Ok(None); };
+    let value: Marker = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(
         value.schema == 1 && uuid::Uuid::parse_str(&value.token).is_ok(),
         "invalid runtime maintenance marker"
@@ -122,11 +140,11 @@ pub(crate) fn credential_state() -> &'static str {
     }
 }
 pub(crate) fn managed_enabled() -> Result<bool> {
-    Ok(read_registration(&respire::service::main_data_dir())?.is_some_and(|config| config.enabled))
+    Ok(read_registration(&respire_client_host::paths::main_data_dir())?.is_some_and(|config| config.enabled))
 }
 pub(crate) fn record_exit(success: bool) {
     if managed_id().is_some() {
-        if let Ok(Some(config)) = read_registration(&respire::service::main_data_dir()) {
+        if let Ok(Some(config)) = read_registration(&respire_client_host::paths::main_data_dir()) {
             if event(&config, if success { "exit_ok" } else { "exit_error" }).is_err() {
                 eprintln!("Managed runtime event could not be recorded.");
             }
@@ -142,7 +160,7 @@ pub(crate) fn current_boot_token() -> Option<String> {
 }
 
 pub(crate) fn check_direct_access() -> Result<()> {
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     if let Some(value) = marker(&root)? {
         anyhow::ensure!(ACTIVE.with(|v|v.borrow().as_deref()==Some(value.token.as_str())),
             "runtime maintenance is incomplete; use the host runtime restart or the indicated snapshot/login recovery before accessing the library");
@@ -151,14 +169,11 @@ pub(crate) fn check_direct_access() -> Result<()> {
 }
 
 pub(crate) fn check_managed_request() -> Result<()> {
-    if crate::rpc::worker_active() {
-        check_direct_access()?;
-    }
-    Ok(())
+    check_direct_access()
 }
 
 pub(crate) fn verify_managed_boot() -> Result<()> {
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     let config = read_registration(&root)?;
     if let Some(id) = managed_id() {
         let config = config
@@ -184,7 +199,7 @@ pub(crate) fn verify_managed_boot() -> Result<()> {
         anyhow::ensure!(
             value.expected_version == env!("CARGO_PKG_VERSION")
                 && value.expected_profile.as_deref()
-                    == Some(respire::service::data_dir().canonicalize()?.as_path()),
+                    == Some(respire_client_host::config::control_roots()?.1.canonicalize()?.as_path()),
             "replacement runtime version/profile differs from maintenance plan"
         );
     }
@@ -192,6 +207,7 @@ pub(crate) fn verify_managed_boot() -> Result<()> {
 }
 
 pub(crate) struct Maintenance {
+    installation: Option<PathBuf>,
     config: Option<Registration>,
     marker: Option<Marker>,
     marker_digest: Option<String>,
@@ -201,6 +217,7 @@ pub(crate) struct Maintenance {
 impl Maintenance {
     fn inactive() -> Self {
         Self {
+            installation: None,
             config: None,
             marker: None,
             marker_digest: None,
@@ -236,6 +253,8 @@ impl Maintenance {
             owner_pid: std::process::id(),
             owner_birth: manager::process_birth(std::process::id())?
                 .context("controller process identity unavailable")?,
+            snapshot: None,
+            agent_config: None,
         };
         if let Some(previous) = previous {
             anyhow::ensure!(
@@ -253,6 +272,7 @@ impl Maintenance {
         save(&mut config)?;
         ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
         Ok(Self {
+            installation: Some(config.installation.clone()),
             config: Some(config),
             marker: Some(value),
             marker_digest: Some(hash(&bytes)),
@@ -260,27 +280,65 @@ impl Maintenance {
         })
     }
 
-    fn mark(&mut self, phase: Phase) -> Result<()> {
-        let Some(config) = self.config.as_ref() else {
+    fn installation_root(&self) -> Result<&Path> {
+        self.installation.as_deref().context("maintenance installation is unavailable")
+    }
+
+    fn begin_local(root: PathBuf, config: Option<Registration>, recover: bool) -> Result<Self> {
+        let id = if let Some(config) = config.as_ref() {
+            owned(config)?;
+            anyhow::ensure!(config.installation == root, "maintenance installation changed");
+            config.id.clone()
+        } else {
+            format!("host-{}", hash(root.display().to_string().as_bytes()))
+        };
+        let previous = marker(&root)?;
+        anyhow::ensure!(previous.is_none() || recover,
+            "interrupted host maintenance; query the original operation before starting another write");
+        if let Some(previous) = previous.as_ref() {
+            anyhow::ensure!(previous.id == id, "maintenance belongs to another installation coordinator");
+        }
+        let previous_digest = previous.as_ref().map(|_| fs::read(marker_path(&root)))
+            .transpose()?.map(|bytes| hash(&bytes));
+        let value = Marker {
+            schema: 1, id, token: uuid::Uuid::new_v4().to_string(), phase: Phase::Paused,
+            expected_profile: None, expected_version: env!("CARGO_PKG_VERSION").into(),
+            owner_pid: std::process::id(), owner_birth: manager::process_birth(std::process::id())?
+                .context("controller process identity unavailable")?,
+            snapshot: None,
+            agent_config: None,
+        };
+        let bytes = serde_json::to_vec(&value)?;
+        private_write(&marker_path(&root), &bytes, previous_digest.as_deref())?;
+        ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
+        // Local maintenance never owns or changes the optional OS service registration.
+        Ok(Self { installation: Some(root), config: None, marker: Some(value),
+            marker_digest: Some(hash(&bytes)), completed: false })
+    }
+
+    pub(super) fn mark(&mut self, phase: Phase) -> Result<()> {
+        let Some(root) = self.installation.as_ref() else {
             return Ok(());
         };
-        let actual = fs::read(marker_path(&config.installation))?;
+        let actual = fs::read(marker_path(root))?;
         let current: Marker = serde_json::from_slice(&actual)?;
         let value = self
             .marker
             .as_mut()
             .context("maintenance marker unavailable")?;
         anyhow::ensure!(
-            current.id == value.id && current.token == value.token,
+            current.id == value.id && current.token == value.token
+                && current.agent_config == value.agent_config,
             "maintenance owner changed before phase transition"
         );
         value.phase = phase;
         if matches!(phase, Phase::Starting | Phase::Verified) {
-            value.expected_profile = Some(respire::service::data_dir().canonicalize()?);
+            value.expected_profile = Some(respire_client_host::config::control_roots()?.1.canonicalize()?);
         }
         let bytes = serde_json::to_vec(value)?;
+        anyhow::ensure!(bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES, "runtime maintenance marker too large");
         private_write(
-            &marker_path(&config.installation),
+            &marker_path(root),
             &bytes,
             Some(&hash(&actual)),
         )?;
@@ -294,9 +352,12 @@ impl Maintenance {
         let root = root.canonicalize()?;
         anyhow::ensure!(selected.canonicalize()? == profile,
             "auth maintenance profile differs from the selected profile");
-        if let Some(config) = self.config.as_ref() {
-            owned(config)?;
-            anyhow::ensure!(config.installation == root, "auth maintenance installation changed");
+        if self.installation.is_some() {
+            anyhow::ensure!(self.installation_root()? == root, "auth maintenance installation changed");
+            if let Some(config) = self.config.as_ref() {
+                owned(config)?;
+                anyhow::ensure!(config.installation == root, "auth maintenance installation changed");
+            }
             let actual = marker(&root)?.context("auth maintenance marker is missing")?;
             let held = self.marker.as_ref().context("auth maintenance ownership is missing")?;
             anyhow::ensure!(actual.phase == Phase::Paused && held.phase == Phase::Paused
@@ -313,6 +374,45 @@ impl Maintenance {
         maintenance_binding(profile, None, true)
     }
 
+    pub(crate) fn save_agent_config(&mut self, record: &respire_protocol::config_control::AgentConfigMaintenance) -> Result<()> {
+        let root = self.installation_root()?.to_path_buf();
+        let actual = marker_bytes(&root)?.context("agent config maintenance missing")?;
+        anyhow::ensure!(Some(hash(&actual)).as_deref() == self.marker_digest.as_deref(),
+            "agent config maintenance changed");
+        let held = self.marker.as_mut().context("agent config owner missing")?;
+        anyhow::ensure!(held.phase == Phase::Paused && held.snapshot.is_none(), "agent config requires Paused maintenance");
+        held.agent_config = Some(serde_json::to_value(record)?);
+        let bytes = serde_json::to_vec(held)?;
+        anyhow::ensure!(bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES, "agent config exceeds maintenance record bound");
+        private_write(&marker_path(&root), &bytes, Some(&hash(&actual)))?;
+        self.marker_digest = Some(hash(&bytes));
+        Ok(())
+    }
+
+    /// Runtime may add only the original operation's receipt, never change its owner or intent.
+    pub(crate) fn refresh_agent_config(&mut self) -> Result<respire_protocol::config_control::AgentConfigMaintenance> {
+        let root = self.installation_root()?;
+        let bytes = marker_bytes(root)?.context("agent config maintenance missing")?;
+        let actual: Marker = serde_json::from_slice(&bytes)?;
+        let held = self.marker.as_ref().context("agent config owner missing")?;
+        let previous: respire_protocol::config_control::AgentConfigMaintenance = serde_json::from_value(
+            held.agent_config.clone().context("agent config review missing")?)?;
+        let current: respire_protocol::config_control::AgentConfigMaintenance = serde_json::from_value(
+            actual.agent_config.clone().context("agent config review disappeared")?)?;
+        let mut expected = previous.clone();
+        expected.receipt = current.receipt.clone();
+        anyhow::ensure!(current == expected && current.receipt.as_ref().is_none_or(|receipt| receipt.review == previous.review)
+            && previous.receipt.as_ref().is_none_or(|receipt| current.receipt.as_ref() == Some(receipt)),
+            "agent config receipt changed its original operation");
+        let mut expected_marker = held.clone();
+        expected_marker.agent_config = actual.agent_config.clone();
+        anyhow::ensure!(serde_json::to_value(&expected_marker)? == serde_json::to_value(&actual)?,
+            "agent config maintenance owner changed");
+        self.marker = Some(actual);
+        self.marker_digest = Some(hash(&bytes));
+        Ok(current)
+    }
+
     pub(crate) fn drain_runtime(&self, health: &crate::net_rpc::Health) -> Result<()> {
         let Some(config) = self.config.as_ref() else {
             return crate::rpc::drain_occupant(health, Duration::from_secs(60));
@@ -326,18 +426,110 @@ impl Maintenance {
         stop_drained_supervisor(config)
     }
 
+    /// Only an independently checked live target may advance an account transaction.
+    pub(crate) fn start_account_target(
+        &mut self, source: &Path, operation_id: &str,
+        receipt: &respire_protocol::host_control::HostAuthAccountResult, register: bool,
+    ) -> Result<()> {
+        super::validate_auth_account_receipt(receipt, operation_id, source, register)?;
+        self.start_account_runtime()?;
+        self.account_target_verified(source, operation_id, receipt, register)
+    }
+
+    /// Both host lifecycle modes require the installed independent Runtime.
+    pub(crate) fn check_account_runtime(&self) -> Result<()> {
+        self.installation_root()?;
+        let (binary, _) = super::supervise::installed_auth_runtime()?;
+        if let Some(config) = self.config.as_ref() {
+            owned(config)?;
+            anyhow::ensure!(registered_runtime_image(config)? == binary
+                && !config.environment.contains_key("GH_TOKEN")
+                && !config.environment.contains_key("GITHUB_TOKEN"),
+                "account startup requires the installed managed Runtime and nonsecret registration environment");
+        } else if let Some(raw) = respire_client_host::env::var_os("RSRS_RUNTIME_BIN") {
+            anyhow::ensure!(PathBuf::from(raw).canonicalize()? == binary,
+                "account startup cannot select an override instead of the installed managed Runtime");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn start_account_runtime(&mut self) -> Result<()> {
+        self.check_account_runtime()?;
+        self.mark(Phase::Starting)?;
+        crate::rpc::ensure_daemon_locked()
+    }
+
+    pub(crate) fn resume_managed_runtime(&mut self) -> Result<()> {
+        // begin_maintenance_locked keeps stopped or disabled registrations in local maintenance.
+        if self.config.is_some() {
+            self.start_account_runtime()?;
+        }
+        Ok(())
+    }
+
+    /// Only an independently checked live target may advance an account transaction.
+    pub(crate) fn account_target_verified(
+        &mut self, source: &Path, operation_id: &str,
+        receipt: &respire_protocol::host_control::HostAuthAccountResult, register: bool,
+    ) -> Result<()> {
+        super::supervise::verify_account_target(receipt, operation_id, source, register)?;
+        let root = self.installation_root()?.to_path_buf();
+        if let Some(config) = self.config.as_ref() { owned(config)?; }
+        let target = receipt.target_profile.as_ref().context("account target is missing")?;
+        let path = marker_path(&root);
+        let bytes = fs::read(&path)?;
+        let mut actual = marker(&root)?.context("account maintenance marker is missing")?;
+        let held = self.marker.as_ref().context("account maintenance ownership is missing")?;
+        anyhow::ensure!(actual.id == held.id && actual.token == held.token
+            && actual.owner_pid == std::process::id() && actual.owner_birth == held.owner_birth
+            && current_boot_token().as_deref() == Some(held.token.as_str())
+            && matches!(actual.phase, Phase::Starting | Phase::Verified)
+            && actual.expected_profile.as_ref() == Some(target)
+            && actual.expected_version == env!("CARGO_PKG_VERSION") && controller_alive(&actual)?
+            && serde_json::to_vec(&actual)? == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?,
+            "account target launch does not belong to this maintenance controller");
+        actual.phase = Phase::Verified;
+        let next = serde_json::to_vec(&actual)?;
+        private_write(&path, &next, Some(&hash(&bytes)))?;
+        self.marker = Some(actual);
+        self.marker_digest = Some(hash(&next));
+        Ok(())
+    }
+
+    /// Completion is a separate grant role. It never converts Paused/Starting into Verified.
+    pub(crate) fn account_complete_launch_binding(
+        &self, source: &Path, operation_id: &str,
+        receipt: &respire_protocol::host_control::HostAuthAccountResult, register: bool,
+    ) -> Result<Option<Value>> {
+        super::validate_auth_account_receipt(receipt, operation_id, source, register)?;
+        anyhow::ensure!(matches!(receipt.outcome,
+            respire_protocol::host_control::HostAuthAccountOutcome::AwaitingVerification
+                | respire_protocol::host_control::HostAuthAccountOutcome::Committed),
+            "account completion requires an applied candidate receipt");
+        let (root, selected) = respire_client_host::config::control_roots()?;
+        let root = root.canonicalize()?;
+        let target = receipt.target_profile.as_ref().context("account target is missing")?;
+        anyhow::ensure!(self.installation_root()? == root, "account completion installation changed");
+        if let Some(config) = self.config.as_ref() { owned(config)?; }
+        let actual = marker(&root)?.context("account completion marker is missing")?;
+        let held = self.marker.as_ref().context("account completion ownership is missing")?;
+        anyhow::ensure!(selected.canonicalize()? == *target,
+            "account completion installation or selection changed");
+        verified_account_marker(&actual, held, target, &fs::read(marker_path(&root))?,
+            self.marker_digest.as_deref().context("account completion marker digest is missing")?)?;
+        maintenance_binding(target, None, false)
+    }
+
     pub(crate) fn finish(&mut self) -> Result<()> {
         if self.completed {
             return Ok(());
         }
         self.mark(Phase::Verified)?;
-        let config = self
-            .config
-            .as_mut()
-            .context("maintenance registration unavailable")?;
-        config.maintenance = false;
-        save(config)?;
-        let path = marker_path(&config.installation);
+        if let Some(config) = self.config.as_mut() {
+            config.maintenance = false;
+            save(config)?;
+        }
+        let path = marker_path(self.installation_root()?);
         anyhow::ensure!(
             hash(&fs::read(&path)?)
                 == self
@@ -364,18 +556,27 @@ impl Maintenance {
 
 impl Drop for Maintenance {
     fn drop(&mut self) {
-        if self.config.is_some() {
-            ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        if self.installation.is_some() {
+            ACTIVE.with(|slot| {
+                let mut active = slot.borrow_mut();
+                if active.as_deref() == self.marker.as_ref().map(|value| value.token.as_str()) {
+                    *active = None;
+                }
+            });
         }
     }
 }
 
 pub(crate) fn begin_maintenance_locked() -> Result<Maintenance> {
-    if ACTIVE.with(|v| v.borrow().is_some()) {
-        return Ok(Maintenance::inactive());
-    }
-    match read_registration(&respire::service::main_data_dir())? {
-        Some(config) if config.enabled => {
+    anyhow::ensure!(
+        !ACTIVE.with(|v| v.borrow().is_some()),
+        "host maintenance already has an active controller"
+    );
+    let (root, _) = respire_client_host::config::control_roots()?;
+    fs::create_dir_all(&root)?;
+    let root = root.canonicalize()?;
+    match read_registration(&root)? {
+        Some(config) if config.enabled && !config.manually_stopped => {
             let guard = Maintenance::begin(config, RECOVERY.with(|v| v.get()))?;
             reset_attempts(
                 guard
@@ -385,15 +586,79 @@ pub(crate) fn begin_maintenance_locked() -> Result<Maintenance> {
             )?;
             Ok(guard)
         }
-        _ => Ok(Maintenance::inactive()),
+        config => Maintenance::begin_local(root, config, RECOVERY.with(|v| v.get())),
     }
+}
+
+/// Reattach only the original identity-write controller, retaining its stable token.
+pub(crate) fn resume_identity_write_maintenance(
+    root: &Path, profile: &Path, token: &str, coordinator: &str,
+) -> Result<Maintenance> {
+    resume_key_maintenance(root, profile, profile, token, coordinator)
+}
+
+/// A key receipt can move selection before its private response reaches CLI.
+/// Keep the original token/controller checks, allowing only source or selection.
+pub(crate) fn resume_key_maintenance(
+    root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
+) -> Result<Maintenance> {
+    resume_key_maintenance_inner(root, profile, source, token, coordinator, false)
+}
+
+pub(crate) fn pending_agent_config(root: &Path) -> Result<Option<(respire_protocol::config_control::AgentConfigMaintenance, String, String)>> {
+    let Some(marker) = marker(root)? else { return Ok(None); };
+    let record = marker.agent_config.context("finish existing maintenance before agent config")?;
+    Ok(Some((serde_json::from_value(record)?, marker.token, marker.id)))
+}
+
+pub(crate) fn resume_agent_config_maintenance(root: &Path, profile: &Path, token: &str, coordinator: &str) -> Result<Maintenance> {
+    resume_key_maintenance_inner(root, profile, profile, token, coordinator, true)
+}
+
+fn resume_key_maintenance_inner(root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
+    agent_config: bool) -> Result<Maintenance> {
+    anyhow::ensure!(current_boot_token().is_none(), "host maintenance already has a controller");
+    let (selected_root, selected_profile) = respire_client_host::config::control_roots()?;
+    anyhow::ensure!(selected_root.canonicalize()? == root && selected_profile.canonicalize()? == profile,
+        "identity recovery selection changed");
+    let previous = marker_bytes(root)?;
+    let mut registration = read_registration(root)?;
+    if let Some(config) = registration.as_ref() {
+        owned(config)?;
+        anyhow::ensure!(config.installation == root && config.id == coordinator, "identity recovery registration changed");
+        ensure_control_endpoint(config)?;
+    } else {
+        anyhow::ensure!(coordinator == format!("host-{}", hash(root.display().to_string().as_bytes())),
+            "identity recovery coordinator changed");
+    }
+    let previous_marker = marker(root)?;
+    if let Some(value) = previous_marker.as_ref() {
+        anyhow::ensure!(value.token == token && value.id == coordinator && value.snapshot.is_none()
+            && value.agent_config.is_some() == agent_config
+            && matches!(value.expected_profile.as_deref(), Some(expected) if expected == profile || expected == source)
+            && value.expected_version == env!("CARGO_PKG_VERSION")
+            && (!controller_alive(value)? || value.owner_pid == std::process::id()),
+            "identity recovery does not own the existing maintenance marker");
+    }
+    let value = Marker { schema: 1, id: coordinator.to_owned(), token: token.to_owned(), phase: Phase::Paused,
+        expected_profile: Some(profile.to_path_buf()), expected_version: env!("CARGO_PKG_VERSION").into(),
+        owner_pid: std::process::id(), owner_birth: manager::process_birth(std::process::id())?
+            .context("identity recovery controller birth unavailable")?, snapshot: None,
+        agent_config: previous_marker.and_then(|value| value.agent_config) };
+    let bytes = serde_json::to_vec(&value)?;
+    private_write(&marker_path(root), &bytes, previous.as_ref().map(|bytes| hash(bytes)).as_deref())?;
+    let mut config = registration.take().filter(|config| config.enabled && !config.manually_stopped);
+    if let Some(config) = config.as_mut() { config.maintenance = true; save(config)?; }
+    ACTIVE.with(|slot| *slot.borrow_mut() = Some(token.to_owned()));
+    Ok(Maintenance { installation: Some(root.to_path_buf()), config, marker: Some(value),
+        marker_digest: Some(hash(&bytes)), completed: false })
 }
 
 /// Explicit host restart is the recovery operation for an interrupted transition.
 /// The caller holds the same installation takeover lock as profile changes.
 pub(crate) fn restart_maintenance_locked() -> Result<Maintenance> {
-    let Some(config) = read_registration(&respire::service::main_data_dir())? else {
-        return Ok(Maintenance::inactive());
+    let Some(config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
+        return with_explicit_recovery(begin_maintenance_locked);
     };
     let mut guard = Maintenance::begin(config, true)?;
     let config = guard
@@ -412,7 +677,7 @@ pub(crate) fn authorize_detached_boot_locked() -> Result<()> {
     let Some(token) = current_boot_token() else {
         return Ok(());
     };
-    let root = respire::service::main_data_dir();
+    let (root, profile) = respire_client_host::config::control_roots()?;
     let Some(mut value) = marker(&root)? else {
         bail!("active maintenance marker missing");
     };
@@ -420,8 +685,20 @@ pub(crate) fn authorize_detached_boot_locked() -> Result<()> {
     let path = marker_path(&root);
     let previous = fs::read(&path)?;
     value.phase = Phase::Starting;
-    value.expected_profile = Some(respire::service::data_dir().canonicalize()?);
+    value.expected_profile = Some(profile.canonicalize()?);
     private_write(&path, &serde_json::to_vec(&value)?, Some(&hash(&previous)))
+}
+
+/// Export only an authorization binding; never forward the reusable maintenance token.
+fn verified_account_marker(actual: &Marker, held: &Marker, target: &Path, bytes: &[u8], digest: &str) -> Result<()> {
+    anyhow::ensure!(actual.phase == Phase::Verified && held.phase == Phase::Verified
+        && actual.id == held.id && actual.token == held.token
+        && actual.owner_pid == std::process::id() && actual.owner_birth == held.owner_birth
+        && actual.expected_profile.as_deref() == Some(target)
+        && current_boot_token().as_deref() == Some(held.token.as_str())
+        && hash(bytes) == digest,
+        "account completion requires this controller's exact Verified marker");
+    Ok(())
 }
 
 /// Export only an authorization binding; never forward the reusable maintenance token.
@@ -430,7 +707,7 @@ pub(super) fn launch_maintenance_binding(profile: &Path, managed_id: Option<&str
 }
 
 fn maintenance_binding(profile: &Path, managed_id: Option<&str>, auth: bool) -> Result<Option<Value>> {
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     let Some(value) = marker(&root)? else {
         return Ok(None);
     };
@@ -469,7 +746,7 @@ fn maintenance_binding(profile: &Path, managed_id: Option<&str>, auth: bool) -> 
 
 pub(crate) fn background_paused() -> bool {
     // Malformed/unreadable control state also fences background mutations.
-    !matches!(marker(&respire::service::main_data_dir()), Ok(None))
+    !matches!(marker(&respire_client_host::paths::main_data_dir()), Ok(None))
 }
 
 pub(crate) fn with_explicit_recovery<T>(action: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -487,7 +764,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
     if current_boot_token().is_some() {
         return Ok(None);
     }
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     let Some(config) = read_registration(&root)?.filter(|c| c.enabled) else {
         return Ok(None);
     };
@@ -515,7 +792,7 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
     );
     anyhow::ensure!(
         registered_root.canonicalize()? == root
-            && respire::service::main_data_dir().canonicalize()? == root,
+            && respire_client_host::paths::main_data_dir().canonicalize()? == root,
         "registered runtime root belongs to another installation"
     );
     // The registered supervisor clears runtime overrides before selecting its child.
@@ -538,7 +815,7 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
     Ok(runtime)
 }
 
-fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
+pub(super) fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
     let root = config.installation.canonicalize()?;
     let runtime = registered_runtime_image(config)?;
     anyhow::ensure!(
@@ -547,7 +824,7 @@ fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) 
             && crate::mcp::exe_matches_dest(&health.exe, &runtime)
             && crate::mcp::exe_matches_dest(&health.image_path, &runtime)
             && !health.data_dir.is_empty()
-            && Path::new(&health.data_dir).canonicalize()? == respire::service::data_dir().canonicalize()?
+            && Path::new(&health.data_dir).canonicalize()? == respire_client_host::config::control_roots()?.1.canonicalize()?
             && !health.installation_root.is_empty()
             && Path::new(&health.installation_root).canonicalize()? == root
             && health.installation_id == hash(root.display().to_string().as_bytes())
@@ -611,7 +888,7 @@ fn wait_ready(config: &Registration) -> Result<()> {
                 crate::runtime_fetch::version_in_accept(&health.runtime_version),
                 "managed runtime version mismatch"
             );
-            if health.store_ready || respire::service::off_mode() {
+            if health.store_ready || respire_client_host::settings::off_mode()? {
                 return Ok(());
             }
         }
@@ -655,7 +932,7 @@ pub(crate) fn may_reuse_runtime(health: &crate::net_rpc::Health) -> Result<bool>
     if background_paused() {
         return Ok(false);
     }
-    match read_registration(&respire::service::main_data_dir())? {
+    match read_registration(&respire_client_host::paths::main_data_dir())? {
         Some(config) if config.enabled => Ok(
             !config.manually_stopped && health.managed_id.as_deref() == Some(config.id.as_str())
         ),
@@ -664,13 +941,24 @@ pub(crate) fn may_reuse_runtime(health: &crate::net_rpc::Health) -> Result<bool>
 }
 
 pub(crate) fn ensure_managed_locked() -> Result<bool> {
-    let Some(config) = read_registration(&respire::service::main_data_dir())? else {
+    let Some(config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return Ok(false);
     };
     if !config.enabled {
         return Ok(false);
     }
     owned(&config)?;
+    if config.manually_stopped {
+        if let Some(token) = current_boot_token() {
+            let value = marker(&config.installation)?.context("manual account maintenance marker is missing")?;
+            anyhow::ensure!(value.id == config.id && value.token == token
+                && value.owner_pid == std::process::id() && controller_alive(&value)?
+                && matches!(value.phase, Phase::Starting | Phase::Verified),
+                "manual detached launch lacks this host controller's startup authority");
+            // A foreground maintenance helper may verify a target without enabling the service.
+            return Ok(false);
+        }
+    }
     anyhow::ensure!(
         !config.manually_stopped,
         "runtime was manually stopped; use runtime start explicitly"
@@ -679,6 +967,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         let value = marker(&config.installation)?.context("active maintenance marker missing")?;
         let digest = hash(&fs::read(marker_path(&config.installation))?);
         let mut borrowed = Maintenance {
+            installation: Some(config.installation.clone()),
             config: Some(config),
             marker: Some(value),
             marker_digest: Some(digest),
@@ -690,6 +979,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         })();
         // This borrowed guard does not own completion or its caller's token.
         borrowed.config = None;
+        borrowed.installation = None;
         result?;
         return Ok(true);
     }
@@ -709,7 +999,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
 }
 
 fn start_explicit_locked() -> Result<()> {
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
         return crate::rpc::ensure_daemon_locked();
     };
@@ -750,7 +1040,7 @@ fn start_explicit_locked() -> Result<()> {
 }
 
 pub(crate) fn stop_managed_locked() -> Result<bool> {
-    let Some(mut config) = read_registration(&respire::service::main_data_dir())? else {
+    let Some(mut config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return Ok(false);
     };
     if !config.enabled {
@@ -773,7 +1063,7 @@ pub(crate) fn stop_managed_locked() -> Result<bool> {
 }
 
 fn new_registration() -> Result<Registration> {
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     let environment_root = if root.is_absolute() {
         root.clone()
     } else {
@@ -904,7 +1194,7 @@ fn now_seconds() -> Result<u64> {
 /// exporting arguments, account data or raw OS errors. Never weaken a fence if
 /// its diagnostic file cannot be updated.
 pub(crate) fn restart_stage(name: &str) {
-    if let Ok(Some(config)) = read_registration(&respire::service::main_data_dir()) {
+    if let Ok(Some(config)) = read_registration(&respire_client_host::paths::main_data_dir()) {
         let _ = event(&config, name);
     }
 }
@@ -980,7 +1270,7 @@ fn event(config: &Registration, name: &str) -> Result<()> {
 
 fn status() -> Result<Value> {
     let mut value = disabled_status()?;
-    let root = respire::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     if let Some(config) = read_registration(&root)? {
         owned(&config)?;
         let actual = manager::inspect(&config)?;
@@ -1015,6 +1305,30 @@ fn emit(command: &str, summary: Value) -> Result<()> {
 }
 
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
+    match command {
+        RuntimeCommand::KeyResult { operation_id } => {
+            return crate::emit_result(super::control_key_result(operation_id)?);
+        }
+        RuntimeCommand::KeyRollback { operation_id, confirm } => {
+            anyhow::ensure!(*confirm, "key rollback requires explicit --confirm");
+            return crate::emit_result(super::control_key_rollback(operation_id)?);
+        }
+        RuntimeCommand::AuthResult { operation_id, force } => {
+            return crate::emit_result(super::control_auth_result(operation_id, *force)?);
+        }
+        RuntimeCommand::AccountResult { operation_id, source_profile, register } => {
+            return crate::emit_result(super::control_account_result(
+                operation_id, source_profile, *register,
+            )?);
+        }
+        RuntimeCommand::AccountRollback { operation_id, source_profile, register, confirm } => {
+            anyhow::ensure!(*confirm, "account rollback requires explicit --confirm");
+            return crate::emit_result(super::control_account_rollback(
+                operation_id, source_profile, *register,
+            )?);
+        }
+        _ => {}
+    }
     if let RuntimeCommand::Result { context } = command {
         let response: crate::rpc::RpcResponse =
             serde_json::from_value(crate::net_rpc::rpc_result(context)?)
@@ -1050,10 +1364,6 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         return emit("runtime.autostart.status", status()?);
     }
     crate::runtime_policy::require_host("runtime lifecycle")?;
-    anyhow::ensure!(
-        !crate::rpc::worker_active(),
-        "runtime lifecycle commands require the host CLI, not a runtime request"
-    );
     match command {
         RuntimeCommand::Run {
             managed,
@@ -1111,6 +1421,13 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
+        RuntimeCommand::KeyResult { .. }
+        | RuntimeCommand::KeyRollback { .. }
+        | RuntimeCommand::AuthResult { .. }
+        | RuntimeCommand::AccountResult { .. }
+        | RuntimeCommand::AccountRollback { .. } => {
+            bail!("authentication recovery command was not handled before lifecycle setup")
+        }
         _ => bail!("unsupported runtime lifecycle command"),
     }
 }
@@ -1131,7 +1448,7 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
         (None, Some(_)) => bail!("--version is only accepted together with --file"),
         (None, None) => {
             if let Some(origin) = mirror {
-                crate::model_install::validate_mirror(origin)?;
+                respire_commands::model_download::validate_mirror(origin)?;
             }
             let binary = crate::runtime_fetch::download_and_install(None, mirror)?;
             emit(
@@ -1162,7 +1479,7 @@ fn enable(now: bool) -> Result<()> {
     // A platform-rejected native path must not even create lifecycle state.
     manager::validate_executable(Platform::current()?, &crate::mcp::stable_bin_path())?;
     let _ownership = crate::runtime_policy::takeover_lock()?;
-    let mut config = match read_registration(&respire::service::main_data_dir())? {
+    let mut config = match read_registration(&respire_client_host::paths::main_data_dir())? {
         Some(config) if !config.enabled && config.artifact_hashes.is_empty() => {
             owned(&config)?;
             anyhow::ensure!(
@@ -1213,11 +1530,11 @@ fn disable(stop: bool, remove: bool) -> Result<()> {
     } else {
         "runtime.autostart.disable"
     };
-    if read_registration(&respire::service::main_data_dir())?.is_none() {
+    if read_registration(&respire_client_host::paths::main_data_dir())?.is_none() {
         return emit(command, status()?);
     }
     let _ownership = crate::runtime_policy::takeover_lock()?;
-    let Some(mut config) = read_registration(&respire::service::main_data_dir())? else {
+    let Some(mut config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return emit(command, status()?);
     };
     owned(&config)?;
@@ -1237,7 +1554,7 @@ fn disable(stop: bool, remove: bool) -> Result<()> {
         let mut guard = Maintenance::begin(config, true)?;
         raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
         guard.finish()?;
-        config = read_registration(&respire::service::main_data_dir())?
+        config = read_registration(&respire_client_host::paths::main_data_dir())?
             .context("registration disappeared")?;
     }
     config.enabled = false;
@@ -1312,30 +1629,91 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
             root.is_none(),
             "installation-root is only accepted for a managed registration"
         );
-        anyhow::ensure!(!read_registration(&respire::service::main_data_dir())?.is_some_and(|config|config.enabled),"the service manager owns this runtime; use runtime start instead of an unmanaged foreground instance");
+        anyhow::ensure!(!read_registration(&respire_client_host::paths::main_data_dir())?.is_some_and(|config|config.enabled),"the service manager owns this runtime; use runtime start instead of an unmanaged foreground instance");
         check_direct_access()?;
     }
     verify_managed_boot()?;
+    let stopped = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
-        let stopped = Arc::new(AtomicBool::new(false));
         signal_hook::flag::register(signal_hook::consts::SIGTERM, stopped.clone())?;
         signal_hook::flag::register(signal_hook::consts::SIGINT, stopped.clone())?;
-        std::thread::spawn(move || {
-            while !stopped.load(Ordering::Acquire) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            crate::rpc::request_drain_exit();
-        });
     }
-    let result = crate::rpc::runtime_entry(crate::rpc::RuntimeFlags {
-        port: Some(crate::net_rpc::rpc_port()),
-        host: "127.0.0.1".into(),
-        status: false,
-        stop: false,
-    });
+    let binary = crate::rpc::resolve_runtime_executable()?.canonicalize()?;
+    let image_sha256 = hash(&fs::read(&binary)?);
+    let mut arguments: Vec<std::ffi::OsString> = vec![
+        "serve".into(),
+        "--data-dir".into(),
+        respire_client_host::paths::main_data_dir().into_os_string(),
+        "--host".into(),
+        "127.0.0.1".into(),
+        "--port".into(),
+        crate::net_rpc::rpc_port().to_string().into(),
+    ];
     if managed_id().is_some() {
-        let config = read_registration(&respire::service::main_data_dir())?
+        arguments.push("--supervised".into());
+    }
+    let (mut child, instance_id) =
+        super::supervise::spawn_authorized_runtime(&binary, &arguments, managed_id())?;
+    let pid = child.id();
+    let birth = manager::process_birth(pid)?;
+    let mut drain: Option<std::thread::JoinHandle<Result<()>>> = None;
+    let mut drain_requested = false;
+    let result = (|| -> Result<()> {
+        loop {
+            if let Some(status) = child.try_wait().context("cannot reap foreground Runtime")? {
+                if let Some(drain) = drain.take() {
+                    drain.join().map_err(|_| anyhow::anyhow!("Runtime drain thread panicked"))??;
+                }
+                crate::set_exit_code(status.code().unwrap_or(1));
+                return Ok(());
+            }
+            if drain.as_ref().is_some_and(|drain| drain.is_finished()) {
+                if let Some(drain) = drain.take() {
+                    drain.join().map_err(|_| anyhow::anyhow!("Runtime drain thread panicked"))??;
+                }
+            }
+            if stopped.load(Ordering::Acquire) && !drain_requested {
+                drain_requested = true;
+                let binary = binary.clone();
+                let image_sha256 = image_sha256.clone();
+                let instance_id = instance_id.clone();
+                let birth = birth.clone();
+                // Reap on this thread while drain verifies process exit and the final receipt.
+                drain = Some(std::thread::spawn(move || -> Result<()> {
+                    let birth = birth.context("foreground Runtime exited before its birth was captured")?;
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    let health = loop {
+                        if let Some(health) = crate::rpc::probe_runtime()? {
+                            break health;
+                        }
+                        anyhow::ensure!(
+                            Instant::now() < deadline,
+                            "foreground Runtime has no verifiable health; no process was forced to exit"
+                        );
+                        std::thread::sleep(Duration::from_millis(50));
+                    };
+                    let process = crate::net_rpc::runtime_process_identity(pid)?;
+                    anyhow::ensure!(
+                        health.pid == pid
+                            && health.instance_id == instance_id
+                            && crate::mcp::exe_matches_dest(&process.executable, &binary)
+                            && (process.started_at == birth || process.started_at == health.process_start_id)
+                            && manager::process_birth(pid)?.as_deref() == Some(birth.as_str())
+                            && crate::mcp::exe_matches_dest(&health.exe, &binary)
+                            && crate::mcp::exe_matches_dest(&health.image_path, &binary)
+                            && health.image_sha256.eq_ignore_ascii_case(&image_sha256)
+                            && health.managed_id.as_deref() == managed_id(),
+                        "foreground Runtime ownership changed; no drain requested"
+                    );
+                    crate::rpc::drain_occupant(&health, Duration::from_secs(120))
+                }));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    })();
+    if managed_id().is_some() {
+        let config = read_registration(&respire_client_host::paths::main_data_dir())?
             .context("managed runtime registration disappeared")?;
         event(
             &config,
@@ -1560,8 +1938,10 @@ mod tests {
                 owner_pid: std::process::id(),
                 owner_birth: manager::process_birth(std::process::id())?
                     .context("test process birth missing")?,
+                snapshot: None,
+                agent_config: None,
             };
-            let path = marker_path(&respire::service::main_data_dir());
+            let path = marker_path(&respire_client_host::paths::main_data_dir());
             fs::create_dir_all(path.parent().context("test marker parent")?)?;
             fs::write(&path, serde_json::to_vec(&value)?)?;
             anyhow::ensure!(controller_alive(&value)?);
@@ -1569,6 +1949,15 @@ mod tests {
             ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
             check_direct_access()?;
             let profile = dir.path().canonicalize()?;
+            let bytes = fs::read(&path)?;
+            let authorized = verified_account_marker(&value, &value, &profile, &bytes, &hash(&bytes));
+            assert_eq!(authorized.is_ok(), phase == Phase::Verified);
+            if phase == Phase::Verified {
+                assert!(verified_account_marker(&value, &value, &profile.join("foreign"), &bytes, &hash(&bytes)).is_err());
+                assert!(verified_account_marker(&value, &value, &profile, &bytes, &hash(b"changed marker")).is_err());
+                let mut foreign = value.clone(); foreign.token = uuid::Uuid::new_v4().to_string();
+                assert!(verified_account_marker(&value, &foreign, &profile, &bytes, &hash(&bytes)).is_err());
+            }
             if phase == Phase::Paused {
                 let binding = maintenance_binding(&profile, None, true)?
                     .context("paused auth binding missing")?;
@@ -1605,12 +1994,69 @@ mod tests {
             anyhow::ensure!(verify_managed_boot().is_err());
             fs::remove_file(path)?;
         }
-        let path = marker_path(&respire::service::main_data_dir());
+        let path = marker_path(&respire_client_host::paths::main_data_dir());
         fs::write(&path, b"malformed")?;
         anyhow::ensure!(background_paused() && check_direct_access().is_err());
         fs::remove_file(path)?;
         anyhow::ensure!(!background_paused());
         check_direct_access()?;
+        let root = dir.path().canonicalize()?;
+        let mut local = begin_maintenance_locked()?;
+        assert_eq!(local.installation_root()?, root);
+        assert!(local.config.is_none() && !control_path(&root).exists());
+        let first = marker(&root)?.context("local Paused marker missing")?;
+        assert_eq!(first.phase, Phase::Paused);
+        assert!(!first.id.is_empty());
+        assert_eq!(local.auth_launch_binding(&root)?.context("local auth binding missing")?["marker_sha256"],
+            hash(&fs::read(marker_path(&root))?));
+        local.mark(Phase::Starting)?;
+        assert_eq!(marker(&root)?.context("local Starting marker missing")?.expected_profile.as_deref(), Some(root.as_path()));
+        local.mark(Phase::Verified)?;
+        assert_eq!(marker(&root)?.context("local Verified marker missing")?.phase, Phase::Verified);
+        local.finish()?;
+        assert!(!marker_path(&root).exists() && !control_path(&root).exists());
+        let mut interrupted = begin_maintenance_locked()?;
+        interrupted.auth_launch_binding(&root)?;
+        let token = current_boot_token().context("local maintenance token missing")?;
+        drop(local);
+        assert_eq!(current_boot_token().as_deref(), Some(token.as_str()));
+        let original = fs::read(marker_path(&root))?;
+        drop(interrupted);
+        assert!(background_paused() && current_boot_token().is_none());
+        assert_eq!(fs::read(marker_path(&root))?, original);
+        assert!(begin_maintenance_locked().is_err());
+        let mut recovered = with_explicit_recovery(begin_maintenance_locked)?;
+        recovered.auth_launch_binding(&root)?;
+        let owned = fs::read(marker_path(&root))?;
+        let mut foreign: Marker = serde_json::from_slice(&owned)?;
+        foreign.token = uuid::Uuid::new_v4().to_string();
+        fs::write(marker_path(&root), serde_json::to_vec(&foreign)?)?;
+        assert!(recovered.finish().is_err() && marker_path(&root).exists());
+        fs::write(marker_path(&root), owned)?;
+        recovered.finish()?;
+        for (enabled, stopped) in [(false, false), (true, true)] {
+            let mut config = super::super::tests::fixture(Platform::current()?);
+            config.owner = manager::owner()?;
+            config.installation = root.clone();
+            config.id = identity(&root, &config.owner);
+            config.executable = root.join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
+            config.environment.insert("RSRS_RPC_PORT".into(), crate::net_rpc::rpc_port().to_string());
+            config.enabled = enabled;
+            config.manually_stopped = stopped;
+            let original = serde_json::to_vec(&config)?;
+            private_write(&control_path(&root), &original, None)?;
+            let mut manual = begin_maintenance_locked()?;
+            assert!(manual.config.is_none());
+            manual.auth_launch_binding(&root)?;
+            manual.mark(Phase::Starting)?;
+            assert!(!ensure_managed_locked()?);
+            assert_eq!(fs::read(control_path(&root))?, original);
+            manual.finish()?;
+            assert_eq!(fs::read(control_path(&root))?, original);
+            assert!(!marker_path(&root).exists());
+            if stopped { assert!(ensure_managed_locked().is_err()); }
+            fs::remove_file(control_path(&root))?;
+        }
         Ok(())
     }
 

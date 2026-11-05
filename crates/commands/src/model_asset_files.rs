@@ -19,7 +19,22 @@ pub fn prepare_model_assets(
     plan: &respire_protocol::AssetsStatus,
     allowed_roots: &[PathBuf],
 ) -> Result<()> {
+    let sources: Vec<_> = plan.assets.iter()
+        .map(|asset| vec![asset.suggested_source.clone()]).collect();
+    prepare_model_assets_with_sources(plan, allowed_roots, &sources).map(|_| ())
+}
+
+/// Sources come from local mirror policy; the Runtime plan still supplies fixed pins.
+pub fn prepare_model_assets_with_sources(
+    plan: &respire_protocol::AssetsStatus,
+    allowed_roots: &[PathBuf],
+    sources: &[Vec<String>],
+) -> Result<bool> {
     use respire_protocol::AssetState;
+    anyhow::ensure!(sources.len() == plan.assets.len()
+        && sources.iter().all(|list| !list.is_empty()
+            && list.iter().all(|source| !source.is_empty())),
+        "every model asset requires local download sources");
     anyhow::ensure!(
         !plan.complete
             && plan.backend_load.is_none()
@@ -37,7 +52,7 @@ pub fn prepare_model_assets(
     let mut pending = Vec::new();
     let mut claimed = std::collections::BTreeSet::new();
     // Validate the entire plan before creating directories or transferring any bytes.
-    for asset in &plan.assets {
+    for (asset, asset_sources) in plan.assets.iter().zip(sources) {
         anyhow::ensure!(
             asset.state == AssetState::Missing
                 && asset.reason.is_none()
@@ -112,10 +127,11 @@ pub fn prepare_model_assets(
         for index in 0..4 {
             check_model_path(&parts.join(index.to_string()))?;
         }
-        pending.push((target, staged, asset));
+        pending.push((target, staged, asset, asset_sources));
     }
     let _operation = crate::model_progress::Operation::begin_download()?;
-    for (target, staged, asset) in &pending {
+    let mut skipped = true;
+    for (target, staged, asset, asset_sources) in &pending {
         let hash = asset
             .sha256
             .as_deref()
@@ -123,6 +139,7 @@ pub fn prepare_model_assets(
         if crate::model_download::file_valid(target, hash, asset.expected_size)? {
             continue;
         }
+        skipped = false;
         crate::model_progress::check()?;
         let parent = staged.parent().context("model staging parent missing")?;
         std::fs::create_dir_all(parent)?;
@@ -134,7 +151,7 @@ pub fn prepare_model_assets(
                 check_model_path(&parts.join(index.to_string()))?;
             }
             download_with_fallback(
-                &[asset.suggested_source.clone()],
+                asset_sources,
                 staged,
                 hash,
                 matches!(
@@ -151,7 +168,7 @@ pub fn prepare_model_assets(
         );
     }
     // Never publish the first replacement until every required download verifies.
-    for (target, staged, asset) in &pending {
+    for (target, staged, asset, _) in &pending {
         crate::model_progress::check()?;
         check_model_path(target)?;
         check_model_path(staged)?;
@@ -177,7 +194,7 @@ pub fn prepare_model_assets(
         remove_download_parts(staged)?;
         replace_file(staged, target)?;
     }
-    for (target, _, asset) in &pending {
+    for (target, _, asset, _) in &pending {
         anyhow::ensure!(
             crate::model_download::file_valid(
                 target,
@@ -190,7 +207,7 @@ pub fn prepare_model_assets(
             "model file preparation is incomplete"
         );
     }
-    Ok(())
+    Ok(skipped)
 }
 
 fn check_plan_source(asset: &respire_protocol::AssetRequirement, filename: &str) -> Result<()> {
@@ -419,10 +436,7 @@ pub(super) fn file_url(origin: &str, rel: &str) -> String {
 }
 
 pub(super) fn replace_file(from: &Path, to: &Path) -> Result<()> {
-    if to.exists() {
-        std::fs::remove_file(to)
-            .with_context(|| format!("cannot replace invalid file {}", to.display()))?;
-    }
+    // Rename replaces the destination without deleting it first if publication fails.
     std::fs::rename(from, to).with_context(|| format!("failed to place {}", to.display()))
 }
 
@@ -465,6 +479,13 @@ mod tests {
         std::fs::remove_dir_all(base_staging)?;
         install_variant_into(name, file, sha256, size, None, dir.path(), &[])?;
         install_variant_into(name, file, sha256, size, None, dir.path(), &[])?;
+        let destination = dir.path().join(file);
+        assert!(replace_file(&dir.path().join("missing-staged-model"), &destination).is_err());
+        assert_eq!(std::fs::read(&destination)?, b"abc");
+        let replacement = dir.path().join("verified-staged-model");
+        std::fs::write(&replacement, b"abc")?;
+        replace_file(&replacement, &destination)?;
+        assert!(!replacement.exists());
         assert_eq!(
             std::fs::read(dir.path().join("onnx/model_fp16.onnx"))?,
             b"abc"
@@ -495,8 +516,14 @@ mod tests {
         assert!(!plan.complete);
         assert!(plan.backend_load.is_none());
         assert_eq!(plan.missing, plan.assets);
+        for sources in [vec![], vec![vec![]], vec![vec![String::new()]]] {
+            assert!(prepare_model_assets_with_sources(&plan, std::slice::from_ref(&root), &sources)
+                .is_err());
+        }
         // The real official artifact cannot match this three-byte pin: downloading would fail.
         prepare_model_assets(&plan, std::slice::from_ref(&root))?;
+        assert!(prepare_model_assets_with_sources(&plan, std::slice::from_ref(&root),
+            &[vec!["https://local-mirror.invalid/unused-verified-file".to_owned()]])?);
         assert_eq!(std::fs::read(root.join(file))?, b"abc");
 
         for (case, expected_error) in [

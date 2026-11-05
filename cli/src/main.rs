@@ -1,13 +1,6 @@
-//! rsrs CLI - thin shell: parse args and assemble.
-//!
-//! local-first: remember/recall/list/forget all hit the local store (the authority);
-//! `sync` does two-way ciphertext sync (local ↔ cloud backup).
-//!
-//! Three parts (locked 2026-09-06): (1) memory CLI (this file, memory operations)
-//! (2) user client (account/keys/inject distribution) (3) server + frontend (respire-server).
-//! The CLI logs in itself: `register` / `login` write session.json (addr/token/user).
-//! Without a token, sync and post-write auto-sync cannot reach the server.
-//! An existing session.json, or RSRS_ADDR/TOKEN, also works.
+//! rsrs CLI: parse commands, manage components, and render Runtime replies.
+//! Business, database, credential and inference work stays in the independent
+//! Runtime. Host code prepares its assets, configuration and private controls.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,78 +8,47 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use uuid::Uuid;
 
 mod autostart;
 mod classify_config;
+mod client_config;
 mod doctor;
 mod host_rpc;
 mod login;
+mod profile_control;
+mod profile_discovery;
 mod mcp;
 mod rpc;
 mod runtime_fetch;
 mod shell;
 mod web;
 
-// Server-face modules moved into the shared runtime crate; these crate-root
-// rebindings keep `crate::admission` / `crate::runtime_http` paths resolving.
-use respire_commands::admission;
-use respire_commands::runtime_http;
-
 // Shared command surface extracted into the respire_commands crate; the bin
 // re-binds the module names so existing `crate::` paths keep resolving.
 use respire_commands::app_version;
+use respire_commands::capabilities::run_capabilities;
+use respire_commands::output_state::DIRECT_MODE;
 use respire_commands::cli_def::{
-    changes_profile, BenchCmd, Cli, Command, GrantCommand, ModelAction, PluginCommand, QueryLogCmd,
+    Cli, Command, ModelAction, PluginCommand,
     SessionCommand, SnapshotCmd,
-};
-pub(crate) use respire_commands::engine::{
-    background_sync_once, change_metadata_profile, run_capabilities, run_local,
-    run_memory_revision, run_metadata_host, run_metadata_status, schedule_autosync,
-    select_diary_tracks, DIRECT_MODE, EMBEDDER_SLOT,
-};
-use respire_commands::engine::{
-    build_local, build_remote, build_session, build_session_with_owner,
-    build_session_with_owner_inner, build_transport, read_session_json,
-    remote_config_from_session_or_env,
 };
 use respire_commands::gates::{
     is_off_allowed, is_readonly_switch_off, is_write_command, is_write_command_fine,
 };
 use respire_commands::i18n;
 use respire_commands::metadata;
-use respire_commands::model_install;
 use respire_commands::model_progress;
 use respire_commands::net_rpc;
 use respire_commands::output::{self, Item as OutputItem, ResultEnvelope, Status as OutputStatus};
-use respire_commands::output_emit::{command_failure, emit_details, emit_result};
+use respire_commands::output_emit::{emit_details, emit_result};
 use respire_commands::output_state::{
     exit_code, json_mode, mark_emitted, output_emitted, parse_failure, progress_enabled,
-    set_exit_code, set_json_mode, status_exit_code, Captured, CAPTURED, DEFER_PROFILE_OUTPUT,
-    HOST_RPC_OUTPUT, OUTPUT_EMITTED, OUTPUT_EXIT_CODE,
+    set_exit_code, set_json_mode, status_exit_code, Captured,
 };
 use respire_commands::progress;
 use respire_commands::runtime_error;
 use respire_commands::runtime_policy;
-pub(crate) use respire_commands::sync_flow::{
-    is_retriable_sync_error, read_remote_sync_history, run_sync_attempts, sync_live, sync_phase,
-    sync_tracked, sync_tracked_boundary, sync_with_retry,
-};
-use respire_commands::util::{
-    current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id,
-};
-use respire_commands::{bench, classify, recall_select, review, skill};
-
-use respire::auth;
-use respire::memory::bge::BgeEmbedder;
-use respire::memory::model::Kind;
-use respire::memory::search::Embedder;
-use respire::memory::{MemoryEngine, MemoryQuery, SessionKeys};
-use respire::sync::{remote_configured, SyncStats};
-
-use respire::transport::local::LocalStore;
-use respire::transport::remote::{RemoteConfig, RemoteTransport};
-use respire::transport::MemoryTransport;
+use respire_commands::classify;
 
 #[cfg(test)]
 pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -94,7 +56,7 @@ pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(()
 pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
     match args.command.as_ref() {
         Some(command @ Command::Extract { .. }) => {
-            match respire_commands::engine::extract_uses_tui(command) {
+            match respire_commands::cli_def::extract_uses_tui(command) {
                 Ok(true) => Some(run_extract_tui()),
                 Ok(false) => None,
                 Err(error) => Some(Err(error)),
@@ -102,7 +64,12 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         }
         Some(Command::AgentConfig { set: None }) => Some(
             runtime_policy::require_host("agent configuration read")
-                .and_then(|()| respire_commands::engine::run_agent_config(None)),
+                .and_then(|()| autostart::control_offline_read(
+                    respire_protocol::metadata_control::HostOfflineRead::AgentConfigRead))
+                .and_then(emit_result),
+        ),
+        Some(Command::AgentConfig { set: Some(kv) }) => Some(
+            autostart::control_agent_config(kv).and_then(emit_result),
         ),
         Some(Command::Session { command }) => Some(run_session(command)),
         Some(Command::SuperReset { super_pass }) => Some(run_super_reset(super_pass.as_deref())),
@@ -146,49 +113,7 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         }
 
         Some(Command::Logout { full }) => {
-            let outcome = match logout_cli(*full) {
-                Ok(value) => value,
-                Err(error) => return Some(Err(error)),
-            };
-            let status = if outcome.session_found {
-                OutputStatus::Ok
-            } else {
-                OutputStatus::Skip
-            };
-            let action = if outcome.full {
-                if outcome.session_found {
-                    "deleted"
-                } else {
-                    "absent"
-                }
-            } else if outcome.session_found {
-                "cleared"
-            } else {
-                "absent"
-            };
-            let mut result = ResultEnvelope::new(
-                "logout",
-                status,
-                serde_json::json!({
-                    "mode": if outcome.full { "full" } else { "session" },
-                    "action": action,
-                    "session_found": outcome.session_found,
-                }),
-                vec![OutputItem::new("session", status, action)],
-            );
-            result.details = serde_json::json!({
-                "path": outcome.path.display().to_string(),
-                "identity_deleted": outcome.full && outcome.session_found,
-                "credentials_cleared": !outcome.full && outcome.session_found,
-            });
-            if outcome.full && outcome.session_found {
-                result
-                    .actions
-                    .push("register or import five-key material to reconnect".to_owned());
-            } else if !outcome.full && outcome.session_found {
-                result.actions.push("login to reconnect".to_owned());
-            }
-            return Some(emit_result(result));
+            Some(autostart::control_logout(*full).and_then(emit_result))
         }
 
         Some(Command::Account { action, name, yes }) => {
@@ -335,33 +260,80 @@ fn run_passport() -> Result<()> {
 }
 
 fn run_super_reset(super_pass: Option<&str>) -> Result<()> {
+    use respire_protocol::key_control::{HostKeyInput, HostKeyOutcome, HostKeyResult};
     runtime_policy::require_host("super password rotation")?;
-    respire::service::ensure_writable()?;
-    let mut issued = None;
-    rpc::change_profile(|| {
-        issued = Some(auth::super_reset(None, super_pass)?);
-        Ok(())
-    })?;
-    let new_super = issued.ok_or_else(|| anyhow!("super reset returned no issued password"))?;
-    emit_result(ResultEnvelope::new(
-        "super-reset",
-        OutputStatus::Ok,
-        serde_json::json!({"ok":true,"super":new_super}),
-        vec![OutputItem::new("password", OutputStatus::Ok, "issued")],
-    ))
+    let mut input = HostKeyInput {
+        password: None,
+        super_password: super_pass.map(str::to_owned),
+        ..HostKeyInput::default()
+    };
+    let mut supplied = std::collections::BTreeSet::new();
+    if super_pass.is_some() {
+        supplied.insert("super_password".to_owned());
+    }
+    let mut envelope = autostart::control_super_reset(super_pass)?;
+    loop {
+        if !matches!(envelope.status, OutputStatus::Pending) {
+            return emit_result(envelope);
+        }
+        let receipt: HostKeyResult = serde_json::from_value(envelope.summary.clone())
+            .map_err(|_| anyhow!("invalid key continuation receipt"))?;
+        envelope.actions.push(format!(
+            "runtime key-result --operation-id {} (use the original selected profile)",
+            receipt.operation_id,
+        ));
+        // Scripts receive the original O without reading stdin or admitting another reset.
+        if receipt.outcome != HostKeyOutcome::AwaitingInput || json_mode()
+            || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+        {
+            return emit_result(envelope);
+        }
+        let requested: std::collections::BTreeSet<_> = receipt.required_inputs.iter().collect();
+        anyhow::ensure!(!requested.is_empty() && requested.len() == receipt.required_inputs.len()
+            && requested.iter().all(|field| matches!(field.as_str(), "password" | "super_password")),
+            "Runtime requested invalid key continuation inputs");
+        if requested.iter().any(|field| supplied.contains(field.as_str())) {
+            return emit_result(envelope);
+        }
+        let continuation = (|| -> Result<ResultEnvelope> {
+            for field in &receipt.required_inputs {
+                let prompt = match field.as_str() {
+                    "password" => "original v1 login password: ",
+                    "super_password" => "super password (A3-...): ",
+                    _ => anyhow::bail!("unsupported key continuation input"),
+                };
+                let value = respire::prompt::ask_secret(prompt)?;
+                anyhow::ensure!(!value.is_empty(), "key input is empty; original operation retained");
+                match field.as_str() {
+                    "password" => input.password = Some(value),
+                    "super_password" => input.super_password = Some(value),
+                    _ => anyhow::bail!("unsupported key continuation input"),
+                }
+                supplied.insert(field.clone());
+            }
+            autostart::control_super_reset_step(None, HostKeyInput {
+                password: input.password.clone(), super_password: input.super_password.clone(),
+                ..HostKeyInput::default()
+            }, Some(&receipt))
+        })();
+        envelope = continuation.map_err(|error| error.context(autostart::KeyRecoveryRequired {
+            operation_id: receipt.operation_id, source_profile: receipt.source_profile,
+        }))?;
+    }
 }
 
 fn run_session(command: &SessionCommand) -> Result<()> {
     runtime_policy::require_host("session identity management")?;
     let revoke = match command {
         SessionCommand::List => None,
-        SessionCommand::Revoke { id } => {
-            respire::service::ensure_writable()?;
-            Some(id.as_str())
-        }
+        SessionCommand::Revoke { id } => Some(id.as_str()),
     };
     let action = if revoke.is_some() { "revoke" } else { "list" };
-    let details = auth::sessions(revoke)?;
+    let details = match revoke {
+        Some(id) => autostart::control_session_revoke(id)?,
+        None => autostart::control_session_list()?,
+    };
     let rows = details.as_array().map(Vec::as_slice).unwrap_or(&[]);
     let items = rows
         .iter()
@@ -389,10 +361,11 @@ fn run_session(command: &SessionCommand) -> Result<()> {
 fn run_plugin(command: &PluginCommand) -> Result<()> {
     runtime_policy::require_host("plugin management")?;
     use respire_commands::hooks;
+    let (_, profile) = respire_client_host::config::control_roots()?;
+    let path = profile.join("plugins.json");
     match command {
         PluginCommand::List => {
-            let cfg = hooks::read_config();
-            let path = hooks::config_path();
+            let cfg = hooks::read_config_at(&path);
             let mut items = Vec::new();
             for (event, hooks) in &cfg.hooks {
                 for hook in hooks {
@@ -442,7 +415,7 @@ fn run_plugin(command: &PluginCommand) -> Result<()> {
             })?;
             let data = serde_json::from_str(payload)
                 .map_err(|error| anyhow!("--payload is not JSON: {error}"))?;
-            let verdict = hooks::fire(event, data);
+            let verdict = hooks::fire_at(&path, event, data);
             let status = if verdict.blocked {
                 OutputStatus::Warn
             } else {
@@ -472,59 +445,8 @@ fn run_plugin(command: &PluginCommand) -> Result<()> {
 }
 
 pub(crate) fn capture_run(args: Vec<String>) -> Captured {
-    // Shared capture contract (parse, defer indexing, MemorySourceChanged
-    // retry, envelope collection) lives in respire_commands::capture; this
-    // host only swaps in its richer run() so login/migrate keep working in
-    // the shim process.
+    // Host capture parses and collects output once; Runtime owns business retries.
     respire_commands::capture::capture_exec(args, run)
-}
-
-struct LogoutOutcome {
-    full: bool,
-    session_found: bool,
-    path: PathBuf,
-}
-
-/// Perform logout in the CLI so the output contract does not depend on a
-/// newer app-core helper. Keep the same session and full-logout semantics.
-fn logout_cli(full: bool) -> Result<LogoutOutcome> {
-    let path = auth::session_file()?;
-    if full {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(LogoutOutcome {
-                full,
-                session_found: true,
-                path,
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(LogoutOutcome {
-                full,
-                session_found: false,
-                path,
-            }),
-            Err(error) => Err(anyhow!("clear failed: {error}")),
-        };
-    }
-
-    match auth::read_session_json() {
-        Ok(mut data) => {
-            if let Some(object) = data.as_object_mut() {
-                object.remove("token");
-                object.remove("session_id");
-            }
-            auth::write_session_json(&data)?;
-            Ok(LogoutOutcome {
-                full,
-                session_found: true,
-                path,
-            })
-        }
-        Err(_error) if !path.exists() => Ok(LogoutOutcome {
-            full,
-            session_found: false,
-            path,
-        }),
-        Err(error) => Err(error),
-    }
 }
 
 fn run_inject(
@@ -663,63 +585,7 @@ fn run_inject(
 }
 
 fn run_keygen(pass: Option<&str>, force: bool) -> Result<()> {
-    // v4: --pass is unused for encryption (super password is system-generated); kept for old scripts
-    if pass.is_some() {
-        eprintln!("INFO from v4, --pass is not used for encryption: the super password is system-generated; copy the output below");
-    }
-    // Overwrite guard: keygen issues a new key, and the old key is the only unwrap for store ciphertext -
-    // 1. Overwriting while this machine has a cloud session (user/token) drops the session; cloud memories become unreadable.
-    // 2. Rotating keys while the local store has memories locks those entries (worse offline: no cloud copy to fall back on).
-    // Without --force, refuse and point at the right command.
-    let has_wrap = auth::read_session_json()
-        .ok()
-        .map(|d| {
-            let wrap = d["wrapped_urk"].as_str().is_some_and(|s| !s.is_empty());
-            let user = d["user"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned);
-            let token = d["token"].as_str().is_some_and(|s| !s.is_empty());
-            (wrap, user, token)
-        })
-        .unwrap_or((false, None, false));
-    if !force {
-        if has_wrap.0 && (has_wrap.1.is_some() || has_wrap.2) {
-            anyhow::bail!(
-                "this machine already has cloud key material (user {}) - keygen would overwrite it and drop the cloud session, leaving cloud memories unreadable.\
-                 To switch to offline keys, add --force. To keep using this machine's memories, rsrs login.\
-                 Backup first: rsrs keys-export --out <file>",
-                has_wrap.1.as_deref().unwrap_or("(unnamed)")
-            );
-        }
-        // count is a MemoryTransport trait method; the trait must be in scope to call it
-        use respire::MemoryTransport as _;
-        let alive = respire::service::open_store()
-            .and_then(|s| s.count())
-            .unwrap_or(0);
-        if has_wrap.0 && alive > 0 {
-            anyhow::bail!(
-                "this store already has {} memories encrypted with the current keys - another keygen would mint new keys and those memories would be unreadable forever.\
-                 To start over (old memories discarded), add --force. To keep using this store, run other commands (no need to rebuild keys).",
-                alive
-            );
-        }
-    }
-    let (path, super_pass) = auth::keygen()?;
-    let mut result = ResultEnvelope::new(
-        "keygen",
-        OutputStatus::Ok,
-        serde_json::json!({"path":path.to_string_lossy(),"super":super_pass}),
-        vec![OutputItem::new(
-            "keys",
-            OutputStatus::Ok,
-            path.display().to_string(),
-        )],
-    );
-    result
-        .actions
-        .push("login --interactive --user <user> --pass <password>".into());
-    emit_result(result)
+    emit_result(autostart::control_keygen(pass, force)?)
 }
 
 /// Version check (`update-check`): query the npm registry for a newer CLI.
@@ -791,7 +657,7 @@ fn run_update_check(force: bool, clear: bool) -> Result<()> {
 fn run_account(action: &str, name: Option<&str>, yes: bool) -> Result<()> {
     match action {
         "list" => {
-            let v = respire::service::account_list()?;
+            let v = profile_discovery::account_list()?;
             let accounts = v["accounts"].as_array().cloned().unwrap_or_default();
             let items = accounts
                 .iter()
@@ -822,7 +688,7 @@ fn run_account(action: &str, name: Option<&str>, yes: bool) -> Result<()> {
                     "use needs a profile name: rsrs account use <name> (main = primary)"
                 )
             })?;
-            print_account_use(&respire::service::account_use(name.trim())?)
+            emit_result(profile_control::account_use(name.trim())?)
         }
         "remove" => {
             let name = name.filter(|n| !n.trim().is_empty()).ok_or_else(|| {
@@ -831,37 +697,11 @@ fn run_account(action: &str, name: Option<&str>, yes: bool) -> Result<()> {
             if !yes {
                 anyhow::bail!("deleting a profile wipes the local store and keys and is unrecoverable - add --yes to confirm");
             }
-            respire::service::account_remove(name.trim())?;
-            emit_result(ResultEnvelope::new(
-                "account",
-                OutputStatus::Ok,
-                serde_json::json!({"action":"remove","name":name}),
-                vec![OutputItem::new("profile", OutputStatus::Ok, "deleted")],
-            ))
+            emit_result(autostart::control_account_remove(name.trim())?)
         }
         // A profile name as the action = switch: rsrs account fslong ≡ account use fslong
-        other => print_account_use(&respire::service::account_use(other)?),
+        other => emit_result(profile_control::account_use(other)?),
     }
-}
-
-fn print_account_use(v: &serde_json::Value) -> Result<()> {
-    emit_result(ResultEnvelope::new(
-        "account",
-        OutputStatus::Ok,
-        serde_json::json!({"name":v["name"],"dir":v["dir"],"user":v["user"]}),
-        vec![
-            OutputItem::new(
-                "profile",
-                OutputStatus::Ok,
-                v["name"].as_str().unwrap_or(""),
-            ),
-            OutputItem::new(
-                "directory",
-                OutputStatus::Ok,
-                v["dir"].as_str().unwrap_or(""),
-            ),
-        ],
-    ))
 }
 
 /// Space (virtual-account) command: an owner creates several virtual accounts, each a space; invite codes join people; kick drops membership.
@@ -878,7 +718,7 @@ fn run_space(
     use respire::space;
     match action {
         "list" => {
-            let v = space::space_list()?;
+            let v = profile_discovery::space_list()?;
             let spaces = v["spaces"].as_array().cloned().unwrap_or_default();
             let items = spaces.iter().map(|s| {
                 let name = s["name"].as_str().unwrap_or("");
@@ -894,38 +734,21 @@ fn run_space(
         }
         "create" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| respire_app::input_error::InputError("create needs a space name: rsrs space create <name>".into()))?;
-            let v = space::space_create(n)?;
-            let mut result = ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"create","name":v["name"]}), vec![OutputItem::new("space", OutputStatus::Ok, v["name"].as_str().unwrap_or(""))]);
-            result.actions.push(v["hint"].as_str().unwrap_or("").to_owned());
-            result.details = v;
-            emit_result(result)
+                .ok_or_else(|| respire_client_host::input_error::InputError("create needs a space name: rsrs space create <name>".into()))?;
+            emit_result(profile_control::space_create(n)?)
         }
         "use" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| respire_app::input_error::InputError("use needs a space name: rsrs space use <name>".into()))?;
-            let v = space::space_use(n)?;
-            let mut result = ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"use","name":v["name"]}), vec![OutputItem::new("space", OutputStatus::Ok, v["name"].as_str().unwrap_or("")), OutputItem::new("directory", OutputStatus::Ok, v["dir"].as_str().unwrap_or(""))]);
-            result.details = v;
-            emit_result(result)
+                .ok_or_else(|| respire_client_host::input_error::InputError("use needs a space name: rsrs space use <name>".into()))?;
+            emit_result(profile_control::space_use(n)?)
         }
         "invite" => {
-            let v = space::space_invite(note, readonly)?;
-            let status = if v["readonly"].as_bool() == Some(true) { OutputStatus::Warn } else { OutputStatus::Ok };
-            let mut result = ResultEnvelope::new("space", status, serde_json::json!({"action":"invite","space":v["space"]}), vec![OutputItem::new("code", status, v["code"].as_str().unwrap_or("")), OutputItem::new("session", OutputStatus::Ok, v["session_id"].as_str().unwrap_or(""))]);
-            result.actions.push("space join <code>".into());
-            result.details = v;
-            emit_result(result)
+            emit_result(autostart::control_space_invite(note, readonly)?)
         }
         "join" => {
             let c = code.or(name).filter(|c| !c.trim().is_empty())
-                .ok_or_else(|| respire_app::input_error::InputError("join needs an invite code: rsrs space join <code>".into()))?;
-            let v = space::space_join(c)?;
-            let status = if v["readonly"].as_bool() == Some(true) || v["keyring"].as_bool() == Some(false) { OutputStatus::Warn } else { OutputStatus::Ok };
-            let mut result = ResultEnvelope::new("space", status, serde_json::json!({"action":"join","space":v["space"]}), vec![OutputItem::new("space", status, v["space"].as_str().unwrap_or(""))]);
-            result.actions.push(v["hint"].as_str().unwrap_or("").to_owned());
-            result.details = v;
-            emit_result(result)
+                .ok_or_else(|| respire_client_host::input_error::InputError("join needs an invite code: rsrs space join <code>".into()))?;
+            emit_result(autostart::control_space_join(c)?)
         }
         "members" => {
             let v = space::space_members(name)?;
@@ -939,25 +762,17 @@ fn run_space(
         }
         "kick" => {
             if !session.map(|s| !s.trim().is_empty()).unwrap_or(false) && !all {
-                return Err(respire_app::input_error::InputError("kick needs --session <id> or --all".into()).into());
+                return Err(respire_client_host::input_error::InputError("kick needs --session <id> or --all".into()).into());
             }
-            let v = space::space_kick(session, all)?;
-            let revoked = v["revoked"].as_array().cloned().unwrap_or_default();
-            let failed = v["failed"].as_array().cloned().unwrap_or_default();
-            let status = if failed.is_empty() { OutputStatus::Ok } else { OutputStatus::Warn };
-            let items = revoked.iter().map(|r| OutputItem::new("revoked", OutputStatus::Ok, r.as_str().unwrap_or(""))).chain(failed.iter().map(|f| OutputItem::new("failed", OutputStatus::Warn, f.as_str().unwrap_or("")))).collect();
-            let mut result = ResultEnvelope::new("space", status, serde_json::json!({"action":"kick","revoked":revoked.len(),"failed":failed.len(),"remaining":v["remaining"]}), items);
-            result.details = v;
-            emit_result(result)
+            emit_result(autostart::control_space_kick(session, all)?)
         }
         "remove" => {
             let n = name.filter(|n| !n.trim().is_empty())
-                .ok_or_else(|| respire_app::input_error::InputError("remove needs a space name: rsrs space remove <name> --yes".into()))?;
+                .ok_or_else(|| respire_client_host::input_error::InputError("remove needs a space name: rsrs space remove <name> --yes".into()))?;
             if !yes {
-                return Err(respire_app::input_error::InputError("deleting a space profile wipes the local store and keys and is unrecoverable - add --yes to confirm".into()).into());
+                return Err(respire_client_host::input_error::InputError("deleting a space profile wipes the local store and keys and is unrecoverable - add --yes to confirm".into()).into());
             }
-            space::space_remove(n)?;
-            emit_result(ResultEnvelope::new("space", OutputStatus::Ok, serde_json::json!({"action":"remove","name":n}), vec![OutputItem::new("space", OutputStatus::Ok, "deleted")]))
+            emit_result(autostart::control_space_remove(n)?)
         }
         other => anyhow::bail!(
             "unknown space action \"{other}\" - use: list | create <name> | use <name> | invite | join <code> | members | kick | remove"
@@ -973,253 +788,19 @@ fn run_config(
     cure_auto: Option<bool>,
     rpc_parallelism: Option<u32>,
 ) -> Result<()> {
-    if let Some(d) = data_dir {
-        respire::service::set_data_dir(d)?;
-    }
-    if let Some(a) = addr {
-        respire::service::set_server_addr(a)?;
-    }
-    if let Some(v) = autosync {
-        respire::service::set_autosync(v)?;
-    }
-    if let Some(v) = cure_auto {
-        respire::service::set_cure_auto(v)?;
-    }
-    if let Some(v) = rpc_parallelism {
-        respire::service::set_rpc_parallelism(v)?;
-    }
-    let workers = rpc::worker_limit();
-    let mut worker_text = workers.to_string();
-    if rpc_parallelism.is_some() {
-        worker_text.push_str(" (after --runtime-internal --stop)");
-    }
-    let info = serde_json::json!({
-        "data_dir": respire::service::data_dir().to_string_lossy(),
-        "default_data_dir": respire::service::default_data_dir().to_string_lossy(),
-        "addr": respire::service::server_addr(),
-        "default_addr": respire::service::DEFAULT_SERVER_ADDR,
-        "autosync": respire::service::autosync_enabled(),
-        "cure_auto": respire::service::cure_auto_enabled(),
-        "rpc_parallelism": respire::service::rpc_parallelism_setting(),
-        "rpc_workers": workers,
-    });
-    let items = vec![
-        OutputItem::new(
-            "data dir",
-            OutputStatus::Ok,
-            info["data_dir"].as_str().unwrap_or(""),
-        ),
-        OutputItem::new(
-            "server",
-            OutputStatus::Ok,
-            info["addr"].as_str().unwrap_or(""),
-        ),
-        OutputItem::new("auto-sync", OutputStatus::Ok, info["autosync"].to_string()),
-        OutputItem::new("auto-cure", OutputStatus::Ok, info["cure_auto"].to_string()),
-        OutputItem::new("rpc workers", OutputStatus::Ok, worker_text),
-    ];
-    emit_result(ResultEnvelope::new("config", OutputStatus::Ok, info, items))
+    emit_result(autostart::run_config_control(
+        data_dir, addr, autosync, cure_auto, rpc_parallelism,
+    )?)
 }
 
 /// Under v3, Account Secret is no longer a decrypt key - export the v3 three-piece; old v1 material is listed as a side note.
 fn run_keys_export(out: Option<&str>) -> Result<()> {
-    let data = respire::auth::read_session_json()?;
-    let user = data["user"].as_str().unwrap_or("").to_owned();
-    let addr = data["addr"].as_str().unwrap_or("").to_owned();
-    let version = data["vault_version"].as_i64().unwrap_or(0);
-    let kdf_salt = data["kdf_salt"].as_str().unwrap_or("").to_owned();
-    let wrapped_urk = data["wrapped_urk"].as_str().unwrap_or("").to_owned();
-    let urk_nonce = data["urk_nonce"].as_str().unwrap_or("").to_owned();
-    if wrapped_urk.is_empty() {
-        anyhow::bail!("no local key material (session.json missing wrapped_urk) - this machine never ran register/keys");
-    }
-    let is_v4 = version >= 4;
-    // v4: super password = session["secret_key"] or the keyring; v3: passphrase + Secret Key two-factor
-    let super_key = data["secret_key"].as_str().unwrap_or("").to_owned();
-    let legacy_super = data["super"]
-        .as_str()
-        .map(ToOwned::to_owned)
-        .or_else(|| respire::keystore::load_super(&user))
-        .unwrap_or_default();
-    let super_key = if is_v4 && super_key.is_empty() {
-        respire::keystore::load_super(&user).unwrap_or_default()
-    } else {
-        super_key
-    };
-    if is_v4 && super_key.is_empty() {
-        anyhow::bail!(
-            "this machine has no super password (session and keyring are both empty) - \
-             if the old machine can still unlock, run rsrs keys-export there; or rsrs super-reset with the current code"
-        );
-    }
-    let is_v3 = version == 3;
-    let body = if version == 1 {
-        let account_secret = data["secret"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "v1 Account Secret is missing; retain the original device and library"
-                )
-            })?;
-        format!(
-            "rsrs v1 key-recovery notes (keep private; losing the original factors makes data unreadable)\n\
-             user: {user}\nserver: {addr}\n\n\
-             -- original v1 decrypt factors (no independent super password) --\n\
-             original login password: required, not included in this export\n\
-             Account Secret: {account_secret}\n\n\
-             -- unchanged vault wrap material --\n\
-             vault_version: 1\n\
-             kdf_salt: {kdf_salt}\n\
-             wrapped_urk: {wrapped_urk}\n\
-             urk_nonce: {urk_nonce}\n\n\
-             -- new device, after explicit full-library and cloud migration --\n\
-             rsrs login --interactive --user {user} --pass <original-login-password>\n\
-             Enter the original Account Secret when prompted; do not use --super or ordinary --secret-key.\n\n\
-             -- select the explicitly migrated library and publish the same v1 factors --\n\
-             rsrs migrate --vault --user {user} --pass <original-login-password> --secret-key <original-account-secret>\n"
-        )
-    } else if is_v4 {
-        format!(
-            "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
-             user: {user}\nserver: {addr}\n\n\
-             -- super password (decrypt depends on this; v4 single factor) --\n\
-             super password: {super_key}\n\n\
-             -- vault wrap material (a new machine login fetches this; listed for lookup) --\n\
-             vault_version: {version}\n\
-             kdf_salt: {kdf_salt}\n\
-             wrapped_urk: {wrapped_urk}\n\
-             urk_nonce: {urk_nonce}\n\n\
-             -- import on a new machine --\n\
-             rsrs login --interactive --user {user} --pass <login-password> --super {super_key}\n\
-             (or fill the same super password on the website Keys & Recovery page after login)\n"
-        )
-    } else {
-        format!(
-            "rsrs key-recovery notes (leak = loss of the store; lost super password = cloud data permanently unreadable)\n\
-             user: {user}\nserver: {addr}\n\n\
-             -- original decrypt factors (migration retains the vault version and factors) --\n\
-             super password (passphrase): {legacy_super}\n\
-             Secret Key (recovery code): {super_key}\n\n\
-             -- vault wrap material (listed for lookup) --\n\
-             vault_version: {version}\n\
-             kdf_salt: {kdf_salt}\n\
-             wrapped_urk: {wrapped_urk}\n\
-             urk_nonce: {urk_nonce}\n\n\
-             -- explicitly migrate the full library, select it, then publish its unchanged-factor vault --\n\
-             rsrs migrate --vault --user {user} --pass <login-password> --super \"{legacy_super}\" --secret-key {super_key}\n"
-        )
-    };
-    if !(is_v4 || is_v3) {
-        eprintln!("WARN this profile retains its original v1/v2 factors; migrate the complete library explicitly before cloud namespace publication");
-    }
-    match out {
-        Some(path) => {
-            #[cfg(unix)]
-            {
-                use std::io::Write;
-                use std::os::unix::fs::OpenOptionsExt;
-                let mut f = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .mode(0o600)
-                    .open(path)?;
-                f.write_all(body.as_bytes())?;
-            }
-            #[cfg(not(unix))]
-            std::fs::write(path, &body)?;
-            let mut result = ResultEnvelope::new(
-                "keys-export",
-                OutputStatus::Ok,
-                serde_json::json!({"path":path,"version":version,"user":user}),
-                vec![OutputItem::new("file", OutputStatus::Ok, path)],
-            );
-            result
-                .actions
-                .push("protect file; it contains decrypt secrets".into());
-            emit_result(result)?;
-        }
-        None => {
-            let mut result = ResultEnvelope::new(
-                "keys-export",
-                OutputStatus::Warn,
-                serde_json::json!({"version":version,"user":user,"inline":true}),
-                vec![OutputItem::new("content", OutputStatus::Warn, body)],
-            );
-            result
-                .actions
-                .push("use --out <file> for protected storage".into());
-            emit_result(result)?;
-        }
-    }
-    Ok(())
+    emit_result(autostart::control_keys_export(out)?)
 }
 
-/// Account Secret / five-keys view (--reveal shows full text; default is masked).
+/// Secrets are read by the authorized Runtime; rendering remains in the CLI.
 fn run_secret(reveal: bool) -> Result<()> {
-    let info = respire::service::session_info();
-    if !info.has_session {
-        let mut result = ResultEnvelope::new(
-            "secret",
-            OutputStatus::Skip,
-            serde_json::json!({"session":false}),
-            vec![OutputItem::new(
-                "session",
-                OutputStatus::Skip,
-                "not available",
-            )],
-        );
-        result.actions.push("register or login".into());
-        return emit_result(result);
-    }
-    let mut items = vec![
-        OutputItem::new("user", OutputStatus::Ok, info.user.clone()),
-        OutputItem::new("address", OutputStatus::Ok, info.addr.clone()),
-        OutputItem::new(
-            "token",
-            OutputStatus::Ok,
-            if info.has_token { "present" } else { "missing" },
-        ),
-    ];
-    let mut details = serde_json::json!({"session":serde_json::to_value(&info)?});
-    if reveal {
-        let secret = respire::service::session_secret_full()?;
-        let five = respire::service::session_five_keys()?;
-        items.push(OutputItem::new(
-            "secret",
-            OutputStatus::Warn,
-            secret.clone(),
-        ));
-        items.push(OutputItem::new(
-            "keys",
-            OutputStatus::Warn,
-            serde_json::to_string(&five)?,
-        ));
-        details["secret"] = serde_json::json!(secret);
-        details["five"] = five;
-    } else {
-        items.push(OutputItem::new(
-            "secret",
-            OutputStatus::Ok,
-            info.secret_masked,
-        ));
-    }
-    let mut result = ResultEnvelope::new(
-        "secret",
-        if reveal {
-            OutputStatus::Warn
-        } else {
-            OutputStatus::Ok
-        },
-        serde_json::json!({"reveal":reveal,"user":info.user}),
-        items,
-    );
-    result.details = details;
-    if reveal {
-        result.actions.push("protect secret output".into());
-    }
-    emit_result(result)
+    emit_result(autostart::control_secret(reveal)?)
 }
 
 fn run_fivekeys(
@@ -1232,22 +813,35 @@ fn run_fivekeys(
     urk_nonce: &str,
     super_pass: &str,
 ) -> Result<()> {
-    auth::fivekeys_login(
-        addr,
-        user,
-        pass,
-        secret,
-        kdf_salt,
-        wrapped_urk,
-        urk_nonce,
-        super_pass,
-    )?;
-    emit_result(ResultEnvelope::new(
-        "fivekeys",
-        OutputStatus::Ok,
-        serde_json::json!({"ok":true,"user":user,"addr":addr}),
-        vec![OutputItem::new("session", OutputStatus::Ok, "ready")],
-    ))
+    use respire_protocol::key_control::{HostKeyInput, HostKeyOperation, HostKeyOutcome, HostKeyResult};
+    let operation = HostKeyOperation::Fivekeys { addr: addr.trim().trim_end_matches('/').to_owned(), user: user.to_owned(),
+        kdf_salt: kdf_salt.to_owned(), wrapped_urk: wrapped_urk.to_owned(), urk_nonce: urk_nonce.to_owned(),
+        use_super: !super_pass.is_empty() };
+    let mut input = HostKeyInput { password: Some(pass.to_owned()),
+        super_password: if super_pass.is_empty() { None } else { Some(super_pass.to_owned()) },
+        account_secret: Some(secret.to_owned()), totp: None };
+    let mut envelope = autostart::control_fivekeys(operation.clone(), HostKeyInput {
+        password: input.password.clone(), super_password: input.super_password.clone(),
+        account_secret: input.account_secret.clone(), totp: None }, None)?;
+    loop {
+        if !matches!(envelope.status, OutputStatus::Pending) { return emit_result(envelope); }
+        let receipt: HostKeyResult = serde_json::from_value(envelope.summary.clone())
+            .map_err(|_| anyhow!("invalid fivekeys continuation receipt"))?;
+        envelope.actions.push(format!("runtime key-result --operation-id {}", receipt.operation_id));
+        if json_mode() || !std::io::IsTerminal::is_terminal(&std::io::stdin())
+            || !std::io::IsTerminal::is_terminal(&std::io::stdout())
+            || receipt.outcome != HostKeyOutcome::AwaitingInput
+            || receipt.required_inputs.as_slice() != ["totp"] || input.totp.is_some() {
+            return emit_result(envelope);
+        }
+        input.totp = Some(respire::prompt::ask_secret("TOTP: ")
+            .map_err(|error| error.context(autostart::KeyRecoveryRequired {
+                operation_id: receipt.operation_id.clone(), source_profile: receipt.source_profile.clone(),
+            }))?);
+        envelope = autostart::control_fivekeys(operation.clone(), HostKeyInput {
+            password: input.password.clone(), super_password: input.super_password.clone(),
+            account_secret: input.account_secret.clone(), totp: input.totp.clone() }, Some(&receipt))?;
+    }
 }
 
 fn run_register(
@@ -1259,7 +853,7 @@ fn run_register(
     let addr: &str = addr
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
-        .unwrap_or(respire::service::DEFAULT_SERVER_ADDR);
+        .unwrap_or(crate::client_config::DEFAULT_SERVER_ADDR);
     // Missing args: interactive prompt (TTY and not --json); args the prompt cannot fill still error.
     let interactive = respire::prompt::interactive();
     let user: String = match user.map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -1291,10 +885,14 @@ fn run_register(
         Some(s) => s.to_owned(),
         None => String::new(),
     };
-    let issued = respire::service::register(addr, &user, &pass, &super_pass)?;
-    let data = auth::read_session_json().unwrap_or_else(|_| serde_json::json!({}));
-    let secret_key = data["secret_key"].as_str().unwrap_or("").to_owned();
-    let super_key = issued.unwrap_or_else(|| secret_key.clone());
+    let response = autostart::control_register(addr, &user, &pass,
+        (!super_pass.is_empty()).then_some(super_pass.as_str()))?;
+    let receipt: respire_protocol::host_control::HostAuthAccountResult =
+        serde_json::from_value(response.summary.clone())?;
+    anyhow::ensure!(receipt.outcome == respire_protocol::host_control::HostAuthAccountOutcome::Committed,
+        "registration was not committed; retain and query the original account operation");
+    let super_key = receipt.super_password.filter(|value| !value.is_empty())
+        .context("committed registration is missing the recovery code")?;
     let mut result = ResultEnvelope::new(
         "register",
         OutputStatus::Ok,
@@ -1316,7 +914,7 @@ fn install_cli_host_hooks() -> bool {
             background_paused: Some(|| autostart::background_paused()),
             check_direct_access: Some(|| autostart::check_direct_access()),
             note_credential_access: Some(|available| autostart::note_credential_access(available)),
-            context_changed: Some(rpc::context_changed),
+            context_changed: None,
             call_runtime_method: Some(rpc::call_method_outcome),
             update_hint: Some(respire::update_check::hint),
             update_enabled: Some(respire::update_check::enabled),
@@ -1342,20 +940,43 @@ fn install_cli_host_hooks() -> bool {
             record_exit: Some(|success| autostart::record_exit(success)),
             credential_state: Some(|| autostart::credential_state()),
             capture_run: Some(capture_run),
-            mcp_http_response: Some(|request| {
-                mcp::http_response(mcp::HttpIn {
-                    method: request.method,
-                    path: request.path,
-                    origin: request.origin,
-                    accept: request.accept,
-                    body: request.body,
-                })
-            }),
+            mcp_http_response: None,
         });
-    if installed {
-        respire_commands::rpc_worker::install_recall_stats_enqueue(rpc::enqueue_recall_stats_local);
-    }
     installed
+}
+
+fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
+    let (mut envelope, code) = respire_commands::output_emit::command_failure(error);
+    if let Some(original) = error.downcast_ref::<autostart::AuthOutcomeUnknown>() {
+        envelope.summary = serde_json::json!({"reason":"auth_outcome_unknown"});
+        envelope.details = serde_json::json!({
+            "error_type":"outcome_unknown", "operation_id":original.operation_id,
+            "force":original.force, "result_command":"runtime auth-result", "replayed":false,
+        });
+    } else if let Some(original) = error.downcast_ref::<autostart::IdentityWriteRecoveryRequired>() {
+        envelope.summary = serde_json::json!({"reason":"identity_write_recovery_required"});
+        envelope.details = serde_json::json!({
+            "error_type":"identity_write_recovery_required", "operation_id":original.operation_id,
+            "idempotency_key":original.key, "source_profile":original.profile,
+            "operation":original.operation, "query_only":original.query_only, "replayed":false,
+            "result_command":"repeat the same logout/session revoke command",
+        });
+    } else if let Some(original) = error.downcast_ref::<autostart::KeyRecoveryRequired>() {
+        envelope.summary = serde_json::json!({"reason":"key_outcome_unknown"});
+        envelope.details = serde_json::json!({
+            "error_type":"outcome_unknown", "operation_id":original.operation_id,
+            "source_profile":original.source_profile, "result_command":"runtime key-result",
+            "query_only":true, "replayed":false,
+        });
+    } else if let Some(original) = error.downcast_ref::<autostart::AccountOutcomeUnknown>() {
+        envelope.summary = serde_json::json!({"reason":"account_outcome_unknown"});
+        envelope.details = serde_json::json!({
+            "error_type":"outcome_unknown", "operation_id":original.operation_id,
+            "source_profile":original.source_profile, "register":original.register,
+            "result_command":"runtime account-result", "replayed":false,
+        });
+    }
+    (envelope, code)
 }
 
 fn main() {
@@ -1402,7 +1023,7 @@ fn main_body() -> i32 {
         if std::env::args_os().any(|arg| arg == "--client-only") {
             std::env::set_var("RSRS_CLIENT_ONLY", "1");
         }
-        return match respire::service::validate_client_config().and_then(|()| host_rpc::serve()) {
+        return match respire_client_host::roots::validate_client_environment().and_then(|()| host_rpc::serve()) {
             Ok(code) => code,
             Err(error) => {
                 let (envelope, code) = command_failure(&error);
@@ -1410,18 +1031,6 @@ fn main_body() -> i32 {
                     eprintln!("host RPC reply failed: {output_error}");
                 }
                 code
-            }
-        };
-    }
-    if !roots_requested && std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == "--core-worker-internal")
-    {
-        return match respire_app::core_sdk::worker::run() {
-            Ok(()) => 0,
-            Err(error) => {
-                eprintln!("Core worker stopped: {error:#}");
-                1
             }
         };
     }
@@ -1441,7 +1050,7 @@ fn main_body() -> i32 {
                 std::env::remove_var("RSRS_DEFAULT_DATA_DIR");
                 std::env::set_var("RSRS_DATA_DIR", dir);
             }
-            respire::service::resolved_roots().and_then(|roots| {
+            respire_client_host::roots::resolved_roots().and_then(|roots| {
                 emit_result(ResultEnvelope::new(
                     "roots",
                     OutputStatus::Ok,
@@ -1462,7 +1071,7 @@ fn main_body() -> i32 {
             set_json_mode(json);
             prepare_command_runtime().and_then(|()| rpc::runtime_entry(flags))
         }
-        Preparsed::Invalid(error) => Err(respire_app::input_error::InputError(error).into()),
+        Preparsed::Invalid(error) => Err(respire_client_host::input_error::InputError(error).into()),
         Preparsed::Cli { direct, args } => {
             DIRECT_MODE.store(direct, Ordering::Relaxed);
             match Cli::try_parse_from(std::iter::once(std::ffi::OsString::from("rsrs")).chain(args))
@@ -1509,9 +1118,9 @@ fn main_body() -> i32 {
 
 /// Normal command bootstrap, intentionally omitted by the read-only revision probe.
 fn prepare_command_runtime() -> Result<()> {
-    respire::service::validate_client_config()?;
+    respire_client_host::roots::validate_client_environment()?;
     if !runtime_policy::client_only() {
-        respire::migration::ensure_default_home()
+        respire_client_host::paths::ensure_default_home()
             .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
     }
     Ok(())
@@ -1688,7 +1297,7 @@ fn run_classify_config(
     let value = if set {
         let selected = backend
             .map(str::to_owned)
-            .or_else(respire::keystore::load_classify_backend)
+            .or_else(respire_client_host::classification::load_classify_backend)
             .unwrap_or_else(|| "jev".to_owned());
         classify_config::configure(&selected, api_base, model, key_stdin)?
     } else {
@@ -1716,42 +1325,98 @@ fn run(args: Cli) -> Result<()> {
         fix,
     }) = args.command.as_ref()
     {
-        if !rpc::worker_active() {
-            set_json_mode(
-                args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
-            );
-            let _progress = progress::Scope::start(args.progress_id.clone(), !json_mode(), true);
-            return doctor::run(*remote, *check_update, *fix);
-        }
+        set_json_mode(
+            args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
+        );
+        let _progress = progress::Scope::start(args.progress_id.clone(), !json_mode(), true);
+        return doctor::run(*remote, *check_update, *fix);
     }
     if let Some(Command::Runtime { command }) = args.command.as_ref() {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
         return autostart::execute(command);
+    }
+    if let Some(Command::SuperReset { super_pass }) = args.command.as_ref() {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        // The private adapter owns Paused recovery; never wrap it in change_profile.
+        return run_super_reset(super_pass.as_deref());
+    }
+    if let Some(Command::Migrate { source: Some(source), account: Some(account), vault: false, .. }) = args.command.as_ref() {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        // This private transaction owns Paused recovery, before generic login/profile gates.
+        return emit_result(autostart::control_migrate_profile(source, account)?);
     }
     // Static CLI support is safe to inspect even on a fresh or inaccessible
     // profile. It makes no statement about account rights or model readiness.
     if matches!(args.command, Some(Command::Capabilities)) {
         return run_capabilities();
     }
+    if matches!(args.command.as_ref(), Some(Command::Keygen { .. } | Command::Register { .. } | Command::Login { .. })) {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        // Account control owns its recovery receipt; the legacy profile wrapper must not replay it.
+        match args.command.as_ref() {
+            Some(Command::Keygen { pass, force }) => return run_keygen(pass.as_deref(), *force),
+            Some(Command::Register { addr, user, pass, super_pass }) => {
+                return run_register(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref());
+            }
+            Some(Command::Login { addr, user, pass, super_pass, interactive, oauth, dashboard, no_open, migrate_local }) => {
+                return login::run(addr.as_deref(), user.as_deref(), pass.as_deref(), super_pass.as_deref(),
+                    *interactive, *oauth, dashboard.as_deref(), *no_open, *migrate_local);
+            }
+            _ => unreachable!("account command matched above"),
+        }
+    }
+    if matches!(args.command.as_ref(), Some(Command::Space { action, .. })
+        if matches!(action.as_str(), "invite" | "join" | "kick" | "create" | "remove"))
+        || matches!(args.command.as_ref(), Some(Command::Account { action, .. }) if action == "remove") {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        // Membership owns its original Paused receipt, before generic profile/login recovery.
+        return host_command(&args).context("private space host handler is missing")?;
+    }
+    // Legacy recovery owns its Paused transaction before ordinary requests hit the fence.
+    if !runtime_policy::client_only() && !matches!(args.command, Some(Command::V)) {
+        rpc::recover_interrupted_login()?;
+    }
+    if let Some(Command::AgentConfig { set: Some(kv) }) = args.command.as_ref() {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        // The original O owns recovery before the generic Paused/request gate.
+        return emit_result(autostart::control_agent_config(kv)?);
+    }
     autostart::check_managed_request()?;
-    let metadata_requested = match args.command.as_ref() {
-        Some(Command::Remember {
-            metadata, r#type, ..
-        }) => {
-            metadata.has_patch()
-                || r#type
-                    .as_deref()
-                    .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
-        }
-        Some(Command::Update { metadata, kind, .. }) => {
-            metadata.has_patch()
-                || kind
-                    .as_deref()
-                    .is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self"))
-        }
-        _ => false,
-    };
-    if metadata_requested {
-        respire_app::metadata_gate::require_support()?;
+    if matches!(args.command.as_ref(), Some(Command::Migrate {
+        source: None, account: None, vault: false, ..
+    })) {
+        runtime_policy::require_host("explicit legacy migration")?;
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        let value = profile_discovery::list_legacy_profiles()?;
+        let mut envelope = ResultEnvelope::new("migrate", OutputStatus::Ok, value.clone(), Vec::new());
+        envelope.details = value;
+        return emit_result(envelope);
+    }
+    // Listings need host metadata only; switches own their config transaction.
+    // Never enter the legacy change_profile -> run_local transaction for them.
+    if matches!(args.command.as_ref(), Some(Command::Account { action, .. })
+        if action != "remove")
+        || matches!(args.command.as_ref(), Some(Command::Space { action, .. }) if matches!(action.as_str(), "list" | "use"))
+    {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return host_command(&args).context("profile switch host handler is missing")?;
+    }
+    if matches!(args.command.as_ref(), Some(Command::Secret { .. } | Command::KeysExport { .. })) {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return match args.command.as_ref() {
+            Some(Command::Secret { reveal }) => run_secret(*reveal),
+            Some(Command::KeysExport { out }) => run_keys_export(out.as_deref()),
+            _ => unreachable!("private secret command matched above"),
+        };
     }
     if DIRECT_MODE.load(Ordering::Relaxed)
         && matches!(
@@ -1765,7 +1430,8 @@ fn run(args: Cli) -> Result<()> {
         set_json_mode(
             args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
         );
-        return run_metadata_status();
+        return emit_result(autostart::control_offline_read(
+            respire_protocol::metadata_control::HostOfflineRead::MetadataStatus)?);
     }
     if let Some(Command::Metadata {
         command: command @ (metadata::Command::Enable { .. } | metadata::Command::Disable),
@@ -1774,7 +1440,7 @@ fn run(args: Cli) -> Result<()> {
         set_json_mode(
             args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
         );
-        return run_metadata_host(command);
+        return emit_result(autostart::control_metadata(command, DIRECT_MODE.load(Ordering::Relaxed))?);
     }
     if let Some(Command::Snapshot {
         cmd: SnapshotCmd::Restore { id, confirm },
@@ -1782,119 +1448,69 @@ fn run(args: Cli) -> Result<()> {
     {
         runtime_policy::require_host("snapshot restore")?;
         anyhow::ensure!(
-            !rpc::worker_active(),
-            "snapshot restore must run in the host CLI, not a runtime request"
-        );
-        anyhow::ensure!(
             *confirm,
             "snapshot restore requires --confirm; it replaces local state and quarantines sync"
         );
-        respire::service::ensure_writable()?;
-        anyhow::ensure!(
-            !respire::service::off_mode(),
-            "snapshot restore is unavailable while memory is paused"
-        );
-        let root = respire::service::data_dir();
-        let account = respire::service::session_user_of_dir(&root);
-        let keys = build_session()?;
-        let receipt = std::cell::RefCell::new(None::<respire_app::snapshot::RestoreReceipt>);
-        let cleanup_issue = std::cell::RefCell::new(None::<String>);
-        rpc::change_profile_with_verification(
-            || {
-                let ownership =
-                    respire::lock::LibraryLock::acquire(&root, std::time::Duration::from_secs(15))?;
-                *receipt.borrow_mut() = Some(respire_app::snapshot::restore_locked(
-                    &root, &account, &keys, id, &ownership,
-                )?);
-                Ok(())
-            },
-            || {
-                if let Some(restored) = receipt.borrow().as_ref() {
-                    let ownership = respire::lock::LibraryLock::acquire(
-                        &root,
-                        std::time::Duration::from_secs(15),
-                    )?;
-                    respire_app::snapshot::rollback_locked(&root, restored, &ownership)?;
-                }
-                Ok(())
-            },
-            || {
-                let held = receipt.borrow();
-                let receipt = held
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("snapshot restore receipt missing"))?;
-                rpc::verify_snapshot_store(&root, &receipt.restored)?;
-                respire_app::snapshot::commit_restore(&root, receipt)?;
-                // A durable commit is never rolled back for cleanup failure.
-                // Both the release and any recovery remain under takeover.
-                *cleanup_issue.borrow_mut() =
-                    respire_app::snapshot::release_restore(&root, receipt)
-                        .err()
-                        .map(|error| error.to_string());
-                Ok(())
-            },
-        )?;
-        let receipt = receipt
-            .into_inner()
-            .ok_or_else(|| anyhow!("snapshot restore receipt missing"))?;
-        let cleanup = cleanup_issue.into_inner();
-        let mut result = ResultEnvelope::new(
-            "snapshot",
-            if cleanup.is_some() {
-                OutputStatus::Warn
-            } else {
-                OutputStatus::Ok
-            },
-            serde_json::json!({"action":"restored","sync_quarantined":true,"cloud_rollback":false,"runtime_verified":true,"service_released":respire_app::snapshot::ensure_no_incomplete_restore(&root).is_ok()}),
-            Vec::new(),
-        );
-        result.details = serde_json::to_value(&receipt)?;
-        if let Some(error) = cleanup {
-            result.errors.push(format!(
-                "restored runtime verified; local rollback cleanup pending: {error}"
-            ));
-        }
-        return emit_result(result);
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return emit_result(autostart::snapshot_restore_control(id)?);
     }
     if let Some(Command::Snapshot {
         cmd: SnapshotCmd::Recover { confirm },
     }) = args.command.as_ref()
     {
         runtime_policy::require_host("snapshot recovery")?;
-        anyhow::ensure!(
-            !rpc::worker_active(),
-            "snapshot recovery must run in the host CLI"
-        );
         anyhow::ensure!(*confirm, "snapshot recover requires --confirm");
-        respire::service::ensure_writable()?;
-        let root = respire::service::data_dir();
-        let account = respire::service::session_user_of_dir(&root);
-        autostart::with_explicit_recovery(|| {
-            rpc::change_profile_with_verification(
-                || {
-                    let ownership = respire::lock::LibraryLock::acquire(
-                        &root,
-                        std::time::Duration::from_secs(15),
-                    )?;
-                    respire_app::snapshot::recover_locked(&root, &account, &ownership)
-                },
-                || Ok(()),
-                || {
-                    if !respire::service::off_mode() {
-                        rpc::verify_open_store(&root)?;
-                    }
-                    Ok(())
-                },
-            )
-        })?;
-        return emit_result(ResultEnvelope::new(
-            "snapshot",
-            OutputStatus::Ok,
-            serde_json::json!({"action":"recovered","runtime_verified":true}),
-            Vec::new(),
-        ));
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return emit_result(autostart::snapshot_recover_control()?);
     }
-    respire_app::snapshot::ensure_no_incomplete_restore(&respire::service::data_dir())?;
+    if let Some(Command::Model {
+        action: ModelAction::InstallM3 { mirror, model, for_engine },
+    }) = args.command.as_ref() {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        let _task = respire_commands::model_progress::TaskScope::new(args.model_task_id.clone());
+        let intent = respire_protocol::ModelInstallIntent {
+            mirror: mirror.clone(), model: model.clone(), for_engine: for_engine.clone(),
+        };
+        let (assets, skipped) = autostart::control_prepare_model(&intent)?;
+        let directory = assets.assets.iter()
+            .find(|asset| matches!(asset.name.as_str(), "bge-m3-tokenizer" | "profile-tokenizer"))
+            .and_then(|asset| asset.path.as_deref())
+            .and_then(|path| std::path::Path::new(path).parent())
+            .context("Runtime model receipt is missing its tokenizer directory")?;
+        let mut result = ResultEnvelope::new("model install-m3", OutputStatus::Ok,
+            serde_json::json!({"dir":directory,"skipped":skipped,"activated":false,"model":"m3"}),
+            vec![OutputItem::new("model", OutputStatus::Ok,
+                "Runtime verified model files and fresh backend loading; run rsrs reembed to rebuild an old index")]);
+        result.details = serde_json::to_value(&assets)?;
+        return emit_result(result);
+    }
+    // Business RPC retains Runtime's post-ownership snapshot gate and bootstrap.
+    // Only local host writes need this offline check before they change files.
+    let host_snapshot_write = match args.command.as_ref() {
+        Some(Command::AgentConfig { set: Some(_) }
+            | Command::ClassifyConfig { set: true, .. }
+            | Command::Inject { targets: false, preview: false, .. }
+            | Command::Plugin { command: PluginCommand::Test { .. } }) => true,
+        Some(Command::Config { data_dir, addr, autosync, cure_auto, rpc_parallelism }) => {
+            data_dir.is_some() || addr.is_some() || autosync.is_some()
+                || cure_auto.is_some() || rpc_parallelism.is_some()
+        }
+        Some(Command::Account { action, .. }) => action == "remove",
+        Some(Command::Space { action, .. }) => matches!(action.as_str(), "create" | "remove"),
+        _ => false,
+    };
+    if host_snapshot_write && !runtime_policy::client_only() {
+        runtime_policy::require_host("local host write snapshot preflight")?;
+        if runtime_fetch::read_manifest()?.is_none() {
+            runtime_fetch::download_and_install(None, None)?;
+        }
+        autostart::control_offline_read(
+            respire_protocol::metadata_control::HostOfflineRead::SnapshotPreflight,
+        ).context("snapshot preflight unavailable or blocked; inspect snapshot recovery before continuing")?;
+    }
     let _model_task = respire::model_progress::TaskScope::new(args.model_task_id.clone());
     set_json_mode(
         args.json || respire::env::var("RSRS_JSON").is_ok_and(|v| v == "1" || v == "true"),
@@ -1931,9 +1547,6 @@ fn run(args: Cli) -> Result<()> {
         }
     }
     if matches!(args.command, Some(Command::MemoryRevision)) {
-        if rpc::worker_active() {
-            return run_memory_revision();
-        }
         if !DIRECT_MODE.load(Ordering::Relaxed) && runtime_policy::client_only() {
             return rpc::call_existing_from_argv();
         }
@@ -1948,7 +1561,7 @@ fn run(args: Cli) -> Result<()> {
         ));
     }
     // Host-only migration and repair dispatch must obey the memory gate too.
-    if respire::service::off_mode() && matches!(args.command.as_ref(), Some(Command::Review { .. }))
+    if respire_client_host::settings::off_mode()? && matches!(args.command.as_ref(), Some(Command::Review { .. }))
     {
         set_exit_code(1);
         let mut result = ResultEnvelope::new(
@@ -1963,16 +1576,15 @@ fn run(args: Cli) -> Result<()> {
             .push("memory service is off; due state is unavailable".to_owned());
         return emit_result(result);
     }
-    if respire::service::off_mode()
+    if respire_client_host::settings::off_mode()?
         && args
             .command
             .as_ref()
             .is_some_and(|command| !is_off_allowed(command))
     {
-        return run_local(args);
+        return rpc::call_from_argv();
     }
     let display = !json_mode()
-        && !rpc::worker_active()
         && args.command.is_some()
         && !matches!(
             args.command,
@@ -1989,17 +1601,11 @@ fn run(args: Cli) -> Result<()> {
     {
         if action == "join" {
             let code = code.as_deref().or(name.as_deref()).ok_or_else(|| {
-                respire_app::input_error::InputError("join needs an invite code".into())
+                respire_client_host::input_error::InputError("join needs an invite code".into())
             })?;
-            respire::space::validate_join(code)?;
+            let invite = respire::space::parse_invite(code)?;
+            respire::space::validate_space_name(invite["space"].as_str().context("invite space missing")?)?;
         }
-    }
-    if !rpc::worker_active()
-        && !runtime_policy::client_only()
-        && !matches!(args.command, Some(Command::V))
-        && respire_app::login_transaction::recovery_pending()
-    {
-        rpc::recover_interrupted_login()?;
     }
     if let Some(Command::Migrate {
         source,
@@ -2014,7 +1620,7 @@ fn run(args: Cli) -> Result<()> {
     }) = args.command.as_ref()
     {
         if *vault || source.is_some() {
-            respire::service::ensure_writable()?;
+            respire_client_host::settings::ensure_writable()?;
         }
         runtime_policy::require_host("explicit legacy migration")?;
         if *vault {
@@ -2028,8 +1634,10 @@ fn run(args: Cli) -> Result<()> {
             );
         }
         let value = match (source.as_deref(), account.as_deref()) {
-            (Some(source), Some(account)) => respire::migration::migrate_profile(source, account)?,
-            (None, None) => respire::migration::list_legacy_profiles()?,
+            (Some(source), Some(account)) => {
+                return emit_result(autostart::control_migrate_profile(source, account)?);
+            }
+            (None, None) => profile_discovery::list_legacy_profiles()?,
             _ => anyhow::bail!("migration requires both --source and --account"),
         };
         let mut envelope =
@@ -2049,9 +1657,6 @@ fn run(args: Cli) -> Result<()> {
     }) = args.command.as_ref()
     {
         runtime_policy::require_host("classification configuration")?;
-        if rpc::worker_active() && *key_stdin {
-            anyhow::bail!("--key-stdin must run in the host CLI, not through runtime RPC");
-        }
         return run_classify_config(
             backend.as_deref(),
             api_base.as_deref(),
@@ -2059,33 +1664,6 @@ fn run(args: Cli) -> Result<()> {
             *set,
             *key_stdin,
         );
-    }
-    if let Some(Command::Login {
-        addr,
-        user,
-        pass,
-        super_pass,
-        interactive,
-        oauth,
-        dashboard,
-        no_open,
-        migrate_local,
-    }) = args.command.as_ref()
-    {
-        return login::run(
-            addr.as_deref(),
-            user.as_deref(),
-            pass.as_deref(),
-            super_pass.as_deref(),
-            *interactive,
-            *oauth,
-            dashboard.as_deref(),
-            *no_open,
-            *migrate_local,
-        );
-    }
-    if rpc::worker_active() {
-        return run_local(args);
     }
     if let Some(Command::Restart { timeout }) = args.command.as_ref() {
         let result = rpc::restart_runtime(std::time::Duration::from_secs(*timeout))?;
@@ -2107,17 +1685,7 @@ fn run(args: Cli) -> Result<()> {
             "\u{5b89}\u{88c5}\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{ff1b}\u{7b49}\u{5f85} Windows ML",
             "Installing inference providers; waiting for Windows ML",
         );
-        let mut providers = Vec::new();
-        rpc::change_profile(|| {
-            providers = respire::model_install::install_engines()?;
-            Ok(())
-        })?;
-        return emit_result(ResultEnvelope::new(
-            "model",
-            OutputStatus::Ok,
-            serde_json::json!({"providers":providers}),
-            Vec::new(),
-        ));
+        return emit_result(autostart::control_install_engines()?);
     }
     if matches!(
         args.command,
@@ -2126,25 +1694,16 @@ fn run(args: Cli) -> Result<()> {
         })
     ) {
         runtime_policy::require_host("CPU recovery and runtime shutdown")?;
-        anyhow::ensure!(respire_app::embedding::saved_selection()?.is_none(),"library uses a model profile; use model switch PROFILE --backend onnx --engine cpu for CPU recovery");
-        if autostart::managed_enabled()? {
-            rpc::change_profile(respire::memory::onnx::reset_cpu_config)?;
-            return emit_result(ResultEnvelope::new(
-                "model",
-                OutputStatus::Ok,
-                serde_json::json!({"engine":"cpu","force_cpu":true,"runtime_restarted":true}),
-                Vec::new(),
-            ));
-        }
-        let _takeover = runtime_policy::takeover_lock()?;
-        respire::memory::onnx::reset_cpu_config()?;
-        let stopped_pid = rpc::force_stop_for_reset()?;
-        return emit_result(ResultEnvelope::new(
-            "model",
-            OutputStatus::Ok,
-            serde_json::json!({"engine":"cpu", "force_cpu":true, "stopped_pid":stopped_pid}),
-            vec![],
-        ));
+        return emit_result(autostart::control_reset_cpu()?);
+    }
+    if matches!(
+        args.command,
+        Some(Command::Model {
+            action: ModelAction::UninstallM3
+        })
+    ) {
+        runtime_policy::require_host("M3 model removal")?;
+        return emit_result(autostart::control_uninstall_m3()?);
     }
     if let Some(Command::Web { no_open }) = args.command.as_ref() {
         if !no_open {
@@ -2163,55 +1722,7 @@ fn run(args: Cli) -> Result<()> {
         }
         return mcp::serve();
     }
-    let host_auth_change = HOST_RPC_OUTPUT.get()
-        && matches!(
-            args.command.as_ref(),
-            Some(Command::Register { .. } | Command::Fivekeys { .. })
-        );
-    // Only these asset/configuration handlers run locally, after Runtime drains.
-    // Business commands continue to use Runtime RPC, including with --direct.
-    let host_asset_change = matches!(
-        args.command.as_ref(),
-        Some(Command::Model {
-            action: ModelAction::InstallM3 { .. } | ModelAction::UninstallM3
-        } | Command::AgentConfig { set: Some(_) })
-    );
-    if host_asset_change
-        || (!DIRECT_MODE.load(Ordering::Relaxed)
-            && (changes_profile(args.command.as_ref()) || host_auth_change))
-    {
-        runtime_policy::require_host("profile switching")?;
-        CAPTURED.with(|slot| *slot.borrow_mut() = None);
-        DEFER_PROFILE_OUTPUT.set(true);
-        let change = || {
-            run_local(args)?;
-            if CAPTURED.with(|slot| {
-                slot.borrow()
-                    .as_ref()
-                    .is_some_and(|value| matches!(value.status, OutputStatus::Fail))
-            }) {
-                let errors = CAPTURED
-                    .with(|slot| slot.borrow().as_ref().map(|value| value.errors.join("; ")));
-                anyhow::bail!(
-                    "{}",
-                    errors.unwrap_or_else(|| "profile change failed".to_owned())
-                );
-            }
-            Ok(())
-        };
-        let switched = if host_asset_change {
-            rpc::change_host_assets(change)
-        } else {
-            rpc::change_profile(change)
-        };
-        DEFER_PROFILE_OUTPUT.set(false);
-        OUTPUT_EMITTED.set(false);
-        OUTPUT_EXIT_CODE.set(0);
-        let result = CAPTURED.with(|slot| slot.borrow_mut().take());
-        switched?;
-        return emit_result(result.ok_or_else(|| anyhow!("profile command returned no result"))?);
-    }
-    // Profile mutations must finish the host drain/restart transaction above.
+    // Profile and agent changes own their private maintenance transactions.
     // Other host commands never belong to Runtime business RPC.
     if let Some(outcome) = host_command(&args) {
         return outcome;
@@ -2238,79 +1749,6 @@ fn run(args: Cli) -> Result<()> {
 #[cfg(test)]
 mod capture_tests {
     use clap::{CommandFactory, Parser};
-
-    fn seed_capture_session() -> anyhow::Result<()> {
-        // Fixed fixture material only; never use this session or key in production.
-        const TEST_SUPER: &str = "A3-000000-000000-000000-000000-000000-000000";
-        std::env::set_var("RSRS_SUPER", TEST_SUPER);
-        let salt = "01".repeat(16);
-        let kek = respire::memory::crypto::derive_rsrs_kek(TEST_SUPER, &salt)?;
-        let (nonce, wrapped) = respire::memory::crypto::wrap_key(&[7; 32], &kek)?;
-        respire::auth::write_session_json(&serde_json::json!({
-            "user":"test", "vault_version":4, "kdf_salt":salt,
-            "wrapped_urk":format!("{}{wrapped}", respire::memory::crypto::RSRS_PREFIX),
-            "urk_nonce":nonce, "pass":"synthetic-capture-unused"
-        }))?;
-        Ok(())
-    }
-
-    pub(crate) fn with_isolated_session<T>(
-        f: impl FnOnce(&std::path::Path) -> anyhow::Result<T>,
-    ) -> anyhow::Result<T> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let dir = tempfile::tempdir()?;
-        struct Restore {
-            values: Vec<(&'static str, Option<std::ffi::OsString>)>,
-            worker: bool,
-        }
-        impl Drop for Restore {
-            fn drop(&mut self) {
-                for (key, value) in &self.values {
-                    match value {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
-                crate::rpc::set_worker_active(self.worker);
-            }
-        }
-        let _restore = Restore {
-            values: [
-                "RSRS_DATA_DIR",
-                "RSRS_BIN_DIR",
-                "RSRS_M3_DIR",
-                "RSRS_SUPER",
-                "RSRS_NO_AUTOSYNC",
-                "RSRS_RPC_PORT",
-                "RSRS_CORE_TEST_MODE",
-            ]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect(),
-            worker: crate::rpc::worker_active(),
-        };
-        let _guard = EnvGuard {
-            prev: respire::env::var("RSRS_DATA_DIR").ok(),
-            prev_super: std::env::var_os("RSRS_SUPER"),
-        };
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
-        std::env::set_var("RSRS_M3_DIR", dir.path().join("absent-model"));
-        std::env::set_var("RSRS_NO_AUTOSYNC", "1");
-        std::env::set_var("RSRS_RPC_PORT", "29873");
-        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
-        crate::rpc::set_worker_active(true);
-        seed_capture_session()?;
-        let result = f(dir.path());
-        respire::resident::clear()?;
-        result
-    }
-
-    mod brief_coverage;
-    mod metadata_coverage;
-    mod review_coverage;
 
     #[test]
     fn injected_chain_examples_follow_the_parser_contract() -> anyhow::Result<()> {
@@ -2437,7 +1875,7 @@ mod capture_tests {
     #[test]
     fn input_failures_remain_distinct_from_runtime_failures() {
         let input: anyhow::Error =
-            respire_app::input_error::InputError("no such entry: fixture".into()).into();
+            respire_client_host::input_error::InputError("no such entry: fixture".into()).into();
         let (envelope, code) = super::command_failure(&input.context("resort validation"));
         assert_eq!(code, 2);
         assert_eq!(envelope.summary["reason"], "invalid_input");
@@ -2451,539 +1889,29 @@ mod capture_tests {
         assert_eq!(code, 1);
         assert_eq!(envelope.summary["reason"], "runtime_error");
         assert_eq!(envelope.details["error_type"], "runtime");
+        let original = "7c633a08-9077-4710-882e-ac3d2998ab8b";
+        let unknown: anyhow::Error = super::autostart::AuthOutcomeUnknown {
+            operation_id: original.into(), force: true,
+        }.into();
+        let (envelope, code) = super::command_failure(&unknown.context("private exchange"));
+        assert_eq!(code, 1);
+        assert_eq!(envelope.summary["reason"], "auth_outcome_unknown");
+        assert_eq!(envelope.details["operation_id"], original);
+        assert_eq!(envelope.details["force"], true);
+        assert_eq!(envelope.details["replayed"], false);
+        let unknown: anyhow::Error = super::autostart::AccountOutcomeUnknown {
+            operation_id: original.into(), source_profile: std::path::PathBuf::from("original-profile"), register: true,
+        }.into();
+        let (envelope, _) = super::command_failure(&unknown);
+        assert_eq!(envelope.summary["reason"], "account_outcome_unknown");
+        assert_eq!(envelope.details["source_profile"], "original-profile");
+        assert_eq!(envelope.details["register"], true);
+        assert_eq!(envelope.details["result_command"], "runtime account-result");
         let parsed = capture_run(vec!["--json".into(), "--not-a-command".into()]);
         assert_eq!(parsed.exit, 2);
         assert_eq!(parsed.envelope.summary["reason"], "invalid_input");
         assert_eq!(parsed.envelope.details["error_type"], "user");
     }
 
-    struct EnvGuard {
-        prev: Option<String>,
-        prev_super: Option<std::ffi::OsString>,
-    }
 
-    #[test]
-    fn residual_input_errors_use_user_envelopes() -> anyhow::Result<()> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let dir = tempfile::tempdir()?;
-        let _guard = EnvGuard {
-            prev: respire::env::var("RSRS_DATA_DIR").ok(),
-            prev_super: std::env::var_os("RSRS_SUPER"),
-        };
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        crate::rpc::set_worker_active(true);
-        seed_capture_session()?;
-        let missing = dir
-            .path()
-            .join("missing.json")
-            .to_string_lossy()
-            .into_owned();
-        let missing_output = dir
-            .path()
-            .join("absent")
-            .join("export.json")
-            .to_string_lossy()
-            .into_owned();
-        for command in [
-            vec!["restore", "deadbeef"],
-            vec!["grant", "create", "--root", "deadbeef", "--label", "probe"],
-            vec![
-                "grant",
-                "create",
-                "--root",
-                "00000000-0000-0000-0000-000000000000",
-                "--label",
-                "probe",
-            ],
-            vec!["space", "kick"],
-            vec!["import", &missing],
-            vec!["bench", "run", &missing],
-            vec!["share-import", &missing],
-            vec!["export", &missing_output],
-            vec!["backup", &missing_output],
-            vec!["agent-config", "--set", "workspace_mode=bogus"],
-        ] {
-            let mut args = vec!["--json".to_owned()];
-            args.extend(command.iter().map(|arg| (*arg).to_owned()));
-            let result = capture_run(args);
-            assert_eq!(result.exit, 2, "{command:?}: {:?}", result.envelope);
-            assert_eq!(
-                result.envelope.summary["reason"], "invalid_input",
-                "{command:?}"
-            );
-            assert_eq!(result.envelope.details["error_type"], "user", "{command:?}");
-            if matches!(command[0], "import" | "bench" | "share-import") {
-                assert!(
-                    result
-                        .envelope
-                        .errors
-                        .iter()
-                        .any(|error| error.contains("failed to read")),
-                    "{command:?}: {:?}",
-                    result.envelope.errors
-                );
-            }
-        }
-        let invalid = dir.path().join("invalid-utf8.json");
-        std::fs::write(&invalid, [0xff])?;
-        let error = respire_app::input_error::read_file(&invalid, "fixture")
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("invalid UTF-8 was accepted"))?;
-        assert_eq!(super::command_failure(&error).1, 1);
-        let existing = dir.path().join("existing-backup.db");
-        std::fs::write(&existing, b"preserve existing backup")?;
-        let error = respire::service::backup_db(&existing)
-            .err()
-            .ok_or_else(|| anyhow::anyhow!("existing backup was overwritten"))?;
-        assert_eq!(super::command_failure(&error).1, 1);
-        assert_eq!(std::fs::read(&existing)?, b"preserve existing backup");
-        assert!(!dir.path().join("absent").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn bench_runs_on_pending_resident_snapshot_without_writing_index() -> anyhow::Result<()> {
-        use respire::MemoryTransport;
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let dir = tempfile::tempdir()?;
-        let _guard = EnvGuard {
-            prev: respire::env::var("RSRS_DATA_DIR").ok(),
-            prev_super: std::env::var_os("RSRS_SUPER"),
-        };
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        crate::rpc::set_worker_active(true);
-        seed_capture_session()?;
-        let keys = super::build_session()?;
-        let store = super::build_local()?;
-        let entry: respire::MemoryEntry = serde_json::from_value(serde_json::json!({
-            "id":"pending-bench","kind":"Context","tags":[],"title":"benchmark pending needle",
-            "content":"benchmark pending needle","user":"test","computer":"test","project":"",
-            "created_at":"2026-10-10T00:00:00Z","updated_at":"2026-10-10T00:00:00Z",
-            "emotion":0,"parent_id":"","importance":"important"
-        }))?;
-        let stored = {
-            let _defer = respire::core_sdk::defer_indexing();
-            respire::MemoryEngine::seal(
-                &keys,
-                &respire::core_sdk::search::HashingEmbedder::new(1024),
-                &entry,
-                "test",
-            )?
-        };
-        store.put_checked(&stored, None)?;
-        let eval = dir.path().join("eval.jsonl");
-        let output = dir.path().join("bench.json");
-        std::fs::write(
-            &eval,
-            r#"{"query":"benchmark pending needle","expect":["pending-bench"]}"#,
-        )?;
-        let captured = capture_run(vec![
-            "--json".into(),
-            "bench".into(),
-            "run".into(),
-            eval.to_string_lossy().into_owned(),
-            "--save".into(),
-            output.to_string_lossy().into_owned(),
-        ]);
-        assert_eq!(captured.exit, 0, "{:?}", captured.envelope);
-        let report: super::bench::BenchReport = serde_json::from_slice(&std::fs::read(output)?)?;
-        assert_eq!(
-            report.params.get("index_pending").map(String::as_str),
-            Some("1")
-        );
-        assert_eq!(report.metrics.hit1, 1.0);
-        assert_eq!(report.n_entries, 1);
-        let current = store.all(false)?;
-        assert_eq!(current.len(), 1);
-        assert_eq!(current[0].ciphertext, stored.ciphertext);
-        assert!(current[0].local_artifact.is_empty());
-        respire::resident::clear()?;
-        Ok(())
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            crate::rpc::set_worker_active(false);
-            match &self.prev {
-                Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
-                None => std::env::remove_var("RSRS_DATA_DIR"),
-            }
-            match &self.prev_super {
-                Some(value) => std::env::set_var("RSRS_SUPER", value),
-                None => std::env::remove_var("RSRS_SUPER"),
-            }
-        }
-    }
-
-    #[test]
-    fn memory_revision_capture_preserves_identity_across_status_reads() -> anyhow::Result<()> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let dir = tempfile::tempdir()?;
-        let _guard = EnvGuard {
-            prev: std::env::var("RSRS_DATA_DIR").ok(),
-            prev_super: std::env::var_os("RSRS_SUPER"),
-        };
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        let _store = respire::service::open_store()?;
-        crate::rpc::set_worker_active(true);
-        let before = capture_run(vec!["memory-revision".into(), "--json".into()]);
-        assert_eq!(before.exit, 0);
-        assert_eq!(before.envelope.command, "memory-revision");
-        assert_eq!(
-            before.envelope.summary["profile"],
-            dir.path().to_string_lossy().as_ref()
-        );
-        let status = capture_run(vec!["status".into(), "--json".into()]);
-        assert_eq!(status.exit, 0);
-        assert_eq!(
-            status.envelope.summary["data_dir"],
-            before.envelope.summary["profile"]
-        );
-        let after = capture_run(vec!["memory-revision".into(), "--json".into()]);
-        assert_eq!(after.exit, 0);
-        assert_eq!(after.envelope.summary, before.envelope.summary);
-        assert!(!dir.path().join("session.json").exists());
-        assert!(!dir.path().join("model").exists());
-        crate::rpc::set_worker_active(false);
-        let control = capture_run(vec!["memory-revision".into(), "--json".into()]);
-        assert_eq!(control.exit, 1);
-        assert!(matches!(control.envelope.status, crate::OutputStatus::Fail));
-        assert!(control.envelope.errors.iter().any(|error| {
-            error.contains("host control requires an installed managed Runtime")
-        }));
-        assert!(!dir.path().join("runtime").exists());
-        Ok(())
-    }
-
-    #[test]
-    fn doctor_json_keeps_command_envelope() -> Result<(), String> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
-        let guard = EnvGuard {
-            prev: respire::env::var("RSRS_DATA_DIR").ok(),
-            prev_super: std::env::var_os("RSRS_SUPER"),
-        };
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        let prev_bin = respire::env::var("RSRS_BIN_DIR").ok();
-        std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
-        respire::service::set_server_addr("https://example.invalid")
-            .map_err(|err| err.to_string())?;
-        crate::rpc::set_worker_active(true);
-        for args in [
-            vec!["--json".to_owned(), "doctor".to_owned()],
-            vec![
-                "--json".to_owned(),
-                "doctor".to_owned(),
-                "--remote".to_owned(),
-            ],
-        ] {
-            let captured = capture_run(args);
-            if captured.envelope.command != "doctor" {
-                return Err(format!(
-                    "doctor JSON was captured as command {}",
-                    captured.envelope.command
-                ));
-            }
-            let total = captured
-                .envelope
-                .summary
-                .get("total")
-                .and_then(|value| value.as_u64())
-                .ok_or("doctor summary is missing total")?;
-            if total == 0 || captured.envelope.items.is_empty() {
-                return Err("doctor envelope has no checks".to_owned());
-            }
-            if captured.envelope.summary["runtime_version"] != crate::app_version::embedded() {
-                return Err("doctor did not report the executing runtime version".to_owned());
-            }
-            let runtime = captured
-                .envelope
-                .items
-                .iter()
-                .find(|item| item.name == "Runtime version")
-                .ok_or("doctor did not include the runtime version check")?;
-            if runtime.value != crate::app_version::embedded()
-                || !matches!(runtime.status, crate::OutputStatus::Ok)
-            {
-                return Err(
-                    "doctor runtime version check differs from the executing binary".to_owned(),
-                );
-            }
-            let want = match captured.envelope.status {
-                crate::OutputStatus::Ok | crate::OutputStatus::Skip => 0,
-                crate::OutputStatus::Warn | crate::OutputStatus::Pending => 2,
-                crate::OutputStatus::Fail => 1,
-            };
-            if captured.exit != want {
-                return Err(format!(
-                    "doctor exit {} does not match status {want}",
-                    captured.exit
-                ));
-            }
-        }
-        // A live background task must not make --fix launch a second installer.
-        let operation =
-            respire::model_progress::Operation::begin("download").map_err(|err| err.to_string())?;
-        for fix in [false, true] {
-            let mut args = vec!["--json".to_owned(), "doctor".to_owned()];
-            if fix {
-                args.push("--fix".to_owned());
-            }
-            let captured = capture_run(args);
-            let embedder = captured
-                .envelope
-                .items
-                .iter()
-                .find(|item| item.name == "embedder")
-                .ok_or("doctor did not report the embedder")?;
-            if !matches!(embedder.status, crate::OutputStatus::Warn) {
-                return Err("active model preparation must be WARN, not FAIL or PASS".to_owned());
-            }
-            if respire::model_progress::status().map_err(|err| err.to_string())?["phase"]
-                != "download"
-            {
-                return Err("doctor replaced the active model task".to_owned());
-            }
-        }
-        drop(operation);
-        drop(guard);
-        match prev_bin {
-            Some(value) => std::env::set_var("RSRS_BIN_DIR", value),
-            None => std::env::remove_var("RSRS_BIN_DIR"),
-        }
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod diary_identity_tests {
-    use super::*;
-
-    /// Construct selection-only metadata without opening a vault.
-    fn track(id: &str, user: &str, title: &str, created: &str) -> respire::StoredMemory {
-        let mut memory = respire::StoredMemory::new_pending(id.into(), user.into());
-        memory.local_title = title.into();
-        memory.local_created_at = created.into();
-        memory
-    }
-
-    /// Stable identity wins over older same-title legacy rows.
-    #[test]
-    fn stable_id_precedes_legacy_titles_and_preserves_importance_compatibility() -> Result<()> {
-        let mut legacy = track(
-            "legacy",
-            "alice",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            "2026-10-13T00:00:00Z",
-        );
-        legacy.local_importance = "normal".into();
-        let canonical = track(
-            "stable",
-            "server-routing-owner",
-            "User's renamed day",
-            "2026-10-13T01:00:00Z",
-        );
-        let rows = vec![legacy, canonical];
-        let tracks = select_diary_tracks(
-            &rows,
-            "stable",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            |row| Ok(row.id == "stable" || row.user == "alice"),
-        )?;
-        assert_eq!(
-            tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            ["stable", "legacy"]
-        );
-        Ok(())
-    }
-
-    /// An unrelated canonical payload must fail before legacy candidates can be merged.
-    #[test]
-    fn canonical_author_mismatch_is_not_a_legacy_fallback() -> Result<()> {
-        let rows = vec![
-            track("stable", "wire-owner", "renamed", "1"),
-            track(
-                "legacy",
-                "alice",
-                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-                "0",
-            ),
-        ];
-        let result = select_diary_tracks(
-            &rows,
-            "stable",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            |row| Ok(row.id != "stable"),
-        );
-        assert!(result.is_err());
-        Ok(())
-    }
-
-    /// Blank titles remain valid while deleted and unrelated tracks stay separate.
-    #[test]
-    fn blank_title_deleted_rows_other_users_and_days_are_handled_separately() -> Result<()> {
-        let mut deleted = track(
-            "deleted",
-            "alice",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            "0",
-        );
-        deleted.deleted = true;
-        let rows = vec![
-            track("stable", "alice", "", "1"),
-            deleted,
-            track(
-                "other-user",
-                "bob",
-                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-                "0",
-            ),
-            track(
-                "other-day",
-                "alice",
-                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-12",
-                "0",
-            ),
-        ];
-        let tracks = select_diary_tracks(
-            &rows,
-            "stable",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            |row| Ok(row.user == "alice"),
-        )?;
-        assert_eq!(tracks.len(), 1);
-        assert_eq!(tracks[0].id, "stable");
-        assert!(select_diary_tracks(
-            &rows,
-            "charlie-stable",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-14",
-            |row| Ok(row.user == "charlie")
-        )?
-        .is_empty());
-        Ok(())
-    }
-
-    /// Live legacy tracks retain their deterministic earliest-created ordering.
-    #[test]
-    fn missing_or_deleted_stable_id_keeps_earliest_legacy_track() -> Result<()> {
-        let mut deleted = track("stable", "alice", "renamed", "0");
-        deleted.deleted = true;
-        let rows = vec![
-            track(
-                "later",
-                "alice",
-                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-                "2",
-            ),
-            track(
-                "earlier",
-                "alice",
-                "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-                "1",
-            ),
-            deleted,
-        ];
-        let tracks = select_diary_tracks(
-            &rows,
-            "stable",
-            "\u{6d3b}\u{52a8}\u{8f68}\u{8ff9} 2026-10-13",
-            |row| Ok(row.user == "alice"),
-        )?;
-        assert_eq!(
-            tracks.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
-            ["earlier", "later"]
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod sync_retry_tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    use anyhow::anyhow;
-
-    use super::run_sync_attempts;
-
-    #[test]
-    fn retries_transport_timeout_then_succeeds() -> anyhow::Result<()> {
-        let hits = AtomicUsize::new(0);
-        let value = run_sync_attempts(|| {
-            let n = hits.fetch_add(1, Ordering::SeqCst);
-            if n < 2 {
-                Err(anyhow!("connection timed out"))
-            } else {
-                Ok(7)
-            }
-        })?;
-        assert_eq!(value, 7);
-        assert_eq!(hits.load(Ordering::SeqCst), 3);
-        Ok(())
-    }
-
-    #[test]
-    fn protocol_error_does_not_retry() {
-        let hits = AtomicUsize::new(0);
-        let err = run_sync_attempts(|| {
-            hits.fetch_add(1, Ordering::SeqCst);
-            Err::<(), _>(anyhow!("server sync epoch changed; local edits kept"))
-        })
-        .unwrap_err();
-        assert!(err.to_string().contains("epoch"));
-        assert_eq!(hits.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn worker_schedules_autosync_without_waiting_on_the_remote() -> anyhow::Result<()> {
-        let _lock = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|err| err.into_inner());
-        let prev_dir = respire::env::var("RSRS_DATA_DIR").ok();
-        let prev_off = respire::env::var("RSRS_NO_AUTOSYNC").ok();
-        let dir = tempfile::tempdir()?;
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        std::env::remove_var("RSRS_NO_AUTOSYNC");
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
-        let port = listener.local_addr()?.port();
-        std::thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(sock) = conn else { break };
-                std::thread::sleep(std::time::Duration::from_secs(60));
-                drop(sock);
-            }
-        });
-        std::fs::write(
-            dir.path().join("session.json"),
-            format!(r#"{{"addr":"http://127.0.0.1:{port}","token":"hang"}}"#),
-        )?;
-        // This scheduling fixture owns its temporary store, not the in-process runtime's boot profile.
-        let store = respire::transport::local::LocalStore::open(&dir.path().join("onememory.db"))?;
-        let keys = respire::SessionKeys::from_urk([9u8; 32])?;
-        crate::rpc::set_worker_active(true);
-        let started = std::time::Instant::now();
-        super::schedule_autosync(&keys, &store);
-        let elapsed = started.elapsed();
-        crate::rpc::set_worker_active(false);
-        match prev_dir {
-            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
-            None => std::env::remove_var("RSRS_DATA_DIR"),
-        }
-        match prev_off {
-            Some(value) => std::env::set_var("RSRS_NO_AUTOSYNC", value),
-            None => std::env::remove_var("RSRS_NO_AUTOSYNC"),
-        }
-        assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "autosync blocked the worker for {elapsed:?}"
-        );
-        Ok(())
-    }
 }

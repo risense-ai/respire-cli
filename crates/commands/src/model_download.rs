@@ -1197,3 +1197,45 @@ mod tests {
         Ok(())
     }
 }
+
+/// Download sources all serve the same pinned BGE-M3 files.
+pub const MIRRORS: &[&str] = &[
+    "auto",
+    "https://hf-mirror.com",
+    "https://hf-mirror.net",
+    "https://huggingface.co",
+];
+
+pub fn validate_mirror(value: &str) -> Result<()> {
+    if value == "auto" {
+        return Ok(());
+    }
+    origin_from_mirror(value).map(|_| ())
+}
+
+pub(crate) fn origin_from_mirror(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        anyhow::bail!("--mirror must not be empty");
+    }
+    let with_scheme = if raw.contains("://") {
+        raw.to_string()
+    } else {
+        format!("https://{raw}")
+    };
+    let Some((scheme, rest)) = with_scheme.split_once("://") else {
+        anyhow::bail!("--mirror is invalid: {raw}");
+    };
+    if scheme != "http" && scheme != "https" {
+        anyhow::bail!("--mirror only supports http/https");
+    }
+    let hostport = match rest.split('/').next() {
+        Some(h) if !h.is_empty() => h.trim(),
+        _ => anyhow::bail!("--mirror is missing a host"),
+    };
+    anyhow::ensure!(
+        !hostport.contains(['@', '?', '#']) && !hostport.chars().any(char::is_whitespace),
+        "mirror must be a host without credentials, query or fragment"
+    );
+    Ok(format!("{scheme}://{hostport}"))
+}

@@ -1,11 +1,33 @@
 //! Local launch-grant producer. The inherited token identifies one private grant.
 use super::super::{
-    lifecycle, private_write, read_registration, recovery::account_identity_source,
+    lifecycle, private_write, read_registration, recovery::account_identity_source, Registration,
 };
 use anyhow::{Context, Result};
 
 #[path = "control.rs"]
 pub(crate) mod control;
+#[path = "identity_write_control.rs"]
+pub(crate) mod identity_write_control;
+#[path = "space_control.rs"]
+pub(crate) mod space_control;
+#[path = "profile_maintenance.rs"]
+pub(crate) mod profile_maintenance;
+#[path = "secret_control.rs"]
+pub(crate) mod secret_control;
+#[path = "key_control.rs"]
+pub(crate) mod key_control;
+#[path = "migration_control.rs"]
+pub(crate) mod migration_control;
+#[path = "metadata_control.rs"]
+pub(crate) mod metadata_control;
+#[path = "model_control.rs"]
+pub(crate) mod model_control;
+#[path = "model_maintenance.rs"]
+pub(crate) mod model_maintenance;
+#[path = "config_control.rs"]
+pub(crate) mod config_control;
+#[path = "agent_config_control.rs"]
+pub(crate) mod agent_config_control;
 use respire_commands::output::{ResultEnvelope, Status};
 use respire_protocol::{
     ControlBinding, HostControlLaunchGrant, HostControlOperation, HostControlParams, RpcRequest,
@@ -64,7 +86,7 @@ fn prepare_grant(
     prepare_grant_for_identity(binary, root, profile, managed_id, port, &account_id, maintenance)
 }
 
-fn prepare_grant_for_identity(
+pub(crate) fn prepare_grant_for_identity(
     binary: &Path,
     root: &Path,
     profile: &Path,
@@ -102,6 +124,52 @@ fn prepare_grant_for_identity(
             "managed launch registration is missing"
         );
     }
+    build_grant(binary, root, profile, managed_id, port, account_id, maintenance, registration.as_ref())
+}
+
+/// Fixed reads may inspect a stopped installation without authorizing a serving launch.
+pub(super) fn prepare_offline_read_grant(
+    binary: &Path, root: &Path, profile: &Path, port: u16, account_id: &str,
+    kind: respire_protocol::metadata_control::HostOfflineRead,
+) -> Result<serde_json::Value> {
+    use respire_protocol::metadata_control::HostOfflineRead;
+    match kind {
+        HostOfflineRead::MetadataStatus | HostOfflineRead::AgentConfigRead | HostOfflineRead::SnapshotPreflight => {}
+    }
+    let registration = read_registration(root)?;
+    let managed_id = registration.as_ref()
+        .filter(|config| config.enabled && !config.manually_stopped)
+        .map(|config| config.id.as_str());
+    if let Some(config) = registration.as_ref() {
+        lifecycle::owned(config)?;
+        anyhow::ensure!(!config.maintenance,
+            "offline read cannot replace an active maintenance controller");
+        if managed_id.is_some() {
+            anyhow::ensure!(std::env::current_exe()?.canonicalize()? == config.executable.canonicalize()?,
+                "managed supervisor differs from the registered CLI");
+        }
+    }
+    let (grant, _) = build_grant(binary, root, profile, managed_id, port, account_id, None, registration.as_ref())?;
+    Ok(grant)
+}
+
+/// A status read cannot start serving or replace an interrupted maintenance marker.
+pub(super) fn prepare_login_recovery_status_grant(
+    binary: &Path, root: &Path, profile: &Path, port: u16, account_id: &str,
+) -> Result<serde_json::Value> {
+    let registration = read_registration(root)?;
+    if let Some(config) = registration.as_ref() {
+        lifecycle::owned(config)?;
+    }
+    let (grant, _) = build_grant(binary, root, profile, None, port, account_id, None, registration.as_ref())?;
+    Ok(grant)
+}
+
+fn build_grant(
+    binary: &Path, root: &Path, profile: &Path, managed_id: Option<&str>,
+    port: u16, account_id: &str, maintenance: Option<serde_json::Value>,
+    registration: Option<&Registration>,
+) -> Result<(serde_json::Value, String)> {
     let supervisor_pid = std::process::id();
     let supervisor_birth = super::super::manager::process_birth(supervisor_pid)?
         .context("launch supervisor process identity is unavailable")?;
@@ -204,7 +272,7 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
     })
 }
 
-fn exchange_control(
+pub(crate) fn exchange_control(
     binary: &Path,
     grant: &HostControlLaunchGrant,
     request: &RpcRequest,

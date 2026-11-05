@@ -1,8 +1,8 @@
 import {createHash} from 'node:crypto';
-import {chmodSync, copyFileSync, mkdirSync, readFileSync} from 'node:fs';
+import {chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, statSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {verifyBinary} from './verify-binary.mjs';
+import {frontendLayout, validateBuildMetadata, verifyBinary} from './verify-binary.mjs';
 
 const [source, destination] = process.argv.slice(2);
 if (!source || !destination) throw new Error('Pass artifact source and destination');
@@ -15,15 +15,17 @@ const metadata = JSON.parse(readFileSync(join(source, `cli-build-${target}.json`
 const extension = target.includes('windows') ? '.exe' : '';
 const binary = `${manifest.binaryName}-${target}${extension}`, runtime = `${manifest.binaryName}-${target}-runtime.tar.gz`;
 const hash = file => createHash('sha256').update(readFileSync(join(source, file))).digest('hex');
-if (metadata.schema_version !== 1 || metadata.git_sha !== sha || metadata.version !== version
-    || metadata.target !== target || metadata.binary_file !== binary || metadata.runtime_file !== runtime
-    || hash(binary) !== metadata.binary_sha256 || hash(runtime) !== metadata.runtime_sha256) {
-  throw new Error('CLI artifact metadata or checksum mismatch');
-}
+const frontend = frontendLayout(manifest);
+validateBuildMetadata(metadata, manifest, target, {sha, version},
+  {file:binary, size:statSync(join(source, binary)).size, sha256:hash(binary)},
+  frontend ? undefined : {file:runtime, sha256:hash(runtime)});
+if (frontend && (existsSync(join(source, runtime)) || existsSync(join(destination, 'core-runtime.json'))
+    || existsSync(join(destination, 'core-notices')))) throw Error('Frontend artifact contains a legacy SDK payload');
 mkdirSync(destination, {recursive:true});
 verifyBinary(join(source, binary), target);
 copyFileSync(join(source, binary), join(destination, manifest.binaryName+extension));
+copyFileSync(join(source, `cli-build-${target}.json`), join(destination, `cli-build-${target}.json`));
 if (!extension) chmodSync(join(destination, manifest.binaryName), 0o755);
 const tar = process.platform === 'win32' ? join(process.env.SystemRoot, 'System32', 'tar.exe') : 'tar';
-execFileSync(tar, ['-xzf', resolve(source, runtime), '-C', resolve(destination)]);
+if (!frontend) execFileSync(tar, ['-xzf', resolve(source, runtime), '-C', resolve(destination)]);
 console.log(`Extracted verified ${target}@${version} from ${sha}`);

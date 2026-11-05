@@ -1099,3 +1099,51 @@ pub fn changes_profile(command: Option<&Command>) -> bool {
         _ => false,
     }
 }
+
+/// Classify host UI dispatch without executing extraction business.
+pub fn extract_uses_tui(command: &Command) -> anyhow::Result<bool> {
+    let Command::Extract {
+        targets,
+        tui,
+        all,
+        id,
+        dry_run,
+        since,
+        limit,
+        cwd,
+        model,
+        session,
+        kind,
+        importance,
+        parent,
+        include_subagents,
+        force,
+    } = command
+    else {
+        return Ok(false);
+    };
+    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let filters_absent = since.is_none()
+        && limit.is_none()
+        && cwd.is_none()
+        && model.is_none()
+        && session.is_none()
+        && kind.as_str() == "context"
+        && importance.as_str() == "important"
+        && parent.is_empty()
+        && !*include_subagents
+        && !*force;
+    let bare = !*targets && id.is_none() && !*all && !*dry_run && filters_absent && !crate::output_state::json_mode();
+    if *tui {
+        if !bare {
+            anyhow::bail!(
+                "--tui opens the interactive picker and cannot be combined with extraction options \
+                 (--since/--limit/--cwd/--model/--session/--kind/--importance/--parent/--include-subagents/--force) \
+                 or --json; drop --tui to apply them."
+            );
+        }
+        return Ok(true);
+    }
+    Ok(bare && interactive)
+}

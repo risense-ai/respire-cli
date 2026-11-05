@@ -1558,7 +1558,6 @@ name = "respire"
 version = "1.0.21-dev.5"
 dependencies = [
  "anyhow",
- "axum",
  "base64",
  "chrono",
  "clap",
@@ -1566,27 +1565,24 @@ dependencies = [
  "dirs",
  "flate2",
  "hex",
- "hmac",
  "rand",
  "ratatui",
- "respire_app",
  "respire_client_host",
  "respire_commands",
  "respire_protocol",
  "respire_spawn",
- "rusqlite",
+ "rpassword",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "signal-hook",
  "tempfile",
  "tiny_http",
- "tokio",
  "unicode-width 0.2.0",
  "ureq",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1655,10 +1651,13 @@ dependencies = [
  "anyhow",
  "dirs",
  "hex",
+ "keyring",
  "rand",
  "rusqlite",
+ "serde",
  "serde_json",
  "tempfile",
+ "whoami",
 ]
 
 [[package]]

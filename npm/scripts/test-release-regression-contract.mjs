@@ -1,19 +1,72 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {runInNewContext} from 'node:vm';
-import {readFileSync,mkdtempSync,mkdirSync,writeFileSync,existsSync,rmSync} from 'node:fs';
+import {readFileSync,mkdtempSync,mkdirSync,writeFileSync,existsSync,rmSync,readdirSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawnSync,execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt} from './release-regression-contract.mjs';
 import {requireRegressions} from './cleanup-release-artifacts.mjs';
-import {verifyBinary} from './verify-binary.mjs';
+import {frontendLayout,releaseAssetNames,verifyBinary} from './verify-binary.mjs';
 import {createHash} from 'node:crypto';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
 const job=name=>({name,status:'completed',conclusion:'success'});
 const inventory=()=>[...contract.native.map(t=>job(`native-regression / Native (${t})`)),...contract.cloud.map(t=>job(`cloud-sweep (runner, ${t})`)),...contract.migration.map(t=>job(`Native migration (${t})`)),...contract.migration_gate.map(t=>job(`Migration gate (${t})`)),job('api-smoke'),job('publish')];
+test('frontend artifacts extract, verify and pack exact CLI bytes without a fabricated SDK inventory',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'cli-frontend-pack-'));
+  const workspace=fileURLToPath(new URL('../../',import.meta.url));
+  const script=name=>fileURLToPath(new URL(name,import.meta.url));
+  const sha=execFileSync('git',['rev-parse','HEAD'],{cwd:workspace,encoding:'utf8'}).trim();
+  const gitDir=execFileSync('git',['rev-parse','--absolute-git-dir'],{cwd:workspace,encoding:'utf8'}).trim();
+  const env={...process.env,GIT_DIR:gitDir};
+  const run=(name,args=[],extra={})=>spawnSync(process.execPath,[script(name),...args],{cwd:root,env:{...env,...extra},encoding:'utf8',timeout:30000});
+  try{
+    assert.equal(frontendLayout(manifest),true);
+    assert.throws(()=>frontendLayout({...manifest,artifactLayout:'unknown'}));
+    for(const folder of ['assets','bins','cli','npm/bin'])mkdirSync(path.join(root,folder),{recursive:true});
+    writeFileSync(path.join(root,'cli/Cargo.toml'),`version = "${manifest.cliVersion}"\n`);
+    writeFileSync(path.join(root,'npm/artifact-manifest.json'),JSON.stringify(manifest));
+    for(const file of ['LICENSE','COMMERCIAL-LICENSE.md','npm/README.md','npm/bin/cli.js'])writeFileSync(path.join(root,file),readFileSync(path.join(workspace,file)));
+    for(const target of manifest.targets){
+      const bytes=Buffer.alloc(128),arm=target.triple.startsWith('aarch64');
+      if(target.triple.includes('windows')){
+        bytes.write('MZ');bytes.writeUInt32LE(64,0x3c);bytes.write('PE\0\0',64);
+        bytes.writeUInt16LE(arm?0xaa64:0x8664,68);bytes.writeUInt16LE(0x20b,88);
+      }else if(target.triple.includes('darwin')){
+        bytes.writeUInt32LE(0xfeedfacf,0);bytes.writeUInt32LE(arm?0x100000c:0x1000007,4);
+      }else{
+        bytes.set([0x7f,0x45,0x4c,0x46,2,1]);bytes.writeUInt16LE(arm?183:62,18);
+      }
+      const [binary,metadata]=releaseAssetNames(manifest,target.triple);
+      assert.equal(releaseAssetNames(manifest,target.triple).length,2);
+      writeFileSync(path.join(root,'assets',binary),bytes);
+      writeFileSync(path.join(root,'assets',metadata),JSON.stringify({schema_version:2,artifact_layout:manifest.artifactLayout,
+        git_sha:sha,version:manifest.cliVersion,target:target.triple,binary_file:binary,binary_size:bytes.length,
+        binary_sha256:createHash('sha256').update(bytes).digest('hex'),producer:{run_id:'700',run_attempt:1}}));
+      const result=run('extract-artifact.mjs',['assets',path.join('bins',target.triple,'release')],
+        {CLI_TARGET:target.triple,CLI_SHA:sha,CLI_VERSION:manifest.cliVersion});
+      assert.equal(result.status,0,result.stderr);
+    }
+    const verified=run('verify-packages.mjs',['assets','--assets-only']);assert.equal(verified.status,0,verified.stderr);
+    const packed=run('pack.mjs',['--repo',root,'--root',path.join(root,'bins')]);assert.equal(packed.status,0,packed.stderr);
+    for(const target of manifest.targets){
+      const files=readdirSync(path.join(root,'npm/dist',target.pkg,'bin'));
+      assert.deepEqual(files,[manifest.binaryName+(target.triple.includes('windows')?'.exe':'')]);
+    }
+    const runtime=path.join(root,'assets',`rsrs-${manifest.targets[0].triple}-runtime.tar.gz`);
+    writeFileSync(runtime,'stale SDK archive');assert.notEqual(run('verify-packages.mjs',['assets','--assets-only']).status,0);
+    rmSync(runtime);
+    writeFileSync(path.join(root,'bins',manifest.targets[0].triple,'release/core-runtime.json'),'{}');
+    assert.notEqual(run('pack.mjs',['--repo',root,'--root',path.join(root,'bins')]).status,0);
+    const workflow=readFileSync(new URL('../../.github/workflows/release-validation.yml',import.meta.url),'utf8');
+    const container=readFileSync(new URL('../../scripts/build-linux-musl-container.sh',import.meta.url),'utf8');
+    assert.doesNotMatch(workflow,/sdk-ci-cache|fetch-core-sdk|stage-core-runtime|check-sdk-release/);
+    assert.doesNotMatch(container,/RSRS_CORE_SDK_DIR|fetch-core-sdk|stage-core-runtime/);
+    assert.match(workflow,/Verify real macOS CPU inference/);assert.match(workflow,/require-native-linux-arm64/);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
 test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',()=>{
   const alias='aarch64-apple-darwin',entry=manifest.targets.find(t=>t.triple===alias);
   assert.deepEqual(entry.os,['darwin']);assert.deepEqual(entry.cpu,['arm64']);
@@ -139,6 +192,9 @@ test('workflow runs independent fixture work before the join, and keeps Linux su
   const migration=part('native-migration'),join=part('migration-gate'),base=part('cloud-sweep'),publish=part('publish'),ready=part('publication-ready');
   assert.match(migration,/needs: plan/);assert.doesNotMatch(migration,/needs:.*cloud-sweep|dev-smoke-gate.py|continue-on-error/);
   assert.match(migration,/dev-profile-migration-smoke.py/);assert.match(migration,/extract-artifact.mjs/);assert.match(migration,/verified-build.json/);
+  assert.match(join,/\$schema = if \(\$manifest.artifactLayout -ceq 'cli-frontend-v2'\) \{ 2 \} else \{ 1 \}/);
+  assert.match(join,/\$build.schema_version -ne \$schema -or \$build.artifact_layout -cne \$manifest.artifactLayout/);
+  assert.match(join,/throw 'Unknown CLI artifact layout'/);
   assert.match(join,/needs: \[plan, cloud-sweep, native-migration\]/);assert.match(join,/base-release-sweep-/);assert.match(join,/native-profile-migration-fixture-/);
   assert.match(join,/--migration-only/);assert.match(join,/--binary-sha256 \$build.binary_sha256/);assert.match(join,/\$build.git_sha -ne \$env:CLI_SHA/);assert.match(join,/\$build.target -ne \$env:CLI_TARGET/);
   assert.doesNotMatch(base,/dev-profile-migration-smoke.py/);assert.match(base,/dev-smoke-supplements.py/);assert(base.indexOf('dev-smoke-supplements.py')<base.indexOf('dev-login-interruption-smoke.py'));

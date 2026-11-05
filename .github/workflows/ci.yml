@@ -10,6 +10,10 @@ on:
         description: Token-free eight-platform research snapshot/feedback and real-model validation using prepared exact SDK caches
         type: boolean
         default: false
+      runtime_examples_sha:
+        description: Exact reviewed Runtime commit containing the migrated examples and CLI business harness
+        required: false
+        type: string
       version_upgrade_only:
         description: Verify only the approved DEV12 to DEV13 version upgrade using existing GNU artifacts
         type: boolean
@@ -206,7 +210,7 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
-      - name: Reject commands source paths into business crates
+      - name: Reject frontend source paths into business crates
         shell: bash
         run: |
           python3 - <<'PY'
@@ -216,7 +220,7 @@ jobs:
           forbidden = [(root / 'crates' / name).resolve() for name in ('core-sdk', 'app', 'app-domain', 'storage', 'crypto')]
           forbidden.append((root / 'runtime').resolve())
           pattern = re.compile(r'#\s*\[\s*(?:path\s*=|cfg_attr\b[^\]]*\bpath\s*=)\s*(?:r#*)?"([^"]+)"|\binclude\s*!\s*\(\s*(?:r#*)?"([^"]+)"')
-          for source in sorted((root / 'crates/commands').rglob('*.rs')):
+          for source in sorted([*(root / 'crates/commands').rglob('*.rs'), *(root / 'cli').rglob('*.rs')]):
               text = source.read_text(encoding='utf-8')
               for match in pattern.finditer(text):
                   relative = match[1] or match[2]
@@ -225,7 +229,7 @@ jobs:
                       line = text.count('\n', 0, match.start()) + 1
                       raise SystemExit(f'{source.relative_to(root)}:{line}: forbidden source path {relative}')
           PY
-      - name: Require a business-free commands dependency graph
+      - name: Require business-free commands and CLI dependency graphs
         shell: bash
         run: |
           set -euo pipefail
@@ -236,6 +240,22 @@ jobs:
             echo 'Commands frontend depends on a forbidden business package' >&2
             exit 1
           fi
+          for features in default no-default; do
+            options=()
+            if [ "$features" = no-default ]; then options+=(--no-default-features); fi
+            cargo tree -p respire "${options[@]}" --locked --edges normal,build,dev --prefix none --format '{p}' > "$RUNNER_TEMP/cli-$features-tree.txt"
+            cat "$RUNNER_TEMP/cli-$features-tree.txt"
+            if grep -Eq '^(respire_app|respire_app_domain|respire_storage|respire_crypto|respire_core_sdk|respire_runtime)([[:space:]]|$)' "$RUNNER_TEMP/cli-$features-tree.txt"; then
+              echo "CLI $features depends on a forbidden business package" >&2
+              exit 1
+            fi
+          done
+      - name: Check the CLI without a native SDK download
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          cargo check -p respire --bin rsrs --locked
       - name: Test only the commands frontend library
         shell: bash
         run: |
@@ -388,6 +408,42 @@ jobs:
             assert.match(values[2], /^[a-f0-9]{64}$/);
           }
           NODE
+      - name: Resolve exact Runtime business test source
+        id: runtime-tests
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
+        env:
+          REQUESTED_RUNTIME_SHA: ${{ inputs.runtime_examples_sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
+          assert.equal(pin.schema_version, 1);
+          assert.equal(pin.repository, 'risense-ai/respire-runtime');
+          const sha = process.env.REQUESTED_RUNTIME_SHA || pin.source_sha;
+          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime SHA containing cli_business_tests; no branch or old release fallback');
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+          NODE
+      - uses: actions/checkout@v4
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
+        with:
+          repository: risense-ai/respire-runtime
+          ref: ${{ steps.runtime-tests.outputs.sha }}
+          path: .runtime-examples
+          persist-credentials: false
+      - name: Bind Runtime business harness and SDK identity
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
+        env:
+          RUNTIME_TESTS_SHA: ${{ steps.runtime-tests.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_TESTS_SHA"
+          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
+          for module in support memory_revision diary_identity snapshot_lifecycle account capture_main; do
+            test -f ".runtime-examples/crates/commands/examples/cli_business_tests/$module.rs"
+          done
       - name: Verify candidate input artifact origin
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         env:
@@ -509,12 +565,30 @@ jobs:
           share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
           PY
           printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$RSRS_M3_DIR" >> "$GITHUB_ENV"
+      - name: Build Runtime-owned business assertions without instrumenting Runtime
+        if: matrix.group == 'core' || matrix.group == 'runtime_smoke'
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          export RSRS_CORE_SDK_DIR="$PWD/.sdk/$target"
+          cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target "$target" --target-dir target/runtime-cli-tests > "$RUNNER_TEMP/runtime-cli-tests-build.jsonl" || { cat "$RUNNER_TEMP/runtime-cli-tests-build.jsonl"; exit 1; }
+          node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-cli-tests/$target/debug/examples"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, readFileSync, realpathSync} from 'node:fs';
+          const records = readFileSync(`${process.env.RUNNER_TEMP}/runtime-cli-tests-build.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+          const artifacts = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cli_business_tests' && record.profile?.test && record.executable);
+          assert.equal(artifacts.length, 1, 'Require the actual compiled Runtime example test harness');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${realpathSync(artifacts[0].executable)}\n`);
+          NODE
       - name: Run this group's instrumented tests
         id: source-tests
         env:
           COVERAGE_GROUP: ${{ matrix.group }}
         run: |
           node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
           import {execFileSync, spawnSync} from 'node:child_process';
           import {captureCoverage} from './scripts/produce-required-tests.mjs';
           const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {encoding: 'utf8'}));
@@ -527,14 +601,42 @@ jobs:
           const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report'];
           if (group === 'core') args.push('--lib', '--bins', '--examples');
           for (const name of selected) args.push('--test', name);
+          let status;
           if (group === 'core') {
             const candidateKeys = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'];
             if (candidateKeys.every(key => process.env[key] === '')) {
               for (const key of candidateKeys) delete process.env[key];
             }
-            process.exit(captureCoverage(args));
+            status = captureCoverage(args);
+          } else {
+            const result = spawnSync('cargo', args, {stdio: 'inherit'});
+            if (result.error) throw result.error;
+            status = result.status ?? 1;
           }
-          const result = spawnSync('cargo', args, {stdio: 'inherit'});
+          if (status !== 0 || group === 'runtime_autostart') process.exit(status);
+          const runner = process.env.RSRS_RUNTIME_TEST_RUNNER;
+          assert.ok(runner, 'Runtime business tests cannot be skipped');
+          const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
+          const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
+          for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
+            assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count, `Missing migrated ${module} assertions`);
+          }
+          const result = spawnSync('bash', ['-euo', 'pipefail', '-c', `
+            cargo llvm-cov show-env --export-prefix > "$RUNNER_TEMP/cli-coverage.env"
+            source "$RUNNER_TEMP/cli-coverage.env"
+            [[ "\${RUSTFLAGS:-}\${CARGO_ENCODED_RUSTFLAGS:-}" == *instrument-coverage* ]]
+            [[ "$LLVM_PROFILE_FILE" == "$PWD/target/llvm-cov-target/"* ]]
+            export RSRS_CLI_BIN="$PWD/target/llvm-cov-target/debug/rsrs"
+            export RSRS_CLI_SOURCE_DIR="$PWD"
+            export RSRS_CLI_SOURCE_SHA="$(git rev-parse HEAD)"
+            test -x "$RSRS_CLI_BIN"
+            original_cli="$(sha256sum "$RSRS_CLI_BIN")"
+            unset GH_TOKEN GITHUB_TOKEN
+            for module in $RUNTIME_BUSINESS_MODULES; do
+              "$RSRS_RUNTIME_TEST_RUNNER" "$module::" --test-threads=1
+            done
+            test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
+          `], {stdio: 'inherit', env: {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'}});
           if (result.error) throw result.error;
           process.exit(result.status ?? 1);
           NODE
@@ -1022,6 +1124,7 @@ jobs:
       cache_key: ${{ matrix.key }}
       runner_os: ${{ matrix.os }}
       feedback_probe: true
+      runtime_examples_sha: ${{ inputs.runtime_examples_sha }}
 
   research-feedback-complete:
     if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.research_feedback_only }}

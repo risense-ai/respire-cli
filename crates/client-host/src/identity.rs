@@ -27,7 +27,8 @@ pub fn read_session_json(path: &Path) -> Result<Option<Value>> {
 
 /// Only an absent session permits the caller's profile-based identity fallback.
 pub fn session_user_of_dir(dir: &Path) -> Result<Option<String>> {
-    let path = dir.join("session.json");
+    let directory = crate::config::normalize_control_path(dir)?;
+    let path = directory.join("session.json");
     match std::fs::symlink_metadata(&path) {
         Ok(_) => {
             let value: Value = serde_json::from_slice(&read_identity_record(&path)?)
@@ -57,7 +58,8 @@ pub fn auth_session_identity(
     dir: &Path,
     sha256: impl Fn(&[u8]) -> String,
 ) -> Result<AuthSessionIdentity> {
-    let path = dir.join("session.json");
+    let directory = crate::config::normalize_control_path(dir)?;
+    let path = directory.join("session.json");
     match std::fs::symlink_metadata(&path) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(AuthSessionIdentity::Absent);
@@ -97,24 +99,10 @@ pub fn auth_session_identity(
     })
 }
 
-// Keep the launch/recovery record boundary, including checking every ancestor.
+// Share the control-root boundary, including its exact system-ancestor aliases.
 fn read_identity_record(path: &Path) -> Result<Vec<u8>> {
-    for ancestor in path.ancestors() {
-        let metadata = std::fs::symlink_metadata(ancestor)?;
-        anyhow::ensure!(
-            !metadata.file_type().is_symlink(),
-            "recovery path contains a symlink"
-        );
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            anyhow::ensure!(
-                metadata.file_attributes() & 0x400 == 0,
-                "recovery path contains a reparse point"
-            );
-        }
-    }
-    let file = std::fs::File::open(path)?;
+    let path = crate::config::normalize_control_path(path)?;
+    let file = std::fs::File::open(&path)?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
         metadata.is_file() && metadata.len() <= 65536,

@@ -642,7 +642,10 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $build = Get-Content -Raw native-profile-migration/verified-build.json | ConvertFrom-Json
-          if ($build.schema_version -ne 1 -or $build.git_sha -ne $env:CLI_SHA -or $build.version -ne $env:CLI_VERSION -or $build.target -ne $env:CLI_TARGET -or $build.binary_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Verified migration artifact identity differs' }
+          $manifest = Get-Content -Raw npm/artifact-manifest.json | ConvertFrom-Json
+          if ($null -ne $manifest.artifactLayout -and $manifest.artifactLayout -cne 'cli-frontend-v2') { throw 'Unknown CLI artifact layout' }
+          $schema = if ($manifest.artifactLayout -ceq 'cli-frontend-v2') { 2 } else { 1 }
+          if ($build.schema_version -ne $schema -or $build.artifact_layout -cne $manifest.artifactLayout -or $build.git_sha -ne $env:CLI_SHA -or $build.version -ne $env:CLI_VERSION -or $build.target -ne $env:CLI_TARGET -or $build.binary_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Verified migration artifact identity differs' }
           python scripts/dev-smoke-gate.py --migration-only --cli-report base-sweep/coverage.json --profile-migration native-profile-migration/migration-coverage.json --report native-profile-migration/migration-platform-gate.json --source-sha $env:CLI_SHA --version $env:CLI_VERSION --binary-sha256 $build.binary_sha256
           if ($LASTEXITCODE -ne 0) { throw 'Native migration/base-sweep join gate failed' }
       - uses: actions/upload-artifact@v4

@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "artifactLayout": "cli-frontend-v2",
   "cliVersion": "1.0.21-dev.5",
   "binaryName": "rsrs",
   "commandAliases": [],

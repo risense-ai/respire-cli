@@ -104,7 +104,7 @@ impl StaleOwner {
             nonce.get_version_num() == 4 && nonce.to_string() == instance,
             "invalid recovery instance"
         );
-        let receipt = respire::service::main_data_dir()
+        let receipt = respire_client_host::paths::main_data_dir()
             .canonicalize()?
             .join("runtime/autostart/launch")
             .join(format!("launch-{instance}.claimed"));
@@ -167,7 +167,7 @@ impl StaleOwner {
             "incomplete nullable ownership bindings"
         );
         let health: crate::net_rpc::Health = serde_json::from_value(endpoint.clone())?;
-        let roots = respire::service::resolved_roots()?;
+        let roots = respire_client_host::roots::resolved_roots()?;
         let root = roots.installation_root.canonicalize()?;
         let profile = roots.account_data_root.canonicalize()?;
         let account_source = account_identity_source(&profile)?;

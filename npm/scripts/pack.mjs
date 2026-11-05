@@ -3,12 +3,14 @@
 // --root layout: <rust-triple>/rsrs[.exe]; default scan is target/<triple>/release.
 // Builds npm/dist/<pkg>/. After verify-packages.mjs writes pack receipts,
 // --publish consumes those exact packages, platform packages before the umbrella.
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, cpSync, existsSync, chmodSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, cpSync, existsSync, chmodSync, rmSync, statSync } from 'node:fs';
+import {execFileSync} from 'node:child_process';
 import { assertPackMatches, currentPackSource, readExpectedPacks, readValidatedPacks } from './registry-publication.mjs';
 import {assertSubmissionActive} from './publication-acceptance.mjs';
 import { publishScopedPackages, acceptScopedPackages } from './parallel-publication.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import {frontendLayout, validateBuildMetadata, verifyBinary} from './verify-binary.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const doPublish = process.argv.includes('--publish');
@@ -36,6 +38,7 @@ if (doPublish && version.includes('-dev') && npmTag === 'latest') {
 }
 
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+const frontend = frontendLayout(manifest);
 if (manifest.cliVersion !== version) {
   console.error(`artifact-manifest cliVersion ${manifest.cliVersion} != Cargo.toml ${version}`);
   process.exit(1);
@@ -119,6 +122,17 @@ for (const [triple, t] of process.argv.includes('--launcher-only') ? [] : Object
   copyFileSync(path.join(repoRoot, 'COMMERCIAL-LICENSE.md'), path.join(dir, 'COMMERCIAL-LICENSE.md'));
   const binFile = path.basename(src);
   copyFileSync(src, path.join(dir, 'bin', binFile));
+  if (frontend && (existsSync(path.join(path.dirname(src), 'core-runtime.json'))
+      || existsSync(path.join(path.dirname(src), 'core-notices')))) throw Error('Frontend source contains a Core SDK payload');
+  if (frontend) {
+    const info = JSON.parse(readFileSync(path.join(path.dirname(src), `cli-build-${triple}.json`), 'utf8'));
+    verifyBinary(src, triple);
+    validateBuildMetadata(info, manifest, triple, {
+      sha:execFileSync('git', ['rev-parse', 'HEAD'], {cwd:repoRoot, encoding:'utf8'}).trim(), version,
+    }, {file:info.binary_file, size:statSync(src).size,
+      sha256:createHash('sha256').update(readFileSync(src)).digest('hex')});
+  }
+  if (!frontend) {
   const runtime = JSON.parse(readFileSync(path.join(path.dirname(src), 'core-runtime.json'), 'utf8'));
   if (runtime.target !== triple) throw new Error(`runtime target mismatch: ${triple}`);
   if (!runtime.files.some(file => file.path === 'core-notices/native/CORE-SDK-NOTICE.txt')) {
@@ -139,6 +153,7 @@ for (const [triple, t] of process.argv.includes('--launcher-only') ? [] : Object
     writeFileSync(destination, bytes);
   }
   copyFileSync(path.join(path.dirname(src), 'core-runtime.json'), path.join(dir, 'bin', 'core-runtime.json'));
+  }
   chmodSync(path.join(dir, 'bin', binFile), 0o755);
   writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name: t.pkg, version,

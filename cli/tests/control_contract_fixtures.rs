@@ -4,6 +4,11 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+mod private_host_control {
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/runtime-control/consumers/private_host_control.rs"));
+    include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../contracts/runtime-control/consumers/space_control.rs"));
+}
+
 fn contract_root() -> Result<PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR is set")?;
     Ok(Path::new(&manifest_dir)
@@ -97,8 +102,8 @@ fn cli_consumes_the_runtime_control_contract() -> Result<()> {
     let negative = manifest["fixtures"]["negative"]
         .as_array()
         .context("negative fixtures")?;
-    assert_eq!(positive.len(), 25);
-    assert_eq!(negative.len(), 48);
+    assert_eq!(positive.len(), 89);
+    assert_eq!(negative.len(), 287);
 
     for bound in manifest["files"].as_array().context("bound files")? {
         let relative = bound["path"].as_str().context("bound path")?;
@@ -178,6 +183,7 @@ fn cli_consumes_the_runtime_control_contract() -> Result<()> {
     let route = fixture("positive/bootstrap-route.json")?;
     assert_eq!(route["payload"]["operation"], "auth.login");
     assert_eq!(route["payload"]["executor"], "cli");
+    private_host_control::space_contract_fixtures()?;
     Ok(())
 }
 

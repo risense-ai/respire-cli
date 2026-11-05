@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model_progress;
-use respire_commands::rpc_worker::PROTOCOL_V;
+use respire_commands::rpc_client::PROTOCOL_V;
 
 /// Release repository that publishes the runtime artifacts.
 pub const RUNTIME_REPO: &str = "risense-ai/respire-runtime";
@@ -939,10 +939,11 @@ fn mirror_origin(raw: &str) -> Result<String> {
 fn download_origins(mirror: Option<&str>) -> Result<Vec<String>> {
     let official = RELEASE_BASE.to_owned();
     let proxied = format!("{MIRROR_PREFIX}/{official}");
-    let setting = mirror
-        .map(str::to_owned)
-        .or_else(crate::model_install::mirror_from_env)
-        .filter(|value| !value.trim().is_empty());
+    let setting = match mirror {
+        Some(value) => Some(value.to_owned()),
+        None => respire_client_host::settings::mirror_from_env()?,
+    }
+    .filter(|value| !value.trim().is_empty());
     match setting {
         Some(value) => {
             let origin = mirror_origin(value.trim())?;

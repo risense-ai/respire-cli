@@ -2,9 +2,11 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {frontendLayout} from './verify-binary.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const manifest = JSON.parse(readFileSync(join(root, 'npm', 'artifact-manifest.json'), 'utf8'));
+frontendLayout(manifest);
 const cargo = readFileSync(join(root, 'cli', 'Cargo.toml'), 'utf8');
 const match = cargo.match(/^version\s*=\s*"([^"]+)"/m);
 const version = match ? match[1] : '';

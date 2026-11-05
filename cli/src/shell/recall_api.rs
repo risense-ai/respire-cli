@@ -2,6 +2,7 @@
 use super::text_input::Input;
 use super::{choice, line, retrieval_action, t, KeyCode, Line};
 use anyhow::{anyhow, Result};
+use respire_client_host::classification as provider_settings;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -17,12 +18,12 @@ pub(super) struct Form {
     saving: Option<(Instant, Receiver<Result<(), String>>)>,
 }
 
-pub(super) fn base() -> String {
-    respire::service::read_agent_config()["recall_api_base"]
+pub(super) fn base() -> Result<String> {
+    Ok(respire_client_host::settings::read_agent_config()?["recall_api_base"]
         .as_str()
         .map(str::to_owned)
-        .or_else(respire::keystore::load_ds_last_base)
-        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned())
+        .or_else(provider_settings::load_ds_last_base)
+        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned()))
 }
 
 fn key_for(base: &str) -> Option<String> {
@@ -30,34 +31,34 @@ fn key_for(base: &str) -> Option<String> {
         .ok()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| {
-            respire::keystore::load_classify_key(&format!(
+            provider_settings::load_classify_key(&format!(
                 "ds@{}",
-                respire::keystore::host_of(base)
+                provider_settings::host_of(base)
             ))
         })
 }
 
-pub(super) fn ready() -> bool {
-    key_for(&base()).is_some()
+pub(super) fn ready() -> Result<bool> {
+    Ok(key_for(&base()?).is_some())
 }
 
 impl Form {
-    pub(super) fn new() -> Self {
-        let config = respire::service::read_agent_config();
+    pub(super) fn new() -> Result<Self> {
+        let config = respire_client_host::settings::read_agent_config()?;
         let values = [
-            base(),
+            base()?,
             config["recall_model"]
                 .as_str()
                 .unwrap_or(crate::classify::DEFAULT_DS_MODEL)
                 .to_owned(),
             String::new(),
         ];
-        Self {
+        Ok(Self {
             values: values.map(Input::new),
             field: 0,
             error: String::new(),
             saving: None,
-        }
+        })
     }
 
     pub(super) fn paste(&mut self, text: &str) {
@@ -157,8 +158,8 @@ impl Form {
             )
         );
         if !key.is_empty() {
-            respire::keystore::save_classify_key(
-                &format!("ds@{}", respire::keystore::host_of(base)),
+            provider_settings::save_classify_key(
+                &format!("ds@{}", provider_settings::host_of(base)),
                 key,
             )?;
         }

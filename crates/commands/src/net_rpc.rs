@@ -37,6 +37,8 @@ pub struct Health {
     #[serde(default)]
     pub inference: Value,
     #[serde(default)]
+    pub rpc: Value,
+    #[serde(default)]
     pub store_ready: bool,
     #[serde(default)]
     pub snapshot_restore_id: Option<String>,
@@ -1533,6 +1535,12 @@ mod tests {
         if is_our_health(&json!({"server":"nginx"})) {
             return Err("nginx".into());
         }
+        let health: Health = serde_json::from_value(ours.clone()).map_err(|error| error.to_string())?;
+        assert!(health.rpc.is_null());
+        let mut reported = ours;
+        reported["rpc"] = json!({"effective_parallelism":3});
+        let health: Health = serde_json::from_value(reported).map_err(|error| error.to_string())?;
+        assert_eq!(health.rpc["effective_parallelism"], 3);
         Ok(())
     }
 
