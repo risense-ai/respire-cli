@@ -21,32 +21,52 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/process.exit\(result.status \?\? 1\)/);
-  const program=source.split("node --input-type=module <<'NODE'\n").slice(1)
-    .map(block=>block.split('\n          NODE')[0]).find(block=>block.includes("const metadata = JSON.parse(execFileSync('cargo'"))
-    .replace("import {execFileSync, spawnSync} from 'node:child_process';",'')
-    .replace("import {captureCoverage} from './scripts/produce-required-tests.mjs';",'');
+  const imports=new Set(["import assert from 'node:assert/strict';",
+    "import {execFileSync, spawnSync} from 'node:child_process';",
+    "import {readFileSync} from 'node:fs';",
+    "import {captureCoverage} from './scripts/produce-required-tests.mjs';"]);
+  const blocks=source.split("node --input-type=module <<'NODE'\n").slice(1)
+    .map(block=>block.split('\n          NODE')[0]).filter(block=>block.includes("const metadata = JSON.parse(execFileSync('cargo'"));
+  assert.equal(blocks.length,1,'coverage selection must have one executable source block');
+  const program=blocks[0].replace(/^[ \t]*import .+;[ \t]*$/gm,statement=>{
+    assert(imports.has(statement.trim()),`inject the coverage dependency explicitly: ${statement.trim()}`);
+    return '';
+  });
+  assert.doesNotMatch(program,/^[ \t]*import\b/m);
   const metadata=JSON.parse(execFileSync('cargo',['metadata','--locked','--no-deps','--format-version','1'],{encoding:'utf8'}));
   const targets=metadata.packages.find(p=>p.name==='respire').targets;
   const allTests=targets.filter(t=>t.kind.includes('test')).map(t=>t.name);
+  const runner='runtime-business-test-runner';
+  const listing=Object.entries({memory_revision:6,diary_identity:11,snapshot_lifecycle:8,account:3,capture_main:2})
+    .flatMap(([module,count])=>Array.from({length:count},(_,i)=>`${module}::case_${i}: test`)).join('\n');
   const selected=[];
   for(const group of ['core','runtime_smoke','runtime_autostart']){
-    const calls=[],exits=[];
+    const calls=[],harness=[],exits=[];
     assert.throws(()=>runInNewContext(program,{
-      execFileSync:()=>JSON.stringify(metadata),
-      spawnSync:(_command,args)=>{calls.push(args);return {status:0};},
+      assert,readFileSync,
+      execFileSync:(command,args)=>{
+        if(command==='cargo'){assert.equal(args[0],'metadata');return JSON.stringify(metadata);}
+        assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);return listing;
+      },
+      spawnSync:(command,args,options)=>{
+        if(command==='cargo')calls.push(args);
+        else {assert.equal(command,'bash');harness.push(options.env.RUNTIME_BUSINESS_MODULES);}
+        return {status:0};
+      },
       captureCoverage:args=>{calls.push(args);return 0;},
-      process:{env:{COVERAGE_GROUP:group},exit:status=>{exits.push(status);throw exits;}},
+      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner},exit:status=>{exits.push(status);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[0]);assert.equal(calls.length,1);
+    assert.deepEqual(harness,group==='runtime_autostart'?[]:[group==='core'?'memory_revision diary_identity snapshot_lifecycle capture_main':'account']);
     for(let i=0;i<calls[0].length;i++)if(calls[0][i]==='--test')selected.push(calls[0][i+1]);
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
   }
   assert.deepEqual(selected.sort(),allTests.sort(),'every integration target must run exactly once');
   const exits=[];
-  runInNewContext(program,{
-    execFileSync:()=>JSON.stringify(metadata),spawnSync:()=>({status:23}),
-    process:{env:{COVERAGE_GROUP:'runtime_smoke'},exit:status=>exits.push(status)},
-  });
+  assert.throws(()=>runInNewContext(program,{
+    assert,readFileSync,execFileSync:()=>JSON.stringify(metadata),spawnSync:()=>({status:23}),
+    process:{env:{COVERAGE_GROUP:'runtime_smoke'},exit:status=>{exits.push(status);throw exits;}},
+  }),error=>error===exits);
   assert.deepEqual(exits,[23],'test failures must fail the coverage group');
 
   const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);

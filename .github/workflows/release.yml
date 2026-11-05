@@ -1149,12 +1149,15 @@ jobs:
           fi
           gh release upload "$CLI_TAG" release-assets/* --clobber
           gh release view "$CLI_TAG" --json assets > "$RUNNER_TEMP/release-assets.json"
-          node - <<'NODE'
-          const fs=require('fs'),path=require('path');
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import {releaseAssetNames} from './npm/scripts/verify-binary.mjs';
           const expected=fs.readdirSync('release-assets').sort();
           const actual=JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP,'release-assets.json'),'utf8')).assets.map(asset=>asset.name).sort();
           const m=JSON.parse(fs.readFileSync('npm/artifact-manifest.json','utf8'));
-          if(expected.length!==m.targets.length*3||JSON.stringify(actual)!==JSON.stringify(expected)) throw new Error('Draft release must contain every exact-source binary/runtime/metadata asset (three per platform)');
+          const required=m.targets.flatMap(target=>releaseAssetNames(m,target.triple)).sort();
+          if(JSON.stringify(expected)!==JSON.stringify(required)||JSON.stringify(actual)!==JSON.stringify(required)) throw new Error('Draft release must contain every exact-source asset required by the manifest layout');
           NODE
       - name: Reconcile any interrupted previous-attempt npm submission
         if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}

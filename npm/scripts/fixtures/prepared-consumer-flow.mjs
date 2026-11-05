@@ -167,7 +167,7 @@ else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r))
     state.currentJobs.push({name:'publication-ready',status:'completed',conclusion:'success',completed_at:new Date().toISOString()});
     // Exercise the actual current workflow snippets against both older four-
     // platform sources and the new six-platform manifest, not current-main assumptions.
-    const workflow=readFileSync(new URL('../../../.github/workflows/release.yml',import.meta.url),'utf8');
+    const workflow=readFileSync(new URL('../../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
     const selector=workflow.split('id: platforms\n')[1].match(/node --input-type=module - <<'NODE'\n([\s\S]*?)          NODE/)[1].replace(/^          /gm,'');
     const select=()=>spawnSync(process.execPath,['--input-type=module','-e',selector],{cwd:root,env,encoding:'utf8',timeout:5000});
     success(select());requireValue(readFileSync(env.GITHUB_OUTPUT,'utf8').includes(`arm64=${arm64}\n`),'Copied platforms came from the workflow head rather than selected source');
@@ -178,8 +178,12 @@ else throw Error('Unexpected API scope');process.stdout.write(JSON.stringify(r))
     writeFileSync(join(root,'npm/artifact-manifest.json'),validManifest);
     cpSync(assets,join(root,'release-assets'),{recursive:true});
     const assetList=join(root,'release-assets.json');writeFileSync(assetList,JSON.stringify({assets:scoped.assets}));
-    const assetCode="const fs=require('fs'),path=require('path');\n"+workflow.match(/const expected=fs.readdirSync\('release-assets'\)\.sort\(\);([\s\S]*?)          NODE/)[0].replace(/          NODE$/,'').replace(/^          /gm,'');
-    const assetGate=()=>spawnSync(process.execPath,['-e',assetCode],{cwd:root,env:{...env,RUNNER_TEMP:root},encoding:'utf8',timeout:5000});
+    const assetBlocks=workflow.split("node --input-type=module <<'NODE'\n").slice(1)
+      .map(block=>block.split('\n          NODE')[0]).filter(block=>block.includes("const expected=fs.readdirSync('release-assets').sort();"));
+    requireValue(assetBlocks.length===1,'Expected exactly one actual release asset gate');
+    const assetCode=assetBlocks[0].replace(/^          /gm,'')
+      .replace("from './npm/scripts/verify-binary.mjs'",`from ${JSON.stringify(new URL('../verify-binary.mjs',import.meta.url).href)}`);
+    const assetGate=()=>spawnSync(process.execPath,['--input-type=module','-e',assetCode],{cwd:root,env:{...env,RUNNER_TEMP:root},encoding:'utf8',timeout:5000});
     success(assetGate());writeFileSync(assetList,JSON.stringify({assets:scoped.assets.slice(1)}));
     requireValue(assetGate().status!==0,'Missing public asset accepted by actual workflow gate');
     writeFileSync(join(root,'scoped-accepted.json'),JSON.stringify(scoped));writeFileSync(join(root,'publication-accepted.json'),JSON.stringify(complete));

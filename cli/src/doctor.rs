@@ -246,6 +246,7 @@ fn repair(diagnostic: &ResultEnvelope) -> Result<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respire_commands::output_state;
     use serde_json::{json, Value};
     use std::{ffi::OsString, path::Path, time::Duration};
 
@@ -270,10 +271,10 @@ mod tests {
                         None => std::env::remove_var(key),
                     }
                 }
-                crate::CAPTURED.with(|slot| *slot.borrow_mut() = self.captured.take());
-                crate::HOST_RPC_OUTPUT.set(self.host_output);
-                crate::OUTPUT_EMITTED.set(self.emitted);
-                crate::OUTPUT_EXIT_CODE.set(self.exit);
+                output_state::CAPTURED.with(|slot| *slot.borrow_mut() = self.captured.take());
+                output_state::HOST_RPC_OUTPUT.set(self.host_output);
+                output_state::OUTPUT_EMITTED.set(self.emitted);
+                output_state::OUTPUT_EXIT_CODE.set(self.exit);
             }
         }
         let keys = [
@@ -298,10 +299,10 @@ mod tests {
                 .into_iter()
                 .map(|key| (key, std::env::var_os(key)))
                 .collect(),
-            captured: crate::CAPTURED.with(|slot| slot.borrow_mut().take()),
-            host_output: crate::HOST_RPC_OUTPUT.get(),
-            emitted: crate::OUTPUT_EMITTED.get(),
-            exit: crate::OUTPUT_EXIT_CODE.get(),
+            captured: output_state::CAPTURED.with(|slot| slot.borrow_mut().take()),
+            host_output: output_state::HOST_RPC_OUTPUT.get(),
+            emitted: output_state::OUTPUT_EMITTED.get(),
+            exit: output_state::OUTPUT_EXIT_CODE.get(),
         };
         std::env::set_var("RSRS_DATA_DIR", root);
         std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
@@ -322,7 +323,7 @@ mod tests {
         let image = root.join("doctor-runtime-fixture");
         std::fs::write(&image, b"doctor HTTP fixture identity")?;
         std::env::set_var("RSRS_RUNTIME_BIN", image);
-        crate::HOST_RPC_OUTPUT.set(true);
+        output_state::HOST_RPC_OUTPUT.set(true);
         test(root)
     }
 
@@ -529,7 +530,7 @@ mod tests {
             }
             with_runtime(vec![("cli.exec", reply(diagnostic(Status::Warn)))], || {
                 run(false, false, false)?;
-                let result = crate::CAPTURED
+                let result = output_state::CAPTURED
                     .with(|slot| slot.borrow_mut().take())
                     .context("client result missing")?;
                 assert_eq!(result.summary["scope"], "runtime");
@@ -636,7 +637,7 @@ mod tests {
                 result.errors = errors;
                 with_runtime(vec![("cli.exec", reply(result))], || {
                     run(false, false, false)?;
-                    let result = crate::CAPTURED
+                    let result = output_state::CAPTURED
                         .with(|slot| slot.borrow_mut().take())
                         .context("host result missing")?;
                     assert_eq!(result.status.as_str(), expected.as_str());
@@ -654,7 +655,7 @@ mod tests {
             paused.summary = json!({"mode":"off","skipped":true});
             with_runtime(vec![("cli.exec", reply(paused))], || {
                 run(false, false, true)?;
-                let result = crate::CAPTURED
+                let result = output_state::CAPTURED
                     .with(|slot| slot.borrow_mut().take())
                     .context("paused result missing")?;
                 assert_eq!(result.command, "doctor");
@@ -676,7 +677,7 @@ mod tests {
                 ],
                 || {
                     run(false, false, true)?;
-                    let result = crate::CAPTURED
+                    let result = output_state::CAPTURED
                         .with(|slot| slot.borrow_mut().take())
                         .context("repaired result missing")?;
                     assert_eq!(result.summary["refreshed"], true);

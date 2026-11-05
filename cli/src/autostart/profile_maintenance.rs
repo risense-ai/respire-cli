@@ -206,7 +206,8 @@ fn remove(name: Option<&str>, query: Option<&str>, space: bool) -> Result<Result
             receipt
         };
         unchanged()?;
-        if original.was_serving {
+        // A later manual stop overrides the original serving state.
+        if original.was_serving && registration.as_ref().is_none_or(|config| !config.manually_stopped) {
             maintenance.start_account_runtime()?;
             let restored = crate::rpc::probe_runtime()?.context("profile removal committed but original owner did not resume")?;
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest, Some(&account))?;

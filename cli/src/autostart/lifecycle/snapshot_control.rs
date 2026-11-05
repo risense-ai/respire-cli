@@ -489,8 +489,7 @@ impl Maintenance {
             "snapshot target selection changed"
         );
         let health = crate::net_rpc::health()?;
-        let scope: respire_protocol::RuntimeRequestScope =
-            serde_json::from_value(crate::net_rpc::request_scope(&health)?)?;
+        let scope = crate::net_rpc::request_scope(&health)?;
         let (binary, digest) = super::super::supervise::installed_auth_runtime()?;
         let birth = manager::process_birth(health.pid)?.context("snapshot target exited")?;
         let process = crate::net_rpc::runtime_process_identity(health.pid)?;

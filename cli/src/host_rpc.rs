@@ -1,6 +1,7 @@
 //! One-shot host RPC survives the memory Runtime's profile transition.
 //! Credentials arrive only on stdin; normal Runtime RPC retains its host gates.
 use anyhow::{bail, ensure, Context, Result};
+use respire_commands::output_state::HOST_RPC_OUTPUT;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -160,11 +161,11 @@ pub(crate) fn serve() -> Result<i32> {
     }) {
         Ok(args) => {
             // Preserve existing host lifecycle, access gates and profile transactions.
-            crate::HOST_RPC_OUTPUT.set(true);
+            HOST_RPC_OUTPUT.set(true);
             TOTP.with(|value| *value.borrow_mut() = request.params.get("totp").cloned());
             let result = crate::capture_run(args);
             TOTP.with(|value| *value.borrow_mut() = None);
-            crate::HOST_RPC_OUTPUT.set(false);
+            HOST_RPC_OUTPUT.set(false);
             result
         }
         Err(error) => {
