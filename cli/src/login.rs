@@ -382,6 +382,7 @@ fn commit_verified(
                     && std::path::Path::new(&health.data_dir).canonicalize()?
                         == expected.directory.canonicalize()?
                     && health.process_start_id == format!("{prefix}{birth}")
+                    && process.started_at == birth
                     && crate::mcp::exe_matches_dest(&health.exe, &executable)
                     && crate::mcp::exe_matches_dest(&process.executable, &executable)
                     && crate::runtime_fetch::version_in_accept(&health.runtime_version)

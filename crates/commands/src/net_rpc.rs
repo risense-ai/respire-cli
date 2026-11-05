@@ -6,7 +6,7 @@
 use std::fs;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::runtime_error::{OperationContext, RuntimeError};
@@ -848,6 +848,9 @@ pub struct RuntimeProcessIdentity {
 /// An endpoint PID is only a locator. Verify runtime arguments and creation time
 /// before waiting, then compare again before forcefully terminating the process.
 fn foreground_runtime_arguments(args: &[&str]) -> bool {
+    let standalone = args.first().is_some_and(|program| {
+        Path::new(program).file_name().and_then(|name| name.to_str()) == Some("rsrs-runtime")
+    });
     let mut args = args.iter().copied().skip(1);
     let command = loop {
         match args.next() {
@@ -855,7 +858,8 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
             other => break other,
         }
     };
-    command == Some("runtime") && args.next() == Some("run")
+    (standalone && command == Some("serve"))
+        || (command == Some("runtime") && args.next() == Some("run"))
 }
 
 pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
@@ -908,7 +912,7 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     #[cfg(all(unix, not(target_os = "linux")))]
     {
         let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
+            .args(["-ww", "-p", &pid.to_string(), "-o", "lstart=", "-o", "args="])
             .env("LC_ALL", "C")
             .output()?;
         anyhow::ensure!(
@@ -925,25 +929,27 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
             .get(24..)
             .context("runtime process command missing")?
             .trim();
-        let stable = stable_bin_path();
-        let foreground = command
-            .strip_prefix(stable.to_string_lossy().as_ref())
-            .is_some_and(|tail| {
-                let mut args = vec!["rsrs"];
-                args.extend(tail.split_whitespace());
-                foreground_runtime_arguments(&args)
-            });
-        let args: Vec<_> = command.split_whitespace().collect();
+        let image = std::process::Command::new("ps")
+            .args(["-ww", "-p", &pid.to_string(), "-o", "comm="])
+            .env("LC_ALL", "C")
+            .output()?;
+        anyhow::ensure!(image.status.success(), "cannot inspect runtime process image");
+        let executable = String::from_utf8(image.stdout)?.trim().to_owned();
+        let tail = command
+            .strip_prefix(&executable)
+            .filter(|tail| tail.is_empty() || tail.starts_with(char::is_whitespace))
+            .context("runtime command does not match its process image")?;
+        let mut args = vec![executable.as_str()];
+        args.extend(tail.split_whitespace());
         anyhow::ensure!(
             args.contains(&"--runtime-internal")
                 || (args.contains(&"web") && args.contains(&"--internal"))
-                || foreground
                 || foreground_runtime_arguments(&args),
             "process {pid} is not a runtime; restart refused"
         );
         Ok(RuntimeProcessIdentity {
             started_at,
-            executable: command.to_owned(),
+            executable,
         })
     }
 }
@@ -1023,6 +1029,24 @@ pub fn ensure_token_file() -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn foreground_identity_accepts_standalone_serve_not_cli_serve() {
+        for args in [
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "15169"],
+            vec!["/tmp/path with spaces/rsrs-runtime", "--json", "serve"],
+            vec!["/tmp/rsrs", "runtime", "run"],
+        ] {
+            assert!(foreground_runtime_arguments(&args), "{args:?}");
+        }
+        for args in [
+            vec!["/tmp/rsrs", "serve"],
+            vec!["/tmp/unrelated", "serve"],
+            vec!["/tmp/rsrs-runtime", "--status"],
+        ] {
+            assert!(!foreground_runtime_arguments(&args), "{args:?}");
+        }
+    }
 
     fn valid_timeout_args(args: &[&str]) -> Vec<String> {
         use clap::Parser;
