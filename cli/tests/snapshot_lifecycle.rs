@@ -1,5 +1,5 @@
 //! Public snapshot commands with an isolated synthetic vault, not user data.
-//! Explicit CLI shim compatibility regression, not standalone Runtime acceptance.
+//! Uses the CI-provided standalone Runtime; not release artifact acceptance.
 use anyhow::{Context, Result};
 use respire::memory::{crypto, search::HashingEmbedder};
 use respire::transport::local::LocalStore;
@@ -13,12 +13,22 @@ use std::{
 
 struct Fixture {
     runtime: Option<std::process::Child>,
+    runtime_bin: std::path::PathBuf,
     root: tempfile::TempDir,
     port: u16,
     secret: String,
 }
 impl Fixture {
     fn new() -> Result<Self> {
+        let runtime_bin = std::path::PathBuf::from(
+            std::env::var_os("RSRS_RUNTIME_BIN")
+                .context("supply RSRS_RUNTIME_BIN with the official standalone Runtime fixture")?,
+        ).canonicalize()?;
+        anyhow::ensure!(runtime_bin.is_file(), "standalone Runtime fixture missing");
+        anyhow::ensure!(
+            runtime_bin != std::path::Path::new(env!("CARGO_BIN_EXE_rsrs")).canonicalize()?,
+            "CLI shim cannot substitute for the standalone Runtime fixture"
+        );
         let root = tempfile::tempdir()?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?
@@ -35,6 +45,7 @@ impl Fixture {
         )?;
         let mut fixture = Self {
             runtime: None,
+            runtime_bin,
             root,
             port,
             secret,
@@ -73,48 +84,50 @@ impl Fixture {
         Ok(fixture)
     }
     fn start_runtime(&mut self) -> Result<()> {
-        let mut runtime = Command::new(env!("CARGO_BIN_EXE_rsrs"))
-            .arg("--runtime-internal")
+        let runtime_stderr = self.root.path().join("runtime-stderr.log");
+        let ready_stdout = self.root.path().join("ready-stdout.log");
+        let ready_stderr = self.root.path().join("ready-stderr.log");
+        let runtime = self.runtime_command()
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .current_dir(self.root.path())
-            .env("HOME", self.root.path())
-            .env("USERPROFILE", self.root.path())
-            .env("RSRS_DATA_DIR", self.root.path())
-            .env("RSRS_RPC_PORT", self.port.to_string())
-            .env("RSRS_PASS", &self.secret)
-            .env("RSRS_SUPER", &self.secret)
-            .env("RSRS_NO_AUTOSYNC", "1")
-            .env("RSRS_UPDATE_CHECK", "0")
-            .env("RSRS_CORE_TEST_MODE", "1")
-            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
+            .stderr(Stdio::from(std::fs::File::create(&runtime_stderr)?))
             .spawn()?;
+        self.runtime = Some(runtime);
         let began = Instant::now();
         loop {
-            if let Some(status) = runtime.try_wait()? {
-                let _ = runtime.wait();
-                anyhow::bail!("runtime exited during fixture startup: {status}");
+            if let Some(status) = self.runtime.as_mut().context("fixture runtime missing")?.try_wait()? {
+                anyhow::bail!("runtime exited during fixture startup: {status}; stderr={}",
+                    std::fs::read_to_string(&runtime_stderr)?);
             }
-            let ready = Command::new(env!("CARGO_BIN_EXE_rsrs"))
-                .args(["--client-only", "--json", "status"])
+            let mut ready = self.command(&["--client-only", "--json", "status"])
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .current_dir(self.root.path())
-                .env("HOME", self.root.path())
-                .env("USERPROFILE", self.root.path())
-                .env("RSRS_DATA_DIR", self.root.path())
-                .env("RSRS_RPC_PORT", self.port.to_string())
-                .status()?;
-            if ready.success() {
-                self.runtime = Some(runtime);
+                .stdout(Stdio::from(std::fs::File::create(&ready_stdout)?))
+                .stderr(Stdio::from(std::fs::File::create(&ready_stderr)?))
+                .spawn()?;
+            // A single RPC must not outlive the fixture's existing startup budget.
+            let status = loop {
+                if let Some(status) = ready.try_wait()? {
+                    break Some(status);
+                }
+                if began.elapsed() > Duration::from_secs(15) {
+                    let _ = ready.kill();
+                    let _ = ready.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            if status.is_some_and(|status| status.success()) {
                 return Ok(());
             }
             if began.elapsed() > Duration::from_secs(15) {
-                let _ = runtime.kill();
-                let _ = runtime.wait();
-                anyhow::bail!("runtime did not become ready");
+                if let Some(mut runtime) = self.runtime.take() {
+                    let _ = runtime.kill();
+                    let _ = runtime.wait();
+                }
+                anyhow::bail!("runtime did not become ready; probe={status:?}; stdout={}; stderr={}; runtime stderr={}",
+                    std::fs::read_to_string(&ready_stdout)?,
+                    std::fs::read_to_string(&ready_stderr)?,
+                    std::fs::read_to_string(&runtime_stderr)?);
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -144,7 +157,15 @@ impl Fixture {
         Ok(())
     }
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rsrs"));
+        self.command_for(std::path::Path::new(env!("CARGO_BIN_EXE_rsrs")), args)
+    }
+    fn runtime_command(&self) -> Command {
+        let mut command = self.command_for(&self.runtime_bin, &["serve"]);
+        command.env("RSRS_PASS", &self.secret);
+        command
+    }
+    fn command_for(&self, executable: &std::path::Path, args: &[&str]) -> Command {
+        let mut command = Command::new(executable);
         for (name, _) in std::env::vars_os() {
             if name.to_str().is_some_and(|n| {
                 n.starts_with("RSRS_") || n.starts_with("ONEMEMORY_") || n.starts_with("RESPIRE_")
@@ -163,7 +184,7 @@ impl Fixture {
             .env("RSRS_NO_AUTOSYNC", "1")
             .env("RSRS_UPDATE_CHECK", "0")
             .env("RSRS_CORE_TEST_MODE", "1")
-            .env("RSRS_RUNTIME_BIN", env!("CARGO_BIN_EXE_rsrs"))
+            .env("RSRS_RUNTIME_BIN", &self.runtime_bin)
             .env("RSRS_LANG", "en")
             .env("RSRS_MIRROR", "http://127.0.0.1:9")
             .env("RSRS_CPU_ORT_MIRROR", "http://127.0.0.1:9");
@@ -426,7 +447,7 @@ fn staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable() -> 
     // without recovery. Afterwards the serving child is reaped so the
     // library lock is released for the following tests.
     let mut serving = fixture
-        .command(&["--runtime-internal"])
+        .runtime_command()
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
