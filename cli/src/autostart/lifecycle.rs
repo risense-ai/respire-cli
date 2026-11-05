@@ -1498,7 +1498,7 @@ mod tests {
         let _lock = crate::TEST_ENV_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
-        struct Restore(Option<std::ffi::OsString>);
+        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 ACTIVE.with(|slot| *slot.borrow_mut() = None);
@@ -1506,9 +1506,16 @@ mod tests {
                     Some(v) => std::env::set_var("RSRS_DATA_DIR", v),
                     None => std::env::remove_var("RSRS_DATA_DIR"),
                 }
+                match &self.1 {
+                    Some(v) => std::env::set_var("RSRS_RUNTIME_BOOT_TOKEN", v),
+                    None => std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN"),
+                }
             }
         }
-        let _restore = Restore(std::env::var_os("RSRS_DATA_DIR"));
+        let _restore = Restore(
+            std::env::var_os("RSRS_DATA_DIR"),
+            std::env::var_os("RSRS_RUNTIME_BOOT_TOKEN"),
+        );
         let dir = tempfile::tempdir()?;
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         anyhow::ensure!(!background_paused());
@@ -1518,7 +1525,7 @@ mod tests {
                 id: "synthetic-installation".into(),
                 token: uuid::Uuid::new_v4().to_string(),
                 phase,
-                expected_profile: None,
+                expected_profile: Some(dir.path().canonicalize()?),
                 expected_version: env!("CARGO_PKG_VERSION").into(),
                 owner_pid: std::process::id(),
                 owner_birth: manager::process_birth(std::process::id())?
@@ -1533,9 +1540,28 @@ mod tests {
             check_direct_access()?;
             // Owning the controller token never authorizes background threads.
             anyhow::ensure!(background_paused());
+            std::env::set_var("RSRS_RUNTIME_BOOT_TOKEN", &value.token);
+            if phase == Phase::Paused {
+                anyhow::ensure!(verify_managed_boot().is_err());
+            } else {
+                verify_managed_boot()?;
+                std::env::set_var("RSRS_RUNTIME_BOOT_TOKEN", "foreign-controller");
+                anyhow::ensure!(verify_managed_boot().is_err());
+                std::env::set_var("RSRS_RUNTIME_BOOT_TOKEN", &value.token);
+                let mut wrong = value.clone();
+                wrong.expected_version.push_str("-foreign");
+                fs::write(&path, serde_json::to_vec(&wrong)?)?;
+                anyhow::ensure!(verify_managed_boot().is_err());
+                wrong = value.clone();
+                wrong.expected_profile = Some(dir.path().join("other-profile"));
+                fs::write(&path, serde_json::to_vec(&wrong)?)?;
+                anyhow::ensure!(verify_managed_boot().is_err());
+            }
             ACTIVE.with(|slot| *slot.borrow_mut() = None);
             value.owner_birth.push_str("-reused-pid");
+            fs::write(&path, serde_json::to_vec(&value)?)?;
             anyhow::ensure!(!controller_alive(&value)?);
+            anyhow::ensure!(verify_managed_boot().is_err());
             fs::remove_file(path)?;
         }
         let path = marker_path(&respire::service::main_data_dir());
@@ -1589,6 +1615,16 @@ mod tests {
         event(&config, "exit_ok")?;
         anyhow::ensure!(fs::metadata(&path)?.len() < 1024);
         anyhow::ensure!(fs::metadata(path.with_file_name("events.previous.jsonl"))?.len() == 65500);
+        let backup = path.with_file_name("events.previous.jsonl");
+        let full = vec![b' '; 65500];
+        fs::write(&path, &full)?;
+        fs::write(&backup, b"previous rotation")?;
+        event(&config, "exit_error")?;
+        anyhow::ensure!(fs::read(&backup)? == full);
+        fs::remove_file(&backup)?;
+        fs::create_dir(&backup)?;
+        fs::write(&path, &full)?;
+        anyhow::ensure!(event(&config, "exit_ok").is_err() && fs::read(&path)? == full);
         Ok(())
     }
 
@@ -1598,29 +1634,29 @@ mod tests {
         let _lock = crate::TEST_ENV_LOCK
             .lock()
             .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
-        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        struct Restore(Vec<(std::ffi::OsString, std::ffi::OsString)>);
+        impl Restore {
+            fn captures(key: &std::ffi::OsStr) -> bool {
+                key.to_str().is_some_and(|key| {
+                    matches!(key, "HOME" | "USERPROFILE")
+                        || ["RSRS_", "ONEMEMORY_", "RESPIRE_"]
+                            .iter()
+                            .any(|prefix| key.starts_with(prefix))
+                })
+            }
+        }
         impl Drop for Restore {
             fn drop(&mut self) {
                 ACTIVE.with(|slot| *slot.borrow_mut() = None);
+                for (key, _) in std::env::vars_os().filter(|(key, _)| Self::captures(key)) {
+                    std::env::remove_var(key);
+                }
                 for (key, value) in &self.0 {
-                    match value {
-                        Some(v) => std::env::set_var(key, v),
-                        None => std::env::remove_var(key),
-                    }
+                    std::env::set_var(key, value);
                 }
             }
         }
-        let _restore = Restore(
-            [
-                "RSRS_DATA_DIR",
-                "RSRS_BIN_DIR",
-                "RSRS_RPC_PORT",
-                "RSRS_RUNTIME_BIN",
-            ]
-            .into_iter()
-            .map(|key| (key, std::env::var_os(key)))
-            .collect(),
-        );
+        let _restore = Restore(std::env::vars_os().filter(|(key, _)| Restore::captures(key)).collect());
         let dir = tempfile::tempdir()?;
         let root = dir.path().canonicalize()?;
         std::env::set_var("RSRS_DATA_DIR", &root);
@@ -1679,6 +1715,135 @@ mod tests {
         let (_scope, state) = manager::test_adapter::install(&config);
         manager::install(&mut config)?;
         save(&mut config)?;
+        let version = crate::runtime_fetch::pinned()?.required.clone();
+        let installed = root.join("runtime").join(&version);
+        fs::create_dir_all(&installed)?;
+        fs::write(installed.join(crate::runtime_fetch::RUNTIME_BINARY), b"inventory only; never executed")?;
+        let inventory = runtime_inventory()?;
+        anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
+            && inventory["installed"][0]["current"] == true);
+        anyhow::ensure!(install_runtime(Some(&runtime), None, None).is_err());
+        anyhow::ensure!(install_runtime(None, Some(&version), None).is_err());
+        anyhow::ensure!(install_runtime(Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+
+        // Recovery must revalidate the registered owner again at the cleanup boundary.
+        {
+            let _takeover = crate::runtime_policy::takeover_lock()?;
+            let session = root.join("session.json");
+            fs::write(&session, br#"{"user":"recovery-fixture-account"}"#)?;
+            let instance = uuid::Uuid::new_v4().to_string();
+            let registration = fs::read(control_path(&root))?;
+            let grant = serde_json::to_string(&json!({
+                "schema_version":1, "protocol_version":crate::rpc::PROTOCOL_V,
+                "nonce":instance, "instance_id":instance, "installation_root":root,
+                "installation_id":hash(root.display().to_string().as_bytes()), "profile":root,
+                "account_id":hash(b"recovery-fixture-account"), "sync_generation":0,
+                "image_path":runtime, "image_sha256":hash(b"synthetic runtime; never executed"),
+                "supervisor_pid":u32::MAX-1, "supervisor_birth":"456", "managed_id":config.id,
+                "registration_sha256":hash(&registration), "maintenance":null,
+                "port":crate::net_rpc::rpc_port(), "issued_at_ms":1, "expires_at_ms":2,
+            }))?;
+            let receipt = serde_json::to_vec(&json!({
+                "schema_version":2, "protocol_version":crate::rpc::PROTOCOL_V, "state":"consumed",
+                "grant_json":grant, "grant_sha256":hash(grant.as_bytes()),
+                "registration_json":std::str::from_utf8(&registration)?,
+                "pid":u32::MAX, "process_start_id":"123",
+            }))?;
+            let launch = root.join("runtime/autostart/launch");
+            fs::create_dir_all(&launch)?;
+            let claim = launch.join(format!("launch-{instance}.claimed"));
+            fs::write(&claim, &receipt)?;
+            let endpoint = crate::rpc::endpoint_path();
+            let record = serde_json::to_vec(&json!({
+                "schema_version":2, "server":"respire", "v":crate::rpc::PROTOCOL_V,
+                "bin":version, "runtime_version":version, "url":crate::net_rpc::rpc_base_url(),
+                "pid":u32::MAX, "process_start_id":"linux-starttime-123", "instance_id":instance,
+                "installation_root":root, "data_dir":root,
+                "installation_id":hash(root.display().to_string().as_bytes()),
+                "account_id":hash(b"recovery-fixture-account"), "generation":7,
+                "exe":runtime, "image_path":runtime, "image_sha256":hash(b"synthetic runtime; never executed"),
+                "managed_id":config.id, "launch_receipt_sha256":hash(&receipt),
+            }))?;
+            fs::write(&endpoint, &record)?;
+            state.borrow_mut().running = true;
+            anyhow::ensure!(super::super::StaleOwner::prepare_locked().is_err());
+            state.borrow_mut().running = false;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", crate::net_rpc::rpc_port()))?;
+            anyhow::ensure!(super::super::StaleOwner::prepare_locked().is_err());
+            drop(listener);
+            let stale = super::super::StaleOwner::prepare_locked()?;
+            let mut changed = config.clone();
+            changed.manually_stopped = true;
+            save(&mut changed)?;
+            anyhow::ensure!(stale.remove_endpoint_locked().is_err());
+            anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            fs::write(control_path(&root), &registration)?;
+            super::super::StaleOwner::prepare_locked()?.remove_endpoint_locked()?;
+            anyhow::ensure!(!endpoint.exists() && fs::read(&claim)? == receipt && !root.join("rsrs.db").exists());
+            fs::remove_file(session)?;
+        }
+        let changes = state.borrow().changes.clone();
+        config.enabled = false;
+        config.manually_stopped = true;
+        save(&mut config)?;
+        anyhow::ensure!(!ensure_managed_locked()? && !stop_managed_locked()?);
+        run_foreground(Some(&config.id), Some(&root), false)?;
+        std::env::set_var("RSRS_RUNTIME_BIN", root.join("missing-runtime"));
+        anyhow::ensure!(start_explicit_locked().is_err());
+        std::env::remove_var("RSRS_RUNTIME_BIN");
+        config = read_registration(&root)?.context("disabled registration disappeared")?;
+        anyhow::ensure!(!config.enabled && !config.manually_stopped
+            && state.borrow().changes == changes);
+        config.enabled = true;
+        save(&mut config)?;
+
+        // Stop at real boot fences, before signal handlers or runtime_entry can run.
+        let mut paused = Maintenance::begin(config.clone(), false)?;
+        anyhow::ensure!(run_foreground(Some(&config.id), None, false).is_err());
+        anyhow::ensure!(run_foreground(Some("foreign"), Some(&root), false).is_err());
+        anyhow::ensure!(run_foreground(Some(&config.id), Some(&root), false).is_err());
+        let executable = fs::read(&config.executable)?;
+        fs::remove_file(&config.executable)?;
+        std::os::unix::fs::symlink(std::env::current_exe()?, &config.executable)?;
+        for key in ["RSRS_UNREGISTERED", "ONEMEMORY_UNREGISTERED", "RESPIRE_UNREGISTERED"] {
+            std::env::set_var(key, "must-not-reach-the-child");
+        }
+        run_foreground(Some(&config.id), Some(&root), false)?;
+        for key in ["RSRS_UNREGISTERED", "ONEMEMORY_UNREGISTERED", "RESPIRE_UNREGISTERED"] {
+            anyhow::ensure!(std::env::var_os(key).is_none());
+        }
+        anyhow::ensure!(std::env::var_os("HOME").as_deref() == Some(config.user_home.as_os_str())
+            && std::env::var_os("USERPROFILE").as_deref() == Some(config.user_home.as_os_str()));
+        paused.mark(Phase::Starting)?;
+        let now = now_seconds()?;
+        for _ in 0..3 {
+            anyhow::ensure!(record_attempt(&config, now)?);
+        }
+        run_foreground(Some(&config.id), Some(&root), false)?;
+        anyhow::ensure!(managed_id().is_none() && read_attempts(&config)?.0.starts.len() == 3);
+        let events = fs::read_to_string(control_path(&root).with_file_name("events.jsonl"))?;
+        anyhow::ensure!(events.contains("\"event\":\"paused\"") && events.contains("\"event\":\"crash_limit\""));
+        paused.finish()?;
+        config = read_registration(&root)?.context("paused registration disappeared")?;
+        fs::remove_file(&config.executable)?;
+        fs::write(&config.executable, executable)?;
+        reset_attempts(&config)?;
+        for materialize in [false, true] {
+            state.borrow_mut().running = true;
+            let error = if materialize {
+                coordinate_materialization().map(|_| ())
+            } else {
+                ensure_managed_locked().map(|_| ())
+            }
+            .err()
+            .context("maintenance without owner proof unexpectedly succeeded")?;
+            anyhow::ensure!(format!("{error:#}").contains("manager stop is blocked")
+                && state.borrow().running && background_paused());
+            state.borrow_mut().running = false;
+            let mut recovered = restart_maintenance_locked()?;
+            recovered.finish()?;
+        }
+        config = read_registration(&root)?.context("recovered registration disappeared")?;
         let cold_changes = state.borrow().changes.clone();
         raw_stop_owned(&config)?;
         anyhow::ensure!(
