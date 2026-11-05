@@ -288,6 +288,19 @@ impl Maintenance {
         Ok(())
     }
 
+    pub(crate) fn drain_runtime(&self, health: &crate::net_rpc::Health) -> Result<()> {
+        let Some(config) = self.config.as_ref() else {
+            return crate::rpc::drain_occupant(health, Duration::from_secs(60));
+        };
+        owned(config)?;
+        ensure_control_endpoint(config)?;
+        manager::inspect(config)?;
+        verify_owned_runtime(config, health)?;
+        crate::rpc::drain_occupant(health, Duration::from_secs(60))?;
+        // Finish stopping the supervisor before a profile change makes old health unavailable.
+        stop_drained_supervisor(config)
+    }
+
     pub(crate) fn finish(&mut self) -> Result<()> {
         if self.completed {
             return Ok(());
@@ -544,7 +557,17 @@ fn raw_stop_owned(config: &Registration) -> Result<()> {
     };
     verify_owned_runtime(config, &health)?;
     crate::rpc::drain_occupant(&health, Duration::from_secs(60))?;
-    manager::stop(config)
+    stop_drained_supervisor(config)
+}
+
+// Call only after drain_occupant has verified the child's final receipt and exit.
+fn stop_drained_supervisor(config: &Registration) -> Result<()> {
+    manager::stop(config)?;
+    anyhow::ensure!(
+        !manager::inspect(config)?.running && !crate::rpc::endpoint_path().try_exists()?,
+        "drained runtime supervisor is still active or its endpoint changed; replacement is blocked"
+    );
+    Ok(())
 }
 
 fn wait_ready(config: &Registration) -> Result<()> {
@@ -1662,6 +1685,37 @@ mod tests {
             !state.borrow().running && state.borrow().changes == cold_changes,
             "cold start attempted to stop an absent owner"
         );
+        // Model the interval after a verified child drain but before supervisor exit.
+        state.borrow_mut().running = true;
+        anyhow::ensure!(
+            raw_stop_owned(&config).is_err() && state.borrow().changes == cold_changes,
+            "an active supervisor without drain proof was stopped"
+        );
+        let mut maintenance = Maintenance::begin(config.clone(), false)?;
+        let mut foreign = health.clone();
+        foreign["managed_id"] = json!("foreign-registration");
+        anyhow::ensure!(
+            maintenance.drain_runtime(&serde_json::from_value(foreign)?).is_err()
+                && state.borrow().running,
+            "profile maintenance stopped a foreign owner"
+        );
+        let before_stop = state.borrow().changes.clone();
+        state.borrow_mut().fail = Some("stop".into());
+        anyhow::ensure!(
+            stop_drained_supervisor(&config).is_err() && state.borrow().running,
+            "failed supervisor stop permitted replacement"
+        );
+        state.borrow_mut().fail = None;
+        stop_drained_supervisor(&config)?;
+        let after_stop = state.borrow().changes.clone();
+        anyhow::ensure!(!state.borrow().running && after_stop.len() == before_stop.len() + 1);
+        raw_stop_owned(&config)?;
+        anyhow::ensure!(
+            state.borrow().changes == after_stop,
+            "a drained and stopped supervisor required a second health proof"
+        );
+        maintenance.finish()?;
+        let cold_changes = state.borrow().changes.clone();
         let endpoint = crate::rpc::endpoint_path();
         fs::create_dir_all(endpoint.parent().context("test endpoint parent missing")?)?;
         anyhow::ensure!(!endpoint.exists());

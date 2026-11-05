@@ -889,5 +889,63 @@ fn public_empty_recall_returns_its_query_log_identity() -> Result<()> {
         .query_log_rows(20)?
         .iter()
         .any(|row| row.request_id.as_deref() == Some(request) && row.candidates.is_empty()));
+    let rows = store.query_log_rows(20)?;
+    let recorded = rows
+        .iter()
+        .find(|row| row.request_id.as_deref() == Some(request))
+        .context("persisted empty recall record")?;
+    assert_eq!(recorded.query, "synthetic absent query");
+    assert_eq!(recorded.project, "not-in-fixture");
+    let before: Vec<_> = rows.iter().map(|row| row.request_id.clone()).collect();
+    drop(store);
+
+    // A successful response must not advertise an identity whose INSERT failed.
+    let database = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+    database.execute_batch(
+        "CREATE TRIGGER reject_empty_query_log BEFORE INSERT ON query_log
+         BEGIN SELECT RAISE(ABORT, 'synthetic empty query log refused'); END;",
+    )?;
+    drop(database);
+    let (ok, denied) = fixture.run(&[
+        "--direct",
+        "--json",
+        "recall",
+        "synthetic rejected query",
+        "--project",
+        "not-in-fixture",
+    ])?;
+    assert!(!ok);
+    assert!(denied["errors"].to_string().contains("synthetic empty query log refused"));
+    assert!(denied["summary"]["query_log_id"].is_null());
+    let database = rusqlite::Connection::open(fixture.root.path().join("rsrs.db"))?;
+    database.execute_batch("DROP TRIGGER reject_empty_query_log;")?;
+    drop(database);
+
+    let (ok, mode) = fixture.run(&[
+        "--direct",
+        "--json",
+        "agent-config",
+        "--set",
+        "workspace_mode=readonly",
+    ])?;
+    anyhow::ensure!(ok, "readonly configuration failed: {}", mode["errors"]);
+    let (ok, readonly) = fixture.run(&[
+        "--direct",
+        "--json",
+        "recall",
+        "synthetic readonly query",
+        "--project",
+        "not-in-fixture",
+    ])?;
+    anyhow::ensure!(ok, "readonly recall failed: {}", readonly["errors"]);
+    assert_eq!(readonly["summary"]["count"], 0);
+    assert!(readonly["summary"]["query_log_id"].is_null());
+    let store = LocalStore::open(&fixture.root.path().join("rsrs.db"))?;
+    let after: Vec<_> = store
+        .query_log_rows(20)?
+        .into_iter()
+        .map(|row| row.request_id)
+        .collect();
+    assert_eq!(after, before);
     Ok(())
 }

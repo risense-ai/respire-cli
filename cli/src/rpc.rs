@@ -301,7 +301,7 @@ fn change_profile_inner(
         None
     };
     if let Some(health) = original_runtime.as_ref() {
-        drain_occupant(health, Duration::from_secs(60))?;
+        maintenance.drain_runtime(health)?;
     }
     let changed = change().and_then(|_| {
         if !start_runtime && !was_running {
@@ -313,7 +313,7 @@ fn change_profile_inner(
     if let Err(error) = changed {
         let cleanup = if start_runtime || was_running {
             probe_runtime().and_then(|health| match health {
-                Some(health) => stop_occupant(health.pid),
+                Some(health) => maintenance.drain_runtime(&health),
                 None => Ok(()),
             })
         } else {
