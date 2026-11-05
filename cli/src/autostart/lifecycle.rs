@@ -1741,6 +1741,8 @@ mod tests {
         let mut recovered = restart_maintenance_locked()?;
         recovered.finish()?;
         anyhow::ensure!(!background_paused());
+        // Recreate a running owner without health before checking the stop fence.
+        state.borrow_mut().running = true;
         state.borrow_mut().fail = Some("enable".into());
         let failed = enable(false)
             .err()

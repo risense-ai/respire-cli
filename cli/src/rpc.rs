@@ -232,6 +232,11 @@ pub fn change_profile(change: impl FnOnce() -> Result<()>) -> Result<()> {
     change_profile_with_rollback(change, || Ok(()))
 }
 
+/// Asset maintenance restores a running owner without starting an idle runtime.
+pub fn change_host_assets(change: impl FnOnce() -> Result<()>) -> Result<()> {
+    change_profile_inner(change, || Ok(()), || Ok(()), false)
+}
+
 pub fn change_profile_with_rollback(
     change: impl FnOnce() -> Result<()>,
     rollback: impl FnOnce() -> Result<()>,
@@ -244,8 +249,23 @@ pub fn change_profile_with_verification(
     rollback: impl FnOnce() -> Result<()>,
     verify: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
+    change_profile_inner(change, rollback, verify, true)
+}
+
+fn change_profile_inner(
+    change: impl FnOnce() -> Result<()>,
+    rollback: impl FnOnce() -> Result<()>,
+    verify: impl FnOnce() -> Result<()>,
+    start_runtime: bool,
+) -> Result<()> {
     crate::progress::phase("\u{534f}\u{8c03}\u{8d26}\u{6237}\u{64cd}\u{4f5c}\u{ff1b}\u{7b49}\u{5f85}\u{5f53}\u{524d} runtime \u{91ca}\u{653e}", "Coordinating account operation; waiting for current runtime to release");
     let _takeover = crate::runtime_policy::takeover_lock()?;
+    let original_runtime = probe_runtime()?;
+    anyhow::ensure!(
+        original_runtime.is_some() || !endpoint_path().exists(),
+        "profile change blocked: recorded owner has no verifiable health/drain receipt"
+    );
+    let was_running = original_runtime.is_some();
     let mut maintenance = crate::autostart::begin_maintenance_locked()?;
     let config_path = respire::service::client_config_path();
     let original = match std::fs::read(&config_path) {
@@ -275,18 +295,25 @@ pub fn change_profile_with_verification(
     } else {
         None
     };
-    if let Some(health) = probe_runtime()? {
-        stop_occupant(health.pid)?;
+    if let Some(health) = original_runtime.as_ref() {
+        drain_occupant(health, Duration::from_secs(60))?;
     }
     let changed = change().and_then(|_| {
+        if !start_runtime && !was_running {
+            return Ok(());
+        }
         crate::progress::phase("\u{542f}\u{52a8} runtime\u{ff1b}\u{6838}\u{5bf9}\u{8d26}\u{6237}\u{548c}\u{8def}\u{5f84}", "Starting runtime; verifying account and path");
         ensure_daemon_locked()
     }).and_then(|_| verify());
     if let Err(error) = changed {
-        let cleanup = probe_runtime().and_then(|health| match health {
-            Some(health) => stop_occupant(health.pid),
-            None => Ok(()),
-        });
+        let cleanup = if start_runtime || was_running {
+            probe_runtime().and_then(|health| match health {
+                Some(health) => stop_occupant(health.pid),
+                None => Ok(()),
+            })
+        } else {
+            Ok(())
+        };
         let mut failures = Vec::new();
         if let Err(error) = &cleanup {
             failures.push(format!("target runtime cleanup failed: {error:#}"));
@@ -327,7 +354,7 @@ pub fn change_profile_with_verification(
         if let Err(error) = &restored {
             failures.push(format!("configuration rollback failed: {error:#}"));
         }
-        if cleanup.is_ok() && restored.is_ok() {
+        if was_running && cleanup.is_ok() && restored.is_ok() {
             if let Err(error) = ensure_daemon_locked() {
                 failures.push(format!("original runtime restart failed: {error:#}"));
             }
@@ -935,6 +962,7 @@ mod runtime_resolution_tests {
             "RSRS_RUNTIME_BIN",
             "ONEMEMORY_RUNTIME_BIN",
             "RESPIRE_RUNTIME_BIN",
+            "RSRS_RPC_PORT",
         ];
         let _restore = Restore(
             keys.iter()
@@ -945,9 +973,47 @@ mod runtime_resolution_tests {
         std::env::set_var("RSRS_DATA_DIR", directory.path());
         std::env::set_var("RSRS_BIN_DIR", directory.path().join("bin"));
         std::env::set_var("RSRS_CORE_TEST_MODE", "1");
-        for key in &keys[3..] {
+        for key in &keys[3..6] {
             std::env::remove_var(key);
         }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+        drop(listener);
+
+        // Idle asset maintenance must never resolve or spawn the selected runtime.
+        std::env::set_var("RSRS_RUNTIME_BIN", directory.path().join("missing-runtime"));
+        let config_path = respire::service::client_config_path();
+        change_host_assets(|| {
+            std::fs::write(&config_path, b"{}")?;
+            Ok(())
+        })?;
+        let error = change_host_assets(|| {
+            std::fs::write(&config_path, b"{\"changed\":true}")?;
+            bail!("synthetic asset failure")
+        })
+        .err()
+        .context("asset failure was swallowed")?;
+        anyhow::ensure!(format!("{error:#}") == "synthetic asset failure");
+        anyhow::ensure!(std::fs::read(&config_path)? == b"{}");
+        anyhow::ensure!(!endpoint_path().exists() && !directory.path().join("bin").exists());
+        std::fs::remove_file(&config_path)?;
+        let error = change_host_assets(|| bail!("synthetic absent-config failure"))
+            .err()
+            .context("absent-config asset failure was swallowed")?;
+        anyhow::ensure!(format!("{error:#}") == "synthetic absent-config failure");
+        anyhow::ensure!(!config_path.exists() && !endpoint_path().exists());
+        let endpoint = endpoint_path();
+        std::fs::create_dir_all(endpoint.parent().context("test endpoint parent missing")?)?;
+        std::fs::write(&endpoint, br#"{"v":1,"pid":0}"#)?;
+        let mut changed = false;
+        anyhow::ensure!(change_host_assets(|| {
+            changed = true;
+            Ok(())
+        })
+        .is_err());
+        anyhow::ensure!(!changed && endpoint.exists() && !config_path.exists());
+        std::fs::remove_file(endpoint)?;
+        std::env::remove_var("RSRS_RUNTIME_BIN");
         let cli = std::env::current_exe()?;
         let health: crate::net_rpc::Health = serde_json::from_value(json!({
             "server": "rsrs", "bin": env!("CARGO_PKG_VERSION"), "pid": 42, "v": PROTOCOL_V,

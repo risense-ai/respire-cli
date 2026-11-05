@@ -2008,7 +2008,7 @@ fn run(args: Cli) -> Result<()> {
         runtime_policy::require_host("profile switching")?;
         CAPTURED.with(|slot| *slot.borrow_mut() = None);
         DEFER_PROFILE_OUTPUT.set(true);
-        let switched = rpc::change_profile(|| {
+        let change = || {
             run_local(args)?;
             if CAPTURED.with(|slot| {
                 slot.borrow()
@@ -2023,7 +2023,12 @@ fn run(args: Cli) -> Result<()> {
                 );
             }
             Ok(())
-        });
+        };
+        let switched = if host_asset_change {
+            rpc::change_host_assets(change)
+        } else {
+            rpc::change_profile(change)
+        };
         DEFER_PROFILE_OUTPUT.set(false);
         OUTPUT_EMITTED.set(false);
         OUTPUT_EXIT_CODE.set(0);
