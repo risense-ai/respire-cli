@@ -169,15 +169,7 @@ pub struct HttpIn {
 
 /// Native daemon directory. Default: `~/.rsrs/bin` (profile root, not the
 /// current account `data_dir()`). Isolation: `RSRS_DATA_DIR` / `RSRS_BIN_DIR`.
-pub fn bin_dir() -> PathBuf {
-    if let Ok(raw) = respire::env::var("RSRS_BIN_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    respire::service::main_data_dir().join("bin")
-}
+pub use respire_client_host::paths::bin_dir;
 
 pub fn stable_bin_path() -> PathBuf {
     let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };

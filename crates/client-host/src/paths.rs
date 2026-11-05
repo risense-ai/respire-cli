@@ -98,6 +98,17 @@ pub fn main_data_dir() -> PathBuf {
     env_root_dir().unwrap_or_else(default_data_dir)
 }
 
+/// Component binary directory, preserving the explicit host override.
+pub fn bin_dir() -> PathBuf {
+    if let Ok(raw) = crate::env::var("RSRS_BIN_DIR") {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    main_data_dir().join("bin")
+}
+
 pub fn home_dir() -> Result<PathBuf> {
     if let Ok(home) = crate::env::var("HOME") {
         if !home.trim().is_empty() {

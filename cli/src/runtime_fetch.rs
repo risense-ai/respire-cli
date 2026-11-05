@@ -542,7 +542,7 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
             }
         }
     }
-    let legacy = crate::mcp::bin_dir().join(LEGACY_COMBINED_BINARY);
+    let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
     if legacy.is_file() {
         return Ok(ResolvedRuntime::LegacyCombined(legacy));
     }
