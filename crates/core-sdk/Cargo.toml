@@ -9,7 +9,7 @@ repository = "https://github.com/risense-ai/respire-cli"
 readme = "README.md"
 include = ["Cargo.toml", "src/**", "notices/**", "build.rs", "host-winml-build.rs", "README.md", "LICENSE", "core-sdk.lock.json", "prepare-sdk.mjs", "private-sdk-download.mjs"]
 links = "respire_core_ffi"
-publish = ["crates-io"]
+publish = false
 
 [features]
 default = ["cpu-owned-ort-experiment", "model-input-stream-experiment"]

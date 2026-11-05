@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       package:
-        description: Protocol publication only; SDK publication is owned by respire-core
+        description: Protocol only; native SDK uses private Core release assets
         type: choice
         default: protocol
         options: [protocol]
