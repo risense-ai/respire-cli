@@ -394,6 +394,14 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
                 .map_err(|err| err.to_string())?;
         }
         let other_port = pick_port()?;
+        let other_stderr_path = rt.dir.path().join(format!(
+            "alternate-runtime-{alternate_profile}.stderr.log"
+        ));
+        let other_stderr = fs::File::create(&other_stderr_path).map_err(|err| err.to_string())?;
+        let read_other_stderr = || match fs::read_to_string(&other_stderr_path) {
+            Ok(stderr) => stderr,
+            Err(err) => format!("failed to read private stderr: {err}"),
+        };
         let mut other = Command::new(runtime_bin()?)
             .args([
                 "serve",
@@ -408,7 +416,7 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
             .env_remove("RSRS_NO_AUTOSTART")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(other_stderr))
             .spawn()
             .map_err(|err| err.to_string())?;
         let started = Instant::now();
@@ -422,17 +430,33 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
                 Duration::from_millis(50),
             )
             .is_ok()
-                || started.elapsed() > Duration::from_secs(20)
             {
-                let _ = other.kill();
-                let _ = other.wait();
-                return Err(
-                    "another port bypassed runtime ownership or did not reject startup".into(),
-                );
+                let kill = other.kill();
+                let wait = other.wait();
+                return Err(format!(
+                    "another port became listening: alternate_profile={alternate_profile}; kill={kill:?}; wait={wait:?}; stderr={}",
+                    read_other_stderr()
+                ));
+            }
+            // Allow both 5s probes and the 15s installation-lock wait, plus margin.
+            if started.elapsed() > Duration::from_secs(40) {
+                if let Some(status) = other.try_wait().map_err(|err| err.to_string())? {
+                    break status;
+                }
+                let kill = other.kill();
+                let wait = other.wait();
+                return Err(format!(
+                    "alternate runtime startup rejection timed out after 40s: alternate_profile={alternate_profile}; kill={kill:?}; wait={wait:?}; stderr={}",
+                    read_other_stderr()
+                ));
             }
             thread::sleep(Duration::from_millis(25));
         };
-        assert!(!status.success());
+        assert!(
+            !status.success(),
+            "alternate runtime exited successfully instead of rejecting startup: alternate_profile={alternate_profile}; status={status}; stderr={}",
+            read_other_stderr()
+        );
         assert_eq!(
             fs::read(rt.dir.path().join("runtime/endpoint.json")).map_err(|err| err.to_string())?,
             endpoint

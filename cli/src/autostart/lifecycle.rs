@@ -476,6 +476,7 @@ impl Maintenance {
         let root = self.installation_root()?.to_path_buf();
         if let Some(config) = self.config.as_ref() { owned(config)?; }
         let target = receipt.target_profile.as_ref().context("account target is missing")?;
+        let target = respire_client_host::config::normalize_control_path(target)?.canonicalize()?;
         let path = marker_path(&root);
         let bytes = fs::read(&path)?;
         let mut actual = marker(&root)?.context("account maintenance marker is missing")?;
@@ -484,7 +485,7 @@ impl Maintenance {
             && actual.owner_pid == std::process::id() && actual.owner_birth == held.owner_birth
             && current_boot_token().as_deref() == Some(held.token.as_str())
             && matches!(actual.phase, Phase::Starting | Phase::Verified)
-            && actual.expected_profile.as_ref() == Some(target)
+            && actual.expected_profile.as_ref() == Some(&target)
             && actual.expected_version == env!("CARGO_PKG_VERSION") && controller_alive(&actual)?
             && serde_json::to_vec(&actual)? == serde_json::to_vec(&serde_json::from_slice::<Marker>(&bytes)?)?,
             "account target launch does not belong to this maintenance controller");
@@ -509,15 +510,16 @@ impl Maintenance {
         let (root, selected) = respire_client_host::config::control_roots()?;
         let root = root.canonicalize()?;
         let target = receipt.target_profile.as_ref().context("account target is missing")?;
+        let target = respire_client_host::config::normalize_control_path(target)?.canonicalize()?;
         anyhow::ensure!(self.installation_root()? == root, "account completion installation changed");
         if let Some(config) = self.config.as_ref() { owned(config)?; }
         let actual = marker(&root)?.context("account completion marker is missing")?;
         let held = self.marker.as_ref().context("account completion ownership is missing")?;
-        anyhow::ensure!(selected.canonicalize()? == *target,
+        anyhow::ensure!(selected.canonicalize()? == target,
             "account completion installation or selection changed");
-        verified_account_marker(&actual, held, target, &fs::read(marker_path(&root))?,
+        verified_account_marker(&actual, held, &target, &fs::read(marker_path(&root))?,
             self.marker_digest.as_deref().context("account completion marker digest is missing")?)?;
-        maintenance_binding(target, None, false)
+        maintenance_binding(&target, None, false)
     }
 
     pub(crate) fn finish(&mut self) -> Result<()> {
@@ -2034,6 +2036,53 @@ mod tests {
         assert!(recovered.finish().is_err() && marker_path(&root).exists());
         fs::write(marker_path(&root), owned)?;
         recovered.finish()?;
+        let takeover = crate::runtime_policy::takeover_lock()?;
+        for phase in [Phase::Paused, Phase::Starting, Phase::Verified] {
+            use respire_protocol::maintenance_control::{LegacySnapshotRecoveryAction,
+                LegacySnapshotRecoveryParams, LegacySnapshotRecoveryBinding, MAINTENANCE_CONTROL_SCHEMA_V};
+            let mut maintenance = begin_maintenance_locked()?;
+            let mut params = LegacySnapshotRecoveryParams {
+                schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
+                binding: respire_protocol::ControlBinding { installation_root: root.clone(),
+                    profile: root.clone(), launch_id: uuid::Uuid::new_v4().to_string(),
+                    expected_account_id: Some("a".repeat(64)) },
+                recovery_operation_id: uuid::Uuid::new_v4().to_string(),
+                request_fingerprint: String::new(), journal_sha256: "b".repeat(64),
+                action: LegacySnapshotRecoveryAction::Query,
+            };
+            params.request_fingerprint = super::super::snapshot_control::legacy_fingerprint(&params)?;
+            maintenance.marker.as_mut().context("test legacy marker missing")?.snapshot =
+                Some(snapshot_control::SnapshotMarkerBinding {
+                    operation_id: String::new(), request_fingerprint: String::new(),
+                    sync_generation: 0, snapshot_id: String::new(), account_id: "a".repeat(64),
+                    drained_birth: String::new(), drain: None, offline: None, verified_runtime: None,
+                    legacy_recovery: Some(LegacySnapshotRecoveryBinding {
+                        recovery_operation_id: params.recovery_operation_id.clone(),
+                        request_fingerprint: params.request_fingerprint.clone(),
+                        journal_sha256: params.journal_sha256.clone(), account_id: "a".repeat(64),
+                    }),
+                });
+            maintenance.mark(phase)?;
+            let original = fs::read(marker_path(&root))?;
+            let mut foreign = params.clone();
+            foreign.recovery_operation_id = uuid::Uuid::new_v4().to_string();
+            foreign.request_fingerprint = super::super::snapshot_control::legacy_fingerprint(&foreign)?;
+            assert!(maintenance.legacy_pause_for_query(&takeover, &foreign, None).is_err());
+            let library = respire_client_host::lock::LibraryLock::acquire(&root, Duration::ZERO)?;
+            assert!(maintenance.legacy_pause_for_query(&takeover, &params, None).is_err());
+            assert_eq!(fs::read(marker_path(&root))?, original);
+            drop(library);
+            maintenance.legacy_pause_for_query(&takeover, &params, None)?;
+            let paused = marker(&root)?.context("test legacy Paused marker missing")?;
+            assert_eq!(paused.phase, Phase::Paused);
+            assert_eq!(paused.snapshot.as_ref().and_then(|bound| bound.legacy_recovery.as_ref())
+                .context("test legacy intent missing")?.recovery_operation_id, params.recovery_operation_id);
+            assert!(paused.snapshot.as_ref().is_some_and(|bound| bound.offline.is_some()
+                && bound.drain.is_none() && bound.verified_runtime.is_none()));
+            assert!(background_paused());
+            maintenance.finish()?;
+        }
+        drop(takeover);
         for (enabled, stopped) in [(false, false), (true, true)] {
             let mut config = super::super::tests::fixture(Platform::current()?);
             config.owner = manager::owner()?;

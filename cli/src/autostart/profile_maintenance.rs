@@ -109,7 +109,11 @@ fn remove(name: Option<&str>, query: Option<&str>, space: bool) -> Result<Result
         let target = crate::profile_control::ProfileTarget::new(name, false)?;
         target.verify_existing()?;
         let target = target.directory().canonicalize()?;
-        anyhow::ensure!(target != profile, "this profile is in use; select another profile before deleting");
+        if target == profile {
+            return Err(respire_client_host::input_error::InputError(
+                "this profile is in use; select another profile before deleting".into(),
+            ).into());
+        }
         let id = uuid::Uuid::new_v4().to_string();
         let mut operation = HostProfileRemoveOperation { schema_version: HOST_PROFILE_SCHEMA_V,
             operation_id: id.clone(), key: id.clone(), installation_root: root.clone(), profile: profile.clone(),

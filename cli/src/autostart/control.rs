@@ -110,9 +110,9 @@ pub(crate) fn validate_account_receipt(
         HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed => {
             let target = receipt.target_profile.as_ref().context("account receipt target is missing")?;
             let (_, selected) = respire_client_host::config::control_roots()?;
-            anyhow::ensure!(selected.canonicalize()? == *target
-                && target.canonicalize()? == *target, "account receipt target is not selected");
-            let actual = identity(target)?;
+            let target = respire_client_host::config::normalize_control_path(target)?.canonicalize()?;
+            anyhow::ensure!(selected.canonicalize()? == target, "account receipt target is not selected");
+            let actual = identity(&target)?;
             anyhow::ensure!(matches!(actual, HostAuthIdentity::Bound { account_id, session_sha256 }
                 if Some(&account_id) == receipt.account_id.as_ref()
                     && Some(&session_sha256) == receipt.session_sha256.as_ref()),
@@ -399,9 +399,10 @@ pub(crate) fn verify_account_target(
     crate::net_rpc::request_scope(&health)?;
     let (binary, digest) = installed_auth_runtime()?;
     let target = receipt.target_profile.as_ref().context("account target is missing")?;
+    let target = respire_client_host::config::normalize_control_path(target)?.canonicalize()?;
     let process = crate::net_rpc::runtime_process_identity(health.pid)?;
     anyhow::ensure!(health.store_ready && health.account_id == *receipt.account_id.as_ref().context("account identity is missing")?
-        && std::fs::canonicalize(&health.data_dir)? == *target
+        && std::fs::canonicalize(&health.data_dir)? == target
         && std::fs::canonicalize(&health.image_path)? == binary
         && std::fs::canonicalize(&process.executable)? == binary
         && account_process_start_matches(&process.started_at, &health.process_start_id)? && health.image_sha256.eq_ignore_ascii_case(&digest),

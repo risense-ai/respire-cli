@@ -351,6 +351,7 @@ fn run_account_control(
     let explicit_super_password = super_password.is_some();
     let mut super_password = super_password.unwrap_or_default().to_owned();
     let mut resume: Option<HostAuthAccountResult> = None;
+    let mut continuation = None;
     let mut supplied = BTreeSet::new();
     if !super_password.is_empty() {
         supplied.insert("super_password".to_owned());
@@ -386,7 +387,7 @@ fn run_account_control(
         let envelope = crate::autostart::control_login_step(
             addr, user, request_authorization,
             (explicit_super_password || !super_password.is_empty()).then_some(super_password.as_str()),
-            request_input, resume.as_ref(),
+            request_input, resume.as_ref(), &mut continuation,
         )?;
         let receipt: HostAuthAccountResult = serde_json::from_value(envelope.summary)
             .map_err(|_| anyhow!("invalid login control receipt"))?;

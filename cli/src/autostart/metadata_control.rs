@@ -285,6 +285,16 @@ fn metadata_result(receipt: &HostMetadataResult) -> Result<ResultEnvelope> {
 
 /// One fixed private read; never takes maintenance, creates a directory, or starts serving.
 pub(crate) fn control_offline_read(kind: HostOfflineRead) -> Result<ResultEnvelope> {
+    offline_read(kind, false)
+}
+
+pub(crate) fn discover_legacy_snapshot() -> Result<Option<super::super::super::snapshot_control::LegacySnapshotDescriptor>> {
+    let envelope = offline_read(HostOfflineRead::SnapshotPreflight, true)?;
+    serde_json::from_value(envelope.summary["legacy_recovery"].clone())
+        .context("invalid legacy snapshot descriptor")
+}
+
+fn offline_read(kind: HostOfflineRead, legacy_snapshot_discovery: bool) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("offline configuration read")?;
     anyhow::ensure!(super::lifecycle::current_boot_token().is_none(),
         "offline configuration read cannot inherit a maintenance boot token");
@@ -304,7 +314,8 @@ pub(crate) fn control_offline_read(kind: HostOfflineRead) -> Result<ResultEnvelo
         "offline read image or identity changed");
     let params = HostMetadataReadParams { schema_version: HOST_METADATA_SCHEMA_V,
         binding: ControlBinding { installation_root: root.clone(), profile: profile.clone(),
-            launch_id: grant.instance_id.clone(), expected_account_id: identity.account_id.clone() } };
+            launch_id: grant.instance_id.clone(), expected_account_id: identity.account_id.clone() },
+        legacy_snapshot_discovery };
     let request = RpcRequest { v: respire_commands::rpc_client::PROTOCOL_V, id: uuid::Uuid::new_v4().to_string(),
         method: kind.method().to_owned(), args: vec![serde_json::to_string(&params)?], scope: None,
         operation_id: None, idempotency_key: None, parent_operation_id: None, queue_wait_ms: None, lifecycle: None };
@@ -333,9 +344,24 @@ pub(crate) fn control_offline_read(kind: HostOfflineRead) -> Result<ResultEnvelo
                 && readiness[1].name == "store_ready" && readiness[1].value == "false"
                 && matches!(readiness[1].status, Status::Skip), "offline read cannot claim store readiness");
             match kind {
-                HostOfflineRead::SnapshotPreflight => anyhow::ensure!(split == 0 && envelope.details.is_null()
-                    && envelope.summary == serde_json::json!({"allowed":true}),
-                    "snapshot preflight did not explicitly allow access"),
+                HostOfflineRead::SnapshotPreflight => {
+                    anyhow::ensure!(split == 0 && envelope.details.is_null(), "invalid snapshot preflight envelope");
+                    if legacy_snapshot_discovery {
+                        let summary = envelope.summary.as_object().context("snapshot discovery must be an object")?;
+                        anyhow::ensure!(summary.len() == 2 && summary.get("allowed").is_some_and(serde_json::Value::is_boolean)
+                            && summary.contains_key("legacy_recovery"), "invalid snapshot discovery result");
+                        let descriptor: Option<super::super::super::snapshot_control::LegacySnapshotDescriptor> =
+                            serde_json::from_value(summary["legacy_recovery"].clone())?;
+                        if let Some(descriptor) = descriptor {
+                            super::super::super::snapshot_control::validate_legacy_descriptor(&descriptor)?;
+                        }
+                    } else {
+                        anyhow::ensure!(envelope.summary == serde_json::json!({"allowed":true})
+                            || (envelope.summary["allowed"] == true && envelope.summary["legacy_recovery"].is_null()
+                                && envelope.summary.as_object().is_some_and(|summary| summary.len() == 2)),
+                            "snapshot preflight did not explicitly allow access");
+                    }
+                }
                 HostOfflineRead::MetadataStatus => anyhow::ensure!(split == 0 && envelope.summary["action"] == "status"
                     && envelope.summary["enabled"].is_boolean() && envelope.summary["sdk_supported"].is_boolean()
                     && envelope.summary["enabled"] == envelope.details["enabled"]

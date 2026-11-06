@@ -1,5 +1,8 @@
 //! Snapshot capability publication follows the existing authenticated drain.
-use super::super::snapshot_control::SnapshotOperation;
+use super::super::snapshot_control::{SnapshotOperation, dispatch_legacy_snapshot, legacy_fingerprint, validate_legacy_descriptor};
+use respire_protocol::maintenance_control::{LegacySnapshotRecoveryAction as LegacyAction,
+    LegacySnapshotRecoveryParams as LegacyParams, LegacySnapshotRecoveryResult as LegacyReceipt};
+use respire_protocol::ControlBinding;
 use super::*;
 use respire_client_host::lock::LibraryLock;
 use respire_commands::output::{ResultEnvelope, Status};
@@ -26,7 +29,11 @@ pub(crate) struct SnapshotMarkerBinding {
     pub offline: Option<SnapshotOfflineProof>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verified_runtime: Option<SnapshotVerifiedRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_recovery: Option<LegacySnapshotRecoveryBinding>,
 }
+
+pub(crate) use respire_protocol::maintenance_control::LegacySnapshotRecoveryBinding;
 
 /// Absence evidence is not a drain receipt. Installation and library locks
 /// serialize its publication; Runtime reacquires both before offline execution.
@@ -113,16 +120,35 @@ impl SnapshotOfflineProof {
     }
 }
 
+fn normal_marker(operation: &SnapshotOperation) -> Result<SnapshotMarkerBinding> {
+    let original = operation.original();
+    Ok(SnapshotMarkerBinding {
+        operation_id: original.operation_id.clone(),
+        request_fingerprint: original.request_fingerprint.clone(),
+        sync_generation: original.sync_generation,
+        snapshot_id: original.snapshot_id.clone(),
+        account_id: original.binding.expected_account_id.clone().context("snapshot account missing")?,
+        drained_birth: String::new(), drain: None, offline: None, verified_runtime: None,
+        legacy_recovery: None,
+    })
+}
+
+fn same_snapshot_intent(left: &SnapshotMarkerBinding, right: &SnapshotMarkerBinding) -> bool {
+    left.operation_id == right.operation_id && left.request_fingerprint == right.request_fingerprint
+        && left.sync_generation == right.sync_generation && left.snapshot_id == right.snapshot_id
+        && left.account_id == right.account_id && left.legacy_recovery == right.legacy_recovery
+}
+
 impl Maintenance {
     /// Publish absence only while both existing locks exclude serving/startup.
     /// The helper reacquires installation ownership before the existing DB lock.
-    fn snapshot_bind_offline(
-        &mut self,
-        takeover: &LibraryLock,
-        operation: &SnapshotOperation,
-    ) -> Result<()> {
-        let original = operation.original();
-        let root = &original.binding.installation_root;
+    fn snapshot_bind_offline(&mut self, takeover: &LibraryLock, operation: &SnapshotOperation) -> Result<()> {
+        self.snapshot_bind_offline_intent(takeover, &operation.original().binding, normal_marker(operation)?)
+    }
+
+    fn snapshot_bind_offline_intent(&mut self, takeover: &LibraryLock, binding: &ControlBinding,
+        mut next_binding: SnapshotMarkerBinding) -> Result<()> {
+        let root = &binding.installation_root;
         anyhow::ensure!(
             takeover.protects(&root.join("runtime/takeover"))?
                 && self.installation_root()? == root.as_path(),
@@ -130,7 +156,7 @@ impl Maintenance {
         );
         let _owner = LibraryLock::acquire(&root.join("runtime"), Duration::ZERO)
             .context("snapshot installation ownership unavailable; absent health is not stopped proof")?;
-        let _library = LibraryLock::acquire(&original.binding.profile, Duration::ZERO)
+        let _library = LibraryLock::acquire(&binding.profile, Duration::ZERO)
             .context("snapshot library ownership unavailable; no offline action taken")?;
         if let Some(config) = self.config.as_ref() {
             owned(config)?;
@@ -158,15 +184,7 @@ impl Maintenance {
             "snapshot offline controller changed"
         );
         if let Some(bound) = actual.snapshot.as_ref() {
-            anyhow::ensure!(
-                bound.operation_id == original.operation_id
-                    && bound.request_fingerprint == original.request_fingerprint
-                    && bound.sync_generation == original.sync_generation
-                    && bound.snapshot_id == original.snapshot_id
-                    && Some(bound.account_id.as_str())
-                        == original.binding.expected_account_id.as_deref(),
-                "snapshot offline original operation changed"
-            );
+            anyhow::ensure!(same_snapshot_intent(bound, &next_binding), "snapshot offline intent changed");
         }
         let prior = actual
             .snapshot
@@ -181,22 +199,9 @@ impl Maintenance {
             });
         let proof = SnapshotOfflineProof::capture(root, prior)?;
         actual.phase = Phase::Paused;
-        actual.expected_profile = Some(original.binding.profile.clone());
-        actual.snapshot = Some(SnapshotMarkerBinding {
-            operation_id: original.operation_id.clone(),
-            request_fingerprint: original.request_fingerprint.clone(),
-            sync_generation: original.sync_generation,
-            snapshot_id: original.snapshot_id.clone(),
-            account_id: original
-                .binding
-                .expected_account_id
-                .clone()
-                .context("snapshot account missing")?,
-            drained_birth: String::new(),
-            drain: None,
-            offline: Some(proof),
-            verified_runtime: None,
-        });
+        actual.expected_profile = Some(binding.profile.clone());
+        next_binding.offline = Some(proof);
+        actual.snapshot = Some(next_binding);
         let next = serde_json::to_vec(&actual)?;
         anyhow::ensure!(
             next.len() <= MAINTENANCE_MARKER_MAX_BYTES,
@@ -217,10 +222,9 @@ impl Maintenance {
     fn snapshot_owned_marker(
         &self,
         takeover: &LibraryLock,
-        operation: &SnapshotOperation,
+        binding: &ControlBinding,
     ) -> Result<(PathBuf, Vec<u8>, Marker)> {
-        let original = operation.original();
-        let root = &original.binding.installation_root;
+        let root = &binding.installation_root;
         if let Some(config) = self.config.as_ref() {
             owned(config)?;
             anyhow::ensure!(
@@ -233,7 +237,7 @@ impl Maintenance {
             takeover.protects(&root.join("runtime/takeover"))?
                 && self.installation_root()? == root.as_path()
                 && selected_root.canonicalize()? == *root
-                && selected_profile.canonicalize()? == original.binding.profile,
+                && selected_profile.canonicalize()? == binding.profile,
             "snapshot takeover, installation or selected profile changed"
         );
         let path = marker_path(root);
@@ -267,18 +271,18 @@ impl Maintenance {
 
     /// No capability is published before drain_runtime validates final receipt,
     /// process exit and supervisor shutdown. Probe/lock availability is not proof.
-    pub(crate) fn snapshot_drain_and_bind(
-        &mut self,
-        takeover: &LibraryLock,
-        operation: &SnapshotOperation,
-        health: &crate::net_rpc::Health,
-    ) -> Result<()> {
-        let (_, _, actual) = self.snapshot_owned_marker(takeover, operation)?;
+    pub(crate) fn snapshot_drain_and_bind(&mut self, takeover: &LibraryLock,
+        operation: &SnapshotOperation, health: &crate::net_rpc::Health) -> Result<()> {
+        self.snapshot_drain_intent(takeover, &operation.original().binding, normal_marker(operation)?, health)
+    }
+
+    fn snapshot_drain_intent(&mut self, takeover: &LibraryLock, binding: &ControlBinding,
+        mut next_binding: SnapshotMarkerBinding, health: &crate::net_rpc::Health) -> Result<()> {
+        let (_, _, actual) = self.snapshot_owned_marker(takeover, binding)?;
         anyhow::ensure!(
             actual.snapshot.is_none(),
             "snapshot marker already bound; query that operation instead of draining again"
         );
-        let original = operation.original();
         let birth = if let Some(config) = self.config.as_ref() {
             verify_owned_runtime(config, health)?
         } else {
@@ -293,12 +297,11 @@ impl Maintenance {
             anyhow::ensure!(
                 health.managed_id.is_none()
                     && Path::new(&health.installation_root).canonicalize()?
-                        == original.binding.installation_root
-                    && Path::new(&health.data_dir).canonicalize()? == original.binding.profile
+                        == binding.installation_root
+                    && Path::new(&health.data_dir).canonicalize()? == binding.profile
                     && health.installation_id
                         == hash(
-                            original
-                                .binding
+                            binding
                                 .installation_root
                                 .display()
                                 .to_string()
@@ -316,7 +319,7 @@ impl Maintenance {
             birth
         };
         anyhow::ensure!(
-            Some(health.account_id.as_str()) == original.binding.expected_account_id.as_deref(),
+            Some(health.account_id.as_str()) == binding.expected_account_id.as_deref(),
             "snapshot drain account differs from original operation"
         );
         self.drain_runtime(health)?;
@@ -328,23 +331,15 @@ impl Maintenance {
             manager::process_birth(health.pid)?.as_deref() != Some(birth.as_str()),
             "snapshot drained owner is still alive"
         );
-        let (path, bytes, mut actual) = self.snapshot_owned_marker(takeover, operation)?;
+        let (path, bytes, mut actual) = self.snapshot_owned_marker(takeover, binding)?;
         anyhow::ensure!(
             actual.snapshot.is_none(),
             "snapshot marker changed during drain"
         );
-        actual.expected_profile = Some(original.binding.profile.clone());
-        actual.snapshot = Some(SnapshotMarkerBinding {
-            operation_id: original.operation_id.clone(),
-            request_fingerprint: original.request_fingerprint.clone(),
-            sync_generation: original.sync_generation,
-            snapshot_id: original.snapshot_id.clone(),
-            account_id: health.account_id.clone(),
-            drained_birth: birth,
-            drain: Some(drain),
-            offline: None,
-            verified_runtime: None,
-        });
+        actual.expected_profile = Some(binding.profile.clone());
+        next_binding.drained_birth = birth;
+        next_binding.drain = Some(drain);
+        actual.snapshot = Some(next_binding);
         let next = serde_json::to_vec(&actual)?;
         anyhow::ensure!(
             next.len() <= MAINTENANCE_MARKER_MAX_BYTES,
@@ -361,7 +356,7 @@ impl Maintenance {
         takeover: &LibraryLock,
         operation: &SnapshotOperation,
     ) -> Result<Value> {
-        let (_, bytes, actual) = self.snapshot_owned_marker(takeover, operation)?;
+        let (_, bytes, actual) = self.snapshot_owned_marker(takeover, &operation.original().binding)?;
         let bound = actual
             .snapshot
             .as_ref()
@@ -481,11 +476,15 @@ impl Maintenance {
         operation: &SnapshotOperation,
         require_snapshot: bool,
     ) -> Result<SnapshotVerifiedRuntime> {
-        let original = operation.original();
+        self.snapshot_live_binding(&operation.original().binding,
+            require_snapshot.then_some(operation.original().snapshot_id.as_str()))
+    }
+
+    fn snapshot_live_binding(&self, binding: &ControlBinding, snapshot_id: Option<&str>) -> Result<SnapshotVerifiedRuntime> {
         let (root, profile) = respire_client_host::config::control_roots()?;
         anyhow::ensure!(
-            root.canonicalize()? == original.binding.installation_root
-                && profile.canonicalize()? == original.binding.profile,
+            root.canonicalize()? == binding.installation_root
+                && profile.canonicalize()? == binding.profile,
             "snapshot target selection changed"
         );
         let health = crate::net_rpc::health()?;
@@ -500,29 +499,28 @@ impl Maintenance {
                 && health.process_start_id == format!("{}{birth}", snapshot_birth_prefix())
                 && (process.started_at == birth || process.started_at == health.process_start_id)
                 && Some(scope.account_id.as_str())
-                    == original.binding.expected_account_id.as_deref()
+                    == binding.expected_account_id.as_deref()
                 && health.managed_id.as_deref() == expected_managed
                 && Path::new(&health.installation_root).canonicalize()?
-                    == original.binding.installation_root
+                    == binding.installation_root
                 && health.installation_id
                     == hash(
-                        original
-                            .binding
+                        binding
                             .installation_root
                             .display()
                             .to_string()
                             .as_bytes()
                     )
-                && Path::new(&health.data_dir).canonicalize()? == original.binding.profile
+                && Path::new(&health.data_dir).canonicalize()? == binding.profile
                 && Path::new(&health.image_path).canonicalize()? == binary
                 && Path::new(&health.exe).canonicalize()? == binary
                 && Path::new(&process.executable).canonicalize()? == binary
                 && health.image_sha256.eq_ignore_ascii_case(&digest)
                 && !health.runtime_version.is_empty()
                 && health.store_ready
-                && (!require_snapshot
+                && (snapshot_id.is_none()
                     || health.snapshot_restore_id.as_deref()
-                        == Some(original.snapshot_id.as_str())),
+                        == snapshot_id),
             "snapshot target process, scope or actual restored store is not verified"
         );
         anyhow::ensure!(
@@ -697,7 +695,8 @@ impl Maintenance {
     fn snapshot_pause_after_drain(
         &mut self,
         takeover: &LibraryLock,
-        operation: &SnapshotOperation,
+        binding: &ControlBinding,
+        expected: &SnapshotMarkerBinding,
         health: &crate::net_rpc::Health,
     ) -> Result<()> {
         let root = self.installation_root()?.to_path_buf();
@@ -720,7 +719,6 @@ impl Maintenance {
                 && current_boot_token().as_deref() == Some(actual.token.as_str()),
             "snapshot recovery controller changed"
         );
-        let original = operation.original();
         crate::net_rpc::request_scope(health)?;
         let (binary, digest) = super::super::supervise::installed_auth_runtime()?;
         let birth =
@@ -728,9 +726,9 @@ impl Maintenance {
         let process = crate::net_rpc::runtime_process_identity(health.pid)?;
         anyhow::ensure!(
             Path::new(&health.installation_root).canonicalize()? == root
-                && Path::new(&health.data_dir).canonicalize()? == original.binding.profile
+                && Path::new(&health.data_dir).canonicalize()? == binding.profile
                 && Some(health.account_id.as_str())
-                    == original.binding.expected_account_id.as_deref()
+                    == binding.expected_account_id.as_deref()
                 && health.process_start_id == format!("{}{birth}", snapshot_birth_prefix())
                 && (process.started_at == birth || process.started_at == health.process_start_id)
                 && Path::new(&process.executable).canonicalize()? == binary
@@ -748,10 +746,7 @@ impl Maintenance {
             .as_mut()
             .context("snapshot recovery operation missing")?;
         anyhow::ensure!(
-            snapshot.operation_id == original.operation_id
-                && snapshot.request_fingerprint == original.request_fingerprint
-                && snapshot.sync_generation == original.sync_generation
-                && snapshot.snapshot_id == original.snapshot_id,
+            same_snapshot_intent(snapshot, expected),
             "snapshot recovery operation changed"
         );
         snapshot.drain = Some(drain);
@@ -773,6 +768,168 @@ impl Maintenance {
 
 fn snapshot_deadline() -> Instant {
     Instant::now() + Duration::from_secs(60)
+}
+
+fn legacy_marker(params: &LegacyParams) -> Result<SnapshotMarkerBinding> {
+    let account_id = params.binding.expected_account_id.clone().context("legacy snapshot account missing")?;
+    Ok(SnapshotMarkerBinding {
+        // These fields never identify an original restore for legacy recovery.
+        operation_id: String::new(), request_fingerprint: String::new(), sync_generation: 0,
+        snapshot_id: String::new(), account_id: account_id.clone(), drained_birth: String::new(),
+        drain: None, offline: None, verified_runtime: None,
+        legacy_recovery: Some(LegacySnapshotRecoveryBinding {
+            recovery_operation_id: params.recovery_operation_id.clone(),
+            request_fingerprint: params.request_fingerprint.clone(),
+            journal_sha256: params.journal_sha256.clone(), account_id,
+        }),
+    })
+}
+
+impl Maintenance {
+    pub(super) fn legacy_pause_for_query(&mut self, takeover: &LibraryLock,
+        params: &LegacyParams, health: Option<&crate::net_rpc::Health>) -> Result<()> {
+        let expected = legacy_marker(params)?;
+        anyhow::ensure!(params.request_fingerprint == legacy_fingerprint(params)?
+            && self.marker.as_ref().and_then(|marker| marker.snapshot.as_ref())
+                .is_some_and(|bound| same_snapshot_intent(bound, &expected)),
+            "legacy recovery query intent changed");
+        if let Some(health) = health {
+            self.snapshot_pause_after_drain(takeover, &params.binding, &expected, health)?;
+        } else {
+            self.snapshot_bind_offline_intent(takeover, &params.binding, expected)?;
+        }
+        self.legacy_launch_binding(takeover, params)?;
+        Ok(())
+    }
+
+    fn legacy_launch_binding(&self, takeover: &LibraryLock, params: &LegacyParams) -> Result<Value> {
+        let (_, bytes, actual) = self.snapshot_owned_marker(takeover, &params.binding)?;
+        let bound = actual.snapshot.as_ref().context("legacy snapshot binding missing")?;
+        anyhow::ensure!(same_snapshot_intent(bound, &legacy_marker(params)?)
+            && actual.expected_profile.as_ref() == Some(&params.binding.profile)
+            && bound.verified_runtime.is_none()
+            && params.request_fingerprint == legacy_fingerprint(params)?
+            && match (&bound.drain, &bound.offline) {
+                (Some(drain), None) => manager::process_birth(drain.pid)?.as_deref()
+                    != Some(bound.drained_birth.as_str()),
+                (None, Some(proof)) => { proof.verify(&params.binding.installation_root)?; true }
+                _ => false,
+            }
+            && match self.config.as_ref() {
+                Some(config) => !manager::inspect(config)?.running,
+                None => true,
+            }, "legacy recovery intent or stopped owner changed");
+        Ok(json!({"marker_sha256":hash(&bytes), "coordinator_id":actual.id,
+            "controller_pid":actual.owner_pid, "controller_birth":actual.owner_birth,
+            "issuer_cli_version":actual.expected_version}))
+    }
+
+    fn legacy_dispatch(&self, takeover: &LibraryLock, original: &LegacyParams,
+        action: LegacyAction) -> Result<LegacyReceipt> {
+        let binding = self.legacy_launch_binding(takeover, original)?;
+        let (binary, digest) = super::super::supervise::installed_auth_runtime()?;
+        let managed_id = self.config.as_ref().filter(|config| config.enabled && !config.manually_stopped)
+            .map(|config| config.id.as_str());
+        let (grant, _) = super::super::supervise::prepare_snapshot_grant(&binary,
+            &original.binding.installation_root, &original.binding.profile, managed_id,
+            crate::net_rpc::rpc_port(), original.binding.expected_account_id.as_deref()
+                .context("legacy snapshot account missing")?, Some(binding))?;
+        let grant: HostControlLaunchGrant = serde_json::from_value(grant)?;
+        anyhow::ensure!(grant.image_sha256.eq_ignore_ascii_case(&digest), "legacy snapshot helper image changed");
+        let mut params = original.clone();
+        params.action = action;
+        params.binding.launch_id = grant.instance_id.clone();
+        dispatch_legacy_snapshot(takeover, &grant, &params)
+    }
+}
+
+fn recover_legacy_snapshot(takeover: &LibraryLock) -> Result<ResultEnvelope> {
+    anyhow::ensure!(current_boot_token().is_none(), "legacy recovery cannot nest maintenance");
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(takeover.protects(&root.join("runtime/takeover"))?
+        && marker_bytes(&root)?.is_none(), "legacy recovery requires an unclaimed installation");
+    let descriptor = super::super::supervise::discover_legacy_snapshot()?;
+    let descriptor = descriptor.context("no legacy snapshot recovery journal; no recovery attempted")?;
+    validate_legacy_descriptor(&descriptor)?;
+    let account = super::super::recovery::account_identity_source(&profile)?;
+    anyhow::ensure!(hash(account.as_bytes()) == descriptor.account_id,
+        "legacy snapshot journal account differs from selected profile");
+    let mut params = LegacyParams { schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
+        binding: ControlBinding { installation_root: root, profile, launch_id: uuid::Uuid::new_v4().to_string(),
+            expected_account_id: Some(descriptor.account_id) },
+        recovery_operation_id: uuid::Uuid::new_v4().to_string(), request_fingerprint: String::new(),
+        journal_sha256: descriptor.journal_sha256, action: LegacyAction::Recover };
+    params.request_fingerprint = legacy_fingerprint(&params)?;
+    let health = crate::rpc::probe_runtime()?;
+    let mut maintenance = begin_maintenance_locked()?;
+    if let Some(health) = health.as_ref() {
+        maintenance.snapshot_drain_intent(takeover, &params.binding, legacy_marker(&params)?, health)?;
+    } else {
+        maintenance.snapshot_bind_offline_intent(takeover, &params.binding, legacy_marker(&params)?)?;
+    }
+    // This fresh O is dispatched once. A lost reply permits Query only.
+    let receipt = match maintenance.legacy_dispatch(takeover, &params, LegacyAction::Recover) {
+        Ok(receipt) => receipt,
+        Err(_) => maintenance.legacy_dispatch(takeover, &params, LegacyAction::Query)
+            .context("legacy recovery outcome unknown; marker retained; no recovery replayed")?,
+    };
+    complete_legacy_snapshot(&mut maintenance, takeover, &params, receipt)
+}
+
+fn query_legacy_snapshot(takeover: &LibraryLock) -> Result<ResultEnvelope> {
+    let mut maintenance = adopt_snapshot_marker(takeover)?;
+    let marker = maintenance.marker.as_ref().context("legacy recovery marker missing")?;
+    let bound = marker.snapshot.as_ref().and_then(|snapshot| snapshot.legacy_recovery.as_ref())
+        .context("legacy recovery request identity missing")?;
+    let params = LegacyParams { schema_version: MAINTENANCE_CONTROL_SCHEMA_V,
+        binding: ControlBinding { installation_root: maintenance.installation_root()?.to_path_buf(),
+            profile: marker.expected_profile.clone().context("legacy recovery profile missing")?,
+            launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: Some(bound.account_id.clone()) },
+        recovery_operation_id: bound.recovery_operation_id.clone(), request_fingerprint: bound.request_fingerprint.clone(),
+        journal_sha256: bound.journal_sha256.clone(), action: LegacyAction::Query };
+    let health = crate::rpc::probe_runtime()?;
+    maintenance.legacy_pause_for_query(takeover, &params, health.as_ref())?;
+    let receipt = maintenance.legacy_dispatch(takeover, &params, LegacyAction::Query)?;
+    complete_legacy_snapshot(&mut maintenance, takeover, &params, receipt)
+}
+
+fn complete_legacy_snapshot(maintenance: &mut Maintenance, takeover: &LibraryLock,
+    params: &LegacyParams, mut receipt: LegacyReceipt) -> Result<ResultEnvelope> {
+    anyhow::ensure!(matches!(receipt.state, MaintenanceState::Released | MaintenanceState::RolledBack
+        | MaintenanceState::Verified),
+        "snapshot_outcome_unknown recovery_operation_id={}; marker retained; no recovery replayed",
+        params.recovery_operation_id);
+    let mut runtime_verified = false;
+    if !receipt.cleanup_pending {
+        anyhow::ensure!(matches!(receipt.state, MaintenanceState::Released | MaintenanceState::RolledBack),
+            "legacy recovery cleanup is not complete; marker retained");
+        maintenance.legacy_launch_binding(takeover, params)?;
+        maintenance.check_account_runtime()?;
+        maintenance.mark(Phase::Starting)?;
+        crate::rpc::ensure_daemon_locked()?;
+        let proof = maintenance.snapshot_live_binding(&params.binding, None)?;
+        anyhow::ensure!(maintenance.snapshot_live_binding(&params.binding, None)? == proof,
+            "legacy recovered Runtime changed before completion");
+        runtime_verified = true;
+        if maintenance.finish().is_err() {
+            receipt.cleanup_pending = true;
+            receipt.cleanup_warning = Some("snapshot recovery completed; host maintenance cleanup pending".to_owned());
+        }
+    }
+    let mut output = ResultEnvelope::new("snapshot", if receipt.cleanup_pending { Status::Warn } else { Status::Ok },
+        json!({"action":"recovered", "sync_quarantined":true, "cloud_rollback":false,
+            "runtime_verified":runtime_verified, "service_released":!receipt.cleanup_pending,
+            "operation_id":receipt.recovery_operation_id}), Vec::new());
+    output.details = json!({"operation":{"recovery_operation_id":receipt.recovery_operation_id,
+        "request_fingerprint":receipt.request_fingerprint}, "journal_sha256":receipt.journal_sha256,
+        "state":receipt.state, "cleanup_pending":receipt.cleanup_pending});
+    if receipt.cleanup_pending {
+        output.errors.push(receipt.cleanup_warning.unwrap_or_else(||
+            "snapshot recovery committed; cleanup pending; no rollback attempted".to_owned()));
+    }
+    Ok(output)
 }
 
 fn original_operation(
@@ -799,6 +956,16 @@ fn original_operation(
 /// Adopt only the existing snapshot marker. Generic begin(recover) would erase
 /// the original operation and must not be used for snapshot recovery.
 fn adopt_snapshot(takeover: &LibraryLock) -> Result<(Maintenance, SnapshotOperation)> {
+    let maintenance = adopt_snapshot_marker(takeover)?;
+    let held = maintenance.marker.as_ref().context("snapshot marker missing")?;
+    let snapshot = held.snapshot.as_ref().context("snapshot operation missing")?;
+    anyhow::ensure!(snapshot.legacy_recovery.is_none(), "legacy marker cannot authorize original restore");
+    let profile = held.expected_profile.clone().context("snapshot profile missing")?;
+    let operation = original_operation(maintenance.installation_root()?.to_path_buf(), profile, snapshot)?;
+    Ok((maintenance, operation))
+}
+
+fn adopt_snapshot_marker(takeover: &LibraryLock) -> Result<Maintenance> {
     anyhow::ensure!(
         current_boot_token().is_none(),
         "snapshot recovery cannot nest maintenance"
@@ -822,8 +989,7 @@ fn adopt_snapshot(takeover: &LibraryLock) -> Result<(Maintenance, SnapshotOperat
             && value.expected_profile.as_ref() == Some(&profile),
         "snapshot recovery requires the exact abandoned marker and original profile"
     );
-    let snapshot = value.snapshot.as_ref().context("snapshot recovery unsupported: legacy/unassociated marker; original operation input is required")?;
-    let operation = original_operation(root.clone(), profile, snapshot)?;
+    anyhow::ensure!(value.snapshot.is_some(), "snapshot recovery marker has no operation");
     let registration = read_registration(&root)?;
     let expected_id = if let Some(config) = registration.as_ref() {
         owned(config)?;
@@ -851,16 +1017,10 @@ fn adopt_snapshot(takeover: &LibraryLock) -> Result<(Maintenance, SnapshotOperat
     );
     private_write(&marker_path(&root), &next, Some(&hash(&bytes)))?;
     ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
-    Ok((
-        Maintenance {
-            installation: Some(root),
-            config,
-            marker: Some(value),
-            marker_digest: Some(hash(&next)),
-            completed: false,
-        },
-        operation,
-    ))
+    Ok(Maintenance {
+        installation: Some(root), config, marker: Some(value),
+        marker_digest: Some(hash(&next)), completed: false,
+    })
 }
 
 fn snapshot_query(
@@ -890,7 +1050,8 @@ fn recover_owned(
 ) -> Result<(MaintenanceControlResult, bool)> {
     let health = crate::rpc::probe_runtime()?;
     if let Some(health) = health.as_ref() {
-        maintenance.snapshot_pause_after_drain(takeover, operation, health)?;
+        maintenance.snapshot_pause_after_drain(takeover, &operation.original().binding,
+            &normal_marker(operation)?, health)?;
     } else {
         maintenance.snapshot_bind_offline(takeover, operation)?;
     }
@@ -1034,6 +1195,14 @@ pub(crate) fn snapshot_recover_control() -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("snapshot recovery control")?;
     super::super::supervise::installed_auth_runtime()?;
     let takeover = crate::runtime_policy::takeover_lock()?;
+    let (root, _) = respire_client_host::config::control_roots()?;
+    match marker(&root)? {
+        None => return recover_legacy_snapshot(&takeover),
+        Some(value) if value.snapshot.as_ref().is_some_and(|snapshot| snapshot.legacy_recovery.is_some()) => {
+            return query_legacy_snapshot(&takeover);
+        }
+        Some(_) => {}
+    }
     let (mut maintenance, operation) = adopt_snapshot(&takeover)?;
     let (result, runtime_verified) = recover_owned(&mut maintenance, &takeover, &operation)?;
     snapshot_output("recovered", &result, runtime_verified)

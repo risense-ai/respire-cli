@@ -15,7 +15,7 @@ use super::{lifecycle, read_registration, Registration};
 mod launch_authorization;
 mod auth_control;
 pub(crate) use launch_authorization::migration_control::control_migrate_profile;
-pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read};
+pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read, discover_legacy_snapshot};
 pub(crate) use launch_authorization::agent_config_control::control_agent_config;
 pub(crate) use launch_authorization::key_control::{
     control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,

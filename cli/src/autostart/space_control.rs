@@ -599,7 +599,10 @@ fn output(receipt: HostSpaceResult) -> Result<ResultEnvelope> {
     }
     envelope.details["outcome"] = json!(receipt.outcome);
     envelope.details["operation_id"] = json!(receipt.operation_id);
-    if receipt.outcome == HostSpaceOutcome::Rejected { envelope.errors.push("space operation rejected; no change was committed".to_owned()); }
+    if receipt.outcome == HostSpaceOutcome::Rejected {
+        envelope.details["error_type"] = json!("runtime");
+        envelope.errors.push("space operation rejected; no change was committed".to_owned());
+    }
     if !complete && receipt.outcome != HostSpaceOutcome::Rejected {
         envelope.actions.push("repeat exactly the same command to query the original operation; do not create a replacement".to_owned());
     }

@@ -10,24 +10,34 @@ use std::path::Path;
 use super::launch_authorization::control;
 use super::super::lifecycle;
 
+/// Only a live login loop may retain the original maintenance and serving state.
+pub(crate) struct AccountContinuation {
+    operation_id: String,
+    source: std::path::PathBuf,
+    original_identity: respire_protocol::HostAuthIdentity,
+    was_serving: bool,
+    maintenance: lifecycle::Maintenance,
+}
+
 pub(crate) fn control_register(
     addr: &str, user: &str, password: &str, super_password: Option<&str>,
 ) -> Result<ResultEnvelope> {
     account_operation(&uuid::Uuid::new_v4().to_string(), None, true,
         control::AccountControl::Register { addr: addr.to_owned(), user: user.to_owned(),
-            password: password.to_owned(), super_password: super_password.map(str::to_owned) })
+            password: password.to_owned(), super_password: super_password.map(str::to_owned) }, None)
 }
 
 pub(crate) fn control_login(
     addr: &str, user: &str, authorization: HostAuthAuthorization, super_password: &str,
 ) -> Result<ResultEnvelope> {
-    control_login_step(addr, user, authorization, Some(super_password), HostAuthLoginContinuation::default(), None)
+    control_login_step(addr, user, authorization, Some(super_password), HostAuthLoginContinuation::default(), None, &mut None)
 }
 
 /// Continue only a known AwaitingInput receipt; an uncertain operation is queried, never replayed.
 pub(crate) fn control_login_step(
     addr: &str, user: &str, authorization: HostAuthAuthorization, super_password: Option<&str>,
     input: HostAuthLoginContinuation, resume: Option<&HostAuthAccountResult>,
+    continuation: &mut Option<AccountContinuation>,
 ) -> Result<ResultEnvelope> {
     let operation = control::AccountControl::LoginStep {
         addr: addr.to_owned(), user: user.to_owned(), authorization,
@@ -41,27 +51,28 @@ pub(crate) fn control_login_step(
         let status = previous.login.as_ref().context("login continuation status is missing")?;
         anyhow::ensure!(status.user == user && status.addr.trim_end_matches('/') == addr.trim().trim_end_matches('/'),
             "login continuation user or server differs from the original operation");
-        return account_operation(&previous.operation_id, Some(&previous.source_profile), false, operation);
+        return account_operation(&previous.operation_id, Some(&previous.source_profile), false, operation, Some(continuation));
     }
-    account_operation(&uuid::Uuid::new_v4().to_string(), None, false, operation)
+    account_operation(&uuid::Uuid::new_v4().to_string(), None, false, operation, Some(continuation))
 }
 
 /// Original source and operation come from AccountOutcomeUnknown, never a new authentication.
 pub(crate) fn control_account_result(
     operation_id: &str, source_profile: &Path, register: bool,
 ) -> Result<ResultEnvelope> {
-    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Result)
+    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Result, None)
 }
 
 /// Explicit local compensation only; Runtime decides whether the vault still permits it.
 pub(crate) fn control_account_rollback(
     operation_id: &str, source_profile: &Path, register: bool,
 ) -> Result<ResultEnvelope> {
-    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Rollback)
+    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Rollback, None)
 }
 
 fn account_operation(
     operation_id: &str, original_source: Option<&Path>, register: bool, operation: control::AccountControl,
+    mut continuation: Option<&mut Option<AccountContinuation>>,
 ) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("private account control")?;
     let id = uuid::Uuid::parse_str(operation_id).context("invalid account operation ID")?;
@@ -69,22 +80,37 @@ fn account_operation(
         "account operation ID must be a canonical random UUID");
     control::installed_auth_runtime()?;
     let (_, selected) = respire_client_host::config::control_roots()?;
-    anyhow::ensure!(lifecycle::current_boot_token().is_none(),
-        "private account control must own its maintenance transaction");
     let takeover = crate::runtime_policy::takeover_lock()?;
     if original_source.is_none() {
         std::fs::create_dir_all(&selected)?;
     }
     let source = original_source.unwrap_or(&selected).canonicalize()?;
-    let original_identity = control::identity(&source)?;
+    let saved = continuation.as_mut().and_then(|slot| slot.take());
+    let is_continuation = original_source.is_some()
+        && matches!(&operation, control::AccountControl::LoginStep { .. });
+    anyhow::ensure!(saved.is_some() == is_continuation,
+        "login continuation requires its original live maintenance context; query the original operation");
     let health = crate::rpc::probe_runtime()?;
     anyhow::ensure!(health.is_some() || !crate::rpc::endpoint_path().try_exists()?,
         "account control blocked: recorded owner has no verifiable health/drain receipt");
-    let mut maintenance = if original_source.is_some() {
-        lifecycle::with_explicit_recovery(lifecycle::begin_maintenance_locked)?
+    let (mut maintenance, original_identity, restore_owner) = if let Some(saved) = saved {
+        anyhow::ensure!(!register && saved.operation_id == operation_id && saved.source == source
+            && selected.canonicalize()? == source
+            && control::identity(&source)? == saved.original_identity,
+            "login continuation changed its original operation or source identity");
+        (saved.maintenance, saved.original_identity, Some(saved.was_serving))
     } else {
-        lifecycle::begin_maintenance_locked()?
+        anyhow::ensure!(lifecycle::current_boot_token().is_none(),
+            "private account control must own its maintenance transaction");
+        let original_identity = control::identity(&source)?;
+        let maintenance = if original_source.is_some() {
+            lifecycle::with_explicit_recovery(lifecycle::begin_maintenance_locked)?
+        } else {
+            lifecycle::begin_maintenance_locked()?
+        };
+        (maintenance, original_identity, None)
     };
+    let restore_owner = restore_owner.or_else(|| original_source.is_none().then_some(health.is_some()));
     // Both service-managed and explicit host-local transactions own a durable marker.
     anyhow::ensure!(maintenance.auth_launch_binding(&selected.canonicalize()?)?.is_some(),
         "account control requires persistent host maintenance; no authentication was sent");
@@ -127,7 +153,15 @@ fn account_operation(
         }
     }
     match receipt.outcome {
-        HostAuthAccountOutcome::AwaitingInput => Ok(envelope),
+        HostAuthAccountOutcome::AwaitingInput => {
+            if let (Some(slot), Some(was_serving)) = (continuation, restore_owner) {
+                *slot = Some(AccountContinuation {
+                    operation_id: operation_id.to_owned(), source, original_identity,
+                    was_serving, maintenance,
+                });
+            }
+            Ok(envelope)
+        }
         HostAuthAccountOutcome::Committed => {
             control::verify_account_target(&receipt, operation_id, &source, register)
                 .map_err(|error| error.context(unknown()))?;
@@ -136,10 +170,11 @@ fn account_operation(
         }
         HostAuthAccountOutcome::RolledBack => {
             // Reconnected callers cannot infer whether the original source was serving.
-            if original_source.is_none() {
-                anyhow::ensure!(control::identity(&source)? == original_identity,
+            if let Some(was_serving) = restore_owner {
+                anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == source
+                    && control::identity(&source)? == original_identity,
                     "account rollback did not restore the original source identity; maintenance retained");
-                if health.is_some() {
+                if was_serving {
                     maintenance.start_account_runtime()?;
                 }
                 maintenance.finish()?;
