@@ -522,9 +522,24 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     assert_eq!(injected["command"], "inject");
     assert!(rt.dir.path().join("host/home/AGENTS.md").is_file());
     // Repairs and migrations belong to the host, not the business RPC allowlist.
-    let (ok, doctor) = host(&rt, &["--json", "doctor", "--fix"])?;
-    assert!(ok, "{doctor}");
+    let doctor_output = rt.host_command(&["--json", "doctor", "--fix"])?;
+    let doctor: serde_json::Value = serde_json::from_slice(&doctor_output.stdout).map_err(|err|
+        format!("doctor returned no envelope: {err}"))?;
+    // Off diagnostics are an explicit warning (exit 2), not a failed host check.
+    assert_eq!(doctor_output.status.code(), Some(2), "off doctor must exit with warning status");
+    assert_eq!(doctor["command"], "doctor");
+    assert_eq!(doctor["status"], "warn");
+    assert_eq!(doctor["errors"], serde_json::json!([]));
+    assert_eq!(doctor["summary"]["mode"], "off");
+    assert_eq!(doctor["summary"]["fail"], 0);
+    assert_eq!(doctor["summary"]["warn"], 1);
     assert_eq!(doctor["summary"]["skipped"], true);
+    assert!(doctor["items"].as_array().is_some_and(|items| items.iter()
+        .any(|item| item["name"] == "Runtime diagnostics" && item["status"] == "warn"
+            && item["value"] == "Memory is off; Runtime diagnostics were not executed")));
+    assert!(doctor["items"].as_array().is_some_and(|items| items.iter()
+        .any(|item| item["name"] == "inject" && item["status"] == "ok"
+            && item["value"] == "1/1 injected and fresh (1 detected)")));
     assert!(doctor["items"].as_array().is_some_and(|items| items.iter()
         .any(|item| item["name"] == "host repair" && item["status"] == "skip")));
     let migration = ["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"];
