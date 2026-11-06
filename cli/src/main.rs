@@ -1378,7 +1378,7 @@ fn run(args: Cli) -> Result<()> {
         return host_command(&args).context("private space host handler is missing")?;
     }
     // Legacy recovery owns its Paused transaction before ordinary requests hit the fence.
-    if !runtime_policy::client_only() && !matches!(args.command, Some(Command::V)) {
+    if !runtime_policy::client_only() && !matches!(args.command, Some(Command::V | Command::MemoryRevision)) {
         rpc::recover_interrupted_login()?;
     }
     if let Some(Command::AgentConfig { set: Some(kv) }) = args.command.as_ref() {
