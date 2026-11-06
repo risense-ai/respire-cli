@@ -96,6 +96,10 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
     let profile = profile.canonicalize()?;
     let path = root.join("runtime/autostart/space-write.json");
     let saved = read_original(&path)?;
+    if saved.is_none() && matches!(&operation, HostSpaceOperation::Join { .. }) {
+        // A retained operation may already own the target; only preflight new joins.
+        respire::space::validate_join(invite_code.context("join invite input missing")?)?;
+    }
     let expected = super::control::identity(&profile)?;
     let registration = super::read_registration(&root)?;
     let managed = registration.as_ref().filter(|config| config.enabled && !config.manually_stopped);
