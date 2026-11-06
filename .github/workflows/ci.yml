@@ -394,6 +394,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - uses: actions/setup-python@v5
+        if: matrix.group == 'runtime_smoke'
+        with:
+          python-version: '3.12'
+      - name: Prepare private business credential fixture
+        if: matrix.group == 'runtime_smoke'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Validate candidate evidence inputs
         if: matrix.group == 'core'
         run: |
@@ -615,7 +626,7 @@ jobs:
             if (result.error) throw result.error;
             status = result.status ?? 1;
           }
-          if (status !== 0 || group === 'runtime_autostart') process.exit(status);
+          if (group === 'runtime_autostart') process.exit(status);
           const runner = process.env.RSRS_RUNTIME_TEST_RUNNER;
           assert.ok(runner, 'Runtime business tests cannot be skipped');
           const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
@@ -623,10 +634,28 @@ jobs:
           for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
             assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count, `Missing migrated ${module} assertions`);
           }
-          const result = spawnSync('bash', ['scripts/run-runtime-business-tests.sh'], {stdio: 'inherit', env: {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'}});
+          const businessArgs = ['scripts/run-runtime-business-tests.sh'];
+          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'};
+          const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
+            '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
+            '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
+            'dbus-run-session', '--', 'env', 'RSRS_SS_FIXTURE_BUS=private',
+            'python', '-B', 'scripts/dev-secret-service-keyring-selftest.py',
+            '--root', `${process.env.RUNNER_TEMP}/account-private-secret-service`, '--', 'bash', ...businessArgs];
+          const result = group === 'runtime_smoke'
+            ? spawnSync('env', privateArgs, {stdio: 'inherit', env: businessEnv})
+            : spawnSync('bash', businessArgs, {stdio: 'inherit', env: businessEnv});
           if (result.error) throw result.error;
-          process.exit(result.status ?? 1);
+          process.exit(status !== 0 ? status : (result.status ?? 1));
           NODE
+      - name: Preserve private business credential diagnostics
+        if: ${{ always() && matrix.group == 'runtime_smoke' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: private-business-credentials-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/account-private-secret-service/business-keyring-selftest.json
+          if-no-files-found: error
+          retention-days: 1
       # Keep failed command output too; raw source logs are not candidate/G1 reports.
       - name: Preserve core source test output
         id: required-raw

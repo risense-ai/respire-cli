@@ -54,6 +54,8 @@ class SecretServiceKeys(_base.TrackedKeys):
             env.pop("GNOME_KEYRING_CONTROL", None)
             for key in ("SSH_AUTH_SOCK", "GNOME_KEYRING_PID"):
                 env.pop(key, None)
+            self.private_env = {key: env[key] for key in (
+                "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")}
             self.daemon = subprocess.Popen([
                 "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
                 "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
@@ -105,6 +107,41 @@ class SecretServiceKeys(_base.TrackedKeys):
         env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
         env["RSRS_SS_FIXTURE_BUS"] = "private"
         return env
+
+    def configure_business_env(self, env):
+        self.configure_env(env)
+        env.update(self.private_env)
+        for key in ("DBUS_STARTER_ADDRESS", "DBUS_STARTER_BUS_TYPE", "DBUS_SESSION_BUS_PID",
+                    "GNOME_KEYRING_CONTROL", "GNOME_KEYRING_PID", "SSH_AUTH_SOCK",
+                    "GH_TOKEN", "GITHUB_TOKEN"):
+            env.pop(key, None)
+        return env
+
+    def verify_owner(self):
+        from jeepney import DBusAddress, new_method_call
+        require(self.daemon is not None and self.daemon.poll() is None,
+                "fixture_secret_service_daemon_exited")
+        address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus", "org.freedesktop.DBus")
+        reply = self.connection.send_and_get_reply(new_method_call(
+            address, "GetConnectionUnixProcessID", "s", ("org.freedesktop.secrets",)))
+        require(reply.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
+
+    def cleanup_business_entries(self):
+        self.verify_owner()
+        # Only this mode runs children against our initially empty private collection.
+        # Match the existing login-interruption cleanup, including auth TOTP checkpoints.
+        items = list(self.collection.get_all_items())
+        for item in items:
+            attributes = item.get_attributes()
+            require(attributes.get("service") == "rsrs"
+                    and attributes.get("target") == "default"
+                    and attributes.get("application") == "rust-keyring"
+                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}",
+                                     attributes.get("username", "")),
+                    "unexpected_private_credential")
+        for item in items:
+            item.delete()
+        require(not list(self.collection.get_all_items()), "native_fixture_cleanup_failed")
 
     @staticmethod
     def attributes(service, slot):
