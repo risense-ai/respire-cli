@@ -6,11 +6,12 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
 import {runInNewContext} from 'node:vm';
+import {createHash} from 'node:crypto';
 import {cacheKey,releaseKey} from '../../scripts/rust-ci-cache.mjs';
 const ci=readFileSync(new URL('../../.github/workflows/ci.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const section=name=>ci.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
 test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',()=>{
-  const contracts=section('contract-checks'),source=section('coverage-tests'),workspace=section('workspace-tests');
+  const contracts=section('contract-checks'),source=section('coverage-tests'),workspace=section('workspace-tests'),integration=section('runtime-integration');
   assert(contracts && source);assert.doesNotMatch(contracts,/\n    needs:|id-token:|actions: write|secrets\.|fetch-core-sdk|cargo /);
   assert.match(contracts,/persist-credentials: false/);assert.match(contracts,/contents: read/);
   assert.match(workspace,/cargo test --workspace --exclude respire --locked/);assert.doesNotMatch(source,/cargo test --workspace --exclude respire/);assert.doesNotMatch(workspace,/llvm-cov|needs:/);assert.match(workspace,/Require the exact SDK cache match/);assert.match(workspace,/RSRS_CORE_TEST_MODE: '1'/);
@@ -20,7 +21,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/targets.filter\(t => t.kind.includes\('test'\)\)/);
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
-  assert.match(source,/if \(group === 'runtime_autostart'\) process.exit\(status\)/);
+  assert.match(source,/if \(process.env.CANDIDATE_MODE !== 'true' \|\| group === 'runtime_autostart'\) process.exit\(status\)/);
   assert.match(source,/process.exit\(status !== 0 \? status : \(result.status \?\? 1\)\)/);
   const business=readFileSync(new URL('../../scripts/run-runtime-business-tests.sh',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(business,/^set -euo pipefail$/m);
@@ -102,7 +103,7 @@ done`),'run every business module and preserve the first failure');
         return {status:businessStatus};
       },
       captureCoverage:args=>{calls.push(args);raw.push(originalStatus);return originalStatus;},
-      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner',
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner',
         GH_TOKEN:'synthetic-gh',GITHUB_TOKEN:'synthetic-github'},exit:status=>{exits.push(status);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[originalStatus!==0?originalStatus:group==='runtime_autostart'?0:(businessStatus??1)]);
@@ -113,9 +114,155 @@ done`),'run every business module and preserve the first failure');
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
   }
   assert.deepEqual(selected.sort(),allTests.sort(),'every integration target must run exactly once');
+  // Source mode runs the same CLI selection but must never dispatch a Runtime harness.
+  for(const group of ['core','runtime_smoke','runtime_autostart'])for(const status of [0,23]){
+    const exits=[],calls=[];
+    assert.throws(()=>runInNewContext(program,{
+      assert,
+      execFileSync:(command,args)=>{assert.equal(command,'cargo');return JSON.stringify(metadata);},
+      spawnSync:(command,args)=>{assert.equal(command,'cargo');calls.push(args);return {status};},
+      captureCoverage:args=>{calls.push(args);return status;},
+      process:{env:{CANDIDATE_MODE:'false',COVERAGE_GROUP:group},exit:value=>{exits.push(value);throw exits;}},
+    }),error=>error===exits);
+    assert.deepEqual(exits,[status]);assert.equal(calls.length,1);
+  }
+  assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands/);
+  for(const lane of [workspace,source]){
+    assert.match(lane,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
+    assert.match(lane,/name: Prepare pinned binary Core SDK\n        if: env.CANDIDATE_MODE == 'true'/);
+    assert.match(lane,/if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''/);
+    for(const block of lane.split(/^      - /m).slice(1).filter(block=>
+      /id: sdk-cache-2|fetch-core-sdk\.mjs|path: \.sdk\//.test(block))){
+      const condition=block.match(/^        if: (.+)$/m)?.[1];
+      assert(condition,'every SDK operation must have its own candidate condition');
+      for(const candidate of ['true','false'])assert.equal(runInNewContext(condition.replaceAll('steps.sdk-cache-2','steps.sdkCache2'),{
+        env:{CANDIDATE_MODE:candidate},steps:{sdkCache2:{outputs:{key:'exact-cache-key'}}},
+      }),candidate==='true');
+    }
+  }
+  assert.match(source,/name: Coverage \(\$\{\{ matrix.group \}\}\)/);
+  for(const name of ['Prepare private business credential fixture','Resolve exact Runtime business test source',
+    'Bind Runtime business harness and SDK identity','Verify or install the real business test model using the official installer',
+    'Build Runtime-owned business assertions without instrumenting Runtime']){
+    const block=source.split(`- name: ${name}\n`)[1]?.split('\n      - ')[0];
+    assert(block?.includes("if: env.CANDIDATE_MODE == 'true'"),name);
+  }
+  const registry=JSON.parse(readFileSync(new URL('../../scripts/required-tests.json',import.meta.url),'utf8'));
+  for(const item of registry.tests.filter(item=>item.evidence?.job==='coverage-tests')){
+    assert.equal(item.evidence.job_name,'Coverage (core)');assert(source.includes(item.evidence.command_fragment));
+  }
+  assert.match(integration,/needs: coverage-tests/);
+  assert.match(integration,/assert.equal\(sha, pin.source_sha/);
+  assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);
+  assert.match(integration,/channel\(pinVersion\), channel\(cliVersion\)/);
+  assert.match(integration,/tar --exclude='\*\.profraw' -xzf/);
+  assert.match(integration,/INTEGRATION_CLI_SHA256/);
+  assert.match(integration,/source_archive_sha256/);
+  assert.match(integration,/runtime_tests_sha: env.RUNTIME_TESTS_SHA/);
+  assert.match(integration,/Preserve private business credential diagnostics\n        if: \$\{\{ always\(\)/);
+  assert.match(integration,/steps.business.outcome == 'failure'/);
+  assert.match(integration,/cargo test --workspace --exclude respire --exclude respire_spawn --exclude respire_protocol --exclude respire_client_host --exclude respire_commands --locked/);
+  assert.match(integration,/python3 scripts\/test-core-payload-lifetime.py/);
+  const jointBlock=integration.split("      - name: Run Runtime business assertions against the source CLI")[1].split("      - name: Preserve private business credential diagnostics")[0];
+  const jointProgram=jointBlock.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]
+    .replace(/^[ \t]*import .+;[ \t]*$/gm,'');
+  assert.equal(jointProgram.slice(jointProgram.indexOf('const runner =')).trim(),
+    program.slice(program.indexOf('const runner =')).trim()
+      .replace('process.exit(status !== 0 ? status : (result.status ?? 1));','process.exit(result.status ?? 1);'),
+    'source integration must reuse the original candidate business dispatch');
+  for(const group of ['core','runtime_smoke'])for(const status of [0,17,null]){
+    const exits=[],modules=[];
+    assert.throws(()=>runInNewContext(jointProgram,{
+      assert,
+      execFileSync:(command,args)=>{assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);return listing;},
+      spawnSync:(command,args,options)=>{
+        assert.equal(command,group==='core'?'bash':'env');
+        if(group==='runtime_smoke')assert(Array.from(args).includes('RSRS_SS_FIXTURE_BUS=private'));
+        modules.push(options.env.RUNTIME_BUSINESS_MODULES);return {status};
+      },
+      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner'},
+        exit:value=>{exits.push(value);throw exits;}},
+    }),error=>error===exits);
+    assert.deepEqual(exits,[status??1]);
+    assert.deepEqual(modules,[group==='core'?'memory_revision diary_identity snapshot_lifecycle capture_main':'account']);
+  }
 
-  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
+
+  // Reject unallocated assertions before either dispatcher can execute a module.
+  for(const dispatch of [program,jointProgram])for(const invalid of [
+    `${listing}\nnew_module::unassigned: test`,
+    listing.replace('account::case_0: test','account::case_1: test'),
+    listing.replace('account::case_0: test','new_module::unassigned: test'),
+  ]){
+    assert.throws(()=>runInNewContext(dispatch,{
+      assert,readFileSync,
+      execFileSync:command=>command==='cargo'?JSON.stringify(metadata):invalid,
+      spawnSync:command=>{assert.equal(command,'cargo','invalid inventory must not dispatch business modules');return {status:0};},
+      captureCoverage:()=>0,
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner},
+        exit:()=>assert.fail('invalid inventory must fail before exit')},
+    }),/Unassigned or duplicate|Missing migrated/);
+  }
+  const expectedProduct=ci.match(/^  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: ([a-f0-9]{40})$/m)?.[1];
+  assert.equal(expectedProduct,'9338a6654cf395525668dd9faaea3f401abe2d5a');
+  const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const binary=Buffer.from('synthetic official runtime'),cliBytes=Buffer.from('instrumented CLI'),archive=Buffer.from('source archive');
+  const pinVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url),'utf8')).required;
+  const releaseMetadata={schema_version:2,runtime_version:pinVersion,source_commit:expectedProduct,binary_sha256:hash(binary)};
+  const selection=()=>{const metadata_json=JSON.stringify(releaseMetadata);return {version:pinVersion,sha256:hash(binary),
+    release:{metadata_json,metadata_sha256:hash(metadata_json)}};};
+  const initialReceipt=group=>({schema:1,repository:'repo',source_sha:'cli-source',run_id:'123',run_attempt:'1',
+    source_artifact:`coverage-${group}`,source_archive_sha256:hash(archive),cli_binary_sha256:hash(cliBytes),
+    runtime_tests_sha:'b'.repeat(40),runtime_version:pinVersion});
+  const productEnv={EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA:expectedProduct,GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:'true',
+    RUNNER_TEMP:'/temp',GITHUB_ENV:'/env',GITHUB_OUTPUT:'/output',COVERAGE_GROUP:'core',GITHUB_REPOSITORY:'repo',
+    GITHUB_SHA:'cli-source',GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1'};
+  const stripImports=block=>block.replace(/^[ \t]*import .+;[ \t]*$/gm,'');
+  let boundReceipt;
+  for(const lane of [source,integration]){
+    const fixture=stripImports(lane.split('- name: Prepare official pinned standalone Runtime for lifecycle tests')[1]
+      .split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]);
+    const runFixture=(selected,actualBinary=binary)=>{
+      let written;
+      runInNewContext(fixture,{assert,createHash,
+        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file==='cli/Cargo.toml'?`version = "${pinVersion}"`:
+          file.endsWith('/runtime.json')?JSON.stringify(selected):file.endsWith('.json')?JSON.stringify(initialReceipt('core')):actualBinary,
+        mkdtempSync:()=>'/fixture',join:path.posix.join,resolve:file=>`/workspace/${file}`,realpathSync:file=>file,
+        statSync:()=>({isFile:()=>true}),spawnSync:()=>({status:0}),appendFileSync:()=>{},
+        writeFileSync:(file,value)=>{written=JSON.parse(value);},process:{env:productEnv}});
+      return written;
+    };
+    const receipt=runFixture(selection());
+    if(lane===integration){boundReceipt=receipt;assert.equal(receipt.runtime_product_source_sha,expectedProduct);
+      assert.equal(receipt.runtime_binary_sha256,hash(binary));assert.equal(receipt.runtime_metadata_sha256,hash(receipt.runtime_metadata_json));}
+    for(const change of [
+      value=>{const metadata=JSON.parse(value.release.metadata_json);metadata.source_commit='b'.repeat(40);
+        value.release.metadata_json=JSON.stringify(metadata);value.release.metadata_sha256=hash(value.release.metadata_json);},
+      value=>{value.release.metadata_sha256='0'.repeat(64);},
+      value=>{value.sha256='0'.repeat(64);},
+    ]){const value=selection();change(value);assert.throws(()=>runFixture(value));}
+    assert.throws(()=>runFixture(selection(),Buffer.from('wrong binary')));
+  }
+
+  const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, runtime-integration, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
   assert.match(report,/for group in core runtime_smoke runtime_autostart/);
+  assert.match(report,/coverage-integration-\$group.tar.gz/);
+  assert.match(report,/receipt.source_archive_sha256/);
+  const mergeProgram=stripImports(report.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]);
+  const runMerge=receipt=>runInNewContext(mergeProgram,{assert,createHash,process:{env:productEnv},
+    readFileSync:file=>file==='runtime-tests-source.json'?JSON.stringify({source_sha:'b'.repeat(40)}):
+      file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file.endsWith('.json')?
+        JSON.stringify({...receipt,source_artifact:`coverage-${file.includes('runtime_smoke')?'runtime_smoke':'core'}`}):archive,
+    execFileSync:()=>cliBytes});
+  runMerge(boundReceipt);
+  for(const change of [
+    value=>{value.runtime_product_source_sha='b'.repeat(40);},
+    value=>{value.runtime_metadata_sha256='0'.repeat(64);},
+    value=>{value.runtime_binary_sha256='0'.repeat(64);},
+    value=>{const metadata=JSON.parse(value.runtime_metadata_json);metadata.source_commit='b'.repeat(40);
+      value.runtime_metadata_json=JSON.stringify(metadata);value.runtime_metadata_sha256=hash(value.runtime_metadata_json);},
+  ]){const receipt={...boundReceipt};change(receipt);assert.throws(()=>runMerge(receipt));}
+  assert.match(report,/test \"\$INTEGRATION_RESULT\" = success/);
   assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 90/);
   assert.match(report,/exit "\$result"/);
   for(const script of ['test-publication-fence','test-publication-acceptance','test-cleanup-release-artifacts','test-registry-publication','test-release-publication','test-dev6-publication-recovery','test-parallel-publication']) {
@@ -125,7 +272,7 @@ done`),'run every business module and preserve the first failure');
   assert(readFileSync(new URL('../../scripts/test-dev-model-fixture.py',import.meta.url),'utf8').includes('from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest'));
 });
 test('fail-closed aggregate separates source success from explicit candidate evidence',()=>{
-  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
+  const complete=section('check-complete');assert.match(complete,/always\(\)/);assert.match(complete,/needs: \[coverage-tests, runtime-integration, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
   assert.match(complete,/test "\$SOURCE_RESULT" = success && test "\$WORKSPACE_RESULT" = success && test "\$CONTRACT_RESULT" = success/);
   const requested="inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != ''";
   assert(section('required-tests').includes(`(${requested})`));
@@ -163,11 +310,11 @@ test('fail-closed aggregate separates source success from explicit candidate evi
   for(const candidate of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
     const result=execFileSync;
     let passed=true;
-    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
+    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:candidate==='true'?'skipped':'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
     assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${source}/${required}`);
   }
-  for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT','COMMANDS_RESULT'])for(const status of ['failure','cancelled','skipped']){
-    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
+  for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT','COMMANDS_RESULT','INTEGRATION_RESULT'])for(const status of ['failure','cancelled','skipped']){
+    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
   }
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
@@ -222,7 +369,7 @@ test('source metadata optimization retains debug safety and only the CLI test-st
     manifest.replace('panic = "unwind"','panic = "abort"'),
   ])assert.throws(()=>assertProfiles(changed));
   assert.deepEqual([...ci.matchAll(/^\s*RUST_MIN_STACK: (.+)$/gm)].map(match=>match[1]),
-    ["'16777216'","'16777216'"],'retain the two existing CI stack settings without adding or raising a global override');
+    ["'16777216'","'16777216'","'16777216'"],'the separated integration lane inherits the existing stack setting without raising it');
   const archive=section('coverage-tests');
   assert.match(archive,/set -euo pipefail/);
   assert.match(archive,/tar -cf -[^\n]+\| gzip -1/);
