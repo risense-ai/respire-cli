@@ -200,6 +200,8 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
     {
         return Ok(src);
     }
+    crate::runtime_fetch::require_automatic_migration_safe()
+        .map_err(|error| format!("{error:#}"))?;
     if let Some(path) =
         crate::autostart::coordinate_materialization().map_err(|error| error.to_string())?
     {

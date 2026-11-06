@@ -609,7 +609,7 @@ mod tests {
             let failure = repair(&result)
                 .err()
                 .context("invalid selection was accepted")?;
-            assert!(format!("{failure:#}").contains("runtime downloads are disabled in core test mode"));
+            assert!(failure.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
             assert_eq!(std::fs::read(&database)?, before);
             assert!(!root.join("models").exists());
             Ok(())

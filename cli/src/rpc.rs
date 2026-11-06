@@ -123,7 +123,9 @@ pub fn stop_if_running() -> Result<()> {
 /// Restart after an authenticated drain, or complete evidence of an exited owner.
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     // An unavailable health response is not permission to discover or kill a PID.
     let health = probe_runtime().context(
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
@@ -731,6 +733,7 @@ pub(crate) fn ensure_daemon() -> Result<()> {
             return Ok(());
         }
     }
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     let _takeover = crate::runtime_policy::takeover_lock()?;
     ensure_daemon_locked()
 }
@@ -767,6 +770,7 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     if crate::autostart::ensure_managed_locked()? {
         return Ok(());
     }
@@ -1006,8 +1010,8 @@ mod runtime_resolution_tests {
             .err()
             .context("restart accepted an owner without persisted recovery evidence")?;
         anyhow::ensure!(
-            format!("{error:#}").contains("endpoint and launch claim do not retain that evidence"),
-            "restart did not report the missing recovery evidence: {error:#}"
+            error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>(),
+            "restart did not defer the unbound legacy owner: {error:#}"
         );
         anyhow::ensure!(
             std::fs::read(&endpoint)? == endpoint_before

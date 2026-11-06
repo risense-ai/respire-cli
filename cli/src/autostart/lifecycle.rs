@@ -659,6 +659,7 @@ fn resume_key_maintenance_inner(root: &Path, profile: &Path, source: &Path, toke
 /// Explicit host restart is the recovery operation for an interrupted transition.
 /// The caller holds the same installation takeover lock as profile changes.
 pub(crate) fn restart_maintenance_locked() -> Result<Maintenance> {
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     let Some(config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return with_explicit_recovery(begin_maintenance_locked);
     };
@@ -763,6 +764,7 @@ pub(crate) fn with_explicit_recovery<T>(action: impl FnOnce() -> Result<T>) -> R
 }
 
 pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     if current_boot_token().is_some() {
         return Ok(None);
     }
@@ -965,6 +967,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         !config.manually_stopped,
         "runtime was manually stopped; use runtime start explicitly"
     );
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     if ACTIVE.with(|v| v.borrow().is_some()) {
         let value = marker(&config.installation)?.context("active maintenance marker missing")?;
         let digest = hash(&fs::read(marker_path(&config.installation))?);
@@ -1001,6 +1004,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
 }
 
 fn start_explicit_locked() -> Result<()> {
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
         return crate::rpc::ensure_daemon_locked();
@@ -1390,6 +1394,7 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             emit("runtime.restart", value)
         }
         RuntimeCommand::Start => {
+            crate::runtime_fetch::require_automatic_migration_safe()?;
             let _ownership = crate::runtime_policy::takeover_lock()?;
             start_explicit_locked()?;
             emit("runtime.start", status()?)
@@ -1478,9 +1483,15 @@ fn runtime_inventory() -> Result<Value> {
 }
 
 fn enable(now: bool) -> Result<()> {
+    crate::runtime_fetch::require_automatic_migration_safe()?;
     // A platform-rejected native path must not even create lifecycle state.
     manager::validate_executable(Platform::current()?, &crate::mcp::stable_bin_path())?;
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    // Resolve before creating the registration: otherwise our new registration
+    // would look like an unbound legacy owner to the materialization preflight.
+    crate::rpc::resolve_runtime_executable()?;
+    anyhow::ensure!(crate::runtime_fetch::managed_runtime_path()?.is_some(),
+        "autostart requires a verified managed Runtime before registration; install the trusted release first");
     let mut config = match read_registration(&respire_client_host::paths::main_data_dir())? {
         Some(config) if !config.enabled && config.artifact_hashes.is_empty() => {
             owned(&config)?;
@@ -2109,6 +2120,83 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fresh_autostart_resolves_before_registration_and_remains_installable() -> Result<()> {
+        let _env = crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE", "RSRS_RUNTIME_BIN",
+            "ONEMEMORY_RUNTIME_BIN", "RESPIRE_RUNTIME_BIN", "RSRS_RPC_PORT", "HOME", "USERPROFILE",
+        ])?;
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        fs::create_dir(root.join("home"))?;
+        std::env::set_var("HOME", root.join("home"));
+        std::env::set_var("USERPROFILE", root.join("home"));
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+        for key in ["RSRS_RUNTIME_BIN", "ONEMEMORY_RUNTIME_BIN", "RESPIRE_RUNTIME_BIN"] {
+            std::env::remove_var(key);
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std::env::set_var("RSRS_RPC_PORT", listener.local_addr()?.port().to_string());
+        drop(listener);
+        let error = enable(false).err().context("fresh hermetic download unexpectedly succeeded")?;
+        anyhow::ensure!(format!("{error:#}").contains("runtime downloads are disabled"));
+        anyhow::ensure!(!control_path(&root).exists() && !marker_path(&root).exists());
+        anyhow::ensure!(!crate::mcp::stable_bin_path().exists());
+
+        crate::runtime_fetch::runtime_fetch_tests::install_lifecycle_fixture()?;
+        let config = new_registration()?;
+        let (_manager, state) = manager::test_adapter::install(&config);
+        enable(false)?;
+        anyhow::ensure!(state.borrow().registered && state.borrow().enabled && !state.borrow().running);
+        anyhow::ensure!(read_registration(&root)?.context("fresh registration missing")?.enabled);
+        anyhow::ensure!(!marker_path(&root).exists());
+        anyhow::ensure!(!crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &config.executable)
+            .map_err(anyhow::Error::msg)?);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_start_and_restart_reject_before_takeover_and_recheck_after_lock() -> Result<()> {
+        let _env = crate::runtime_fetch::runtime_fetch_tests::env_scope(&[
+            "RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE",
+        ])?;
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+        for command in [RuntimeCommand::Start, RuntimeCommand::Restart] {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            std::env::set_var("RSRS_DATA_DIR", &root);
+            std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
+            fs::write(root.join("session.json"), b"legacy session")?;
+            let error = execute(&command).err().context("unbound legacy start was accepted")?;
+            anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
+            anyhow::ensure!(fs::read(root.join("session.json"))? == b"legacy session");
+            anyhow::ensure!(!root.join("runtime").exists(), "rejection created takeover state");
+            anyhow::ensure!(fs::read_dir(&root)?.count() == 1);
+        }
+
+        let directory = tempfile::tempdir()?;
+        let root = directory.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
+        crate::runtime_fetch::require_automatic_migration_safe()?;
+        let _ownership = crate::runtime_policy::takeover_lock()?;
+        // Model state appearing after initial admission. The lock is coordination
+        // metadata and must not be removed as a cleanup response to this refusal.
+        fs::write(root.join("session.json"), b"late legacy session")?;
+        let error = start_explicit_locked().err().context("locked start skipped its second check")?;
+        anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
+        let error = restart_maintenance_locked().err().context("restart maintenance skipped its check")?;
+        anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
+        anyhow::ensure!(fs::read(root.join("session.json"))? == b"late legacy session");
+        anyhow::ensure!(root.join("runtime/takeover/lock.db").is_file());
+        anyhow::ensure!(!control_path(&root).exists() && !marker_path(&root).exists());
+        anyhow::ensure!(!crate::runtime_fetch::manifest_path().exists());
+        Ok(())
+    }
+
     #[test]
     fn managed_launch_budget_is_bounded_persistent_and_registration_scoped() -> Result<()> {
         let dir = tempfile::tempdir()?;
@@ -2217,9 +2305,8 @@ mod tests {
             root.join("bin").display().to_string(),
         );
         fs::create_dir_all(root.join("bin"))?;
-        fs::write(&config.executable, b"synthetic supervisor; never executed")?;
-        let runtime = root.join("bin").join(crate::runtime_fetch::RUNTIME_BINARY);
-        fs::write(&runtime, b"synthetic runtime; never executed")?;
+        fs::copy(std::env::current_exe()?, &config.executable)?;
+        let runtime = crate::runtime_fetch::runtime_fetch_tests::install_lifecycle_fixture()?;
         std::env::remove_var("RSRS_RUNTIME_BIN");
         let birth =
             manager::process_birth(std::process::id())?.context("test process birth missing")?;
@@ -2254,7 +2341,6 @@ mod tests {
         let version = crate::runtime_fetch::pinned()?.required.clone();
         let installed = root.join("runtime").join(&version);
         fs::create_dir_all(&installed)?;
-        fs::write(installed.join(crate::runtime_fetch::RUNTIME_BINARY), b"inventory only; never executed")?;
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);

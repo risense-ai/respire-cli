@@ -378,6 +378,18 @@ impl std::fmt::Display for ManagedRuntimeRepairRequired {
 
 impl std::error::Error for ManagedRuntimeRepairRequired {}
 
+/// An automatic install must not select a new protocol for an unbound old owner.
+#[derive(Debug)]
+pub struct LegacyRuntimeMigrationRequired;
+
+impl std::fmt::Display for LegacyRuntimeMigrationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("legacy_runtime_migration_required: automatic Runtime replacement is blocked; the existing CLI, Runtime selection and data were preserved; keep using the existing client until a compatible host migration is available")
+    }
+}
+
+impl std::error::Error for LegacyRuntimeMigrationRequired {}
+
 impl ManagedManifest {
     fn from_release(metadata: &BuildMetadata, bytes: &[u8]) -> Result<Self> {
         let manifest = Self {
@@ -506,8 +518,8 @@ pub enum ResolvedRuntime {
     /// A verified `rsrs-runtime` executable, ready to spawn.
     Ready(PathBuf),
     /// A legacy combined `rsrs` binary occupies the old stable location and no
-    /// usable runtime was found first. The caller runs the migration flow:
-    /// install the pinned runtime, stop the old owner, rewrite autostart.
+    /// usable runtime was found first. Automatic replacement requires proving
+    /// this is the current CLI image, not an old combined service.
     LegacyCombined(PathBuf),
 }
 
@@ -1516,10 +1528,75 @@ fn staging_dir() -> Result<PathBuf> {
 }
 
 fn is_progress_abort(error: &anyhow::Error) -> bool {
-    error
+    error.is::<LegacyRuntimeMigrationRequired>()
+        || error.is::<ManagedRuntimeRepairRequired>()
+        || error
         .downcast_ref::<model_progress::OperationStopped>()
         .is_some()
         || error.downcast_ref::<std::io::Error>().is_some()
+}
+
+/// Read-only admission before progress, downloads, install locks or selection writes.
+/// A different pin is not permission to discard an unverified existing selection.
+fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
+    let manifest = read_manifest().context(ManagedRuntimeRepairRequired)?;
+    let selected = if let Some(manifest) = &manifest {
+        let binary = validate_installed(manifest).map_err(|error| {
+            if manifest.release.is_none() {
+                error.context(LegacyRuntimeMigrationRequired)
+            } else {
+                error
+            }
+        })?;
+        (manifest.version == required).then_some(binary)
+    } else {
+        // Resolve configured paths read-only. This never imports records or
+        // turns the selected profile into request identity or migration authority.
+        let (_, profile) = respire_client_host::config::control_roots()
+            .context(LegacyRuntimeMigrationRequired)?;
+        let records = [
+            "runtime/endpoint.json",
+            "runtime/autostart/registration.json",
+            "session.json",
+            "rsrs.db",
+            "onememory.db",
+        ].into_iter().map(|relative| installation_root().join(relative))
+            .chain(["session.json", "rsrs.db", "onememory.db"].into_iter()
+                .map(|name| profile.join(name)));
+        // Missing executable bytes do not prove a fresh installation.
+        for record in records {
+            match fs::symlink_metadata(record) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+                Ok(_) => anyhow::bail!(LegacyRuntimeMigrationRequired),
+            }
+        }
+        None
+    };
+    let legacy = crate::mcp::stable_bin_path();
+    match fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(selected),
+        Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
+                LegacyRuntimeMigrationRequired);
+        }
+    }
+    // Release provenance is not permission to overwrite a different host CLI.
+    // A materialized copy of this CLI is a normal fresh-install layout. Compare
+    // bytes, not filenames, version strings or the currently selected account.
+    let current = std::env::current_exe().context(LegacyRuntimeMigrationRequired)?;
+    let different = crate::mcp::bin_needs_refresh(&current, &legacy)
+        .map_err(anyhow::Error::msg)
+        .context(LegacyRuntimeMigrationRequired)?;
+    anyhow::ensure!(!different, LegacyRuntimeMigrationRequired);
+    Ok(selected)
+}
+
+/// Materialization and managed replacement must use the same read-only boundary
+/// before changing the old CLI image, supervisor registration or maintenance state.
+pub(crate) fn require_automatic_migration_safe() -> Result<()> {
+    automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
 
 /// Install the pinned release (or an explicit `pin` version override),
@@ -1532,7 +1609,6 @@ fn is_progress_abort(error: &anyhow::Error) -> bool {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
-    let _operation = model_progress::Operation::begin_download()?;
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -1543,20 +1619,20 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         }
         None => pinned()?.required.clone(),
     };
-    let triple = release_triple()?;
-    // Idempotent: an already-installed matching build wins over re-downloading.
-    if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
-        if manifest.version == required {
-            return validate_installed(&manifest);
-        }
+    if let Some(binary) = automatic_install_preflight(&required)? {
+        return Ok(binary);
     }
-    // Test harnesses set RSRS_CORE_TEST_MODE=1 for hermetic runs: downloads
-    // are refused so every caller takes its local fallback (the in-process
-    // shim) deterministically instead of touching the network.
+    let triple = release_triple()?;
+    // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
     anyhow::ensure!(
         !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
         "runtime downloads are disabled in core test mode"
     );
+    let lock = install_lock()?;
+    if let Some(binary) = automatic_install_preflight(&required)? {
+        return Ok(binary);
+    }
+    let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");
     let origins = download_origins(mirror)?;
     // Mirrors carry archives only; metadata remains bound to the official source.
@@ -1568,7 +1644,6 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         serde_json::from_slice(&metadata_bytes).context("invalid runtime release metadata")?;
     metadata.validate(&required, &triple)?;
     let manifest = ManagedManifest::from_release(&metadata, &metadata_bytes)?;
-    let lock = install_lock()?;
     let mut installed = None;
     let mut failures = Vec::new();
     for origin in &origins {
@@ -1596,6 +1671,7 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
             // Release archives carry the full-triple binary name; publish the
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
+            automatic_install_preflight(&required)?;
             adopt_or_verify_version_dir(&unpacked, &manifest)?;
             publish_manifest(&manifest)?;
             Ok(managed_binary_path(&required))
@@ -1812,7 +1888,7 @@ fn remove_version_dir(version: &str) -> Result<()> {
 
 #[cfg(test)]
 #[path = "runtime_fetch_tests.rs"]
-mod runtime_fetch_tests;
+pub(crate) mod runtime_fetch_tests;
 
 #[cfg(test)]
 mod revision4_install_validation {

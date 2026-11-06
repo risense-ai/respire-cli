@@ -2,8 +2,42 @@
 //! stage verification and offline installation against fixture archives.
 use super::*;
 
+/// Lifecycle fixtures use a fully verified synthetic selection, never an
+/// unproven old installation that the migration guard is supposed to preserve.
+pub(crate) fn install_lifecycle_fixture() -> Result<PathBuf> {
+    let version = &pinned()?.required;
+    let triple = release_triple()?;
+    let binary = managed_binary_path(version);
+    let directory = binary.parent().context("fixture directory missing")?;
+    fs::create_dir_all(directory)?;
+    let payload = b"synthetic runtime; never executed";
+    fs::write(&binary, payload)?;
+    let resource = b"synthetic provider; never loaded";
+    fs::create_dir_all(directory.join("lib"))?;
+    fs::write(directory.join("lib/provider.bin"), resource)?;
+    let core = serde_json::json!({"schema_version":1, "target":triple,
+        "files":[{"path":"lib/provider.bin", "sha256":sha256_hex(resource)}]}).to_string();
+    fs::write(directory.join(CORE_MANIFEST_FILE), &core)?;
+    let name = release_binary_name(&triple);
+    let metadata = serde_json::json!({
+        "schema_version":2, "runtime_version":version, "tag":format!("v{version}"),
+        "target_triple":triple, "archive_file":format!("rsrs-runtime-{triple}.tar.gz"),
+        "archive_sha256":"0".repeat(64), "binary_file":name, "binary_sha256":sha256_hex(payload),
+        "source_commit":"0".repeat(40), "compat":{"min_cli":"1.0.0", "max_cli":"*"},
+        "protocol_range":{"minimum":1, "maximum":1},
+        "capabilities":{"business_executor":"1", "mcp_server":"1"},
+        "files":[{"path":name, "size":payload.len(), "sha256":sha256_hex(payload)},
+            {"path":CORE_MANIFEST_FILE, "size":core.len(), "sha256":sha256_hex(core.as_bytes())},
+            {"path":"lib/provider.bin", "size":resource.len(), "sha256":sha256_hex(resource)}],
+    }).to_string();
+    let parsed: BuildMetadata = serde_json::from_str(&metadata)?;
+    publish_manifest(&ManagedManifest::from_release(&parsed, metadata.as_bytes())?)?;
+    anyhow::ensure!(managed_runtime_path()?.as_ref() == Some(&binary));
+    Ok(binary)
+}
+
 /// Serialize env-mutating tests and restore the previous environment on drop.
-fn env_scope(keys: &[&'static str]) -> Result<impl Drop> {
+pub(crate) fn env_scope(keys: &[&'static str]) -> Result<impl Drop> {
     struct Restore {
         _guard: std::sync::MutexGuard<'static, ()>,
         saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
@@ -334,9 +368,10 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
         Ok(triple) => triple,
         Err(_) => return Ok(()),
     };
-    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_RUNTIME_BIN", "RSRS_CORE_TEST_MODE"])?;
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RUNTIME_BIN", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     std::env::remove_var("RSRS_RUNTIME_BIN");
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     let binary_name = release_binary_name(&triple);
@@ -384,6 +419,18 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     anyhow::ensure!(proof.metadata_sha256 == sha256_hex(metadata.to_string().as_bytes()));
     anyhow::ensure!(managed_runtime_path()?.context("managed path missing")? == binary);
     anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
+    // A trusted Runtime archive is not old-host migration authorization.
+    fs::create_dir(dir.path().join("bin"))?;
+    let legacy = crate::mcp::stable_bin_path();
+    fs::write(&legacy, b"old combined CLI")?;
+    let before = fs::read(manifest_path())?;
+    let error = download_and_install(Some("1.0.21-dev.1"), None)
+        .err().context("verified Runtime permitted replacement of the old host")?;
+    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(crate::mcp::materialize_bin().is_err());
+    anyhow::ensure!(fs::read(&legacy)? == b"old combined CLI");
+    anyhow::ensure!(fs::read(manifest_path())? == before);
+    fs::remove_file(legacy)?;
     let resource = binary
         .parent()
         .context("binary has no parent")?
@@ -415,6 +462,12 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
         .err()
         .context("cached install ignored damaged resources")?;
     anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    let before = fs::read(manifest_path())?;
+    let error = download_and_install(Some("1.0.21-dev.2"), None)
+        .err()
+        .context("a different pin bypassed damaged resource verification")?;
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    anyhow::ensure!(fs::read(manifest_path())? == before);
     fs::write(&core_path, &core)?;
     fs::write(&resource, resource_bytes)?;
     fs::remove_file(&resource)?;
@@ -478,6 +531,14 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
         .context("cached install accepted a legacy selection without proof")?;
     anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
     // An explicit trusted reinstall can establish proof for a legacy selection.
+    let before = fs::read(manifest_path())?;
+    let error = download_and_install(Some("1.0.21-dev.2"), None)
+        .err()
+        .context("a different pin bypassed legacy migration protection")?;
+    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(error.is::<ManagedRuntimeRepairRequired>());
+    anyhow::ensure!(fs::read(manifest_path())? == before);
+    anyhow::ensure!(fs::read(&resource)? == resource_bytes);
     anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1")? == binary);
     anyhow::ensure!(read_manifest()?
         .context("repaired selection missing")?
@@ -543,6 +604,128 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
     fs::write(&explicit, b"synthetic explicit runtime")?;
     std::env::set_var("RSRS_RUNTIME_BIN", &explicit);
     anyhow::ensure!(resolve_runtime_bin()? == ResolvedRuntime::Ready(explicit));
+    Ok(())
+}
+
+#[test]
+fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    fs::create_dir(dir.path().join("bin"))?;
+    let legacy = crate::mcp::stable_bin_path();
+    let legacy_bytes = b"legacy combined CLI image; not executable";
+    fs::write(&legacy, legacy_bytes)?;
+    let session = dir.path().join("session.json");
+    let library = dir.path().join("rsrs.db");
+    fs::write(&session, b"legacy session bytes")?;
+    fs::write(&library, b"legacy data bytes")?;
+    let error = download_and_install(None, None)
+        .err()
+        .context("legacy owner triggered automatic installation")?;
+    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(is_progress_abort(&error));
+    anyhow::ensure!(!format!("{error:#}").contains("downloads are disabled"),
+        "legacy check happened after the download boundary");
+    let materialize = crate::mcp::materialize_bin()
+        .err()
+        .context("CLI materialization overwrote the old combined service")?;
+    anyhow::ensure!(materialize.contains("legacy_runtime_migration_required"));
+    anyhow::ensure!(crate::autostart::coordinate_materialization().is_err());
+    anyhow::ensure!(crate::autostart::restart_maintenance_locked().is_err());
+    anyhow::ensure!(fs::read(&legacy)? == legacy_bytes);
+    anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
+    anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
+    anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    Ok(())
+}
+
+#[test]
+fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    let required = &pinned()?.required;
+    anyhow::ensure!(automatic_install_preflight(required)?.is_none());
+    anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    fs::write(dir.path().join("client.json"), br#"{"language":"en"}"#)?;
+    anyhow::ensure!(automatic_install_preflight(required)?.is_none(),
+        "fresh preferences were mistaken for an old installation");
+    fs::create_dir(dir.path().join("bin"))?;
+    fs::copy(std::env::current_exe()?, crate::mcp::stable_bin_path())?;
+    anyhow::ensure!(automatic_install_preflight(required)?.is_none());
+    let error = download_and_install(None, None)
+        .err()
+        .context("hermetic download was allowed")?;
+    anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
+    anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    Ok(())
+}
+
+#[test]
+fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    for relative in [
+        "runtime/endpoint.json", "runtime/autostart/registration.json", "client.json",
+        "session.json", "rsrs.db", "onememory.db",
+    ] {
+        let dir = tempfile::tempdir()?;
+        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+        let record = dir.path().join(relative);
+        fs::create_dir_all(record.parent().context("legacy record parent missing")?)?;
+        fs::write(&record, b"existing legacy state")?;
+        let error = download_and_install(None, None)
+            .err().context("missing binary was treated as a fresh installation")?;
+        anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>(), "missed {relative}");
+        anyhow::ensure!(fs::read(&record)? == b"existing legacy state");
+        anyhow::ensure!(!manifest_path().exists() && !runtime_dir().join(".install.lock").exists());
+        anyhow::ensure!(!crate::mcp::stable_bin_path().exists());
+    }
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    let profile = dir.path().join("accounts/previous");
+    fs::create_dir_all(&profile)?;
+    fs::write(profile.join("rsrs.db"), b"old profile data")?;
+    fs::write(dir.path().join("client.json"),
+        serde_json::json!({"data_dir": profile}).to_string())?;
+    let error = download_and_install(None, None)
+        .err().context("configured legacy profile was mistaken for a fresh installation")?;
+    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(fs::read(profile.join("rsrs.db"))? == b"old profile data");
+    anyhow::ensure!(!manifest_path().exists() && !runtime_dir().exists());
+    Ok(())
+}
+
+#[test]
+#[ignore = "requires the independently verified official GNU CLI v1.0.20 binary"]
+fn automatic_install_preserves_official_cli_1_0_20() -> Result<()> {
+    let fixture = PathBuf::from(std::env::var("RSRS_TEST_LEGACY_CLI_BIN")
+        .context("set RSRS_TEST_LEGACY_CLI_BIN to the official GNU v1.0.20 binary")?);
+    let expected = "c03c131c61819a5f4d132cfe328f7c1da82c2f0b21a9c87d2b8870d1541a4c3e";
+    anyhow::ensure!(sha256_file(&fixture)? == expected, "wrong official legacy fixture digest");
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let dir = tempfile::tempdir()?;
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    fs::create_dir(dir.path().join("bin"))?;
+    let legacy = crate::mcp::stable_bin_path();
+    fs::copy(fixture, &legacy)?;
+    let error = download_and_install(None, None)
+        .err()
+        .context("official legacy CLI triggered automatic installation")?;
+    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+    anyhow::ensure!(crate::mcp::materialize_bin().is_err());
+    anyhow::ensure!(sha256_file(&legacy)? == expected);
+    anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     Ok(())
 }
 
