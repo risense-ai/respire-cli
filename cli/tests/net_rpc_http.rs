@@ -482,6 +482,7 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
 #[test]
 fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(), String> {
     let mut rt = start_runtime("off", false, true)?;
+    eprintln!("device-stage=off-rpc-probes");
     let execute = |rt: &Runtime, args: &[&str]| {
         rt.rpc(&uuid::Uuid::new_v4().to_string(), args, Duration::from_secs(20))
     };
@@ -499,7 +500,9 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         assert_eq!(result["summary"]["action"], "updated");
         assert_eq!(result["summary"]["key"], "workspace_mode");
         assert_eq!(result["summary"]["value"], mode);
+        eprintln!("device-stage=mode-owner-refresh");
         rt.refresh_controlled_identity()?;
+        eprintln!("device-stage=mode-config-read");
         let (ok, config) = host(rt, &["--json", "agent-config"])?;
         assert!(ok, "{config}");
         assert_eq!(config["summary"]["workspace_mode"], mode, "{config}");
@@ -517,11 +520,13 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         assert_eq!(response["envelope"]["items"], serde_json::json!([]));
     }
     // Doctor always checks the generic prompt, even when no IDE is installed.
+    eprintln!("device-stage=off-host-inject");
     let (ok, injected) = host(&rt, &["--json", "inject", "--id", "generic"])?;
     assert!(ok, "{injected}");
     assert_eq!(injected["command"], "inject");
     assert!(rt.dir.path().join("host/home/AGENTS.md").is_file());
     // Repairs and migrations belong to the host, not the business RPC allowlist.
+    eprintln!("device-stage=off-host-doctor");
     let doctor_output = rt.host_command(&["--json", "doctor", "--fix"])?;
     let doctor: serde_json::Value = serde_json::from_slice(&doctor_output.stdout).map_err(|err|
         format!("doctor returned no envelope: {err}"))?;
@@ -543,10 +548,12 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     assert!(doctor["items"].as_array().is_some_and(|items| items.iter()
         .any(|item| item["name"] == "host repair" && item["status"] == "skip")));
     let migration = ["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"];
+    eprintln!("device-stage=off-host-migration");
     let (ok, rejected) = host(&rt, &migration)?;
     assert!(!ok, "invalid legacy source was accepted: {rejected}");
     assert!(rejected["errors"].as_array().is_some_and(|errors| errors.iter()
         .any(|error| error.as_str().is_some_and(|message| message.contains("invalid migration source or account")))));
+    eprintln!("device-stage=off-status-rpc");
     let status = execute(&rt, &["--json", "status"])?;
     assert_eq!(status["envelope"]["summary"]["workspace"], "off", "{status}");
     assert!(status["envelope"]["summary"]["local_total"].is_null());
@@ -559,11 +566,15 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     let plain = rt.host_command(&["--client-only", "recall", "synthetic query"])?;
     assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
     assert!(plain.stdout.is_empty(), "disabled human output must be empty");
+    eprintln!("device-stage=enter-readonly");
     set_mode(&mut rt, "readonly")?;
+    eprintln!("device-stage=enter-normal");
     set_mode(&mut rt, "normal")?;
+    eprintln!("device-stage=normal-initial-status-rpc");
     let initialized = execute(&rt, &["--json", "status"])?;
     assert_eq!(initialized["ok"], true, "{initialized}");
     assert!(rt.dir.path().join("rsrs.db").exists());
+    eprintln!("device-stage=enter-readonly");
     set_mode(&mut rt, "readonly")?;
     let (ok, config) = host(&rt, &["--json", "agent-config"])?;
     assert!(ok, "{config}");
@@ -586,11 +597,14 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
                 .any(|error| error.as_str().is_some_and(|message| message.contains(expected)))),
                 "host rejection was not the intended guard: {result}");
         } else {
+            eprintln!("device-stage=readonly-reject-write-rpc");
             let response = execute(&rt, &args)?;
             assert_eq!(response["ok"], false, "read-only accepted {args:?}: {response}");
         }
     }
+    eprintln!("device-stage=enter-normal");
     set_mode(&mut rt, "normal")?;
+    eprintln!("device-stage=normal-final-status-rpc");
     let status = execute(&rt, &["--json", "status"])?;
     assert_eq!(status["ok"], true, "{status}");
     assert_ne!(status["envelope"]["summary"]["workspace"], "off");
