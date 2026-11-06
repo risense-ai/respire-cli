@@ -709,7 +709,11 @@ enum Command {
     /// medium -> suggest attach (`--parent` as cause); no candidate or --force writes directly.
     /// `--parent` = causal attach; parent/child is cause/effect.
     Remember {
-        content: String,
+        /// Body text; mutually exclusive with --content-file (one of them is required).
+        content: Option<String>,
+        /// Read the body from a file: bypasses shell quoting/escaping and makes the file the source of truth before a write.
+        #[arg(long)]
+        content_file: Option<std::path::PathBuf>,
         /// Kind; defaults to context for creation and the first source's kind for merge.
         #[arg(long, value_parser = metadata::kind)]
         r#type: Option<String>,
@@ -1339,6 +1343,12 @@ enum Command {
         title: Option<String>,
         #[arg(long)]
         content: Option<String>,
+        /// Read the new body from a file instead of --content (mutually exclusive; the file is the source of truth).
+        #[arg(long)]
+        content_file: Option<std::path::PathBuf>,
+        /// Explicitly drop legacy unknown metadata fields (action/cause/effect) that the write gate rejects; their names are echoed back.
+        #[arg(long)]
+        drop_legacy_metadata: bool,
         #[arg(long)]
         tags: Option<String>,
         #[arg(long, value_parser = metadata::kind)]
@@ -4923,6 +4933,79 @@ fn short_id(id: &str) -> String {
 
 /// Version check (`update-check`): query the npm registry for a newer CLI.
 /// 24h throttle (`--force` skips it); `--clear` drops the cache. Any network failure reports "not found", not an error.
+/// Resolve a write body from either the direct value or `--content-file`.
+///
+/// The file path is read as-is (no shell quoting layer), must exist and be
+/// non-blank, and is the source of truth written to the store. `required`
+/// models `remember` (a body must be supplied); `update` keeps its
+/// omitted-means-unchanged semantics when neither source is given.
+fn resolve_content(
+    primary: Option<String>,
+    file: Option<std::path::PathBuf>,
+    required: bool,
+) -> Result<Option<String>> {
+    let text = match (primary, file) {
+        (Some(_), Some(_)) => anyhow::bail!("--content and --content-file are mutually exclusive"),
+        (Some(text), None) => Some(text),
+        (None, Some(path)) => {
+            let text = std::fs::read_to_string(&path)
+                .map_err(|error| anyhow!("failed to read --content-file {}: {error}", path.display()))?;
+            anyhow::ensure!(!text.trim().is_empty(), "--content-file {} is empty", path.display());
+            Some(text)
+        }
+        (None, None) => None,
+    };
+    if required {
+        anyhow::ensure!(text.is_some(), "provide the content argument or --content-file <path>");
+    }
+    Ok(text)
+}
+
+#[cfg(test)]
+mod content_source_tests {
+    use super::resolve_content;
+
+    fn scratch(name: &str, body: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("rsrs-content-file-{name}"));
+        std::fs::write(&path, body).expect("scratch write");
+        path
+    }
+
+    #[test]
+    fn file_source_reads_body_verbatim() {
+        let path = scratch("ok", "line one\nline two\n");
+        let out = resolve_content(None, Some(path.clone()), true).expect("read");
+        assert_eq!(out.as_deref(), Some("line one\nline two\n"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn missing_file_errors() {
+        let path = std::env::temp_dir().join("rsrs-content-file-does-not-exist");
+        let err = resolve_content(None, Some(path), false).expect_err("must fail");
+        assert!(err.to_string().contains("failed to read --content-file"), "{err}");
+    }
+
+    #[test]
+    fn blank_file_errors() {
+        let path = scratch("blank", "  \n");
+        let err = resolve_content(None, Some(path.clone()), false).expect_err("must fail");
+        assert!(err.to_string().contains("is empty"), "{err}");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn exclusive_and_required_contract() {
+        let path = scratch("both", "x");
+        let err = resolve_content(Some("a".into()), Some(path.clone()), false).expect_err("must fail");
+        assert!(err.to_string().contains("mutually exclusive"), "{err}");
+        let err = resolve_content(None, None, true).expect_err("must fail");
+        assert!(err.to_string().contains("provide the content"), "{err}");
+        assert!(resolve_content(None, None, false).expect("optional").is_none());
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 fn run_update_check(force: bool, clear: bool) -> Result<()> {
     use respire::update_check as uc;
     if clear {
@@ -7862,6 +7945,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
         Command::Runtime { command } => return autostart::execute(&command),
         Command::Remember {
             content,
+            content_file,
             r#type,
             metadata,
             tags,
@@ -7876,6 +7960,8 @@ fn run_local_inner(args: Cli) -> Result<()> {
             supersedes,
             see_also,
         } => {
+            let content = resolve_content(content, content_file, true)?
+                .ok_or_else(|| anyhow!("provide the content argument or --content-file <path>"))?;
             let explicit_kind = r#type.is_some();
             let r#type = r#type.unwrap_or_else(|| "context".to_owned());
             let metadata_patch = metadata.patch();
@@ -9961,10 +10047,13 @@ fn run_local_inner(args: Cli) -> Result<()> {
             metadata,
             title,
             content,
+            content_file,
+            drop_legacy_metadata,
             tags,
             kind,
             importance,
         } => {
+            let content = resolve_content(content, content_file, false)?;
             if metadata.patch().is_some() || kind.as_deref().is_some_and(|kind| matches!(kind, "hypothesis" | "reflection" | "self")) {
                 respire_app::metadata_gate::require_support()?;
             }
@@ -10014,6 +10103,14 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 entry.importance = imp;
             }
             metadata.apply(&mut entry);
+            // Legacy 09-24 entries carry unknown fields (action/cause/effect) the write gate
+            // rejects. Dropping them is explicit-only and the dropped names are echoed back —
+            // never silent data loss.
+            let mut dropped_legacy: Vec<String> = Vec::new();
+            if drop_legacy_metadata && !entry.unknown_fields.is_empty() {
+                dropped_legacy = entry.unknown_fields.keys().cloned().collect();
+                entry.unknown_fields.clear();
+            }
             let metadata_receipt = metadata::prepare(&session, &store, &entry)?;
             let skill_missing = if entry.kind == Kind::Skill && entry.importance == "important" {
                 let missing = skill::missing_sections(&entry.content);
@@ -10050,6 +10147,7 @@ fn run_local_inner(args: Cli) -> Result<()> {
                 },
                 serde_json::json!({"action":"written", "id": stored.id, "maintenance_hint": hint,
                     "skill_template_missing": skill_missing,
+                    "dropped_legacy_metadata": dropped_legacy,
                     "index_state": if new_stored.local_artifact.is_empty() { "pending" } else { "ready" }}),
                 vec![OutputItem::new(
                     "entry",
