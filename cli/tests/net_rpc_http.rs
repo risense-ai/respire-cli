@@ -56,9 +56,52 @@ struct Runtime {
     port: u16,
     stderr_path: std::path::PathBuf,
     identity: serde_json::Value,
+    host_control: bool,
 }
 
 impl Runtime {
+    fn host_command(&self, args: &[&str]) -> Result<std::process::Output, String> {
+        Command::new(bin()).args(args)
+            .env("RSRS_DATA_DIR", self.dir.path()).env("RSRS_RPC_PORT", self.port.to_string())
+            .env("RSRS_BIN_DIR", self.dir.path().join("bin"))
+            .env_remove("RSRS_RUNTIME_BIN").env_remove("RSRS_CLIENT_ONLY")
+            .env_remove("RSRS_NO_AUTOSTART").env_remove("RSRS_RPC_TOKEN")
+            .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+            .output().map_err(|err| err.to_string())
+    }
+
+    fn refresh_controlled_identity(&mut self) -> Result<(), String> {
+        self.verify_stop_receipt(None)?;
+        let health: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", self.port))
+            .timeout(Duration::from_secs(3)).call().map_err(|err| err.to_string())?
+            .into_json().map_err(|err| err.to_string())?;
+        for field in ["server", "v", "installation_id", "account_id", "bin", "runtime_version", "image_sha256"] {
+            assert_eq!(health[field], self.identity[field], "replacement Runtime changed {field}");
+        }
+        for field in ["installation_root", "data_dir", "exe", "image_path"] {
+            let actual = health[field].as_str().ok_or("replacement Runtime path missing")?;
+            let expected = self.identity[field].as_str().ok_or("original Runtime path missing")?;
+            assert_eq!(fs::canonicalize(actual).map_err(|err| err.to_string())?,
+                fs::canonicalize(expected).map_err(|err| err.to_string())?);
+        }
+        assert_ne!(health["instance_id"], self.identity["instance_id"]);
+        assert!(health["generation"].as_u64().is_some_and(|generation| generation > 0));
+        for field in ["account_id", "instance_id", "process_start_id"] {
+            assert!(health[field].as_str().is_some_and(|value| !value.is_empty()));
+        }
+        let pid = health["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+            .ok_or("replacement Runtime PID missing")?;
+        let process = respire_commands::net_rpc::runtime_process_identity(pid).map_err(|err| err.to_string())?;
+        let prefix = if cfg!(windows) { "windows-filetime-" }
+            else if cfg!(target_os = "linux") { "linux-starttime-" } else { "darwin-lstart-" };
+        assert_eq!(health["process_start_id"], format!("{prefix}{}", process.started_at));
+        assert_eq!(fs::canonicalize(&process.executable).map_err(|err| err.to_string())?,
+            fs::canonicalize(health["image_path"].as_str().ok_or("Runtime image missing")?)
+                .map_err(|err| err.to_string())?);
+        self.identity = health;
+        Ok(())
+    }
+
     fn check_health(&self, health: &serde_json::Value) {
         for field in ["pid", "bin", "runtime_version", "installation_id", "installation_root",
             "account_id", "instance_id", "generation", "process_start_id", "image_path", "image_sha256"] {
@@ -118,6 +161,17 @@ impl Runtime {
 
 impl Drop for Runtime {
     fn drop(&mut self) {
+        if self.host_control {
+            // Private setters replace the original child. CLI stop verifies roots and OS birth
+            // before draining the current owner, rather than killing a PID found by port.
+            match self.host_command(&["--runtime-internal", "--stop", "--json"]) {
+                Ok(output) if output.status.success() => {}
+                _ => {
+                    self.dir.disable_cleanup(true);
+                    eprintln!("owned mode-test Runtime cleanup was not confirmed; retained {}", self.dir.path().display());
+                }
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -135,14 +189,14 @@ fn start_internal_runtime_with_legacy_path(
     mode: &str,
     legacy_path: bool,
 ) -> Result<Runtime, String> {
-    start_runtime(mode, legacy_path)
+    start_runtime(mode, legacy_path, false)
 }
 
 fn start_scoped_runtime() -> Result<Runtime, String> {
-    start_runtime("normal", false)
+    start_runtime("normal", false, false)
 }
 
-fn start_runtime(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
+fn start_runtime(mode: &str, legacy_path: bool, host_control: bool) -> Result<Runtime, String> {
     let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
     fs::write(
         dir.path().join("client.json"),
@@ -162,7 +216,15 @@ fn start_runtime(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
     let port = pick_port()?;
     let stderr_path = dir.path().join("stderr.log");
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
-    let runtime = runtime_bin()?;
+    let mut runtime = runtime_bin()?;
+    if host_control {
+        support::install_runtime_fixture(dir.path()).map_err(|err| format!("{err:#}"))?;
+        let version = runtime.parent().and_then(std::path::Path::file_name)
+            .ok_or("Runtime fixture version directory missing")?;
+        let filename = runtime.file_name().ok_or("Runtime fixture binary name missing")?;
+        runtime = dir.path().join("runtime").join(version).join(filename)
+            .canonicalize().map_err(|err| err.to_string())?;
+    }
     let version = Command::new(&runtime).arg("--version").output().map_err(|err| err.to_string())?;
     if !version.status.success() {
         return Err("standalone Runtime version query failed".into());
@@ -207,7 +269,7 @@ fn start_runtime(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
                     Ok(identity) => identity,
                     Err(err) => { last = err.to_string(); continue; }
                 };
-                let rt = Runtime { child, dir, port, stderr_path, identity };
+                let rt = Runtime { child, dir, port, stderr_path, identity, host_control };
                 let health = &rt.identity;
                 if health["server"] != "respire" || health["v"] != 1
                     || health["pid"] != rt.child.id() || health["bin"] != version
@@ -242,7 +304,7 @@ fn start_runtime(mode: &str, legacy_path: bool) -> Result<Runtime, String> {
 
 #[test]
 fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
-    let mut rt = start_runtime("normal", true)?;
+    let mut rt = start_runtime("normal", true, false)?;
     let health = || -> Result<serde_json::Value, String> {
         ureq::get(&format!("http://127.0.0.1:{}/api/health", rt.port))
             .timeout(Duration::from_secs(3))
@@ -396,70 +458,73 @@ fn runtime_uses_only_tcp_and_preserves_owner() -> Result<(), String> {
 
 #[test]
 fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(), String> {
-    let rt = start_internal_runtime_with_mode("off")?;
-    let execute = |args: &[&str]| {
+    let mut rt = start_runtime("off", false, true)?;
+    let execute = |rt: &Runtime, args: &[&str]| {
         rt.rpc(&uuid::Uuid::new_v4().to_string(), args, Duration::from_secs(20))
+    };
+    let host = |rt: &Runtime, args: &[&str]| -> Result<(bool, serde_json::Value), String> {
+        let output = rt.host_command(args)?;
+        let envelope = serde_json::from_slice(&output.stdout).map_err(|err|
+            format!("host command {args:?} returned no envelope: {err}; {}", String::from_utf8_lossy(&output.stderr)))?;
+        Ok((output.status.success(), envelope))
+    };
+    let set_mode = |rt: &mut Runtime, mode: &str| -> Result<(), String> {
+        let intent = format!("workspace_mode={mode}");
+        let (ok, result) = host(rt, &["--json", "agent-config", "--set", &intent])?;
+        assert!(ok, "{result}");
+        assert_eq!(result["command"], "agent-config");
+        assert_eq!(result["summary"]["action"], "updated");
+        assert_eq!(result["summary"]["key"], "workspace_mode");
+        assert_eq!(result["summary"]["value"], mode);
+        rt.refresh_controlled_identity()?;
+        let (ok, config) = host(rt, &["--json", "agent-config"])?;
+        assert!(ok, "{config}");
+        assert_eq!(config["summary"]["workspace_mode"], mode, "{config}");
+        Ok(())
     };
     for args in [
         vec!["--json", "recall", "synthetic query"],
         vec!["--json", "remember", "synthetic memory"],
         vec!["--json", "list"],
         vec!["--json", "sync"],
-        vec!["--json", "doctor", "--fix"],
-        vec![
-            "--json",
-            "migrate",
-            "--source",
-            "/missing-synthetic-library",
-            "--account",
-            "fixture",
-        ],
     ] {
-        let response = execute(&args)?;
+        let response = execute(&rt, &args)?;
         assert_eq!(response["ok"], true, "{response}");
         assert_eq!(response["envelope"]["summary"]["skipped"], true);
         assert_eq!(response["envelope"]["items"], serde_json::json!([]));
     }
-    let status = execute(&["--json", "status"])?;
-    assert_eq!(
-        status["envelope"]["summary"]["workspace"], "off",
-        "{status}"
-    );
+    // Repairs and migrations belong to the host, not the business RPC allowlist.
+    let (ok, doctor) = host(&rt, &["--json", "doctor", "--fix"])?;
+    assert!(ok, "{doctor}");
+    assert_eq!(doctor["summary"]["skipped"], true);
+    assert!(doctor["items"].as_array().is_some_and(|items| items.iter()
+        .any(|item| item["name"] == "host repair" && item["status"] == "skip")));
+    let migration = ["--json", "migrate", "--source", "/missing-synthetic-library", "--account", "fixture"];
+    let (ok, rejected) = host(&rt, &migration)?;
+    assert!(!ok, "invalid legacy source was accepted: {rejected}");
+    assert!(rejected["errors"].as_array().is_some_and(|errors| errors.iter()
+        .any(|error| error.as_str().is_some_and(|message| message.contains("invalid migration source or account")))));
+    let status = execute(&rt, &["--json", "status"])?;
+    assert_eq!(status["envelope"]["summary"]["workspace"], "off", "{status}");
     assert!(status["envelope"]["summary"]["local_total"].is_null());
     assert!(!rt.dir.path().join("rsrs.db").exists());
     assert!(!rt.dir.path().join("onememory.db").exists());
-    let config = execute(&["--json", "agent-config"])?;
-    assert_eq!(
-        config["envelope"]["summary"]["memory_off"], true,
-        "{config}"
-    );
-    assert_eq!(config["envelope"]["summary"]["workspace_mode"], "off");
-    let plain = Command::new(bin())
-        .args(["--client-only", "recall", "synthetic query"])
-        .env("RSRS_DATA_DIR", rt.dir.path())
-        .env("RSRS_RPC_PORT", rt.port.to_string())
-        .output()
-        .map_err(|err| err.to_string())?;
-    assert!(
-        plain.status.success(),
-        "{}",
-        String::from_utf8_lossy(&plain.stderr)
-    );
-    assert!(
-        plain.stdout.is_empty(),
-        "disabled human output must be empty"
-    );
-    let restore = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
-    assert_eq!(restore["ok"], true, "{restore}");
-    let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
-    assert_eq!(normal["ok"], true, "{normal}");
-    let initialized = execute(&["--json", "status"])?;
+    let (ok, config) = host(&rt, &["--json", "agent-config"])?;
+    assert!(ok, "{config}");
+    assert_eq!(config["summary"]["memory_off"], true, "{config}");
+    assert_eq!(config["summary"]["workspace_mode"], "off");
+    let plain = rt.host_command(&["--client-only", "recall", "synthetic query"])?;
+    assert!(plain.status.success(), "{}", String::from_utf8_lossy(&plain.stderr));
+    assert!(plain.stdout.is_empty(), "disabled human output must be empty");
+    set_mode(&mut rt, "readonly")?;
+    set_mode(&mut rt, "normal")?;
+    let initialized = execute(&rt, &["--json", "status"])?;
     assert_eq!(initialized["ok"], true, "{initialized}");
     assert!(rt.dir.path().join("rsrs.db").exists());
-    let readonly = execute(&["--json", "agent-config", "--set", "workspace_mode=readonly"])?;
-    assert_eq!(readonly["ok"], true, "{readonly}");
-    let config = execute(&["--json", "agent-config"])?;
-    assert_eq!(config["envelope"]["summary"]["readonly"], true, "{config}");
+    set_mode(&mut rt, "readonly")?;
+    let (ok, config) = host(&rt, &["--json", "agent-config"])?;
+    assert!(ok, "{config}");
+    assert_eq!(config["summary"]["readonly"], true, "{config}");
     for args in [
         vec!["--json", "remember", "synthetic memory"],
         vec!["--json", "sync"],
@@ -467,36 +532,37 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         vec!["--json", "doctor", "--fix"],
         vec!["--json", "sync-conflicts", "--refresh"],
         vec!["--json", "sync-history", "--remote"],
-        vec![
-            "--json",
-            "migrate",
-            "--source",
-            "/missing-synthetic-library",
-            "--account",
-            "fixture",
-        ],
+        migration.to_vec(),
     ] {
-        let response = execute(&args)?;
-        assert_eq!(
-            response["ok"], false,
-            "read-only accepted {args:?}: {response}"
-        );
+        if matches!(args.get(1), Some(&"doctor" | &"migrate")) {
+            let (ok, result) = host(&rt, &args)?;
+            assert!(!ok, "read-only host accepted {args:?}: {result}");
+            assert_ne!(result["details"]["error_type"], "host_boundary");
+            let expected = if args[1] == "doctor" { "read-only" } else { "invalid migration source or account" };
+            assert!(result["errors"].as_array().is_some_and(|errors| errors.iter()
+                .any(|error| error.as_str().is_some_and(|message| message.contains(expected)))),
+                "host rejection was not the intended guard: {result}");
+        } else {
+            let response = execute(&rt, &args)?;
+            assert_eq!(response["ok"], false, "read-only accepted {args:?}: {response}");
+        }
     }
-    let normal = execute(&["--json", "agent-config", "--set", "workspace_mode=normal"])?;
-    assert_eq!(normal["ok"], true, "{normal}");
-    let status = execute(&["--json", "status"])?;
+    set_mode(&mut rt, "normal")?;
+    let status = execute(&rt, &["--json", "status"])?;
     assert_eq!(status["ok"], true, "{status}");
     assert_ne!(status["envelope"]["summary"]["workspace"], "off");
-    let config = execute(&["--json", "agent-config"])?;
-    assert_eq!(config["envelope"]["summary"]["readonly"], false, "{config}");
-    assert_eq!(config["envelope"]["summary"]["memory_off"], false);
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(
-            &fs::read(rt.dir.path().join("client.json")).map_err(|err| err.to_string())?
-        )
-        .map_err(|err| err.to_string())?["service_mode"],
-        "normal"
-    );
+    let (ok, config) = host(&rt, &["--json", "agent-config"])?;
+    assert!(ok, "{config}");
+    assert_eq!(config["summary"]["readonly"], false, "{config}");
+    assert_eq!(config["summary"]["memory_off"], false);
+    assert_eq!(serde_json::from_slice::<serde_json::Value>(
+        &fs::read(rt.dir.path().join("client.json")).map_err(|err| err.to_string())?
+    ).map_err(|err| err.to_string())?["service_mode"], "normal");
+    let cleanup = rt.host_command(&["--runtime-internal", "--stop", "--json"])?;
+    assert!(cleanup.status.success(), "{}", String::from_utf8_lossy(&cleanup.stderr));
+    rt.verify_stop_receipt(None)?;
+    assert!(std::net::TcpStream::connect(("127.0.0.1", rt.port)).is_err());
+    rt.host_control = false;
     Ok(())
 }
 

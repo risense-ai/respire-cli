@@ -353,7 +353,7 @@ mod tests {
         use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
             HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams, HostAuthAccountParams};
         let binding = respire_protocol::ControlBinding {
-            installation_root: std::env::current_dir()?, profile: std::env::current_dir()?,
+            installation_root: std::env::current_dir()?.canonicalize()?, profile: std::env::current_dir()?.canonicalize()?,
             launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None,
         };
         let identity = respire_protocol::HostAuthIdentity::Absent;
@@ -458,6 +458,64 @@ mod tests {
         let validate = |response| launch_authorization::control::validate_account_response(
             response, &request, &binding.profile, 5252, &binding.profile, false);
         assert!(validate(response.clone()).is_ok());
+        let diagnostic = "synthetic-private-account-diagnostic";
+        let rejection = |code: &str| -> Result<respire_protocol::RpcResponse<ResultEnvelope>> {
+            let mut rejected = response.clone();
+            rejected.ok = false;
+            rejected.exit = 2;
+            rejected.code = Some(code.to_owned());
+            rejected.error = Some(diagnostic.into());
+            rejected.data_dir = Some(binding.profile.to_string_lossy().into_owned());
+            let deadline = code == "control_outcome_unknown";
+            let executed = code == "account_outcome_unknown";
+            let mut envelope = ResultEnvelope::new("auth-account", Status::Fail,
+                if deadline { serde_json::json!({"outcome":"unknown"}) } else { serde_json::json!({}) },
+                vec![respire_commands::output::Item::new("control_ready",
+                    if deadline { Status::Skip } else if executed { Status::Ok } else { Status::Fail },
+                    if deadline { "unknown" } else if executed { "true" } else { "false" }),
+                    respire_commands::output::Item::new("store_ready", Status::Skip, "false")]);
+            if !deadline { envelope.errors.push(diagnostic.into()); }
+            rejected.envelope = Some(envelope);
+            Ok(rejected)
+        };
+        for code in ["unauthorized", "scope_mismatch", "auth_ownership_unavailable",
+            "control_unavailable", "account_outcome_unknown", "control_outcome_unknown"] {
+            let error = validate(rejection(code)?).err().context("rejection was accepted")?.to_string();
+            assert!(error.contains(&format!("Runtime rejected account control ({code})")));
+            assert!(!error.contains(diagnostic));
+        }
+        let mut valid_rejection = serde_json::to_value(rejection("unauthorized")?)?;
+        valid_rejection["scope"] = serde_json::Value::Null;
+        for (pointer, value) in [
+            ("/v", serde_json::json!(request.v + 1)),
+            ("/id", serde_json::json!("foreign-request")),
+            ("/pid", serde_json::json!(5253)),
+            ("/bin", serde_json::json!("foreign-image")),
+            ("/operation_id", serde_json::json!(uuid::Uuid::new_v4().to_string())),
+            ("/idempotency_key", serde_json::json!("foreign-key")),
+            ("/scope", serde_json::json!({"account_id":"foreign-account","instance_id":"foreign-instance","generation":1})),
+            ("/web_url", serde_json::json!("https://fixture.invalid")),
+            ("/data_dir", serde_json::json!(root)),
+            ("/ok", serde_json::json!(true)),
+            ("/exit", serde_json::json!(0)),
+            ("/code", serde_json::json!("unrecognized-private-code")),
+            ("/error", serde_json::Value::Null),
+            ("/envelope/command", serde_json::json!("foreign-command")),
+            ("/envelope/status", serde_json::json!("ok")),
+            ("/envelope/summary", serde_json::json!({"outcome":"committed"})),
+            ("/envelope/details", serde_json::json!({})),
+            ("/envelope/actions", serde_json::json!(["untrusted-action"])),
+            ("/envelope/errors", serde_json::json!(["different-diagnostic"])),
+            ("/envelope/items/0/value", serde_json::json!("true")),
+            ("/envelope/items/1/value", serde_json::json!("true")),
+        ] {
+            let mut malformed = valid_rejection.clone();
+            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value;
+            let error = validate(serde_json::from_value(malformed)?)
+                .err().context("malformed rejection was accepted")?.to_string();
+            assert!(!error.contains("Runtime rejected account control"), "accepted malformed field {pointer}");
+            assert!(!error.contains(diagnostic));
+        }
         let mut awaiting = response.clone();
         awaiting.envelope.as_mut().context("account fixture envelope missing")?
             .summary["outcome"] = serde_json::json!("awaiting_verification");

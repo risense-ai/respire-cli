@@ -409,10 +409,42 @@ pub(crate) fn validate_account_response(
     anyhow::ensure!(response.v == request.v && response.id == request.id
         && response.bin == "rsrs-runtime" && response.pid == Some(pid)
         && response.operation_id == request.operation_id && response.idempotency_key == request.idempotency_key
-        && response.scope.is_none() && response.web_url.is_none() && response.error.is_none(),
+        && response.scope.is_none() && response.web_url.is_none(),
         "account control response identity mismatch");
     if let Some(directory) = &response.data_dir {
         anyhow::ensure!(Path::new(directory).canonicalize()? == profile, "account response launch profile mismatch");
+    }
+    if response.error.is_some() {
+        let envelope = response.envelope.as_ref().context("account control rejection envelope missing")?;
+        let (code, message) = match response.code.as_deref() {
+            Some("unauthorized") => ("unauthorized", "account launch or parent authorization failed"),
+            Some("scope_mismatch") => ("scope_mismatch", "account control binding changed or does not match"),
+            Some("auth_ownership_unavailable") => ("auth_ownership_unavailable", "account library ownership is unavailable"),
+            Some("control_unavailable") => ("control_unavailable", "account controller is unavailable"),
+            Some("account_outcome_unknown") => ("account_outcome_unknown", "account outcome is unknown; query the original operation without replaying"),
+            Some("control_outcome_unknown") => ("control_outcome_unknown", "account deadline or parent authorization ended; query the original operation without replaying"),
+            _ => anyhow::bail!("invalid account control rejection code"),
+        };
+        let deadline = code == "control_outcome_unknown";
+        let executed = code == "account_outcome_unknown";
+        anyhow::ensure!(!response.ok && response.exit == 2
+            && response.error.as_deref().is_some_and(|error| !error.is_empty())
+            && envelope.command == "auth-account" && matches!(envelope.status, Status::Fail)
+            && envelope.details.is_null() && envelope.actions.is_empty() && envelope.related.is_empty()
+            && envelope.items.len() == 2
+            && envelope.items[0].name == "control_ready"
+            && envelope.items[0].value == (if deadline { "unknown" } else if executed { "true" } else { "false" })
+            && (if deadline { matches!(envelope.items[0].status, Status::Skip) }
+                else if executed { matches!(envelope.items[0].status, Status::Ok) }
+                else { matches!(envelope.items[0].status, Status::Fail) })
+            && envelope.items[1].name == "store_ready" && envelope.items[1].value == "false"
+            && matches!(envelope.items[1].status, Status::Skip)
+            && (if deadline { envelope.summary == serde_json::json!({"outcome":"unknown"}) && envelope.errors.is_empty() }
+                else { envelope.summary == serde_json::json!({}) && envelope.errors.len() == 1
+                    && response.error.as_ref() == envelope.errors.first() }),
+            "invalid account control rejection envelope");
+        // Never echo the Runtime diagnostic; every rejection retains the original operation.
+        anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
     let envelope = response.envelope.context("account control result is missing")?;
     anyhow::ensure!(envelope.command == "auth-account" && envelope.details.is_null() && envelope.errors.is_empty(),
