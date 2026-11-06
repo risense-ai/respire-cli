@@ -158,6 +158,7 @@ done`),'run every business module and preserve the first failure');
   assert.match(integration,/tar --exclude='\*\.profraw' -xzf/);
   assert.match(integration,/INTEGRATION_CLI_SHA256/);
   assert.match(integration,/source_archive_sha256/);
+  for(const lane of [source,integration])assert.match(lane,/tar --hard-dereference -cf - -T "\$RUNNER_TEMP\/coverage-files" \| gzip -1/);
   assert.match(integration,/runtime_tests_sha: env.RUNTIME_TESTS_SHA/);
   assert.match(integration,/Preserve private business credential diagnostics\n        if: \$\{\{ always\(\)/);
   assert.match(integration,/steps.business.outcome == 'failure'/);
@@ -372,7 +373,7 @@ test('source metadata optimization retains debug safety and only the CLI test-st
     ["'16777216'","'16777216'","'16777216'"],'the separated integration lane inherits the existing stack setting without raising it');
   const archive=section('coverage-tests');
   assert.match(archive,/set -euo pipefail/);
-  assert.match(archive,/tar -cf -[^\n]+\| gzip -1/);
+  assert.match(archive,/tar --hard-dereference -cf -[^\n]+\| gzip -1/);
   assert.match(archive,/compression-level: 0/);
   assert.match(archive,/cargo llvm-cov clean --profraw-only/);
   const identity={rust:'pinned compiler',locks:['dependencies','sdk'],flags:['coverage']};

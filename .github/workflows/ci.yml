@@ -729,7 +729,7 @@ jobs:
           find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -executable >> "$RUNNER_TEMP/coverage-files"
           test -x target/llvm-cov-target/debug/rsrs
           echo target/llvm-cov-target/debug/rsrs >> "$RUNNER_TEMP/coverage-files"
-          tar -cf - -T "$RUNNER_TEMP/coverage-files" | gzip -1 > "$RUNNER_TEMP/coverage-$COVERAGE_GROUP.tar.gz"
+          tar --hard-dereference -cf - -T "$RUNNER_TEMP/coverage-files" | gzip -1 > "$RUNNER_TEMP/coverage-$COVERAGE_GROUP.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.group }}
@@ -1047,7 +1047,7 @@ jobs:
           find target/llvm-cov-target/debug/deps -maxdepth 1 -type f -executable >> "$RUNNER_TEMP/coverage-files"
           test -x target/llvm-cov-target/debug/rsrs
           echo target/llvm-cov-target/debug/rsrs >> "$RUNNER_TEMP/coverage-files"
-          tar -cf - -T "$RUNNER_TEMP/coverage-files" | gzip -1 > "$RUNNER_TEMP/coverage-$COVERAGE_GROUP.tar.gz"
+          tar --hard-dereference -cf - -T "$RUNNER_TEMP/coverage-files" | gzip -1 > "$RUNNER_TEMP/coverage-$COVERAGE_GROUP.tar.gz"
       - name: Preserve integration CLI counters and their source binding
         if: ${{ always() && (steps.business.outcome == 'success' || steps.business.outcome == 'failure') }}
         uses: actions/upload-artifact@v4
