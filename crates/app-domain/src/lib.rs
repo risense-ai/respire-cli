@@ -30,6 +30,7 @@ pub mod review;
 pub mod review_approval;
 pub mod service;
 pub mod share;
+pub mod sim_thresholds;
 pub mod snapshot;
 pub mod sync;
 pub mod taxonomy;

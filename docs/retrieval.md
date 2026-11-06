@@ -373,3 +373,30 @@ that judgement; the count is cumulative and never feeds ranking.
 The judgement is not silent: the injected policy requires the AI to state its
 decision in the reply (which entry was upgraded and why, or why nothing was), so
 the user can veto an upgrade.
+
+## Per-domain judge-then-store thresholds (`sim_thresholds`)
+
+`remember` without `--force`/`--merge-ids`/`--parent` ranks candidates once and
+Core splits them on fixed lines: score ≥ 0.45 → merge candidate, ≥ 0.30 → attach
+candidate. `agent.json` key `sim_thresholds` overrides those lines per taxonomy
+root, opt-in:
+
+```sh
+rsrs agent-config --set 'sim_thresholds={"default":{"merge":0.45,"parent":0.30},"编程开发":{"merge":0.9,"parent":0.6}}'
+```
+
+- Key absent (or not an object): the legacy Core split runs untouched — default
+  behavior is byte-for-byte unchanged.
+- Each band is `{"merge": <number>, "parent": <number>}` with
+  `0 <= parent <= merge <= 1`; malformed bands are refused by `agent-config`
+  (and ignored at read time if hand-edited in `agent.json`).
+- A candidate resolves its domain by walking `local_parent_id` to the taxonomy
+  root title. Unknown domains, broken chains and cycles fall back to `default`,
+  then to the legacy lines (0.45 / 0.30).
+- When the key is present the CLI ranks through `query` mode `scored` (the same
+  Core `recall_local_scored`, same payload) and applies the bands locally; with
+  every band set to `0.45`/`0.30` the result equals the Core split element for
+  element (covered by `sim_thresholds::tests::split_matches_core_remember_candidates_filter`).
+
+Enabling is a file edit only: the running resident runtime keeps its loaded
+behavior until the host redeploys/restarts `rsrs` (not done by this change).

@@ -5109,14 +5109,32 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     rpc::kick_index();
                 }
                 let q = MemoryQuery::new(&content).limit(5);
-                let candidates: respire_app::core_sdk::RememberCandidates =
-                    respire_app::core_sdk::execute(
-                        "remember_candidates",
-                        serde_json::json!({
-                            "model":embedder!().model_name(),"snapshots":respire_app::memory::engine::snapshots(&session,&candidates_all)?,
-                            "query":q,"query_settings":respire_app::feedback::query_settings(&store,&q,&candidates_all)?
-                        }),
-                    )?;
+                let snapshots =
+                    respire_app::memory::engine::snapshots(&session, &candidates_all)?;
+                let query_settings =
+                    respire_app::feedback::query_settings(&store, &q, &candidates_all)?;
+                let mut judge = serde_json::json!({
+                    "model":embedder!().model_name(),"snapshots":snapshots,
+                    "query":q,"query_settings":query_settings
+                });
+                // Opt-in per-domain judge bands (agent.json `sim_thresholds`): key absent
+                // keeps the legacy Core `remember_candidates` split byte-for-byte; key
+                // present ranks once via query mode `scored` (same recall_local_scored,
+                // same payload) and splits here with the configured per-root bands.
+                let thresholds =
+                    respire_app::sim_thresholds::SimThresholds::parse(&service::read_agent_config());
+                let candidates: respire_app::core_sdk::RememberCandidates = match &thresholds {
+                    None => respire_app::core_sdk::execute("remember_candidates", judge)?,
+                    Some(thresholds) => {
+                        judge["mode"] = serde_json::json!("scored");
+                        let ranked: Vec<(f32, respire_app::MemoryEntry)> =
+                            respire_app::core_sdk::execute("query", judge)?;
+                        let domains =
+                            respire_app::sim_thresholds::DomainIndex::new(&candidates_all);
+                        let (merge, parent) = thresholds.split(&ranked, &domains);
+                        respire_app::core_sdk::RememberCandidates { merge, parent }
+                    }
+                };
                 let merge_cand = candidates.merge;
                 let parent_cand = candidates.parent;
 

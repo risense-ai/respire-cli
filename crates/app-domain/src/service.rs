@@ -1352,6 +1352,9 @@ pub fn write_agent_config_key(key: &str, value: &serde_json::Value) -> Result<()
     if key == "recall_fusion" {
         crate::recall_fusion::effective(value)?;
     }
+    if key == "sim_thresholds" {
+        crate::sim_thresholds::validate(value)?;
+    }
     if key == "read_heat" {
         anyhow::ensure!(value.is_boolean(), "read_heat must be true or false");
         crate::read_heat::configured()?;
