@@ -380,6 +380,15 @@ pub(crate) fn auth_account_locked(
         }))
 }
 
+fn account_process_start_matches(birth: &str, start_id: &str) -> Result<bool> {
+    let prefix = match crate::autostart::Platform::current()? {
+        crate::autostart::Platform::Windows => "windows-filetime-",
+        crate::autostart::Platform::Linux => "linux-starttime-",
+        crate::autostart::Platform::Macos => "darwin-lstart-",
+    };
+    Ok(!birth.is_empty() && start_id.strip_prefix(prefix) == Some(birth))
+}
+
 pub(crate) fn verify_account_target(
     receipt: &HostAuthAccountResult, operation_id: &str, source: &Path, register: bool,
 ) -> Result<()> {
@@ -395,7 +404,7 @@ pub(crate) fn verify_account_target(
         && std::fs::canonicalize(&health.data_dir)? == *target
         && std::fs::canonicalize(&health.image_path)? == binary
         && std::fs::canonicalize(&process.executable)? == binary
-        && process.started_at == health.process_start_id && health.image_sha256.eq_ignore_ascii_case(&digest),
+        && account_process_start_matches(&process.started_at, &health.process_start_id)? && health.image_sha256.eq_ignore_ascii_case(&digest),
         "target Runtime does not match the account receipt or managed image");
     anyhow::ensure!(crate::net_rpc::runtime_process_identity(health.pid)? == process,
         "target Runtime changed during account verification");
@@ -540,4 +549,33 @@ pub(super) fn validate_auth_response(
         HostAuthOutcome::Unknown => anyhow::bail!("auth control completion is unknown; query the original operation"),
     }
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn account_process_start_requires_exact_native_birth() -> Result<()> {
+        let birth = "123456789";
+        let prefix = match crate::autostart::Platform::current()? {
+            crate::autostart::Platform::Windows => "windows-filetime-",
+            crate::autostart::Platform::Linux => "linux-starttime-",
+            crate::autostart::Platform::Macos => "darwin-lstart-",
+        };
+        let start_id = format!("{prefix}{birth}");
+        assert!(account_process_start_matches(birth, &start_id)?);
+        for invalid in [birth.to_owned(), format!("{prefix}987654321"),
+            format!("{prefix}{start_id}"), format!("{start_id} "), String::new()] {
+            assert!(!account_process_start_matches(birth, &invalid)?);
+        }
+        assert!(!account_process_start_matches("", prefix)?);
+        assert!(!account_process_start_matches(&start_id, &start_id)?);
+        for foreign in ["windows-filetime-", "linux-starttime-", "darwin-lstart-"] {
+            if foreign != prefix {
+                assert!(!account_process_start_matches(birth, &format!("{foreign}{birth}"))?);
+            }
+        }
+        Ok(())
+    }
 }
