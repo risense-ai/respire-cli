@@ -102,8 +102,8 @@ fn cli_consumes_the_runtime_control_contract() -> Result<()> {
     let negative = manifest["fixtures"]["negative"]
         .as_array()
         .context("negative fixtures")?;
-    assert_eq!(positive.len(), 89);
-    assert_eq!(negative.len(), 287);
+    assert_eq!(positive.len(), 93);
+    assert_eq!(negative.len(), 300);
 
     for bound in manifest["files"].as_array().context("bound files")? {
         let relative = bound["path"].as_str().context("bound path")?;
