@@ -248,6 +248,36 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         && response.operation_id.as_deref() == Some(original.operation_id.as_str())
         && response.idempotency_key.as_deref() == Some(original.key.as_str()), "space response binding mismatch");
     if let Some(path) = response.data_dir.as_deref() { anyhow::ensure!(Path::new(path).canonicalize()? == profile, "space response profile mismatch"); }
+    if response.error.is_some() {
+        let code = match response.code.as_deref() {
+            Some("unauthorized") => "unauthorized",
+            Some("scope_mismatch") => "scope_mismatch",
+            Some("auth_ownership_unavailable") => "auth_ownership_unavailable",
+            Some("control_unavailable") => "control_unavailable",
+            Some("space_outcome_unknown") => "space_outcome_unknown",
+            Some("control_outcome_unknown") => "control_outcome_unknown",
+            _ => anyhow::bail!("invalid space control rejection code"),
+        };
+        let deadline = code == "control_outcome_unknown";
+        let envelope = response.envelope.as_ref().context("space control rejection envelope missing")?;
+        anyhow::ensure!(!response.ok && response.exit == 2
+            && response.error.as_deref().is_some_and(|error| !error.is_empty())
+            && envelope.command == "space-control" && matches!(envelope.status, Status::Fail)
+            && envelope.details.is_null() && envelope.actions.is_empty() && envelope.related.is_empty()
+            && envelope.items.len() == 2
+            && envelope.items[0].name == "control_ready"
+            && envelope.items[0].value == (if deadline { "unknown" } else { "false" })
+            && (if deadline { matches!(envelope.items[0].status, Status::Skip) }
+                else { matches!(envelope.items[0].status, Status::Fail) })
+            && envelope.items[1].name == "store_ready" && envelope.items[1].value == "false"
+            && matches!(envelope.items[1].status, Status::Skip)
+            && (if deadline { envelope.summary == json!({"outcome":"unknown"}) && envelope.errors.is_empty() }
+                else { envelope.summary == json!({}) && envelope.errors.len() == 1
+                    && response.error.as_ref() == envelope.errors.first() }),
+            "invalid space control rejection envelope");
+        // Keep the original operation Paused; never echo a possibly secret diagnostic.
+        anyhow::bail!("Runtime rejected space control ({code}); query the original operation without replaying");
+    }
     let envelope = response.envelope.context("space receipt missing")?;
     anyhow::ensure!(envelope.command == "space-control" && envelope.details.is_null() && envelope.errors.is_empty(), "invalid space envelope");
     for (name,value) in [("control_ready","true"),("store_ready","false")] {
@@ -324,6 +354,156 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         }
     }
     Ok(envelope)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PID: u32 = 5252;
+    const DIAGNOSTIC: &str = "synthetic-private-space-diagnostic";
+
+    struct Fixture {
+        _directory: tempfile::TempDir,
+        original: Original,
+        request: RpcRequest,
+        response: serde_json::Value,
+    }
+
+    impl Fixture {
+        fn new() -> Result<Self> {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let operation_id = uuid::Uuid::new_v4().to_string();
+            let original = Original { schema_version: HOST_SPACE_SCHEMA_V, root: root.clone(), profile: root.clone(),
+                operation_id: operation_id.clone(), key: operation_id.clone(), source_identity: HostAuthIdentity::Absent,
+                operation: HostSpaceOperation::Kick { session_id: None, all: true }, token: "fixture-maintenance".into(),
+                coordinator: uuid::Uuid::new_v4().to_string(), was_serving: false, store_ready: false, sent: true };
+            let receipt = HostSpaceResult { operation_id: operation_id.clone(), fingerprint: original.fingerprint()?,
+                profile: root.clone(), identity: original.source_identity.clone(), operation: original.operation.clone(),
+                outcome: HostSpaceOutcome::Committed, invite_code: None, session_id: None, target_profile: None,
+                target_account_id: None, target_session_sha256: None,
+                kick: vec![HostSpaceKickItem { session_id: uuid::Uuid::new_v4().to_string(), state: HostSpaceKickState::Revoked }],
+                remaining: Some(0) };
+            let request: RpcRequest = serde_json::from_value(json!({"v":1,"id":uuid::Uuid::new_v4().to_string(),
+                "method":HOST_SPACE_KICK_METHOD,"args":[],"operation_id":operation_id,"idempotency_key":operation_id}))?;
+            let response = json!({"v":request.v,"id":request.id,"pid":PID,"bin":"rsrs-runtime",
+                "operation_id":original.operation_id,"idempotency_key":original.key,"scope":null,"web_url":null,
+                "data_dir":root,"ok":true,"exit":0,"code":null,"error":null,
+                "envelope":ResultEnvelope::new("space-control",Status::Ok,serde_json::to_value(receipt)?,vec![
+                    Item::new("control_ready",Status::Ok,"true"),Item::new("store_ready",Status::Skip,"false")])});
+            Ok(Self { _directory: directory, original, request, response })
+        }
+
+        fn validate(&self, response: serde_json::Value) -> Result<ResultEnvelope> {
+            validate_response(serde_json::from_value(response)?, &self.request, &self.original.profile, PID, &self.original)
+        }
+
+        fn rejection(&self, code: &str) -> serde_json::Value {
+            let mut response = self.response.clone();
+            response["ok"] = json!(false);
+            response["exit"] = json!(2);
+            response["code"] = json!(code);
+            response["error"] = json!(DIAGNOSTIC);
+            let deadline = code == "control_outcome_unknown";
+            response["envelope"] = json!({"command":"space-control","status":"fail",
+                "summary":if deadline { json!({"outcome":"unknown"}) } else { json!({}) },
+                "details":null,"actions":[],"related":[],"errors":if deadline { json!([]) } else { json!([DIAGNOSTIC]) },
+                "items":[Item::new("control_ready",if deadline { Status::Skip } else { Status::Fail },
+                    if deadline { "unknown" } else { "false" }),Item::new("store_ready",Status::Skip,"false")]});
+            response
+        }
+
+        fn reject_malformed(&self, response: serde_json::Value) -> Result<()> {
+            let error = self.validate(response).err().context("malformed space response was accepted")?.to_string();
+            assert!(!error.contains("Runtime rejected space control"), "malformed response was classified: {error}");
+            assert!(!error.contains(DIAGNOSTIC));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stable_rejections_preserve_codes_without_exposing_diagnostics() -> Result<()> {
+        let fixture = Fixture::new()?;
+        for code in ["unauthorized", "scope_mismatch", "auth_ownership_unavailable", "control_unavailable",
+            "space_outcome_unknown", "control_outcome_unknown"] {
+            let error = fixture.validate(fixture.rejection(code)).err().context("rejection was accepted")?.to_string();
+            assert_eq!(error, format!("Runtime rejected space control ({code}); query the original operation without replaying"));
+            assert!(!error.contains(DIAGNOSTIC));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejections_require_the_original_request_owner_and_scope() -> Result<()> {
+        let fixture = Fixture::new()?;
+        for (pointer, value) in [
+            ("/v", json!(fixture.request.v + 1)), ("/id", json!("foreign-request")),
+            ("/pid", json!(PID + 1)), ("/bin", json!("foreign-image")),
+            ("/operation_id", json!(uuid::Uuid::new_v4().to_string())), ("/idempotency_key", json!("foreign-key")),
+            ("/scope", json!({"account_id":"foreign-account","instance_id":"foreign-instance","generation":1})),
+            ("/web_url", json!("https://fixture.invalid")), ("/data_dir", json!(fixture.original.profile.parent())),
+        ] {
+            let mut response = fixture.rejection("unauthorized");
+            *response.pointer_mut(pointer).context("fixture binding field missing")? = value;
+            fixture.reject_malformed(response).with_context(|| format!("binding field {pointer}"))?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn rejections_reject_unknown_codes_and_malformed_envelopes() -> Result<()> {
+        let fixture = Fixture::new()?;
+        for code in ["unauthorized", "control_outcome_unknown"] {
+            for (pointer, value) in [
+                ("/code", json!("unrecognized-private-code")), ("/ok", json!(true)), ("/exit", json!(0)),
+                ("/error", json!(null)), ("/error", json!("")), ("/envelope", json!(null)),
+                ("/envelope/command", json!("foreign-command")), ("/envelope/status", json!("ok")),
+                ("/envelope/summary", json!({"outcome":"committed"})), ("/envelope/details", json!({})),
+                ("/envelope/actions", json!(["untrusted-action"])),
+                ("/envelope/related", json!([respire_protocol::RelatedMemory { id: "foreign-memory".into(),
+                    title: "untrusted-related".into(), source_id: "foreign-source".into(),
+                    relation: respire_protocol::RelationKind::SeeAlso }])),
+                ("/envelope/errors", json!(["different-diagnostic"])), ("/envelope/items", json!([])),
+                ("/envelope/items/0/name", json!("other-ready")), ("/envelope/items/0/value", json!("true")),
+                ("/envelope/items/0/status", json!("ok")), ("/envelope/items/1/value", json!("true")),
+                ("/envelope/items/1/status", json!("ok")),
+            ] {
+                let mut response = fixture.rejection(code);
+                *response.pointer_mut(pointer).context("fixture envelope field missing")? = value;
+                if pointer == "/envelope/related" {
+                    let _: RpcResponse<ResultEnvelope> = serde_json::from_value(response.clone())?;
+                }
+                fixture.reject_malformed(response).with_context(|| format!("{code} field {pointer}"))?;
+            }
+            let mut response = fixture.rejection(code);
+            let duplicate = response["envelope"]["items"][0].clone();
+            response["envelope"]["items"].as_array_mut().context("fixture items missing")?.push(duplicate);
+            fixture.reject_malformed(response)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn typed_success_and_receipt_binding_remain_unchanged() -> Result<()> {
+        let fixture = Fixture::new()?;
+        let accepted = fixture.validate(fixture.response.clone())?;
+        assert_eq!(serde_json::to_value(accepted)?, fixture.response["envelope"]);
+        for (pointer, value) in [
+            ("/envelope/summary/operation_id", json!(uuid::Uuid::new_v4().to_string())),
+            ("/envelope/summary/fingerprint", json!("foreign-fingerprint")),
+            ("/envelope/summary/identity", json!({"kind":"bound","account_id":"foreign-account","session_sha256":"foreign-session"})),
+            ("/envelope/summary/profile", json!(fixture.original.profile.parent())),
+            ("/envelope/summary/operation", json!({"kind":"kick","session_id":null,"all":false})),
+            ("/envelope/summary/kick", json!([])), ("/envelope/summary/remaining", json!(null)),
+            ("/envelope/summary/invite_code", json!("unrelated-secret")),
+        ] {
+            let mut response = fixture.response.clone();
+            *response.pointer_mut(pointer).context("fixture receipt field missing")? = value;
+            fixture.reject_malformed(response).with_context(|| format!("receipt field {pointer}"))?;
+        }
+        Ok(())
+    }
 }
 
 fn verify_target_path(target: &Path) -> Result<()> {
