@@ -61,7 +61,18 @@ struct Runtime {
 
 impl Runtime {
     fn host_command(&self, args: &[&str]) -> Result<std::process::Output, String> {
-        Command::new(bin()).args(args)
+        let host = self.dir.path().join("host");
+        let home = host.join("home");
+        Command::new(self.dir.path().join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))
+            .args(args).current_dir(host.join("work"))
+            .env("HOME", &home).env("USERPROFILE", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("XDG_DATA_HOME", home.join(".local/share"))
+            .env("XDG_STATE_HOME", home.join(".local/state"))
+            .env("XDG_CACHE_HOME", home.join(".cache"))
+            .env("XDG_RUNTIME_DIR", host.join("run"))
+            .env("APPDATA", home.join("AppData/Roaming"))
+            .env("LOCALAPPDATA", home.join("AppData/Local"))
             .env("RSRS_DATA_DIR", self.dir.path()).env("RSRS_RPC_PORT", self.port.to_string())
             .env("RSRS_BIN_DIR", self.dir.path().join("bin"))
             .env_remove("RSRS_RUNTIME_BIN").env_remove("RSRS_CLIENT_ONLY")
@@ -218,6 +229,18 @@ fn start_runtime(mode: &str, legacy_path: bool, host_control: bool) -> Result<Ru
     let stderr_file = fs::File::create(&stderr_path).map_err(|err| err.to_string())?;
     let mut runtime = runtime_bin()?;
     if host_control {
+        let cli = dir.path().join("bin").join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
+        fs::create_dir_all(cli.parent().ok_or("CLI fixture bin directory missing")?)
+            .map_err(|err| err.to_string())?;
+        fs::copy(bin(), &cli).map_err(|err| err.to_string())?;
+        use sha2::Digest;
+        let source_hash = sha2::Sha256::digest(fs::read(bin()).map_err(|err| err.to_string())?);
+        let installed_hash = sha2::Sha256::digest(fs::read(&cli).map_err(|err| err.to_string())?);
+        assert_eq!(installed_hash, source_hash, "installed CLI fixture differs from the tested binary");
+        for path in ["host/work", "host/run", "host/home/.config", "host/home/.local/share",
+            "host/home/.local/state", "host/home/.cache", "host/home/AppData/Roaming", "host/home/AppData/Local"] {
+            fs::create_dir_all(dir.path().join(path)).map_err(|err| err.to_string())?;
+        }
         support::install_runtime_fixture(dir.path()).map_err(|err| format!("{err:#}"))?;
         let version = runtime.parent().and_then(std::path::Path::file_name)
             .ok_or("Runtime fixture version directory missing")?;
@@ -493,6 +516,11 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         assert_eq!(response["envelope"]["summary"]["skipped"], true);
         assert_eq!(response["envelope"]["items"], serde_json::json!([]));
     }
+    // Doctor always checks the generic prompt, even when no IDE is installed.
+    let (ok, injected) = host(&rt, &["--json", "inject", "--id", "generic"])?;
+    assert!(ok, "{injected}");
+    assert_eq!(injected["command"], "inject");
+    assert!(rt.dir.path().join("host/home/AGENTS.md").is_file());
     // Repairs and migrations belong to the host, not the business RPC allowlist.
     let (ok, doctor) = host(&rt, &["--json", "doctor", "--fix"])?;
     assert!(ok, "{doctor}");
