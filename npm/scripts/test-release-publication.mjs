@@ -240,8 +240,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Intel dev.5 import is deferred; all seven current imports and source reports remain.
-  assert.equal(uploads, 52, 'preserve seven-platform publication evidence and both source-report uploads');
+  // Intel dev.5 import is deferred; the private business credential diagnostic adds one upload.
+  assert.equal(uploads, 53, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
@@ -249,6 +249,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   const ci = readFileSync(new URL('ci.yml', root), 'utf8');
   assert.match(ci, /name: required-tests-raw-cli-core-/);
   assert.match(ci, /name: required-tests-report-/);
+  assert.match(ci, /name: private-business-credentials-/);
   const crates = readFileSync(new URL('publish-crates.yml', root), 'utf8');
   assert.match(crates, /name: protocol-package-verification/);
   assert.doesNotMatch(crates, /name: sdk-package-verification/);

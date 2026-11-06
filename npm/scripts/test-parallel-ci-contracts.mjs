@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,mkdtempSync,mkdirSync,writeFileSync,utimesSync,statSync,rmSync} from 'node:fs';
+import {existsSync,readFileSync,readdirSync,mkdtempSync,mkdirSync,writeFileSync,utimesSync,statSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -20,7 +20,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/targets.filter\(t => t.kind.includes\('test'\)\)/);
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
-  assert.match(source,/process.exit\(result.status \?\? 1\)/);
+  assert.match(source,/if \(group === 'runtime_autostart'\) process.exit\(status\)/);
+  assert.match(source,/process.exit\(status !== 0 \? status : \(result.status \?\? 1\)\)/);
   const business=readFileSync(new URL('../../scripts/run-runtime-business-tests.sh',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(business,/^set -euo pipefail$/m);
   assert(business.includes('coverage_dir="$PWD/target/llvm-cov-target"'));
@@ -37,6 +38,18 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert(business.indexOf(before)>=0&&business.indexOf(before)<business.indexOf(invoke));
   assert(business.indexOf(after)>business.indexOf(invoke),'the same instrumented CLI must retain its hash');
   assert(business.includes('for module in $RUNTIME_BUSINESS_MODULES; do'));
+  assert(business.includes(`business_status=0
+for module in $RUNTIME_BUSINESS_MODULES; do
+  phase="business module $module"
+  if ${invoke}; then
+    :
+  else
+    module_status=$?
+    if [[ "$business_status" == 0 ]]; then business_status=$module_status; fi
+  fi
+done`),'run every business module and preserve the first failure');
+  assert(business.trimEnd().endsWith(`${after}\nexit "$business_status"`),
+    'verify the unchanged CLI before returning the retained business status');
   assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')>business.indexOf(before));
   assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')<business.indexOf(invoke));
   assert.doesNotMatch(business,/cargo\s+(?:build|test|run|metadata)\b|cargo\s+llvm-cov\s+(?:run|test)\b/);
@@ -52,41 +65,54 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     return '';
   });
   assert.doesNotMatch(program,/^[ \t]*import\b/m);
-  const metadata=JSON.parse(execFileSync('cargo',['metadata','--locked','--no-deps','--format-version','1'],{encoding:'utf8'}));
-  const targets=metadata.packages.find(p=>p.name==='respire').targets;
-  const allTests=targets.filter(t=>t.kind.includes('test')).map(t=>t.name);
+  // This CLI uses Cargo's automatic integration-test discovery; keep this guard product-free.
+  const manifest=readFileSync(new URL('../../cli/Cargo.toml',import.meta.url),'utf8');
+  assert.doesNotMatch(manifest,/^\s*(?:autotests\s*=\s*false|\[\[test\]\])/m);
+  const allTests=readdirSync(new URL('../../cli/tests/',import.meta.url),{withFileTypes:true})
+    .flatMap(entry=>entry.isFile()&&entry.name.endsWith('.rs')?[entry.name.slice(0,-3)]:
+      entry.isDirectory()&&existsSync(new URL(`../../cli/tests/${entry.name}/main.rs`,import.meta.url))?[entry.name]:[]);
+  const metadata={packages:[{name:'respire',targets:allTests.map(name=>({name,kind:['test']}))}]};
   const runner='runtime-business-test-runner';
   const listing=Object.entries({memory_revision:6,diary_identity:11,snapshot_lifecycle:8,account:3,capture_main:2})
     .flatMap(([module,count])=>Array.from({length:count},(_,i)=>`${module}::case_${i}: test`)).join('\n');
   const selected=[];
-  for(const group of ['core','runtime_smoke','runtime_autostart']){
-    const calls=[],harness=[],exits=[];
+  for(const group of ['core','runtime_smoke','runtime_autostart'])for(const originalStatus of [0,23])for(const businessStatus of [0,17,null]){
+    const calls=[],harness=[],exits=[],raw=[],listed=[];
     assert.throws(()=>runInNewContext(program,{
       assert,readFileSync,
       execFileSync:(command,args)=>{
-        if(command==='cargo'){assert.equal(args[0],'metadata');return JSON.stringify(metadata);}
-        assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);return listing;
+        if(command==='cargo'){assert.deepEqual(Array.from(args),['metadata','--locked','--no-deps','--format-version','1']);return JSON.stringify(metadata);}
+        assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);listed.push(command);return listing;
       },
       spawnSync:(command,args,options)=>{
-        if(command==='cargo')calls.push(args);
-        else {assert.equal(command,'bash');assert.deepEqual(Array.from(args),['scripts/run-runtime-business-tests.sh']);harness.push(options.env.RUNTIME_BUSINESS_MODULES);}
-        return {status:0};
+        if(command==='cargo'){calls.push(args);return {status:originalStatus};}
+        assert.equal(options.stdio,'inherit');
+        assert.equal(options.env.GH_TOKEN,'synthetic-gh');assert.equal(options.env.GITHUB_TOKEN,'synthetic-github');
+        if(group==='runtime_smoke'){
+          assert.equal(command,'env');
+          assert.deepEqual(Array.from(args),['-u','DBUS_SESSION_BUS_ADDRESS','-u','DBUS_SESSION_BUS_PID',
+            '-u','DBUS_STARTER_ADDRESS','-u','DBUS_STARTER_BUS_TYPE','-u','GNOME_KEYRING_CONTROL',
+            '-u','GNOME_KEYRING_PID','-u','SSH_AUTH_SOCK','dbus-run-session','--','env','RSRS_SS_FIXTURE_BUS=private',
+            'python','-B','scripts/dev-secret-service-keyring-selftest.py','--root',
+            '/synthetic-runner/account-private-secret-service','--','bash','scripts/run-runtime-business-tests.sh']);
+        }else{
+          assert.equal(command,'bash');assert.deepEqual(Array.from(args),['scripts/run-runtime-business-tests.sh']);
+        }
+        harness.push(options.env.RUNTIME_BUSINESS_MODULES);
+        return {status:businessStatus};
       },
-      captureCoverage:args=>{calls.push(args);return 0;},
-      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner},exit:status=>{exits.push(status);throw exits;}},
+      captureCoverage:args=>{calls.push(args);raw.push(originalStatus);return originalStatus;},
+      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner',
+        GH_TOKEN:'synthetic-gh',GITHUB_TOKEN:'synthetic-github'},exit:status=>{exits.push(status);throw exits;}},
     }),error=>error===exits);
-    assert.deepEqual(exits,[0]);assert.equal(calls.length,1);
+    assert.deepEqual(exits,[originalStatus!==0?originalStatus:group==='runtime_autostart'?0:(businessStatus??1)]);
+    assert.equal(calls.length,1);assert.deepEqual(raw,group==='core'?[originalStatus]:[]);
+    assert.equal(listed.length,group==='runtime_autostart'?0:1);
     assert.deepEqual(harness,group==='runtime_autostart'?[]:[group==='core'?'memory_revision diary_identity snapshot_lifecycle capture_main':'account']);
-    for(let i=0;i<calls[0].length;i++)if(calls[0][i]==='--test')selected.push(calls[0][i+1]);
+    if(originalStatus===0&&businessStatus===0)for(let i=0;i<calls[0].length;i++)if(calls[0][i]==='--test')selected.push(calls[0][i+1]);
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
   }
   assert.deepEqual(selected.sort(),allTests.sort(),'every integration target must run exactly once');
-  const exits=[];
-  assert.throws(()=>runInNewContext(program,{
-    assert,readFileSync,execFileSync:()=>JSON.stringify(metadata),spawnSync:()=>({status:23}),
-    process:{env:{COVERAGE_GROUP:'runtime_smoke'},exit:status=>{exits.push(status);throw exits;}},
-  }),error=>error===exits);
-  assert.deepEqual(exits,[23],'test failures must fail the coverage group');
 
   const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, workspace-tests, contract-checks, required-tests, commands-frontend\]/);
   assert.match(report,/for group in core runtime_smoke runtime_autostart/);

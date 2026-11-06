@@ -33,10 +33,17 @@ test -x "$RSRS_CLI_BIN"
 original_cli="$(sha256sum "$RSRS_CLI_BIN")"
 unset GH_TOKEN GITHUB_TOKEN
 
+business_status=0
 for module in $RUNTIME_BUSINESS_MODULES; do
   phase="business module $module"
-  "$RSRS_RUNTIME_TEST_RUNNER" "$module::" --test-threads=1
+  if "$RSRS_RUNTIME_TEST_RUNNER" "$module::" --test-threads=1; then
+    :
+  else
+    module_status=$?
+    if [[ "$business_status" == 0 ]]; then business_status=$module_status; fi
+  fi
 done
 
 phase='unchanged instrumented CLI identity'
 test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
+exit "$business_status"
