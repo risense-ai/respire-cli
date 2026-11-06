@@ -3,6 +3,15 @@ name: Native release regression
 on:
   workflow_call:
     inputs:
+      artifact_source:
+        default: build
+        type: string
+      published_assets:
+        default: ''
+        type: string
+      published_assets_sha256:
+        default: ''
+        type: string
       ref:
         required: true
         type: string
@@ -20,11 +29,19 @@ on:
 permissions:
   contents: read
 
+env:
+  ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
+  PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+  PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+  REQUEST_PUBLISH: 'false'
+  VALIDATION_PROFILE: full
+  RELEASE_REF: ${{ inputs.ref }}
+
 jobs:
   native:
     name: Native (${{ matrix.target }})
     permissions:
-      contents: write
+      contents: read
       actions: read
     strategy:
       fail-fast: false
@@ -74,6 +91,7 @@ jobs:
           VALIDATION_PROFILE: ${{ inputs.validation_profile }}
         run: node -e "if(!['critical','full'].includes(process.env.VALIDATION_PROFILE))throw Error('Unknown native validation profile')"
       - name: Prepare ephemeral build version
+        if: inputs.artifact_source != 'published-assets'
         run: node npm/scripts/set-build-version.mjs ${{ inputs.version }}
       - name: Wait only for this target's successful producer and unique artifact
         id: artifact
@@ -139,17 +157,24 @@ jobs:
           path: validated-cli
           merge-multiple: true
       - uses: actions/download-artifact@v4
-        if: inputs.validation_profile == 'full'
+        if: inputs.validation_profile == 'full' && inputs.artifact_source != 'published-assets'
         with:
           name: cli-release-${{ matrix.target }}
           path: validated-cli
+      - uses: actions/download-artifact@v4
+        if: inputs.artifact_source == 'published-assets'
+        with:
+          name: published-assets-verification-${{ matrix.target }}
+          path: validated-cli
       - name: Verify and extract the release binary
         env:
+          GH_TOKEN: ${{ github.token }}
           CLI_TARGET: ${{ matrix.target }}
-          CLI_SHA: ${{ inputs.ref }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}
           CLI_VERSION: ${{ inputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli target/ci/${{ matrix.target }}/release
       - name: Install and verify the official pinned standalone Runtime
+        if: inputs.artifact_source != 'published-assets'
         id: pinned-runtime
         shell: bash
         env:
@@ -224,16 +249,21 @@ jobs:
           RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
           RSRS_NO_AUTOSYNC: '1'
           RSRS_UPDATE_CHECK: '0'
-          RSRS_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
-          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
+          NATIVE_RUNTIME_BIN: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_RUNTIME_BIN || steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_SHA256 || steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_VERSION || steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN
-          test -n "$RSRS_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
+          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
+          export RSRS_RUNTIME_BIN="$NATIVE_RUNTIME_BIN"
           exe=target/ci/${{ matrix.target }}/release/rsrs
           if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          if [ "$ARTIFACT_SOURCE" = published-assets ]; then
+            RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
+            export RSRS_RUNTIME_BIN
+          fi
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json
@@ -285,11 +315,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-          NATIVE_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
-          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
-          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
+          NATIVE_RUNTIME_BIN: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_RUNTIME_BIN || steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_SHA256 || steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_VERSION || steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
+          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           py="$RUNNER_TEMP/upgrade-python/bin/python"
           exe="target/ci/${{ matrix.target }}/release/rsrs"
           if [ "$RUNNER_OS" = Windows ]; then
@@ -310,7 +341,6 @@ jobs:
               --output native-legacy-model/onnx/model_fp16.onnx
           fi
           "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
-          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
@@ -321,18 +351,18 @@ jobs:
         shell: bash
         env:
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-          NATIVE_RUNTIME_BIN: ${{ steps.pinned-runtime.outputs.path }}
-          NATIVE_RUNTIME_SHA256: ${{ steps.pinned-runtime.outputs.sha256 }}
-          NATIVE_RUNTIME_VERSION: ${{ steps.pinned-runtime.outputs.version }}
+          NATIVE_RUNTIME_BIN: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_RUNTIME_BIN || steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_SHA256 || steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_VERSION || steps.pinned-runtime.outputs.version }}
         run: |
           set -euo pipefail
+          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           py="$RUNNER_TEMP/upgrade-python/bin/python"
           exe="target/ci/${{ matrix.target }}/release/rsrs"
           if [ "$RUNNER_OS" = Windows ]; then
             py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
             exe="$exe.exe"
           fi
-          test -n "$NATIVE_RUNTIME_BIN" && test -n "$NATIVE_RUNTIME_SHA256" && test -n "$NATIVE_RUNTIME_VERSION"
           "$py" scripts/test-native-fixture-process.py --output-dir "$RUNNER_TEMP/native-fixture-bounds"
           RSRS_INTRA_THREADS=2 "$py" scripts/test-real-m3-account-switch.py --binary "$exe" \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
@@ -369,7 +399,7 @@ jobs:
           "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
       - uses: actions/upload-artifact@v4
         if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
         with:
@@ -381,7 +411,7 @@ jobs:
         id: cache-write
         shell: bash
         env:
-          TRUSTED_SOURCE: ${{ github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+          TRUSTED_SOURCE: ${{ inputs.artifact_source != 'published-assets' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
         run: |
           set -euo pipefail
           # Cache actions enforce cache-mode; shell steps may not receive ACTIONS_CACHE_MODE.
@@ -394,19 +424,19 @@ jobs:
       - name: Stage only verified public model inputs for the next run
         id: model-cache-stage
         continue-on-error: true
-        if: ${{ steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.artifact_source != 'published-assets' && steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache.outputs.cache-hit != 'true' }}
         shell: bash
         run: python scripts/native-model-cache.py stage --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
       - uses: actions/cache/save@v4
         continue-on-error: true
-        if: ${{ steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache-stage.outcome == 'success' }}
+        if: ${{ inputs.artifact_source != 'published-assets' && steps.cache-write.outputs.may_save == 'true' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.model-cache-stage.outcome == 'success' }}
         with:
           path: .native-model-cache
           key: ${{ steps.model-key.outputs.key }}
           enableCrossOsArchive: true
       - uses: actions/cache/save@v4
         continue-on-error: true
-        if: ${{ steps.cache-write.outputs.may_save == 'true' && runner.os == 'Windows' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.wheel-cache.outputs.cache-hit != 'true' }}
+        if: ${{ inputs.artifact_source != 'published-assets' && steps.cache-write.outputs.may_save == 'true' && runner.os == 'Windows' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && inputs.ref == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && steps.wheel-cache.outputs.cache-hit != 'true' }}
         with:
           path: .native-psutil-wheels
           key: ${{ steps.wheel-key.outputs.key }}

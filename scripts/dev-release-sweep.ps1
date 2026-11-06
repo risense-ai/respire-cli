@@ -132,6 +132,7 @@ $script:SweepReportClock = [Diagnostics.Stopwatch]::StartNew()
 trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport -Force; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
+$script:PublishedRuntimePaths = @{}
 
 function Write-SweepReport([switch]$Force) {
     # Keep periodic diagnostics without rebuilding the entire report after every assertion.
@@ -416,6 +417,9 @@ function Invoke-Om {
     $psi.StandardErrorEncoding = $utf8
     $psi.StandardInputEncoding = $utf8
     foreach ($a in $ArgList) { $psi.ArgumentList.Add([string]$a) }
+    foreach ($tokenName in @('GH_TOKEN', 'GITHUB_TOKEN')) {
+        [void]$psi.Environment.Remove($tokenName)
+    }
     $psi.Environment['RSRS_DATA_DIR'] = $DataDir
     $psi.Environment['RSRS_LANG'] = 'en'
     $psi.Environment['HOME'] = $SmokeHome
@@ -424,6 +428,32 @@ function Invoke-Om {
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
+    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') {
+        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+            $install = [System.Diagnostics.ProcessStartInfo]::new()
+            $install.FileName = 'python'
+            $install.UseShellExecute = $false
+            $install.CreateNoWindow = $true
+            $install.RedirectStandardOutput = $true
+            $install.RedirectStandardError = $true
+            $install.Environment.Clear()
+            foreach ($pair in $psi.Environment.GetEnumerator()) { $install.Environment[$pair.Key] = $pair.Value }
+            $install.ArgumentList.Add((Join-Path $PSScriptRoot 'native_fixture_process.py'))
+            $install.ArgumentList.Add('--install-published')
+            $install.ArgumentList.Add($script:ExePath)
+            $child = [System.Diagnostics.Process]::Start($install)
+            try {
+                if (-not $child.WaitForExit(210000)) {
+                    $child.Kill($true)
+                    $child.WaitForExit()
+                    throw 'Selected Runtime offline installation timed out.'
+                }
+                if ($child.ExitCode -ne 0) { throw 'Selected Runtime offline installation failed.' }
+                $script:PublishedRuntimePaths[$DataDir] = $child.StandardOutput.ReadToEnd().Trim()
+            } finally { $child.Dispose() }
+        }
+        $psi.Environment['RSRS_RUNTIME_BIN'] = $script:PublishedRuntimePaths[$DataDir]
+    }
     # Only this disposable child may opt into the three named lifecycle tools.
     # Parent environment and all normal/default-policy calls remain unchanged.
     foreach ($policyPrefix in @('RSRS_', 'ONEMEMORY_', 'RESPIRE_')) {

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Explicit CLI shim/dashboard checks on an ephemeral GitHub-hosted Linux runner.
+"""Published Runtime/dashboard checks on an ephemeral GitHub-hosted Linux runner.
 
 Uses a fresh owned HOME, models and development account. Reports never contain
 credentials, command arguments, plaintext responses or raw subprocess logs.
-This legacy compatibility suite is not independent Runtime or G1 evidence.
+Legacy mode is explicitly separate from standalone Runtime evidence; neither is G1.
 """
 import argparse
 import hashlib
@@ -22,6 +22,8 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
+from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
 
 
 REQUIRED = json.loads(Path(__file__).with_name('dev-runtime-required.json').read_text(encoding='utf-8'))['required_cases']
@@ -61,6 +63,7 @@ class Smoke:
                        'runtime_mode': 'explicit_cli_shim', 'standalone_runtime_evidence': False,
                        'status': 'failed', 'passed': False, 'cases': {}, 'required_cases': REQUIRED,
                        'missing_cases': REQUIRED[:], 'cloud_cleanup': {'passed': False, 'remaining_users': []}}
+        self.report.update(runtime_report(args, False))
 
     def passed(self, name, **evidence):
         require(name in REQUIRED, 'unknown_runtime_case')
@@ -110,9 +113,16 @@ class Smoke:
             raise Failure('owned_http_response_not_json') from None
 
     def rpc(self, args, expected=0):
+        body = {'v': 1, 'id': secrets.token_hex(8), 'method': 'cli.exec', 'args': ['--json', *args]}
+        if self.args.runtime_binary:
+            code, health, _ = self.http(self.url, 'GET', '/api/health')
+            require(code == 200, 'runtime_scope_health_failed')
+            verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+            body = scoped_rpc_request(health, ['--json', *args])
         code, reply, _ = self.http(self.url, 'POST', '/api/rpc',
-                                  {'v': 1, 'id': secrets.token_hex(8), 'method': 'cli.exec',
-                                   'args': ['--json', *args]}, self.token)
+                                  body, self.token)
+        if self.args.runtime_binary:
+            verify_rpc_receipt(body, reply)
         require(code == 200 and isinstance(reply, dict) and reply.get('ok') is (expected == 0),
                 'runtime_rpc_transport_failed')
         envelope = reply.get('envelope', {})
@@ -124,8 +134,11 @@ class Smoke:
         if self.child is None:
             return
         if self.child.poll() is None:
-            code, reply, _ = self.http(self.url, 'POST', '/api/runtime/stop', {}, self.token)
-            require(code == 200 and reply.get('ok') is True, 'owned_runtime_stop_rejected')
+            if self.args.runtime_binary:
+                self.direct(['--runtime-internal', '--stop'])
+            else:
+                code, reply, _ = self.http(self.url, 'POST', '/api/runtime/stop', {}, self.token)
+                require(code == 200 and reply.get('ok') is True, 'owned_runtime_stop_rejected')
             try:
                 self.child.wait(timeout=20)
             except subprocess.TimeoutExpired:
@@ -135,7 +148,11 @@ class Smoke:
 
     def start(self):
         require(self.child is None, 'runtime_already_owned')
-        self.child = subprocess.Popen([str(self.args.binary), '--runtime-internal', '--port', str(self.port),
+        if self.args.runtime_binary:
+            self.direct(['--runtime-internal', '--stop'])
+        launch = ([str(self.args.runtime_binary), 'serve'] if self.args.runtime_binary else
+                  [str(self.args.binary), '--runtime-internal'])
+        self.child = subprocess.Popen([*launch, '--port', str(self.port),
                                        '--host', '127.0.0.1'], env=self.env, cwd=self.root,
                                       stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.monotonic() + 45
@@ -150,7 +167,10 @@ class Smoke:
                     time.sleep(0.1)
                     continue
                 if code == 200:
-                    require(health.get('v') == 1 and health.get('bin') == self.args.version
+                    if self.args.runtime_binary:
+                        verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+                    else:
+                        require(health.get('v') == 1 and health.get('bin') == self.args.version
                             and health.get('pid') == self.child.pid
                             and Path(health.get('exe', '')).resolve() == self.args.binary
                             and Path(health.get('data_dir', '')).resolve() == self.library,
@@ -184,10 +204,12 @@ class Smoke:
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
                         TMPDIR=str(self.root / 'tmp'), RSRS_DATA_DIR=str(self.root),
                         RSRS_BIN_DIR=str(self.root / 'bin'), RSRS_ENGINE='cpu',
-                        RSRS_RUNTIME_BIN=str(self.args.binary.resolve()),
+                        RSRS_RUNTIME_BIN=str(self.args.runtime_binary or self.args.binary.resolve()),
                         RSRS_LANG='en', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0',
                         RSRS_M3_DIR=str(self.root / 'models/bge-m3'),
                         )
+        if self.args.runtime_binary:
+            self.env['LC_ALL'] = 'C'
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
             self.env.pop(key, None)
         with socket.socket() as port:
@@ -195,6 +217,9 @@ class Smoke:
             self.port = port.getsockname()[1]
         self.url = 'http://127.0.0.1:' + str(self.port)
         self.env['RSRS_RPC_PORT'] = str(self.port)
+        installed = install_published_runtime(self.args.binary, self.env)
+        if installed is not None:
+            self.args.runtime_binary = installed
         value = self.direct(['-v'])
         require(value.get('summary', {}).get('version') == self.args.version, 'exact_version_mismatch')
         self.passed('artifact_identity_verified')
@@ -282,7 +307,11 @@ class Smoke:
         self.passed('hidden_runtime_status_up')
         for token, name in ((None, 'runtime_loopback_without_token'), ('ci-invalid-token', 'runtime_loopback_ignores_token')):
             code, value, _ = self.http(self.url, 'GET', '/api/health', token=token)
-            require(code == 200 and value.get('v') == 1 and value.get('bin') == self.args.version
+            if self.args.runtime_binary:
+                require(code == 200, 'runtime_loopback_health_status_failed')
+                verify_runtime_health(self.args, value, self.root, self.library, self.child.pid)
+            else:
+                require(code == 200 and value.get('v') == 1 and value.get('bin') == self.args.version
                     and value.get('pid') == self.child.pid
                     and Path(value.get('exe', '')).resolve() == self.args.binary
                     and Path(value.get('data_dir', '')).resolve() == self.library
@@ -294,9 +323,15 @@ class Smoke:
         code, value, _ = self.http(self.url, 'POST', '/api/rpc', {'v': 999, 'id': 'bad-version', 'method': 'runtime.status', 'args': []}, self.token)
         require(code == 200 and value.get('ok') is False and value.get('code') == 'protocol_version_mismatch', 'rpc_version_not_rejected')
         self.passed('runtime_rpc_version_rejected')
-        config = self.rpc(['config'])['summary']
+        if self.args.runtime_binary:
+            rejected = self.rpc(['config'], expected=1)
+            require(rejected['details'].get('error_type') == 'host_boundary', 'host_config_not_fenced')
+            config = self.direct(['config'])['summary']
+        else:
+            config = self.rpc(['config'])['summary']
         require(Path(config.get('data_dir', '')).resolve() == self.library and config.get('addr') == DEV, 'rpc_config_mismatch')
-        self.passed('runtime_rpc_config_verified')
+        self.passed('runtime_rpc_config_verified', host_boundary_rejected=bool(self.args.runtime_binary),
+                    config_owner='host_cli' if self.args.runtime_binary else 'legacy_shim')
         require(self.rpc(['status'])['summary'].get('unlocked') is True, 'runtime_not_unlocked')
         self.passed('runtime_rpc_status_unlocked')
         for method, ident, name in (('initialize', 1, 'runtime_mcp_initialized'), ('tools/list', 2, 'runtime_mcp_tools_list')):
@@ -317,26 +352,35 @@ class Smoke:
             require(code == 404 and value.get('error') == 'unknown runtime endpoint', 'removed_ui_route_still_served')
         self.passed('removed_ui_routes_not_served', routes=6)
 
+    def agent_config(self, args):
+        if not self.args.runtime_binary:
+            return self.rpc(['agent-config', *args])
+        # This is a host-owned profile change, not a fallback after an RPC failure.
+        self.stop()
+        value = self.direct(['agent-config', *args])
+        self.start()
+        return value
+
     def settings(self):
         for mode in ('verbose', 'concise'):
-            self.rpc(['agent-config', '--set', 'diary_mode=' + mode])
-            require(self.rpc(['agent-config'])['summary'].get('diary_mode') == mode, 'diary_mode_not_persisted')
+            self.agent_config(['--set', 'diary_mode=' + mode])
+            require(self.agent_config([])['summary'].get('diary_mode') == mode, 'diary_mode_not_persisted')
         self.passed('diary_mode_persisted')
         value = self.rpc(['remember', 'Runtime fixture persisted memory.', '--title', 'Runtime fixture', '--importance', 'important', '--force'])
         memory_id = value['summary'].get('id')
         require(isinstance(memory_id, str) and memory_id, 'owned_memory_not_created')
-        self.rpc(['agent-config', '--set', 'readonly=true'])
+        self.agent_config(['--set', 'readonly=true'])
         rejected = self.rpc(['remember', 'Readonly write must fail.', '--importance', 'important', '--force'], expected=1)
         require('read-only' in ' '.join(rejected.get('errors', [])), 'readonly_write_guard_missing')
         require(self.rpc(['show', memory_id])['details'].get('entry', {}).get('id') == memory_id, 'readonly_read_failed')
-        self.rpc(['agent-config', '--set', 'readonly=false'])
-        self.rpc(['agent-config', '--set', 'memory_off=true'])
+        self.agent_config(['--set', 'readonly=false'])
+        self.agent_config(['--set', 'memory_off=true'])
         skipped = self.rpc(['show', memory_id])
         require(skipped.get('summary') == {'mode': 'off', 'skipped': True, 'count': 0}
                 and skipped.get('items') == [] and skipped.get('details') == []
                 and skipped.get('errors') == [], 'off_read_empty_response_missing')
-        self.rpc(['agent-config', '--set', 'memory_off=false'])
-        normal = self.rpc(['agent-config'])['summary']
+        self.agent_config(['--set', 'memory_off=false'])
+        normal = self.agent_config([])['summary']
         require(normal.get('readonly') is False and normal.get('memory_off') is False, 'normal_mode_not_restored')
         require(self.rpc(['show', memory_id])['details']['entry']['content'] == 'Runtime fixture persisted memory.', 'normal_read_not_restored')
         self.passed('workspace_three_states_persisted')
@@ -521,9 +565,24 @@ class Smoke:
         self.env['RSRS_MIRROR'] = 'http://127.0.0.1:' + str(server.server_port)
 
         def doctor(fix=False):
-            code, reply, _ = self.http(self.url, 'POST', '/api/rpc',
-                {'v': 1, 'id': secrets.token_hex(8), 'method': 'cli.exec',
-                 'args': ['--json', 'doctor', *(['--fix'] if fix else [])]}, self.token)
+            argv = ['--json', 'doctor', *(['--fix'] if fix else [])]
+            body = {'v': 1, 'id': secrets.token_hex(8), 'method': 'cli.exec', 'args': argv}
+            if self.args.runtime_binary and fix:
+                # Repair and asset installation belong to the host CLI.
+                result = subprocess.run([str(self.args.binary), *argv], env=self.env,
+                                        cwd=self.root, capture_output=True, timeout=90)
+                require(result.returncode in (0, 1, 2), 'host_doctor_repair_failed')
+                reply = {'exit': result.returncode, 'envelope': json.loads(result.stdout)}
+                code = 200
+            else:
+                if self.args.runtime_binary:
+                    code, health, _ = self.http(self.url, 'GET', '/api/health')
+                    require(code == 200, 'doctor_scope_health_failed')
+                    verify_runtime_health(self.args, health, self.root, self.library, self.child.pid)
+                    body = scoped_rpc_request(health, argv)
+                code, reply, _ = self.http(self.url, 'POST', '/api/rpc', body, self.token)
+                if self.args.runtime_binary:
+                    verify_rpc_receipt(body, reply)
             envelope = reply.get('envelope', {})
             require(code == 200 and envelope.get('command') == 'doctor'
                     and reply.get('exit') in (0, 1, 2), 'doctor_repair_envelope_invalid')
@@ -539,7 +598,10 @@ class Smoke:
                     # Exercise the existing repair while TUI-style reads continue.
                     # These reads must not restart model verification or indexing.
                     for command in (['account', 'list'], ['config'], ['agent-config']):
-                        self.rpc(command)
+                        if self.args.runtime_binary:
+                            self.direct(command)
+                        else:
+                            self.rpc(command)
                 index = self.rpc(['status'])['summary']['retrieval_index']
                 if index.get('state') == want:
                     return index
@@ -618,7 +680,8 @@ class Smoke:
     def host_space_commands(self):
         home = self.root / 'space-command-home'
         library = home / '.rsrs'
-        library.mkdir(parents=True)
+        home.mkdir(mode=0o700)
+        library.mkdir(mode=0o700)
         config = library / 'client.json'
         config.write_text(json.dumps({'data_dir': str(library), 'api_base': 'https://fixture.invalid',
                                       'custom': 'preserve'}), encoding='utf-8')
@@ -629,6 +692,7 @@ class Smoke:
         url = 'http://127.0.0.1:' + str(port)
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(library),
                    RSRS_RPC_PORT=str(port), XDG_RUNTIME_DIR=str(home / 'runtime'))
+        install_published_runtime(self.args.binary, env)
         def cli(args, expected=0):
             result = subprocess.run([str(self.args.binary), '--json', *args], env=env, cwd=home,
                                     capture_output=True, text=True, timeout=90)
@@ -638,7 +702,11 @@ class Smoke:
             return value
         def health(profile):
             code, actual, _ = self.http(url, 'GET', '/api/health')
-            require(code == 200 and actual['bin'] == self.args.version
+            if self.args.runtime_binary:
+                require(code == 200, 'space_host_health_failed')
+                verify_runtime_health(self.args, actual, library, profile)
+            else:
+                require(code == 200 and actual['bin'] == self.args.version
                     and hashlib.sha256(Path(actual['exe']).read_bytes()).hexdigest() == self.args.binary_sha256
                     and Path(actual['data_dir']).resolve() == profile.resolve(), 'space_host_runtime_readback_failed')
             return actual['pid']
@@ -710,8 +778,10 @@ def main():
     parser.add_argument('--source-sha', required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--report', type=Path)
+    add_runtime_arguments(parser)
     args = parser.parse_args()
     args.binary = args.binary.resolve()
+    runtime_inputs(args, [args.binary])
     destination = args.report.resolve() if args.report else args.root.resolve() / 'runtime-coverage.json'
     temp = Path(os.environ.get('RUNNER_TEMP', '')).resolve()
     require(destination != temp and destination.is_relative_to(temp) and not destination.exists(),
@@ -734,6 +804,10 @@ def main():
     smoke.report['missing_cases'] = [name for name in REQUIRED if smoke.report['cases'].get(name, {}).get('passed') is not True]
     smoke.report['passed'] = not smoke.report['missing_cases'] and not smoke.report.get('failure_code') and smoke.cloud_clean
     smoke.report['status'] = 'passed' if smoke.report['passed'] else 'failed'
+    smoke.report.update(runtime_report(args, smoke.report['passed']))
+    if args.runtime_binary and not smoke.report['standalone_runtime_evidence']:
+        smoke.report['passed'] = False
+        smoke.report['status'] = 'failed'
     if smoke.created:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(smoke.report, indent=2) + '\n', encoding='utf-8')

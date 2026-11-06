@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """CI-only real CPU/tree smoke and deterministic local provider contract smoke."""
+from native_fixture_process import install_published_runtime
 import argparse
 import hashlib
 import json
@@ -282,6 +283,7 @@ class Smoke:
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             self.env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
+        install_published_runtime(args.binary, self.env)
         self.report = {"binary_sha256": args.binary_sha256, "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"),
             "version": args.version, "target": "https://api-dev.rsrs.rs", "cases": {},

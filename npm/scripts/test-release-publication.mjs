@@ -1,4 +1,6 @@
 import test from 'node:test';
+import {gzipSync,gunzipSync} from 'node:zlib';
+import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validatePublishedPackage} from './extract-artifact.mjs';
 import assert from 'node:assert/strict';
 import {existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
 import {createServer} from 'node:http';
@@ -240,8 +242,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Intel dev.5 import is deferred; the private business credential diagnostic adds one upload.
-  assert.equal(uploads, 53, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
+  // Intel dev.5 is deferred; source CI adds integration coverage and credential uploads.
+  assert.equal(uploads, 57, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
@@ -420,4 +422,376 @@ test('public installation selects explicit libc and requires actual matching hos
     assert.throws(()=>publicInstallPlatform(platform,{platform:'darwin',arch:'arm64'}));
   }
   assert.throws(()=>publicInstallPlatform('foreign',{platform:'linux',arch:'arm64'}));
+});
+
+test('public release assets bind exact ID, dereferenced tag SHA, size and digest; paginated APIs never accept a draft', async () => {
+  const bytes = Buffer.from('synthetic asset only'), digest = createHash('sha256').update(bytes).digest('hex');
+  const asset = {id: 8, name: 'fixed.bin', size: bytes.length, sha256: digest};
+  const part = {repository: 'risense-ai/respire-cli', release_id: 7, version: '1.0.21-dev.5', source_sha: 'a'.repeat(40), producer:{run_id:91,run_attempt:2}, assets: [asset]};
+  const release = {id: 7, tag_name: 'v1.0.21-dev.5', draft: false, published_at: '2026-11-05T00:00:00Z'};
+  const actual = {...asset, state: 'uploaded', digest: `sha256:${digest}`};
+  validatePublishedRelease(part, release, [actual], part.source_sha);
+  for (const bad of [{draft: true}, {id: 9}, {tag_name: 'v1.0.21-dev.6'}, {published_at: null}]) {
+    assert.throws(() => validatePublishedRelease(part, {...release, ...bad}, [actual], part.source_sha));
+  }
+  for (const bad of [{id: 9}, {name: 'other.bin'}, {size: 1}, {state: 'new'}, {digest: 'sha256:' + 'b'.repeat(64)}]) {
+    assert.throws(() => validatePublishedRelease(part, release, [{...actual, ...bad}], part.source_sha));
+  }
+  assert.throws(() => validatePublishedRelease(part, release, [actual], 'b'.repeat(40)));
+  assert.throws(() => validatePublishedRelease(part, release, [actual, actual], part.source_sha));
+  const calls = [], tag = 'b'.repeat(40);
+  const fetcher = async url => {
+    calls.push(url);
+    let value;
+    if (url.endsWith('/releases/7')) value = release;
+    else if (url.endsWith('/git/ref/tags/v1.0.21-dev.5')) value = {object: {type: 'tag', sha: tag}};
+    else if (url.endsWith('/git/tags/' + tag)) value = {object: {type: 'commit', sha: part.source_sha}};
+    else if (url.endsWith('page=1')) value = [actual, ...Array.from({length: 99}, (_, i) => ({id: 100 + i, name: `extra-${i}`}))];
+    else if (url.endsWith('page=2')) value = [];
+    else if (url.includes('/actions/runs/91/attempts/2')) value = {id:91,run_attempt:2,head_sha:part.source_sha,status:'completed',conclusion:'success',path:'.github/workflows/release.yml',repository:{full_name:part.repository}};
+    else throw Error('Unexpected metadata request ' + url);
+    return {status: 200, json: async () => value};
+  };
+  assert.equal((await inspectPublishedRelease(part, {fetcher})).source_sha, part.source_sha);
+  assert.ok(calls.some(url => url.endsWith('page=2')));
+  for (const changed of [{run_attempt:3},{head_sha:'f'.repeat(40)},{conclusion:'failure'},
+    {status:'in_progress'},{path:'.github/workflows/other.yml'},{repository:{full_name:'foreign/cli'}}]) {
+    await assert.rejects(inspectPublishedRelease(part,{fetcher:async url=>{
+      const response=await fetcher(url);
+      return url.includes('/actions/runs/')?{status:200,json:async()=>({...await response.json(),...changed})}:response;
+    }}),/producer run\/source\/attempt/);
+  }
+  await assert.rejects(inspectPublishedRelease(part, {fetcher: async () => ({status: 404})}), /HTTP 404/);
+  await assert.rejects(inspectPublishedRelease(part, {fetcher: async url => {
+    if (url.includes('/git/')) return {status: 200, json: async () => ({object: {type: 'tag', sha: tag}})};
+    return fetcher(url);
+  }}), /exact commit/);
+  const root = mkdtempSync(path.join(tmpdir(), 'published-assets-test-'));
+  try {
+    const fetchBytes = async () => new Response(bytes);
+    await downloadPublishedAsset(part, asset, root, {fetcher: fetchBytes});
+    assert.deepEqual(readFileSync(path.join(root, asset.name)), bytes);
+    await assert.rejects(downloadPublishedAsset(part, asset, root, {fetcher: fetchBytes}), /EEXIST/);
+    assert.deepEqual(readFileSync(path.join(root, asset.name)), bytes, 'never remove an existing asset');
+    const bad = {...asset, name: 'bad.bin', sha256: 'f'.repeat(64)};
+    await assert.rejects(downloadPublishedAsset(part, bad, root, {fetcher: fetchBytes}), /hash\/size/);
+    assert.equal(existsSync(path.join(root, bad.name)), false);
+    await assert.rejects(downloadPublishedAsset(part, {...asset, name: 'oversize.bin', size: 1}, root, {fetcher: fetchBytes}), /approved size/);
+    assert.equal(existsSync(path.join(root, 'oversize.bin')), false);
+  } finally { rmSync(root, {recursive: true, force: true}); }
+});
+test('published CLI and Runtime metadata cannot swap source, version, target, hashes or unsafe payload inventory', () => {
+  const target = 'x86_64-unknown-linux-gnu', hash = 'a'.repeat(64);
+  const spec = {cli: {version, source_sha: sha, producer:{run_id:91,run_attempt:2}, assets: [
+    {name: `rsrs-${target}`, size:64, sha256: hash}]},
+    runtime: {version, source_sha: sha, assets: [{name: `rsrs-runtime-${target}`, sha256: hash},
+      {name: `rsrs-runtime-${target}.tar.gz`, sha256: hash}]}};
+  const cli = {schema_version: 2, artifact_layout:'cli-frontend-v2', git_sha: sha, version, target, binary_file: `rsrs-${target}`,
+    binary_size:64, binary_sha256: hash, producer:spec.cli.producer};
+  const runtime = {schema_version: 2, source_commit: sha, runtime_version: version, target_triple: target,
+    binary_file: `rsrs-runtime-${target}`, archive_file: `rsrs-runtime-${target}.tar.gz`, binary_sha256: hash,
+    archive_sha256: hash, protocol_range: {minimum: 1, maximum: 1}, capabilities: {business_executor: '1', mcp_server: '1'},
+    files: [{path: 'rsrs-runtime', size: 10, sha256: hash}]};
+  validatePublishedMetadata(spec, target, cli, runtime);
+  for (const invalid of [{git_sha: 'c'.repeat(40)}, {version: '1.0.21-dev.99'}, {target: 'other'},
+    {binary_sha256: 'f'.repeat(64)}, {runtime_file: 'other.tar.gz'}, {binary_size:65}, {producer:{run_id:92,run_attempt:2}}, {producer:{run_id:91,run_attempt:3}}]) {
+    assert.throws(() => validatePublishedMetadata(spec, target, {...cli, ...invalid}, runtime));
+  }
+  for (const invalid of [{source_commit: 'c'.repeat(40)}, {runtime_version: '1.0.21-dev.99'},
+    {target_triple: 'other'}, {archive_sha256: 'f'.repeat(64)}, {binary_sha256: 'f'.repeat(64)},
+    {protocol_range: {minimum: 1, maximum: 2}}, {capabilities: {}}, {files: []},
+    {files: [{path: '../escape', size: 1, sha256: hash}]}, {files: [runtime.files[0], runtime.files[0]]}]) {
+    assert.throws(() => validatePublishedMetadata(spec, target, cli, {...runtime, ...invalid}));
+  }
+});
+
+function producerZip(entries) {
+  return execFileSync(process.platform === 'win32' ? 'py' : 'python3',
+    [...(process.platform === 'win32' ? ['-3'] : []), '-I', '-c', `import base64,io,json,sys,zipfile
+b=io.BytesIO()
+with zipfile.ZipFile(b,'w',compression=zipfile.ZIP_DEFLATED) as z:
+ for name,data,mode in json.load(sys.stdin):
+  e=zipfile.ZipInfo(name); e.external_attr=mode<<16; z.writestr(e,base64.b64decode(data))
+sys.stdout.buffer.write(b.getvalue())`],
+    {input:JSON.stringify(entries.map(([name, bytes, mode=0o100644]) => [name, Buffer.from(bytes).toString('base64'), mode])), timeout:10000});
+}
+function runtimeProducerFixture(part, target, metadata, archive) {
+  const digest = bytes => createHash('sha256').update(bytes).digest('hex');
+  const names = publishedAssetNames('runtime', target), producer = part.producer;
+  const report = {target, version:part.version, source_commit:part.source_sha, run_id:String(producer.run_id),
+    run_attempt:String(producer.run_attempt), archive_sha256:digest(archive),
+    binary_sha256:part.assets.find(a => a.name === names[1]).sha256, passed:true, g1Passed:false};
+  const jobs = [`Release (${target})`,`Native regression (${target})`].map((name, i) => ({id:i+11, name,
+    run_id:producer.run_id, run_attempt:producer.run_attempt, head_sha:part.source_sha, status:'completed', conclusion:'success',
+    started_at:'2026-11-05T00:00:00Z', completed_at:'2026-11-05T00:01:00Z'}));
+  const zips = new Map(), artifacts = [];
+  for (const [i, name, entries] of [[0,`runtime-release-${target}`,[[names[0],metadata],[names[2],archive]]],
+    [1,`runtime-smoke-${target}`,[[`runtime-smoke-${target}.json`,JSON.stringify(report)]]]]) {
+    const bytes = producerZip(entries); zips.set(i+31, bytes);
+    artifacts.push({id:i+31, name, size_in_bytes:bytes.length, digest:`sha256:${digest(bytes)}`, expired:false,
+      workflow_run:{id:producer.run_id, head_sha:part.source_sha}, created_at:'2026-11-05T00:00:20Z', updated_at:'2026-11-05T00:00:21Z'});
+  }
+  return {jobs, artifacts, zips, report,
+    fetcher:async url => ({status:200, json:async () => {
+      if (url.includes(`/attempts/${producer.run_attempt}/jobs?`)) return {jobs};
+      assert(url.includes(`/runs/${producer.run_id}/artifacts?`)); return {artifacts};
+    }}),
+    artifactTransport:args => zips.get(Number(args.at(-1).split('/').at(-2))),
+    replaceZip(index, entries) {
+      const bytes=producerZip(entries), artifact=artifacts[index]; zips.set(artifact.id,bytes);
+      artifact.size_in_bytes=bytes.length; artifact.digest=`sha256:${digest(bytes)}`;
+    }};
+}
+
+test('published Runtime producer binds exact attempt reports and build bytes, including metadata', async () => {
+  const target='x86_64-pc-windows-msvc', names=publishedAssetNames('runtime',target);
+  const payloads=[Buffer.from('{"synthetic":"metadata"}'),Buffer.from('binary'),Buffer.from('archive')];
+  const part={repository:'risense-ai/respire-runtime',version,source_sha:sha,producer:{run_id:91,run_attempt:2},
+    assets:payloads.map((bytes,i)=>({name:names[i],size:bytes.length,sha256:createHash('sha256').update(bytes).digest('hex')}))};
+  const fixture=()=>runtimeProducerFixture(part,target,payloads[0],payloads[2]);
+  const run=f=>inspectRuntimeProducer(part,target,f);
+  const evidence=await run(fixture());
+  assert.equal(evidence.metadata_sha256,part.assets[0].sha256);assert.equal(evidence.binary_sha256,part.assets[1].sha256);
+  assert.equal(evidence.archive_sha256,part.assets[2].sha256);assert.equal(evidence.run_attempt,2);assert.equal(evidence.artifacts.length,2);
+  for(const change of [f=>f.jobs.pop(),f=>f.jobs.push(f.jobs[0]),f=>f.jobs[0].run_attempt=1,
+    f=>f.jobs[0].run_id++,f=>f.jobs[0].head_sha='f'.repeat(40),f=>f.jobs[1].name='Native regression (other)',
+    f=>f.jobs[0].status='in_progress',f=>f.jobs[1].conclusion='failure',f=>f.artifacts.pop(),f=>f.artifacts.push(f.artifacts[0]),
+    f=>f.artifacts[0].expired=true,f=>delete f.artifacts[0].digest,f=>f.artifacts[0].workflow_run.id++,
+    f=>f.artifacts[0].workflow_run.head_sha='f'.repeat(40),f=>f.artifacts[0].created_at='2026-11-04T00:00:00Z',
+    f=>f.artifacts[0].updated_at='2026-11-06T00:00:00Z',f=>f.jobs[0].started_at='invalid',
+    f=>f.artifacts[0].digest='sha256:'+'f'.repeat(64),f=>f.artifacts[0].size_in_bytes++,
+    f=>f.zips.set(31,Buffer.from('tampered ZIP'))]) {
+    const f=fixture();change(f);await assert.rejects(run(f));
+  }
+  for(const change of [r=>r.run_id='92',r=>r.run_attempt='1',r=>r.source_commit='f'.repeat(40),r=>r.target='other',
+    r=>r.version='1.0.21-dev.99',r=>r.passed=false,r=>r.archive_sha256='f'.repeat(64),r=>r.binary_sha256='f'.repeat(64)]) {
+    const f=fixture();change(f.report);f.replaceZip(1,[[`runtime-smoke-${target}.json`,JSON.stringify(f.report)]]);
+    await assert.rejects(run(f),/native report\/source\/attempt\/bytes/);
+  }
+  for(const entries of [[[names[0],Buffer.from('{"synthetic":"different metadata"}')],[names[2],payloads[2]]],
+    [[names[0],payloads[0]],[names[2],Buffer.from('different archive')]],
+    [[names[0],payloads[0]]],[[names[0],payloads[0]],[names[0],payloads[0]],[names[2],payloads[2]]],
+    [[names[0],payloads[0],0o120777],[names[2],payloads[2]]]]) {
+    const f=fixture();f.replaceZip(0,entries);await assert.rejects(run(f));
+  }
+});
+
+test('published target downloads and verifies both real file sets but records no process/full success before execution', async () => {
+  const target = 'x86_64-unknown-linux-gnu', root = mkdtempSync(path.join(tmpdir(), 'published-target-test-'));
+  const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+  const image = Buffer.alloc(64); image.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]); image.writeUInt16LE(62, 18);
+  const license = Buffer.from('synthetic license'), sdk = {sdk_version:'1.0.2-dev.23',manifest_sha256:'a'.repeat(64),archive_sha256:'b'.repeat(64),redistribution:'approved'};
+  const core = Buffer.from(JSON.stringify({schema_version:1,target,sdk_version:sdk.sdk_version,redistribution:'permitted-under-included-license',files:[{path:'core-notices/CORE-SDK-LICENSE.txt',sha256:hash(license)}]}));
+  const archive = syntheticTar([['core-runtime.json',core],['core-notices/CORE-SDK-LICENSE.txt',license],[`rsrs-runtime-${target}`,image]]);
+  const fileHash = hash(image), archiveHash = hash(archive), manifestHash = 'd'.repeat(64);
+  const cli = {schema_version: 2, artifact_layout:'cli-frontend-v2', git_sha: sha, version, target, binary_file: `rsrs-${target}`,
+    binary_size:image.length, binary_sha256: fileHash, producer:{run_id:91,run_attempt:2}};
+  const runtime = {schema_version: 2, source_commit: sha, runtime_version: version, target_triple: target,
+    binary_file: `rsrs-runtime-${target}`, archive_file: `rsrs-runtime-${target}.tar.gz`, binary_sha256: fileHash,
+    archive_sha256: archiveHash, protocol_range: {minimum: 1, maximum: 1}, capabilities: {business_executor: '1', mcp_server: '1'},
+    compat:{min_cli:version,max_cli:'*'},
+    files: [{path:'core-runtime.json',size:core.length,sha256:hash(core)},{path:'core-notices/CORE-SDK-LICENSE.txt',size:license.length,sha256:hash(license)}, {path: `rsrs-runtime-${target}`, size: image.length, sha256: fileHash}]};
+  const bytes = new Map();
+  const part = (kind, metadata, names, id) => ({repository: `risense-ai/respire-${kind}`, release_id: id, version, source_sha: sha, producer:{run_id:91,run_attempt:2},
+    assets: [Buffer.from(JSON.stringify(metadata)), image, ...(kind === 'cli' ? [] : [archive])].map((value, n) => {
+      const asset = {id: id * 10 + n, name: names[n], size: value.length, sha256: hash(value)};
+      bytes.set(asset.id, value); return asset;
+    })});
+  const spec = {cli: part('cli', cli, [`cli-build-${target}.json`, cli.binary_file], 10),
+    runtime: part('runtime', runtime, [`runtime-build-${target}.json`, runtime.binary_file, runtime.archive_file], 20)};
+  const producer=runtimeProducerFixture(spec.runtime,target,bytes.get(spec.runtime.assets[0].id),archive);
+  let corrupt = false;
+  const fetcher = async url => {
+    const kind = url.includes('/respire-runtime/') ? 'runtime' : 'cli', selected = spec[kind];
+    if (url.includes('/jobs?') || url.includes('/artifacts?')) return producer.fetcher(url);
+    if(url.includes('/contents/')) {
+      const value=url.includes('runtime-pin.json')?{required:version,accept:`>=${version},<2.0.0`}:url.includes('artifact-manifest.json')?{artifactLayout:'cli-frontend-v2',cliVersion:version,targets:[{triple:target}]}:{targets:{[target]:sdk}};
+      const body=Buffer.from(JSON.stringify(value));
+      return {status:200,json:async()=>({type:'file',encoding:'base64',size:body.length,content:body.toString('base64'),sha:createHash('sha1').update(Buffer.concat([Buffer.from(`blob ${body.length}\0`),body])).digest('hex')})};
+    }
+    if (url.includes('/actions/runs/')) return {status:200,json:async()=>({id:91,run_attempt:2,head_sha:sha,status:'completed',conclusion:'success',path:'.github/workflows/release.yml',repository:{full_name:selected.repository}})};
+    if (url.includes('/releases/assets/')) return new Response(corrupt ? 'bad' : bytes.get(Number(url.split('/').pop())));
+    if (url.includes('/git/ref/')) return {status: 200, json: async () => ({object: {type: 'commit', sha}})};
+    if (url.includes('/assets?')) return {status: 200, json: async () => selected.assets.map(a => ({...a, state: 'uploaded', digest: `sha256:${a.sha256}`}))};
+    return {status: 200, json: async () => ({id: selected.release_id, tag_name: `v${version}`, draft: false, published_at: '2026-11-05T00:00:00Z'})};
+  };
+  const options={fetcher,artifactTransport:producer.artifactTransport};
+  try {
+    const destination = path.join(root, 'success');
+    const receipt = await verifyPublishedTarget(spec, target, destination, manifestHash, options);
+    assert.equal(receipt.assets_verified, true); assert.equal(receipt.payloads_verified, true); assert.equal(receipt.manifest_sha256, manifestHash);
+    assert.deepEqual(receipt.product_sources, {cli: sha, runtime: sha});
+    assert.equal(receipt.harness_sha, process.env.GITHUB_SHA ?? null);
+    assert.equal(receipt.workflow_sha, receipt.harness_sha);
+    assert.equal(receipt.full_passed, false); assert.equal(receipt.g1Passed, false); assert.deepEqual(receipt.actual_processes, []);
+    assert.equal(receipt.assets.length, 5); assert.ok(receipt.remaining.includes('actual running image digests'));
+    assert.equal(receipt.runtime_producer.metadata_sha256,spec.runtime.assets[0].sha256);
+    assert.equal(receipt.runtime_producer.run_attempt,2);assert.equal(receipt.runtime_producer.artifacts.length,2);
+    assert.deepEqual(JSON.parse(readFileSync(path.join(destination, 'published-assets-receipt.json'))), receipt);
+    const inspected=path.join(destination,'inspected/runtime'),licensePath=path.join(inspected,'core-notices/CORE-SDK-LICENSE.txt');
+    writeFileSync(licensePath,'tampered');assert.throws(()=>verifyCorePayload(inspected,target,sdk,runtime.files),/hash\/size/);writeFileSync(licensePath,license);
+    writeFileSync(path.join(inspected,'unexpected'),'extra');assert.throws(()=>verifyCorePayload(inspected,target,sdk,runtime.files),/Runtime\/Core inventory/);rmSync(path.join(inspected,'unexpected'));
+    assert.throws(()=>verifyCorePayload(inspected,target,{...sdk,sdk_version:'1.0.2-dev.22'}),/Core identity/);
+    const consumed=await consumePublishedTarget(spec,target,destination,path.join(root,'nested/consumer/release'),manifestHash,{fetcher});
+    assert.deepEqual(consumed.env,{RSRS_ARTIFACT_SOURCE:'published-assets',RSRS_RUNTIME_BIN:path.resolve(root,'nested/consumer/release/runtime',runtime.binary_file),RSRS_PUBLISHED_RUNTIME_SHA256:fileHash,RSRS_PUBLISHED_RUNTIME_VERSION:version,RSRS_PUBLISHED_ASSETS_SHA256:manifestHash,RSRS_PUBLISHED_BUNDLE_SHA256:archiveHash,RSRS_PUBLISHED_RUNTIME_ARCHIVE:path.resolve(destination,'runtime',runtime.archive_file),RSRS_PUBLISHED_RUNTIME_METADATA:path.resolve(destination,'runtime',`runtime-build-${target}.json`),RSRS_PUBLISHED_RUNTIME_METADATA_SHA256:hash(Buffer.from(JSON.stringify(runtime))),RSRS_RUNTIME_TRIPLE:target});
+    assert.equal(hash(readFileSync(consumed.env.RSRS_RUNTIME_BIN)),fileHash);
+    await assert.rejects(verifyPublishedTarget(spec, target, destination, manifestHash, options), /EEXIST/);
+    producer.report.run_attempt='1';
+    producer.replaceZip(1,[[`runtime-smoke-${target}.json`,JSON.stringify(producer.report)]]);
+    const staleProducer=path.join(root,'stale-producer');
+    await assert.rejects(verifyPublishedTarget(spec,target,staleProducer,manifestHash,options),/native report\/source\/attempt\/bytes/);
+    const rejectedProducer=JSON.parse(readFileSync(path.join(staleProducer,'published-assets-receipt.json')));
+    assert.equal(rejectedProducer.assets_verified,false);assert.equal(rejectedProducer.full_passed,false);
+    corrupt = true;
+    const failed = path.join(root, 'failed');
+    await assert.rejects(verifyPublishedTarget(spec, target, failed, manifestHash, options), /hash\/size/);
+    const failure = JSON.parse(readFileSync(path.join(failed, 'published-assets-receipt.json')));
+    assert.equal(failure.assets_verified, false); assert.equal(failure.full_passed, false);
+    assert.match(failure.error, /hash\/size/); assert.deepEqual(failure.actual_processes, []);
+  } finally { rmSync(root, {recursive: true, force: true}); }
+});
+
+function syntheticTar(entries) {
+  const blocks=[];
+  for(const [name,content,type='0'] of entries) {
+    const bytes=Buffer.from(content), header=Buffer.alloc(512);
+    header.write(name,0,100); header.write('0000755\0',100); header.write('0000000\0',108); header.write('0000000\0',116);
+    header.write(bytes.length.toString(8).padStart(11,'0')+'\0',124); header.write('00000000000\0',136);
+    header.fill(32,148,156); header.write(type,156); header.write('ustar\0',257);
+    const checksum=[...header].reduce((a,b)=>a+b,0); header.write(checksum.toString(8).padStart(6,'0')+'\0 ',148);
+    blocks.push(header,bytes,Buffer.alloc((512-bytes.length%512)%512));
+  }
+  return gzipSync(Buffer.concat([...blocks,Buffer.alloc(1024)]));
+}
+test('published archive extractor refuses links, traversal, duplicates, bad checksums and truncated payloads',async()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'published-tar-test-'));
+  try {
+    const good=path.join(root,'good.tgz');writeFileSync(good,syntheticTar([['nested/file',Buffer.from('value')]]));
+    await extractPublishedArchive(good,path.join(root,'good'));assert.equal(readFileSync(path.join(root,'good/nested/file'),'utf8'),'value');
+    let i=0;
+    for(const entries of [[['../escape','x']],[['/absolute','x']],[['dir/link','', '2']],[['hard','', '1']],[['device','', '3']],[['file','a'],['FILE','b']],[['dir/CON.txt','x']],[['dir./file','x']]]) {
+      const file=path.join(root,`bad-${i}.tgz`);writeFileSync(file,syntheticTar(entries));await assert.rejects(extractPublishedArchive(file,path.join(root,`out-${i++}`)));
+    }
+    const damaged=gunzipSync(readFileSync(good));damaged[0]^=1;writeFileSync(path.join(root,'checksum.tgz'),gzipSync(damaged));
+    await assert.rejects(extractPublishedArchive(path.join(root,'checksum.tgz'),path.join(root,'checksum')),/checksum/);
+    const long='nested/'+ 'a'.repeat(120),extended=path.join(root,'long.tgz');
+    writeFileSync(extended,syntheticTar([['././@LongLink',long+'\0','L'],['placeholder','long value']]));
+    await extractPublishedArchive(extended,path.join(root,'long'));assert.equal(readFileSync(path.join(root,'long',long),'utf8'),'long value');
+    writeFileSync(path.join(root,'truncated.tgz'),readFileSync(good).subarray(0,25));
+    await assert.rejects(extractPublishedArchive(path.join(root,'truncated.tgz'),path.join(root,'truncated')));
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+test('published compatibility checks exact product pin and numeric DEV minCLI without rebuilding',()=>{
+  const spec={cli:{version:'1.0.21-dev.5'},runtime:{version:'1.0.21-dev.4'}};
+  const runtime={compat:{min_cli:'1.0.21-dev.5',max_cli:'*'}}, pin={required:spec.runtime.version,accept:'>=1.0.21-dev.4,<2.0.0'};
+  validatePublishedCompatibility(spec,runtime,pin);
+  for(const bad of [{required:'1.0.21-dev.3'}, {accept:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,runtime,{...pin,...bad}));
+  for(const compat of [{min_cli:'1.0.21-dev.6',max_cli:'*'},{min_cli:'1.0.21-dev.5',max_cli:'1.0.21-dev.5'},{min_cli:'invalid',max_cli:'*'}])assert.throws(()=>validatePublishedCompatibility(spec,{compat},pin));
+  validatePublishedCompatibility({...spec,cli:{version:'1.0.21-dev.10'}},runtime,pin);
+});
+
+function publishedFullFixture(root) {
+  const targets=m.targets.map(t=>t.triple), manifestHash='d'.repeat(64), context={sha:'e'.repeat(40),run_id:901,run_attempt:2};
+  let id=1;
+  const spec={schema:2,...Object.fromEntries(['cli','runtime'].map(kind=>[kind,{repository:`risense-ai/respire-${kind}`,version:kind==='cli'?'1.0.21-dev.5':'1.0.21-dev.4',source_sha:(kind==='cli'?'a':'b').repeat(40),release_id:kind==='cli'?21:22,producer:{run_id:91,run_attempt:2},assets:targets.flatMap(target=>publishedAssetNames(kind,target).map(name=>({id:id++,name,size:64,sha256:(kind==='cli'?'a':'b').repeat(64)})))}]))};
+  const jobs=[];
+  const job=name=>jobs.push({name,status:'completed',conclusion:'success',run_id:context.run_id,run_attempt:context.run_attempt,head_sha:context.sha});
+  function put(artifact,file,value) {const location=path.join(root,artifact,file);mkdirSync(path.dirname(location),{recursive:true});writeFileSync(location,JSON.stringify(value));}
+  const identity={source_sha:spec.cli.source_sha,version:spec.cli.version,binary_sha256:'a'.repeat(64)};
+  const process={manifest_sha256:manifestHash,bundle_sha256:'b'.repeat(64),image_sha256:'b'.repeat(64),exe:'/isolated/runtime',pid:42,process_start_id:'synthetic-birth',installation_root:'/isolated',data_dir:'/isolated/profile',account_id:'account',instance_id:'instance',generation:1,protocol_v:1};
+  const runtime={...identity,passed:true,runtime_mode:'standalone_runtime',standalone_runtime_evidence:true,runtime_binary_sha256:'b'.repeat(64),runtime_version:spec.runtime.version,runtime_identity_receipts:[process]};
+  for(const target of targets) {
+    job(`validate / Release (${target})`);job(`native-regression / Native (${target})`);
+    const runtime_producer={...spec.runtime.producer,source_sha:spec.runtime.source_sha,target,metadata_sha256:'b'.repeat(64),
+      binary_sha256:'b'.repeat(64),archive_sha256:'b'.repeat(64),artifacts:['runtime-release-','runtime-smoke-'].map((prefix,i)=>({id:31+i,job_id:11+i,name:prefix+target,zip_sha256:'c'.repeat(64)}))};
+    put('published-assets-verification-'+target,'published-assets-receipt.json',{assets_verified:true,payloads_verified:true,target,manifest_sha256:manifestHash,harness_sha:context.sha,run_id:String(context.run_id),run_attempt:String(context.run_attempt),product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},releases:Object.fromEntries(['cli','runtime'].map(kind=>[kind,{...spec[kind],assets:undefined}])),runtime_producer,assets:['cli','runtime'].flatMap(kind=>spec[kind].assets.filter(a=>a.name.includes(target)).map(a=>({repository:spec[kind].repository,...a})))});
+    put('resident-concurrency-'+target,'real-account-return-verification.json',[runtime]);
+    put('resident-concurrency-'+target,'resident-stress-metrics.json',{passed:true});
+    put('resident-concurrency-'+target,'fixture-dependencies.json',{synthetic:true});
+    put('resident-concurrency-'+target,'fixture-process-verification.json',[{passed:true}]);
+    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'full',full_coverage:true,all_published_sources_covered:true,target,candidate_sha256:identity.binary_sha256,selected_sources:['v1.0.20'],sources:[{version:'1.0.20',passed:true}]});
+    put('published-upgrades-'+target,'v1.0.20/results/real-account-return-verification.json',[runtime]);
+    if(target==='x86_64-unknown-linux-gnu')continue;
+    job(`cloud-sweep (runner, ${target})`);
+    put('base-release-sweep-'+target,'coverage.json',{...identity,observed_version:spec.cli.version,expected_version:spec.cli.version,base_complete:true,failed:0,required_missing:[]});
+    if(target.includes('linux')) {
+      put('release-sweep-'+target,'combined-coverage.json',{...identity,complete:true});
+      put('release-sweep-'+target,'suite-results.json',['outbox','ai_inject','runtime','legacy_vault','profile_migration','login_interruption'].map(suite=>({suite,passed:true,exit:0})));
+      for(const name of ['ai-inject-coverage.json','legacy-vault-coverage.json','migration-coverage.json','interruption-coverage.json'])put('release-sweep-'+target,name,{...identity,passed:true});
+      for(const name of ['outbox-coverage.json','runtime-coverage.json'])put('release-sweep-'+target,name,runtime);
+      put('secret-service-profile-migration-'+target,'migration-platform-gate.json',{...identity,passed:true});
+      put('secret-service-profile-migration-'+target,'interruption-coverage.json',{...identity,passed:true});
+    } else {
+      job(`Native migration (${target})`);job(`Migration gate (${target})`);
+      put('native-profile-migration-'+target,'migration-platform-gate.json',{...identity,complete:true});
+    }
+  }
+  put('gnu-login-interruption','interruption-coverage.json',{...identity,passed:true});
+  job('validate / npm-dry-run');job('api-smoke');
+  const packageManifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
+  const packages=[...packageManifest.targets.map(t=>t.pkg),packageManifest.npmScope].map((name,i)=>{
+    const file=`synthetic-${i}.tgz`,bytes=Buffer.from(`synthetic package ${i}`);
+    mkdirSync(path.join(root,'npm-release-packages'),{recursive:true});writeFileSync(path.join(root,'npm-release-packages',file),bytes);
+    return {name,version:spec.cli.version,file,sha256:createHash('sha256').update(bytes).digest('hex')};
+  });
+  put('npm-release-packages','published-package-validation.json',{artifact_source:'published-assets',harness_sha:context.sha,manifest_sha256:manifestHash,product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},run_id:context.run_id,run_attempt:context.run_attempt,packages});
+
+  const apiReports={};
+  for(const name of ['dev-api-coverage.json','dev-github-api-coverage.json']) {
+    put('dev-api-coverage',name,{complete:true,...(name==='dev-api-coverage.json'?{cli_workflow_sha:context.sha}:{} )});
+    apiReports[name]=createHash('sha256').update(readFileSync(path.join(root,'dev-api-coverage',name))).digest('hex');
+  }
+  put('dev-api-coverage','published-api-identity.json',{harness_sha:context.sha,manifest_sha256:manifestHash,run_id:context.run_id,run_attempt:context.run_attempt,reports:apiReports});
+  return {spec,targets,manifestHash,context,jobs,put,runtime};
+}
+test('published full joins every existing report and live image identity; copied summaries and partial jobs cannot pass',()=>{
+  const root=mkdtempSync(path.join(tmpdir(),'published-full-join-'));
+  try {
+    const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context);
+    const complete=run();assert.equal(complete.full_passed,true);assert.equal(complete.harness_sha,f.context.sha);
+    assert.notEqual(complete.harness_sha,complete.product_sources.cli);assert(complete.actual_processes.length>=20);
+    for(const change of [j=>j.pop(),j=>j.push(j[0]),j=>j[0].conclusion='skipped',j=>j[0].conclusion='cancelled',j=>j[0].conclusion='failure',j=>j[0].status='in_progress',j=>j[0].run_attempt=1,j=>j[0].head_sha=f.spec.cli.source_sha,j=>j[0].run_id=900]) {
+      const jobs=copy(f.jobs);change(jobs);assert.throws(()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,jobs,f.context));
+    }
+    const first=f.targets[0],artifact='resident-concurrency-'+first,file='real-account-return-verification.json';
+    const producerReceipt=path.join(root,'published-assets-verification-'+first,'published-assets-receipt.json');
+    const originalReceipt=readFileSync(producerReceipt);
+    for(const kind of ['cli','runtime'])for(const field of ['run_id','run_attempt']){
+      const changed=JSON.parse(originalReceipt);changed.releases[kind].producer[field]++;
+      writeFileSync(producerReceipt,JSON.stringify(changed));assert.throws(run,/producer identity/);
+    }
+    for(const change of [r=>delete r.runtime_producer,r=>r.runtime_producer.run_attempt++,r=>r.runtime_producer.run_id++,
+      r=>r.runtime_producer.source_sha='f'.repeat(40),r=>r.runtime_producer.target='other',r=>r.runtime_producer.metadata_sha256='f'.repeat(64),
+      r=>r.runtime_producer.archive_sha256='f'.repeat(64),r=>r.runtime_producer.binary_sha256='f'.repeat(64),r=>r.runtime_producer.artifacts.pop()]) {
+      const changed=JSON.parse(originalReceipt);change(changed);writeFileSync(producerReceipt,JSON.stringify(changed));
+      assert.throws(run,/Runtime producer byte binding/);
+    }
+    writeFileSync(producerReceipt,originalReceipt);
+    for(const change of [r=>r.passed=false,r=>r.runtime_mode='explicit_cli_shim',r=>r.standalone_runtime_evidence=false,r=>r.runtime_binary_sha256='c'.repeat(64),r=>r.runtime_version='1.0.21-dev.3',r=>r.runtime_identity_receipts=[],r=>r.runtime_identity_receipts[0].pid=0,r=>delete r.runtime_identity_receipts[0].process_start_id,r=>r.runtime_identity_receipts[0].protocol_v=2,r=>delete r.runtime_identity_receipts[0].account_id,r=>r.runtime_identity_receipts[0].image_sha256='c'.repeat(64),r=>r.runtime_identity_receipts[0].bundle_sha256='c'.repeat(64),r=>r.runtime_identity_receipts[0].manifest_sha256='c'.repeat(64)]) {
+      const row=copy(f.runtime);change(row);f.put(artifact,file,[row]);assert.throws(run);f.put(artifact,file,[f.runtime]);
+    }
+    for(const [folder,name] of [['release-sweep-'+f.targets.find(t=>t.includes('linux')&&t!==first),'outbox-coverage.json'],['published-upgrades-'+first,'v1.0.20/results/real-account-return-verification.json'],['dev-api-coverage','published-api-identity.json'],['published-assets-verification-'+first,'published-assets-receipt.json']]) {
+      const location=path.join(root,folder,name),bytes=readFileSync(location);rmSync(location);assert.throws(run);writeFileSync(location,bytes);
+    }
+    assert.equal(run().full_passed,true);
+  } finally {rmSync(root,{recursive:true,force:true});}
+});
+
+test('published pack adapter retains version, repository, launcher, optional dependencies and SDK license assertions',()=>{
+  const manifest={cliVersion:version,npmScope:'rsrs-cli',targets:[{pkg:'@rsrsai/linux-x64'}]};
+  const launcher={name:manifest.npmScope,version,repository:{url:'https://github.com/risense-ai/respire-cli.git'},license:'SEE LICENSE IN LICENSE',bin:{rsrs:'./bin/cli.js'},optionalDependencies:{'@rsrsai/linux-x64':version}};
+  const native={name:'@rsrsai/linux-x64',version,repository:launcher.repository,license:launcher.license};
+  const files=new Set(['LICENSE','bin/core-notices/CORE-SDK-LICENSE.txt']),core={redistribution:'permitted-under-included-license'};
+  validatePublishedPackage(launcher,manifest,launcher.name,null,files);validatePublishedPackage(native,manifest,native.name,core,files);
+  for(const mutate of [p=>p.name='other',p=>p.version='1.0.0',p=>p.repository.url='https://foreign/repo.git',p=>p.dependencies={},p=>p.bin={other:'./bin/cli.js'},p=>p.optionalDependencies={},p=>p.license='MIT']) {
+    const pkg=copy(launcher);mutate(pkg);assert.throws(()=>validatePublishedPackage(pkg,manifest,launcher.name,null,files));
+  }
+  for(const bad of [new Set(),new Set(['LICENSE','LICENSE-MIT-LEGACY']),new Set(['LICENSE'])])assert.throws(()=>validatePublishedPackage(native,manifest,native.name,core,bad));
+  assert.throws(()=>validatePublishedPackage(native,manifest,native.name,{redistribution:'forbidden'},files));
+  const frontend={...manifest,artifactLayout:'cli-frontend-v2'},frontendFiles=new Set(['LICENSE','bin/rsrs']);
+  validatePublishedPackage(native,frontend,native.name,null,frontendFiles);
+  validatePublishedPackage(launcher,frontend,launcher.name,null,new Set(['LICENSE','bin/cli.js']));
+  assert.throws(()=>validatePublishedPackage(native,frontend,native.name,core,frontendFiles));
+  assert.throws(()=>validatePublishedPackage(native,frontend,native.name,null,files));
+  assert.throws(()=>validatePublishedPackage(native,frontend,native.name,null,new Set(['bin/rsrs'])));
 });

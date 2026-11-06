@@ -27,6 +27,19 @@ on:
         description: Optional exact DEV version; only unpublished versions or empty DEV drafts can be used
         default: ''
         type: string
+      artifact_source:
+        description: Build a candidate or verify immutable published assets without publication
+        default: build
+        type: choice
+        options: [build, published-assets]
+      published_assets:
+        description: Exact JSON inventory of approved CLI and Runtime release asset IDs and hashes
+        default: ''
+        type: string
+      published_assets_sha256:
+        description: SHA-256 of the exact published_assets input bytes
+        default: ''
+        type: string
       prepared_run:
         description: Completed exact-source main preparation with the same selected validation profile
         default: ''
@@ -52,9 +65,146 @@ on:
 permissions:
   contents: read
 
+env:
+  ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
+  PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+  PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+  REQUEST_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+  VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
+  RELEASE_REF: ${{ inputs.ref || github.ref }}
+  DEV_VERSION: ${{ inputs.dev_version }}
+  PREPARED_RUN: ${{ inputs.prepared_run }}
+  REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
+  REPAIR_DEV12: ${{ inputs.repair_dev12 }}
+  REPAIR_DEV14: ${{ inputs.repair_dev14 }}
+  RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
+  GH_TOKEN: ${{ github.token }}
+
 jobs:
+  artifact-inputs:
+    outputs:
+      sha: ${{ steps.validated.outputs.product_sha }}
+      version: ${{ steps.validated.outputs.version }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
+      PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+      PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+      REQUEST_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+      VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
+      RELEASE_REF: ${{ inputs.ref || github.ref }}
+      DEV_VERSION: ${{ inputs.dev_version }}
+      PREPARED_RUN: ${{ inputs.prepared_run }}
+      REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
+      REPAIR_DEV12: ${{ inputs.repair_dev12 }}
+      REPAIR_DEV14: ${{ inputs.repair_dev14 }}
+      RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Reject mixed publication and published-asset modes before planning
+        id: validated
+        run: node npm/scripts/extract-artifact.mjs --validate-published
+
+  published-assets-verification:
+    if: ${{ always() && needs.artifact-inputs.result == 'success' && inputs.artifact_source == 'published-assets' }}
+    needs: artifact-inputs
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    env:
+      ARTIFACT_SOURCE: ${{ inputs.artifact_source || 'build' }}
+      PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+      PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+      REQUEST_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+      VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
+      RELEASE_REF: ${{ inputs.ref || github.ref }}
+      DEV_VERSION: ${{ inputs.dev_version }}
+      PREPARED_RUN: ${{ inputs.prepared_run }}
+      REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
+      REPAIR_DEV12: ${{ inputs.repair_dev12 }}
+      REPAIR_DEV14: ${{ inputs.repair_dev14 }}
+      RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
+      CLI_TARGET: ${{ matrix.target }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Download and verify only the approved public release bytes
+        run: node npm/scripts/extract-artifact.mjs --verify-published "${{ runner.temp }}/published-assets-${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          retention-days: 1
+          name: published-assets-verification-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/published-assets-${{ matrix.target }}/published-assets-receipt.json
+            ${{ runner.temp }}/published-assets-${{ matrix.target }}/cli/*
+            ${{ runner.temp }}/published-assets-${{ matrix.target }}/runtime/*
+          if-no-files-found: error
+
+  published-full-complete:
+    if: ${{ always() && inputs.artifact_source == 'published-assets' }}
+    needs: [artifact-inputs, published-assets-verification, validate, native-regression, cloud-sweep, native-migration, migration-gate, api-smoke]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require every existing full consumer to succeed
+        env:
+          FULL_NEEDS: ${{ toJSON(needs) }}
+        run: node -e "const n=JSON.parse(process.env.FULL_NEEDS); if(Object.values(n).some(j=>j.result!=='success'))throw Error('Missing successful full consumer')"
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/download-artifact@v4
+        with:
+          path: full-reports
+      - name: Join exact-attempt full reports and actual process image digests
+        run: node npm/scripts/extract-artifact.mjs --complete-published full-reports
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-full-result
+          path: full-reports/published-full-result.json
+          if-no-files-found: error
+          retention-days: 1
+
   reject-prepared-recovery:
-    if: ${{ inputs.prepared_run != '' && (inputs.reuse_dev12_validation || inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) }}
+    if: ${{ (inputs.prepared_run != '' && (inputs.reuse_dev12_validation || inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication)) && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     permissions: {}
     steps:
@@ -63,7 +213,8 @@ jobs:
           exit 1
 
   plan:
-    if: ${{ !inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation) }}
+    needs: artifact-inputs
+    if: ${{ (!inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation)) && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -239,34 +390,40 @@ jobs:
           NODE
 
   validate:
-    if: ${{ inputs.prepared_run == '' }}
-    needs: plan
+    if: ${{ always() && ((needs.plan.result == 'success' && (inputs.prepared_run == '') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
+    needs: [plan, artifact-inputs, published-assets-verification]
     permissions:
       contents: write
       actions: read
     uses: ./.github/workflows/release-validation.yml
     with:
-      ref: ${{ needs.plan.outputs.sha }}
-      version: ${{ needs.plan.outputs.version }}
+      ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
+      version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       full_validation: false
 
+      artifact_source: ${{ inputs.artifact_source || 'build' }}
+      published_assets: ${{ inputs.published_assets }}
+      published_assets_sha256: ${{ inputs.published_assets_sha256 }}
   native-regression:
     cache-mode: read
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
-    needs: [plan, validate]
+    if: ${{ always() && ((needs.plan.result == 'success' && needs.validate.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success' && needs.validate.result == 'success')) }}
+    needs: [plan, validate, artifact-inputs, published-assets-verification]
     permissions:
       contents: write
       actions: read
     uses: ./.github/workflows/release-native-validation.yml
     with:
-      ref: ${{ needs.plan.outputs.sha }}
-      version: ${{ needs.plan.outputs.version }}
+      ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
+      version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       validation_profile: full
 
+      artifact_source: ${{ inputs.artifact_source || 'build' }}
+      published_assets: ${{ inputs.published_assets }}
+      published_assets_sha256: ${{ inputs.published_assets_sha256 }}
   native-regression-critical:
     name: native-regression
     cache-mode: write
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    if: ${{ (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) && (inputs.artifact_source || 'build') == 'build' }}
     needs: plan
     permissions:
       contents: write
@@ -281,7 +438,7 @@ jobs:
   native-regression-critical-readonly:
     name: native-regression
     cache-mode: read
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && !(github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')) }}
+    if: ${{ (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'critical' && !(github.repository == 'risense-ai/respire-cli' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && (github.event_name == 'push' || github.event_name == 'workflow_dispatch'))) && (inputs.artifact_source || 'build') == 'build' }}
     needs: plan
     permissions:
       contents: write
@@ -294,8 +451,8 @@ jobs:
       producer_prefix: 'validate / '
 
   cloud-sweep:
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
-    needs: plan
+    if: ${{ always() && ((needs.plan.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
+    needs: [plan, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
       actions: read
@@ -320,7 +477,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
           persist-credentials: false
       - name: Require native Windows ARM64 hardware
         if: matrix.target == 'aarch64-pc-windows-msvc'
@@ -341,8 +498,10 @@ jobs:
         run: |
           node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api-dev.rsrs.rs")'
       - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+        if: inputs.artifact_source != 'published-assets'
+        run: node npm/scripts/set-build-version.mjs ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       - name: Wait for this platform's build artifact
+        if: inputs.artifact_source != 'published-assets'
         timeout-minutes: 46
         shell: bash
         env:
@@ -378,15 +537,21 @@ jobs:
           wait().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - uses: actions/download-artifact@v4
+        if: inputs.artifact_source != 'published-assets'
         with:
           name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - uses: actions/download-artifact@v4
+        if: inputs.artifact_source == 'published-assets'
+        with:
+          name: published-assets-verification-${{ matrix.target }}
           path: validated-cli
       - name: Verify and extract this platform's artifacts
         id: verified_artifact
         env:
           CLI_TARGET: ${{ matrix.target }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli cli
       - name: Install PowerShell
         if: runner.os != 'Windows'
@@ -401,17 +566,22 @@ jobs:
             sudo apt-get update
             sudo apt-get install -y powershell
           fi
+      - uses: actions/setup-python@v5
+        id: supplement_python
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' && (runner.os == 'Linux' || inputs.artifact_source == 'published-assets') }}
+        with:
+          python-version: '3.12'
       - name: Sweep the approved development server
         shell: pwsh
         env:
           RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
           RSRS_ENGINE: cpu
           RSRS_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path (Resolve-Path cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
-          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
+          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion '${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}' -Root (Join-Path $env:RUNNER_TEMP 'release-sweep') -DeferSupplemental
       - name: Upload base smoke diagnostics
         if: always()
         uses: actions/upload-artifact@v4
@@ -422,22 +592,17 @@ jobs:
             ${{ runner.temp }}/release-sweep/report.md
             ${{ runner.temp }}/release-sweep/coverage.json
           if-no-files-found: warn
-      - uses: actions/setup-python@v5
-        id: supplement_python
-        if: ${{ !cancelled() && runner.os == 'Linux' && steps.verified_artifact.outcome == 'success' }}
-        with:
-          python-version: '3.12'
       - name: Verify all supplementary CLI contracts
         if: ${{ !cancelled() && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
         shell: bash
         env:
           RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
         run: |
           set -euo pipefail
-          python3 -m pip install --only-binary=:all: cryptography==46.0.3
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3 psutil==7.1.0
           binary="$(realpath cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/release-supplements" --cli-report "$RUNNER_TEMP/release-sweep/coverage.json"
@@ -447,8 +612,8 @@ jobs:
         env:
           RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -493,8 +658,8 @@ jobs:
 
   native-migration:
     name: Native migration (${{ matrix.target }})
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
-    needs: plan
+    if: ${{ always() && ((needs.plan.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
+    needs: [plan, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
       actions: read
@@ -513,7 +678,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
@@ -524,8 +689,10 @@ jobs:
         run: |
           node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("Release smoke requires https://api-dev.rsrs.rs")'
       - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
+        if: inputs.artifact_source != 'published-assets'
+        run: node npm/scripts/set-build-version.mjs ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       - name: Wait for this platform's build artifact
+        if: inputs.artifact_source != 'published-assets'
         timeout-minutes: 46
         shell: bash
         env:
@@ -561,15 +728,21 @@ jobs:
           wait().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - uses: actions/download-artifact@v4
+        if: inputs.artifact_source != 'published-assets'
         with:
           name: cli-release-${{ matrix.target }}
+          path: validated-cli
+      - uses: actions/download-artifact@v4
+        if: inputs.artifact_source == 'published-assets'
+        with:
+          name: published-assets-verification-${{ matrix.target }}
           path: validated-cli
       - name: Verify and extract this platform's artifacts
         id: verified_artifact
         env:
           CLI_TARGET: ${{ matrix.target }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli cli
       - uses: actions/setup-python@v5
         with:
@@ -579,8 +752,8 @@ jobs:
         env:
           RSRS_DEV_SERVER_ADDR: ${{ vars.RESPIRE_DEV_SERVER_ADDR }}
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
         run: |
           $ErrorActionPreference = 'Stop'
           python -m pip install --only-binary=:all: cryptography==46.0.3
@@ -600,8 +773,8 @@ jobs:
 
   migration-gate:
     name: Migration gate (${{ matrix.target }})
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full' }}
-    needs: [plan, cloud-sweep, native-migration]
+    if: ${{ always() && ((needs.plan.result == 'success' && needs.cloud-sweep.result == 'success' && needs.native-migration.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success' && needs.cloud-sweep.result == 'success' && needs.native-migration.result == 'success')) }}
+    needs: [plan, cloud-sweep, native-migration, artifact-inputs, published-assets-verification]
     permissions:
       contents: read
       actions: read
@@ -620,7 +793,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -636,8 +809,8 @@ jobs:
       - name: Require both actual base sweep and migration reports for this platform and binary
         shell: pwsh
         env:
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
+          CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
+          CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
           CLI_TARGET: ${{ matrix.target }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -657,8 +830,8 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.reuse_dev12_validation && inputs.prepared_run == '' }}
-    needs: plan
+    if: ${{ always() && ((needs.plan.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
+    needs: [plan, artifact-inputs, published-assets-verification]
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
@@ -668,7 +841,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.plan.outputs.sha }}
+          ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
           persist-credentials: false
       - uses: actions/setup-python@v5
         with:
@@ -687,6 +860,13 @@ jobs:
           sleep 61
           python3 scripts/dev-api-smoke.py --report "$RUNNER_TEMP/dev-api-coverage.json" --scope all
           python3 scripts/dev-github-api-smoke.py --report "$RUNNER_TEMP/dev-github-api-coverage.json"
+          if [ "$ARTIFACT_SOURCE" = published-assets ]; then
+            node - <<'NODE'
+            const fs=require('fs'),path=require('path'),{createHash}=require('crypto');
+            const reports=Object.fromEntries(['dev-api-coverage.json','dev-github-api-coverage.json'].map(name=>[name,createHash('sha256').update(fs.readFileSync(path.join(process.env.RUNNER_TEMP,name))).digest('hex')]));
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'published-api-identity.json'),JSON.stringify({harness_sha:process.env.GITHUB_SHA,manifest_sha256:process.env.PUBLISHED_ASSETS_SHA256,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),reports}));
+            NODE
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -695,19 +875,13 @@ jobs:
           path: |
             ${{ runner.temp }}/dev-api-coverage.json
             ${{ runner.temp }}/dev-github-api-coverage.json
+            ${{ runner.temp }}/published-api-identity.json
           if-no-files-found: error
 
   preparation-receipt:
     # This read-only proof is deliberately not a publication fast path. A later
     # consumer must independently validate its source/attempt, jobs and bytes.
-    if: >-
-      ${{ always() && !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
-          needs.plan.result == 'success' && needs.validate.result == 'success' &&
-          ((needs.plan.outputs.validation_profile == 'full' && needs.native-regression.result == 'success') ||
-           (needs.plan.outputs.validation_profile == 'critical' && needs.native-regression-critical.result == 'success' && needs.native-regression-critical-readonly.result == 'skipped')) &&
-          needs.plan.outputs.sha == github.sha && needs.plan.outputs.publish == 'false' &&
-          !inputs.reuse_dev12_validation &&
-          !inputs.resume_dev6_publication && !inputs.repair_dev12 && !inputs.repair_dev14 }}
+    if: ${{ (always() && !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.validate.result == 'success' && ((needs.plan.outputs.validation_profile == 'full' && needs.native-regression.result == 'success') || (needs.plan.outputs.validation_profile == 'critical' && needs.native-regression-critical.result == 'success' && needs.native-regression-critical-readonly.result == 'skipped')) && needs.plan.outputs.sha == github.sha && needs.plan.outputs.publish == 'false' && !inputs.reuse_dev12_validation && !inputs.resume_dev6_publication && !inputs.repair_dev12 && !inputs.repair_dev14) && (inputs.artifact_source || 'build') == 'build' }}
     needs: [plan, validate, native-regression, native-regression-critical, native-regression-critical-readonly, cloud-sweep, native-migration, migration-gate, api-smoke]
     runs-on: ubuntu-latest
     permissions:
@@ -746,7 +920,7 @@ jobs:
           if-no-files-found: error
 
   prepared-import:
-    if: ${{ inputs.prepared_run != '' && needs.plan.outputs.prepared_run == inputs.prepared_run }}
+    if: ${{ (inputs.prepared_run != '' && needs.plan.outputs.prepared_run == inputs.prepared_run) && (inputs.artifact_source || 'build') == 'build' }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -888,11 +1062,7 @@ jobs:
 
   publication-ready:
     # Long read-only gates never hold the publication transaction lock.
-    if: >-
-      ${{ !cancelled() && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) &&
-          needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' &&
-          ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
-           (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success')) }}
+    if: ${{ (!cancelled() && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') || (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success'))) && (inputs.artifact_source || 'build') == 'build' }}
     needs: [plan, validate, prepared-import]
     runs-on: ubuntu-latest
     timeout-minutes: 145
@@ -987,15 +1157,8 @@ jobs:
   publish:
     name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
     # Every stable/DEV publication waits for the selected profile readiness.
-    needs: [plan, validate, prepared-import, publication-ready]
-    if: >-
-      ${{ always() && !cancelled() && !inputs.resume_dev6_publication &&
-          ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.prepared_run == '' && inputs.publish) ||
-           (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' &&
-            ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') ||
-             (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success' && needs.plan.outputs.prepared_run == inputs.prepared_run)) &&
-            needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' &&
-            (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true'))) }}
+    needs: [artifact-inputs, plan, validate, prepared-import, publication-ready]
+    if: ${{ (always() && !cancelled() && !inputs.resume_dev6_publication && ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.prepared_run == '' && inputs.publish) || (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' && ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') || (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success' && needs.plan.outputs.prepared_run == inputs.prepared_run)) && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' && (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true')))) && needs.artifact-inputs.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
@@ -1257,8 +1420,9 @@ jobs:
           if-no-files-found: error
 
   dev6-publication-resume:
+    needs: artifact-inputs
     name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication && inputs.prepared_run == ''
+    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication && inputs.prepared_run == '') && needs.artifact-inputs.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     timeout-minutes: 120
     concurrency:
