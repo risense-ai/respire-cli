@@ -23,14 +23,14 @@
         {
           "file": "cli/src/runtime_fetch_tests.rs",
           "test": "offline_install_publishes_manifest_and_retains_one_rollback",
-          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::offline_install_publishes_manifest_and_retains_one_rollback --locked -- --exact",
+          "command": "cargo test -p respire --lib runtime_fetch::runtime_fetch_tests::offline_install_publishes_manifest_and_retains_one_rollback --locked -- --exact",
           "coverage": "source-test",
           "scope": "schema 2 dual digest and complete payload; synthetic archive, not published assets"
         },
         {
           "file": "cli/src/runtime_fetch_tests.rs",
           "test": "metadata_validation_rejects_cross_purpose_documents",
-          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
+          "command": "cargo test -p respire --lib runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
           "coverage": "source-test",
           "scope": "legacy/canonical aliases, conflicts and independent digests"
         }
@@ -65,7 +65,7 @@
         {
           "file": "cli/src/runtime_fetch_tests.rs",
           "test": "metadata_validation_rejects_cross_purpose_documents",
-          "command": "cargo test -p respire --bin rsrs runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
+          "command": "cargo test -p respire --lib runtime_fetch::runtime_fetch_tests::metadata_validation_rejects_cross_purpose_documents --locked -- --exact",
           "coverage": "source-test",
           "scope": "legacy/canonical aliases, conflicts and independent digests"
         }

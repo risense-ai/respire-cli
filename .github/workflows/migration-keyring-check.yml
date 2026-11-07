@@ -1,6 +1,9 @@
 name: Native migration credential fixture
 
 on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       runtime_candidate_sha:
@@ -30,6 +33,7 @@ permissions:
 
 jobs:
   native-fixture:
+    if: github.event_name == 'workflow_dispatch'
     name: Native credentials (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 5
@@ -56,6 +60,7 @@ jobs:
           if-no-files-found: error
 
   secret-service-fixture:
+    if: github.event_name == 'workflow_dispatch'
     name: Isolated Secret Service credentials
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -82,7 +87,7 @@ jobs:
           if-no-files-found: error
 
   targeted-native-migration:
-    if: inputs.release_run_id != ''
+    if: github.event_name == 'workflow_dispatch' && inputs.release_run_id != ''
     name: Targeted migration (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -197,33 +202,48 @@ jobs:
           if-no-files-found: error
 
   source-account-regression:
-    if: inputs.runtime_candidate_sha != ''
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.runtime_candidate_sha != '') ||
+      (github.event_name == 'pull_request' && github.repository == 'risense-ai/respire-cli' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'integrate/shared-host-frontend-20261107')
     name: Original account regression (source candidate)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
+      CLI_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '7711a88939c9923c5b519cc5af7909ff784d2c9f' || inputs.runtime_candidate_sha }}
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RSRS_ENGINE: cpu
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ env.CLI_SHA }}
           persist-credentials: false
       - name: Require exact candidate source identities
         env:
-          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
+          CLI_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CLI_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          CLI_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = risense-ai/respire-cli
           [[ "$RUNTIME_SHA" =~ ^[a-f0-9]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          [[ "$CLI_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CLI_SHA"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$CLI_SHA" = "$CLI_HEAD_SHA"
+            test "$CLI_HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
+            test "$CLI_HEAD_REF" = integrate/shared-host-frontend-20261107
+            test "$RUNTIME_SHA" = 7711a88939c9923c5b519cc5af7909ff784d2c9f
+          fi
           test "$RUNNER_ARCH" = X64
           test "$(uname -m)" = x86_64
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-runtime
-          ref: ${{ inputs.runtime_candidate_sha }}
+          ref: ${{ env.RUNTIME_SHA }}
           path: .account-runtime
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -234,8 +254,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Bind the candidate Runtime and SDK locks
-        env:
-          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
         run: |
           set -euo pipefail
           test "$(git -C .account-runtime rev-parse HEAD)" = "$RUNTIME_SHA"
@@ -287,12 +305,10 @@ jobs:
           sudo apt-get install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
       - name: Execute the original account regression with the offline candidate
-        env:
-          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
         run: |
           python -B scripts/native-account-candidate.py \
             --root "$RUNNER_TEMP/source-account-regression" \
-            --cli-source "$PWD" --cli-sha "$GITHUB_SHA" \
+            --cli-source "$PWD" --cli-sha "$CLI_SHA" \
             --runtime-source "$PWD/.account-runtime" --runtime-sha "$RUNTIME_SHA" \
             --cli "$RUNNER_TEMP/account-cli-target/debug/rsrs" \
             --runtime "$RUNNER_TEMP/account-runtime-target/debug/rsrs-runtime" \

@@ -242,8 +242,11 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Intel dev.5 is deferred; source CI adds integration coverage and credential uploads.
-  assert.equal(uploads, 57, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
+  // Retain all prior uploads plus the sanitized source-account candidate result.
+  assert.equal(uploads, 58, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
+  const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
+  assert.match(candidate, /name: source-account-regression-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+  assert.match(candidate, /path: \$\{\{ runner.temp \}\}\/source-account-regression\/result\.json/);
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
