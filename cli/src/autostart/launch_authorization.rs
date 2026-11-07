@@ -4,6 +4,9 @@ use super::super::{
 };
 use anyhow::{Context, Result};
 
+#[path = "shared_host.rs"]
+pub(super) mod shared_host;
+
 #[path = "control.rs"]
 pub(crate) mod control;
 #[path = "identity_write_control.rs"]

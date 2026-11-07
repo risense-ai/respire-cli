@@ -346,39 +346,7 @@ pub(super) fn auth_exchange(
     }).map_err(exchange_error)
 }
 
-#[derive(Debug)]
-pub(crate) struct AccountOutcomeUnknown {
-    pub operation_id: String,
-    pub source_profile: std::path::PathBuf,
-    pub register: bool,
-}
-impl std::fmt::Display for AccountOutcomeUnknown {
-    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(output, "account_outcome_unknown operation_id={} source_profile={} register={}; query the same operation, do not replay authentication",
-            self.operation_id, self.source_profile.display(), self.register)
-    }
-}
-impl std::error::Error for AccountOutcomeUnknown {}
-
-pub(crate) fn auth_account_locked(
-    takeover: &LibraryLock,
-    maintenance: &mut super::lifecycle::Maintenance,
-    operation_id: &str,
-    source: &Path,
-    register: bool,
-    operation: AccountControl,
-    completion: Option<&HostAuthAccountResult>,
-) -> Result<ResultEnvelope> {
-    anyhow::ensure!(matches!(&operation, AccountControl::Complete) == completion.is_some(),
-        "account completion requires its original receipt and dedicated grant");
-    auth_exchange(takeover, maintenance, Instant::now() + Duration::from_secs(120),
-        completion.map(|receipt| (source, operation_id, receipt, register)),
-        |binding, identity| account_request(binding, identity, operation_id, operation),
-        |response, request, profile, pid| validate_account_response(response, request, profile, pid, source, register),
-        |error| error.context(AccountOutcomeUnknown {
-            operation_id: operation_id.to_owned(), source_profile: source.to_path_buf(), register,
-        }))
-}
+pub(crate) use respire_host_control::AccountOutcomeUnknown;
 
 fn account_process_start_matches(birth: &str, start_id: &str) -> Result<bool> {
     let prefix = match crate::autostart::Platform::current()? {

@@ -275,7 +275,8 @@ impl StaleOwner {
         let image = Path::new(text(&grant, "image_path")?).canonicalize()?;
         anyhow::ensure!(
             image.is_file()
-                && image != std::env::current_exe()?.canonicalize()?
+                && (crate::embedding::selection().is_some()
+                    || image != std::env::current_exe()?.canonicalize()?)
                 && Path::new(text(&endpoint, "exe")?).canonicalize()? == image
                 && Path::new(text(&endpoint, "image_path")?).canonicalize()? == image
                 && grant["image_sha256"] == health.image_sha256

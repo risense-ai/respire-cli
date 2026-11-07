@@ -258,6 +258,9 @@ fn parse_pin(raw: &str) -> Result<RuntimePin> {
 
 /// True when `version` satisfies the build-time accept range.
 pub fn version_in_accept(version: &str) -> bool {
+    if let Some(selected) = crate::embedding::selection() {
+        return version == selected.version();
+    }
     pinned().is_ok_and(|pin| pin.accept.contains(version))
 }
 
@@ -330,11 +333,17 @@ pub fn installation_root() -> PathBuf {
 
 /// Managed runtime directory: `<installation_root>/runtime/`.
 pub fn runtime_dir() -> PathBuf {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.runtime_dir.clone();
+    }
     installation_root().join("runtime")
 }
 
 /// Shared manifest read and written by both the CLI and client2.
 pub fn manifest_path() -> PathBuf {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.manifest_path.clone();
+    }
     installation_root().join(MANIFEST_FILE)
 }
 
@@ -439,6 +448,16 @@ impl ManagedManifest {
 
 /// Read the managed manifest without validating the binary on disk.
 pub fn read_manifest() -> Result<Option<ManagedManifest>> {
+    if let Some(selected) = crate::embedding::selection() {
+        let runtime = selected.verify()?;
+        // The embedding verifies Client2's selection and inventory. Do not invent
+        // an official release proof for that independently validated layout.
+        return Ok(Some(ManagedManifest {
+            version: runtime.version().to_owned(),
+            sha256: runtime.sha256().to_owned(),
+            release: None,
+        }));
+    }
     let path = manifest_path();
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -488,6 +507,13 @@ fn safe_metadata_path(raw: &str) -> bool {
 }
 
 fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
+    if let Some(selected) = crate::embedding::selection() {
+        let runtime = selected.verify()?;
+        anyhow::ensure!(manifest.version == runtime.version()
+            && manifest.sha256.eq_ignore_ascii_case(runtime.sha256()),
+            "embedded Runtime differs from its selected manifest");
+        return Ok(runtime.path().to_path_buf());
+    }
     (|| {
         let triple = release_triple()?;
         let metadata = manifest.bound_metadata(&triple)?;
@@ -531,6 +557,9 @@ pub enum ResolvedRuntime {
 /// verified), the portable layout next to this CLI binary, the legacy combined
 /// stable location, and finally [`download_and_install`].
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
+    if let Some(selected) = crate::embedding::selection() {
+        return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
+    }
     if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_BIN") {
         let explicit = PathBuf::from(raw.trim());
         anyhow::ensure!(
@@ -1596,6 +1625,11 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
 /// Materialization and managed replacement must use the same read-only boundary
 /// before changing the old CLI image, supervisor registration or maintenance state.
 pub(crate) fn require_automatic_migration_safe() -> Result<()> {
+    if let Some(selected) = crate::embedding::selection() {
+        // Client2 has already selected this image. Host commands do not migrate
+        // or materialize a CLI; installation entry points reject embedding.
+        return selected.verify().map(|_| ());
+    }
     automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
 
@@ -1609,6 +1643,8 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -1717,6 +1753,8 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
 /// Managed activation requires schema 2 with a complete file inventory;
 /// parsing historical schema-1 metadata alone does not establish this proof.
 pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
     anyhow::ensure!(
         archive.is_file(),
         "archive {} does not exist",
@@ -1844,6 +1882,8 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
 /// Remove old version directories, keeping the current version and the newest
 /// remaining one as the rollback point. Returns the removed versions.
 pub fn clean_old() -> Result<Vec<String>> {
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
     let keep = list_installed()?
         .iter()
         .find(|entry| entry.current)

@@ -1,188 +1,88 @@
-//! Host lifecycle for private account control; business credentials stay in Runtime.
+//! CLI account adapter. Shared host control owns transactions and continuations.
+//! The existing keygen flow remains separate from account and key recovery.
 
 use anyhow::{Context, Result};
 use respire_commands::output::{Item, ResultEnvelope, Status};
+use respire_protocol::host_control::{
+    HostAuthAccountResult, HostAuthAuthorization, HostAuthLoginContinuation,
+};
 use respire_protocol::{HostAuthOutcome, HostAuthResult};
-use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult, HostAuthAuthorization,
-    HostAuthLoginContinuation};
 use std::path::Path;
 
-use super::launch_authorization::control;
 use super::super::lifecycle;
+use super::launch_authorization::{control, shared_host};
 
-/// Only a live login loop may retain the original maintenance and serving state.
-pub(crate) struct AccountContinuation {
-    operation_id: String,
-    source: std::path::PathBuf,
-    original_identity: respire_protocol::HostAuthIdentity,
-    was_serving: bool,
-    maintenance: lifecycle::Maintenance,
-}
+pub(crate) use respire_host_control::AccountContinuation;
 
 pub(crate) fn control_register(
-    addr: &str, user: &str, password: &str, super_password: Option<&str>,
+    addr: &str,
+    user: &str,
+    password: &str,
+    super_password: Option<&str>,
 ) -> Result<ResultEnvelope> {
-    account_operation(&uuid::Uuid::new_v4().to_string(), None, true,
-        control::AccountControl::Register { addr: addr.to_owned(), user: user.to_owned(),
-            password: password.to_owned(), super_password: super_password.map(str::to_owned) }, None)
+    if crate::output_state::HOST_RPC_OUTPUT.get() {
+        anyhow::ensure!(super_password.is_none(), "host registration does not accept supplied recovery material");
+        return shared_host::accounts().register_or_query(addr, user, password);
+    }
+    shared_host::accounts().register(addr, user, password, super_password)
 }
 
 pub(crate) fn control_login(
-    addr: &str, user: &str, authorization: HostAuthAuthorization, super_password: &str,
+    addr: &str,
+    user: &str,
+    authorization: HostAuthAuthorization,
+    super_password: &str,
 ) -> Result<ResultEnvelope> {
-    control_login_step(addr, user, authorization, Some(super_password), HostAuthLoginContinuation::default(), None, &mut None)
+    control_login_step(
+        addr,
+        user,
+        authorization,
+        Some(super_password),
+        HostAuthLoginContinuation::default(),
+        None,
+        &mut None,
+    )
 }
 
-/// Continue only a known AwaitingInput receipt; an uncertain operation is queried, never replayed.
+/// Preserve the original live maintenance capability through every input prompt.
 pub(crate) fn control_login_step(
-    addr: &str, user: &str, authorization: HostAuthAuthorization, super_password: Option<&str>,
-    input: HostAuthLoginContinuation, resume: Option<&HostAuthAccountResult>,
+    addr: &str,
+    user: &str,
+    authorization: HostAuthAuthorization,
+    super_password: Option<&str>,
+    input: HostAuthLoginContinuation,
+    resume: Option<&HostAuthAccountResult>,
     continuation: &mut Option<AccountContinuation>,
 ) -> Result<ResultEnvelope> {
-    let operation = control::AccountControl::LoginStep {
-        addr: addr.to_owned(), user: user.to_owned(), authorization,
-        super_password: super_password.map(str::to_owned), input,
-    };
-    if let Some(previous) = resume {
-        control::validate_account_receipt(previous, &previous.operation_id, &previous.source_profile, false)?;
-        if previous.outcome != HostAuthAccountOutcome::AwaitingInput {
-            return control_account_result(&previous.operation_id, &previous.source_profile, false);
-        }
-        let status = previous.login.as_ref().context("login continuation status is missing")?;
-        anyhow::ensure!(status.user == user && status.addr.trim_end_matches('/') == addr.trim().trim_end_matches('/'),
-            "login continuation user or server differs from the original operation");
-        return account_operation(&previous.operation_id, Some(&previous.source_profile), false, operation, Some(continuation));
+    if crate::output_state::HOST_RPC_OUTPUT.get() && resume.is_none() && continuation.is_none() {
+        return shared_host::accounts().login_or_continue(addr, user, authorization, super_password, input);
     }
-    account_operation(&uuid::Uuid::new_v4().to_string(), None, false, operation, Some(continuation))
+    shared_host::accounts().login_step(
+        addr,
+        user,
+        authorization,
+        super_password,
+        input,
+        resume,
+        continuation,
+    )
 }
 
-/// Original source and operation come from AccountOutcomeUnknown, never a new authentication.
+/// Query only the original operation, never replay authentication.
 pub(crate) fn control_account_result(
-    operation_id: &str, source_profile: &Path, register: bool,
+    operation_id: &str,
+    source_profile: &Path,
+    register: bool,
 ) -> Result<ResultEnvelope> {
-    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Result, None)
+    shared_host::accounts().result(operation_id, source_profile, register)
 }
 
-/// Explicit local compensation only; Runtime decides whether the vault still permits it.
 pub(crate) fn control_account_rollback(
-    operation_id: &str, source_profile: &Path, register: bool,
+    operation_id: &str,
+    source_profile: &Path,
+    register: bool,
 ) -> Result<ResultEnvelope> {
-    account_operation(operation_id, Some(source_profile), register, control::AccountControl::Rollback, None)
-}
-
-fn account_operation(
-    operation_id: &str, original_source: Option<&Path>, register: bool, operation: control::AccountControl,
-    mut continuation: Option<&mut Option<AccountContinuation>>,
-) -> Result<ResultEnvelope> {
-    crate::runtime_policy::require_host("private account control")?;
-    let id = uuid::Uuid::parse_str(operation_id).context("invalid account operation ID")?;
-    anyhow::ensure!(id.get_version_num() == 4 && id.to_string() == operation_id,
-        "account operation ID must be a canonical random UUID");
-    control::installed_auth_runtime()?;
-    let (_, selected) = respire_client_host::config::control_roots()?;
-    let takeover = crate::runtime_policy::takeover_lock()?;
-    if original_source.is_none() {
-        std::fs::create_dir_all(&selected)?;
-    }
-    let source = original_source.unwrap_or(&selected).canonicalize()?;
-    let saved = continuation.as_mut().and_then(|slot| slot.take());
-    let is_continuation = original_source.is_some()
-        && matches!(&operation, control::AccountControl::LoginStep { .. });
-    anyhow::ensure!(saved.is_some() == is_continuation,
-        "login continuation requires its original live maintenance context; query the original operation");
-    let health = crate::rpc::probe_runtime()?;
-    anyhow::ensure!(health.is_some() || !crate::rpc::endpoint_path().try_exists()?,
-        "account control blocked: recorded owner has no verifiable health/drain receipt");
-    let (mut maintenance, original_identity, restore_owner) = if let Some(saved) = saved {
-        anyhow::ensure!(!register && saved.operation_id == operation_id && saved.source == source
-            && selected.canonicalize()? == source
-            && control::identity(&source)? == saved.original_identity,
-            "login continuation changed its original operation or source identity");
-        (saved.maintenance, saved.original_identity, Some(saved.was_serving))
-    } else {
-        anyhow::ensure!(lifecycle::current_boot_token().is_none(),
-            "private account control must own its maintenance transaction");
-        let original_identity = control::identity(&source)?;
-        let maintenance = if original_source.is_some() {
-            lifecycle::with_explicit_recovery(lifecycle::begin_maintenance_locked)?
-        } else {
-            lifecycle::begin_maintenance_locked()?
-        };
-        (maintenance, original_identity, None)
-    };
-    let restore_owner = restore_owner.or_else(|| original_source.is_none().then_some(health.is_some()));
-    // Both service-managed and explicit host-local transactions own a durable marker.
-    anyhow::ensure!(maintenance.auth_launch_binding(&selected.canonicalize()?)?.is_some(),
-        "account control requires persistent host maintenance; no authentication was sent");
-    maintenance.check_account_runtime()?;
-    if let Some(health) = health.as_ref() {
-        maintenance.drain_runtime(health)?;
-    }
-    let unknown = || control::AccountOutcomeUnknown {
-        operation_id: operation_id.to_owned(), source_profile: source.clone(), register,
-    };
-    let mut envelope = if let (Some(_), control::AccountControl::LoginStep { addr, user, .. }) = (original_source, &operation) {
-        // Query again under takeover: a stale prompt receipt cannot authorize replay after uncertainty.
-        let queried = control::auth_account_locked(&takeover, &mut maintenance,
-            operation_id, &source, register, control::AccountControl::Result, None)?;
-        let receipt: HostAuthAccountResult = serde_json::from_value(queried.summary.clone())
-            .map_err(|_| anyhow::anyhow!("invalid login continuation receipt shape").context(unknown()))?;
-        if receipt.outcome == HostAuthAccountOutcome::AwaitingInput {
-            let status = receipt.login.as_ref().context("login continuation status is missing")?;
-            anyhow::ensure!(status.user == *user && status.addr.trim_end_matches('/') == addr.trim().trim_end_matches('/'),
-                "queried login user or server differs from the original operation");
-            control::auth_account_locked(&takeover, &mut maintenance,
-                operation_id, &source, register, operation, None)?
-        } else {
-            queried
-        }
-    } else {
-        control::auth_account_locked(&takeover, &mut maintenance,
-            operation_id, &source, register, operation, None)?
-    };
-    let mut receipt: HostAuthAccountResult = serde_json::from_value(envelope.summary.clone())
-        .map_err(|_| anyhow::anyhow!("invalid account receipt shape"))?;
-    if matches!(receipt.outcome, HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Committed) {
-        maintenance.start_account_target(&source, operation_id, &receipt, register)
-            .map_err(|error| error.context(unknown()))?;
-        if matches!(receipt.outcome, HostAuthAccountOutcome::AwaitingVerification) {
-            envelope = control::auth_account_locked(&takeover, &mut maintenance, operation_id,
-                &source, register, control::AccountControl::Complete, Some(&receipt))?;
-            receipt = serde_json::from_value(envelope.summary.clone())
-                .map_err(|_| anyhow::anyhow!("invalid account completion receipt shape"))?;
-        }
-    }
-    match receipt.outcome {
-        HostAuthAccountOutcome::AwaitingInput => {
-            if let (Some(slot), Some(was_serving)) = (continuation, restore_owner) {
-                *slot = Some(AccountContinuation {
-                    operation_id: operation_id.to_owned(), source, original_identity,
-                    was_serving, maintenance,
-                });
-            }
-            Ok(envelope)
-        }
-        HostAuthAccountOutcome::Committed => {
-            control::verify_account_target(&receipt, operation_id, &source, register)
-                .map_err(|error| error.context(unknown()))?;
-            maintenance.finish().map_err(|error| error.context(unknown()))?;
-            Ok(envelope)
-        }
-        HostAuthAccountOutcome::RolledBack => {
-            // Reconnected callers cannot infer whether the original source was serving.
-            if let Some(was_serving) = restore_owner {
-                anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == source
-                    && control::identity(&source)? == original_identity,
-                    "account rollback did not restore the original source identity; maintenance retained");
-                if was_serving {
-                    maintenance.start_account_runtime()?;
-                }
-                maintenance.finish()?;
-            }
-            Ok(envelope)
-        }
-        HostAuthAccountOutcome::AwaitingVerification | HostAuthAccountOutcome::Unknown => Err(unknown().into()),
-    }
+    shared_host::accounts().rollback(operation_id, source_profile, register)
 }
 
 /// New keygen operation. The legacy pass argument is deliberately not a credential.

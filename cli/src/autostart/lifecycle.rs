@@ -87,7 +87,7 @@ fn controller_alive(value: &Marker) -> Result<bool> {
     Ok(manager::process_birth(value.owner_pid)?.as_deref() == Some(value.owner_birth.as_str()))
 }
 
-fn save(config: &mut Registration) -> Result<()> {
+pub(super) fn save(config: &mut Registration) -> Result<()> {
     let path = control_path(&config.installation);
     let bytes = serde_json::to_vec_pretty(config)?;
     let result = private_write(&path, &bytes, config.digest.as_deref());
@@ -872,7 +872,7 @@ fn raw_stop_owned(config: &Registration) -> Result<()> {
 }
 
 // Call only after drain_occupant has verified the child's final receipt and exit.
-fn stop_drained_supervisor(config: &Registration) -> Result<()> {
+pub(super) fn stop_drained_supervisor(config: &Registration) -> Result<()> {
     manager::stop(config)?;
     anyhow::ensure!(
         !manager::inspect(config)?.running && !crate::rpc::endpoint_path().try_exists()?,
@@ -881,7 +881,7 @@ fn stop_drained_supervisor(config: &Registration) -> Result<()> {
     Ok(())
 }
 
-fn wait_ready(config: &Registration) -> Result<()> {
+pub(super) fn wait_ready(config: &Registration) -> Result<()> {
     owned(config)?;
     manager::inspect(config)?;
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1181,7 +1181,7 @@ fn record_attempt(config: &Registration, now: u64) -> Result<bool> {
     )?;
     Ok(true)
 }
-fn reset_attempts(config: &Registration) -> Result<()> {
+pub(super) fn reset_attempts(config: &Registration) -> Result<()> {
     let (mut attempts, digest) = read_attempts(config)?;
     attempts.starts.clear();
     private_write(

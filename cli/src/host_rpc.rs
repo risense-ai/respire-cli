@@ -197,3 +197,88 @@ pub(crate) fn serve() -> Result<i32> {
     stdout.flush()?;
     Ok(captured.exit)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(method: &str, params: &[(&str, &str)]) -> Request {
+        Request {
+            v: 1,
+            id: "original-client2-request".into(),
+            method: method.into(),
+            params: params
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn original_offline_recovery_keeps_empty_server_and_user() -> Result<()> {
+        let command = arguments(&request(
+            "auth.recover",
+            &[
+                ("super", "synthetic-super"),
+                ("kdf_salt", "synthetic-salt"),
+                ("wrapped_urk", "synthetic-wrap"),
+                ("urk_nonce", "synthetic-nonce"),
+            ],
+        ))?;
+        assert_eq!(command[1], "fivekeys");
+        assert!(command.iter().any(|value| value == "--pass="));
+        assert!(!command
+            .iter()
+            .any(|value| value.starts_with("--addr=") || value.starts_with("--user=")));
+        Ok(())
+    }
+
+    #[test]
+    fn original_password_totp_form_retains_its_existing_fields() -> Result<()> {
+        let command = arguments(&request(
+            "auth.login",
+            &[
+                ("addr", "http://127.0.0.1:9"),
+                ("user", "synthetic-user"),
+                ("password", "synthetic-password"),
+                ("totp", "123456"),
+            ],
+        ))?;
+        assert!(command.iter().any(|value| value == "--interactive"));
+        assert!(!command.iter().any(|value| value.contains("123456")));
+        assert!(arguments(&request(
+            "auth.login",
+            &[
+                ("user", "synthetic-user"),
+                ("password", "synthetic-password"),
+                ("totp", "invalid")
+            ]
+        ))
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn existing_transport_rejects_unknown_method_fields_and_missing_inputs() {
+        assert!(arguments(&request("auth.unknown", &[])).is_err());
+        assert!(arguments(&request("auth.login", &[("user", "synthetic-user")])).is_err());
+        assert!(arguments(&request("auth.reset", &[("unexpected", "value")])).is_err());
+        assert!(arguments(&request(
+            "auth.recover",
+            &[
+                ("kdf_salt", "salt"),
+                ("wrapped_urk", "wrap"),
+                ("urk_nonce", "nonce")
+            ]
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn existing_failure_scrubber_removes_synthetic_values() {
+        let mut value =
+            json!({"errors":["synthetic-secret", {"detail":"prefix synthetic-secret suffix"}]});
+        scrub(&mut value, &["synthetic-secret"]);
+        assert!(!value.to_string().contains("synthetic-secret"));
+    }
+}

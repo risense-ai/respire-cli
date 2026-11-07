@@ -70,7 +70,7 @@ pub fn auth_session_identity(
     let bytes = read_identity_record(&path)?;
     let session: Value = serde_json::from_slice(&bytes).context("invalid auth session JSON")?;
     let object = session.as_object().context("auth session must be an object")?;
-    if let Some(user) = object.get("user") {
+    if let Some(user) = object.get("user").filter(|user| user.as_str() != Some("")) {
         let user = user.as_str().filter(|user| !user.is_empty())
             .context("bound auth session needs a nonempty user")?;
         return Ok(AuthSessionIdentity::Bound {
@@ -80,9 +80,10 @@ pub fn auth_session_identity(
     }
     let fields = ["kdf_salt", "wrapped_urk", "urk_nonce", "keyring_account",
         "keyring_backend", "auth_operation_id"];
-    anyhow::ensure!(object.len() == 7 && session["vault_version"] == 4
+    let keygen = object.len() == 7 && session.get("user").is_none() && session["vault_version"] == 4;
+    anyhow::ensure!((keygen || offline_recovery_candidate(&session))
         && fields.iter().all(|field| session[*field].as_str().is_some_and(|value| !value.is_empty())),
-        "unbound auth session must be an exact keygen candidate");
+        "unbound auth session must be an exact keygen or offline recovery candidate");
     anyhow::ensure!(session["keyring_backend"] != "kernel",
         "unbound auth requires a persistent credential backend");
     let operation_id = session["auth_operation_id"].as_str()
@@ -97,6 +98,75 @@ pub fn auth_session_identity(
         operation_id: operation_id.to_owned(),
         session_sha256: sha256(&bytes),
     })
+}
+
+fn offline_recovery_candidate(session: &Value) -> bool {
+    let Some(object) = session.as_object() else { return false; };
+    let Some(version @ (1 | 2 | 4)) = session["vault_version"].as_i64() else { return false; };
+    session["user"] == "" && session["addr"] == ""
+        && object.len() == (if version == 1 { 10 } else { 9 })
+        && (version != 1 || session["secret"].as_str().is_some_and(|value| !value.is_empty()))
+        && object.keys().all(|field| matches!(field.as_str(), "user" | "addr" | "vault_version"
+            | "kdf_salt" | "wrapped_urk" | "urk_nonce" | "keyring_account" | "keyring_backend" | "auth_operation_id")
+            || (version == 1 && field == "secret"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unbound_reader_keeps_keygen_strict_and_requires_offline_receipt_fields() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let path = root.path().join("session.json");
+        let session = serde_json::json!({"vault_version":4, "kdf_salt":"salt", "wrapped_urk":"wrap",
+            "urk_nonce":"nonce", "keyring_account":"login-fixture", "keyring_backend":"native",
+            "auth_operation_id":"00000000-0000-4000-8000-000000000001"});
+        let read = |value: &Value| -> Result<AuthSessionIdentity> {
+            std::fs::write(&path, serde_json::to_vec(value)?)?;
+            auth_session_identity(root.path(), |_| "synthetic-digest".to_owned())
+        };
+        assert!(matches!(read(&session)?, AuthSessionIdentity::Unbound { .. }));
+        let mut changed = session.clone();
+        changed["vault_version"] = serde_json::json!(2);
+        assert!(read(&changed).is_err());
+        changed = session.clone();
+        changed["user"] = serde_json::json!("");
+        assert!(read(&changed).is_err());
+        changed["addr"] = serde_json::json!("");
+        assert!(matches!(read(&changed)?, AuthSessionIdentity::Unbound { .. }));
+        for (field, value) in [("keyring_backend", "kernel"), ("auth_operation_id", "foreign-operation"),
+            ("kdf_salt", ""), ("token", "unexpected-token")] {
+            let mut invalid = changed.clone();
+            invalid[field] = serde_json::json!(value);
+            assert!(read(&invalid).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn offline_recovery_claim_rejects_cloud_or_plaintext_material() {
+        for version in [1, 2, 4] {
+            let mut session = serde_json::json!({"user":"", "addr":"", "vault_version":version,
+                "kdf_salt":"salt", "wrapped_urk":"wrap", "urk_nonce":"nonce",
+                "keyring_account":"login-fixture", "keyring_backend":"native",
+                "auth_operation_id":"00000000-0000-4000-8000-000000000001"});
+            if version == 1 { session["secret"] = serde_json::json!("synthetic-account-secret"); }
+            assert!(offline_recovery_candidate(&session));
+            for field in ["token", "session_id", "pass", "super", "secret_key"] {
+                let mut changed = session.clone();
+                changed[field] = serde_json::json!("unexpected");
+                assert!(!offline_recovery_candidate(&changed));
+            }
+            for (field, value) in [("user", "named-account"), ("addr", "https://never-contact.invalid")] {
+                let mut changed = session.clone();
+                changed[field] = serde_json::json!(value);
+                assert!(!offline_recovery_candidate(&changed));
+            }
+            session["vault_version"] = serde_json::json!(3);
+            assert!(!offline_recovery_candidate(&session));
+        }
+    }
 }
 
 // Share the control-root boundary, including its exact system-ancestor aliases.

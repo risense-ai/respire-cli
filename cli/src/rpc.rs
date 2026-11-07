@@ -466,6 +466,11 @@ pub fn runtime_entry(flags: RuntimeFlags) -> Result<()> {
 
 /// Detect an explicit CLI selection so callers can reject it, never authorize it.
 pub(crate) fn explicit_cli_runtime(executable: &std::path::Path) -> Result<bool> {
+    if let Some(selected) = crate::embedding::selection() {
+        anyhow::ensure!(crate::mcp::same_path(executable, selected.verify()?.path()),
+            "embedded host selected a different Runtime image");
+        return Ok(false);
+    }
     let Some(selected) = respire::env::var("RSRS_RUNTIME_BIN")
         .ok()
         .map(|value| PathBuf::from(value.trim()))
@@ -489,7 +494,8 @@ pub(crate) fn resolve_runtime_executable() -> Result<PathBuf> {
         }
     };
     anyhow::ensure!(
-        !crate::mcp::same_path(&executable, &std::env::current_exe()?),
+        crate::embedding::selection().is_some()
+            || !crate::mcp::same_path(&executable, &std::env::current_exe()?),
         "CLI image cannot substitute for the independent Runtime; repair the selected Runtime"
     );
     Ok(executable)
@@ -755,7 +761,9 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
     let Some(expected) = override_bin.or(managed).or(portable) else {
         return Ok(false);
     };
-    if crate::mcp::exe_matches_dest(&health.exe, &std::env::current_exe()?) {
+    if crate::embedding::selection().is_none()
+        && crate::mcp::exe_matches_dest(&health.exe, &std::env::current_exe()?)
+    {
         return Ok(false);
     }
     Ok(!health.data_dir.is_empty()

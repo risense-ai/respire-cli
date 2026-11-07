@@ -183,6 +183,10 @@ pub fn mcp_http_url(web_url: &str) -> String {
 
 /// Copy this process's native binary to `stable_bin_path()` when missing or stale.
 pub fn materialize_bin() -> Result<PathBuf, String> {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.verify().map(|runtime| runtime.path().to_path_buf())
+            .map_err(|error| error.to_string());
+    }
     crate::runtime_policy::require_host("runtime binary installation")
         .map_err(|error| error.to_string())?;
     let dest = stable_bin_path();

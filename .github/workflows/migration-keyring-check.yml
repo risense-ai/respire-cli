@@ -3,6 +3,11 @@ name: Native migration credential fixture
 on:
   workflow_dispatch:
     inputs:
+      runtime_candidate_sha:
+        description: Optional exact unpublished Runtime source commit for the original account regression; CLI is this workflow commit
+        required: false
+        default: ''
+        type: string
       release_run_id:
         description: Optional validated Release run for targeted native migration; blank runs credential fixtures only
         required: false
@@ -189,4 +194,113 @@ jobs:
             ${{ runner.temp }}/targeted-migration-identity.json
             ${{ runner.temp }}/targeted-native-migration/migration-coverage.json
             ${{ runner.temp }}/targeted-native-migration/migration-platform-gate.json
+          if-no-files-found: error
+
+  source-account-regression:
+    if: inputs.runtime_candidate_sha != ''
+    name: Original account regression (source candidate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      RSRS_ENGINE: cpu
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require exact candidate source identities
+        env:
+          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = risense-ai/respire-cli
+          [[ "$RUNTIME_SHA" =~ ^[a-f0-9]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-runtime
+          ref: ${{ inputs.runtime_candidate_sha }}
+          path: .account-runtime
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Bind the candidate Runtime and SDK locks
+        env:
+          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .account-runtime rev-parse HEAD)" = "$RUNTIME_SHA"
+          cmp sdk/core-sdk.lock.json .account-runtime/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .account-runtime/crates/core-sdk/core-sdk.lock.json
+          test "$(rustc -Vv | sed -n 's/^host: //p')" = x86_64-unknown-linux-gnu
+          python -B scripts/test-native-account-candidate.py
+          python -B scripts/dev-secret-service-keyring-selftest.py --self-test
+      - name: Resolve the existing pinned SDK cache
+        id: account-sdk
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key x86_64-unknown-linux-gnu)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: account-sdk-restore
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.account-sdk.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Verify the exact SDK cache and bytes without a private token
+        env:
+          EXPECTED_KEY: ${{ steps.account-sdk.outputs.key }}
+          MATCHED_KEY: ${{ steps.account-sdk-restore.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
+          node scripts/fetch-core-sdk.mjs x86_64-unknown-linux-gnu
+      - name: Build the exact CLI, Runtime and original business harness
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          export RSRS_CORE_SDK_DIR="$PWD/.sdk/x86_64-unknown-linux-gnu"
+          cargo build --locked -p respire --bin rsrs --target-dir "$RUNNER_TEMP/account-cli-target"
+          cargo build --locked --manifest-path .account-runtime/Cargo.toml -p respire_runtime --bin rsrs-runtime --target-dir "$RUNNER_TEMP/account-runtime-target"
+          cargo test --locked --manifest-path .account-runtime/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir "$RUNNER_TEMP/account-runtime-target" > "$RUNNER_TEMP/account-harness-build.jsonl"
+          node .account-runtime/scripts/stage-core-runtime.mjs "$RUNNER_TEMP/account-runtime-target/debug"
+          node .account-runtime/scripts/stage-core-runtime.mjs "$RUNNER_TEMP/account-runtime-target/debug/examples"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          records = [json.loads(line) for line in (Path(os.environ['RUNNER_TEMP']) / 'account-harness-build.jsonl').read_text().splitlines()]
+          binaries = [row['executable'] for row in records if row.get('reason') == 'compiler-artifact' and row.get('target', {}).get('name') == 'cli_business_tests' and row.get('profile', {}).get('test') and row.get('executable')]
+          assert len(binaries) == 1, 'Require the actual original account harness'
+          with open(os.environ['GITHUB_ENV'], 'a') as output:
+              output.write(f'ACCOUNT_HARNESS={Path(binaries[0]).resolve()}\n')
+          PY
+      - name: Install the existing private credential fixture dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+      - name: Execute the original account regression with the offline candidate
+        env:
+          RUNTIME_SHA: ${{ inputs.runtime_candidate_sha }}
+        run: |
+          python -B scripts/native-account-candidate.py \
+            --root "$RUNNER_TEMP/source-account-regression" \
+            --cli-source "$PWD" --cli-sha "$GITHUB_SHA" \
+            --runtime-source "$PWD/.account-runtime" --runtime-sha "$RUNTIME_SHA" \
+            --cli "$RUNNER_TEMP/account-cli-target/debug/rsrs" \
+            --runtime "$RUNNER_TEMP/account-runtime-target/debug/rsrs-runtime" \
+            --harness "$ACCOUNT_HARNESS"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-account-regression-${{ github.run_id }}-${{ github.run_attempt }}
+          retention-days: 1
+          path: ${{ runner.temp }}/source-account-regression/result.json
           if-no-files-found: error

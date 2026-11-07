@@ -1569,6 +1569,7 @@ dependencies = [
  "ratatui",
  "respire_client_host",
  "respire_commands",
+ "respire_host_control",
  "respire_protocol",
  "respire_spawn",
  "rpassword",
@@ -1723,6 +1724,23 @@ dependencies = [
  "respire_protocol",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "respire_host_control"
+version = "0.1.0-dev.1"
+dependencies = [
+ "anyhow",
+ "hex",
+ "respire_client_host",
+ "respire_commands",
+ "respire_protocol",
+ "respire_spawn",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
