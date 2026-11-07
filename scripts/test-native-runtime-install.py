@@ -1,5 +1,6 @@
 """Offline fixture installation tests; no credentials, downloads or live processes."""
 import hashlib
+import ast
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,19 @@ from native_fixture_process import install_official_runtime
 
 
 class FixtureInstallationTests(unittest.TestCase):
+    def test_upgrade_fixture_installs_before_creating_legacy_session_state(self):
+        tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+        installs = [node.lineno for node in calls if isinstance(node.func, ast.Name)
+                    and node.func.id in ('install_published_runtime', 'install_official_runtime')]
+        session_writes = [node.lineno for node in calls if isinstance(node.func, ast.Attribute)
+                          and node.func.attr == 'write_bytes'
+                          and any(isinstance(part, ast.Constant) and part.value == 'session.json'
+                                  for part in ast.walk(node.func.value))]
+        self.assertEqual(len(installs), 2)
+        self.assertTrue(session_writes)
+        self.assertLess(max(installs), min(session_writes))
+
     def run_fixture(self, fault=None):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / 'fixture'
