@@ -1603,6 +1603,16 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         None
     };
     let legacy = crate::mcp::stable_bin_path();
+    // Windows can report NotFound for `file/rsrs.exe`, unlike Unix ENOTDIR.
+    // Missing leaf bytes are not evidence that the installation path is usable.
+    // Inspect existing ancestors before any takeover lock or lifecycle write.
+    for parent in legacy.ancestors().skip(1).filter(|path| !path.as_os_str().is_empty()) {
+        match fs::metadata(parent) {
+            Ok(metadata) => anyhow::ensure!(metadata.is_dir(), LegacyRuntimeMigrationRequired),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+        }
+    }
     match fs::symlink_metadata(&legacy) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(selected),
         Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),

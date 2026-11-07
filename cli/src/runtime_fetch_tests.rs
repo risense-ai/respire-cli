@@ -643,6 +643,35 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
 }
 
 #[test]
+fn automatic_install_rejects_non_directory_binary_ancestors_without_writes() -> Result<()> {
+    let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().join("fresh-installation");
+    let blocked = dir.path().join("blocked");
+    fs::write(&blocked, b"existing non-directory bytes")?;
+    std::env::set_var("RSRS_DATA_DIR", &root);
+    std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+    // Cover Windows PATH_NOT_FOUND as well as Unix ENOTDIR, including a
+    // missing suffix below the obstructing ancestor. Never run/download bytes.
+    for binary_dir in [blocked.clone(), blocked.join("missing/nested")] {
+        std::env::set_var("RSRS_BIN_DIR", &binary_dir);
+        let error = require_automatic_migration_safe()
+            .err().context("non-directory binary ancestor passed admission")?;
+        anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+        let error = download_and_install(None, None)
+            .err().context("non-directory binary ancestor triggered installation")?;
+        anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
+        anyhow::ensure!(!root.exists(), "rejected binary path created installation state");
+        anyhow::ensure!(fs::read(&blocked)? == b"existing non-directory bytes");
+    }
+    // A genuinely missing directory chain still admits a fresh install.
+    std::env::set_var("RSRS_BIN_DIR", dir.path().join("fresh/missing/bin"));
+    require_automatic_migration_safe()?;
+    anyhow::ensure!(!root.exists() && !dir.path().join("fresh").exists());
+    Ok(())
+}
+
+#[test]
 fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     let dir = tempfile::tempdir()?;
