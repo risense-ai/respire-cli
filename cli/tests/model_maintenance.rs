@@ -823,3 +823,143 @@ fn anonymous_owner_host_config_reports_workers_without_restarting_the_owner() ->
     runtime.stop()?;
     Ok(())
 }
+
+#[test]
+fn anonymous_owner_profile_switch_validates_and_serves_the_selected_target() -> Result<()> {
+    let mut runtime = OwnedRuntime::new()?;
+    let source = runtime.fixture.profile.clone();
+    let original = runtime.start()?;
+    let target = runtime.fixture.root.join("profiles/config-target");
+    std::fs::create_dir(&target)?;
+    let target = target.canonicalize()?;
+    std::fs::write(target.join("keep.txt"), b"synthetic target marker")?;
+    let (output, result) = runtime.fixture.command(&[
+        "config",
+        "--data-dir",
+        target.to_str().context("target is not UTF-8")?,
+        "--autosync",
+        "true",
+    ])?;
+    anyhow::ensure!(output.status.success(), "profile switch failed: {result}");
+    // Future health/normal-stop checks must use the committed target, not the old profile.
+    runtime.fixture.profile = target.clone();
+    assert_eq!(result["command"], "config");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["errors"], json!([]));
+    runtime.verify_drained(&original)?;
+    let current = runtime.health()?;
+    runtime.last_owner = Some(current.clone());
+    assert_ne!(current.instance_id, original.instance_id);
+    assert_ne!(
+        (current.pid, &current.process_start_id),
+        (original.pid, &original.process_start_id)
+    );
+    assert_ne!(current.account_id, original.account_id);
+    assert_eq!(current.installation_id, original.installation_id);
+    assert_eq!(current.image_sha256, original.image_sha256);
+    assert!(current.store_ready);
+    assert_eq!(
+        result["summary"]["rpc_workers"],
+        current.rpc["effective_parallelism"]
+    );
+    let mut expected: Value = serde_json::from_slice(&runtime.fixture.client)?;
+    expected["data_dir"] = json!(target);
+    expected["autosync"] = json!(true);
+    let committed = std::fs::read(runtime.fixture.root.join("client.json"))?;
+    assert_eq!(serde_json::from_slice::<Value>(&committed)?, expected);
+    assert_eq!(
+        std::fs::read(source.join("keep.txt"))?,
+        b"synthetic profile marker"
+    );
+    assert_eq!(
+        std::fs::read(target.join("keep.txt"))?,
+        b"synthetic target marker"
+    );
+    assert!(source.join("rsrs.db").is_file());
+    assert!(target.join("rsrs.db").is_file());
+    assert!(!source.join("session.json").exists());
+    assert!(!target.join("session.json").exists());
+    assert!(!runtime.fixture.marker().exists());
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        runtime.fixture.selection
+    );
+    assert!(!runtime
+        .fixture
+        .root
+        .join("runtime/autostart/registration.json")
+        .exists());
+    runtime.stop()?;
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("client.json"))?,
+        committed
+    );
+    Ok(())
+}
+
+#[test]
+fn anonymous_owner_ambiguous_profile_validation_rolls_back_and_retains_source_fence() -> Result<()>
+{
+    let mut runtime = OwnedRuntime::new()?;
+    let original = runtime.start()?;
+    // A healthy serving source is the same-installation baseline. The target has
+    // two ordinary owned files: database_path rejects their ambiguity before
+    // opening either DB, reading credentials or attempting synchronization.
+    assert!(original.store_ready);
+    assert!(runtime.fixture.profile.join("rsrs.db").is_file());
+    let target = runtime.fixture.root.join("profiles/ambiguous-target");
+    std::fs::create_dir(&target)?;
+    let target = target.canonicalize()?;
+    let current = b"synthetic current database marker";
+    let legacy = b"synthetic legacy database marker";
+    std::fs::write(target.join("rsrs.db"), current)?;
+    std::fs::write(target.join("onememory.db"), legacy)?;
+    let (output, result) = runtime.fixture.command(&[
+        "config",
+        "--data-dir",
+        target.to_str().context("target is not UTF-8")?,
+        "--autosync",
+        "true",
+    ])?;
+    assert_eq!(output.status.code(), Some(1), "{result}");
+    assert_eq!(result["status"], "fail");
+    let errors = result["errors"]
+        .as_array()
+        .context("config errors missing")?;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0], "original config restored by CAS; maintenance remains Paused for explicit recovery: Runtime did not confirm private config validation");
+    runtime.verify_drained(&original)?;
+    assert!(!net_rpc::port_is_open_on(runtime.fixture.port));
+    runtime.cleanup_required = false;
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("client.json"))?,
+        runtime.fixture.client
+    );
+    assert_eq!(std::fs::read(target.join("rsrs.db"))?, current);
+    assert_eq!(std::fs::read(target.join("onememory.db"))?, legacy);
+    let paused = std::fs::read(runtime.fixture.marker())?;
+    let marker: Value = serde_json::from_slice(&paused)?;
+    assert_eq!(marker["phase"], "Paused");
+    assert_eq!(marker["expected_profile"], json!(runtime.fixture.profile));
+    assert_eq!(marker["expected_version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(
+        marker["id"],
+        format!(
+            "host-{:x}",
+            Sha256::digest(runtime.fixture.root.display().to_string().as_bytes())
+        )
+    );
+    assert!(marker["snapshot"].is_null() && marker["agent_config"].is_null());
+    runtime.assert_anonymous_selection_unchanged()?;
+    assert!(!target.join("session.json").exists());
+    // Read-only access must retain this real failure fence, not replay validation.
+    let (status, blocked) = runtime.fixture.command(&["metadata", "status"])?;
+    assert_eq!(status.status.code(), Some(1), "{blocked}");
+    assert_eq!(blocked["errors"], json!(["runtime maintenance is incomplete; use the host runtime restart or the indicated snapshot/login recovery before accessing the library"]));
+    assert_eq!(std::fs::read(runtime.fixture.marker())?, paused);
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("client.json"))?,
+        runtime.fixture.client
+    );
+    Ok(())
+}

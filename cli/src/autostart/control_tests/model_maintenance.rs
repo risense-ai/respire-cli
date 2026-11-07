@@ -46,12 +46,22 @@ fn model_paths_require_explicit_unambiguous_local_destinations() -> Result<()> {
     let root = dir.path().canonicalize()?;
     check_path(&root.join("new-model/onnx/model.onnx"))?;
     assert!(check_path(Path::new("relative-model")).is_err());
-    for bad in ["model.", "model ", "model:alias", "models/../outside"] {
+    for bad in ["model.", "model ", "model:alias"] {
         assert!(
             check_path(&root.join(bad)).is_err(),
             "accepted ambiguous destination {bad}"
         );
     }
+    // PathBuf::join normalizes parent components after a Windows verbatim
+    // prefix. Build the raw negative input without erasing its tested syntax.
+    let separator = std::path::MAIN_SEPARATOR_STR;
+    let mut raw_parent = root.as_os_str().to_os_string();
+    raw_parent.push(format!("{separator}models{separator}..{separator}outside"));
+    let parent_path = PathBuf::from(raw_parent);
+    assert!(parent_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir)));
+    assert!(check_path(&parent_path).is_err());
     // Backslash is a native separator on Windows, but an ambiguous literal
     // component on other platforms. Preserve the same per-component checks.
     #[cfg(windows)]
