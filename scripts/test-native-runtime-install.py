@@ -9,10 +9,51 @@ import types
 import unittest
 from unittest.mock import patch
 
-from native_fixture_process import install_official_runtime
+from native_fixture_process import install_official_runtime, same_existing_path, canonical_scope_path, runtime_scope_ids
 
 
 class FixtureInstallationTests(unittest.TestCase):
+    def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            profile = root / 'profile'
+            profile.mkdir()
+            expected_root = canonical_scope_path(root)
+            expected_profile = canonical_scope_path(profile)
+            expected = tuple(hashlib.sha256(value.encode()).hexdigest()
+                             for value in (expected_root, expected_profile))
+            self.assertEqual(runtime_scope_ids(root, profile, {}), expected)
+            self.assertEqual(runtime_scope_ids(root / '.', profile / '..' / 'profile', {}), expected)
+            bound = hashlib.sha256(b'fixture-account').hexdigest()
+            self.assertEqual(runtime_scope_ids(root, profile, {'user': 'fixture-account'}), (expected[0], bound))
+            self.assertNotEqual(runtime_scope_ids(root, root, {})[1], expected[1])
+            with self.assertRaises(OSError):
+                runtime_scope_ids(root, root / 'missing', {})
+            with self.assertRaises(ValueError):
+                runtime_scope_ids(root, profile, {'user': 1})
+            if os.name == 'nt':
+                self.assertTrue(expected_root.startswith('\\\\?\\'))
+                self.assertEqual(runtime_scope_ids(expected_root, expected_profile, {}), expected)
+                self.assertNotEqual(hashlib.sha256(str(root).encode()).hexdigest(), expected[0])
+
+    def test_path_identity_requires_the_same_existing_file_or_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.write_bytes(b'one')
+            second.write_bytes(b'one')
+            self.assertTrue(same_existing_path(first, root / '.' / 'first'))
+            self.assertTrue(same_existing_path(root, root.resolve()))
+            self.assertFalse(same_existing_path(first, second))
+            self.assertFalse(same_existing_path(first, root))
+            self.assertFalse(same_existing_path(first, root / 'missing'))
+            self.assertFalse(same_existing_path('', root))
+            self.assertFalse(same_existing_path(1, root))
+            self.assertFalse(same_existing_path({'path': str(root)}, root))
+            if os.name == 'nt':
+                self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
+                self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
+
     def test_upgrade_fixture_installs_before_creating_legacy_session_state(self):
         tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]

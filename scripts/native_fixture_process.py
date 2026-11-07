@@ -193,6 +193,34 @@ def install_published_runtime(binary, env):
     return installed.resolve(strict=True)
 
 
+def same_existing_path(left, right):
+    """Compare OS file identities, including Windows verbatim-path aliases."""
+    if not left or not right:
+        return False
+    try:
+        return pathlib.Path(left).samefile(right)
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def canonical_scope_path(value):
+    """Match Rust canonicalize().display(), retaining Windows verbatim prefixes."""
+    path = pathlib.Path(value).resolve(strict=True)
+    if os.name == 'nt':
+        from nt import _getfinalpathname
+        return _getfinalpathname(str(path))
+    return str(path)
+
+
+def runtime_scope_ids(root, profile, session):
+    user = session.get('user')
+    if user is not None and not isinstance(user, str):
+        raise ValueError('fixture session user must be a string')
+    installation = hashlib.sha256(canonical_scope_path(root).encode()).hexdigest()
+    account = hashlib.sha256((user or canonical_scope_path(profile)).encode()).hexdigest()
+    return installation, account
+
+
 def verify_runtime_health(args, health, root, profile, pid=None):
     import psutil
     root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
@@ -205,24 +233,29 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     image = pathlib.Path(owner.exe()).resolve(strict=True)
     session_path = profile / 'session.json'
     session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
-    account_source = session.get('user') or health.get('data_dir', '')
-    if (type(health.get('v')) is not int or health['v'] != 1 or (pid is not None and owner.pid != pid)
-            or image != ((root / 'runtime' / args.runtime_version /
-                          ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
-                         if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
-            or pathlib.Path(health.get('exe', '')).resolve() != image
-            or pathlib.Path(health.get('image_path', '')).resolve() != image
-            or health.get('process_start_id') != birth
-            or health.get('runtime_version') != args.runtime_version
-            or health.get('bin') != args.runtime_version
-            or pathlib.Path(health.get('installation_root', '')).resolve() != root
-            or health.get('installation_id') != hashlib.sha256(health.get('installation_root', '').encode()).hexdigest()
-            or pathlib.Path(health.get('data_dir', '')).resolve() != profile
-            or health.get('account_id') != hashlib.sha256(account_source.encode()).hexdigest()
-            or not isinstance(health.get('instance_id'), str) or not health['instance_id']
-            or not isinstance(health.get('generation'), int)
-            or isinstance(health.get('generation'), bool) or health['generation'] <= 0):
-        raise AssertionError('standalone Runtime process/health/scope mismatch')
+    installation_id, account_id = runtime_scope_ids(root, profile, session)
+    selected_image = ((root / 'runtime' / args.runtime_version /
+                       ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
+                      if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
+    checks = {
+        'protocol': type(health.get('v')) is int and health['v'] == 1,
+        'pid': pid is None or owner.pid == pid,
+        'selected_image': same_existing_path(image, selected_image),
+        'exe': same_existing_path(health.get('exe'), image),
+        'image_path': same_existing_path(health.get('image_path'), image),
+        'process_start_id': health.get('process_start_id') == birth,
+        'runtime_version': health.get('runtime_version') == args.runtime_version,
+        'bin_version': health.get('bin') == args.runtime_version,
+        'installation_root': same_existing_path(health.get('installation_root'), root),
+        'installation_id': health.get('installation_id') == installation_id,
+        'profile': same_existing_path(health.get('data_dir'), profile),
+        'account_id': health.get('account_id') == account_id,
+        'instance_id': isinstance(health.get('instance_id'), str) and bool(health['instance_id']),
+        'generation': type(health.get('generation')) is int and health['generation'] > 0,
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise AssertionError('standalone Runtime process/health/scope mismatch: ' + ', '.join(failed))
     identity = (owner.pid, birth, health['instance_id'], health['account_id'], health['generation'])
     previous = next((item for item in args.runtime_identity_receipts
                      if item['_identity'] == identity), None)

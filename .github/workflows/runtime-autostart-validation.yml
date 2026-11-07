@@ -6,6 +6,8 @@ on:
       - '.github/workflows/runtime-autostart-validation.yml'
       - 'runtime-pin.json'
       - 'scripts/test-runtime-autostart.py'
+      - 'scripts/native_fixture_process.py'
+      - 'scripts/test-native-runtime-install.py'
       - 'cli/src/autostart.rs'
       - 'cli/src/autostart/**'
       - 'cli/tests/model_maintenance.rs'
@@ -51,6 +53,11 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify fixture Runtime installation and native path identity
+        run: python scripts/test-native-runtime-install.py
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}

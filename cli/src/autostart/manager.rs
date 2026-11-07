@@ -52,17 +52,29 @@ pub(crate) fn process_birth(pid: u32) -> Result<Option<String>> {
     {
         let output = control(
             "ps",
-            &["-p".into(), pid.to_string(), "-o".into(), "lstart=".into()],
+            &["-p".into(), pid.to_string(), "-o".into(), "stat=".into(), "-o".into(), "lstart=".into()],
         )?;
-        if output.code == 1 && output.stdout.trim().is_empty() {
-            return Ok(None);
-        }
-        anyhow::ensure!(
-            output.code == 0 && !output.stdout.trim().is_empty(),
-            "process identity unavailable"
-        );
-        Ok(Some(output.stdout.trim().into()))
+        darwin_process_birth(output.code, &output.stdout)
     }
+}
+
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
+fn darwin_process_birth(code: i32, stdout: &str) -> Result<Option<String>> {
+    if code == 1 && stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(code == 0, "process identity unavailable");
+    let line = stdout.trim();
+    anyhow::ensure!(!line.contains('\n'), "ambiguous process identity");
+    let (state, birth) = line.split_once(char::is_whitespace)
+        .context("process state or birth missing")?;
+    anyhow::ensure!(!birth.trim().is_empty(), "process birth missing");
+    // A zombie has already exited and released its resources. Waiting for its
+    // parent (possibly this CLI) to reap it must not block a verified drain.
+    if state.starts_with('Z') {
+        return Ok(None);
+    }
+    Ok(Some(birth.trim().into()))
 }
 
 pub(super) fn validate_executable(platform: Platform, path: &Path) -> Result<()> {
@@ -1026,6 +1038,37 @@ pub(super) mod test_adapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn darwin_birth_distinguishes_live_exited_and_unavailable_processes() -> Result<()> {
+        let birth = "Sat Nov  7 14:00:00 2026";
+        assert_eq!(darwin_process_birth(0, &format!("S+ {birth}\n"))?, Some(birth.into()));
+        for state in ["Z", "Z+"] {
+            assert_eq!(darwin_process_birth(0, &format!("{state} {birth}"))?, None);
+        }
+        assert_eq!(darwin_process_birth(1, "")?, None);
+        for (code, text) in [(2, ""), (0, ""), (0, "S"), (0, "S \n"), (0, "S first\nS second")] {
+            assert!(darwin_process_birth(code, text).is_err());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exited_unreaped_child_is_not_a_live_drain_owner() -> Result<()> {
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+        let result: Result<()> = (|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while process_birth(child.id())?.is_some() {
+                anyhow::ensure!(Instant::now() < deadline, "exited child remained a live owner");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(())
+        })();
+        let status = child.wait()?;
+        result?;
+        anyhow::ensure!(status.success());
+        Ok(())
+    }
     #[test]
     fn loaded_systemd_configuration_must_match_disk_identity_without_overrides() -> Result<()> {
         let config = super::super::tests::fixture(Platform::Linux);
