@@ -372,5 +372,4 @@ jobs:
             "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
             test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
           )
-          cargo llvm-cov report -p respire --fail-under-lines 90 \
-            --ignore-filename-regex '(main\.rs|(^|/)cli/src/frontend\.rs$|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
+          node scripts/check-cli-coverage.mjs '(main\.rs|(^|/)cli/src/frontend\.rs$|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'

@@ -264,8 +264,8 @@ done`),'run every business module and preserve the first failure');
       value.runtime_metadata_json=JSON.stringify(metadata);value.runtime_metadata_sha256=hash(value.runtime_metadata_json);},
   ]){const receipt={...boundReceipt};change(receipt);assert.throws(()=>runMerge(receipt));}
   assert.match(report,/test \"\$INTEGRATION_RESULT\" = success/);
-  assert.match(report,/cargo llvm-cov report -p respire --fail-under-lines 90/);
-  assert.match(report,/exit "\$result"/);
+  assert.match(report,/node scripts\/check-cli-coverage\.mjs/);
+  assert.match(report,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
   for(const script of ['test-publication-fence','test-publication-acceptance','test-cleanup-release-artifacts','test-registry-publication','test-release-publication','test-dev6-publication-recovery','test-parallel-publication']) {
     assert(contracts.includes(`npm/scripts/${script}.mjs`),script);assert(!source.includes(`npm/scripts/${script}.mjs`),`not serialized: ${script}`);
   }
@@ -343,7 +343,7 @@ test('source metadata optimization retains debug safety and only the CLI test-st
       assert(text.includes(`CARGO_PROFILE_${profile}_OPT_LEVEL: '0'`));
     }
   }
-  assert.match(section('check-complete'),/--fail-under-lines 90/);
+  assert.match(section('check-complete'),/node scripts\/check-cli-coverage\.mjs/);
   assert.doesNotMatch(section('platform-build'),/CARGO_PROFILE_/);
   const manifest=readFileSync(new URL('../../Cargo.toml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(manifest,/\[profile.dev.package.sha2\]\nopt-level = 3/);
