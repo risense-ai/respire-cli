@@ -963,3 +963,140 @@ fn anonymous_owner_ambiguous_profile_validation_rolls_back_and_retains_source_fe
     );
     Ok(())
 }
+
+#[test]
+fn off_mode_migration_failure_preserves_original_operation_and_drains_the_owner() -> Result<()> {
+    use respire_protocol::migration_control::{HostMigrationOperation, HOST_MIGRATION_SCHEMA_V};
+    let mut runtime = OwnedRuntime::new()?;
+    let mut config: Value = serde_json::from_slice(&runtime.fixture.client)?;
+    config["service_mode"] = json!("off");
+    config["autosync"] = json!(false);
+    config["cure_auto"] = json!(false);
+    runtime.fixture.client = serde_json::to_vec(&config)?;
+    std::fs::write(
+        runtime.fixture.root.join("client.json"),
+        &runtime.fixture.client,
+    )?;
+    let records = runtime.fixture.root.join("runtime/autostart/migrations");
+    for path in [
+        runtime.fixture.marker(),
+        records.clone(),
+        runtime.fixture.profile.join("session.json"),
+        runtime.fixture.profile.join("agent.json"),
+        runtime.fixture.root.join(".login-recovery.json"),
+        runtime.fixture.root.join("accounts"),
+    ] {
+        assert!(!path.exists(), "fixture is not fresh: {}", path.display());
+    }
+    // An off-mode owner is a verified live listener, not a ready business store.
+    // No read_heat setting is present, so its startup does not request SDK capabilities.
+    let owner = runtime.start()?;
+    assert!(!owner.store_ready);
+    for path in [
+        runtime.fixture.profile.join("rsrs.db"),
+        runtime.fixture.profile.join("session.json"),
+        runtime.fixture.profile.join("agent.json"),
+        runtime.fixture.root.join(".login-recovery.json"),
+    ] {
+        assert!(
+            !path.exists(),
+            "off startup changed fixture: {}",
+            path.display()
+        );
+    }
+    let source = "f".repeat(64);
+    let account = "synthetic-missing";
+    // Preserve the original operation and fixture if any following assertion or
+    // normal owner cleanup fails. Never replay/query an uncertain migration.
+    runtime.fixture._temporary.disable_cleanup(true);
+    eprintln!(
+        "isolated migration fixture (retained on failure): {}",
+        runtime.fixture.base.display()
+    );
+    let (output, result) =
+        runtime
+            .fixture
+            .command(&["migrate", "--source", &source, "--account", account])?;
+    assert_eq!(output.status.code(), Some(1), "{result}");
+    assert_eq!(result["command"], "cli");
+    assert_eq!(result["status"], "fail");
+    let paths = std::fs::read_dir(&records)?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    assert_eq!(paths.len(), 1);
+    let original_bytes = std::fs::read(&paths[0])?;
+    let original: Value = serde_json::from_slice(&original_bytes)?;
+    let operation: HostMigrationOperation = serde_json::from_value(original["operation"].clone())?;
+    assert_eq!(operation.schema_version, HOST_MIGRATION_SCHEMA_V);
+    let id = uuid::Uuid::parse_str(&operation.operation_id)?;
+    assert_eq!(id.get_version_num(), 4);
+    assert_eq!(id.to_string(), operation.operation_id);
+    assert_eq!(operation.key, operation.operation_id);
+    assert_eq!(operation.installation_root, runtime.fixture.root);
+    assert_eq!(operation.profile, runtime.fixture.profile);
+    assert_eq!(
+        operation.identity,
+        respire_protocol::HostAuthIdentity::Absent
+    );
+    assert_eq!(operation.source_id, source);
+    assert_eq!(operation.account, account);
+    assert_eq!(
+        operation.fingerprint,
+        format!("{:x}", Sha256::digest(operation.fingerprint_bytes()?))
+    );
+    assert_eq!(
+        paths[0],
+        records.join(format!("{}.json", operation.fingerprint))
+    );
+    assert_eq!(original["was_serving"], true);
+    assert_eq!(original["store_ready"], false);
+    assert_eq!(original["sent"], true);
+    assert_eq!(original["finished"], false);
+    assert!(original["terminal_receipt"].is_null());
+    // The public adapter deliberately hides the private failure cause. This
+    // proves failure fencing, not a terminal rollback or an observed off-guard result.
+    assert_eq!(result["errors"], json!([format!(
+        "migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed",
+        operation.operation_id)]));
+    let marker: Value = serde_json::from_slice(&std::fs::read(runtime.fixture.marker())?)?;
+    assert_eq!(marker["phase"], "Paused");
+    assert_eq!(marker["expected_profile"], json!(runtime.fixture.profile));
+    let token = original["token"]
+        .as_str()
+        .context("original token is a string")?;
+    let token_id = uuid::Uuid::parse_str(token)?;
+    assert_eq!(token_id.get_version_num(), 4);
+    assert_eq!(token_id.to_string(), token);
+    let coordinator = format!(
+        "host-{:x}",
+        Sha256::digest(runtime.fixture.root.display().to_string().as_bytes())
+    );
+    assert_eq!(original["coordinator"].as_str(), Some(coordinator.as_str()));
+    assert_eq!(marker["token"].as_str(), Some(token));
+    assert_eq!(marker["id"].as_str(), Some(coordinator.as_str()));
+    assert!(marker["snapshot"].is_null() && marker["agent_config"].is_null());
+    runtime.verify_drained(&owner)?;
+    assert!(!net_rpc::port_is_open_on(runtime.fixture.port));
+    runtime.cleanup_required = false;
+    runtime.assert_anonymous_selection_unchanged()?;
+    for path in [
+        runtime.fixture.profile.join("rsrs.db"),
+        runtime.fixture.profile.join("onememory.db"),
+        runtime.fixture.profile.join("agent.json"),
+        runtime.fixture.root.join(".login-recovery.json"),
+        runtime.fixture.root.join("accounts"),
+        runtime.fixture.base.join("home/.rsrs-migration-lock"),
+        runtime.fixture.base.join("home/.rsrs-migration-staging"),
+    ] {
+        assert!(
+            !path.exists(),
+            "unexpected migration data: {}",
+            path.display()
+        );
+    }
+    assert_eq!(std::fs::read(&paths[0])?, original_bytes);
+    // All intended evidence and normal drain checks succeeded. Only this owned
+    // temporary fixture may now be cleaned; no other paused operation is touched.
+    runtime.fixture._temporary.disable_cleanup(false);
+    Ok(())
+}
