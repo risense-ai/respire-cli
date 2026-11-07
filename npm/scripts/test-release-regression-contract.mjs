@@ -121,6 +121,9 @@ test('both Linux ARM targets require native runners, every source feedback phase
   const step=name=>native.split('      - name: '+name+'\n')[1]?.split('\n      - ')[0];
   const install=step('Install and verify the official pinned standalone Runtime');
   assert.match(install,/id: pinned-runtime/);assert.match(install,/if: inputs.artifact_source != 'published-assets'/);
+  const dataRoot=block=>block.match(/^          RSRS_DATA_DIR: (.+)$/m)?.[1];
+  assert.equal(dataRoot(install),'${{ runner.temp }}/release-probe');
+  assert.equal(dataRoot(install),dataRoot(step('Install and probe BGE CPU inference')));
   assert(native.indexOf('id: pinned-runtime')<native.indexOf('      - name: Install and probe BGE CPU inference'));
   const script=install.split("<<'NODE'\n")[1].split('\n          NODE')[0].replace(/^          /gm,'').replace(/^import .*;\n/gm,'');
   for(const platform of ['linux','win32']) {
@@ -131,9 +134,9 @@ test('both Linux ARM targets require native runners, every source feedback phase
       const selected={version,sha256:digest,release:{metadata_json:metadata,metadata_sha256:createHash('sha256').update(metadata).digest('hex')}};
       const state={selected,status:0,sameImage:false,hosted:'true'};change?.(state);
       const tokenSentinel='fixture-only-value';
-      const output=[],calls=[],env={GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:state.hosted,CLI_TARGET:'synthetic-target',RUNNER_TEMP:p.dirname(root),GITHUB_OUTPUT:'fixture-output',GH_TOKEN:tokenSentinel,GITHUB_TOKEN:tokenSentinel};
+      const output=[],calls=[],env={GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:state.hosted,CLI_TARGET:'synthetic-target',RUNNER_TEMP:p.dirname(root),RSRS_DATA_DIR:root,GITHUB_OUTPUT:'fixture-output',GH_TOKEN:tokenSentinel,GITHUB_TOKEN:tokenSentinel};
       runInNewContext(script,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
-        mkdirSync:()=>{},mkdtempSync:()=>root,statSync:()=>({isFile:()=>true}),
+        mkdirSync:()=>{},statSync:()=>({isFile:()=>true}),
         realpathSync:file=>state.sameImage?'same-image':file,
         readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'runtime.json')?JSON.stringify(selected):image,
         appendFileSync:(_file,line)=>output.push(line),
