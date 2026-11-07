@@ -1,6 +1,7 @@
 //! Real private Runtime exchanges with an owned, account-free managed installation.
-//! No model download, inference, keyring, live owner or OS service registration.
+//! No model download, inference request, keyring or OS service registration.
 use anyhow::{Context, Result};
+use respire_commands::net_rpc::{self, Health};
 use respire_protocol::model_maintenance::{
     ModelMaintenanceKind, ModelMaintenancePhase, ModelMaintenanceReceipt,
 };
@@ -8,6 +9,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::process::{Command, Output};
+use std::time::Duration;
 
 mod support;
 
@@ -58,6 +60,10 @@ impl Fixture {
     }
 
     fn run(&self, action: &str) -> Result<(Output, Value)> {
+        self.command(&["model", action])
+    }
+
+    fn command(&self, args: &[&str]) -> Result<(Output, Value)> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_rsrs"));
         command.env_clear();
         // Preserve execution/coverage plumbing, never account or desktop-session state.
@@ -78,7 +84,8 @@ impl Fixture {
             }
         }
         let output = command
-            .args(["--json", "model", action])
+            .arg("--json")
+            .args(args)
             .current_dir(&self.base)
             .env("HOME", self.base.join("home"))
             .env("USERPROFILE", self.base.join("home"))
@@ -102,7 +109,7 @@ impl Fixture {
             .output()?;
         let value = serde_json::from_slice(&output.stdout).with_context(|| {
             format!(
-                "model {action}: status={}, stdout={}, stderr={}",
+                "{args:?}: status={}, stdout={}, stderr={}",
                 output.status,
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
@@ -299,5 +306,274 @@ fn refused_link_deletion_preserves_data_and_fences_later_mutation() -> Result<()
     assert_eq!(std::fs::read(&outside)?, b"outside synthetic marker");
     assert!(fixture.model.is_dir());
     fixture.assert_profile_untouched()?;
+    Ok(())
+}
+
+// Own only this temporary installation. Failed cleanup preserves its files and
+// evidence; it never substitutes a forced kill for a verified Runtime drain.
+struct OwnedRuntime {
+    fixture: Fixture,
+    last_owner: Option<Health>,
+    cleanup_required: bool,
+}
+
+impl OwnedRuntime {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            fixture: Fixture::new()?,
+            last_owner: None,
+            cleanup_required: false,
+        })
+    }
+
+    fn health(&self) -> Result<Health> {
+        let health: Health = ureq::get(&format!(
+            "http://127.0.0.1:{}/api/health",
+            self.fixture.port
+        ))
+        .timeout(Duration::from_secs(3))
+        .call()?
+        .into_json()?;
+        let pin: Value = serde_json::from_str(include_str!("../../runtime-pin.json"))?;
+        let version = pin["required"].as_str().context("Runtime pin missing")?;
+        let binary = self
+            .fixture
+            .root
+            .join("runtime")
+            .join(version)
+            .join(if cfg!(windows) {
+                "rsrs-runtime.exe"
+            } else {
+                "rsrs-runtime"
+            })
+            .canonicalize()?;
+        anyhow::ensure!(
+            health.server == "respire"
+                && health.v == 1
+                && health.bin == version
+                && health.runtime_version == version,
+            "unexpected Runtime protocol/version"
+        );
+        anyhow::ensure!(
+            PathBuf::from(&health.installation_root).canonicalize()? == self.fixture.root
+                && PathBuf::from(&health.data_dir).canonicalize()? == self.fixture.profile,
+            "Runtime roots do not match the owned fixture"
+        );
+        anyhow::ensure!(
+            PathBuf::from(&health.exe).canonicalize()? == binary
+                && PathBuf::from(&health.image_path).canonicalize()? == binary
+                && health.image_sha256 == format!("{:x}", Sha256::digest(std::fs::read(&binary)?)),
+            "Runtime image does not match the official installed fixture"
+        );
+        anyhow::ensure!(
+            health.installation_id
+                == format!(
+                    "{:x}",
+                    Sha256::digest(self.fixture.root.display().to_string().as_bytes())
+                )
+                && health.account_id
+                    == format!(
+                        "{:x}",
+                        Sha256::digest(self.fixture.profile.display().to_string().as_bytes())
+                    )
+                && health.managed_id.is_none()
+                && health.pid > 0
+                && health.generation > 0
+                && !health.instance_id.is_empty(),
+            "Runtime scope does not match the anonymous owner"
+        );
+        let process = net_rpc::runtime_process_identity(health.pid)?;
+        let prefix = if cfg!(windows) {
+            "windows-filetime-"
+        } else if cfg!(target_os = "linux") {
+            "linux-starttime-"
+        } else {
+            "darwin-lstart-"
+        };
+        anyhow::ensure!(
+            PathBuf::from(&process.executable).canonicalize()? == binary
+                && health.process_start_id == format!("{prefix}{}", process.started_at),
+            "Runtime OS process identity differs from health"
+        );
+        Ok(health)
+    }
+
+    fn start(&mut self) -> Result<Health> {
+        self.cleanup_required = true;
+        let (output, result) = self.fixture.command(&["runtime", "start"])?;
+        anyhow::ensure!(output.status.success(), "Runtime start failed: {result}");
+        assert_eq!(result["command"], "runtime.start");
+        assert_eq!(result["summary"]["registered"], false);
+        let health = self.health()?;
+        self.last_owner = Some(health.clone());
+        Ok(health)
+    }
+
+    fn verify_drained(&self, health: &Health) -> Result<()> {
+        let receipt: Value = serde_json::from_slice(&std::fs::read(
+            self.fixture
+                .root
+                .join("runtime")
+                .join(format!("stop-{}.json", health.instance_id)),
+        )?)?;
+        net_rpc::validate_final_stop_receipt(health, None, &receipt)?;
+        // Permission or identity-query failures cannot stand in for OS exit.
+        // Reused PIDs conservatively fail rather than bypassing this check.
+        net_rpc::wait_until_exited(health.pid)?;
+        Ok(())
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        let health = if net_rpc::port_is_open_on(self.fixture.port) {
+            self.health()?
+        } else {
+            self.last_owner
+                .clone()
+                .context("no verified owner for cleanup")?
+        };
+        let (output, result) = self.fixture.command(&["runtime", "stop"])?;
+        anyhow::ensure!(output.status.success(), "Runtime stop failed: {result}");
+        self.verify_drained(&health)?;
+        anyhow::ensure!(
+            !net_rpc::port_is_open_on(self.fixture.port),
+            "Runtime port remains open after stop"
+        );
+        self.cleanup_required = false;
+        Ok(())
+    }
+}
+
+impl Drop for OwnedRuntime {
+    fn drop(&mut self) {
+        if self.cleanup_required {
+            if let Err(error) = self.stop() {
+                self.fixture._temporary.disable_cleanup(true);
+                eprintln!(
+                    "owned Runtime cleanup unconfirmed; preserved {}: {error:#}",
+                    self.fixture.base.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn anonymous_owner_cpu_reset_drains_and_restores_verified_runtime() -> Result<()> {
+    let mut runtime = OwnedRuntime::new()?;
+    let original = runtime.start()?;
+    let (output, result) = runtime.fixture.run("reset-cpu")?;
+    anyhow::ensure!(output.status.success(), "owned CPU reset failed: {result}");
+    assert_eq!(result["command"], "model");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["errors"], json!([]));
+    // Manual reset intentionally stops, rather than automatically resurrecting,
+    // an unregistered owner. Restore explicitly using the public lifecycle API.
+    assert_eq!(
+        result["summary"],
+        json!({"engine":"cpu", "force_cpu":true,
+        "runtime_restarted":false, "stopped_pid":original.pid})
+    );
+    let receipt: ModelMaintenanceReceipt = serde_json::from_value(result["details"].clone())?;
+    assert_eq!(receipt.plan.kind, ModelMaintenanceKind::ResetCpu);
+    assert_eq!(receipt.phase, ModelMaintenancePhase::Apply);
+    assert!(receipt.config_applied && receipt.verified && receipt.warning.is_none());
+    let bytes = std::fs::read(runtime.fixture.root.join("inference.json"))?;
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes)?,
+        json!({"engine":"cpu","model":"q4","force_cpu":true})
+    );
+    assert_eq!(
+        receipt.plan.cpu_candidate_sha256.as_deref(),
+        Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
+    );
+    assert!(!runtime.fixture.marker().exists());
+    assert!(!runtime.fixture.model.exists());
+    runtime.verify_drained(&original)?;
+    assert!(!net_rpc::port_is_open_on(runtime.fixture.port));
+    runtime.cleanup_required = false;
+
+    let restored = runtime.start()?;
+    assert_ne!(restored.instance_id, original.instance_id);
+    assert_ne!(
+        (restored.pid, &restored.process_start_id),
+        (original.pid, &original.process_start_id)
+    );
+    assert_eq!(restored.account_id, original.account_id);
+    assert_eq!(restored.installation_id, original.installation_id);
+    assert_eq!(restored.image_sha256, original.image_sha256);
+    assert!(!original.store_ready || restored.store_ready);
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("inference.json"))?,
+        bytes
+    );
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        runtime.fixture.selection
+    );
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("client.json"))?,
+        runtime.fixture.client
+    );
+    assert_eq!(
+        std::fs::read(runtime.fixture.profile.join("keep.txt"))?,
+        b"synthetic profile marker"
+    );
+    assert!(!runtime.fixture.profile.join("session.json").exists());
+    assert!(!runtime
+        .fixture
+        .root
+        .join("runtime/autostart/registration.json")
+        .exists());
+    // Uninstall does automatically restore a previously serving manual owner.
+    // The owned files are deliberately not loadable models; no backend is claimed.
+    std::fs::create_dir_all(&runtime.fixture.model)?;
+    std::fs::write(
+        runtime.fixture.model.join("owned-marker"),
+        b"synthetic removable bytes",
+    )?;
+    let sibling = runtime.fixture.root.join("models/keep.txt");
+    std::fs::write(&sibling, b"unrelated model marker")?;
+    let (output, result) = runtime.fixture.run("uninstall-m3")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "owned model uninstall failed: {result}"
+    );
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["errors"], json!([]));
+    assert_eq!(
+        result["summary"],
+        json!({"dir":runtime.fixture.model,"removed":true,"model":"bge-m3"})
+    );
+    let receipt: ModelMaintenanceReceipt = serde_json::from_value(result["details"].clone())?;
+    assert_eq!(receipt.plan.kind, ModelMaintenanceKind::UninstallM3);
+    assert_eq!(receipt.phase, ModelMaintenancePhase::Verify);
+    assert!(receipt.verified && !receipt.config_applied && receipt.warning.is_none());
+    assert!(!runtime.fixture.model.exists());
+    assert_eq!(std::fs::read(&sibling)?, b"unrelated model marker");
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("inference.json"))?,
+        bytes
+    );
+    assert!(!runtime.fixture.marker().exists());
+    runtime.verify_drained(&restored)?;
+    let automatic = runtime.health()?;
+    assert_ne!(automatic.instance_id, restored.instance_id);
+    assert_ne!(
+        (automatic.pid, &automatic.process_start_id),
+        (restored.pid, &restored.process_start_id)
+    );
+    assert_eq!(automatic.account_id, restored.account_id);
+    assert_eq!(automatic.installation_id, restored.installation_id);
+    assert_eq!(automatic.image_sha256, restored.image_sha256);
+    assert!(!restored.store_ready || automatic.store_ready);
+    runtime.last_owner = Some(automatic);
+    runtime.stop()?;
+    assert!(!runtime.fixture.marker().exists());
+    assert!(!runtime.fixture.profile.join("session.json").exists());
+    assert!(!runtime
+        .fixture
+        .root
+        .join("runtime/autostart/registration.json")
+        .exists());
     Ok(())
 }
