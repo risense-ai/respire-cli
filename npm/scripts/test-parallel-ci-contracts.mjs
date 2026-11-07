@@ -205,7 +205,7 @@ done`),'run every business module and preserve the first failure');
     }),/Unassigned or duplicate|Missing migrated/);
   }
   const expectedProduct=ci.match(/^  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: ([a-f0-9]{40})$/m)?.[1];
-  assert.equal(expectedProduct,'9338a6654cf395525668dd9faaea3f401abe2d5a');
+  assert.equal(expectedProduct,'387ed1c560fd3bf336400f29119b6a577fa3f3d9');
   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
   const binary=Buffer.from('synthetic official runtime'),cliBytes=Buffer.from('instrumented CLI'),archive=Buffer.from('source archive');
   const pinVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url),'utf8')).required;

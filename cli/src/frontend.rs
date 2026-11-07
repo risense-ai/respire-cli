@@ -2166,4 +2166,57 @@ mod capture_tests {
         assert_eq!(parsed.envelope.summary["reason"], "invalid_input");
         assert_eq!(parsed.envelope.details["error_type"], "user");
     }
+
+    #[test]
+    fn account_handoff_pending_preserves_committed_query_only_context() {
+        let operation = "7c633a08-9077-4710-882e-ac3d2998ab8b";
+        let source = std::path::PathBuf::from("synthetic profile/含 空格");
+        for (register, expected_args) in [
+            (
+                false,
+                serde_json::json!(["--operation-id", operation, "--source-profile", source,]),
+            ),
+            (
+                true,
+                serde_json::json!([
+                    "--operation-id",
+                    operation,
+                    "--source-profile",
+                    source,
+                    "--register",
+                ]),
+            ),
+        ] {
+            let pending: anyhow::Error = respire_host_control::AccountHandoffPending {
+                operation_id: operation.into(),
+                source_profile: source.clone(),
+                register,
+            }
+            .into();
+            let (envelope, code) =
+                super::command_failure(&pending.context("synthetic supervisor handoff failure"));
+            assert_eq!(code, 1);
+            assert!(matches!(envelope.status, super::OutputStatus::Fail));
+            assert_eq!(
+                envelope.summary,
+                serde_json::json!({
+                    "reason": "account_handoff_pending",
+                })
+            );
+            assert_eq!(
+                envelope.details,
+                serde_json::json!({
+                    "error_type": "handoff_pending",
+                    "operation_id": operation,
+                    "source_profile": source,
+                    "register": register,
+                    "committed": true,
+                    "result_command": "runtime account-result",
+                    "result_args": expected_args,
+                    "query_only": true,
+                    "replayed": false,
+                })
+            );
+        }
+    }
 }

@@ -1,9 +1,9 @@
 name: Native migration credential fixture
 
+# The temporary PR source-candidate trigger ended after Runtime dev.16 publication.
+# Required CLI CI still runs the original three account cases against the official
+# pinned Runtime, using the private Secret Service fixture and check-complete gate.
 on:
-  pull_request:
-    branches: [main]
-    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       runtime_candidate_sha:
