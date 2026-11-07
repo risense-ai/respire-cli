@@ -212,7 +212,7 @@ jobs:
     timeout-minutes: 90
     env:
       CLI_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '7711a88939c9923c5b519cc5af7909ff784d2c9f' || inputs.runtime_candidate_sha }}
+      RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '387ed1c560fd3bf336400f29119b6a577fa3f3d9' || inputs.runtime_candidate_sha }}
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RSRS_ENGINE: cpu
@@ -236,7 +236,7 @@ jobs:
             test "$CLI_SHA" = "$CLI_HEAD_SHA"
             test "$CLI_HEAD_REPOSITORY" = "$GITHUB_REPOSITORY"
             test "$CLI_HEAD_REF" = integrate/shared-host-frontend-20261107
-            test "$RUNTIME_SHA" = 7711a88939c9923c5b519cc5af7909ff784d2c9f
+            test "$RUNTIME_SHA" = 387ed1c560fd3bf336400f29119b6a577fa3f3d9
           fi
           test "$RUNNER_ARCH" = X64
           test "$(uname -m)" = x86_64
