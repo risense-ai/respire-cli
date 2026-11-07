@@ -46,18 +46,18 @@ fn model_paths_require_explicit_unambiguous_local_destinations() -> Result<()> {
     let root = dir.path().canonicalize()?;
     check_path(&root.join("new-model/onnx/model.onnx"))?;
     assert!(check_path(Path::new("relative-model")).is_err());
-    for bad in [
-        "model.",
-        "model ",
-        "model:alias",
-        "model\\alias",
-        "models/../outside",
-    ] {
+    for bad in ["model.", "model ", "model:alias", "models/../outside"] {
         assert!(
             check_path(&root.join(bad)).is_err(),
             "accepted ambiguous destination {bad}"
         );
     }
+    // Backslash is a native separator on Windows, but an ambiguous literal
+    // component on other platforms. Preserve the same per-component checks.
+    #[cfg(windows)]
+    check_path(&root.join("model\\alias"))?;
+    #[cfg(not(windows))]
+    assert!(check_path(&root.join("model\\alias")).is_err());
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStringExt;
