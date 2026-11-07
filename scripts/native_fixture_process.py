@@ -89,6 +89,47 @@ def process_start_id(pid):
     raise RuntimeError('authoritative Runtime birth unsupported on this platform')
 
 
+def install_official_runtime(binary, env, version, binary_hash):
+    """Install the pinned Runtime into a fresh source-build fixture, then bind its identity."""
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'):
+        raise ValueError('official installation requires a dedicated GitHub-hosted runner')
+    root = pathlib.Path(env['RSRS_DATA_DIR'])
+    if root.is_symlink():
+        raise ValueError('official installation root must not be linked')
+    root = root.resolve()
+    if not any(root != pathlib.Path(os.environ[key]).resolve()
+               and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+               for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+        raise ValueError('official installation must remain inside the owned runner workspace')
+    if (root / 'runtime.json').exists():
+        raise ValueError('source-build fixture must start without a Runtime receipt')
+    install_env = {key: value for key, value in env.items()
+                   if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
+                   and not key.endswith(('_TOKEN', '_API_KEY'))}
+    result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
+                            env=install_env, capture_output=True, timeout=180)
+    if result.returncode:
+        raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
+    receipt = json.loads((root / 'runtime.json').read_text(encoding='utf-8'))
+    proof = receipt.get('release') or {}
+    metadata_bytes = proof.get('metadata_json', '').encode('utf-8')
+    metadata = json.loads(metadata_bytes)
+    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
+            or proof.get('metadata_sha256') != hashlib.sha256(metadata_bytes).hexdigest()
+            or metadata.get('schema_version') != 2 or metadata.get('runtime_version') != version
+            or (metadata.get('target_triple') or metadata.get('triple')) != env['RSRS_RUNTIME_TRIPLE']
+            or metadata.get('binary_sha256') != binary_hash
+            or installed.is_symlink() or not installed.resolve().is_relative_to(root)):
+        raise ValueError('fixture installation differs from the selected official Runtime')
+    with installed.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != binary_hash:
+            raise ValueError('fixture Runtime image differs from the selected asset')
+    env['RSRS_RUNTIME_BIN'] = str(installed.resolve(strict=True))
+    return installed.resolve(strict=True)
+
+
 def install_published_runtime(binary, env):
     """Use the real offline installer with the selected release's unchanged bytes."""
     if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':

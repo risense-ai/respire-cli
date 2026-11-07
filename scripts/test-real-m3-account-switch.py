@@ -1,6 +1,6 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, hmac, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
-from native_fixture_process import (install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
+from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
     add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -83,6 +83,8 @@ for binary in BINARIES:
     env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
     if args.runtime_binary: env['LC_ALL']='C'
     installed = install_published_runtime(binary, env)
+    if installed is None and args.runtime_binary:
+        installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
     if installed is not None: args.runtime_binary = installed
     seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
     if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())

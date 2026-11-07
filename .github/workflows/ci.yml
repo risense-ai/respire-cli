@@ -1277,6 +1277,7 @@ jobs:
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
       - run: python3 scripts/test-dev-model-fixture.py
+      - run: python3 scripts/test-native-runtime-install.py
       - run: python3 scripts/test-dev-fixture-tty.py
       - run: python3 scripts/test-dev-witness-fixture.py
       - name: Validate release sweep PowerShell syntax
