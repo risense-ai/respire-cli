@@ -216,6 +216,37 @@ fn uninstall_reviews_removes_and_verifies_only_the_owned_model_tree() -> Result<
 }
 
 #[test]
+fn rejected_install_plan_preserves_configuration_and_fences_later_mutation() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let before = std::fs::read(fixture.root.join("inference.json"))?;
+    let (output, value) = fixture.command(&[
+        "model", "install-m3", "--mirror", "ftp://invalid.example", "--for-engine", "cpu",
+    ])?;
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(value["status"], "fail");
+    let error = value["errors"][0].as_str().context("model plan rejection")?;
+    assert!(error.contains("private Runtime model plan was rejected"), "{error}");
+    assert!(error.contains("maintenance remains Paused"), "{error}");
+    assert_eq!(std::fs::read(fixture.root.join("inference.json"))?, before);
+    assert!(!fixture.model.exists(), "rejected plan must not create model files");
+    let marker = std::fs::read(fixture.marker())?;
+    let paused: Value = serde_json::from_slice(&marker)?;
+    assert_eq!(paused["phase"], "Paused");
+    assert_eq!(paused["expected_profile"], json!(fixture.profile));
+    fixture.assert_profile_untouched()?;
+
+    let (output, value) = fixture.run("reset-cpu")?;
+    assert_eq!(output.status.code(), Some(1));
+    assert!(value["errors"][0].as_str().context("maintenance fence")?
+        .contains("runtime maintenance is incomplete"));
+    assert_eq!(std::fs::read(fixture.marker())?, marker);
+    assert_eq!(std::fs::read(fixture.root.join("inference.json"))?, before);
+    assert!(!fixture.model.exists());
+    fixture.assert_profile_untouched()?;
+    Ok(())
+}
+
+#[test]
 fn cpu_reset_applies_the_reviewed_bytes_without_a_model_or_serving_owner() -> Result<()> {
     let fixture = Fixture::new()?;
     for _ in 0..2 {
