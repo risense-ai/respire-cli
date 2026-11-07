@@ -199,8 +199,26 @@ def same_existing_path(left, right):
         return False
     try:
         return pathlib.Path(left).samefile(right)
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return False
+
+
+def canonical_scope_path(value):
+    """Match Rust canonicalize().display(), retaining Windows verbatim prefixes."""
+    path = pathlib.Path(value).resolve(strict=True)
+    if os.name == 'nt':
+        from nt import _getfinalpathname
+        return _getfinalpathname(str(path))
+    return str(path)
+
+
+def runtime_scope_ids(root, profile, session):
+    user = session.get('user')
+    if user is not None and not isinstance(user, str):
+        raise ValueError('fixture session user must be a string')
+    installation = hashlib.sha256(canonical_scope_path(root).encode()).hexdigest()
+    account = hashlib.sha256((user or canonical_scope_path(profile)).encode()).hexdigest()
+    return installation, account
 
 
 def verify_runtime_health(args, health, root, profile, pid=None):
@@ -215,7 +233,7 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     image = pathlib.Path(owner.exe()).resolve(strict=True)
     session_path = profile / 'session.json'
     session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
-    account_source = session.get('user') or health.get('data_dir', '')
+    installation_id, account_id = runtime_scope_ids(root, profile, session)
     selected_image = ((root / 'runtime' / args.runtime_version /
                        ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
                       if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
@@ -229,9 +247,9 @@ def verify_runtime_health(args, health, root, profile, pid=None):
         'runtime_version': health.get('runtime_version') == args.runtime_version,
         'bin_version': health.get('bin') == args.runtime_version,
         'installation_root': same_existing_path(health.get('installation_root'), root),
-        'installation_id': health.get('installation_id') == hashlib.sha256(health.get('installation_root', '').encode()).hexdigest(),
+        'installation_id': health.get('installation_id') == installation_id,
         'profile': same_existing_path(health.get('data_dir'), profile),
-        'account_id': health.get('account_id') == hashlib.sha256(account_source.encode()).hexdigest(),
+        'account_id': health.get('account_id') == account_id,
         'instance_id': isinstance(health.get('instance_id'), str) and bool(health['instance_id']),
         'generation': type(health.get('generation')) is int and health['generation'] > 0,
     }
