@@ -66,11 +66,6 @@ for binary in BINARIES:
     alternate.mkdir(mode=0o700)
     entropy = secrets.token_bytes(18)
     code = 'A3-' + '-'.join(entropy.hex().upper()[i:i+6] for i in range(0,36,6))
-    for profile in [main, alternate]:
-        salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
-        kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
-        session=json.dumps({'user':'fixture-'+str(time.time_ns()),'vault_version':4,'kdf_salt':salt.hex(),'wrapped_urk':AESGCM(kek).encrypt(nonce,urk,None).hex(),'urk_nonce':nonce.hex()}).encode()
-        (profile/'session.json').write_bytes(session)
     with socket.socket() as listener:
         listener.bind(('127.0.0.1',0)); port = listener.getsockname()[1]
     env = {key: value for key, value in os.environ.items()
@@ -86,6 +81,12 @@ for binary in BINARIES:
     if installed is None and args.runtime_binary:
         installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
     if installed is not None: args.runtime_binary = installed
+    # Install before fixture sessions exist: legacy-session admission stays fail-closed.
+    for profile in [main, alternate]:
+        salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
+        kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
+        session=json.dumps({'user':'fixture-'+str(time.time_ns()),'vault_version':4,'kdf_salt':salt.hex(),'wrapped_urk':AESGCM(kek).encrypt(nonce,urk,None).hex(),'urk_nonce':nonce.hex()}).encode()
+        (profile/'session.json').write_bytes(session)
     seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
     if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())
     # Historical artifacts predate RSRS_*; keep their inputs explicit and

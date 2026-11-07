@@ -13,6 +13,14 @@ import {publishedAssetNames,parsePublishedAssets,validateArtifactRequest} from '
 import {createHash} from 'node:crypto';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
+test('API smoke shell parses even when published-assets mode is inactive',()=>{
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  const job=workflow.split('\n  api-smoke:\n')[1].split('\n  publish:\n')[0];
+  const script=job.split('        run: |\n')[1].split('\n      - uses:')[0].replace(/^          /gm,'');
+  const result=spawnSync('bash',['-n'],{input:script,encoding:'utf8'});
+  assert.equal(result.status,0,result.stderr);
+  assert.match(script,/dev-api-smoke.py/);assert.match(script,/dev-github-api-smoke.py/);
+});
 const job=name=>({name,status:'completed',conclusion:'success'});
 const inventory=()=>[...contract.native.map(t=>job(`native-regression / Native (${t})`)),...contract.cloud.map(t=>job(`cloud-sweep (runner, ${t})`)),...contract.migration.map(t=>job(`Native migration (${t})`)),...contract.migration_gate.map(t=>job(`Migration gate (${t})`)),job('api-smoke'),job('publish')];
 test('frontend artifacts extract, verify and pack exact CLI bytes without a fabricated SDK inventory',()=>{
@@ -109,7 +117,7 @@ test('both Linux ARM targets require native runners, every source feedback phase
   for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
   assert.match(alpine,/--network none/);assert.match(alpine,/--direct model probe --json/);
-  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c -s/g)||[]).length,3);
+  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,3);
   assert.doesNotMatch(alpine,/--check|--status/);
   assert.match(alpine,/--runtime-internal --stop --json/);
   assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model probe'),'mounted CPU artifact must be checked before inference');

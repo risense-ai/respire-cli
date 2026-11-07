@@ -865,7 +865,7 @@ jobs:
             const fs=require('fs'),path=require('path'),{createHash}=require('crypto');
             const reports=Object.fromEntries(['dev-api-coverage.json','dev-github-api-coverage.json'].map(name=>[name,createHash('sha256').update(fs.readFileSync(path.join(process.env.RUNNER_TEMP,name))).digest('hex')]));
             fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'published-api-identity.json'),JSON.stringify({harness_sha:process.env.GITHUB_SHA,manifest_sha256:process.env.PUBLISHED_ASSETS_SHA256,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),reports}));
-            NODE
+          NODE
           fi
       - uses: actions/upload-artifact@v4
         if: always()
