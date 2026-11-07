@@ -577,3 +577,249 @@ fn anonymous_owner_cpu_reset_drains_and_restores_verified_runtime() -> Result<()
         .exists());
     Ok(())
 }
+
+impl OwnedRuntime {
+    fn restored_after(&mut self, previous: &Health) -> Result<Health> {
+        self.verify_drained(previous)?;
+        let restored = self.health()?;
+        assert_ne!(restored.instance_id, previous.instance_id);
+        assert_ne!(
+            (restored.pid, &restored.process_start_id),
+            (previous.pid, &previous.process_start_id)
+        );
+        assert_eq!(restored.account_id, previous.account_id);
+        assert_eq!(restored.installation_id, previous.installation_id);
+        assert_eq!(restored.image_sha256, previous.image_sha256);
+        assert!(!previous.store_ready || restored.store_ready);
+        assert!(!self.fixture.marker().exists());
+        self.last_owner = Some(restored.clone());
+        Ok(restored)
+    }
+
+    fn assert_anonymous_selection_unchanged(&self) -> Result<()> {
+        assert_eq!(
+            std::fs::read(self.fixture.root.join("runtime.json"))?,
+            self.fixture.selection
+        );
+        assert_eq!(
+            std::fs::read(self.fixture.root.join("client.json"))?,
+            self.fixture.client
+        );
+        assert_eq!(
+            std::fs::read(self.fixture.profile.join("keep.txt"))?,
+            b"synthetic profile marker"
+        );
+        assert!(!self.fixture.profile.join("session.json").exists());
+        assert!(!self
+            .fixture
+            .root
+            .join("runtime/autostart/registration.json")
+            .exists());
+        Ok(())
+    }
+}
+
+#[test]
+fn anonymous_owner_secret_reads_restore_without_unlocking_credentials() -> Result<()> {
+    let mut runtime = OwnedRuntime::new()?;
+    let mut owner = runtime.start()?;
+    for args in [vec!["secret"], vec!["secret", "--reveal"]] {
+        let (output, result) = runtime.fixture.command(&args)?;
+        anyhow::ensure!(
+            output.status.success(),
+            "anonymous secret read failed: {result}"
+        );
+        assert_eq!(result["command"], "secret");
+        assert_eq!(result["status"], "skip");
+        assert_eq!(result["summary"], json!({"session":false}));
+        assert_eq!(result["errors"], json!([]));
+        assert!(result["details"].is_null());
+        owner = runtime.restored_after(&owner)?;
+        runtime.assert_anonymous_selection_unchanged()?;
+    }
+    runtime.stop()?;
+    Ok(())
+}
+
+#[test]
+fn anonymous_owner_metadata_disable_commits_and_restores_the_original_scope() -> Result<()> {
+    use respire_protocol::metadata_control::{
+        HostMetadataIdentity, HostMetadataIntent, HostMetadataOperation,
+    };
+    let mut runtime = OwnedRuntime::new()?;
+    let owner = runtime.start()?;
+    assert!(runtime.fixture.profile.join("rsrs.db").is_file());
+    // Public startup creates the legitimate empty database. No session or fake
+    // metadata receipt is installed, and no enable/backup success is claimed.
+    let (status, before) = runtime.fixture.command(&["metadata", "status"])?;
+    anyhow::ensure!(
+        status.status.success(),
+        "initial metadata status failed: {before}"
+    );
+    assert_eq!(before["summary"]["enabled"], false);
+    let (output, result) = runtime.fixture.command(&["metadata", "disable"])?;
+    anyhow::ensure!(
+        output.status.success(),
+        "anonymous metadata disable failed: {result}"
+    );
+    assert_eq!(result["command"], "metadata");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["errors"], json!([]));
+    assert_eq!(
+        result["summary"],
+        json!({"action":"disabled","enabled":false})
+    );
+    assert_eq!(
+        result["details"],
+        json!({"enabled":false,"mode":"isolated",
+        "metadata_retained":false,"sync_isolation_retained":true})
+    );
+    let record_path = runtime
+        .fixture
+        .root
+        .join("runtime/autostart/metadata")
+        .join(format!(
+            "{:x}.json",
+            Sha256::digest(runtime.fixture.profile.display().to_string().as_bytes())
+        ));
+    let record_bytes = std::fs::read(&record_path)?;
+    let record: Value = serde_json::from_slice(&record_bytes)?;
+    assert_eq!(record["sent"], true);
+    assert_eq!(record["finished"], true);
+    assert_eq!(record["was_serving"], true);
+    let original: HostMetadataOperation = serde_json::from_value(record["operation"].clone())?;
+    assert_eq!(
+        uuid::Uuid::parse_str(&original.operation_id)?.get_version_num(),
+        4
+    );
+    assert_eq!(original.key, original.operation_id);
+    assert_eq!(original.installation_root, runtime.fixture.root);
+    assert_eq!(original.profile, runtime.fixture.profile);
+    assert!(original.intent == HostMetadataIntent::Disable);
+    assert!(
+        original.identity
+            == HostMetadataIdentity {
+                account_id: None,
+                session_sha256: None
+            }
+    );
+    assert_eq!(
+        original.fingerprint,
+        format!("{:x}", Sha256::digest(original.fingerprint_bytes()?))
+    );
+    runtime.restored_after(&owner)?;
+    let (status, after) = runtime.fixture.command(&["metadata", "status"])?;
+    anyhow::ensure!(
+        status.status.success(),
+        "committed metadata status failed: {after}"
+    );
+    assert_eq!(after["summary"]["enabled"], false);
+    assert_eq!(std::fs::read(&record_path)?, record_bytes);
+    runtime.assert_anonymous_selection_unchanged()?;
+    runtime.stop()?;
+    Ok(())
+}
+
+#[test]
+fn anonymous_owner_agent_setting_is_persisted_without_changing_other_fields() -> Result<()> {
+    let mut runtime = OwnedRuntime::new()?;
+    let agent = runtime.fixture.profile.join("agent.json");
+    std::fs::write(
+        &agent,
+        br#"{"keep":"synthetic unrelated setting","diary_mode":"concise"}"#,
+    )?;
+    let owner = runtime.start()?;
+    let (output, result) =
+        runtime
+            .fixture
+            .command(&["agent-config", "--set", "diary_mode=verbose"])?;
+    anyhow::ensure!(
+        output.status.success(),
+        "anonymous agent setter failed: {result}"
+    );
+    assert_eq!(result["command"], "agent-config");
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["summary"]["action"], "updated");
+    assert_eq!(result["summary"]["key"], "diary_mode");
+    assert_eq!(result["summary"]["value"], "verbose");
+    assert_eq!(result["errors"], json!([]));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(&agent)?)?,
+        json!({"keep":"synthetic unrelated setting","diary_mode":"verbose"})
+    );
+    let restored = runtime.restored_after(&owner)?;
+    runtime.assert_anonymous_selection_unchanged()?;
+    let committed = std::fs::read(&agent)?;
+    // Runtime rejects this type before read-heat/SDK configuration. It returns
+    // a durable RolledBack terminal result, not an unknown operation to retry.
+    let (output, rejected) =
+        runtime
+            .fixture
+            .command(&["agent-config", "--set", "read_heat=not-a-bool"])?;
+    assert_eq!(output.status.code(), Some(1), "{rejected}");
+    assert_eq!(rejected["command"], "agent-config");
+    assert_eq!(rejected["status"], "fail");
+    assert_eq!(rejected["summary"], json!({"action":"rolled_back"}));
+    assert_eq!(
+        rejected["errors"],
+        json!(["read_heat must be true or false"])
+    );
+    assert_eq!(std::fs::read(&agent)?, committed);
+    runtime.restored_after(&restored)?;
+    runtime.assert_anonymous_selection_unchanged()?;
+    runtime.stop()?;
+    Ok(())
+}
+
+#[test]
+fn anonymous_owner_host_config_reports_workers_without_restarting_the_owner() -> Result<()> {
+    let mut runtime = OwnedRuntime::new()?;
+    let owner = runtime.start()?;
+    let workers = owner.rpc["effective_parallelism"]
+        .as_u64()
+        .context("serving worker count missing")?;
+    assert!(workers > 0);
+    for args in [vec!["config"], vec!["config", "--rpc-parallelism", "1"]] {
+        let (output, result) = runtime.fixture.command(&args)?;
+        anyhow::ensure!(output.status.success(), "host config failed: {result}");
+        assert_eq!(result["command"], "config");
+        assert_eq!(result["status"], "ok");
+        assert_eq!(result["summary"]["rpc_workers"], workers);
+        let current = runtime.health()?;
+        assert_eq!(current.rpc["effective_parallelism"], workers);
+        assert_eq!(result["errors"], json!([]));
+        assert_eq!(current.pid, owner.pid);
+        assert_eq!(current.process_start_id, owner.process_start_id);
+        assert_eq!(current.instance_id, owner.instance_id);
+        assert!(!runtime.fixture.marker().exists());
+        if args.len() > 1 {
+            assert_eq!(result["summary"]["rpc_parallelism"], 1);
+            let items = result["items"]
+                .as_array()
+                .context("config output items missing")?;
+            let item = items
+                .iter()
+                .find(|item| item["name"] == "rpc workers")
+                .context("worker output missing")?;
+            assert_eq!(item["value"], format!("{workers} (after runtime restart)"));
+        }
+    }
+    let mut expected: Value = serde_json::from_slice(&runtime.fixture.client)?;
+    expected["rpc_parallelism"] = json!(1);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(runtime.fixture.root.join("client.json"))?)?,
+        expected
+    );
+    assert_eq!(
+        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        runtime.fixture.selection
+    );
+    assert!(!runtime.fixture.profile.join("session.json").exists());
+    assert!(!runtime
+        .fixture
+        .root
+        .join("runtime/autostart/registration.json")
+        .exists());
+    runtime.stop()?;
+    Ok(())
+}
