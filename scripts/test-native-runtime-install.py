@@ -9,10 +9,26 @@ import types
 import unittest
 from unittest.mock import patch
 
-from native_fixture_process import install_official_runtime
+from native_fixture_process import install_official_runtime, same_existing_path
 
 
 class FixtureInstallationTests(unittest.TestCase):
+    def test_path_identity_requires_the_same_existing_file_or_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first, second = root / 'first', root / 'second'
+            first.write_bytes(b'one')
+            second.write_bytes(b'one')
+            self.assertTrue(same_existing_path(first, root / '.' / 'first'))
+            self.assertTrue(same_existing_path(root, root.resolve()))
+            self.assertFalse(same_existing_path(first, second))
+            self.assertFalse(same_existing_path(first, root))
+            self.assertFalse(same_existing_path(first, root / 'missing'))
+            self.assertFalse(same_existing_path('', root))
+            if os.name == 'nt':
+                self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
+                self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
+
     def test_upgrade_fixture_installs_before_creating_legacy_session_state(self):
         tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
