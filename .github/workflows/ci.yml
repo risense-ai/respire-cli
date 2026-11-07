@@ -355,9 +355,18 @@ jobs:
         run: python3 scripts/test-core-payload-lifetime.py
       - name: Stage ordinary Rust dependency cache
         if: steps.rust-build.outputs.cache-hit != 'true'
-        run: node scripts/rust-ci-cache.mjs pack workspace
-      - uses: actions/upload-artifact@v4
+        run: |
+          node scripts/rust-ci-cache.mjs pack workspace
+          ls -lh "$RUNNER_TEMP/rust-build-workspace.tar.gz"
+          sha256sum "$RUNNER_TEMP/rust-build-workspace.tar.gz"
+      # Cache transport must fail promptly; a stall must not hold source acceptance indefinitely.
+      - name: Upload workspace dependency cache with bounded transport
+        uses: actions/upload-artifact@v4
         if: steps.rust-build.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY: '2'
+          ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS: '60000'
         with:
           name: rust-build-workspace
           path: ${{ runner.temp }}/rust-build-workspace.tar.gz
@@ -740,9 +749,18 @@ jobs:
 
       - name: Stage instrumented Rust dependency cache
         if: matrix.group == 'core' && steps.rust-build.outputs.cache-hit != 'true'
-        run: node scripts/rust-ci-cache.mjs pack coverage
-      - uses: actions/upload-artifact@v4
+        run: |
+          node scripts/rust-ci-cache.mjs pack coverage
+          ls -lh "$RUNNER_TEMP/rust-build-coverage.tar.gz"
+          sha256sum "$RUNNER_TEMP/rust-build-coverage.tar.gz"
+      # Cache transport must fail promptly; a stall must not hold source acceptance indefinitely.
+      - name: Upload coverage dependency cache with bounded transport
+        uses: actions/upload-artifact@v4
         if: matrix.group == 'core' && steps.rust-build.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        env:
+          ACTIONS_ARTIFACT_UPLOAD_CONCURRENCY: '2'
+          ACTIONS_ARTIFACT_UPLOAD_TIMEOUT_MS: '60000'
         with:
           name: rust-build-coverage
           path: ${{ runner.temp }}/rust-build-coverage.tar.gz
