@@ -566,3 +566,7 @@ impl SnapshotOperation {
         Ok(envelope)
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests/snapshot_validation.rs"]
+mod validation_tests;

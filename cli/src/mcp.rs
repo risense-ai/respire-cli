@@ -1818,3 +1818,7 @@ mod tests {
 #[cfg(test)]
 #[path = "mcp_diary_tests.rs"]
 mod diary_tests;
+
+#[cfg(test)]
+#[path = "mcp_contract_tests.rs"]
+mod contract_tests;

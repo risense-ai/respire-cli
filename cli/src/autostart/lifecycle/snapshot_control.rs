@@ -1257,3 +1257,7 @@ fn snapshot_birth_prefix() -> &'static str {
         "darwin-lstart-"
     }
 }
+
+#[cfg(test)]
+#[path = "../control_tests/snapshot_offline_proof.rs"]
+mod offline_proof_tests;
