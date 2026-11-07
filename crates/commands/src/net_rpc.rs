@@ -37,6 +37,8 @@ pub struct Health {
     #[serde(default)]
     pub inference: Value,
     #[serde(default)]
+    pub rpc: Value,
+    #[serde(default)]
     pub store_ready: bool,
     #[serde(default)]
     pub snapshot_restore_id: Option<String>,
@@ -69,7 +71,7 @@ impl Health {
 }
 
 pub fn rpc_port() -> u16 {
-    if let Ok(raw) = respire_app::env::var("RSRS_RPC_PORT") {
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RPC_PORT") {
         let trimmed = raw.trim();
         if let Ok(port) = trimmed.parse::<u16>() {
             if port != 0 {
@@ -93,17 +95,13 @@ pub fn no_autostart() -> bool {
 /// by the CLI's mcp module; the transport owns the same rule in one place).
 pub fn stable_bin_path() -> PathBuf {
     let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
-    if let Ok(raw) = respire_app::env::var("RSRS_BIN_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed).join(name);
-        }
-    }
-    respire_app::service::main_data_dir().join("bin").join(name)
+    respire_client_host::paths::bin_dir().join(name)
 }
 
 pub fn token_path() -> PathBuf {
-    crate::rpc_worker::runtime_dir_path().join("token")
+    respire_client_host::paths::main_data_dir()
+        .join("runtime")
+        .join("token")
 }
 
 #[cfg(test)]
@@ -112,7 +110,7 @@ fn load_token() -> Option<String> {
 }
 
 fn read_token() -> Result<Option<String>> {
-    if let Ok(raw) = respire_app::env::var("RSRS_RPC_TOKEN") {
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RPC_TOKEN") {
         let trimmed = raw.trim().to_owned();
         if !trimmed.is_empty() {
             return Ok(Some(trimmed));
@@ -122,21 +120,15 @@ fn read_token() -> Result<Option<String>> {
         return Ok(Some(token));
     }
     read_token_file(
-        &respire_app::service::data_dir()
+        &respire_client_host::paths::legacy_token_data_dir()
             .join("runtime")
             .join("token"),
     )
 }
 
 fn read_token_file(path: &std::path::Path) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(value) if !value.trim().is_empty() => Ok(Some(value.trim().to_owned())),
-        Ok(_) => Ok(None),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => {
-            Err(RuntimeError::TokenUnreadable(format!("{}: {error}", path.display())).into())
-        }
-    }
+    respire_client_host::credential::read_token_file(path)
+        .map_err(|error| RuntimeError::TokenUnreadable(format!("{error:#}")).into())
 }
 
 fn check_connection() -> Result<()> {
@@ -252,12 +244,12 @@ pub fn pid_is_respire(pid: u32) -> bool {
 pub fn load_or_create_token() -> Result<String> {
     crate::runtime_policy::require_host("creating runtime credentials")?;
     if let Some(existing) = read_token()? {
-        if respire_app::env::var("RSRS_RPC_TOKEN").is_ok() {
+        if respire_client_host::env::var("RSRS_RPC_TOKEN").is_ok() {
             return Ok(existing);
         }
         return Ok(existing);
     }
-    let generated = respire_app::memory::crypto::random_hex(32);
+    let generated = respire_client_host::credential::generate_runtime_token()?;
     persist_token(&generated)?;
     Ok(generated)
 }
@@ -300,25 +292,7 @@ pub fn is_our_health(value: &Value) -> bool {
         && value.get("bin").and_then(|v| v.as_str()).is_some()
 }
 
-pub fn version_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
-    fn nums(s: &str) -> Vec<u64> {
-        s.split(|c: char| !c.is_ascii_digit())
-            .filter(|p| !p.is_empty())
-            .map(|p| p.parse().unwrap_or(0))
-            .collect()
-    }
-    let a = nums(ours);
-    let b = nums(theirs);
-    let len = a.len().max(b.len());
-    for i in 0..len {
-        let x = a.get(i).copied().unwrap_or(0);
-        let y = b.get(i).copied().unwrap_or(0);
-        if x != y {
-            return x.cmp(&y);
-        }
-    }
-    std::cmp::Ordering::Equal
-}
+pub use respire_client_host::version_cmp;
 
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new()
@@ -425,7 +399,7 @@ pub fn final_stop_receipt(health: &Health, operation_id: Option<&str>) -> Result
                 .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'_'),
         "invalid runtime stop instance ID"
     );
-    let root = respire_app::service::main_data_dir();
+    let root = respire_client_host::paths::main_data_dir();
     anyhow::ensure!(
         !health.installation_root.is_empty()
             && fs::canonicalize(&health.installation_root)? == fs::canonicalize(&root)?,
@@ -503,7 +477,7 @@ pub fn rpc_method(method: &str, args: Vec<String>) -> Result<Value> {
 
 pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequestScope> {
     anyhow::ensure!(
-        health.v == crate::rpc_worker::PROTOCOL_V
+        health.v == crate::rpc_client::PROTOCOL_V
             && !health.account_id.is_empty()
             && !health.instance_id.is_empty()
             && health.generation > 0
@@ -512,7 +486,7 @@ pub fn request_scope(health: &Health) -> Result<respire_protocol::RuntimeRequest
     );
     anyhow::ensure!(
         fs::canonicalize(&health.installation_root)?
-            == fs::canonicalize(respire_app::service::main_data_dir())?,
+            == fs::canonicalize(respire_client_host::paths::main_data_dir())?,
         "runtime request belongs to another installation"
     );
     Ok(respire_protocol::RuntimeRequestScope {
@@ -552,7 +526,7 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
     }
     // Native inference stays inside the runtime. Tracking IDs are values, not
     // command words, and longer write budgets never authorize a request replay.
-    let command: Vec<_> = crate::rpc_worker::command_words(args).take(2).collect();
+    let command: Vec<_> = crate::rpc_client::command_words(args).take(2).collect();
     if matches!(
         command.as_slice(),
         ["model", "install" | "install-m3" | "activate"]
@@ -612,7 +586,7 @@ fn rpc_request(
         }
     };
     let body = json!({
-        "v": crate::rpc_worker::PROTOCOL_V,
+        "v": crate::rpc_client::PROTOCOL_V,
         "id": request_id.clone(),
         "operation_id": operation_id,
         "idempotency_key": idempotency_key,
@@ -667,7 +641,7 @@ fn validate_rpc_response(
         let header: respire_protocol::RpcResponse<crate::output::ResultEnvelope> =
             serde_json::from_value(response.clone()).context("malformed runtime RPC response")?;
         anyhow::ensure!(
-            header.v == crate::rpc_worker::PROTOCOL_V
+            header.v == crate::rpc_client::PROTOCOL_V
                 && header.id == request_id
                 && header.code.as_deref() != Some("protocol_version_mismatch"),
             "runtime RPC response request ID or protocol version mismatch"
@@ -862,6 +836,68 @@ fn foreground_runtime_arguments(args: &[&str]) -> bool {
         || (command == Some("runtime") && args.next() == Some("run"))
 }
 
+fn runtime_role_arguments(executable: &Path, args: &[&str]) -> bool {
+    let image_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.strip_suffix(" (deleted)").unwrap_or(name));
+    let standalone = image_name == Some("rsrs-runtime");
+    if standalone {
+        if args.get(1) == Some(&"--runtime-internal") {
+            return matches!(&args[2..], ["--runtime-background-internal", "--port", port]
+                if port.parse::<u16>().is_ok_and(|port| port > 0));
+        }
+        let mut args = args.iter().copied().skip(1);
+        while let Some(argument) = args.next() {
+            match argument {
+                "--json" | "--supervised" | "serve" => {}
+                "runtime" if args.next() == Some("start") => {}
+                "--host" if args.next().is_some_and(|value| !value.is_empty()) => {}
+                "--port"
+                    if args
+                        .next()
+                        .and_then(|value| value.parse::<u16>().ok())
+                        .is_some_and(|port| port > 0) => {}
+                "--data-dir" if args.next().is_some() => {}
+                _ => return false,
+            }
+        }
+        // Bare invocation serves too; consumed option values are never modes.
+        return true;
+    }
+    if image_name != Some("rsrs") {
+        return false;
+    }
+    if args.contains(&"--runtime-internal")
+        || (args.contains(&"web") && args.contains(&"--internal"))
+    {
+        return true;
+    }
+    combined_foreground_runtime_arguments(args)
+}
+
+fn combined_foreground_runtime_arguments(args: &[&str]) -> bool {
+    let mut args = args.iter().copied().skip(1);
+    let command = loop {
+        match args.next() {
+            Some("--json" | "--direct") => continue,
+            other => break other,
+        }
+    };
+    command == Some("runtime") && args.next() == Some("run")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_process_arguments(command: &[u8]) -> Result<Vec<&str>> {
+    command
+        .strip_suffix(&[0])
+        .context("runtime command line is not terminated")?
+        .split(|byte| *byte == 0)
+        .map(std::str::from_utf8)
+        .collect::<std::result::Result<_, _>>()
+        .context("runtime command line is not UTF-8")
+}
+
 pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     anyhow::ensure!(
         pid != std::process::id() && pid_is_respire(pid),
@@ -885,14 +921,10 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     {
         let directory = std::path::PathBuf::from(format!("/proc/{pid}"));
         let command = std::fs::read(directory.join("cmdline"))?;
-        let args: Vec<_> = command
-            .split(|byte| *byte == 0)
-            .filter_map(|arg| std::str::from_utf8(arg).ok())
-            .collect();
+        let args = linux_process_arguments(&command)?;
+        let executable = std::fs::read_link(directory.join("exe"))?;
         anyhow::ensure!(
-            args.contains(&"--runtime-internal")
-                || (args.contains(&"web") && args.contains(&"--internal"))
-                || foreground_runtime_arguments(&args),
+            runtime_role_arguments(&executable, &args),
             "process {pid} is not a runtime; restart refused"
         );
         let stat = std::fs::read_to_string(directory.join("stat"))?;
@@ -901,9 +933,7 @@ pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
             .and_then(|(_, fields)| fields.split_whitespace().nth(19))
             .context("runtime process creation time missing")?
             .to_owned();
-        let executable = std::fs::read_link(directory.join("exe"))?
-            .to_string_lossy()
-            .into_owned();
+        let executable = executable.to_string_lossy().into_owned();
         Ok(RuntimeProcessIdentity {
             started_at,
             executable,
@@ -1048,6 +1078,164 @@ mod tests {
         }
     }
 
+    #[test]
+    fn foreground_identity_accepts_standalone_serving_modes_and_option_values() {
+        for args in [
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "15169"],
+            vec!["/tmp/path with spaces/rsrs-runtime", "--json", "serve"],
+            vec!["/tmp/rsrs-runtime"],
+            vec!["/tmp/rsrs-runtime", "--json", "runtime", "start"],
+            vec!["/tmp/rsrs-runtime", "--port", "15169", "serve"],
+            vec!["/tmp/rsrs-runtime", "serve", "--data-dir", "--status"],
+            vec![
+                "/tmp/rsrs-runtime",
+                "serve",
+                "--data-dir",
+                "/tmp/profile",
+                "--supervised",
+            ],
+            vec![
+                "/tmp/rsrs-runtime",
+                "serve",
+                "--data-dir",
+                "/tmp/profile",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "15169",
+            ],
+            vec!["/tmp/rsrs", "runtime", "run"],
+            vec!["/tmp/rsrs", "--runtime-internal"],
+            vec!["/tmp/rsrs", "web", "--internal"],
+        ] {
+            assert!(
+                runtime_role_arguments(Path::new(args[0]), &args),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreground_identity_rejects_conflicting_or_incomplete_standalone_arguments() {
+        for args in [
+            vec!["/tmp/rsrs", "serve"],
+            vec!["/tmp/unrelated", "serve"],
+            vec!["/tmp/rsrs-runtime", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--stop"],
+            vec!["/tmp/rsrs-runtime", "serve", "--version"],
+            vec!["/tmp/rsrs-runtime", "runtime", "start", "--stop"],
+            vec!["/tmp/rsrs-runtime", "runtime", "status"],
+            vec!["/tmp/rsrs-runtime", "runtime"],
+            vec!["/tmp/rsrs-runtime", "serve", "--data-dir"],
+            vec!["/tmp/rsrs-runtime", "serve", "--host"],
+            vec!["/tmp/rsrs-runtime", "serve", "--host", ""],
+            vec!["/tmp/rsrs-runtime", "serve", "--port"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "0"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "65536"],
+            vec!["/tmp/rsrs-runtime", "serve", "--port", "--status"],
+            vec!["/tmp/rsrs-runtime", "serve", "--direct"],
+            vec!["/tmp/rsrs-runtime", "serve", "--core-worker-internal"],
+            vec!["/tmp/rsrs-runtime", "serve", "--runtime-internal"],
+            vec!["/tmp/rsrs-runtime", "--runtime-internal"],
+            vec!["/tmp/rsrs-runtime", "web", "--internal"],
+            vec!["/tmp/rsrs-runtime", "--status", "--data-dir", "serve"],
+            vec!["/tmp/rsrs-runtime", "serve", "unknown"],
+        ] {
+            assert!(
+                !runtime_role_arguments(Path::new(args[0]), &args),
+                "{args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_identity_requires_the_exact_internal_launcher_shape() {
+        for image in ["/tmp/rsrs-runtime", "/tmp/rsrs-runtime (deleted)"] {
+            assert!(runtime_role_arguments(Path::new(image),
+                &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
+        }
+        for args in [
+            vec!["rsrs-runtime", "--runtime-background-internal"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "0"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169", "--status"],
+            vec!["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--data-dir", "15169"],
+        ] {
+            assert!(!runtime_role_arguments(Path::new("/tmp/rsrs-runtime"), &args));
+        }
+        assert!(!runtime_role_arguments(Path::new("/tmp/foreign"),
+            &["rsrs-runtime", "--runtime-internal", "--runtime-background-internal", "--port", "15169"]));
+    }
+
+    #[test]
+    fn runtime_role_uses_the_executable_not_argv_zero() {
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/foreign"),
+            &["rsrs", "--runtime-internal"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime"),
+            &["rsrs", "--runtime-internal"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime"),
+            &["rsrs", "serve"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime (deleted)"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(runtime_role_arguments(
+            Path::new("/tmp/rsrs (deleted)"),
+            &["rsrs", "runtime", "run"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/foreign (deleted)"),
+            &["rsrs-runtime", "serve"]
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("/tmp/rsrs-runtime (deleted) suffix"),
+            &["rsrs-runtime", "serve"]
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn procfs_arguments_preserve_empty_values_and_reject_malformed_input() -> Result<()> {
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0serve\0")?,
+            ["rsrs-runtime", "serve"]
+        );
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0--host\0\0")?,
+            ["rsrs-runtime", "--host", ""]
+        );
+        assert!(!runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0--host\0\0")?
+        ));
+        assert_eq!(
+            linux_process_arguments(b"rsrs-runtime\0serve\0--data-dir\0\0")?,
+            ["rsrs-runtime", "serve", "--data-dir", ""]
+        );
+        assert!(runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0serve\0--data-dir\0\0")?
+        ));
+        assert!(!runtime_role_arguments(
+            Path::new("rsrs-runtime"),
+            &linux_process_arguments(b"rsrs-runtime\0serve\0\0")?
+        ));
+        assert!(linux_process_arguments(b"").is_err());
+        assert!(linux_process_arguments(b"rsrs-runtime\0serve").is_err());
+        assert!(linux_process_arguments(b"rsrs-runtime\0\xff\0").is_err());
+        Ok(())
+    }
     fn valid_timeout_args(args: &[&str]) -> Vec<String> {
         use clap::Parser;
         crate::cli_def::Cli::try_parse_from(std::iter::once("rsrs").chain(args.iter().copied()))
@@ -1416,14 +1604,17 @@ mod tests {
                         "ambiguous transport failure was not marked outcome_unknown: {error}"
                     ),
                 };
-                let (failure, _) = crate::output_emit::command_failure(&error);
-                anyhow::ensure!(
-                    failure.details["scope"] == serde_json::to_value(&operation.scope)?
-                        && failure.details["operation_id"] == operation.operation_id
-                        && failure.details["idempotency_key"] == operation.idempotency_key
-                        && failure.details["replayed"] == false,
-                    "outcome_unknown output lost the original operation context"
-                );
+                #[cfg(feature = "server")]
+                {
+                    let (failure, _) = crate::output_emit::command_failure(&error);
+                    anyhow::ensure!(
+                        failure.details["scope"] == serde_json::to_value(&operation.scope)?
+                            && failure.details["operation_id"] == operation.operation_id
+                            && failure.details["idempotency_key"] == operation.idempotency_key
+                            && failure.details["replayed"] == false,
+                        "outcome_unknown output lost the original operation context"
+                    );
+                }
                 anyhow::ensure!(
                     rpc_method("runtime.result", vec![operation.operation_id.clone()]).is_err(),
                     "result query without original context must fail before contacting runtime"
@@ -1505,7 +1696,7 @@ mod tests {
     fn rpc_port_reads_env() -> Result<(), String> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = respire_app::env::var("RSRS_RPC_PORT").ok();
+        let prev = respire_client_host::env::var("RSRS_RPC_PORT").ok();
         std::env::set_var("RSRS_RPC_PORT", "26111");
         let got = rpc_port();
         match prev {
@@ -1558,6 +1749,12 @@ mod tests {
         if is_our_health(&json!({"server":"nginx"})) {
             return Err("nginx".into());
         }
+        let health: Health = serde_json::from_value(ours.clone()).map_err(|error| error.to_string())?;
+        assert!(health.rpc.is_null());
+        let mut reported = ours;
+        reported["rpc"] = json!({"effective_parallelism":3});
+        let health: Health = serde_json::from_value(reported).map_err(|error| error.to_string())?;
+        assert_eq!(health.rpc["effective_parallelism"], 3);
         Ok(())
     }
 
@@ -1577,8 +1774,8 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = respire_app::env::var("RSRS_DATA_DIR").ok();
-        let prev_tok = respire_app::env::var("RSRS_RPC_TOKEN").ok();
+        let prev_data = respire_client_host::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire_client_host::env::var("RSRS_RPC_TOKEN").ok();
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         std::env::set_var("RSRS_RPC_TOKEN", "from-env");
         let got = load_token();
@@ -1601,8 +1798,28 @@ mod tests {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let prev_data = respire_app::env::var("RSRS_DATA_DIR").ok();
-        let prev_tok = respire_app::env::var("RSRS_RPC_TOKEN").ok();
+
+        let fixture = dir.path().join("token-reader");
+        assert!(read_token_file(&fixture).map_err(|e| e.to_string())?.is_none());
+        for invalid in [b"".as_slice(), b" \t\r\n".as_slice(), &[0xff]] {
+            std::fs::write(&fixture, invalid).map_err(|e| e.to_string())?;
+            let error = read_token_file(&fixture).err().ok_or("invalid token accepted")?;
+            assert!(matches!(
+                error.downcast_ref::<RuntimeError>(), Some(RuntimeError::TokenUnreadable(_))
+            ));
+            assert_eq!(std::fs::read(&fixture).map_err(|e| e.to_string())?, invalid);
+        }
+        std::fs::write(&fixture, "  file-token\r\n").map_err(|e| e.to_string())?;
+        assert_eq!(
+            read_token_file(&fixture).map_err(|e| e.to_string())?.as_deref(),
+            Some("file-token")
+        );
+        std::fs::remove_file(&fixture).map_err(|e| e.to_string())?;
+        std::fs::create_dir(&fixture).map_err(|e| e.to_string())?;
+        assert!(read_token_file(&fixture).is_err());
+        std::fs::remove_dir(&fixture).map_err(|e| e.to_string())?;
+        let prev_data = respire_client_host::env::var("RSRS_DATA_DIR").ok();
+        let prev_tok = respire_client_host::env::var("RSRS_RPC_TOKEN").ok();
         std::env::remove_var("RSRS_RPC_TOKEN");
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         persist_token("file-token").map_err(|e| e.to_string())?;

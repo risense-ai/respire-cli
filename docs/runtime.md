@@ -359,3 +359,23 @@ Add `--legacy` to exercise borrowed ONNX instead of streamed owned ORT. The prob
 reports background prepare and concurrent foreground latency for background
 counts 1 and 4; it also checks cache-policy rejection and native pool creation.
 These fixture timings are measurements, not a production speedup guarantee.
+
+
+### Recover private account control
+
+Private account recovery is distinct from a business `runtime result` query:
+
+```sh
+rsrs --json runtime auth-result --operation-id ORIGINAL_KEYGEN_UUID
+rsrs --json runtime account-result --operation-id ORIGINAL_ACCOUNT_UUID --source-profile ORIGINAL_PROFILE
+rsrs --json runtime account-rollback --operation-id ORIGINAL_ACCOUNT_UUID --source-profile ORIGINAL_PROFILE --confirm
+```
+
+For keygen, preserve the original `--force` value. For account registration,
+include `--register`; omit it for login. Keep the operation ID and source profile
+from the unknown-outcome diagnostic. These host-only commands use the original
+journaled operation; they never issue another keygen, registration or login.
+Account recovery may finish an interrupted transaction only after independently
+verifying its target Runtime. Rollback is explicit and the original receipt
+must permit compensation. An unknown result retains maintenance ownership.
+Never place passwords, tokens or recovery codes in the operation arguments.

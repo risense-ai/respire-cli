@@ -1,13 +1,14 @@
 import {createHash} from 'node:crypto';
-import {copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {copyFileSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync} from 'node:fs';
 import {join, resolve} from 'node:path';
 import {execFileSync, spawnSync} from 'node:child_process';
-import {verifyBinary} from './verify-binary.mjs';
+import {frontendLayout, validateBuildMetadata, verifyBinary} from './verify-binary.mjs';
 import {currentPackSource, downloadValidatedPacks, packProducer, readValidatedPacks, verifyPackFile} from './registry-publication.mjs';
 
 const root = process.cwd();
 const assets = resolve(process.argv[2] || 'release-assets');
 const manifest = JSON.parse(readFileSync(join(root, 'npm/artifact-manifest.json'), 'utf8'));
+const frontend = frontendLayout(manifest);
 const sha = execFileSync('git', ['rev-parse', 'HEAD'], {encoding:'utf8'}).trim();
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 for (const target of manifest.targets) {
@@ -15,14 +16,13 @@ for (const target of manifest.targets) {
   const binary = `${manifest.binaryName}-${target.triple}${target.triple.includes('windows') ? '.exe' : ''}`;
   const runtime = `${manifest.binaryName}-${target.triple}-runtime.tar.gz`;
   verifyBinary(join(assets, binary), target.triple);
-  if (metadata.schema_version !== 1 || metadata.git_sha !== sha || metadata.version !== manifest.cliVersion
-      || metadata.target !== target.triple || metadata.binary_file !== binary || metadata.runtime_file !== runtime
-      || hash(join(assets, binary)) !== metadata.binary_sha256 || hash(join(assets, runtime)) !== metadata.runtime_sha256) {
-    throw new Error(`Release artifact metadata/checksum mismatch: ${target.triple}`);
-  }
+  validateBuildMetadata(metadata, manifest, target.triple, {sha, version:manifest.cliVersion},
+    {file:binary, size:statSync(join(assets, binary)).size, sha256:hash(join(assets, binary))},
+    frontend ? undefined : {file:runtime, sha256:hash(join(assets, runtime))});
+  if (frontend && existsSync(join(assets, runtime))) throw Error('Frontend artifact contains a legacy SDK archive');
 }
 if (process.argv.includes('--assets-only')) {
-  console.log(`Verified ${manifest.targets.length} release binary/runtime artifacts for ${sha}`);
+  console.log(`Verified ${manifest.targets.length} release ${frontend ? 'frontend' : 'binary/runtime'} artifacts for ${sha}`);
   process.exit(0);
 }
 
@@ -53,7 +53,7 @@ for (const name of names) {
         || JSON.stringify(pkg.optionalDependencies) !== JSON.stringify(Object.fromEntries(manifest.targets.map(target => [target.pkg, manifest.cliVersion])))) {
       throw new Error('npm launcher/optional dependency mismatch');
     }
-  } else {
+  } else if (!frontend) {
     const runtime = JSON.parse(readFileSync(join(directory, 'bin/core-runtime.json'), 'utf8'));
     if (pkg.license !== 'SEE LICENSE IN LICENSE'
         || runtime.redistribution !== 'permitted-under-included-license'
@@ -80,8 +80,14 @@ for (const name of names) {
     throw new Error(`npm pack report mismatch: ${name}`);
   }
   const packedFiles = new Set(report[0].files.map(file => file.path));
-  if (pkg.license !== 'SEE LICENSE IN LICENSE' || packedFiles.has('LICENSE-MIT-LEGACY') || !packedFiles.has('LICENSE') || (name !== manifest.npmScope && !packedFiles.has('bin/core-notices/CORE-SDK-LICENSE.txt'))) {
-    throw new Error(`npm package is missing its source or binary SDK license: ${name}`);
+  if (frontend && name !== manifest.npmScope) {
+    const target = manifest.targets.find(t => t.pkg === name);
+    const executable = `bin/${manifest.binaryName}${target.triple.includes('windows') ? '.exe' : ''}`;
+    if ([...packedFiles].some(file => file.startsWith('bin/') && file !== executable)
+        || !packedFiles.has(executable)) throw Error(`Frontend package contains extra runtime payload: ${name}`);
+  }
+  if (pkg.license !== 'SEE LICENSE IN LICENSE' || packedFiles.has('LICENSE-MIT-LEGACY') || !packedFiles.has('LICENSE') || (!frontend && name !== manifest.npmScope && !packedFiles.has('bin/core-notices/CORE-SDK-LICENSE.txt'))) {
+    throw new Error(`npm package is missing its source or required legacy SDK license: ${name}`);
   }
   writeFileSync(join(directory, 'release.pack.json'), JSON.stringify(report, null, 2)+'\n');
   if (packDirectory) packages.push({name, version:manifest.cliVersion, file:report[0].filename, sha256:hash(join(packDirectory, report[0].filename)),pack:report[0]});

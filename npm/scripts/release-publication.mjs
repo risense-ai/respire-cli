@@ -8,6 +8,7 @@ import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {packPackage, publishPackage, readExpectedPacks, waitForPackage} from './registry-publication.mjs';
 import {validateRecoverySource, validateRecoveryAuthority} from './dev6-recovery-policy.mjs';
+import {releaseAssetNames} from './verify-binary.mjs';
 
 const RELEASE_WORKFLOW = '.github/workflows/release.yml';
 // Only new receipts opt into post-consumption temporary artifact deletion.
@@ -88,9 +89,7 @@ export function validateScopedPayload(receipt, expectedManifest) {
       receipt.packages.some(p => p.version !== source.version || !/^sha512-[A-Za-z0-9+/]{86}==$/.test(p.integrity) || !/^[a-f0-9]{40}$/.test(p.shasum))) {
     throw new Error('Scoped receipt must contain every exact version and content digest once');
   }
-  const expectedAssets = expectedManifest.targets.flatMap(t => [
-    `cli-build-${t.triple}.json`, `rsrs-${t.triple}-runtime.tar.gz`, `rsrs-${t.triple}${t.triple.includes('windows') ? '.exe' : ''}`,
-  ]).sort();
+  const expectedAssets = expectedManifest.targets.flatMap(t => releaseAssetNames(expectedManifest, t.triple)).sort();
   if (!Array.isArray(receipt.assets) || !equal(receipt.assets.map(a => a.name).sort(), expectedAssets) ||
       receipt.assets.some(a => !Number.isSafeInteger(a.size) || a.size <= 0 || !HASH.test(a.sha256))) throw new Error('Invalid validated asset set');
   if (!Array.isArray(receipt.binaries) || receipt.binaries.length !== expectedManifest.targets.length ||

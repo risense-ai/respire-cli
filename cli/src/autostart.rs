@@ -10,12 +10,39 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod lifecycle;
+mod snapshot_control;
+pub(crate) use snapshot_control::{SnapshotOperation, SnapshotOutcomeUnknown, SnapshotRemoteFailure};
 mod recovery;
 pub(crate) use recovery::StaleOwner;
 mod manager;
 pub(crate) use manager::process_birth;
 mod supervise;
-pub(crate) use supervise::spawn_authorized_runtime;
+pub(crate) use supervise::control_migrate_profile;
+pub(crate) use supervise::{login_recovery_status, recover_legacy_login_locked};
+pub(crate) use supervise::{control_metadata, control_offline_read};
+pub(crate) use supervise::control_agent_config;
+pub(crate) use supervise::{
+    control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,
+    control_fivekeys,
+    KeyRecoveryRequired,
+};
+pub(crate) use supervise::{control_logout, control_session_revoke, IdentityWriteRecoveryRequired};
+pub(crate) use supervise::{control_space_invite, control_space_join, control_space_kick};
+pub(crate) use supervise::{control_account_remove, control_space_remove, run_space_config_control};
+pub(crate) use supervise::control_prepare_model;
+pub(crate) use supervise::{
+    control_install_engines, control_reset_cpu, control_uninstall_m3,
+};
+pub(crate) use supervise::{run_config_control, run_profile_config_control};
+pub(crate) use supervise::{control_secret, control_keys_export, control_session_list, control_login_step};
+pub(crate) use lifecycle::{snapshot_recover_control, snapshot_restore_control};
+pub(crate) use supervise::{
+    auth_keygen_locked, auth_result_locked, control_auth_result, control_keygen,
+    control_memory_revision, spawn_authorized_runtime,
+    control_account_result, control_account_rollback, control_login, control_register,
+    prepare_model_locked, model_install_plan_locked, model_install_verify_locked,
+    prepare_auth_account_request, validate_auth_account_receipt, AuthAccountControl, AccountOutcomeUnknown, AuthOutcomeUnknown,
+};
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
@@ -212,7 +239,7 @@ const ENVIRONMENT: &[&str] = &[
 ];
 
 fn disabled_status() -> Result<Value> {
-    let root = respire::service::main_data_dir();
+    let (root, _) = respire_client_host::config::control_roots()?;
     match read_registration(&root)? {
         None => Ok(
             json!({"schema_version":1,"enabled":false,"registered":false,

@@ -1,7 +1,10 @@
+#[cfg(feature = "server")]
 use anyhow::{Context, Result};
-use respire_app::memory::model::{Artifact, MemoryMeta, SourceRef};
+#[cfg(feature = "server")]
 use respire_app::transport::local::LocalStore;
-use respire_app::{Kind, MemoryEntry, SessionKeys};
+#[cfg(feature = "server")]
+use respire_app::SessionKeys;
+use respire_protocol::{Artifact, Kind, MemoryEntry, MemoryMeta, SourceRef};
 use serde_json::{json, Value};
 
 // A JSON array is one clap value; Option<Vec<T>> would mean repeated T values.
@@ -51,7 +54,7 @@ pub fn kind(value: &str) -> std::result::Result<String, String> {
     Ok(value)
 }
 fn timestamp(value: &str) -> std::result::Result<String, String> {
-    respire_app::memory::model::metadata::validate_timestamp(value).map_err(|e| e.to_string())?;
+    respire_protocol::metadata::validate_timestamp(value).map_err(|e| e.to_string())?;
     Ok(value.to_owned())
 }
 fn sources(value: &str) -> std::result::Result<SourceRefs, String> {
@@ -78,6 +81,20 @@ fn artifact(value: &str) -> std::result::Result<Artifact, String> {
 }
 
 impl Flags {
+    pub fn has_patch(&self) -> bool {
+        self.summary.is_some()
+            || self.clear_summary
+            || self.source_refs.is_some()
+            || self.clear_source_refs
+            || self.valid_until.is_some()
+            || self.clear_valid_until
+            || self.review_at.is_some()
+            || self.clear_review_at
+            || self.artifact.is_some()
+            || self.clear_artifact
+    }
+
+    #[cfg(feature = "server")]
     pub fn patch(&self) -> Option<respire_app::service::MetadataPatch> {
         let patch = respire_app::service::MetadataPatch {
             summary: self
@@ -106,13 +123,9 @@ impl Flags {
                 .map(Some)
                 .or_else(|| self.clear_artifact.then_some(None)),
         };
-        (patch.summary.is_some()
-            || patch.source_refs.is_some()
-            || patch.valid_until.is_some()
-            || patch.review_at.is_some()
-            || patch.artifact.is_some())
-        .then_some(patch)
+        self.has_patch().then_some(patch)
     }
+    #[cfg(feature = "server")]
     pub fn apply(&self, entry: &mut MemoryEntry) {
         if let Some(patch) = self.patch() {
             patch.apply(&mut entry.metadata);
@@ -127,6 +140,7 @@ impl Flags {
 }
 
 /// Compute the receipt before committing, so a Core rejection cannot follow a save.
+#[cfg(feature = "server")]
 pub fn prepare(keys: &SessionKeys, store: &LocalStore, entry: &MemoryEntry) -> Result<Value> {
     respire_app::metadata_gate::ensure_write(store, entry)?;
     respire_app::metadata_gate::ensure_sources(keys, store, entry)?;
@@ -138,7 +152,7 @@ pub fn prepare(keys: &SessionKeys, store: &LocalStore, entry: &MemoryEntry) -> R
     let revision = validation["record_revision"]
         .as_str()
         .context("Core omitted record_revision")?;
-    respire_app::memory::model::metadata::validate_revision(revision)?;
+    respire_protocol::metadata::validate_revision(revision)?;
     Ok(receipt(entry, revision))
 }
 
@@ -182,6 +196,7 @@ pub struct DeploymentReview {
     pub reconciled_offline_writes: String,
 }
 
+#[cfg(feature = "server")]
 pub fn deployment(
     mode: &str,
     file: Option<&std::path::Path>,

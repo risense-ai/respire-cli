@@ -111,7 +111,7 @@ pub fn read_session_json() -> Result<serde_json::Value> {
 // cache, verbatim from their extraction source apart from rebinding `respire::`
 // app-core paths, CLI-host services through `host_hooks`, and the host-command
 // router that stays in the CLI binary.
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 
 use anyhow::Context;
@@ -151,7 +151,7 @@ use crate::sync_flow::{
 };
 use crate::util::{current_user, dev_label, list_since_bound, local_day_of, now_stamp, short_id};
 
-pub static DIRECT_MODE: AtomicBool = AtomicBool::new(false);
+pub use crate::output_state::DIRECT_MODE;
 
 pub static EMBEDDER_SLOT: std::sync::Mutex<Option<Box<BgeEmbedder>>> = std::sync::Mutex::new(None);
 
@@ -671,53 +671,7 @@ pub fn run_tree_deepen(
     Ok(())
 }
 
-/// Classify host UI dispatch without executing extraction business.
-pub fn extract_uses_tui(command: &Command) -> Result<bool> {
-    let Command::Extract {
-        targets,
-        tui,
-        all,
-        id,
-        dry_run,
-        since,
-        limit,
-        cwd,
-        model,
-        session,
-        kind,
-        importance,
-        parent,
-        include_subagents,
-        force,
-    } = command
-    else {
-        return Ok(false);
-    };
-    let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stdout());
-    let filters_absent = since.is_none()
-        && limit.is_none()
-        && cwd.is_none()
-        && model.is_none()
-        && session.is_none()
-        && kind.as_str() == "context"
-        && importance.as_str() == "important"
-        && parent.is_empty()
-        && !*include_subagents
-        && !*force;
-    let bare = !*targets && id.is_none() && !*all && !*dry_run && filters_absent && !json_mode();
-    if *tui {
-        if !bare {
-            anyhow::bail!(
-                "--tui opens the interactive picker and cannot be combined with extraction options \
-                 (--since/--limit/--cwd/--model/--session/--kind/--importance/--parent/--include-subagents/--force) \
-                 or --json; drop --tui to apply them."
-            );
-        }
-        return Ok(true);
-    }
-    Ok(bare && interactive)
-}
+pub use crate::cli_def::extract_uses_tui;
 
 /// TUI/non-TUI dispatch for `extract`, kept out of `run_local_inner` to bound its stack frame.
 pub fn run_extract_command(command: &Command) -> Result<()> {
@@ -3950,25 +3904,7 @@ pub fn run_memory_revision() -> Result<()> {
     ))
 }
 
-pub fn run_capabilities() -> Result<()> {
-    emit_result(ResultEnvelope::new(
-        "capabilities",
-        OutputStatus::Ok,
-        serde_json::json!({
-            "schema_version": 1,
-            "cli_version": crate::app_version::embedded(),
-            "capabilities": {
-                "host_rpc": {"version":1,"transport":"stdio","flag":"--host-rpc-stdio","methods":["auth.register","auth.login","auth.recover","auth.reset"]},
-                "memory_list_metadata": true,
-                "memory_metadata_flags": true,
-                "memory_metadata_gate_default": false,
-                "rerank": false,
-                "model": {"install": true, "install_rerank": false, "profile_contract":1, "transport_contract":1, "methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"], "selection_scope":"library"}
-            }
-        }),
-        Vec::new(),
-    ))
-}
+pub use crate::capabilities::run_capabilities;
 
 pub fn run_metadata_status() -> Result<()> {
     let root = respire_app::service::data_dir();

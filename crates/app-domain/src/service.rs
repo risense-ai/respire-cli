@@ -912,87 +912,9 @@ pub fn keygen() -> Result<(PathBuf, String)> {
 /// Default server address (client can change it; stored in ~/.rsrs/client.json, separate from session.json auth).
 pub const DEFAULT_SERVER_ADDR: &str = "https://api.rsrs.rs";
 
-/// Expand `~` (`~/` and Windows `~\` both count) — **the only impl**; do not rewrite elsewhere.
-///
-/// Why (2026-09-20 audit): this fn used to have three independent impls (two here + web.rs),
-/// and they disagreed — inject.rs accepted `~\`, service.rs three sites only `~/`, so on Windows
-/// `~\...` paths did not expand. Now collected here; every caller uses this.
-pub fn expand_tilde(v: &str) -> PathBuf {
-    if let Some(rest) = v.strip_prefix("~/").or_else(|| v.strip_prefix("~\\")) {
-        if let Ok(h) = home_dir() {
-            return h.join(rest);
-        }
-    }
-    PathBuf::from(v)
-}
-
-/// Resolve `RSRS_DATA_DIR` to an absolute path (None if unset or empty).
-/// Semantics: the env var names the profile root — the `main` profile is that root, space profiles live under its `accounts/`,
-/// and client.json lives there too (an isolated instance must not write config into the real user dir).
-pub fn env_root_dir() -> Option<PathBuf> {
-    let v = crate::env::var("RSRS_DATA_DIR").ok()?;
-    let v = v.trim();
-    if v.is_empty() {
-        return None;
-    }
-    if internally_configured_root(v) {
-        return None;
-    }
-    Some(expand_tilde(v))
-}
-
-// Sunk from the client-side migration module (WP-2c): engine flows must classify the
-// internally configured default home, and the domain crate cannot reach back into the
-// client crate. The client migration module re-imports this function.
-const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
-
-/// The SDK accepts the original data-root environment variable. This marker lets
-/// app configuration retain its default-home and active-profile semantics.
-pub fn internally_configured_root(value: &str) -> bool {
-    crate::env::var(DEFAULT_ENV).ok().is_some_and(|marker| {
-        equivalent_path(
-            &crate::service::expand_tilde(&marker),
-            &crate::service::expand_tilde(value),
-        ) && equivalent_path(
-            &crate::service::expand_tilde(value),
-            &crate::service::default_data_dir(),
-        )
-    })
-}
-
-fn equivalent_path(left: &Path, right: &Path) -> bool {
-    let absolute = |path: &Path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|root| root.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    };
-    let normalize = |path: PathBuf| {
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                _ => normalized.push(component.as_os_str()),
-            }
-        }
-        normalized
-    };
-    let left = normalize(absolute(left));
-    let right = normalize(absolute(right));
-    if cfg!(windows) {
-        left.to_string_lossy()
-            .replace('/', "\\")
-            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
-    } else {
-        left == right
-    }
-}
+pub use crate::client_paths::{
+    default_data_dir, env_root_dir, expand_tilde, home_dir, internally_configured_root, main_data_dir,
+};
 
 /// client.json path is special: it itself decides data_dir, so **usually** we always read the copy in the default dir
 /// (otherwise after changing data_dir the new dir has no client.json and config locks itself).
@@ -1005,13 +927,7 @@ fn equivalent_path(left: &Path, right: &Path) -> bool {
 /// data_dir is decided by the env var (in-tree first), not this file.
 /// Host profile transactions preserve the complete configuration on failure.
 pub fn client_config_path() -> PathBuf {
-    if let Some(root) = env_root_dir() {
-        return root.join("client.json");
-    }
-    home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".rsrs")
-        .join("client.json")
+    respire_client_host::paths::client_config_path()
 }
 
 fn read_client_config() -> Option<serde_json::Value> {
@@ -1067,76 +983,13 @@ fn client_config_lock() -> Result<std::fs::File> {
 
 fn read_client_config_for_write() -> Result<serde_json::Value> {
     crate::memory::bge::m3_model_dir()?;
-    let path = client_config_path();
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::json!({}))
-        }
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("cannot read client config {}", path.display()))
-        }
-    };
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("client config {} contains invalid JSON", path.display()))?;
-    anyhow::ensure!(
-        value.is_object(),
-        "client config {} must contain a JSON object",
-        path.display()
-    );
-    for key in [
-        "lang",
-        "data_dir",
-        "addr",
-        "api_base",
-        "service_mode",
-        "engine",
-        "model",
-    ] {
-        if let Some(field) = value.get(key) {
-            anyhow::ensure!(
-                field.is_string(),
-                "client config {} has invalid type for {key}",
-                path.display()
-            );
-        }
-    }
-    for key in ["autosync", "cure_auto"] {
-        if let Some(field) = value.get(key) {
-            anyhow::ensure!(
-                field.is_boolean(),
-                "client config {} has invalid type for {key}",
-                path.display()
-            );
-        }
-    }
-    if let Some(field) = value.get("rpc_parallelism") {
-        anyhow::ensure!(
-            field.as_u64().is_some_and(|value| value <= u32::MAX as u64),
-            "client config {} has invalid rpc_parallelism",
-            path.display()
-        );
-    }
-    Ok(value)
+    Ok(respire_client_host::config::read_client_config(&client_config_path())?
+        .unwrap_or_else(|| serde_json::json!({})))
 }
 
 // ── data dir (client.json data_dir → RSRS_DATA_DIR → ~/.rsrs) ──
 // For tests and multi-lib maintenance: changing data_dir switches the whole library (db/session/lock follow).
 // Order: env var wins (one-shot override for CI/tests) → client.json data_dir → default ~/.rsrs.
-
-pub fn default_data_dir() -> PathBuf {
-    home_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(".rsrs")
-}
-
-/// Main-profile dir: `RSRS_DATA_DIR` when isolated, else default `~/.rsrs`.
-/// **Every "back to main" path must use this**, not a hard `default_data_dir()` — otherwise an isolated instance
-/// switching back to main would land in the real user dir (hit 2026-09-20).
-pub fn main_data_dir() -> PathBuf {
-    env_root_dir().unwrap_or_else(default_data_dir)
-}
 
 /// Effective data dir. Empty/missing fall back to default — never panics.
 ///
@@ -1152,21 +1005,7 @@ pub fn data_dir() -> PathBuf {
 }
 
 fn data_dir_from_config(config: Option<&serde_json::Value>) -> PathBuf {
-    let env_root = env_root_dir();
-    let from_config = config
-        .and_then(|d| {
-            d["data_dir"]
-                .as_str()
-                .filter(|s| !s.is_empty())
-                .map(ToOwned::to_owned)
-        })
-        .map(|v| expand_tilde(&v));
-    match (env_root, from_config) {
-        (Some(root), Some(cfg)) if cfg.starts_with(&root) => cfg,
-        (Some(root), _) => root,
-        (None, Some(cfg)) => cfg,
-        (None, None) => default_data_dir(),
-    }
+    respire_client_host::paths::data_dir_from_config(config)
 }
 
 #[derive(serde::Serialize)]
@@ -3409,15 +3248,6 @@ pub fn local_snapshot(source_secret: Option<&str>) -> Result<String> {
     Ok(serde_json::to_string(&entries)?)
 }
 
-pub fn home_dir() -> Result<PathBuf> {
-    if let Ok(home) = crate::env::var("HOME") {
-        if !home.trim().is_empty() {
-            return Ok(PathBuf::from(home));
-        }
-    }
-    dirs::home_dir().ok_or_else(|| anyhow!("cannot determine home directory"))
-}
-
 /// Auto title: untitled entries take the first body line (strip markers/time prefix), 20 chars — the tree no longer shows a blank title.
 pub fn derive_title(content: &str) -> String {
     let mut t = content.trim();
@@ -3939,6 +3769,32 @@ mod tests {
             }
             assert_eq!(std::fs::read(iso.path().join("client.json"))?, config_before);
         }
+
+        let path = client_config_path();
+        let original = std::fs::read(&path)?;
+        std::fs::remove_file(&path)?;
+        assert!(respire_client_host::config::read_client_config(&path)?.is_none());
+        assert_eq!(read_client_config_for_write()?, serde_json::json!({}));
+        for invalid in [
+            "", "{", "null", "[]", r#"{"lang":7}"#, r#"{"data_dir":false}"#,
+            r#"{"addr":null}"#, r#"{"api_base":[]}"#, r#"{"service_mode":7}"#,
+            r#"{"engine":false}"#, r#"{"model":{}}"#, r#"{"autosync":"true"}"#,
+            r#"{"cure_auto":1}"#, r#"{"rpc_parallelism":-1}"#,
+            r#"{"rpc_parallelism":4294967296}"#, r#"{"rpc_parallelism":1.5}"#,
+        ] {
+            std::fs::write(&path, invalid)?;
+            assert!(respire_client_host::config::read_client_config(&path).is_err());
+            assert!(validate_client_config().is_err());
+            assert_eq!(std::fs::read(&path)?, invalid.as_bytes());
+        }
+        std::fs::write(&path, [0xff])?;
+        assert!(validate_client_config().is_err());
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(respire_client_host::config::read_client_config(&path).is_err());
+        assert!(validate_client_config().is_err());
+        std::fs::remove_dir(&path)?;
+        std::fs::write(&path, original)?;
         assert_eq!(
             std::fs::read(&real_client).ok(),
             before,

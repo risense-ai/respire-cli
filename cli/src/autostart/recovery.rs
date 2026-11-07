@@ -51,6 +51,14 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
         .with_context(|| format!("recovery identity missing {key}"))
 }
 
+pub(super) fn account_identity_source(profile: &Path) -> Result<String> {
+    match respire_client_host::identity::session_user_of_dir(profile)? {
+        Some(user) => Ok(user),
+        // Only an absent session retains the existing profile-based identity.
+        None => Ok(profile.display().to_string()),
+    }
+}
+
 fn pid(value: &Value, key: &str) -> Result<u32> {
     value[key]
         .as_u64()
@@ -96,7 +104,7 @@ impl StaleOwner {
             nonce.get_version_num() == 4 && nonce.to_string() == instance,
             "invalid recovery instance"
         );
-        let receipt = respire::service::main_data_dir()
+        let receipt = respire_client_host::paths::main_data_dir()
             .canonicalize()?
             .join("runtime/autostart/launch")
             .join(format!("launch-{instance}.claimed"));
@@ -159,23 +167,10 @@ impl StaleOwner {
             "incomplete nullable ownership bindings"
         );
         let health: crate::net_rpc::Health = serde_json::from_value(endpoint.clone())?;
-        let roots = respire::service::resolved_roots()?;
+        let roots = respire_client_host::roots::resolved_roots()?;
         let root = roots.installation_root.canonicalize()?;
         let profile = roots.account_data_root.canonicalize()?;
-        let session = profile.join("session.json");
-        let account = match fs::symlink_metadata(&session) {
-            Ok(_) => {
-                let value: Value = serde_json::from_slice(&read_record(&session)?)?;
-                text(&value, "user")?.to_owned()
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(error) => return Err(error).context("current account identity is unavailable"),
-        };
-        let account_source = if account.is_empty() {
-            profile.display().to_string()
-        } else {
-            account
-        };
+        let account_source = account_identity_source(&profile)?;
         let runtime_pid = pid(&endpoint, "pid")?;
         let supervisor_pid = pid(&grant, "supervisor_pid")?;
         let birth = text(&receipt, "process_start_id")?;
@@ -280,7 +275,8 @@ impl StaleOwner {
         let image = Path::new(text(&grant, "image_path")?).canonicalize()?;
         anyhow::ensure!(
             image.is_file()
-                && image != std::env::current_exe()?.canonicalize()?
+                && (crate::embedding::selection().is_some()
+                    || image != std::env::current_exe()?.canonicalize()?)
                 && Path::new(text(&endpoint, "exe")?).canonicalize()? == image
                 && Path::new(text(&endpoint, "image_path")?).canonicalize()? == image
                 && grant["image_sha256"] == health.image_sha256

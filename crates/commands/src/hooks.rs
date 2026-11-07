@@ -10,11 +10,12 @@
 //! Semantics: event JSON is written to the plugin stdin (`{"event":"...","ts":"...","data":{...}}`);
 //! a `pre-*` hook that exits 0 with stdout `{"verdict":"block","reason":"..."}` vetoes the action;
 //! a non-zero exit follows `on_error` (block=veto / warn=log and continue / skip=silent);
-//! `post-*` never blocks the main flow. Timeouts kill the child.
+//! `post-*` failures do not block the main flow. Timeouts report failure; the child is not killed.
 //! Safety: the child is stripped of all ONEMEMORY_* secrets; payloads are summaries, not keys.
 
 use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -59,7 +60,7 @@ impl HookEvent {
 pub struct HookSpec {
     /// Plugin command (run via shell; may include args).
     pub cmd: String,
-    /// Timeout in milliseconds (default 5000; on timeout the child is killed and `on_error` applies).
+    /// Wait timeout in milliseconds (default 5000; `on_error` applies without killing the child).
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Failure policy: block (pre may veto) / warn (stderr warning, action continues) / skip (silent).
@@ -78,13 +79,21 @@ pub struct HooksConfig {
     pub hooks: BTreeMap<String, Vec<HookSpec>>,
 }
 
+#[cfg(feature = "server")]
+
 pub fn config_path() -> std::path::PathBuf {
     respire_app::service::data_dir().join("plugins.json")
 }
 
-/// Read hook config. Missing or corrupt files fall back to empty - a bad plugin config must not crash the CLI.
+/// Compatibility entry for Runtime callers using their current data directory.
+#[cfg(feature = "server")]
 pub fn read_config() -> HooksConfig {
-    std::fs::read_to_string(config_path())
+    read_config_at(&config_path())
+}
+
+/// Preserve plugins.json compatibility: missing or corrupt files mean no hooks.
+pub fn read_config_at(path: &Path) -> HooksConfig {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or_default()
@@ -113,10 +122,16 @@ enum HookOutcome {
     Failed(String),
 }
 
+/// Compatibility entry for Runtime callers using their current data directory.
+#[cfg(feature = "server")]
+pub fn fire(event: HookEvent, payload: serde_json::Value) -> HookVerdict {
+    fire_at(&config_path(), event, payload)
+}
+
 /// Fire one event: run every hook for it in order.
 /// payload is a summary-level business payload; combined with event/ts into JSON on plugin stdin.
-pub fn fire(event: HookEvent, payload: serde_json::Value) -> HookVerdict {
-    let cfg = read_config();
+pub fn fire_at(path: &Path, event: HookEvent, payload: serde_json::Value) -> HookVerdict {
+    let cfg = read_config_at(path);
     let specs = match cfg.hooks.get(event.as_str()) {
         Some(v) if !v.is_empty() => v,
         _ => return HookVerdict::allow(),
@@ -187,11 +202,11 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
-        .env("PATH", respire_app::env::var("PATH").unwrap_or_default())
-        .env("HOME", respire_app::env::var("HOME").unwrap_or_default())
+        .env("PATH", crate::env::var("PATH").unwrap_or_default())
+        .env("HOME", crate::env::var("HOME").unwrap_or_default())
         .env("RSRS_HOOK_EVENT", envelope["event"].as_str().unwrap_or(""));
     #[cfg(windows)]
-    if let Some(root) = respire_app::env::var_os("SystemRoot") {
+    if let Some(root) = crate::env::var_os("SystemRoot") {
         spawn.env("SystemRoot", root);
     }
     let mut child = match spawn.spawn() {
@@ -255,6 +270,8 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
     }
     HookOutcome::Ok(Vec::new())
 }
+
+#[cfg(feature = "server")]
 
 /// Alias over fire(): public paths all go through fire.
 pub fn verdict_of(event: HookEvent, payload: serde_json::Value) -> HookVerdict {
@@ -330,17 +347,14 @@ mod tests {
     }
 
     #[test]
-    fn test_config_missing_is_empty() {
-        let _g = crate::TEST_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        // config_path points at a missing test dir -> empty config, fire allows
-        std::env::set_var("RSRS_DATA_DIR", "/tmp/onememory-hooks-test-nonexistent");
-        let cfg = read_config();
+    fn test_config_missing_is_empty() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("missing/plugins.json");
+        let cfg = read_config_at(&path);
         assert!(cfg.hooks.is_empty());
-        let v = fire(HookEvent::PreRemember, serde_json::json!({}));
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
         assert!(!v.blocked);
-        std::env::remove_var("RSRS_DATA_DIR");
+        Ok(())
     }
 
     #[test]
@@ -357,33 +371,28 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var("RSRS_DATA_DIR").ok();
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
+        let path = dir.path().join("plugins.json");
         let cfg = serde_json::json!({
             "hooks": {
                 "pre-remember": [{"cmd": "exit 0", "timeout_ms": 2000, "on_error": "warn"}]
             }
         });
-        let _ = std::fs::write(config_path(), cfg.to_string());
-        let v = fire(HookEvent::PreRemember, serde_json::json!({"title":"t"}));
+        std::fs::write(&path, cfg.to_string())?;
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({"title":"t"}));
         assert!(!v.blocked);
         let cfg_block = serde_json::json!({
             "hooks": {
                 "pre-remember": [{"cmd": "exit 1", "timeout_ms": 2000, "on_error": "block"}]
             }
         });
-        let _ = std::fs::write(config_path(), cfg_block.to_string());
-        let v = fire(HookEvent::PreRemember, serde_json::json!({}));
+        std::fs::write(&path, cfg_block.to_string())?;
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
         assert!(v.blocked);
-        match saved {
-            Some(s) => std::env::set_var("RSRS_DATA_DIR", s),
-            None => std::env::remove_var("RSRS_DATA_DIR"),
-        }
         Ok(())
     }
 
     #[test]
-    fn payload_builders_and_event_names() {
+    fn payload_builders_and_event_names() -> anyhow::Result<()> {
         assert_eq!(EVENT_NAMES.len(), 5);
         let done = remember_done_payload("id", "t", "important");
         assert_eq!(done["id"], "id");
@@ -391,8 +400,10 @@ mod tests {
         assert_eq!(rec["query"], "q");
         assert_eq!(forget_payload("x")["id"], "x");
         assert_eq!(sync_payload(1, 2)["pulled"], 1);
-        let v = verdict_of(HookEvent::PostSync, serde_json::json!({}));
+        let dir = tempfile::tempdir()?;
+        let v = fire_at(&dir.path().join("plugins.json"), HookEvent::PostSync, serde_json::json!({}));
         assert!(!v.blocked);
+        Ok(())
     }
 
     #[test]
@@ -401,58 +412,50 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir()?;
-        let saved = std::env::var_os("RSRS_DATA_DIR");
-        std::env::set_var("RSRS_DATA_DIR", dir.path());
-        let result = (|| -> anyhow::Result<()> {
-            for (event, policy, blocked, warned) in [
-                (HookEvent::PreRemember, "", false, true),
-                (HookEvent::PreRemember, "warn", false, true),
-                (HookEvent::PreRemember, "skip", false, false),
-                (HookEvent::PreRemember, "block", true, false),
-                (HookEvent::PostSync, "", false, false),
-                (HookEvent::PostSync, "block", false, false),
-                (HookEvent::PostSync, "warn", false, true),
-            ] {
-                let cfg = serde_json::json!({"hooks": {event.as_str(): [
-                    {"cmd": "exit 1", "on_error": policy, "timeout_ms": 2000}
-                ]}});
-                std::fs::write(config_path(), cfg.to_string())?;
-                let verdict = fire(event, serde_json::json!({}));
-                assert_eq!(
-                    verdict.blocked,
-                    blocked,
-                    "{} policy={policy}",
-                    event.as_str()
-                );
-                assert_eq!(!verdict.warnings.is_empty(), warned);
-                assert!(!verdict.reason.contains("failed to start"));
-                assert!(verdict
-                    .warnings
-                    .iter()
-                    .all(|warning| !warning.contains("failed to start")));
-            }
-            let veto_command = if cfg!(windows) {
-                "echo {\"verdict\":\"block\",\"reason\":\"private data\"}"
-            } else {
-                "echo '{\"verdict\":\"block\",\"reason\":\"private data\"}'"
-            };
-            let cfg = serde_json::json!({"hooks": {"pre-remember": [
-                {"cmd": veto_command, "on_error": "skip"},
-                {"cmd": "exit 1", "on_error": "warn"}
+        let path = dir.path().join("plugins.json");
+        for (event, policy, blocked, warned) in [
+            (HookEvent::PreRemember, "", false, true),
+            (HookEvent::PreRemember, "warn", false, true),
+            (HookEvent::PreRemember, "skip", false, false),
+            (HookEvent::PreRemember, "block", true, false),
+            (HookEvent::PostSync, "", false, false),
+            (HookEvent::PostSync, "block", false, false),
+            (HookEvent::PostSync, "warn", false, true),
+        ] {
+            let cfg = serde_json::json!({"hooks": {event.as_str(): [
+                {"cmd": "exit 1", "on_error": policy, "timeout_ms": 2000}
             ]}});
-            std::fs::write(config_path(), cfg.to_string())?;
-            let verdict = fire(HookEvent::PreRemember, serde_json::json!({}));
-            assert!(verdict.blocked);
-            assert!(verdict.reason.contains("private data"));
-            assert!(verdict.warnings.is_empty(), "a veto must stop later hooks");
-            std::fs::write(config_path(), "invalid json")?;
-            assert!(read_config().hooks.is_empty());
-            Ok(())
-        })();
-        match saved {
-            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
-            None => std::env::remove_var("RSRS_DATA_DIR"),
+            std::fs::write(&path, cfg.to_string())?;
+            let verdict = fire_at(&path, event, serde_json::json!({}));
+            assert_eq!(
+                verdict.blocked,
+                blocked,
+                "{} policy={policy}",
+                event.as_str()
+            );
+            assert_eq!(!verdict.warnings.is_empty(), warned);
+            assert!(!verdict.reason.contains("failed to start"));
+            assert!(verdict
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("failed to start")));
         }
-        result
+        let veto_command = if cfg!(windows) {
+            "echo {\"verdict\":\"block\",\"reason\":\"private data\"}"
+        } else {
+            "echo '{\"verdict\":\"block\",\"reason\":\"private data\"}'"
+        };
+        let cfg = serde_json::json!({"hooks": {"pre-remember": [
+            {"cmd": veto_command, "on_error": "skip"},
+            {"cmd": "exit 1", "on_error": "warn"}
+        ]}});
+        std::fs::write(&path, cfg.to_string())?;
+        let verdict = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
+        assert!(verdict.blocked);
+        assert!(verdict.reason.contains("private data"));
+        assert!(verdict.warnings.is_empty(), "a veto must stop later hooks");
+        std::fs::write(&path, "invalid json")?;
+        assert!(read_config_at(&path).hooks.is_empty());
+        Ok(())
     }
 }

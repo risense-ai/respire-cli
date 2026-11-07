@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """CI-only synthetic legacy wraps, real CLI upgrade and new-device decryption."""
+from native_fixture_process import install_published_runtime
 import argparse
 import hashlib
 import hmac
@@ -123,6 +124,7 @@ class Smoke:
             self.write_session(env, {"user": user})
         if self.keys is not None:
             self.keys.configure_env(env)
+        install_published_runtime(self.args.binary, env)
         return env
 
     def redacted_cli_error(self, env, output):
@@ -326,6 +328,7 @@ class Smoke:
         if version == 1:
             migration_env.pop("RSRS_SUPER", None)
         migration_env.pop("RSRS_DATA_DIR")
+        install_published_runtime(self.args.binary, migration_env)
         candidates = self.cli(migration_env, "migrate")["details"]["profiles"]
         rows = [row for row in candidates if Path(row["source"]).resolve() == source.resolve()]
         require(len(rows) == 1, "legacy_source_not_unique")
@@ -333,6 +336,7 @@ class Smoke:
         require(result["summary"].get("state") == "migrated", "full_migration_not_published")
         destination = Path(result["summary"]["dir"])
         upgraded_env = dict(env, RSRS_DATA_DIR=str(destination), RSRS_SUPER=original_super)
+        install_published_runtime(self.args.binary, upgraded_env)
         if version == 1:
             upgraded_env.pop("RSRS_SUPER", None)
         upgraded = self.session(upgraded_env)

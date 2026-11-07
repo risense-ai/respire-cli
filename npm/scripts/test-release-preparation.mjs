@@ -111,18 +111,31 @@ test('source CI may finish during producer setup before the attester reads its s
 });
 
 test('actual synthetic asset files bind source, version, platform and binary/runtime hashes',()=>{
+  for(const frontend of [false,true]){
   const folder=mkdtempSync(join(tmpdir(),'prepared-assets-'));
+  const layout={...manifest,...(frontend?{artifactLayout:'cli-frontend-v2'}:{})};
   try{
     for(const t of manifest.targets){
       const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`;
       const content=Buffer.from(t.triple),sha256=createHash('sha256').update(content).digest('hex');
-      writeFileSync(join(folder,binary),content);writeFileSync(join(folder,runtime),content);
-      writeFileSync(join(folder,`cli-build-${t.triple}.json`),JSON.stringify({schema_version:1,git_sha:sha,version,target:t.triple,
-        binary_file:binary,runtime_file:runtime,binary_sha256:sha256,runtime_sha256:sha256}));
+      writeFileSync(join(folder,binary),content);
+      if(!frontend)writeFileSync(join(folder,runtime),content);
+      writeFileSync(join(folder,`cli-build-${t.triple}.json`),JSON.stringify(frontend
+        ? {schema_version:2,artifact_layout:layout.artifactLayout,git_sha:sha,version,target:t.triple,
+          binary_file:binary,binary_size:content.length,binary_sha256:sha256,producer:{run_id:source.run_id,run_attempt:source.run_attempt}}
+        : {schema_version:1,git_sha:sha,version,target:t.triple,
+          binary_file:binary,runtime_file:runtime,binary_sha256:sha256,runtime_sha256:sha256}));
     }
-    assert.equal(preparedAssets(folder,source,manifest).length,12);
-    writeFileSync(join(folder,`rsrs-${targets[0][0]}`),'tampered');assert.throws(()=>preparedAssets(folder,source,manifest));
+    assert.equal(preparedAssets(folder,source,layout).length,frontend?8:12);
+    const metadata=join(folder,`cli-build-${targets[0][0]}.json`),original=JSON.parse(readFileSync(metadata));
+    for(const mutate of frontend?[m=>m.binary_size++,m=>m.producer.run_attempt++,m=>m.producer.run_id='999',
+      m=>m.runtime_file='unexpected-runtime.tar.gz',m=>m.schema_version=1]:[m=>m.schema_version=2]){
+      const changed=structuredClone(original);mutate(changed);writeFileSync(metadata,JSON.stringify(changed));
+      assert.throws(()=>preparedAssets(folder,source,layout));writeFileSync(metadata,JSON.stringify(original));
+    }
+    writeFileSync(join(folder,`rsrs-${targets[0][0]}`),'tampered');assert.throws(()=>preparedAssets(folder,source,layout));
   }finally{rmSync(folder,{recursive:true,force:true});}
+  }
 });
 test('actual synthetic npm packs must match the full exact-version local pack index',()=>{
   const folder=mkdtempSync(join(tmpdir(),'prepared-packs-'));

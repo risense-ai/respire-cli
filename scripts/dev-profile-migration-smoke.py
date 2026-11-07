@@ -193,7 +193,9 @@ class Smoke(support.Smoke):
         # Consume the migration's actual configuration. Do not repair its path
         # spelling here: runtime verification must exercise the published result.
         try:
-            yield dict(default, RSRS_DATA_DIR=str(profile))
+            env = dict(default, RSRS_DATA_DIR=str(profile))
+            support.install_published_runtime(self.args.binary, env)
+            yield env
         finally:
             if original is None:
                 config_path.unlink()
@@ -239,12 +241,15 @@ class Smoke(support.Smoke):
         result = dict(env)
         result.pop("RSRS_DATA_DIR", None)
         result.pop("RSRS_SUPER", None)
+        if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets':
+            result.pop('RSRS_RUNTIME_BIN', None)
         return result
 
     def seed(self, env, path, service, label):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         path.mkdir(parents=True, exist_ok=True)
         env = dict(env, RSRS_DATA_DIR=str(path))
+        support.install_published_runtime(self.args.binary, env)
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
         self.diagnostic_secrets.add(password)
@@ -444,6 +449,7 @@ class Smoke(support.Smoke):
             current_env = dict(env, RSRS_DATA_DIR=str(current["source"]))
             current_session = self.session(current_env)
         default = self.default_env(env)
+        support.install_published_runtime(self.args.binary, default)
         self.cli(default, "status")
         root = home / ".rsrs"
         require(not list(root.rglob(".rsrs-migration.json")), "startup_automatically_migrated_profiles")

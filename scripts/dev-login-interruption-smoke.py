@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Real Linux CLI SIGINT recovery; only synthetic accounts and loopback HTTP."""
+from native_fixture_process import install_published_runtime
 import argparse
 import hashlib
 import importlib.util
@@ -121,7 +122,9 @@ def main():
     addr = f"http://127.0.0.1:{server.server_port}"
     root = args.root / "library"
     root.mkdir(mode=0o700)
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))}
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
+           and k not in ("GH_TOKEN", "GITHUB_TOKEN")}
     home = args.root / "home"
     home.mkdir(mode=0o700)
     with socket.socket() as listener:
@@ -139,6 +142,7 @@ def main():
         key_spec.loader.exec_module(key_module)
         keys = key_module.SecretServiceKeys(native_root)
         keys.configure_env(env)
+    install_published_runtime(args.binary, env)
     session = root / "session.json"
     config = root / "client.json"
     config_bytes = json.dumps({"data_dir": str(root), "api_base": "https://previous.invalid", "custom": "preserve"}).encode()

@@ -93,7 +93,7 @@ fn diagnostics_paused(result: &ResultEnvelope) -> bool {
 fn host_rows(check_update: bool) -> Vec<Item> {
     let mut rows = Vec::new();
     progress::phase("Checking host configuration", "Checking host configuration");
-    match respire::migration::pending_legacy_profiles() {
+    match crate::profile_discovery::pending_legacy_profiles() {
         Ok(profiles) if !profiles.is_empty() => rows.push(Item::new(
             "migration",
             Status::Warn,
@@ -105,10 +105,6 @@ fn host_rows(check_update: bool) -> Vec<Item> {
         Ok(_) => {}
         Err(error) => rows.push(Item::new("migration", Status::Fail, format!("{error:#}"))),
     }
-    rows.push(match respire::auth::load_local_session() {
-        Ok(_) => Item::new("session", Status::Ok, "Five-keys complete, can unlock"),
-        Err(error) => Item::new("session", Status::Fail, format!("{error:#}")),
-    });
     rows.push(match respire::inject::targets() {
         Ok(targets) => {
             let detected = targets
@@ -194,7 +190,7 @@ fn host_rows(check_update: bool) -> Vec<Item> {
 }
 
 fn repair(diagnostic: &ResultEnvelope) -> Result<Item> {
-    if diagnostics_paused(diagnostic) || respire::service::off_mode() {
+    if diagnostics_paused(diagnostic) || respire_client_host::settings::off_mode()? {
         return Ok(Item::new(
             "host repair",
             Status::Skip,
@@ -223,33 +219,16 @@ fn repair(diagnostic: &ResultEnvelope) -> Result<Item> {
             "No asset or index repair requested by Runtime diagnostics",
         ));
     }
-    respire::service::ensure_writable()?;
-    let mirror = respire::model_install::mirror_from_env();
+    respire_client_host::settings::ensure_writable()?;
     if needs_assets {
-        rpc::change_host_assets(|| {
-            ensure!(
-                !respire::service::off_mode(),
-                "memory was paused before asset maintenance; selection was not read"
-            );
-            // Read selection only after the owner drains; never open a business engine here.
-            if let Some(selection) = respire_app::embedding::saved_selection()? {
-                respire_app::embedding::prepare(&selection, |name, _, _| {
-                    progress::phase(name, name);
-                    Ok(())
-                })?;
-            } else {
-                respire::model_install::install_m3(mirror.as_deref())?;
-            }
-            Ok(())
-        })?;
+        crate::autostart::control_prepare_model(&respire_protocol::ModelInstallIntent::default())?;
         ensure!(
-            !respire::service::off_mode(),
+            !respire_client_host::settings::off_mode()?,
             "memory was paused after asset maintenance; Runtime preparation was not requested"
         );
-        rpc::prepare_model(mirror.as_deref().unwrap_or("auto"))?;
     }
     ensure!(
-        !respire::service::off_mode(),
+        !respire_client_host::settings::off_mode()?,
         "memory is paused; Runtime index preparation was not requested"
     );
     let response = rpc::call_method("index.prepare", Vec::new(), false)?;
@@ -267,69 +246,85 @@ fn repair(diagnostic: &ResultEnvelope) -> Result<Item> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use respire_commands::output_state;
     use serde_json::{json, Value};
     use std::{ffi::OsString, path::Path, time::Duration};
 
     fn isolated(test: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
-        crate::capture_tests::with_isolated_session(|root| {
-            struct Restore {
-                env: Vec<(&'static str, Option<OsString>)>,
-                captured: Option<ResultEnvelope>,
-                host_output: bool,
-                emitted: bool,
-                exit: u8,
-            }
-            impl Drop for Restore {
-                fn drop(&mut self) {
-                    for (key, value) in &self.env {
-                        match value {
-                            Some(value) => std::env::set_var(key, value),
-                            None => std::env::remove_var(key),
-                        }
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        struct Restore {
+            env: Vec<(&'static str, Option<OsString>)>,
+            captured: Option<ResultEnvelope>,
+            host_output: bool,
+            emitted: bool,
+            exit: u8,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.env {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
                     }
-                    crate::CAPTURED.with(|slot| *slot.borrow_mut() = self.captured.take());
-                    crate::HOST_RPC_OUTPUT.set(self.host_output);
-                    crate::OUTPUT_EMITTED.set(self.emitted);
-                    crate::OUTPUT_EXIT_CODE.set(self.exit);
                 }
+                output_state::CAPTURED.with(|slot| *slot.borrow_mut() = self.captured.take());
+                output_state::HOST_RPC_OUTPUT.set(self.host_output);
+                output_state::OUTPUT_EMITTED.set(self.emitted);
+                output_state::OUTPUT_EXIT_CODE.set(self.exit);
             }
-            let keys = [
-                "HOME",
-                "USERPROFILE",
-                "RSRS_CLIENT_ONLY",
-                "RSRS_NO_AUTOSTART",
-                "RSRS_UPDATE_CHECK",
-                "RSRS_REGISTRY",
-                "RSRS_RUNTIME_BIN",
-                "RSRS_RPC_TOKEN",
-                "RSRS_RPC_PORT",
-            ];
-            let _restore = Restore {
-                env: keys
-                    .into_iter()
-                    .map(|key| (key, std::env::var_os(key)))
-                    .collect(),
-                captured: crate::CAPTURED.with(|slot| slot.borrow_mut().take()),
-                host_output: crate::HOST_RPC_OUTPUT.get(),
-                emitted: crate::OUTPUT_EMITTED.get(),
-                exit: crate::OUTPUT_EXIT_CODE.get(),
-            };
-            let home = root.join("home");
-            std::fs::create_dir(&home)?;
-            std::env::set_var("HOME", &home);
-            std::env::set_var("USERPROFILE", &home);
-            std::env::set_var("RSRS_CLIENT_ONLY", "0");
-            std::env::set_var("RSRS_NO_AUTOSTART", "0");
-            std::env::set_var("RSRS_UPDATE_CHECK", "0");
-            std::env::remove_var("RSRS_RPC_TOKEN");
-            // This file supplies an identity to the HTTP fixture; it is never executed.
-            let image = root.join("doctor-runtime-fixture");
-            std::fs::write(&image, b"doctor HTTP fixture identity")?;
-            std::env::set_var("RSRS_RUNTIME_BIN", image);
-            crate::rpc::set_worker_active(false);
-            crate::HOST_RPC_OUTPUT.set(true);
-            test(root)
-        })
+        }
+        let keys = [
+            "RSRS_DATA_DIR",
+            "RSRS_BIN_DIR",
+            "RSRS_M3_DIR",
+            "RSRS_NO_AUTOSYNC",
+            "RSRS_SUPER",
+            "HOME",
+            "USERPROFILE",
+            "RSRS_CLIENT_ONLY",
+            "RSRS_NO_AUTOSTART",
+            "RSRS_UPDATE_CHECK",
+            "RSRS_REGISTRY",
+            "RSRS_RUNTIME_BIN",
+            "RSRS_CORE_TEST_MODE",
+            "RSRS_RPC_TOKEN",
+            "RSRS_RPC_PORT",
+        ];
+        let _restore = Restore {
+            env: keys
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect(),
+            captured: output_state::CAPTURED.with(|slot| slot.borrow_mut().take()),
+            host_output: output_state::HOST_RPC_OUTPUT.get(),
+            emitted: output_state::OUTPUT_EMITTED.get(),
+            exit: output_state::OUTPUT_EXIT_CODE.get(),
+        };
+        std::env::set_var("RSRS_DATA_DIR", root);
+        std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
+        std::env::set_var("RSRS_M3_DIR", root.join("absent-model"));
+        std::env::set_var("RSRS_NO_AUTOSYNC", "1");
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+        std::env::remove_var("RSRS_SUPER");
+        std::env::remove_var("RSRS_RPC_PORT");
+        let home = root.join("home");
+        std::fs::create_dir(&home)?;
+        std::env::set_var("HOME", &home);
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("RSRS_CLIENT_ONLY", "0");
+        std::env::set_var("RSRS_NO_AUTOSTART", "0");
+        std::env::set_var("RSRS_UPDATE_CHECK", "0");
+        std::env::remove_var("RSRS_RPC_TOKEN");
+        // This file supplies an identity to the HTTP fixture; it is never executed.
+        let image = root.join("doctor-runtime-fixture");
+        std::fs::write(&image, b"doctor HTTP fixture identity")?;
+        std::env::set_var("RSRS_RUNTIME_BIN", image);
+        output_state::HOST_RPC_OUTPUT.set(true);
+        test(root)
     }
 
     fn diagnostic(status: Status) -> ResultEnvelope {
@@ -351,8 +346,8 @@ mod tests {
         let health = json!({
             "server":"respire", "bin":"doctor-fixture", "v":1, "pid":std::process::id(),
             "runtime_version":crate::runtime_fetch::pinned()?.required,
-            "installation_root":respire::service::main_data_dir().canonicalize()?,
-            "data_dir":respire::service::data_dir().canonicalize()?,
+            "installation_root":respire_client_host::paths::main_data_dir().canonicalize()?,
+            "data_dir":respire_client_host::config::control_roots()?.1.canonicalize()?,
             "exe":std::path::PathBuf::from(std::env::var_os("RSRS_RUNTIME_BIN").context("fixture image")?),
             "account_id":"doctor-account", "instance_id":"doctor-instance", "generation":1,
             "store_ready":true,
@@ -411,10 +406,7 @@ mod tests {
                     .find(|item| item.name == name)
                     .context("missing host row")
             };
-            assert!(matches!(
-                row(host_rows(false), "session")?.status,
-                Status::Ok
-            ));
+            assert!(!host_rows(false).iter().any(|item| item.name == "session"));
             assert!(matches!(
                 row(host_rows(false), "inject")?.status,
                 Status::Fail
@@ -538,7 +530,7 @@ mod tests {
             }
             with_runtime(vec![("cli.exec", reply(diagnostic(Status::Warn)))], || {
                 run(false, false, false)?;
-                let result = crate::CAPTURED
+                let result = output_state::CAPTURED
                     .with(|slot| slot.borrow_mut().take())
                     .context("client result missing")?;
                 assert_eq!(result.summary["scope"], "runtime");
@@ -565,12 +557,15 @@ mod tests {
             result.summary = json!({"mode":"off","skipped":true});
             assert!(matches!(repair(&result)?.status, Status::Skip));
             result.summary = json!({"scope":"runtime"});
-            let config = respire::service::client_config_path();
+            let config = respire_client_host::paths::client_config_path();
             std::fs::write(&config, br#"{"service_mode":"off"}"#)?;
             assert!(matches!(repair(&result)?.status, Status::Skip));
             std::fs::write(&config, b"{}")?;
+            let operation = respire::model_progress::Operation::begin("download")?;
             result.details = json!({"model_operation":{"active":true}});
             assert!(matches!(repair(&result)?.status, Status::Warn));
+            assert_eq!(respire::model_progress::status()?["phase"], "download");
+            drop(operation);
             assert_eq!(std::fs::read(&database)?, before);
             assert!(!root.join("models").exists());
             result.details = Value::Null;
@@ -585,6 +580,9 @@ mod tests {
                 .context("readonly repair accepted")?
                 .to_string()
                 .contains("read-only"));
+            std::fs::write(&config, b"{")?;
+            assert!(respire_client_host::settings::ensure_writable().is_err());
+            assert_eq!(std::fs::read(&database)?, before);
             std::fs::write(&config, b"{}")?;
             for error in [Some("fixture index refused"), None] {
                 with_runtime(
@@ -602,15 +600,16 @@ mod tests {
                 assert!(matches!(repair(&result)?.status, Status::Ok));
                 Ok(())
             })?;
-            // Idle asset maintenance reaches saved-selection validation, never a download.
+            // A client never opens the local store to inspect selection; missing Runtime fails closed.
             let unused = std::net::TcpListener::bind("127.0.0.1:0")?;
             std::env::set_var("RSRS_RPC_PORT", unused.local_addr()?.port().to_string());
             drop(unused);
+            std::env::set_var("RSRS_CORE_TEST_MODE", "1");
             result.items = vec![Item::new("embedder", Status::Fail, "invalid selection")];
             let failure = repair(&result)
                 .err()
                 .context("invalid selection was accepted")?;
-            assert!(format!("{failure:#}").contains("not a database"));
+            assert!(failure.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
             assert_eq!(std::fs::read(&database)?, before);
             assert!(!root.join("models").exists());
             Ok(())
@@ -635,10 +634,16 @@ mod tests {
                 ),
             ] {
                 let mut result = diagnostic(status);
+                // Session diagnostics moved from the host to the Runtime response.
+                result.items.push(Item::new(
+                    "session",
+                    Status::Ok,
+                    "five-keys complete, can unlock",
+                ));
                 result.errors = errors;
                 with_runtime(vec![("cli.exec", reply(result))], || {
                     run(false, false, false)?;
-                    let result = crate::CAPTURED
+                    let result = output_state::CAPTURED
                         .with(|slot| slot.borrow_mut().take())
                         .context("host result missing")?;
                     assert_eq!(result.status.as_str(), expected.as_str());
@@ -656,7 +661,7 @@ mod tests {
             paused.summary = json!({"mode":"off","skipped":true});
             with_runtime(vec![("cli.exec", reply(paused))], || {
                 run(false, false, true)?;
-                let result = crate::CAPTURED
+                let result = output_state::CAPTURED
                     .with(|slot| slot.borrow_mut().take())
                     .context("paused result missing")?;
                 assert_eq!(result.command, "doctor");
@@ -678,7 +683,7 @@ mod tests {
                 ],
                 || {
                     run(false, false, true)?;
-                    let result = crate::CAPTURED
+                    let result = output_state::CAPTURED
                         .with(|slot| slot.borrow_mut().take())
                         .context("repaired result missing")?;
                     assert_eq!(result.summary["refreshed"], true);

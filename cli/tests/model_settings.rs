@@ -57,8 +57,10 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
         );
         Ok(output)
     };
-    for variant in respire::memory::onnx::MODEL_VARIANTS {
-        let saved = run(&["model", "engine", "cpu", "--model", variant.name])?;
+    // Pin the public names independently of the implementation and its response.
+    const MODEL_VARIANTS: [&str; 6] = ["quantized", "fp16", "int8", "uint8", "q4", "q4f16"];
+    for variant in MODEL_VARIANTS {
+        let saved = run(&["model", "engine", "cpu", "--model", variant])?;
         anyhow::ensure!(
             saved.status.success(),
             "{}",
@@ -73,13 +75,13 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
             String::from_utf8_lossy(&read.stderr)
         );
         let value: Value = serde_json::from_slice(&read.stdout)?;
-        assert_eq!(value["summary"]["model"], variant.name);
+        assert_eq!(value["summary"]["model"], variant);
         assert_eq!(
             value["summary"]["variants"]
                 .as_array()
                 .context("inventory missing")?
                 .len(),
-            respire::memory::onnx::MODEL_VARIANTS.len()
+            MODEL_VARIANTS.len()
         );
     }
     let settings = profile.path().join("data/inference.json");

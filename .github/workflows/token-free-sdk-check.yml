@@ -7,6 +7,7 @@ on:
       cache_key: {required: true, type: string}
       runner_os: {required: true, type: string}
       feedback_probe: {required: false, type: boolean, default: false}
+      runtime_examples_sha: {required: false, type: string, default: ''}
     # Deliberately no secret declarations or inheritance.
 permissions:
   contents: read
@@ -31,6 +32,46 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
+      - name: Require an exact reviewed Runtime example source
+        id: runtime-source
+        if: inputs.feedback_probe
+        shell: bash
+        env:
+          RUNTIME_EXAMPLES_SHA: ${{ inputs.runtime_examples_sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
+          assert.equal(pin.schema_version, 1);
+          assert.equal(pin.repository, 'risense-ai/respire-runtime');
+          const sha = process.env.RUNTIME_EXAMPLES_SHA || pin.source_sha;
+          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime examples/harness SHA');
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+          NODE
+      - uses: actions/checkout@v5
+        if: inputs.feedback_probe
+        with:
+          repository: risense-ai/respire-runtime
+          ref: ${{ steps.runtime-source.outputs.sha }}
+          path: .runtime-examples
+          persist-credentials: false
+      - name: Bind Runtime example source to the verified SDK lock
+        if: inputs.feedback_probe
+        shell: bash
+        env:
+          RUNTIME_EXAMPLES_SHA: ${{ steps.runtime-source.outputs.sha }}
+          CLI_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CLI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CLI_SOURCE_SHA"
+          test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
+          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          test -f .runtime-examples/crates/commands/examples/feedback_contract_probe.rs
+          test -f .runtime-examples/crates/commands/examples/ablation_bench.rs
+          test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ inputs.target }}
@@ -91,7 +132,7 @@ jobs:
           CLI_FIXTURE_BINARY="$exe" node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
-          import {readFileSync, realpathSync, statSync} from 'node:fs';
+          import {appendFileSync, readFileSync, realpathSync, statSync} from 'node:fs';
           import {join} from 'node:path';
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
@@ -110,6 +151,7 @@ jobs:
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           const result = spawnSync('bash', ['scripts/probe-native-arm64-alpine.sh', process.env.RSRS_RUNTIME_TRIPLE,
             process.env.CLI_FIXTURE_BINARY, process.env.RSRS_M3_DIR, join(process.env.RUNNER_TEMP, 'arm-alpine-probe'),
             runtime, selected.sha256, selected.version], {env: process.env, stdio: 'inherit'});
@@ -122,30 +164,43 @@ jobs:
         shell: bash
         env:
           SDK_TARGET: ${{ inputs.target }}
+          RSRS_CLI_SOURCE_SHA: ${{ inputs.source_sha }}
+          RSRS_CORE_TEST_MODEL_DIR: ${{ runner.temp }}/private-sdk-probe/model
         run: |
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
-          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire_app snapshot::tests --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
-          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire_storage transport::local::sync::diary_tests --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
-          RSRS_CORE_TEST_MODE=1 cargo test --locked -p respire --test snapshot_lifecycle --target "$SDK_TARGET" --target-dir target/ci -- --test-threads=1
-          cargo build --locked -p respire --example feedback_contract_probe --example ablation_bench --target "$SDK_TARGET" --target-dir target/ci
-          node scripts/stage-core-runtime.mjs "target/ci/$SDK_TARGET/debug/examples"
+          test -f "$RSRS_RUNTIME_BIN"
+          export RSRS_CORE_SDK_DIR="$(node -p 'require("node:path").resolve(process.argv[1])' ".sdk/$SDK_TARGET")"
+          suffix=''; if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
+          export RSRS_CLI_BIN="$(node -p 'require("node:path").resolve(process.argv[1])' "target/ci/$SDK_TARGET/debug/rsrs$suffix")"
+          export RSRS_CLI_SOURCE_DIR="$(node -p 'process.cwd()')"
+          unset GH_TOKEN GITHUB_TOKEN
+          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_app snapshot::tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
+          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_storage transport::local::sync::diary_tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
+          cargo build --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --examples --target "$SDK_TARGET" --target-dir target/runtime-examples
+          node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-examples/$SDK_TARGET/debug/examples"
+          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
       - name: Static musl snapshot lifecycle and feedback probe build
         if: ${{ inputs.feedback_probe && contains(inputs.target, '-musl') }}
         shell: bash
         env:
           SDK_TARGET: ${{ inputs.target }}
+          RSRS_CLI_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          docker run --rm -v "$PWD:/workspace" -w /workspace -e TARGET="$SDK_TARGET" rust:1.95.0-alpine3.23 sh -ec '
+          test -f "$RSRS_RUNTIME_BIN"
+          fixture_root="$(dirname "$(dirname "$(dirname "$RSRS_RUNTIME_BIN")")")"
+          fixture_binary="/runtime-fixture/runtime/$(basename "$(dirname "$RSRS_RUNTIME_BIN")")/$(basename "$RSRS_RUNTIME_BIN")"
+          unset GH_TOKEN GITHUB_TOKEN
+          docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CORE_SDK_DIR="/workspace/.sdk/$SDK_TARGET" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model rust:1.95.0-alpine3.23 sh -ec '
             . scripts/build-linux-musl-container.sh
             echo "Checking minimal-musl ps syntax (diagnostic only):"
             if ps -p $$ -o pid= -o stat=; then echo "ps syntax available"; else echo "ps syntax unavailable; Linux lifecycle requires verified procfs"; fi
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire_app snapshot::tests --target "$TARGET" --target-dir target/ci -- --test-threads=1
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire_storage transport::local::sync::diary_tests --target "$TARGET" --target-dir target/ci -- --test-threads=1
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release -p respire --test snapshot_lifecycle --target "$TARGET" --target-dir target/ci -- --test-threads=1
-            cargo build --locked --release -p respire --example feedback_contract_probe --example ablation_bench --target "$TARGET" --target-dir target/ci
-            node scripts/stage-core-runtime.mjs "target/ci/$TARGET/release/examples"
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_app snapshot::tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_storage transport::local::sync::diary_tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
+            cargo build --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --examples --target "$TARGET" --target-dir target/runtime-examples
+            node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-examples/$TARGET/release/examples"
+            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
           '
       - name: Actual model feedback across Core service runtime and both benchmarks
         if: inputs.feedback_probe
@@ -160,7 +215,10 @@ jobs:
           profile=debug; suffix=''
           if [[ "$SDK_TARGET" == *musl ]]; then profile=release; fi
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
-          "target/ci/$SDK_TARGET/$profile/examples/feedback_contract_probe$suffix"
+          unset GH_TOKEN GITHUB_TOKEN
+          export RSRS_CLI_BIN="$(node -p 'require("node:path").resolve(process.argv[1])' "target/ci/$SDK_TARGET/$profile/rsrs$suffix")"
+          test -f "$RSRS_CLI_BIN"
+          "target/runtime-examples/$SDK_TARGET/$profile/examples/feedback_contract_probe$suffix"
 
   source-coverage:
     if: inputs.target == 'x86_64-unknown-linux-gnu'
@@ -179,6 +237,38 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
+      - name: Resolve exact Runtime coverage source
+        id: runtime-source
+        shell: bash
+        env:
+          RUNTIME_EXAMPLES_SHA: ${{ inputs.runtime_examples_sha }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
+          assert.equal(pin.schema_version, 1);
+          assert.equal(pin.repository, 'risense-ai/respire-runtime');
+          const sha = process.env.RUNTIME_EXAMPLES_SHA || pin.source_sha;
+          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime SHA containing the migrated business tests');
+          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
+          NODE
+      - uses: actions/checkout@v5
+        with:
+          repository: risense-ai/respire-runtime
+          ref: ${{ steps.runtime-source.outputs.sha }}
+          path: .runtime-examples
+          persist-credentials: false
+      - name: Bind coverage Runtime source and SDK identity
+        shell: bash
+        env:
+          RUNTIME_EXAMPLES_SHA: ${{ steps.runtime-source.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
+          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
+          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ inputs.target }}
@@ -207,6 +297,59 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - name: Prepare official Runtime and real model for migrated coverage tests
+        shell: bash
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/coverage-runtime-fixture
+          RSRS_M3_DIR: ${{ runner.temp }}/coverage-runtime-fixture/model
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN RSRS_CORE_TEST_MODE
+          cargo build --locked -p respire --bin rsrs
+          target/debug/rsrs --json runtime install
+          target/debug/rsrs --json model install-m3
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
+          import {appendFileSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join} from 'node:path';
+          const root = realpathSync(process.env.RSRS_DATA_DIR);
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          assert.equal(selected.version, pin.required);
+          assert.ok(selected.release);
+          assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.equal(metadata.binary_sha256, selected.sha256);
+          const runtime = realpathSync(join(root, 'runtime', selected.version, 'rsrs-runtime'));
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(runtime, realpathSync('target/debug/rsrs'));
+          assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\nRSRS_CORE_TEST_MODEL_DIR=${process.env.RSRS_M3_DIR}\n`);
+          NODE
+      - name: Build uninstrumented Runtime business harness for source coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          export RSRS_CORE_SDK_DIR="$PWD/.sdk/x86_64-unknown-linux-gnu"
+          cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target/runtime-cli-tests > "$RUNNER_TEMP/runtime-cli-tests-build.jsonl" || { cat "$RUNNER_TEMP/runtime-cli-tests-build.jsonl"; exit 1; }
+          node .runtime-examples/scripts/stage-core-runtime.mjs target/runtime-cli-tests/debug/examples
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {execFileSync} from 'node:child_process';
+          import {appendFileSync, readFileSync, realpathSync} from 'node:fs';
+          const records = readFileSync(`${process.env.RUNNER_TEMP}/runtime-cli-tests-build.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
+          const artifacts = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cli_business_tests' && record.profile?.test && record.executable);
+          assert.equal(artifacts.length, 1);
+          const runner = realpathSync(artifacts[0].executable);
+          const names = execFileSync(runner, ['--list'], {encoding: 'utf8'}).split('\n').filter(line => line.endsWith(': test'));
+          for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
+            assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count);
+          }
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${runner}\n`);
+          NODE
       - name: Complete GNU source tests and existing coverage gate
         env:
           RSRS_CORE_TEST_MODE: '1'
@@ -214,5 +357,19 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --workspace --exclude respire --locked
-          cargo llvm-cov --locked -p respire --fail-under-lines 90 \
-            --ignore-filename-regex '(main\.rs|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
+          cargo llvm-cov --locked -p respire --no-report
+          (
+            cargo llvm-cov show-env --export-prefix > "$RUNNER_TEMP/cli-coverage.env"
+            source "$RUNNER_TEMP/cli-coverage.env"
+            [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" == *instrument-coverage* ]]
+            [[ "$LLVM_PROFILE_FILE" == "$PWD/target/llvm-cov-target/"* ]]
+            export RSRS_CLI_BIN="$PWD/target/llvm-cov-target/debug/rsrs"
+            export RSRS_CLI_SOURCE_DIR="$PWD"
+            export RSRS_CLI_SOURCE_SHA="$(git rev-parse HEAD)"
+            test -x "$RSRS_CLI_BIN"
+            original_cli="$(sha256sum "$RSRS_CLI_BIN")"
+            unset GH_TOKEN GITHUB_TOKEN
+            "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
+            test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
+          )
+          node scripts/check-cli-coverage.mjs '(main\.rs|(^|/)cli/src/frontend\.rs$|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'

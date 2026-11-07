@@ -241,7 +241,7 @@ pub fn run() -> Result<()> {
                 app.overlay = Overlay::None;
             } else if key.code == KeyCode::Enter {
                 let value = input.text.trim().to_owned();
-                let result = respire::model_install::validate_mirror(&value)
+                let result = respire_commands::model_download::validate_mirror(&value)
                     .map_err(|e| e.to_string())
                     .and_then(|_| {
                         retrieval_action(&[
@@ -269,7 +269,7 @@ pub fn run() -> Result<()> {
                     Err(error) => app.set_notice(error),
                 }
             } else if matches!(key.code, KeyCode::Up | KeyCode::Down) {
-                let presets = respire::model_install::MIRRORS;
+                let presets = respire_commands::model_download::MIRRORS;
                 let index = presets.iter().position(|v| *v == input.text).unwrap_or(0);
                 let next = if key.code == KeyCode::Down {
                     (index + 1) % presets.len()
@@ -873,7 +873,7 @@ fn account_key(app: &mut App, code: KeyCode) {
         return;
     }
     if app.cursor == app.live.accounts.len() {
-        match respire::migration::list_legacy_profiles() {
+        match crate::profile_discovery::list_legacy_profiles() {
             Ok(value) => {
                 app.migration_profiles = value["profiles"]
                     .as_array()
@@ -1107,12 +1107,8 @@ fn model_engines() -> &'static [&'static str] {
     }
 }
 
-fn selected_model_mirror() -> String {
-    respire::service::read_agent_config()["model_mirror"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(respire::model_install::mirror_from_env)
-        .unwrap_or_else(|| "auto".to_owned())
+fn selected_model_mirror() -> Result<String> {
+    Ok(respire_client_host::settings::mirror_from_env()?.unwrap_or_else(|| "auto".to_owned()))
 }
 
 fn cancel_model(id: &str) -> Result<(), String> {
@@ -1146,8 +1142,14 @@ fn cancel_model(id: &str) -> Result<(), String> {
 }
 
 fn model_key(app: &mut App, code: KeyCode) {
+    if let Err(error) = try_model_key(app, code) {
+        app.set_notice(format!("{error:#}"));
+    }
+}
+
+fn try_model_key(app: &mut App, code: KeyCode) -> Result<()> {
     if code != KeyCode::Enter {
-        return;
+        return Ok(());
     }
     match app.cursor {
         0 => ask(
@@ -1167,7 +1169,7 @@ fn model_key(app: &mut App, code: KeyCode) {
             ConfirmKind::UninstallM3,
         ),
         2 => {
-            let current = selected_model_mirror();
+            let current = selected_model_mirror()?;
             app.overlay = Overlay::ModelMirror(text_input::Input::new(current));
         }
         cursor => {
@@ -1189,8 +1191,8 @@ fn model_key(app: &mut App, code: KeyCode) {
                 let index = 4 + engines.len() + usize::from(cfg!(windows));
                 match cursor.checked_sub(index) {
                     Some(0) => run_confirm(app, ConfirmKind::RecallMode("fast".to_owned())),
-                    Some(1) if !recall_api::ready() => {
-                        app.overlay = Overlay::RecallApi(recall_api::Form::new());
+                    Some(1) if !recall_api::ready()? => {
+                        app.overlay = Overlay::RecallApi(recall_api::Form::new()?);
                         app.set_notice(t("\u{8bf7}\u{5148}\u{914d}\u{7f6e}\u{9ad8}\u{8d28}\u{91cf}\u{53ec}\u{56de} API", "Configure the recall API first"));
                     }
                     Some(1) => ask(
@@ -1201,7 +1203,7 @@ fn model_key(app: &mut App, code: KeyCode) {
                         ),
                         ConfirmKind::RecallMode("quality".to_owned()),
                     ),
-                    Some(2) => app.overlay = Overlay::RecallApi(recall_api::Form::new()),
+                    Some(2) => app.overlay = Overlay::RecallApi(recall_api::Form::new()?),
                     Some(3) => app.overlay = Overlay::RecallTest(recall_test::Form::new("fast")),
                     Some(4) => app.overlay = Overlay::RecallTest(recall_test::Form::new("quality")),
                     Some(5) => {
@@ -1212,10 +1214,13 @@ fn model_key(app: &mut App, code: KeyCode) {
                     }
                     Some(6) => {
                         let id = app.live.model_progress["id"].as_str().unwrap_or("").to_owned();
-                        ask(app, t("\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{4efb}\u{52a1}\u{5e76}\u{4ece}\u{6240}\u{9009}\u{4e0b}\u{8f7d}\u{6e90}\u{91cd}\u{65b0}\u{4e0b}\u{8f7d}\u{672a}\u{5b8c}\u{6210}\u{6587}\u{4ef6}\u{ff1f}", "Cancel the current task and redownload unfinished files from the selected source?"), ConfirmKind::RestartM3(id, selected_model_mirror()));
+                        ask(app, t("\u{53d6}\u{6d88}\u{5f53}\u{524d}\u{4efb}\u{52a1}\u{5e76}\u{4ece}\u{6240}\u{9009}\u{4e0b}\u{8f7d}\u{6e90}\u{91cd}\u{65b0}\u{4e0b}\u{8f7d}\u{672a}\u{5b8c}\u{6210}\u{6587}\u{4ef6}\u{ff1f}", "Cancel the current task and redownload unfinished files from the selected source?"), ConfirmKind::RestartM3(id, selected_model_mirror()?));
                     }
                     Some(7) => app.overlay = Overlay::RecallTest(recall_test::Form::new("benchmark")),
-                    Some(8) => app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings)),
+                    Some(8) => match model_weights::Form::new(&app.live.model_settings) {
+                        Ok(form) => app.overlay = Overlay::ModelWeights(form),
+                        Err(error) => app.set_notice(format!("{error:#}")),
+                    },
                     Some(9) => match recall_fusion::Form::new() {
                         Ok(form) => app.overlay = Overlay::RecallFusion(form),
                         Err(error) => app.set_notice(error),
@@ -1226,6 +1231,7 @@ fn model_key(app: &mut App, code: KeyCode) {
             }
         }
     }
+    Ok(())
 }
 
 fn model_weights_key(app: &mut App, code: KeyCode) {
@@ -1234,26 +1240,26 @@ fn model_weights_key(app: &mut App, code: KeyCode) {
     };
     let action = form.key(code);
     let (engine, variant) = form.selection();
+    let variant = variant.to_owned();
+    let size = form.selected_size();
     match action {
         Some(model_weights::Action::Back) => app.overlay = Overlay::None,
         Some(model_weights::Action::Save) => {
             if !model_engines().contains(&engine) {
                 app.set_notice(t("\u{6b64}\u{7cfb}\u{7edf}\u{4e0d}\u{652f}\u{6301}\u{8be5}\u{5f15}\u{64ce}\u{ff1b}\u{8bf7}\u{9009}\u{62e9} CPU", "This OS does not support that engine; choose CPU"));
-            } else if !model_weights::Form::present(&app.live.model_settings, variant) {
+            } else if !model_weights::Form::present(&app.live.model_settings, &variant) {
                 app.set_notice(t("\u{8bf7}\u{5148}\u{4e0b}\u{8f7d}\u{6240}\u{9009}\u{6743}\u{91cd}\u{ff1b}\u{4e0d}\u{4f1a}\u{81ea}\u{52a8}\u{4e0b}\u{8f7d}\u{6216}\u{4fdd}\u{5b58}", "Download the selected weights first; nothing was downloaded or saved"));
             } else {
                 ask(app, t(&format!("\u{6821}\u{9a8c}\u{5e76}\u{52a0}\u{8f7d} {engine} / {variant}\u{ff1f}\u{8bd5}\u{63a8}\u{7406}\u{6210}\u{529f}\u{540e}\u{4fdd}\u{5b58}\u{ff1b}\u{4e0d}\u{4f1a}\u{4e0b}\u{8f7d}\u{3002}"),
                     &format!("Validate and load {engine} / {variant}? Save only after trial inference succeeds; no download.")),
-                    ConfirmKind::Weights(engine.to_owned(), variant.to_owned()));
+                    ConfirmKind::Weights(engine.to_owned(), variant));
             }
         }
         Some(model_weights::Action::Install) => {
-            if let Ok(selected) = respire::memory::onnx::parse_variant(variant) {
-                let mib = selected.size as f64 / 1048576.0;
-                ask(app, t(&format!("\u{4e0b}\u{8f7d} {variant}\u{ff08}{mib:.0} MiB\u{ff09}\u{ff1f}\u{57fa}\u{7840}\u{6a21}\u{578b}\u{53ca} CPU \u{5bb9}\u{5668}\u{53ef}\u{80fd}\u{53e6}\u{9700}\u{5404} 543 MiB\u{ff0c}tokenizer \u{7ea6} 17 MiB\u{ff1b}\u{5df2}\u{9a8c}\u{8bc1}\u{6587}\u{4ef6}\u{8df3}\u{8fc7}\u{3002}\u{53ea}\u{4e0b}\u{8f7d}\u{ff0c}\u{4e0d}\u{4fdd}\u{5b58}\u{9009}\u{62e9}\u{3002}"),
+            let mib = size as f64 / 1048576.0;
+            ask(app, t(&format!("\u{4e0b}\u{8f7d} {variant}\u{ff08}{mib:.0} MiB\u{ff09}\u{ff1f}\u{57fa}\u{7840}\u{6a21}\u{578b}\u{53ca} CPU \u{5bb9}\u{5668}\u{53ef}\u{80fd}\u{53e6}\u{9700}\u{5404} 543 MiB\u{ff0c}tokenizer \u{7ea6} 17 MiB\u{ff1b}\u{5df2}\u{9a8c}\u{8bc1}\u{6587}\u{4ef6}\u{8df3}\u{8fc7}\u{3002}\u{53ea}\u{4e0b}\u{8f7d}\u{ff0c}\u{4e0d}\u{4fdd}\u{5b58}\u{9009}\u{62e9}\u{3002}"),
                     &format!("Download {variant} ({mib:.0} MiB)? Baseline and CPU container may each need another 543 MiB plus a 17 MiB tokenizer; verified files are skipped. Downloads only; selection is not saved.")),
-                    ConfirmKind::InstallVariant(engine.to_owned(), variant.to_owned()));
-            }
+                    ConfirmKind::InstallVariant(engine.to_owned(), variant));
         }
         None => {}
     }
@@ -1497,7 +1503,8 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             ConfirmKind::Migrate(id, account) => host_command(&["migrate", "--source", &id, "--account", &account])
                 .map(|_| t("\u{8fc1}\u{79fb}\u{5b8c}\u{6210}\u{ff1b}\u{53ef}\u{5728}\u{8d26}\u{6237}\u{9875}\u{9762}\u{5207}\u{6362}", "Migration complete; select it on the Accounts page")),
             ConfirmKind::Sync => rpc(&["sync"]).map(|value| sync_notice(&value)),
-            ConfirmKind::InstallM3 => host_command(&["model", "install-m3", "--mirror", &selected_model_mirror()])
+            ConfirmKind::InstallM3 => selected_model_mirror().map_err(|error| format!("{error:#}"))
+                .and_then(|mirror| host_command(&["model", "install-m3", "--mirror", &mirror]))
                 .map(|_| t("BGE-M3 \u{5904}\u{7406}\u{7ed3}\u{675f}", "BGE-M3 step finished")),
             ConfirmKind::CancelModel(id) => cancel_model(&id)
                 .map(|_| t("\u{5df2}\u{53d6}\u{6d88}\u{6a21}\u{578b}\u{4efb}\u{52a1}", "Model task cancelled")),
@@ -1509,8 +1516,9 @@ fn run_confirm(app: &mut App, kind: ConfirmKind) {
             }
             ConfirmKind::Engine(engine) => save_model_settings(&shared, &engine, None),
             ConfirmKind::Weights(engine, variant) => save_model_settings(&shared, &engine, Some(&variant)),
-            ConfirmKind::InstallVariant(engine, variant) => host_command(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
-                "--mirror", &selected_model_mirror()]).map(|_| t(
+            ConfirmKind::InstallVariant(engine, variant) => selected_model_mirror().map_err(|error| format!("{error:#}"))
+                .and_then(|mirror| host_command(&["model", "install-m3", "--model", &variant, "--for-engine", &engine,
+                "--mirror", &mirror])).map(|_| t(
                     "\u{9884}\u{4e0b}\u{8f7d}\u{5b8c}\u{6210}\u{ff1b}\u{5f53}\u{524d}\u{6a21}\u{578b}\u{672a}\u{5207}\u{6362}\u{ff0c}\u{53ef}\u{7ee7}\u{7eed}\u{4e0b}\u{8f7d}\u{5176}\u{4ed6}\u{6743}\u{91cd}\u{6216}\u{9009}\u{62e9}\u{52a0}\u{8f7d}", "Download complete; current model unchanged. Download more weights or select Load.")),
             ConfirmKind::RecallMode(mode) => {
                 retrieval_action(&["agent-config", "--set", &format!("recall_mode={mode}")]).map(
@@ -1969,7 +1977,7 @@ fn home_body(app: &App, inner: usize) -> Vec<Line<'static>> {
         live.user.clone()
     };
     let addr = if live.addr.is_empty() {
-        respire::service::DEFAULT_SERVER_ADDR.to_owned()
+        crate::client_config::DEFAULT_SERVER_ADDR.to_owned()
     } else {
         live.addr.clone()
     };
@@ -2455,6 +2463,14 @@ fn sync_body(app: &App) -> Vec<Line<'static>> {
 }
 
 fn model_body(app: &App) -> Vec<Line<'static>> {
+    let mirror = match selected_model_mirror() {
+        Ok(value) => value,
+        Err(error) => return vec![fail_line(format!("{error:#}"))],
+    };
+    let config = match respire_client_host::settings::read_agent_config() {
+        Ok(value) => value,
+        Err(error) => return vec![fail_line(format!("{error:#}"))],
+    };
     let bge = doctor_value(&app.live, "embedder");
     let engine = &app.live.engine;
     let mut lines = vec![
@@ -2467,7 +2483,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             app.cursor == 1,
             t("\u{5378}\u{8f7d} BGE-M3\u{ff08}\u{5220}\u{9664}\u{6587}\u{4ef6}\u{ff09}", "Uninstall BGE-M3 (delete files)"),
         ),
-        choice(app.cursor == 2, format!("{}: {}", t("\u{4e0b}\u{8f7d}\u{6e90}\u{ff08}\u{56de}\u{8f66}\u{9009}\u{62e9}\u{ff09}", "Download source (Enter to choose)"), selected_model_mirror())),
+        choice(app.cursor == 2, format!("{}: {}", t("\u{4e0b}\u{8f7d}\u{6e90}\u{ff08}\u{56de}\u{8f66}\u{9009}\u{62e9}\u{ff09}", "Download source (Enter to choose)"), mirror)),
         line(format!(
             "{}: {engine} / {}",
             t("\u{5f53}\u{524d}\u{63a8}\u{7406}\u{8bbe}\u{7f6e}", "Inference setting"), app.live.model_settings["model"].as_str().unwrap_or("unknown")
@@ -2500,7 +2516,7 @@ fn model_body(app: &App) -> Vec<Line<'static>> {
             "Check inference",
         ),
     ));
-    let mode = respire::service::read_agent_config()["recall_mode"]
+    let mode = config["recall_mode"]
         .as_str()
         .unwrap_or("fast")
         .to_owned();
@@ -2734,9 +2750,14 @@ mod model_menu_tests {
         let mut app = App::new(shared);
         app.live.connected = true;
         app.page = Page::Model;
-        let mut form =
-            model_weights::Form::new(&serde_json::json!({"engine":"cpu","model":"quantized"}));
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 1;
+        let variants = (0..12).map(|index| serde_json::json!({
+            "name":format!("runtime-{index}"),"size":7340032,"state":"present"
+        })).collect::<Vec<_>>();
+        let count = variants.len();
+        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-0",
+            "variants":variants});
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = count + 1;
         app.overlay = Overlay::ModelWeights(form);
         let backend = ratatui::backend::TestBackend::new(70, 20);
         let mut terminal = Terminal::new(backend)?;
@@ -2798,20 +2819,20 @@ mod model_menu_tests {
         let shared = Arc::new(Mutex::new(Live::empty()));
         let mut app = App::new(shared);
         app.live.connected = true;
-        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"fp16", "variants":[]});
-        app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings));
+        app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-only",
+            "variants":[{"name":"runtime-only","size":7340032,"state":"missing"}]});
+        app.overlay = Overlay::ModelWeights(model_weights::Form::new(&app.live.model_settings)?);
         assert!(!handle(&mut app, KeyCode::Esc));
         assert!(matches!(app.overlay, Overlay::None));
-        let mut form = model_weights::Form::new(&app.live.model_settings);
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 1;
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = 2;
         app.overlay = Overlay::ModelWeights(form);
         model_weights_key(&mut app, KeyCode::Enter);
         assert!(
             matches!(app.overlay, Overlay::ModelWeights(_)),
             "missing weights must not be saved"
         );
-        app.live.model_settings["variants"] =
-            serde_json::json!([{"name":"fp16","state":"present"}]);
+        app.live.model_settings["variants"][0]["state"] = serde_json::json!("present");
         model_weights_key(&mut app, KeyCode::Enter);
         assert!(matches!(
             app.overlay,
@@ -2823,8 +2844,8 @@ mod model_menu_tests {
         ));
         confirm_key(&mut app, KeyCode::Enter);
         assert!(matches!(app.overlay, Overlay::None));
-        let mut form = model_weights::Form::new(&app.live.model_settings);
-        form.cursor = respire::memory::onnx::MODEL_VARIANTS.len() + 2;
+        let mut form = model_weights::Form::new(&app.live.model_settings)?;
+        form.cursor = 3;
         app.overlay = Overlay::ModelWeights(form);
         model_weights_key(&mut app, KeyCode::Enter);
         let Overlay::Confirm {
@@ -2836,7 +2857,8 @@ mod model_menu_tests {
             anyhow::bail!("download must require confirmation defaulting to cancel");
         };
         assert_eq!(engine, "cpu");
-        assert_eq!(name, "fp16");
+        assert_eq!(name, "runtime-only");
+        assert!(text.contains("7 MiB"));
         assert!(text.contains("543 MiB"));
         confirm_key(&mut app, KeyCode::Enter);
         assert!(app
@@ -2844,7 +2866,7 @@ mod model_menu_tests {
             .lock()
             .map_err(|e| anyhow::anyhow!("{e}"))?
             .is_none());
-        assert_eq!(app.live.model_settings["model"], "fp16");
+        assert_eq!(app.live.model_settings["model"], "runtime-only");
         Ok(())
     }
 
@@ -2857,9 +2879,11 @@ mod model_menu_tests {
         let previous = respire::env::var("RSRS_DATA_DIR").ok();
         std::env::set_var("RSRS_DATA_DIR", dir.path());
         let result = (|| -> anyhow::Result<()> {
-            respire::service::write_agent_config_key(
-                "model_mirror",
-                &serde_json::json!("http://127.0.0.1:9999"),
+            std::fs::write(
+                dir.path().join("agent.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "model_mirror": "http://127.0.0.1:9999"
+                }))?,
             )?;
             let mut app = App::new(Arc::new(Mutex::new(Live::empty())));
             for width in [40, 100] {
@@ -2944,6 +2968,11 @@ mod model_menu_tests {
             assert!(matches!(&app.overlay, Overlay::RecallTest(_)));
             app.overlay = Overlay::None;
             app.cursor += 1;
+            app.live.model_settings = Value::Null;
+            model_key(&mut app, KeyCode::Enter);
+            assert!(matches!(app.overlay, Overlay::None));
+            app.live.model_settings = serde_json::json!({"engine":"cpu","model":"runtime-only",
+                "variants":[{"name":"runtime-only","size":7340032,"state":"present"}]});
             model_key(&mut app, KeyCode::Enter);
             assert!(matches!(app.overlay, Overlay::ModelWeights(_)));
             app.overlay = Overlay::None;
@@ -2987,7 +3016,7 @@ fn overlay_lines(app: &App) -> Option<Vec<Line<'static>>> {
         ]),
         Overlay::ModelMirror(input) => {
             let mut lines = vec![line(t("BGE-M3 \u{4e0b}\u{8f7d}\u{6e90}", "BGE-M3 download source"))];
-            lines.extend(respire::model_install::MIRRORS.iter().map(|mirror| choice(input.text == *mirror, (*mirror).to_owned())));
+            lines.extend(respire_commands::model_download::MIRRORS.iter().map(|mirror| choice(input.text == *mirror, (*mirror).to_owned())));
             lines.push(input.line(70, true, false));
             lines.push(line(t("\u{4e0a}\u{4e0b}\u{952e}\u{9009}\u{62e9}\u{ff0c}\u{4e5f}\u{53ef}\u{8f93}\u{5165}\u{81ea}\u{5b9a}\u{4e49}\u{5730}\u{5740}\u{ff1b}\u{56de}\u{8f66}\u{4fdd}\u{5b58}\u{ff0c}Esc \u{8fd4}\u{56de}\u{3002}", "Up/down selects; custom URL supported; Enter saves, Esc returns.")));
             lines.push(line(t("\u{8fd0}\u{884c}\u{4e2d}\u{7684}\u{4e0b}\u{8f7d}\u{4e0d}\u{4f1a}\u{76f4}\u{63a5}\u{6362}\u{6e90}\u{ff1b}\u{4fdd}\u{5b58}\u{540e}\u{53ef}\u{53d6}\u{6d88}\u{5e76}\u{91cd}\u{65b0}\u{4e0b}\u{8f7d}\u{3002}", "An active download keeps its source; cancel and restart after saving.")));

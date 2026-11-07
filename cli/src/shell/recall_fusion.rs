@@ -1,7 +1,7 @@
 //! Draft editor; validation and persistence belong to the host application.
 use super::{choice, line, retrieval_action, t, text_input::Input, Line, Value};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use respire_app::recall_fusion::{defaults, validate, MODES, NUMERIC};
+use respire::recall_fusion::{defaults, validate, MODES, NUMERIC};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 pub(super) struct Form {

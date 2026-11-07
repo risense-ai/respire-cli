@@ -1558,7 +1558,6 @@ name = "respire"
 version = "1.0.21-dev.5"
 dependencies = [
  "anyhow",
- "axum",
  "base64",
  "chrono",
  "clap",
@@ -1566,26 +1565,25 @@ dependencies = [
  "dirs",
  "flate2",
  "hex",
- "hmac",
  "rand",
  "ratatui",
- "respire_app",
+ "respire_client_host",
  "respire_commands",
+ "respire_host_control",
  "respire_protocol",
  "respire_spawn",
- "rusqlite",
+ "rpassword",
  "serde",
  "serde_json",
- "sha1",
  "sha2",
  "signal-hook",
  "tempfile",
  "tiny_http",
- "tokio",
  "unicode-width 0.2.0",
  "ureq",
  "url",
  "uuid",
+ "zip",
 ]
 
 [[package]]
@@ -1629,6 +1627,7 @@ dependencies = [
  "flate2",
  "hex",
  "keyring",
+ "respire_client_host",
  "respire_core_sdk",
  "respire_crypto",
  "respire_protocol",
@@ -1647,6 +1646,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_client_host"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "hex",
+ "keyring",
+ "rand",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "whoami",
+]
+
+[[package]]
 name = "respire_commands"
 version = "1.0.0"
 dependencies = [
@@ -1657,6 +1672,7 @@ dependencies = [
  "clap",
  "hex",
  "respire_app",
+ "respire_client_host",
  "respire_protocol",
  "respire_spawn",
  "serde",
@@ -1683,6 +1699,7 @@ dependencies = [
  "hex",
  "libloading",
  "ort-sys",
+ "respire_client_host",
  "respire_protocol",
  "serde",
  "serde_json",
@@ -1710,8 +1727,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_host_control"
+version = "0.1.0-dev.1"
+dependencies = [
+ "anyhow",
+ "hex",
+ "respire_client_host",
+ "respire_commands",
+ "respire_protocol",
+ "respire_spawn",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.4"
+version = "2.0.0-dev.7"
 dependencies = [
  "anyhow",
  "serde",

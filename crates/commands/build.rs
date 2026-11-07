@@ -8,8 +8,13 @@
 use std::path::PathBuf;
 
 fn main() {
-    println!("cargo:rerun-if-changed=../../cli/Cargo.toml");
-    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../cli/Cargo.toml");
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let manifest_path = ["../../cli/Cargo.toml", "../../host-frontend/cli/Cargo.toml"]
+        .into_iter()
+        .map(|relative| root.join(relative))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| root.join("../../cli/Cargo.toml"));
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
     let manifest = match std::fs::read_to_string(&manifest_path) {
         Ok(manifest) => manifest,
         Err(error) => panic!(

@@ -41,7 +41,41 @@ def digest(path):
     return value.hexdigest()
 
 
-def stage_runtime(cli_binary, runtime_binary, destination, archive=None, version=None):
+def copy_managed_installation(source_root, destination):
+    source_root, destination = Path(source_root), Path(destination)
+    receipt = regular_file(source_root, "runtime.json")
+    selected = json.loads(receipt.read_text(encoding="utf-8"))
+    version = selected["version"]
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.+-]*", version) or not isinstance(
+        selected.get("release", {}).get("metadata_json"), str
+    ):
+        raise ValueError("official managed Runtime receipt required")
+    source = source_root / "runtime" / version
+    runtime_name = "rsrs-runtime.exe" if os.name == "nt" else "rsrs-runtime"
+    regular_file(source_root, f"runtime/{version}/{runtime_name}")
+    files = []
+    for path in source.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("managed Runtime fixture contains a link")
+        if not path.is_dir():
+            files.append(regular_file(source, path.relative_to(source).as_posix()))
+    target = destination / "runtime" / version
+    if target.exists() or (destination / "runtime.json").exists():
+        raise ValueError("managed Runtime fixture destination must be fresh")
+    shutil.copytree(source, target)
+    for path in files:
+        if digest(path) != digest(target / path.relative_to(source)):
+            raise ValueError("managed Runtime fixture checksum mismatch")
+    # Preserve the installer's original release proof; never synthesize a receipt.
+    shutil.copy2(receipt, destination / "runtime.json")
+    if receipt.read_bytes() != (destination / "runtime.json").read_bytes():
+        raise ValueError("managed Runtime fixture receipt mismatch")
+    return target / runtime_name
+
+
+def stage_runtime(cli_binary, runtime_binary, destination, archive=None, version=None,
+                  installation_root=None):
     if archive is not None:
         if runtime_binary is not None or not version:
             raise ValueError("archive requires a version and cannot be combined with a Runtime binary")
@@ -59,7 +93,8 @@ def stage_runtime(cli_binary, runtime_binary, destination, archive=None, version
             if installed.returncode != 0:
                 raise RuntimeError(f"verified Runtime install failed: {installed.stdout} {installed.stderr}")
             candidate = json.loads(installed.stdout)["summary"]["binary"]
-            return stage_runtime(cli_binary, candidate, destination)
+            return stage_runtime(cli_binary, candidate, destination,
+                                 installation_root=installation_root)
     if runtime_binary is None or version is not None:
         raise ValueError("supply a Runtime binary bundle or an archive with its version")
     cli_binary = Path(cli_binary).resolve(strict=True)
@@ -92,6 +127,12 @@ def stage_runtime(cli_binary, runtime_binary, destination, archive=None, version
     destination = Path(destination)
     if destination.exists():
         raise ValueError("Runtime acceptance destination must be fresh")
+    if installation_root is not None:
+        if root.parent.name != "runtime":
+            raise ValueError("managed Runtime candidate required for host control")
+        installed = copy_managed_installation(root.parent.parent, installation_root)
+        if root.name != installed.parent.name or digest(runtime_binary) != digest(installed):
+            raise ValueError("Runtime candidate does not match the managed installation")
     # Validate the complete allowlist before copying anything into the fixture.
     for source, name in selected:
         target = destination / name

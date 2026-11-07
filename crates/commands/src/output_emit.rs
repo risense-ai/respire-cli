@@ -12,7 +12,9 @@ use crate::output_state::{
     json_mode, mark_emitted, set_exit_code, status_exit_code, CAPTURED, DEFER_PROFILE_OUTPUT,
     HOST_RPC_OUTPUT,
 };
+#[cfg(feature = "server")]
 use crate::progress;
+#[cfg(feature = "server")]
 use crate::rpc_worker;
 use crate::runtime_error;
 
@@ -21,12 +23,17 @@ pub fn emit_result(result: ResultEnvelope) -> Result<()> {
     result.ensure_failure_diagnostics();
     result.details = crate::output::sanitize_details(&result.command, &result.details);
     let exit_code = status_exit_code(result.status);
-    if rpc_worker::worker_active() || DEFER_PROFILE_OUTPUT.get() || HOST_RPC_OUTPUT.get() {
+    #[cfg(feature = "server")]
+    let worker_active = rpc_worker::worker_active();
+    #[cfg(not(feature = "server"))]
+    let worker_active = false;
+    if worker_active || DEFER_PROFILE_OUTPUT.get() || HOST_RPC_OUTPUT.get() {
         CAPTURED.with(|slot| *slot.borrow_mut() = Some(result));
         mark_emitted();
         set_exit_code(exit_code);
         return Ok(());
     }
+    #[cfg(feature = "server")]
     progress::finish();
     println!("{}", result.render(json_mode())?);
     mark_emitted();
@@ -36,7 +43,7 @@ pub fn emit_result(result: ResultEnvelope) -> Result<()> {
 
 pub fn command_failure(error: &anyhow::Error) -> (ResultEnvelope, i32) {
     let input = error
-        .downcast_ref::<respire_app::input_error::InputError>()
+        .downcast_ref::<respire_client_host::input_error::InputError>()
         .is_some();
     let unknown = match error.downcast_ref::<runtime_error::RuntimeError>() {
         Some(runtime_error::RuntimeError::OutcomeUnknown {

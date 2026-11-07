@@ -1,5 +1,41 @@
 import {readFileSync} from 'node:fs';
 
+export function frontendLayout(manifest) {
+  if (manifest.artifactLayout === undefined) return false;
+  if (manifest.artifactLayout !== 'cli-frontend-v2') throw Error('Unknown CLI artifact layout');
+  return true;
+}
+
+export function releaseAssetNames(manifest, target) {
+  const binary = `${manifest.binaryName || 'rsrs'}-${target}${target.includes('windows') ? '.exe' : ''}`;
+  return [binary, `cli-build-${target}.json`,
+    ...(!frontendLayout(manifest) ? [`${manifest.binaryName || 'rsrs'}-${target}-runtime.tar.gz`] : [])];
+}
+
+// Callers supply hashes and sizes of actual files, never metadata claims.
+export function validateBuildMetadata(info, manifest, target, source, binary, runtime) {
+  const names = releaseAssetNames(manifest, target);
+  const fail = () => { throw Error('CLI artifact metadata/source/size/checksum mismatch'); };
+  if (info.git_sha !== source.sha || info.version !== source.version || info.target !== target
+      || info.binary_file !== names[0] || binary.file !== names[0]
+      || !/^[a-f0-9]{64}$/.test(info.binary_sha256 || '') || info.binary_sha256 !== binary.sha256) fail();
+  if (frontendLayout(manifest)) {
+    const keys = ['schema_version','artifact_layout','git_sha','version','target','binary_file','binary_size','binary_sha256','producer'];
+    const positive = value => /^[1-9]\d*$/.test(String(value)) && Number.isSafeInteger(Number(value));
+    if (info.schema_version !== 2 || info.artifact_layout !== manifest.artifactLayout
+        || Object.keys(info).sort().join() !== keys.sort().join()
+        || !Number.isSafeInteger(binary.size) || binary.size <= 0 || info.binary_size !== binary.size
+        || !info.producer || Object.keys(info.producer).sort().join() !== 'run_attempt,run_id'
+        || !positive(info.producer.run_id) || !positive(info.producer.run_attempt)
+        || (source.run_id !== undefined && String(info.producer.run_id) !== String(source.run_id))
+        || (source.run_attempt !== undefined && Number(info.producer.run_attempt) !== Number(source.run_attempt))
+        || runtime !== undefined) fail();
+  } else if (info.schema_version !== 1 || info.artifact_layout !== undefined
+      || info.runtime_file !== names[2] || runtime?.file !== names[2]
+      || !/^[a-f0-9]{64}$/.test(info.runtime_sha256 || '') || info.runtime_sha256 !== runtime?.sha256) fail();
+  return info;
+}
+
 // Execution alone accepts x64 under Windows ARM emulation; inspect the image too.
 export function verifyBinary(file, target) {
   // This published asset label is the manifest's darwin/arm64 alias.

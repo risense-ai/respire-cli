@@ -59,14 +59,14 @@ impl ReviewArgs {
             "invalid_metadata: due request scope cannot contain wildcards"
         );
         if let Some(date) = &self.review_at {
-            respire_app::memory::model::metadata::validate_timestamp(date)?;
+            respire_protocol::metadata::validate_timestamp(date)?;
         }
         ensure!(
             self.due == self.id.is_none(),
             "invalid_metadata: --due takes no id; other review actions require a full id"
         );
         if let Some(id) = &self.id {
-            respire_app::memory::model::metadata::validate_full_id(id)?;
+            respire_protocol::metadata::validate_full_id(id)?;
         }
         ensure!(
             self.input.is_none() || self.draft || self.confirm,
@@ -89,7 +89,7 @@ impl ReviewArgs {
                 self.input.is_some() && self.approval.is_some(),
                 "invalid_metadata: confirm requires --input and --approval"
             );
-            respire_app::memory::model::metadata::validate_full_id(
+            respire_protocol::metadata::validate_full_id(
                 self.approval.as_deref().context("missing approval")?,
             )?;
         }
@@ -112,9 +112,12 @@ impl ReviewArgs {
 }
 // CLI review shell (migrated): dispatch and emission for the shared inputs.
 
+#[cfg(feature = "server")]
 use respire_app::review::{ReviewInput, ReviewService};
+#[cfg(feature = "server")]
 use serde_json::{json, Value};
 
+#[cfg(feature = "server")]
 fn invoke(args: &ReviewArgs) -> Result<Value> {
     args.validate()?;
     let candidate = args
@@ -179,6 +182,7 @@ fn invoke(args: &ReviewArgs) -> Result<Value> {
     )
 }
 
+#[cfg(feature = "server")]
 fn error_code(error: &anyhow::Error) -> &str {
     if error.is::<serde_json::Error>() {
         return "invalid_metadata";
@@ -210,6 +214,7 @@ fn error_code(error: &anyhow::Error) -> &str {
     "review_failed"
 }
 
+#[cfg(feature = "server")]
 pub fn run(args: &ReviewArgs) -> Result<()> {
     use crate::output::{ResultEnvelope, Status};
     let result = invoke(args);
@@ -246,7 +251,7 @@ pub fn run(args: &ReviewArgs) -> Result<()> {
     crate::output_emit::emit_result(envelope)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "server"))]
 mod review_coverage {
     use super::*;
     use anyhow::Context;

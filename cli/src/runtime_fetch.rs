@@ -26,7 +26,7 @@
 //! download version: `required` is the exact pinned version fetched by
 //! [`download_and_install`]; `accept` is a range such as `>=1.0.21-dev.1,<2.0.0`
 //! (comma-separated `>=min` / `<max` bounds, min inclusive, max exclusive,
-//! compared with the same numeric rules as `crate::net_rpc::version_cmp`) that
+//! compared with the same numeric rules as `respire_client_host::version_cmp`) that
 //! an already-installed runtime must satisfy to be reused instead of replaced.
 //! Runtime releases publish `runtime-build-<triple>.json` with
 //! `{"runtime_version","tag","triple","binary_sha256","binary_file","compat":{"min_cli","max_cli"}}`
@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::model_progress;
-use respire_commands::rpc_worker::PROTOCOL_V;
+use respire_commands::rpc_client::PROTOCOL_V;
 
 /// Release repository that publishes the runtime artifacts.
 pub const RUNTIME_REPO: &str = "risense-ai/respire-runtime";
@@ -158,7 +158,7 @@ impl AcceptRange {
         );
         if let (Some(min), Some(max)) = (range.min.as_deref(), range.max.as_deref()) {
             anyhow::ensure!(
-                crate::net_rpc::version_cmp(min, max) == std::cmp::Ordering::Less,
+                respire_client_host::version_cmp(min, max) == std::cmp::Ordering::Less,
                 "accept lower bound is not below its upper bound"
             );
         }
@@ -258,6 +258,9 @@ fn parse_pin(raw: &str) -> Result<RuntimePin> {
 
 /// True when `version` satisfies the build-time accept range.
 pub fn version_in_accept(version: &str) -> bool {
+    if let Some(selected) = crate::embedding::selection() {
+        return version == selected.version();
+    }
     pinned().is_ok_and(|pin| pin.accept.contains(version))
 }
 
@@ -297,7 +300,7 @@ pub fn valid_version(version: &str) -> bool {
 /// its obfuscated triple name (see [`TRIPLES`]); Linux follows the compiled
 /// ABI, with an explicit asset override available through `RSRS_RUNTIME_TRIPLE`.
 pub fn release_triple() -> Result<String> {
-    if let Ok(raw) = respire::env::var("RSRS_RUNTIME_TRIPLE") {
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_TRIPLE") {
         let trimmed = raw.trim();
         anyhow::ensure!(
             TRIPLES.contains(&trimmed),
@@ -325,16 +328,22 @@ pub fn release_triple() -> Result<String> {
 
 /// CLI installation root (`~/.rsrs` unless isolated).
 pub fn installation_root() -> PathBuf {
-    respire::service::main_data_dir()
+    respire_client_host::paths::main_data_dir()
 }
 
 /// Managed runtime directory: `<installation_root>/runtime/`.
 pub fn runtime_dir() -> PathBuf {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.runtime_dir.clone();
+    }
     installation_root().join("runtime")
 }
 
 /// Shared manifest read and written by both the CLI and client2.
 pub fn manifest_path() -> PathBuf {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.manifest_path.clone();
+    }
     installation_root().join(MANIFEST_FILE)
 }
 
@@ -377,6 +386,18 @@ impl std::fmt::Display for ManagedRuntimeRepairRequired {
 }
 
 impl std::error::Error for ManagedRuntimeRepairRequired {}
+
+/// An automatic install must not select a new protocol for an unbound old owner.
+#[derive(Debug)]
+pub struct LegacyRuntimeMigrationRequired;
+
+impl std::fmt::Display for LegacyRuntimeMigrationRequired {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("legacy_runtime_migration_required: automatic Runtime replacement is blocked; the existing CLI, Runtime selection and data were preserved; keep using the existing client until a compatible host migration is available")
+    }
+}
+
+impl std::error::Error for LegacyRuntimeMigrationRequired {}
 
 impl ManagedManifest {
     fn from_release(metadata: &BuildMetadata, bytes: &[u8]) -> Result<Self> {
@@ -427,6 +448,16 @@ impl ManagedManifest {
 
 /// Read the managed manifest without validating the binary on disk.
 pub fn read_manifest() -> Result<Option<ManagedManifest>> {
+    if let Some(selected) = crate::embedding::selection() {
+        let runtime = selected.verify()?;
+        // The embedding verifies Client2's selection and inventory. Do not invent
+        // an official release proof for that independently validated layout.
+        return Ok(Some(ManagedManifest {
+            version: runtime.version().to_owned(),
+            sha256: runtime.sha256().to_owned(),
+            release: None,
+        }));
+    }
     let path = manifest_path();
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
@@ -476,6 +507,13 @@ fn safe_metadata_path(raw: &str) -> bool {
 }
 
 fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
+    if let Some(selected) = crate::embedding::selection() {
+        let runtime = selected.verify()?;
+        anyhow::ensure!(manifest.version == runtime.version()
+            && manifest.sha256.eq_ignore_ascii_case(runtime.sha256()),
+            "embedded Runtime differs from its selected manifest");
+        return Ok(runtime.path().to_path_buf());
+    }
     (|| {
         let triple = release_triple()?;
         let metadata = manifest.bound_metadata(&triple)?;
@@ -506,8 +544,8 @@ pub enum ResolvedRuntime {
     /// A verified `rsrs-runtime` executable, ready to spawn.
     Ready(PathBuf),
     /// A legacy combined `rsrs` binary occupies the old stable location and no
-    /// usable runtime was found first. The caller runs the migration flow:
-    /// install the pinned runtime, stop the old owner, rewrite autostart.
+    /// usable runtime was found first. Automatic replacement requires proving
+    /// this is the current CLI image, not an old combined service.
     LegacyCombined(PathBuf),
 }
 
@@ -519,7 +557,10 @@ pub enum ResolvedRuntime {
 /// verified), the portable layout next to this CLI binary, the legacy combined
 /// stable location, and finally [`download_and_install`].
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
-    if let Ok(raw) = respire::env::var("RSRS_RUNTIME_BIN") {
+    if let Some(selected) = crate::embedding::selection() {
+        return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
+    }
+    if let Ok(raw) = respire_client_host::env::var("RSRS_RUNTIME_BIN") {
         let explicit = PathBuf::from(raw.trim());
         anyhow::ensure!(
             !explicit.as_os_str().is_empty(),
@@ -542,7 +583,7 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
             }
         }
     }
-    let legacy = crate::mcp::bin_dir().join(LEGACY_COMBINED_BINARY);
+    let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
     if legacy.is_file() {
         return Ok(ResolvedRuntime::LegacyCombined(legacy));
     }
@@ -740,14 +781,14 @@ impl BuildMetadata {
             "release metadata has an invalid compat range"
         );
         anyhow::ensure!(
-            crate::net_rpc::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
+            respire_client_host::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
             "runtime {} requires CLI >= {}; upgrade the CLI first",
             self.runtime_version,
             self.compat.min_cli
         );
         anyhow::ensure!(
             self.compat.max_cli == "*"
-                || crate::net_rpc::version_cmp(cli, &self.compat.max_cli)
+                || respire_client_host::version_cmp(cli, &self.compat.max_cli)
                     == std::cmp::Ordering::Less,
             "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
             self.runtime_version,
@@ -939,10 +980,11 @@ fn mirror_origin(raw: &str) -> Result<String> {
 fn download_origins(mirror: Option<&str>) -> Result<Vec<String>> {
     let official = RELEASE_BASE.to_owned();
     let proxied = format!("{MIRROR_PREFIX}/{official}");
-    let setting = mirror
-        .map(str::to_owned)
-        .or_else(crate::model_install::mirror_from_env)
-        .filter(|value| !value.trim().is_empty());
+    let setting = match mirror {
+        Some(value) => Some(value.to_owned()),
+        None => respire_client_host::settings::mirror_from_env()?,
+    }
+    .filter(|value| !value.trim().is_empty());
     match setting {
         Some(value) => {
             let origin = mirror_origin(value.trim())?;
@@ -1452,8 +1494,8 @@ fn place_managed_binary(stage: &Path, binary_file: &str) -> Result<()> {
 // Install transactions
 // ---------------------------------------------------------------------------
 
-fn install_lock() -> Result<respire::lock::LibraryLock> {
-    respire::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
+fn install_lock() -> Result<respire_client_host::lock::LibraryLock> {
+    respire_client_host::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
         .context("another process is installing the runtime")
 }
 
@@ -1515,10 +1557,90 @@ fn staging_dir() -> Result<PathBuf> {
 }
 
 fn is_progress_abort(error: &anyhow::Error) -> bool {
-    error
+    error.is::<LegacyRuntimeMigrationRequired>()
+        || error.is::<ManagedRuntimeRepairRequired>()
+        || error
         .downcast_ref::<model_progress::OperationStopped>()
         .is_some()
         || error.downcast_ref::<std::io::Error>().is_some()
+}
+
+/// Read-only admission before progress, downloads, install locks or selection writes.
+/// A different pin is not permission to discard an unverified existing selection.
+fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
+    let manifest = read_manifest().context(ManagedRuntimeRepairRequired)?;
+    let selected = if let Some(manifest) = &manifest {
+        let binary = validate_installed(manifest).map_err(|error| {
+            if manifest.release.is_none() {
+                error.context(LegacyRuntimeMigrationRequired)
+            } else {
+                error
+            }
+        })?;
+        (manifest.version == required).then_some(binary)
+    } else {
+        // Resolve configured paths read-only. This never imports records or
+        // turns the selected profile into request identity or migration authority.
+        let (_, profile) = respire_client_host::config::control_roots()
+            .context(LegacyRuntimeMigrationRequired)?;
+        let records = [
+            "runtime/endpoint.json",
+            "runtime/autostart/registration.json",
+            "session.json",
+            "rsrs.db",
+            "onememory.db",
+        ].into_iter().map(|relative| installation_root().join(relative))
+            .chain(["session.json", "rsrs.db", "onememory.db"].into_iter()
+                .map(|name| profile.join(name)));
+        // Missing executable bytes do not prove a fresh installation.
+        for record in records {
+            match fs::symlink_metadata(record) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+                Ok(_) => anyhow::bail!(LegacyRuntimeMigrationRequired),
+            }
+        }
+        None
+    };
+    let legacy = crate::mcp::stable_bin_path();
+    // Windows can report NotFound for `file/rsrs.exe`, unlike Unix ENOTDIR.
+    // Missing leaf bytes are not evidence that the installation path is usable.
+    // Inspect existing ancestors before any takeover lock or lifecycle write.
+    for parent in legacy.ancestors().skip(1).filter(|path| !path.as_os_str().is_empty()) {
+        match fs::metadata(parent) {
+            Ok(metadata) => anyhow::ensure!(metadata.is_dir(), LegacyRuntimeMigrationRequired),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+        }
+    }
+    match fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(selected),
+        Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
+        Ok(metadata) => {
+            anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
+                LegacyRuntimeMigrationRequired);
+        }
+    }
+    // Release provenance is not permission to overwrite a different host CLI.
+    // A materialized copy of this CLI is a normal fresh-install layout. Compare
+    // bytes, not filenames, version strings or the currently selected account.
+    let current = std::env::current_exe().context(LegacyRuntimeMigrationRequired)?;
+    let different = crate::mcp::bin_needs_refresh(&current, &legacy)
+        .map_err(anyhow::Error::msg)
+        .context(LegacyRuntimeMigrationRequired)?;
+    anyhow::ensure!(!different, LegacyRuntimeMigrationRequired);
+    Ok(selected)
+}
+
+/// Materialization and managed replacement must use the same read-only boundary
+/// before changing the old CLI image, supervisor registration or maintenance state.
+pub(crate) fn require_automatic_migration_safe() -> Result<()> {
+    if let Some(selected) = crate::embedding::selection() {
+        // Client2 has already selected this image. Host commands do not migrate
+        // or materialize a CLI; installation entry points reject embedding.
+        return selected.verify().map(|_| ());
+    }
+    automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
 
 /// Install the pinned release (or an explicit `pin` version override),
@@ -1531,7 +1653,8 @@ fn is_progress_abort(error: &anyhow::Error) -> bool {
 /// A damaged selected build requires repair; it never triggers automatic
 /// replacement. An explicit trusted offline install can re-establish proof.
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
-    let _operation = model_progress::Operation::begin_download()?;
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -1542,20 +1665,20 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         }
         None => pinned()?.required.clone(),
     };
-    let triple = release_triple()?;
-    // Idempotent: an already-installed matching build wins over re-downloading.
-    if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
-        if manifest.version == required {
-            return validate_installed(&manifest);
-        }
+    if let Some(binary) = automatic_install_preflight(&required)? {
+        return Ok(binary);
     }
-    // Test harnesses set RSRS_CORE_TEST_MODE=1 for hermetic runs: downloads
-    // are refused so every caller takes its local fallback (the in-process
-    // shim) deterministically instead of touching the network.
+    let triple = release_triple()?;
+    // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
     anyhow::ensure!(
-        !respire::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
+        !respire_client_host::env::var("RSRS_CORE_TEST_MODE").is_ok_and(|value| value == "1"),
         "runtime downloads are disabled in core test mode"
     );
+    let lock = install_lock()?;
+    if let Some(binary) = automatic_install_preflight(&required)? {
+        return Ok(binary);
+    }
+    let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");
     let origins = download_origins(mirror)?;
     // Mirrors carry archives only; metadata remains bound to the official source.
@@ -1567,7 +1690,6 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         serde_json::from_slice(&metadata_bytes).context("invalid runtime release metadata")?;
     metadata.validate(&required, &triple)?;
     let manifest = ManagedManifest::from_release(&metadata, &metadata_bytes)?;
-    let lock = install_lock()?;
     let mut installed = None;
     let mut failures = Vec::new();
     for origin in &origins {
@@ -1595,6 +1717,7 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
             // Release archives carry the full-triple binary name; publish the
             // bare managed name before switching the version directory.
             place_managed_binary(&unpacked, &metadata.binary_file)?;
+            automatic_install_preflight(&required)?;
             adopt_or_verify_version_dir(&unpacked, &manifest)?;
             publish_manifest(&manifest)?;
             Ok(managed_binary_path(&required))
@@ -1640,6 +1763,8 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
 /// Managed activation requires schema 2 with a complete file inventory;
 /// parsing historical schema-1 metadata alone does not establish this proof.
 pub fn install_from_file(archive: &Path, version: &str) -> Result<PathBuf> {
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
     anyhow::ensure!(
         archive.is_file(),
         "archive {} does not exist",
@@ -1752,7 +1877,7 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
         });
     }
     // Newest first; equal comparisons keep a stable relative order.
-    installed.sort_by(|a, b| crate::net_rpc::version_cmp(&b.version, &a.version));
+    installed.sort_by(|a, b| respire_client_host::version_cmp(&b.version, &a.version));
     let current = read_manifest()?
         .map(|manifest| manifest.version)
         .or_else(|| installed.first().map(|entry| entry.version.clone()));
@@ -1767,6 +1892,8 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
 /// Remove old version directories, keeping the current version and the newest
 /// remaining one as the rollback point. Returns the removed versions.
 pub fn clean_old() -> Result<Vec<String>> {
+    anyhow::ensure!(crate::embedding::selection().is_none(),
+        "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
     let keep = list_installed()?
         .iter()
         .find(|entry| entry.current)
@@ -1811,7 +1938,7 @@ fn remove_version_dir(version: &str) -> Result<()> {
 
 #[cfg(test)]
 #[path = "runtime_fetch_tests.rs"]
-mod runtime_fetch_tests;
+pub(crate) mod runtime_fetch_tests;
 
 #[cfg(test)]
 mod revision4_install_validation {

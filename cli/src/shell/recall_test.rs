@@ -157,7 +157,7 @@ impl Form {
                     );
                 }
                 if let Some(related) = value.get("related") {
-                    match serde_json::from_value::<Vec<respire::memory::model::RelatedMemory>>(
+                    match serde_json::from_value::<Vec<respire_protocol::RelatedMemory>>(
                         related.clone(),
                     ) {
                         Ok(related) => self.result.extend(

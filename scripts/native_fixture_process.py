@@ -89,6 +89,69 @@ def process_start_id(pid):
     raise RuntimeError('authoritative Runtime birth unsupported on this platform')
 
 
+def install_published_runtime(binary, env):
+    """Use the real offline installer with the selected release's unchanged bytes."""
+    if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
+        return None
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'):
+        raise ValueError('published installation requires a dedicated GitHub-hosted runner')
+    root = pathlib.Path(env.get('RSRS_DATA_DIR') or pathlib.Path(env['HOME']) / '.rsrs')
+    if root.is_symlink():
+        raise ValueError('published installation root must not be linked')
+    root = root.resolve()
+    if not any(root != pathlib.Path(os.environ[key]).resolve()
+               and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+               for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+        raise ValueError('published installation must remain inside the owned runner workspace')
+    archive = pathlib.Path(os.environ['RSRS_PUBLISHED_RUNTIME_ARCHIVE']).resolve(strict=True)
+    metadata_path = pathlib.Path(os.environ['RSRS_PUBLISHED_RUNTIME_METADATA']).resolve(strict=True)
+    version = os.environ['RSRS_PUBLISHED_RUNTIME_VERSION']
+    triple = os.environ['RSRS_RUNTIME_TRIPLE']
+    if metadata_path != archive.with_name('runtime-build-' + triple + '.json'):
+        raise ValueError('offline installation requires the selected adjacent metadata')
+    metadata_bytes = metadata_path.read_bytes()
+    metadata_hash = hashlib.sha256(metadata_bytes).hexdigest()
+    with archive.open('rb') as stream:
+        archive_hash = hashlib.file_digest(stream, 'sha256').hexdigest()
+    metadata = json.loads(metadata_bytes)
+    binary_hash = os.environ['RSRS_PUBLISHED_RUNTIME_SHA256']
+    if (metadata_hash != os.environ['RSRS_PUBLISHED_RUNTIME_METADATA_SHA256']
+            or archive_hash != os.environ['RSRS_PUBLISHED_BUNDLE_SHA256']
+            or metadata.get('schema_version') != 2 or metadata.get('runtime_version') != version
+            or metadata.get('target_triple') != triple or metadata.get('archive_sha256') != archive_hash
+            or metadata.get('binary_sha256') != binary_hash):
+        raise ValueError('selected published Runtime bytes or identity changed')
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name == 'posix':
+        root.chmod(0o700)
+    receipt_path = root / 'runtime.json'
+    if not receipt_path.exists():
+        install_env = {key: value for key, value in env.items()
+                       if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
+                       and not key.endswith(('_TOKEN', '_API_KEY'))}
+        install_env.update(RSRS_DATA_DIR=str(root), RSRS_RUNTIME_TRIPLE=triple,
+                           RSRS_UPDATE_CHECK='0', RSRS_NO_AUTOSYNC='1')
+        result = subprocess.run([str(binary), '--json', 'runtime', 'install', '--file', str(archive),
+                                 '--version', version], env=install_env, capture_output=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError('selected published Runtime offline install failed: exit ' + str(result.returncode))
+    receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+    proof = receipt.get('release', {})
+    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
+            or proof.get('metadata_sha256') != metadata_hash
+            or proof.get('metadata_json', '').encode('utf-8') != metadata_bytes
+            or installed.is_symlink() or not installed.resolve().is_relative_to(root)):
+        raise ValueError('managed installation does not preserve the selected release proof')
+    with installed.open('rb') as stream:
+        if hashlib.file_digest(stream, 'sha256').hexdigest() != binary_hash:
+            raise ValueError('managed installation image differs from the selected asset')
+    env['RSRS_RUNTIME_BIN'] = str(installed.resolve(strict=True))
+    env['RSRS_RUNTIME_TRIPLE'] = triple
+    return installed.resolve(strict=True)
+
+
 def verify_runtime_health(args, health, root, profile, pid=None):
     import psutil
     root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
@@ -103,7 +166,9 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
     account_source = session.get('user') or health.get('data_dir', '')
     if (type(health.get('v')) is not int or health['v'] != 1 or (pid is not None and owner.pid != pid)
-            or image != args.runtime_binary
+            or image != ((root / 'runtime' / args.runtime_version /
+                          ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
+                         if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
             or pathlib.Path(health.get('exe', '')).resolve() != image
             or pathlib.Path(health.get('image_path', '')).resolve() != image
             or health.get('process_start_id') != birth
@@ -419,4 +484,7 @@ def serve(directory):
 
 
 if __name__ == '__main__':
-    serve(sys.argv[1])
+    if sys.argv[1] == '--install-published':
+        print(install_published_runtime(sys.argv[2], dict(os.environ)))
+    else:
+        serve(sys.argv[1])

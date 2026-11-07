@@ -17,8 +17,8 @@ pub fn session_file() -> Result<PathBuf> {
 
 pub fn read_session_json() -> Result<serde_json::Value> {
     let path = session_file()?;
-    let text = std::fs::read_to_string(&path).map_err(|_| anyhow!("no local session"))?;
-    Ok(serde_json::from_str(&text)?)
+    respire_client_host::identity::read_session_json(&path)?
+        .ok_or_else(|| anyhow!("no local session"))
 }
 
 pub fn write_session_json(data: &serde_json::Value) -> Result<PathBuf> {
@@ -1145,6 +1145,64 @@ mod tests {
             "wrapped_urk": wrapped, "urk_nonce": nonce,
         }))?;
         assert!(load_local_session().is_ok());
+
+        let path = session_file()?;
+        let original = std::fs::read(&path)?;
+        let canonical_profile = path.parent().context("session parent missing")?.canonicalize()?;
+        let profile = canonical_profile.as_path();
+        let missing = tempfile::tempdir()?;
+        assert!(respire_client_host::identity::read_session_json(
+            &missing.path().join("session.json")
+        )?.is_none());
+        assert!(respire_client_host::identity::session_user_of_dir(missing.path())?.is_none());
+        for invalid in ["", "{", "null", "[]"] {
+            std::fs::write(&path, invalid)?;
+            assert!(read_session_json().is_err());
+            assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());
+            assert_eq!(std::fs::read(&path)?, invalid.as_bytes());
+        }
+        // Key initialization can store an object without an account, but it cannot authorize a launch.
+        for local in ["{}", r#"{"user":""}"#, r#"{"user":7}"#, r#"{"user":null}"#] {
+            std::fs::write(&path, local)?;
+            assert!(read_session_json()?.is_object());
+            assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());
+        }
+        std::fs::write(&path, r#"{"user":"  Fixture-Account  "}"#)?;
+        assert_eq!(
+            respire_client_host::identity::session_user_of_dir(profile)?,
+            Some("  Fixture-Account  ".to_owned())
+        );
+        let empty = serde_json::to_vec(&serde_json::json!({"user":"u", "padding":""}))?;
+        let bounded = serde_json::to_vec(&serde_json::json!({
+            "user":"u", "padding":"x".repeat(65536 - empty.len())
+        }))?;
+        assert_eq!(bounded.len(), 65536);
+        std::fs::write(&path, &bounded)?;
+        assert_eq!(
+            respire_client_host::identity::session_user_of_dir(profile)?,
+            Some("u".to_owned())
+        );
+        let mut oversized = bounded;
+        oversized.push(b' ');
+        std::fs::write(&path, &oversized)?;
+        assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());
+        std::fs::write(&path, r#"{"user":"u"}"#)?;
+        #[cfg(unix)]
+        {
+            let linked = tempfile::tempdir()?;
+            std::os::unix::fs::symlink(&path, linked.path().join("session.json"))?;
+            assert!(respire_client_host::identity::session_user_of_dir(linked.path()).is_err());
+            std::os::unix::fs::symlink(
+                profile, linked.path().join("profile")
+            )?;
+            assert!(respire_client_host::identity::session_user_of_dir(&linked.path().join("profile")).is_err());
+        }
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(read_session_json().is_err());
+        assert!(respire_client_host::identity::session_user_of_dir(profile).is_err());
+        std::fs::remove_dir(&path)?;
+        std::fs::write(&path, original)?;
         Ok(())
     }
 

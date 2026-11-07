@@ -60,7 +60,7 @@ pub struct ResultEnvelope {
     pub errors: Vec<String>,
     pub details: Value,
     #[serde(default)]
-    pub related: Vec<respire_app::memory::model::RelatedMemory>,
+    pub related: Vec<respire_protocol::RelatedMemory>,
 }
 
 impl ResultEnvelope {
@@ -134,7 +134,7 @@ impl ResultEnvelope {
             .collect::<Vec<_>>();
         rows.extend(self.related.iter().map(|related| {
             vec![
-                respire_app::service::short_id(&related.id),
+                related.id.chars().take(8).collect(),
                 status_label(Status::Ok).to_owned(),
                 related_value(related),
                 String::new(),
@@ -282,8 +282,8 @@ fn task_phase(phase: &str) -> String {
     .to_owned()
 }
 
-pub fn related_value(related: &respire_app::memory::model::RelatedMemory) -> String {
-    use respire_app::memory::model::RelationKind;
+pub fn related_value(related: &respire_protocol::RelatedMemory) -> String {
+    use respire_protocol::RelationKind;
     let label = match related.relation {
         RelationKind::NewVersion => "new version",
         RelationKind::OldVersion => "old version",
@@ -722,6 +722,62 @@ mod tests {
             result.ensure_failure_diagnostics();
             assert!(result.errors.is_empty());
         }
+
+        let input = anyhow::Error::new(respire_client_host::input_error::InputError(
+            "fixture invalid input".to_owned(),
+        ))
+        .context("fixture input context");
+        let (failure, exit) = crate::output_emit::command_failure(&input);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 2);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"invalid_input"}));
+        assert_eq!(failure.details, serde_json::json!({"error_type":"user"}));
+        assert_eq!(failure.errors, [format!("{input:#}")]);
+
+        let runtime = anyhow::anyhow!("fixture runtime failure");
+        let (failure, exit) = crate::output_emit::command_failure(&runtime);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 1);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"runtime_error"}));
+        assert_eq!(failure.details, serde_json::json!({"error_type":"runtime"}));
+        assert_eq!(failure.errors, [format!("{runtime:#}")]);
+
+        let operation = crate::runtime_error::OperationContext {
+            scope: respire_protocol::RuntimeRequestScope {
+                account_id: "fixture-account".to_owned(),
+                instance_id: "fixture-instance".to_owned(),
+                generation: 7,
+            },
+            operation_id: "fixture-operation".to_owned(),
+            idempotency_key: "fixture-idempotency-key".to_owned(),
+        };
+        let unknown = anyhow::Error::new(crate::runtime_error::RuntimeError::OutcomeUnknown {
+            request_id: "fixture-request".to_owned(),
+            operation,
+            detail: "fixture response timeout".to_owned(),
+        })
+        .context("fixture transport context");
+        let (failure, exit) = crate::output_emit::command_failure(&unknown);
+        assert!(matches!(failure.status, Status::Fail));
+        assert_eq!(exit, 1);
+        assert_eq!(failure.summary, serde_json::json!({"reason":"request_outcome_unknown"}));
+        assert_eq!(failure.details, serde_json::json!({
+            "error_type":"outcome_unknown",
+            "request_id":"fixture-request",
+            "operation_id":"fixture-operation",
+            "idempotency_key":"fixture-idempotency-key",
+            "scope":{"account_id":"fixture-account","instance_id":"fixture-instance","generation":7},
+            "replayed":false,
+            "result_method":"runtime.result"
+        }));
+        assert_eq!(failure.errors, [format!("{unknown:#}")]);
+
+        for (status, expected) in [
+            (Status::Ok, 0), (Status::Skip, 0), (Status::Warn, 2),
+            (Status::Pending, 2), (Status::Fail, 1),
+        ] {
+            assert_eq!(crate::output_state::status_exit_code(status), expected);
+        }
     }
 
     #[test]
@@ -754,7 +810,7 @@ mod tests {
         let guard = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|err| err.into_inner());
-        let prev = respire_app::env::var("RSRS_LANG").ok();
+        let prev = crate::env::var("RSRS_LANG").ok();
         std::env::set_var("RSRS_LANG", "en");
         (guard, prev)
     }

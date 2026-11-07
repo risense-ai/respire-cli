@@ -8,6 +8,33 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod maintenance_control;
+pub mod host_control;
+pub mod model_control;
+pub mod secret_control;
+pub mod config_control;
+pub mod identity_control;
+pub mod identity_write_control;
+pub mod space_control;
+pub mod profile_maintenance;
+pub mod key_control;
+pub mod migration_control;
+pub mod metadata_control;
+pub mod model_maintenance;
+pub use maintenance_control::{
+    LegacySnapshotDescriptor, LegacySnapshotRecoveryAction, LegacySnapshotRecoveryBinding,
+    LegacySnapshotRecoveryParams, LegacySnapshotRecoveryResult, LEGACY_SNAPSHOT_RECOVERY_METHOD,
+};
+pub use metadata_control::SnapshotPreflightPayload;
+pub use model_control::{HostModelParams, ModelInstallIntent, ModelPreparation, HOST_MODEL_SCHEMA_V};
+pub use host_control::{
+    HostAuthIdentity, HostAuthKeygenParams, HostAuthOutcome, HostAuthResult,
+    HOST_AUTH_SCHEMA_V, HOST_AUTH_KEYGEN_METHOD, HOST_AUTH_RESULT_METHOD,
+    ControlBinding, HostControlLaunchGrant, HostControlMaintenanceBinding,
+    HostControlOperation, HostControlParams,
+    HOST_CONTROL_MAX_FRAME_BYTES, HOST_CONTROL_SCHEMA_V,
+};
+
 pub mod metadata;
 pub use metadata::{
     Artifact, ConfirmedBy, ConfirmerKind, Evidence, ExtraFields, MemoryMeta, MetadataError,

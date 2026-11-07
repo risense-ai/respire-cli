@@ -18,10 +18,31 @@ use ratatui::{
     widgets::{Block, BorderType, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::session_import::{self, Source};
-
 const ACCENT: Color = Color::Rgb(86, 156, 214);
 const BAR_BG: Color = Color::Rgb(22, 26, 34);
+
+#[derive(serde::Deserialize)]
+struct Source {
+    id: String,
+    name: String,
+    installed: bool,
+}
+
+type SourceQuery = fn(Vec<String>) -> Result<crate::output::ResultEnvelope>;
+
+fn load_sources(query: SourceQuery) -> Result<Vec<Source>> {
+    let envelope = query(vec![
+        "--json".to_owned(),
+        "extract".to_owned(),
+        "--targets".to_owned(),
+    ])
+    .context("list extract sources")?;
+    anyhow::ensure!(
+        envelope.command == "extract" && matches!(envelope.status, crate::output::Status::Ok),
+        "extract sources did not complete: {envelope:?}"
+    );
+    serde_json::from_value(envelope.details).context("extract sources: invalid Runtime source list")
+}
 
 enum Work {
     Progress(String, usize, usize),
@@ -30,6 +51,7 @@ enum Work {
 }
 
 struct App {
+    query: SourceQuery,
     rows: Vec<Source>,
     checked: HashSet<String>,
     cursor: usize,
@@ -44,14 +66,15 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        let rows = session_import::source_list();
+    fn new(query: SourceQuery) -> Result<Self> {
+        let rows = load_sources(query)?;
         let checked: HashSet<String> = rows
             .iter()
             .filter(|source| source.installed)
             .map(|source| source.id.clone())
             .collect();
         let mut app = Self {
+            query,
             rows,
             checked,
             cursor: 0,
@@ -69,7 +92,7 @@ impl App {
             should_exit: false,
         };
         app.sync_list_state();
-        app
+        Ok(app)
     }
 
     fn sync_list_state(&mut self) {
@@ -168,10 +191,15 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.rows = session_import::source_list();
-        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
-        self.sync_list_state();
-        self.log_line("source status refreshed".to_owned(), ACCENT);
+        match load_sources(self.query) {
+            Ok(rows) => {
+                self.rows = rows;
+                self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+                self.sync_list_state();
+                self.log_line("source status refreshed".to_owned(), ACCENT);
+            }
+            Err(error) => self.log_line(format!("source refresh failed: {error:#}"), Color::Red),
+        }
     }
 }
 
@@ -231,14 +259,15 @@ fn spawn_worker(ids: Vec<String>, sender: Sender<Work>) {
     });
 }
 
-pub fn run() -> Result<()> {
+/// The host callback must prepare the managed Runtime and validate its RPC response.
+pub fn run(query: fn(Vec<String>) -> Result<crate::output::ResultEnvelope>) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
     {
         anyhow::bail!("extract --tui needs a real terminal (stdin/stdout must both be tty)");
     }
+    let mut app = App::new(query)?;
     enable_raw_mode()?;
-    let mut app = App::new();
     let mut terminal = match setup_terminal() {
         Ok(terminal) => terminal,
         Err(error) => {

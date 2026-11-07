@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import socket
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -45,14 +46,20 @@ def main():
     if runtime_binary is not None and os.path.samefile(binary, runtime_binary):
         parser.error("independent Runtime required; the CLI cannot be its Runtime candidate")
 
-    prepare_bundle = runpy.run_path(str(Path(__file__).with_name("runtime-acceptance-bundle.py")))["stage_runtime"]
+    bundle_helpers = runpy.run_path(str(Path(__file__).with_name("runtime-acceptance-bundle.py")))
+    prepare_bundle = bundle_helpers["stage_runtime"]
+    copy_managed_installation = bundle_helpers["copy_managed_installation"]
 
-    def stage_runtime(directory):
+    def stage_runtime(directory, installation_root=None):
         return prepare_bundle(binary, runtime_binary, directory,
                               args.runtime_archive if runtime_binary is None else None,
-                              args.runtime_version if runtime_binary is None else None)
+                              args.runtime_version if runtime_binary is None else None,
+                              installation_root=installation_root)
 
-    with tempfile.TemporaryDirectory(prefix="respire-autostart-") as temporary:
+    # Failed startup/cleanup can leave a detached owner or OS registration.
+    # Preserve its files for explicit recovery instead of deleting live paths.
+    temporary = tempfile.mkdtemp(prefix="respire-autostart-")
+    try:
         base = Path(temporary).resolve(strict=True)
         home = base / "home"
         home.mkdir()
@@ -77,7 +84,11 @@ def main():
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root),
                    RSRS_BIN_DIR=str(base / "bin"), RSRS_RPC_PORT=str(port),
                    RSRS_CORE_TEST_MODE="1", RSRS_NO_AUTOSYNC="1", RSRS_UPDATE_CHECK="0")
-        runtime_binary = stage_runtime(base / "bin")
+        managed_fixture = base / "managed-installation"
+        # Restart/drain and registration tests must start from the installer's
+        # original release proof, not an unbound explicit Runtime override.
+        needs_managed = args.register or os.name == "nt"
+        runtime_binary = stage_runtime(base / "bin", managed_fixture if needs_managed else None)
         env["RSRS_RUNTIME_BIN"] = str(base / "bin" / runtime_name)
 
         restart_stages={"restart_probe","restart_managed","restart_identity","restart_stop","restart_start","restart_ready"}
@@ -187,6 +198,8 @@ def main():
         off_env = dict(env, RSRS_DATA_DIR=str(off_root), RSRS_BIN_DIR=str(base/"off-bin"))
         stage_runtime(base / "off-bin")
         off_env["RSRS_RUNTIME_BIN"] = str(base / "off-bin" / runtime_name)
+        if needs_managed:
+            off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture, off_root))
         try:
             for argv in [("runtime","start"),("runtime","stop")]*3+[("runtime","restart")]:
                 result = subprocess.run([binary,"--json",*argv],env=off_env,capture_output=True,text=True,timeout=45)
@@ -315,7 +328,9 @@ def main():
                     assert kernel.WaitForSingleObject(handle,0)==258, "fixture process already exited"
                     return handle,(values[0].dwHighDateTime<<32)|values[0].dwLowDateTime
                 try:
-                    child,child_birth=checked_process(current["pid"], Path(expected["executable"]).parent/runtime_name)
+                    selection=json.loads((expected_root/"runtime.json").read_text())
+                    runtime_image=expected_root/"runtime"/selection["version"]/runtime_name
+                    child,child_birth=checked_process(current["pid"], runtime_image)
                     class ProcessEntry(ctypes.Structure):
                         _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),
                             ("th32ProcessID",wintypes.DWORD),("th32DefaultHeapID",ctypes.c_size_t),
@@ -421,7 +436,16 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     print("isolated launchd override diagnostic",json.dumps({"label":label,"entries":[line[:160] for line in matching]}))
 
             def run(*argv):
-                result = command(*argv)
+                if argv[:1] == ("config",):
+                    # Host maintenance must use the exact registered controller image.
+                    registered_cli = Path(json.loads(config_path.read_text())["executable"])
+                    cli_name = "rsrs.exe" if os.name == "nt" else "rsrs"
+                    assert os.path.samefile(registered_cli, Path(env["RSRS_BIN_DIR"]) / cli_name)
+                    assert bundle_helpers["digest"](registered_cli) == bundle_helpers["digest"](Path(binary))
+                    result = subprocess.run([str(registered_cli), "--json", *argv], env=env,
+                                            capture_output=True, text=True, timeout=45)
+                else:
+                    result = command(*argv)
                 if result.returncode != 0:
                     diagnose_registration()
                 assert result.returncode == 0, f"{argv}: {result.stderr} {result.stdout}"
@@ -432,7 +456,6 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
             try:
                 if args.previous_binary:
                     import hashlib
-                    import shutil
                     previous=args.previous_binary.resolve(strict=True)
                     version=subprocess.run([str(previous),"--version"],env=env,capture_output=True,text=True,timeout=15)
                     assert version.returncode == 0 and "1.0.17-dev.6" in version.stdout, "unexpected previous native version"
@@ -482,15 +505,29 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         assert os.path.samefile(old_health["exe"],stable)
                         assert hashlib.sha256(stable.read_bytes()).digest()==hashlib.sha256(previous.read_bytes()).digest()
                         legacy_running=True
-                        # Legacy health cannot authorize a new registration's owner.
+                        # An unbound old installation is rejected before any
+                        # migration. Deeper owned-identity/fence rejection is
+                        # tested separately below with a genuinely managed fixture.
+                        endpoint=upgrade_root/"runtime/endpoint.json"
+                        endpoint_before=endpoint.read_bytes()
                         denied=upgrade_call(binary,"runtime","autostart","enable")
                         assert denied.returncode!=0, "legacy owner was adopted without registration identity"
-                        assert "runtime identity/profile does not match" in " ".join(json.loads(denied.stdout)["errors"]), denied.stdout
+                        assert "legacy_runtime_migration_required" in " ".join(json.loads(denied.stdout)["errors"]), denied.stdout
+                        assert endpoint.read_bytes()==endpoint_before
+                        assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](previous)
+                        assert not (upgrade_root/"runtime.json").exists()
+                        assert not (upgrade_root/"runtime/autostart/registration.json").exists()
+                        assert not (upgrade_root/"runtime/autostart/maintenance.json").exists()
+                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                            preserved=json.load(response)
+                        assert preserved["pid"]==old_health["pid"] and preserved["bin"]==old_health["bin"]
                         stop_legacy_owner()
                         require_upgrade("runtime","autostart","remove","--stop")
-                        handoff_runtime=upgrade_root/"handoff-runtime"
-                        stage_runtime(handoff_runtime)
-                        shutil.copytree(handoff_runtime,upgrade_root/"bin",dirs_exist_ok=True)
+                        # Explicit test-harness transition AFTER the verified
+                        # legacy stop. This is not automatic migration acceptance.
+                        upgrade_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture, upgrade_root))
+                        shutil.copy2(binary,stable)
+                        assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](Path(binary))
                         upgraded=require_upgrade("runtime","autostart","enable","--now")
                         assert upgraded["enabled"] and upgraded["runtime"]["running"]
                         assert upgraded["runtime"]["version"] == health["bin"] and upgraded["runtime"]["pid"] != old_health["pid"]
@@ -518,16 +555,25 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                                 assert source.is_file() and not destination.is_symlink()
                                 destination.parent.mkdir(parents=True,exist_ok=True)
                                 shutil.copy2(source,destination)
-                        # Old CLI SDK sidecars must not replace the new Runtime's
-                        # verified dependencies during this stopped upgrade fixture.
-                        restored_runtime = upgrade_root / "restored-runtime"
-                        stage_runtime(restored_runtime)
-                        shutil.copytree(restored_runtime, upgrade_root / "bin", dirs_exist_ok=True)
+                        # A verified Runtime receipt does not authorize replacing
+                        # an unknown old controller, even while disabled/stopped.
+                        registration=upgrade_root/"runtime/autostart/registration.json"
+                        disabled_before=registration.read_bytes()
+                        refused=upgrade_call(binary,"runtime","start")
+                        assert refused.returncode!=0
+                        assert "legacy_runtime_migration_required" in " ".join(json.loads(refused.stdout)["errors"]), refused.stdout
+                        assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](previous)
+                        assert registration.read_bytes()==disabled_before
+                        assert not (upgrade_root/"runtime/endpoint.json").exists()
+                        # Deliberately restore the known controller in the stopped
+                        # test fixture; managed Runtime sidecars were never changed.
+                        shutil.copy2(binary,stable)
+                        assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](Path(binary))
                         require_upgrade("runtime","start")
                         disabled_upgrade=require_upgrade("runtime","status")
                         assert disabled_upgrade["enabled"] is False and disabled_upgrade["runtime"]["version"] == health["bin"]
                         require_upgrade("runtime","stop")
-                        print("PASS: DEV.6 takeover refused, explicit legacy stop then native upgrade, live legacy-client no-replacement, disabled-state preservation")
+                        print("PASS: DEV.6 migration deferred without replacement; explicitly stopped/trusted fixture transition, live old-client preservation and disabled-state checks (not automatic migration)")
                     finally:
                         primary_error=sys.exc_info()[1]
                         try:
@@ -541,15 +587,102 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                                 raise
                             print(f"previous-version cleanup also failed: {cleanup_error}",file=sys.stderr)
 
-                failure_root=base/"failed-installation"
+                # An invalid bin directory is now refused by read-only admission,
+                # before maintenance. Keep that negative case, but do not pretend
+                # it exercises the later persisted-failure recovery path.
+                blocked_root=base/"blocked-installation"
                 blocked=base/"blocked-native-directory"
                 blocked.write_text("synthetic file, not a directory")
-                failure_env=dict(env,RSRS_DATA_DIR=str(failure_root),RSRS_BIN_DIR=str(blocked))
-                failed=subprocess.run([binary,"--json","runtime","autostart","enable"],env=failure_env,capture_output=True,text=True,timeout=45)
-                assert failed.returncode != 0 and (failure_root/"runtime/autostart/maintenance.json").exists(), "failure fixture did not reach persisted maintenance"
-                cleaned=subprocess.run([binary,"--json","runtime","autostart","remove","--stop"],env=failure_env,capture_output=True,text=True,timeout=45)
-                assert cleaned.returncode == 0 and not (failure_root/"runtime/autostart/maintenance.json").exists(), f"explicit failed-install cleanup did not recover: {cleaned.stdout} {cleaned.stderr}"
-                print("PASS: failed native installation retains a fence and explicit remove --stop safely clears it")
+                rejected=subprocess.run([binary,"--json","runtime","autostart","enable"],
+                    env=dict(env,RSRS_DATA_DIR=str(blocked_root),RSRS_BIN_DIR=str(blocked)),
+                    capture_output=True,text=True,timeout=45)
+                assert rejected.returncode!=0 and not blocked_root.exists(), "invalid bin path created lifecycle state"
+                assert blocked.read_text()=="synthetic file, not a directory"
+
+                # Reach the actual identity check AFTER admission/maintenance:
+                # an independently owned, healthy off-mode Runtime occupies this
+                # port, while a different verified installation tries to enable.
+                # Neither a synthetic receipt nor a forged health response is used.
+                failure_root=base/"failed-installation"
+                failure_runtime=copy_managed_installation(managed_fixture,failure_root)
+                failure_bin=failure_root/"bin"
+                failure_bin.mkdir()
+                shutil.copy2(binary,failure_bin/("rsrs.exe" if os.name=="nt" else "rsrs"))
+                failure_env=dict(env,RSRS_DATA_DIR=str(failure_root),RSRS_BIN_DIR=str(failure_bin),RSRS_RUNTIME_BIN=str(failure_runtime))
+                owner_attempted=False
+                owner_before=None
+                try:
+                    owner_attempted=True
+                    owner_start=subprocess.run([binary,"--json","runtime","start"],env=off_env,capture_output=True,text=True,timeout=45)
+                    assert owner_start.returncode==0, f"identity fixture startup failed: {owner_start.stdout} {owner_start.stderr}"
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                        owner_before=json.load(response)
+                    assert Path(owner_before["installation_root"]).resolve()==off_root.resolve()
+                    assert Path(owner_before["data_dir"]).resolve()==off_root.resolve()
+                    assert os.path.samefile(owner_before["exe"],off_env["RSRS_RUNTIME_BIN"])
+                    owner_endpoint=off_root/"runtime/endpoint.json"
+                    owner_endpoint_before=owner_endpoint.read_bytes()
+                    failed=subprocess.run([binary,"--json","runtime","autostart","enable"],env=failure_env,capture_output=True,text=True,timeout=45)
+                    assert failed.returncode!=0
+                    assert "runtime identity/profile does not match" in " ".join(json.loads(failed.stdout)["errors"]), failed.stdout
+                    assert (failure_root/"runtime/autostart/maintenance.json").is_file(), "identity failure did not reach persisted maintenance"
+                    assert owner_endpoint.read_bytes()==owner_endpoint_before
+                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                        owner_after=json.load(response)
+                    for key in ("pid","instance_id","process_start_id","image_sha256","account_id","generation"):
+                        assert owner_after[key]==owner_before[key], f"wrong-installation enable replaced owner: {key}"
+                finally:
+                    primary_error=sys.exc_info()[1]
+                    try:
+                        # Even a failed/timed-out start may have created its child.
+                        # Only the original installation may drain this owner.
+                        # Never kill by port or manually clear a maintenance fence.
+                        if owner_attempted:
+                            stopped=subprocess.run([binary,"--json","runtime","stop"],env=off_env,capture_output=True,text=True,timeout=45)
+                            assert stopped.returncode==0, f"identity owner cleanup failed: {stopped.stdout} {stopped.stderr}"
+                            assert not (off_root/"runtime/endpoint.json").exists()
+                            if owner_before is not None:
+                                # Stop=0 alone could mean "already stopped". Require
+                                # the original instance's actual final drain receipt.
+                                receipt=json.loads(stopped.stdout)["summary"]
+                                for key in ("pid","generation","installation_id","instance_id","process_start_id","image_path","image_sha256","runtime_version","account_id"):
+                                    assert receipt[key]==owner_before[key], f"cleanup receipt owner mismatch: {key}"
+                                assert receipt["schema_version"]==1 and receipt["protocol_version"]==owner_before["v"]
+                                assert receipt["operation_id"] and receipt["state"]=="drained" and receipt["unfinished"]==[]
+                                receipt_file=off_root/"runtime"/f"stop-{owner_before['instance_id']}.json"
+                                assert not receipt_file.is_symlink() and receipt_file.stat().st_size<=1024*1024
+                                assert json.loads(receipt_file.read_text())==receipt
+                                # A reused live PID conservatively fails/retains the
+                                # directory. Never infer OS exit from a closed port.
+                                deadline=time.monotonic()+15
+                                while True:
+                                    if os.name=="nt":
+                                        handle=kernel.OpenProcess(0x100000,False,owner_before["pid"])
+                                        if handle:
+                                            try:
+                                                exited=kernel.WaitForSingleObject(handle,0)==0
+                                            finally:
+                                                kernel.CloseHandle(handle)
+                                        else:
+                                            assert ctypes.get_last_error()==87, "could not verify fixture process exit"
+                                            exited=True
+                                    else:
+                                        state=subprocess.run(["ps","-p",str(owner_before["pid"]),"-o","stat="],env=off_env,capture_output=True,text=True,timeout=5)
+                                        assert state.returncode in (0,1) and not state.stderr.strip(), "could not verify fixture process exit"
+                                        exited=(state.returncode==1 and not state.stdout.strip()) or state.stdout.strip().startswith("Z")
+                                    if exited:
+                                        break
+                                    assert time.monotonic()<deadline, "inspected fixture PID still exists after drain"
+                                    time.sleep(0.1)
+                        cleaned=subprocess.run([binary,"--json","runtime","autostart","remove","--stop"],env=failure_env,capture_output=True,text=True,timeout=45)
+                        assert cleaned.returncode == 0 and not (failure_root/"runtime/autostart/maintenance.json").exists(), f"explicit failed-install cleanup did not recover: {cleaned.stdout} {cleaned.stderr}"
+                    except Exception as cleanup_error:
+                        if primary_error is None:
+                            raise
+                        print(f"identity fixture cleanup also failed: {cleanup_error}",file=sys.stderr)
+                print("PASS: verified cross-installation owner refused without replacement; persisted fence cleared only by explicit recovery after owner drain")
+                managed_runtime_binary = copy_managed_installation(managed_fixture, root)
+                env["RSRS_RUNTIME_BIN"] = str(managed_runtime_binary)
                 enabled = run("runtime", "autostart", "enable")
                 assert enabled["enabled"] is True and enabled["registered"] is True, enabled
                 assert enabled["runtime"]["running"] is False, "enable without --now unexpectedly starts runtime"
@@ -777,6 +910,11 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         raise
                     print(f"owned registration cleanup also failed: {cleanup_error}",file=sys.stderr)
 
+    except BaseException:
+        print(f"Failed lifecycle fixture retained for explicit recovery: {temporary}",file=sys.stderr)
+        raise
+    else:
+        shutil.rmtree(temporary)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,14 @@ fn runtime_help_is_static_without_a_profile_or_lifecycle_action() -> anyhow::Res
         serde_json::from_str::<Value>(context)?
     );
 
+    let operation = "7c633a08-9077-4710-882e-ac3d2998ab8b";
+    for flags in [
+        vec!["auth-result", "--operation-id", operation],
+        vec!["account-result", "--operation-id", operation, "--source-profile", "original-profile", "--register"],
+        vec!["account-rollback", "--operation-id", operation, "--source-profile", "original-profile", "--confirm"],
+    ] {
+        Cli::try_parse_from(["rsrs", "runtime"].into_iter().chain(flags))?;
+    }
     let root = tempfile::tempdir()?;
     for flags in [
         vec!["--runtime-internal", "--help"],
@@ -58,7 +66,18 @@ fn runtime_help_is_static_without_a_profile_or_lifecycle_action() -> anyhow::Res
 
 #[test]
 fn help_cannot_swallow_a_stop_or_unknown_argument() -> anyhow::Result<()> {
+    for flags in [
+        vec!["--core-worker-internal"],
+        vec!["--core-worker-internal", "--json"],
+        vec!["--json", "--core-worker-internal"],
+    ] {
+        assert!(Cli::try_parse_from(std::iter::once("rsrs").chain(flags)).is_err());
+    }
     assert!(Cli::try_parse_from(["rsrs", "runtime", "result"]).is_err());
+    for operation in ["not-uuid", "12345678-1234-1234-8234-123456789abc", "7C633A08-9077-4710-882E-AC3D2998AB8B"] {
+        assert!(Cli::try_parse_from(["rsrs", "runtime", "auth-result", "--operation-id", operation]).is_err());
+    }
+    assert!(Cli::try_parse_from(["rsrs", "runtime", "account-result", "--operation-id", "7c633a08-9077-4710-882e-ac3d2998ab8b"]).is_err());
     for context in [
         "not-json",
         "{}",
@@ -73,6 +92,22 @@ fn help_cannot_swallow_a_stop_or_unknown_argument() -> anyhow::Result<()> {
     }
 
     let root = tempfile::tempdir()?;
+    for flags in [
+        vec!["--core-worker-internal", "--json"],
+        vec!["--json", "--core-worker-internal"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_rsrs"))
+            .args(flags)
+            .env("RSRS_DATA_DIR", root.path().join("absent-profile"))
+            .env("RSRS_BIN_DIR", root.path().join("absent-bin"))
+            .env("RSRS_M3_DIR", root.path().join("absent-model"))
+            .output()?;
+        assert_eq!(output.status.code(), Some(2));
+        let value: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(value["status"], "fail");
+        assert_eq!(value["summary"]["reason"], "invalid_input");
+        assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
+    }
     for extra in ["--stop", "--unknown-flag"] {
         let output = Command::new(env!("CARGO_BIN_EXE_rsrs"))
             .args([
