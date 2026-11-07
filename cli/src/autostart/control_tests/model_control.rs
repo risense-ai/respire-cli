@@ -61,6 +61,31 @@ fn assets(values: &[(&str, &str)]) -> Result<AssetsStatus> {
 }
 
 #[test]
+fn model_preparation_preserves_damaged_installations_before_maintenance() -> Result<()> {
+    let _guard = crate::TEST_ENV_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    let _restore = isolate(&root);
+    let manifest = root.join("runtime.json");
+    let unproved = serde_json::to_vec(&json!({
+        "version": "1.0.21-dev.17", "sha256": "a".repeat(64)
+    }))?;
+    for bytes in [b"not-json".as_slice(), br#"{}"#, unproved.as_slice()] {
+        std::fs::write(&manifest, bytes)?;
+        let error = control_prepare_model(&ModelInstallIntent::default())
+            .expect_err("damaged installation must not bootstrap or enter maintenance");
+        let diagnostic = format!("{error:#}");
+        assert!(diagnostic.contains("repair required"), "{diagnostic}");
+        assert_eq!(std::fs::read(&manifest)?, bytes);
+        assert!(!root.join("models").exists());
+        assert!(!root.join("runtime/autostart/maintenance.json").exists());
+    }
+    Ok(())
+}
+
+#[test]
 fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> Result<()> {
     let _guard = crate::TEST_ENV_LOCK
         .lock()
