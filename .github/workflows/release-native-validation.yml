@@ -180,19 +180,22 @@ jobs:
         env:
           CLI_TARGET: ${{ matrix.target }}
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/release-probe
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
-          import {appendFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {appendFileSync, mkdirSync, readFileSync, realpathSync, statSync} from 'node:fs';
           import {join, resolve} from 'node:path';
           import {spawnSync} from 'node:child_process';
           assert.equal(process.env.GITHUB_ACTIONS, 'true');
           assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true');
           const extension = process.platform === 'win32' ? '.exe' : '';
           const cli = resolve('target/ci', process.env.CLI_TARGET, 'release', 'rsrs' + extension);
-          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'native-official-runtime-'));
+          // Model maintenance verifies the managed installation in the probe's data root.
+          // A binary override from another root cannot replace that installation proof.
+          const root = resolve(process.env.RSRS_DATA_DIR); mkdirSync(root);
           const home = join(root, 'home'); mkdirSync(home);
           const env = {...process.env, RSRS_DATA_DIR: root, HOME: home, USERPROFILE: home, RSRS_RUNTIME_TRIPLE: process.env.CLI_TARGET,
             RSRS_UPDATE_CHECK: '0', RSRS_NO_AUTOSYNC: '1'};
