@@ -264,3 +264,7 @@ fn validate_terminal_receipt(receipt: &HostMigrationResult, original: &HostMigra
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "control_tests/migration_control.rs"]
+mod tests;

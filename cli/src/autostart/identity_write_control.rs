@@ -302,3 +302,7 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
     }
     Ok(envelope)
 }
+
+#[cfg(test)]
+#[path = "control_tests/identity_write_control.rs"]
+mod tests;

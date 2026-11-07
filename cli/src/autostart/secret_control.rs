@@ -372,3 +372,7 @@ pub(crate) fn keys_export_result(read: HostKeysExportReadResult, out: Option<&st
         }
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests/secret_control.rs"]
+mod tests;

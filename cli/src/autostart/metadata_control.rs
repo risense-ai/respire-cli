@@ -500,3 +500,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "control_tests/metadata_control.rs"]
+mod receipt_tests;

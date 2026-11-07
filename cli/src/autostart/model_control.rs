@@ -475,3 +475,7 @@ fn validate_plan_response(
     }
     Ok(envelope)
 }
+
+#[cfg(test)]
+#[path = "control_tests/model_control.rs"]
+mod tests;

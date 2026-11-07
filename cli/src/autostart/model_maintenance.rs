@@ -825,3 +825,7 @@ fn publish(target: &Path, bytes: &[u8]) -> Result<()> {
     }
     result
 }
+
+#[cfg(test)]
+#[path = "control_tests/model_maintenance.rs"]
+mod tests;
