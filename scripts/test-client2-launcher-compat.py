@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 
-CLIENT2_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
+CLIENT2_SHA = 'd798d6fb943a1c7515f5bb427f72c6aee0341ffb'
 MAGPIE_SHA = 'a3ae9b3035d02b181ba7a8ddae251495d092dd63'
 MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
 # Desktop workflow run 42458504861, artifact 13609150108, unchanged CLIENT2_SHA.

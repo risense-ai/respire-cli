@@ -235,7 +235,8 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
             $next = $queue.Dequeue(); $visited++; $current = $next.element.Current
             if (-not $ownedIds.Contains([int]$current.ProcessId)) {
                 $report.offline.foreign_node_matches_selector = ($current.ControlType.ProgrammaticName -eq $Type -and $current.Name -match $Name)
-                throw 'Offline UIA node escaped the bound process tree'
+                if ($report.offline.foreign_node_matches_selector) { throw 'Offline UIA node escaped the bound process tree' }
+                continue
             }
             $document = $next.document -or $current.ControlType -eq [Windows.Automation.ControlType]::Document
             # Only a selector match is retained. Never serialize arbitrary UIA names or values:
