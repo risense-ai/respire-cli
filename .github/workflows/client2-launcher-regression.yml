@@ -7,6 +7,8 @@ on:
       - 'spawn/**'
       - 'crates/commands/src/net_rpc.rs'
       - 'scripts/test-client2-launcher-compat.py'
+      - 'scripts/probe-client2-gui.ps1'
+      - 'scripts/probe-client2-gui-cdp.mjs'
       - 'scripts/fixtures/client2-v0256-probe/**'
       - '.github/workflows/client2-launcher-regression.yml'
   workflow_dispatch:
@@ -96,11 +98,26 @@ jobs:
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
             --report "$RUNNER_TEMP/client2-launcher-regression.json"
+      - name: Probe original Windows Client2 GUI connectivity (not full GUI acceptance)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = (Get-Content -Raw -LiteralPath runtime-pin.json | ConvertFrom-Json).required
+          ./scripts/probe-client2-gui.ps1 `
+            -Cli "$PWD/target/debug/rsrs.exe" `
+            -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `
+            -RuntimeVersion $version `
+            -OutputDirectory "$env:RUNNER_TEMP/client2-gui-probe"
       - name: Preserve actual host results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: client2-launcher-raw-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/client2-launcher-regression.json
+          path: |
+            ${{ runner.temp }}/client2-launcher-regression.json
+            ${{ runner.temp }}/client2-gui-probe/report.json
+            ${{ runner.temp }}/client2-gui-probe/cdp.json
+            ${{ runner.temp }}/client2-gui-probe/workspace.png
           if-no-files-found: warn
           retention-days: 1
