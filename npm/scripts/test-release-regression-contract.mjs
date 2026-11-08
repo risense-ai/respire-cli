@@ -111,7 +111,7 @@ test('both Linux ARM targets require native runners, every source feedback phase
   }
   const source=text('token-free-sdk-check.yml');assert.match(source,/if: \$\{\{ !contains\(inputs.target, '-musl'\) \}\}/);
   assert.match(source,/run: bash scripts\/build-linux-musl.sh \$\{\{ inputs.target \}\}/);
-  assert.match(source,/inputs.feedback_probe && contains\(inputs.target, '-musl'\)/);
+  assert.match(source,/if: \$\{\{ inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin' && contains\(inputs.target, '-musl'\) \}\}/);
   assert.match(source,/scripts\/verify-linux-arm64-elf.sh/);assert.match(source,/diary_tests/);assert.match(source,/feedback_contract_probe/);
   assert.match(source,/scripts\/probe-native-arm64-alpine.sh/);
   for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
