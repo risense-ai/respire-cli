@@ -10,7 +10,7 @@ import {createHash} from 'node:crypto';
 import {cacheKey,releaseKey} from '../../scripts/rust-ci-cache.mjs';
 const ci=readFileSync(new URL('../../.github/workflows/ci.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const section=name=>ci.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',()=>{
+test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',async()=>{
   const contracts=section('contract-checks'),source=section('coverage-tests'),workspace=section('workspace-tests'),integration=section('runtime-integration');
   assert(contracts && source);assert.doesNotMatch(contracts,/\n    needs:|id-token:|actions: write|secrets\.|fetch-core-sdk|cargo /);
   assert.match(contracts,/persist-credentials: false/);assert.match(contracts,/contents: read/);
@@ -222,18 +222,24 @@ done`),'run every business module and preserve the first failure');
   let boundReceipt;
   for(const lane of [source,integration]){
     const fixture=stripImports(lane.split('- name: Prepare official pinned standalone Runtime for lifecycle tests')[1]
-      .split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]);
-    const runFixture=(selected,actualBinary=binary)=>{
+      .split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0])
+      .replace("const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');",'');
+    const runFixture=async(selected,actualBinary=binary)=>{
       let written;
-      runInNewContext(fixture,{assert,createHash,
+      await runInNewContext(`(async()=>{${fixture}\n})()`,{assert,createHash,
         readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file==='cli/Cargo.toml'?`version = "${pinVersion}"`:
           file.endsWith('/runtime.json')?JSON.stringify(selected):file.endsWith('.json')?JSON.stringify(initialReceipt('core')):actualBinary,
         mkdtempSync:()=>'/fixture',join:path.posix.join,resolve:file=>`/workspace/${file}`,realpathSync:file=>file,
-        statSync:()=>({isFile:()=>true}),spawnSync:()=>({status:0}),appendFileSync:()=>{},
+        statSync:()=>({isFile:()=>true}),
+        installPinnedRuntime:async(cli,{env},target)=>{
+          assert.equal(cli,lane===source?'/workspace/target/debug/rsrs':'/workspace/target/llvm-cov-target/debug/rsrs');
+          assert.equal(env.RSRS_DATA_DIR,'/fixture');assert.equal(target,'x86_64-unknown-linux-gnu');
+          return {status:0};
+        },appendFileSync:()=>{},
         writeFileSync:(file,value)=>{written=JSON.parse(value);},process:{env:productEnv}});
       return written;
     };
-    const receipt=runFixture(selection());
+    const receipt=await runFixture(selection());
     if(lane===integration){boundReceipt=receipt;assert.equal(receipt.runtime_product_source_sha,expectedProduct);
       assert.equal(receipt.runtime_binary_sha256,hash(binary));assert.equal(receipt.runtime_metadata_sha256,hash(receipt.runtime_metadata_json));}
     for(const change of [
@@ -241,8 +247,8 @@ done`),'run every business module and preserve the first failure');
         value.release.metadata_json=JSON.stringify(metadata);value.release.metadata_sha256=hash(value.release.metadata_json);},
       value=>{value.release.metadata_sha256='0'.repeat(64);},
       value=>{value.sha256='0'.repeat(64);},
-    ]){const value=selection();change(value);assert.throws(()=>runFixture(value));}
-    assert.throws(()=>runFixture(selection(),Buffer.from('wrong binary')));
+    ]){const value=selection();change(value);await assert.rejects(()=>runFixture(value));}
+    await assert.rejects(()=>runFixture(selection(),Buffer.from('wrong binary')));
   }
 
   const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, runtime-integration, workspace-tests, contract-checks, required-tests, commands-frontend\]/);

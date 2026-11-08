@@ -102,7 +102,7 @@ test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',
     }
   }finally{rmSync(root,{recursive:true,force:true})}
 });
-test('both Linux ARM targets require native runners, every source feedback phase and background install proof',()=>{
+test('both Linux ARM targets require native runners, every source feedback phase and background install proof',async()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
   for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
     const workflow=text(file).replace(/\r\n/g,'\n');
@@ -133,32 +133,34 @@ test('both Linux ARM targets require native runners, every source feedback phase
   assert.equal(dataRoot(install),'${{ runner.temp }}/release-probe');
   assert.equal(dataRoot(install),dataRoot(step('Install and probe BGE CPU inference')));
   assert(native.indexOf('id: pinned-runtime')<native.indexOf('      - name: Install and probe BGE CPU inference'));
-  const script=install.split("<<'NODE'\n")[1].split('\n          NODE')[0].replace(/^          /gm,'').replace(/^import .*;\n/gm,'');
+  const script=install.split("<<'NODE'\n")[1].split('\n          NODE')[0].replace(/^          /gm,'').replace(/^import .*;\n/gm,'')
+    .replace("const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');",'');
   for(const platform of ['linux','win32']) {
     const p=platform==='win32'?path.win32:path.posix, root=platform==='win32'?'C:\\runner\\native-runtime':'/runner/native-runtime';
     const image=Buffer.from('synthetic installed Runtime; never executed'), version='1.0.21-dev.5';
     const digest=createHash('sha256').update(image).digest('hex'), metadata=JSON.stringify({triple:'synthetic-target',runtime_version:version});
-    const simulate=change=>{
+    const simulate=async change=>{
       const selected={version,sha256:digest,release:{metadata_json:metadata,metadata_sha256:createHash('sha256').update(metadata).digest('hex')}};
       const state={selected,status:0,sameImage:false,hosted:'true'};change?.(state);
       const tokenSentinel='fixture-only-value';
       const output=[],calls=[],env={GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:state.hosted,CLI_TARGET:'synthetic-target',RUNNER_TEMP:p.dirname(root),RSRS_DATA_DIR:root,GITHUB_OUTPUT:'fixture-output',GH_TOKEN:tokenSentinel,GITHUB_TOKEN:tokenSentinel};
-      runInNewContext(script,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
+      await runInNewContext(`(async()=>{${script}\n})()`,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
         mkdirSync:()=>{},statSync:()=>({isFile:()=>true}),
         realpathSync:file=>state.sameImage?'same-image':file,
         readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'runtime.json')?JSON.stringify(selected):image,
         appendFileSync:(_file,line)=>output.push(line),
-        spawnSync:(cli,args,options)=>{calls.push({cli,args:[...args],env:options.env});return {status:state.status}}});
-      assert.equal(calls.length,1);assert.deepEqual(calls[0].args,['--json','runtime','install']);
+        installPinnedRuntime:async(cli,options,target)=>{assert.equal(target,'synthetic-target');
+          calls.push({cli,env:options.env});return {status:state.status}}});
+      assert.equal(calls.length,1);assert.equal(calls[0].cli,p.resolve('target/ci','synthetic-target','release','rsrs'+(platform==='win32'?'.exe':'')));
       for(const token of ['GH_TOKEN','GITHUB_TOKEN']){assert.equal(calls[0].env[token],undefined);assert.equal(env[token],tokenSentinel);}
       assert.equal(calls[0].env.RSRS_DATA_DIR,root);assert.equal(calls[0].env.HOME,p.join(root,'home'));
       assert.equal(calls[0].env.RSRS_RUNTIME_TRIPLE,'synthetic-target');
       assert.deepEqual(output,[`path=${p.join(root,'runtime',version,'rsrs-runtime'+(platform==='win32'?'.exe':''))}\n`,`sha256=${digest}\n`,`version=${version}\n`]);
     };
-    simulate();
+    await simulate();
     for(const change of [s=>s.status=1,s=>s.selected.version='1.0.21-dev.4',s=>s.selected.sha256='a'.repeat(64),
       s=>s.selected.release=null,s=>s.selected.release.metadata_sha256='b'.repeat(64),s=>s.sameImage=true,s=>s.hosted='false',
-      s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])assert.throws(()=>simulate(change));
+      s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])await assert.rejects(()=>simulate(change));
   }
   for(const name of ['Require every upgrade selected by the native validation profile','Verify resident foreground and background inference under concurrent CLI load']) {
     const consumer=step(name);
