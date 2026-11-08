@@ -578,14 +578,11 @@ fn rpc_request(
     let request_id = uuid::Uuid::new_v4().to_string();
     let (operation_id, idempotency_key, scope) = match operation {
         Some(operation) => (
-            operation.operation_id.clone(),
-            operation.idempotency_key.clone(),
+            Some(operation.operation_id.clone()),
+            Some(operation.idempotency_key.clone()),
             Some(&operation.scope),
         ),
-        None => {
-            let operation_id = uuid::Uuid::new_v4().to_string();
-            (operation_id.clone(), operation_id, None)
-        }
+        None => (None, None, None),
     };
     let body = json!({
         "v": crate::rpc_client::PROTOCOL_V,
