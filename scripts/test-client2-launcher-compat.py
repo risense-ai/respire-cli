@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+"""Real unchanged Client2 v0.2.56 host calls; account-free temporary installations.
+
+Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
+Client2 source. This is not GUI, account, model-inference or G1 acceptance.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import tempfile
+
+CLIENT2_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cli', type=Path, required=True)
+    parser.add_argument('--runtime-archive', type=Path, required=True)
+    parser.add_argument('--runtime-version', required=True)
+    parser.add_argument('--client2-source', type=Path, required=True)
+    parser.add_argument('--go', type=Path, required=True)
+    parser.add_argument('--report', type=Path, required=True)
+    parser.add_argument('--go-mod-cache', type=Path)
+    parser.add_argument('--offline', action='store_true')
+    args = parser.parse_args()
+    cli, archive, source, go = (p.resolve(strict=True) for p in
+                                [args.cli, args.runtime_archive, args.client2_source, args.go])
+    def git(*argv):
+        return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
+    if git('rev-parse', 'HEAD') != CLIENT2_SHA or git('status', '--porcelain'):
+        raise RuntimeError('Require unchanged Client2 v0.2.56 source')
+    base = Path(tempfile.mkdtemp(prefix='client2-launcher-regression-')).resolve()
+    probe = base / 'probe'; probe.mkdir()
+    (probe / 'go.mod').write_text('module respire-client2/regression\n\ngo 1.26.0\n\n'
+        'require respire-client2 v0.0.0\nreplace respire-client2 => ' + json.dumps(str(source)) + '\n')
+    shutil.copyfile(source / 'go.sum', probe / 'go.sum')
+    shutil.copyfile(Path(__file__).parent / 'fixtures/client2-v0256-probe/main.go', probe / 'main.go')
+    executable = probe / ('probe.exe' if os.name == 'nt' else 'probe')
+    build_env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
+    build_env.update(GOPATH=str(base / 'go-path'), GOCACHE=str(base / 'go-cache'), GOMODCACHE=str(args.go_mod_cache.resolve(strict=True) if args.go_mod_cache else base / 'go-mod'))
+    if args.offline: build_env['GOPROXY'] = 'off'
+    subprocess.run([str(go), 'build', '-buildvcs=false', '-mod=mod', '-o', str(executable), '.'],
+                   cwd=probe, env=build_env, check=True, timeout=300)
+    report = {'client2_source': CLIENT2_SHA, 'coverage': 'real-host-process-no-accounts',
+              'g1_passed': False, 'root': str(base), 'cases': [],
+              'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
+                         'runtime_version': args.runtime_version},
+              'excluded': ['desktop GUI', 'accounts and credentials', 'model inference',
+                           'managed services', 'cross-platform execution']}
+    def run(argv, env):
+        return subprocess.run([str(x) for x in argv], env=env, capture_output=True, text=True, timeout=150)
+    for mode in ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']:
+        root = base / mode; root.mkdir(); home = root / 'home'; home.mkdir()
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0)); port = listener.getsockname()[1]
+        env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
+        env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root), RSRS_BIN_DIR=str(root/'bin'),
+                   RSRS_RPC_PORT=str(port), RSRS_CORE_TEST_MODE='1', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0', RSRS_LANG='en')
+        for key, name in [('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','share'),('XDG_CACHE_HOME','cache'),
+                          ('XDG_STATE_HOME','state'),('XDG_RUNTIME_DIR','run'),('APPDATA','appdata'),('LOCALAPPDATA','local')]:
+            path = root / name; path.mkdir(); env[key] = str(path)
+        case = {'name': mode, 'passed': False}; report['cases'].append(case)
+        try:
+            installed = run([cli, '--json', 'runtime', 'install', '--file', archive, '--version', args.runtime_version], env)
+            if installed.returncode: raise RuntimeError('Official Runtime installation failed: '+installed.stderr)
+            selection = json.loads((root/'runtime.json').read_text())
+            (root/'bin').mkdir(exist_ok=True)
+            shutil.copy2(cli, root/'bin'/('rsrs.exe' if os.name=='nt' else 'rsrs'))
+            if mode == 'client2-owned':
+                destination = root/'client2/runtime'/args.runtime_version
+                shutil.copytree(root/'runtime'/args.runtime_version, destination)
+                (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
+            if mode == 'reuse-cli-started':
+                started = run([cli, '--json', 'runtime', 'start'], env)
+                if started.returncode: raise RuntimeError('CLI startup failed: '+started.stderr)
+            result = run([executable, 'start'], env)
+            payload = json.loads(result.stdout)
+            case['client2_exit'] = result.returncode
+            case['errors'] = {k:v for k,v in payload.items() if k.endswith('_error')}
+            case['legacy_rpc_ok'] = payload.get('diagnostic_rpc',{}).get('ok')
+            case['legacy_rpc_code'] = payload.get('diagnostic_rpc',{}).get('code')
+            if result.returncode or case['legacy_rpc_ok'] is not True:
+                raise RuntimeError('Unmodified Client2 startup/business calls failed')
+            reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
+            case['cli_reuse_exit'] = reused.returncode
+            if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
+            stopped = run([executable, 'stop'], env)
+            case['client2_stop_exit'] = stopped.returncode
+            if stopped.returncode: raise RuntimeError('Client2 cannot stop its visible service')
+            case['passed'] = True
+        except Exception as error:
+            case['failure'] = str(error)
+        finally:
+            stopped = run([executable, 'stop'] if mode=='client2-owned' else [cli,'--json','runtime','stop'], env)
+            case['cleanup_exit'] = stopped.returncode
+            if stopped.returncode: case['passed'] = False
+            args.report.parent.mkdir(parents=True, exist_ok=True)
+            args.report.write_text(json.dumps(report, indent=2)+'\n')
+    print(json.dumps(report, indent=2))
+    return 0 if all(case['passed'] for case in report['cases']) else 1
+
+if __name__ == '__main__':
+    raise SystemExit(main())
