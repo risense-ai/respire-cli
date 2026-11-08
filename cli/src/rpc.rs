@@ -860,7 +860,8 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
         health.process_start_id == format!("{prefix}{birth}"),
         "runtime process start identity does not match health"
     );
-    let operation_id = crate::net_rpc::request_stop_for(health, Duration::from_secs(120))?;
+    let operation_id = crate::net_rpc::request_stop_for(health, Duration::from_secs(120))
+        .context("runtime drain stop request failed")?;
     let deadline = Instant::now() + timeout;
     loop {
         if crate::autostart::process_birth(pid)?.as_deref() != Some(birth.as_str()) {
@@ -872,8 +873,10 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))?;
-    crate::net_rpc::wait_until_down()?;
+    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))
+        .context("runtime drain final receipt verification failed")?;
+    crate::net_rpc::wait_until_down()
+        .context("runtime drain listener did not close")?;
     let released = respire::lock::LibraryLock::acquire(
         std::path::Path::new(&health.data_dir),
         Duration::from_secs(15),
@@ -885,7 +888,8 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
             endpoint_pid() == Some(pid) && crate::autostart::process_birth(pid)?.is_none(),
             "runtime endpoint owner changed after drain; record was not removed"
         );
-        std::fs::remove_file(endpoint_path())?;
+        std::fs::remove_file(endpoint_path())
+            .context("runtime drain endpoint removal failed")?;
     }
     drop(released);
     Ok(())
