@@ -248,8 +248,12 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(compatibility, /path: \$\{\{ runner.temp \}\}\/client2-launcher-regression\.json/);
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
-  assert.match(candidate, /name: source-account-regression-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  assert.match(candidate, /path: \$\{\{ runner.temp \}\}\/source-account-regression\/result\.json/);
+  const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
+  const candidateLines = candidate.split(/\r?\n/);
+  assert(candidateLines.includes(`      CANDIDATE_CASE_NAME: ${candidateCase}`));
+  assert(candidateLines.includes(`          name: ${candidateCase}-\${{ github.run_id }}-\${{ github.run_attempt }}`));
+  assert(candidateLines.includes('            --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \\'));
+  assert(candidateLines.includes('          path: ${{ runner.temp }}/${{ env.CANDIDATE_CASE_NAME }}/result.json'));
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
