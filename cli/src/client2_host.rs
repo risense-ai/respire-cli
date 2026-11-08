@@ -193,6 +193,33 @@ impl Backend {
         validate_request(request.method().as_str(), request.url(),
             request.remote_addr().is_some_and(|address| address.ip().is_loopback()),
             &headers, self.public_port)?;
+        let coordinator_stop = request.method() == &tiny_http::Method::Post
+            && request.url() == "/api/runtime/stop"
+            && headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("X-Respire-Lifecycle")
+                && value == "coordinator-v1");
+        if coordinator_stop {
+            // Paused maintenance deliberately revokes legacy health. The stop
+            // target must instead identify this previously observed, OS-verified
+            // owned Runtime; the backend still validates its current generation.
+            anyhow::ensure!(request.body_length().is_none_or(|length| length <= 4096),
+                "coordinator stop body is too large");
+            let mut bytes = Vec::new();
+            request.as_reader().take(4097).read_to_end(&mut bytes)?;
+            anyhow::ensure!(bytes.len() <= 4096, "coordinator stop body is too large");
+            if !bytes.is_empty() {
+                let target: Value = serde_json::from_slice(&bytes)?;
+                let health = self.last_health.lock().map_err(|_| anyhow::anyhow!("health state poisoned"))?.clone();
+                self.verify(&health)?;
+                anyhow::ensure!(!health.installation_id.is_empty() && !health.instance_id.is_empty()
+                    && !health.account_id.is_empty() && health.generation > 0
+                    && target["installation_id"] == health.installation_id
+                    && target["instance_id"] == health.instance_id
+                    && target["account_id"] == health.account_id
+                    && target["generation"].as_u64() == Some(health.generation),
+                    "coordinator stop target differs from the verified owned Runtime");
+                return self.forward(request, &headers, &bytes);
+            }
+        }
         let live = health_at(self.port)?;
         let health: crate::net_rpc::Health = serde_json::from_value(live.clone())?;
         self.verify(&health)?;
@@ -223,6 +250,11 @@ impl Backend {
         anyhow::ensure!(bytes.len() as u64 <= LIMIT, "request body is too large");
         anyhow::ensure!(request.method() != &tiny_http::Method::Get || bytes.is_empty(),
             "GET compatibility requests cannot carry a body");
+        self.forward(request, &headers, &bytes)
+    }
+
+    fn forward(&self, request: &tiny_http::Request, headers: &[(String, String)],
+        bytes: &[u8]) -> Result<(u16, String, Vec<u8>)> {
         let mut outgoing = agent().request(request.method().as_str(), &format!("http://127.0.0.1:{}{}", self.port, request.url()))
             .set("Content-Type", "application/json");
         if let Some((_, accept)) = headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("Accept")) {
@@ -236,7 +268,7 @@ impl Backend {
         // forwarding header is copied, and no scope or operation ID is added.
         let response = match if request.method() == &tiny_http::Method::Get {
             outgoing.call()
-        } else { outgoing.send_bytes(&bytes) } {
+        } else { outgoing.send_bytes(bytes) } {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
             Err(error) => return Err(error.into()), // Never replay an uncertain write.
         };
