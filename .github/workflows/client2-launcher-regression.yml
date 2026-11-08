@@ -84,11 +84,12 @@ jobs:
               data = (root / name).read_bytes()
               assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
           PY
-      - name: Exercise original Client2 host and both startup orders
+      - name: Exercise original Client2 host and all startup orders
         shell: bash
         run: |
           set -euo pipefail
           python3 scripts/test-client2-launcher-compat.py \
+            --ordinary-cli-cold-start \
             --cli target/debug/rsrs${{ matrix.exe }} \
             --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
             --runtime-version "$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')" \

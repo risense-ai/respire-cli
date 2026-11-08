@@ -794,6 +794,16 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             return Ok(());
         }
     }
+    #[cfg(feature = "client2-host-prototype")]
+    if current.is_none()
+        && crate::autostart::lifecycle_boot_token().is_none()
+        && !respire_client_host::paths::main_data_dir()
+            .join("runtime/autostart/registration.json")
+            .exists()
+        && !endpoint_path().exists()
+    {
+        return crate::client2_host::start_locked();
+    }
     // Resolve before stopping the resident owner: a missing or damaged release
     // must fail without replacing it with a CLI shim.
     let executable = resolve_runtime_executable()?;

@@ -107,6 +107,8 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--ordinary-cli-cold-start', action='store_true',
+                        help='Also verify ordinary CLI status cold-start before original Client2 reuse')
     args = parser.parse_args()
     desktop = desktop_executable(args.desktop_executable)
     cli, archive, source, go = (p.resolve(strict=True) for p in
@@ -147,7 +149,8 @@ def main():
     report = {'client2_source': CLIENT2_SHA, 'coverage': 'real-host-process-no-accounts',
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
-                         'runtime_version': args.runtime_version},
+                         'runtime_version': args.runtime_version,
+                         'ordinary_cli_cold_start': args.ordinary_cli_cold_start},
               'desktop_headless': {'enabled': desktop is not None, 'client2_source': CLIENT2_SHA,
                                    'run_id': '42458504861', 'artifact_id': '13609150108',
                                    'artifact_sha256': DESKTOP_ARTIFACT_SHA256,
@@ -245,6 +248,8 @@ def main():
         assert set(payload) == {'ok', 'result', 'task'}
         return payload['result']
     modes = ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']
+    if args.ordinary_cli_cold_start:
+        modes.append('reuse-cli-business-started')
     if desktop:
         modes.append('desktop-owned')
     if os.name == 'posix':
@@ -300,12 +305,33 @@ def main():
                 assert verify_desktop_runtime(desktop_action('status', env), root, image, port) == identity
                 case['desktop_headless'] = {'cold_start': True, 'status': True, 'rpc_status': True,
                                             'reused_same_runtime': True, 'verified_identity': identity}
+            if mode == 'reuse-cli-business-started':
+                started = run([cli, '--json', 'status'], env)
+                case['ordinary_cli_start_exit'] = started.returncode
+                if started.returncode:
+                    raise RuntimeError('Ordinary CLI business cold-start failed: ' + started.stderr)
+                # --json renders ResultEnvelope directly; helper_result only decodes JSON.
+                initial_status = helper_result(started)
+                assert initial_status['command'] == 'status' and initial_status['status'] == 'ok'
+                assert initial_status['errors'] == []
+                code, initial_health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+                assert code == 200 and initial_health['runtime_version'] == args.runtime_version
+                assert Path(initial_health['installation_root']).resolve() == root
+                assert initial_health['image_sha256'] == selection['sha256']
+                identity_keys = ['pid', 'instance_id', 'process_start_id', 'image_sha256',
+                                 'runtime_version', 'account_id', 'generation', 'installation_root', 'data_dir']
+                case['ordinary_cli_start_identity'] = {key: initial_health[key] for key in identity_keys}
             result = run([executable, 'start'], env)
             payload = helper_result(result)
             case['client2_exit'] = result.returncode
             case['errors'] = {k:v for k,v in payload.items() if k.endswith('_error')}
             case['legacy_rpc_ok'] = payload.get('diagnostic_rpc',{}).get('ok')
             case['legacy_rpc_code'] = payload.get('diagnostic_rpc',{}).get('code')
+            if mode == 'reuse-cli-business-started':
+                code, reused_health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+                assert code == 200
+                assert {key: reused_health[key] for key in identity_keys} == case['ordinary_cli_start_identity']
+                case['ordinary_cli_actor_preserved'] = True
             if result.returncode or case['legacy_rpc_ok'] is not True:
                 raise RuntimeError('Unmodified Client2 startup/business calls failed')
             case['boundaries'] = boundaries(port)
