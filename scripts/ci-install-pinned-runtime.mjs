@@ -1,6 +1,10 @@
 // CI fixture installation only: product verification remains in the caller.
 import {spawnSync} from 'node:child_process';
-import {readFileSync} from 'node:fs';
+import {appendFileSync, mkdirSync, readFileSync, realpathSync, statSync} from 'node:fs';
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {join, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {setTimeout as delay} from 'node:timers/promises';
 
 const readTimeout = 'Network Error: Network Error: Error encountered in the status line: timed out reading response: Network Error: Error encountered in the status line: timed out reading response: timed out reading response';
@@ -53,5 +57,45 @@ export async function installPinnedRuntime(cli, {env}, target, {
     if (attempt === 2 || !retryable(result, url)) return result;
     stderr.write('Official pinned Runtime download network failure; retrying once after 2s.\n');
     await pause(2000);
+  }
+}
+
+// Full release fixtures bind every case to a separately installed official image.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  assert.equal(process.env.GITHUB_ACTIONS, 'true');
+  assert.equal(process.env.RUNNER_ENVIRONMENT, 'github-hosted');
+  assert.equal(process.env.ARTIFACT_SOURCE, 'build');
+  assert.equal(process.env.VALIDATION_PROFILE, 'full');
+  assert.equal(process.argv.length, 3);
+  const cli = realpathSync(process.argv[2]);
+  const target = process.env.RSRS_RUNTIME_TRIPLE;
+  const root = resolve(process.env.RSRS_DATA_DIR);
+  const temporary = realpathSync(process.env.RUNNER_TEMP);
+  assert.ok(root.startsWith(temporary + (process.platform === 'win32' ? '\\' : '/')));
+  mkdirSync(root, {mode: 0o700});
+  const home = join(root, 'home'); mkdirSync(home, {mode: 0o700});
+  const env = {...process.env, RSRS_DATA_DIR: root, HOME: home, USERPROFILE: home,
+    RSRS_UPDATE_CHECK: '0', RSRS_NO_AUTOSYNC: '1'};
+  for (const key of Object.keys(env)) if (['RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN'].includes(key)
+    || key.endsWith('_TOKEN') || key.endsWith('_API_KEY')) delete env[key];
+  const result = await installPinnedRuntime(cli, {env}, target);
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+  const pin = JSON.parse(readFileSync(new URL('../runtime-pin.json', import.meta.url), 'utf8'));
+  const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+  assert.equal(selected.version, pin.required);
+  assert.match(selected.sha256, /^[0-9a-f]{64}$/);
+  assert.ok(selected.release, 'Official Runtime release proof is required');
+  assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
+  const metadata = JSON.parse(selected.release.metadata_json);
+  assert.equal(metadata.triple ?? metadata.target_triple, target);
+  assert.equal(metadata.runtime_version, pin.required);
+  const runtime = realpathSync(join(root, 'runtime', pin.required, 'rsrs-runtime' + (process.platform === 'win32' ? '.exe' : '')));
+  assert.ok(statSync(runtime).isFile());
+  assert.notEqual(runtime, cli, 'CLI cannot substitute for standalone Runtime');
+  assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+  for (const [key, value] of Object.entries({NATIVE_RUNTIME_BIN: runtime, NATIVE_RUNTIME_SHA256: selected.sha256, NATIVE_RUNTIME_VERSION: selected.version})) {
+    assert.ok(!/[\r\n]/.test(value));
+    appendFileSync(process.env.GITHUB_ENV, `${key}=${value}\n`);
   }
 }
