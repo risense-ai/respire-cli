@@ -264,10 +264,8 @@ jobs:
           export RSRS_RUNTIME_BIN="$NATIVE_RUNTIME_BIN"
           exe=target/ci/${{ matrix.target }}/release/rsrs
           if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          if [ "$ARTIFACT_SOURCE" = published-assets ]; then
-            RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
-            export RSRS_RUNTIME_BIN
-          fi
+          RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
+          export RSRS_RUNTIME_BIN
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --direct model install-m3 --json

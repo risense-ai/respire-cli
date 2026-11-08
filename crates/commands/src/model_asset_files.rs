@@ -49,6 +49,12 @@ pub fn prepare_model_assets_with_sources(
     for root in allowed_roots {
         check_model_path(root)?;
     }
+    // Match Windows canonical roots and ordinary paths, including missing model files.
+    #[cfg(windows)]
+    let allowed_roots = allowed_roots
+        .iter()
+        .map(|root| respire_protocol::metadata_control::metadata_status_path(root))
+        .collect::<std::io::Result<Vec<_>>>()?;
     let mut pending = Vec::new();
     let mut claimed = std::collections::BTreeSet::new();
     // Validate the entire plan before creating directories or transferring any bytes.
@@ -89,6 +95,8 @@ pub fn prepare_model_assets_with_sources(
         );
         let target = PathBuf::from(asset.path.as_deref().context("model asset path missing")?);
         check_model_path(&target)?;
+        #[cfg(windows)]
+        let target = respire_protocol::metadata_control::metadata_status_path(&target)?;
         let relative = allowed_roots
             .iter()
             .find_map(|root| target.strip_prefix(root).ok())

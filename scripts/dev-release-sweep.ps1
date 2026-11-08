@@ -428,8 +428,10 @@ function Invoke-Om {
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
-    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') {
-        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets' -or
+        ($env:ARTIFACT_SOURCE -ceq 'build' -and $env:VALIDATION_PROFILE -ceq 'full' -and
+         $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted')) {
+        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir) -or $env:RSRS_ARTIFACT_SOURCE -cne 'published-assets') {
             $install = [System.Diagnostics.ProcessStartInfo]::new()
             $install.FileName = 'python'
             $install.UseShellExecute = $false

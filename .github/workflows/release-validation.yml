@@ -202,9 +202,16 @@ jobs:
           path: ${{ runner.temp }}/release-probe/models/bge-m3
           key: release-m3-quantized-0826f8c1-macos
       - uses: actions/setup-python@v5
-        if: inputs.artifact_source == 'published-assets' && runner.os == 'macOS'
+        if: runner.os == 'macOS'
         with:
           python-version: '3.12'
+      - name: Bind macOS fixtures to an independent official pinned Runtime
+        if: runner.os == 'macOS' && inputs.artifact_source != 'published-assets'
+        shell: bash
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/full-runtime-proof
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
+        run: node scripts/ci-install-pinned-runtime.mjs target/ci/${{ matrix.target }}/release/rsrs
       - name: Verify real macOS CPU inference before DEV publication
         if: runner.os == 'macOS'
         shell: bash
@@ -214,16 +221,21 @@ jobs:
           RSRS_M3_DIR: ${{ runner.temp }}/release-probe/models/bge-m3
           RSRS_NO_AUTOSYNC: '1'
           RSRS_UPDATE_CHECK: '0'
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_CORE_TEST_MODE RSRS_RUNTIME_BIN
           exe=target/ci/${{ matrix.target }}/release/rsrs
-          if [ "$ARTIFACT_SOURCE" = published-assets ]; then
-            RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
-            export RSRS_RUNTIME_BIN
-          fi
+          export HOME="$RSRS_DATA_DIR/home" USERPROFILE="$RSRS_DATA_DIR/home" RSRS_BIN_DIR="$RSRS_DATA_DIR/bin"
+          mkdir -p "$HOME" "$RSRS_BIN_DIR"
+          cp "$exe" "$RSRS_BIN_DIR/rsrs"
+          cmp "$exe" "$RSRS_BIN_DIR/rsrs"
+          RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
+          export RSRS_RUNTIME_BIN
+          trap 'status=$?; trap - EXIT; "$exe" --json runtime stop || exit 1; exit "$status"' EXIT
           "$exe" --direct model install-m3 --json
+          "$exe" --json runtime start
           "$exe" --direct model probe --json
-          "$exe" --runtime-internal --stop --json
       - name: Prepare versioned CLI artifacts
         if: inputs.artifact_source != 'published-assets'
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}

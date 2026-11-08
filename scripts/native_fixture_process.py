@@ -14,6 +14,7 @@ import threading
 import time
 import traceback
 import secrets
+import shutil
 
 
 def add_runtime_arguments(parser):
@@ -102,15 +103,19 @@ def install_official_runtime(binary, env, version, binary_hash):
                and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
                for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
         raise ValueError('official installation must remain inside the owned runner workspace')
+    source_full = (os.environ.get('ARTIFACT_SOURCE') == 'build'
+                   and os.environ.get('VALIDATION_PROFILE') == 'full')
     if (root / 'runtime.json').exists():
-        raise ValueError('source-build fixture must start without a Runtime receipt')
-    install_env = {key: value for key, value in env.items()
-                   if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
-                   and not key.endswith(('_TOKEN', '_API_KEY'))}
-    result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
-                            env=install_env, capture_output=True, timeout=180)
-    if result.returncode:
-        raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
+        if not source_full:
+            raise ValueError('source-build fixture must start without a Runtime receipt')
+    else:
+        install_env = {key: value for key, value in env.items()
+                       if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
+                       and not key.endswith(('_TOKEN', '_API_KEY'))}
+        result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
+                                env=install_env, capture_output=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
     receipt = json.loads((root / 'runtime.json').read_text(encoding='utf-8'))
     proof = receipt.get('release') or {}
     metadata_bytes = proof.get('metadata_json', '').encode('utf-8')
@@ -132,6 +137,62 @@ def install_official_runtime(binary, env, version, binary_hash):
 
 def install_published_runtime(binary, env):
     """Use the real offline installer with the selected release's unchanged bytes."""
+    if (os.environ.get('ARTIFACT_SOURCE') == 'build'
+            and os.environ.get('VALIDATION_PROFILE') == 'full'
+            and os.environ.get('GITHUB_ACTIONS') == 'true'
+            and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+            and os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets'):
+        root = pathlib.Path(env.get('RSRS_DATA_DIR') or pathlib.Path(env['HOME']) / '.rsrs')
+        if root.is_symlink():
+            raise ValueError('source installation root must not be linked')
+        root = root.resolve()
+        if not any(root != pathlib.Path(os.environ[key]).resolve()
+                   and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+                   for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+            raise ValueError('source installation must remain inside the owned runner workspace')
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == 'posix':
+            root.chmod(0o700)
+        env['RSRS_RUNTIME_TRIPLE'] = os.environ['RSRS_RUNTIME_TRIPLE']
+        repository = pathlib.Path(__file__).resolve().parent.parent
+        version = os.environ['NATIVE_RUNTIME_VERSION']
+        binary_hash = os.environ['NATIVE_RUNTIME_SHA256']
+        if (version != json.loads((repository / 'runtime-pin.json').read_text(encoding='utf-8'))['required']
+                or len(binary_hash) != 64 or any(c not in '0123456789abcdef' for c in binary_hash)):
+            raise ValueError('source fixture differs from the independently pinned Runtime identity')
+        if not (root / 'runtime.json').exists():
+            install_env = {key: value for key, value in env.items()
+                           if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
+                           and not key.endswith(('_TOKEN', '_API_KEY'))}
+            install_env['RSRS_DATA_DIR'] = str(root)
+            result = subprocess.run(['node', '--input-type=module', '-e',
+                "import {installPinnedRuntime} from './scripts/ci-install-pinned-runtime.mjs';"
+                "const result = await installPinnedRuntime(process.argv[1], {env:process.env}, process.env.RSRS_RUNTIME_TRIPLE, {stdout:process.stderr});"
+                "if(result.error) throw result.error; process.exit(result.status ?? 1);", str(pathlib.Path(binary).resolve(strict=True))],
+                cwd=repository, env=install_env, stdout=sys.stderr, timeout=365)
+            if result.returncode:
+                raise RuntimeError('pinned Runtime fixture install failed: exit ' + str(result.returncode))
+        install_env = dict(env, RSRS_DATA_DIR=str(root))
+        installed = install_official_runtime(binary, install_env, version, binary_hash)
+        env['RSRS_RUNTIME_BIN'] = install_env['RSRS_RUNTIME_BIN']
+        bin_dir = pathlib.Path(env.get('RSRS_BIN_DIR') or root / 'bin')
+        if bin_dir.is_symlink():
+            raise ValueError('fixture bin must not be linked')
+        bin_dir = bin_dir.resolve()
+        if not any(bin_dir != pathlib.Path(os.environ[key]).resolve()
+                   and bin_dir.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+                   for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+            raise ValueError('fixture bin must remain inside the owned runner workspace')
+        bin_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staged = bin_dir / ('rsrs.exe' if os.name == 'nt' else 'rsrs')
+        if staged.is_symlink():
+            raise ValueError('fixture CLI must not be linked')
+        if not staged.exists():
+            shutil.copy2(binary, staged)
+        if staged.read_bytes() != pathlib.Path(binary).read_bytes():
+            raise ValueError('fixture CLI differs from the selected build')
+        env['RSRS_BIN_DIR'] = str(bin_dir)
+        return installed
     if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
         return None
     if (os.environ.get('GITHUB_ACTIONS') != 'true'
@@ -236,7 +297,11 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     installation_id, account_id = runtime_scope_ids(root, profile, session)
     selected_image = ((root / 'runtime' / args.runtime_version /
                        ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
-                      if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
+                      if (os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets'
+                          or (os.environ.get('ARTIFACT_SOURCE') == 'build'
+                              and os.environ.get('VALIDATION_PROFILE') == 'full'
+                              and os.environ.get('GITHUB_ACTIONS') == 'true'
+                              and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')) else args.runtime_binary)
     checks = {
         'protocol': type(health.get('v')) is int and health['v'] == 1,
         'pid': pid is None or owner.pid == pid,

@@ -451,6 +451,9 @@ jobs:
       producer_prefix: 'validate / '
 
   cloud-sweep:
+    env:
+      VALIDATION_PROFILE: full
+      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
     if: ${{ always() && ((needs.plan.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
     needs: [plan, artifact-inputs, published-assets-verification]
     permissions:
@@ -553,6 +556,16 @@ jobs:
           CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
           CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli cli
+      - name: Bind fixtures to an independent official pinned Runtime
+        if: inputs.artifact_source != 'published-assets'
+        shell: bash
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/full-runtime-proof
+        run: |
+          set -euo pipefail
+          exe=cli/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          node scripts/ci-install-pinned-runtime.mjs "$exe"
       - name: Install PowerShell
         if: runner.os != 'Windows'
         shell: bash
@@ -657,6 +670,9 @@ jobs:
           if-no-files-found: error
 
   native-migration:
+    env:
+      VALIDATION_PROFILE: full
+      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
     name: Native migration (${{ matrix.target }})
     if: ${{ always() && ((needs.plan.result == 'success' && (!inputs.reuse_dev12_validation && inputs.prepared_run == '' && needs.plan.outputs.validation_profile == 'full') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
     needs: [plan, artifact-inputs, published-assets-verification]
@@ -744,6 +760,16 @@ jobs:
           CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.sha || needs.plan.outputs.sha }}
           CLI_VERSION: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli cli
+      - name: Bind fixtures to an independent official pinned Runtime
+        if: inputs.artifact_source != 'published-assets'
+        shell: bash
+        env:
+          RSRS_DATA_DIR: ${{ runner.temp }}/full-runtime-proof
+        run: |
+          set -euo pipefail
+          exe=cli/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          node scripts/ci-install-pinned-runtime.mjs "$exe"
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
