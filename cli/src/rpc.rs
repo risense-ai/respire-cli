@@ -800,7 +800,6 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
         && !respire_client_host::paths::main_data_dir()
             .join("runtime/autostart/registration.json")
             .exists()
-        && !endpoint_path().exists()
     {
         return crate::client2_host::start_locked();
     }
