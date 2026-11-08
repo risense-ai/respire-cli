@@ -25,6 +25,16 @@ def sha256(path):
             digest.update(chunk)
     return digest.hexdigest()
 
+def annotate_failure(case):
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        return
+    # Only the current account-free fixture's errors. Do not copy files,
+    # credentials, downloaded logs, or another run's evidence into annotations.
+    message = json.dumps({'case': case['name'], 'failure': case.get('failure'),
+                          'errors': case.get('errors'), 'cleanup_exit': case.get('cleanup_exit')})
+    message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+    print(f'::error title=Client2 fixture failure::{message}', flush=True)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cli', type=Path, required=True)
@@ -145,6 +155,7 @@ def main():
             stopped = run([executable, 'stop'] if mode=='client2-owned' else [cli,'--json','runtime','stop'], env)
             case['cleanup_exit'] = stopped.returncode
             if stopped.returncode: case['passed'] = False
+            if not case['passed']: annotate_failure(case)
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(report, indent=2)+'\n')
     print(json.dumps(report, indent=2))
