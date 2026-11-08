@@ -123,14 +123,26 @@ class CandidateFixtureTests(unittest.TestCase):
                 candidate.verify_receipt(self.root / "installation", metadata_path)
 
     def test_full_suite_requires_every_original_module_and_unique_case(self):
-        names = [f"{module}::case_{index}" for module, count in candidate.MODULE_COUNTS.items()
-                 for index in range(count)]
-        names[names.index("account::case_0")] = candidate.CASE
+        names = list(candidate.BASELINE_CASES)
+        self.assertEqual(len(names), 30)
         listing = "\n".join(name + ": test" for name in names)
         self.assertEqual(candidate.selected_cases(listing, "account"), [candidate.CASE])
         self.assertEqual(candidate.selected_cases(listing, "full"), names)
+        self.assertEqual(candidate.selected_cases(listing, "diagnostic-failures"), list(candidate.DIAGNOSTIC_CASES))
+        extended = names + [candidate.NATIVE_STOP_CASE]
+        extended_listing = "\n".join(name + ": test" for name in extended)
+        self.assertEqual(candidate.selected_cases(extended_listing, "full"), extended)
+        self.assertEqual(candidate.selected_cases(extended_listing, "full", True), extended)
+        with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
+            candidate.selected_cases(listing, "full", True)
+        for suite in ("account", "diagnostic-failures"):
+            with self.subTest(suite=suite), self.assertRaisesRegex(RuntimeError, "native_stop_requires_full_suite"):
+                candidate.selected_cases(listing, suite, True)
         for broken in (names[:-1], names + [names[0]],
-                       ["unassigned::case_0" if name == names[0] else name for name in names]):
+                       ["unassigned::case_0" if name == names[0] else name for name in names],
+                       ["diary_identity::unknown_replacement" if name == names[5] else name for name in names],
+                       names + ["diary_identity::unknown_addition"],
+                       extended + [candidate.NATIVE_STOP_CASE]):
             with self.subTest(broken=broken), self.assertRaises(RuntimeError):
                 candidate.selected_cases("\n".join(name + ": test" for name in broken), "full")
         with self.assertRaisesRegex(RuntimeError, "unknown_business_suite"):
