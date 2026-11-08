@@ -268,16 +268,19 @@ function Focus-OfflineControl($Element) {
         throw 'Offline control did not receive real target-document keyboard focus'
     }
 }
-function Send-OfflineKey([int]$Key) {
+function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
     $null = Assert-Target $true
     $focus = Read-TargetFocus
     if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen) { throw 'Offline input focus escaped the original visible document' }
+    if ($ExpectedRuntimeId -and $focus.runtime_id -ne $ExpectedRuntimeId) { throw 'Offline button focus changed before key dispatch' }
     if ([RespireNativeInput]::Key([IntPtr][long]$binding.hwnd, [uint16]$Key) -ne 2) { throw 'Offline SendInput key was rejected' }
     $null = Assert-Target $true
 }
 function Press-OfflineButton([string]$Name) {
-    Focus-OfflineControl (Find-OfflineControl 'ControlType.Button' $Name)
-    Send-OfflineKey 13
+    $element = Find-OfflineControl 'ControlType.Button' $Name
+    $expected = $element.GetRuntimeId() -join '.'
+    Focus-OfflineControl $element
+    Send-OfflineKey 13 $expected
 }
 function Fill-OfflineField([string]$Name, [string]$Text) {
     $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Name) + '$')
@@ -365,6 +368,11 @@ function Wait-OfflinePreferences([string]$Field, $Expected) {
         if ($preferences.$Field -eq $Expected) { return }
         Pause-Probe
     }
+    $report.offline.preference_observation = @{
+        onboarding_completed=($preferences.onboardingCompleted -eq $true)
+        step=$(if ($preferences.onboardingStep -in @('language','sync','model','done')) { $preferences.onboardingStep } else { 'other' })
+        sync_choice=$(if ($preferences.onboardingSyncChoice -in @('offline','cloud','')) { $preferences.onboardingSyncChoice } else { 'other' })
+    }
     throw "Original preferences did not persist the visible action: $Field"
 }
 function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
@@ -397,14 +405,23 @@ function Invoke-OfflineGuiAcceptance {
         local_keys_initialized=$false; important_memory_readback=$false; diary_readback=$false
         settings_persisted=$false; runtime_normal_stop_confirmed=$false
         full_gui_acceptance='not-evaluated'; g1_passed=$false}
+    $report.offline.onboarding_stage = 'choose_offline'
     # Normal first-run route; do not use the separate \u201cskip wizard\u201d action or edit completion markers.
     Press-OfflineButton ([regex]::Unescape('\u005e\u4ec5\u5728\u6b64\u8bbe\u5907\u4f7f\u7528\u0028\u003f\u003a\u005c\u0073\u007c\u0024\u0029'))
     Press-OfflineButton ([regex]::Unescape('\u005e\u4e0b\u4e00\u6b65\u0024'))
+    $report.offline.onboarding_stage = 'await_model_step'
+    Wait-OfflinePreferences 'onboardingStep' 'model'
+    Wait-OfflinePreferences 'onboardingSyncChoice' 'offline'
+    $report.offline.onboarding_stage = 'open_model_confirmation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6682\u4e0d\u4e0b\u8f7d\u0024'))
+    $confirmation = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u6682\u4e0d\u4e0b\u8f7d\u6a21\u578b\u0024'))
+    if ($confirmation.Current.IsOffscreen) { throw 'Original model confirmation title is not visible' }
+    $report.offline.onboarding_stage = 'confirm_model_skip'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6682\u4e0d\u4e0b\u8f7d\u0024')) # Original confirmation dialog.
     Wait-OfflinePreferences 'onboardingCompleted' $true
     Wait-OfflinePreferences 'onboardingSyncChoice' 'offline'
     $report.offline.onboarding_completed = $true
+    $report.offline.onboarding_stage = 'completed'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60

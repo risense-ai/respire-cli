@@ -226,6 +226,16 @@ def safe_failure_diagnostics(captured, failed_cases):
             invalid = True
 
     known = {
+        b'registered lifecycle command failed with exit code': 'owned_registered_lifecycle_failed',
+        b'registered service could not unlock its actual persistent credential': 'owned_registered_unlock_failed',
+        b'original Go Manager.Start failed': 'owned_client2_start_failed',
+        b'original Go startup/RPC failed': 'owned_client2_start_rpc_failed',
+        b'registered business did not reach the actual provider': 'owned_registered_provider_not_reached',
+        b'actual Client2-owned SDK callback missing': 'owned_client2_provider_not_reached',
+        b'library lock check failed without proving contention': 'owned_library_lock_unproved',
+        b'owned Runtime released its library lock before business cleanup': 'owned_library_lock_released_early',
+        b'REGISTERED_STOP_CLEANUP_FAILED': 'owned_registered_cleanup_preserved',
+        b'CLIENT2_OWNED_STOP_CLEANUP_FAILED': 'owned_client2_cleanup_preserved',
         b"authorized OAuth login failed": "account_authorized_login_failed",
         b"owned space command": "account_owned_space_command_failed",
         b"join never fetched": "account_join_request_not_observed",
@@ -471,11 +481,35 @@ def safe_failure_diagnostics(captured, failed_cases):
                 checkpoint_invalid = True
                 continue
             checkpoints.append(checkpoint)
+    owned_checkpoints, owned_invalid, owned_seen = [], False, 0
+    owned_stages = {"actors_bound", "actors_exited", "bundle_staged", "business_completed", "caller_wait_complete", "cleanup_complete", "cleanup_requested", "complete", "core_bound", "core_reaped", "credential_ready", "credential_requested", "drain_observed", "fixture_created", "fixture_ready", "force_requested", "health_bound", "lock_held_draining", "lock_held_initial", "memory_seeded", "provider_finished", "provider_received", "provider_release_requested", "provider_requested", "quiet_period_verified", "receipt_verified", "recovery_bound", "recovery_requested", "recovery_started", "recovery_stop_requested", "recovery_stopped", "runtime_install_requested", "runtime_installed", "start", "start_complete", "start_requested", "stop_requested", "stop_started", "write_verified"}
+    marker = b"OWNED_STOP_CHECKPOINT "
+    for line in blocks.get(NATIVE_STOP_CASE, []):
+        if b"OWNED_STOP_CHECKPOINT" not in line:
+            continue
+        owned_seen += 1
+        if owned_seen > 128:
+            owned_invalid = True
+            break
+        try:
+            if not line.startswith(marker) or len(line) > 2048:
+                raise ValueError
+            event = json.loads(line[len(marker):])
+            if (not isinstance(event, dict) or set(event) != {"startup_mode", "case", "stage"}
+                    or not all(isinstance(value, str) for value in event.values())
+                    or event["startup_mode"] not in {"registered", "client2-owned"}
+                    or event["case"] not in {"normal", "caller-timeout", "explicit-force"}
+                    or event["stage"] not in owned_stages):
+                raise ValueError
+            owned_checkpoints.append(event)
+        except (ValueError, TypeError):
+            owned_invalid = True
     return {"authorization_events": events, "authorization_event_invalid": invalid,
             "failure_codes": codes, "failure_locations": locations,
             "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,
             "response_events": response_events, "response_event_invalid": response_invalid,
-            "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid}
+            "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid,
+            "owned_stop_checkpoints": owned_checkpoints, "owned_stop_checkpoint_invalid": owned_invalid}
 
 
 MODEL_HASHES = {

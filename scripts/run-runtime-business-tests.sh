@@ -79,6 +79,40 @@ const complete = mode => JSON.stringify(actual.filter(line => line.startsWith(`N
 const normal = complete('normal'), forced = complete('forced');
 const checkpointsExact = JSON.stringify(actual) === JSON.stringify(expected);
 const diaryPassed = process.argv[3] === '0';
+const checkpointEvidence = Object.fromEntries(['normal','forced'].map(mode => {
+  const allowed = expected.filter(line => line.startsWith(`NATIVE_STOP_CHECKPOINT mode=${mode} `));
+  const matched = actual.filter(line => allowed.includes(line));
+  const stage = line => line.split(' stage=')[1];
+  return [mode, {stages_seen:Object.fromEntries(allowed.map(line => [stage(line), matched.includes(line)])),
+    last_stage:matched.length ? stage(matched.at(-1)) : null,
+    valid_count:Math.min(matched.length,64),count_capped:matched.length > 64}];
+}));
+// Only the exact native libtest output block can supply a numeric source location.
+let inNativeBlock = false, nativeLines = [], nativeBlockCapped = false;
+for (const line of lines) {
+  const header = line.match(/^---- (.+) stdout ----$/);
+  if (header) { inNativeBlock = header[1] === nativeName; continue; }
+  if (/^(?:successes|failures):$|^test result: /.test(line)) inNativeBlock = false;
+  if (inNativeBlock) {
+    if (nativeLines.length < 4096) nativeLines.push(line); else nativeBlockCapped = true;
+  }
+}
+const nativeThread = `thread '${nativeName}' panicked at `;
+const panicLines = nativeLines.filter(line => line.length <= 8192 && line.startsWith(nativeThread));
+const locations = [];
+for (const line of panicLines) {
+  const match = line.match(/(?:^|[/\\])diary_identity\.rs:([0-9]{1,6}):([0-9]{1,4}):/);
+  if (!match) continue;
+  const row = Number(match[1]), column = Number(match[2]);
+  if (row < 1 || row > 20000 || column < 1 || column > 4096) continue;
+  if (locations.length < 4 && !locations.some(location => location.line === row && location.column === column))
+    locations.push({file:'diary_identity.rs',line:row,column});
+}
+const failureKind = nativeTestOk ? null : panicLines.length ? 'native_panic' :
+  nativeLines.some(line => line.startsWith('Error: ')) ? 'native_result_error' : 'native_failure_unlocated';
+const safeNativeDiagnostic = {checkpoint_modes:checkpointEvidence,
+  unknown_checkpoint_count:Math.min(actual.filter(line => !expected.includes(line)).length,64),
+  native_failure_kind:failureKind,native_failure_locations:locations,native_block_capped:nativeBlockCapped};
 const passed = nativeTestOk && normal && forced && checkpointsExact && diaryPassed;
 console.log(JSON.stringify({schema:1,evidence_class:'coverage-regression',gate:'not-evaluated',
   source_sha:source,run_id:env.GITHUB_RUN_ID,run_attempt:env.GITHUB_RUN_ATTEMPT,
@@ -86,7 +120,7 @@ console.log(JSON.stringify({schema:1,evidence_class:'coverage-regression',gate:'
   harness_sha256:hash(readFileSync(env.RSRS_RUNTIME_TEST_RUNNER)),runtime_product_source_sha:metadata.source_commit,
   runtime_version:metadata.runtime_version,runtime_metadata_sha256:receipt.release.metadata_sha256,runtime_binary_sha256:receipt.sha256,
   native_test_ok:nativeTestOk,normal_checkpoints_complete:normal,forced_checkpoints_complete:forced,
-  checkpoints_exact:checkpointsExact,diary_module_passed:diaryPassed,passed}));
+  checkpoints_exact:checkpointsExact,diary_module_passed:diaryPassed,safe_native_diagnostic:safeNativeDiagnostic,passed}));
 if (!passed) process.exit(1);
 NODE
     then :; elif [[ "$module_status" == 0 ]]; then module_status=1; fi

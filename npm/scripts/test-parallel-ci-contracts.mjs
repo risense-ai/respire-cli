@@ -83,6 +83,41 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.equal(runEvidence(completeNative).report.runtime_product_source_sha,productSha);
   assert.equal(runEvidence(completeNative).report.runtime_version,'synthetic');
   assert.deepEqual(runEvidence(completeNative).exits,[]);
+  const diagnostic = runEvidence(completeNative).report.safe_native_diagnostic;
+  assert.equal(diagnostic.checkpoint_modes.normal.last_stage,'complete');
+  assert.equal(diagnostic.checkpoint_modes.normal.valid_count,16);
+  assert.equal(diagnostic.checkpoint_modes.forced.last_stage,'complete');
+  assert.equal(diagnostic.checkpoint_modes.forced.valid_count,17);
+  assert.equal(diagnostic.native_failure_kind,null);
+  const forcedPrefix=checkpointsNative.slice(0,16+7).join('\n');
+  const failureBlock=[`---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----`,
+    `thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at /synthetic-secret/location/diary_identity.rs:1812:7:`,
+    'synthetic-secret panic body', '---- diary_identity::unrelated stdout ----',
+    `thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at /private-log/diary_identity.rs:999:2:`].join('\n');
+  const failedDiagnostic=runEvidence(forcedPrefix+'\n'+failureBlock,'101').report.safe_native_diagnostic;
+  assert.equal(failedDiagnostic.checkpoint_modes.normal.last_stage,'complete');
+  assert.equal(failedDiagnostic.checkpoint_modes.forced.last_stage,'stop_accepted');
+  assert.equal(failedDiagnostic.checkpoint_modes.forced.stages_seen.force_identities_rejected,false);
+  assert.equal(failedDiagnostic.native_failure_kind,'native_panic');
+  assert.deepEqual(failedDiagnostic.native_failure_locations,[{file:'diary_identity.rs',line:1812,column:7}]);
+  for(const invalidLocation of ['0:1','20001:1','1:0','1:4097']) {
+    const output=failureBlock.replace('1812:7',invalidLocation);
+    assert.deepEqual(runEvidence(output,'101').report.safe_native_diagnostic.native_failure_locations,[]);
+  }
+  const unknownDiagnostic=runEvidence(forcedPrefix+'\nNATIVE_STOP_CHECKPOINT mode=forced stage=synthetic-secret-canary','101').report.safe_native_diagnostic;
+  assert.equal(unknownDiagnostic.unknown_checkpoint_count,1);
+  assert.equal(unknownDiagnostic.checkpoint_modes.forced.last_stage,'stop_accepted');
+  const capped=runEvidence(checkpointsNative.concat(Array(100).fill(checkpointsNative[0])).join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(capped.checkpoint_modes.normal.valid_count,64);assert.equal(capped.checkpoint_modes.normal.count_capped,true);
+  const resultError=runEvidence('---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----\nError: synthetic-secret-canary','101').report.safe_native_diagnostic;
+  assert.equal(resultError.native_failure_kind,'native_result_error');
+  const nativeHeader='---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----';
+  const blockCapped=runEvidence(nativeHeader+'\n'+Array(4097).fill('synthetic-secret-canary').join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(blockCapped.native_block_capped,true);
+  const panicPrefix="thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at ";
+  const manyLocations=runEvidence(nativeHeader+'\n'+[1,2,3,4,5].map(line=>panicPrefix+`/synthetic-secret/diary_identity.rs:${line}:1:`).join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(manyLocations.native_failure_locations.length,4);
+
   for(const [output,status] of [[completeNative.replace(testlineNative,''),'0'],
     [completeNative.replace('mode=normal stage=normal_waited','mode=normal stage=invalid'),'0'],
     [completeNative.replace('mode=forced stage=worker_reaped','mode=forced stage=invalid'),'0'],

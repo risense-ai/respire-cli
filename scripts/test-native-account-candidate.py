@@ -111,6 +111,27 @@ class CandidateFixtureTests(unittest.TestCase):
             with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
                 candidate.owned_stop_checks(payload, "client2-owned", "a" * 64, "b" * 64)
 
+    def test_owned_failure_stages_are_bounded_and_never_publish_private_fields(self):
+        def captured(events):
+            return (b"failures:\n---- " + candidate.NATIVE_STOP_CASE.encode() + b" stdout ----\n"
+                    + b"\n".join(b"OWNED_STOP_CHECKPOINT " + json.dumps(event).encode() for event in events))
+        event = {"startup_mode": "client2-owned", "case": "normal", "stage": "start_requested"}
+        result = candidate.safe_failure_diagnostics(captured([event]), [candidate.NATIVE_STOP_CASE])
+        self.assertEqual(result["owned_stop_checkpoints"], [event])
+        self.assertFalse(result["owned_stop_checkpoint_invalid"])
+        for invalid in ({**event, "stage": "private-canary"}, {**event, "case": "private-canary"},
+                        {**event, "startup_mode": "private-canary"}, {**event, "secret": "private-canary"},
+                        {**event, "stage": ["private-canary"]}, {**event, "stage": "private-canary" * 300}):
+            result = candidate.safe_failure_diagnostics(captured([invalid]), [candidate.NATIVE_STOP_CASE])
+            self.assertTrue(result["owned_stop_checkpoint_invalid"])
+            self.assertEqual(result["owned_stop_checkpoints"], [])
+            self.assertNotIn("private-canary", json.dumps(result))
+        result = candidate.safe_failure_diagnostics(captured([event] * 129), [candidate.NATIVE_STOP_CASE])
+        self.assertTrue(result["owned_stop_checkpoint_invalid"])
+        self.assertEqual(len(result["owned_stop_checkpoints"]), 128)
+        ignored = candidate.safe_failure_diagnostics(captured([event]), [])
+        self.assertEqual(ignored["owned_stop_checkpoints"], [])
+
     def save_core(self):
         candidate.write_json(self.staged / "core-runtime.json", self.core)
 
