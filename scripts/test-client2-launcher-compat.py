@@ -46,6 +46,27 @@ def annotate_failure(case):
     message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
     print(f'::error title=Client2 fixture failure::{message}', flush=True)
 
+def coverage_profile(value):
+    if value is None:
+        return None
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'):
+        raise RuntimeError('Coverage forwarding requires an isolated hosted runner')
+    expected = Path(__file__).resolve().parents[1] / 'target' / 'llvm-cov-target'
+    if expected.resolve(strict=True) != expected:
+        raise RuntimeError('Coverage directory must not redirect outside the source workspace')
+    template = Path(value)
+    if not template.is_absolute() or template.parent.resolve(strict=True) != expected:
+        raise RuntimeError('Coverage profile parent must be the current source coverage directory')
+    plain_name = template.name.replace('%m', '').replace('%p', '')
+    if ('%m' not in template.name or '%p' not in template.name
+            or not template.name.endswith('.profraw')
+            or not plain_name or any(not (char.isascii() and (char.isalnum() or char in '_.-'))
+                                     for char in plain_name)):
+        raise RuntimeError('Coverage profile must retain the process and module placeholders')
+    return str(expected / template.name)
+
+
 def desktop_executable(value):
     if value is None:
         return None
@@ -109,7 +130,9 @@ def main():
     parser.add_argument('--offline', action='store_true')
     parser.add_argument('--ordinary-cli-cold-start', action='store_true',
                         help='Also verify ordinary CLI status cold-start before original Client2 reuse')
+    parser.add_argument('--coverage-profile-file', help='Hosted CI only: existing instrumented CLI profile template')
     args = parser.parse_args()
+    profile = coverage_profile(args.coverage_profile_file)
     desktop = desktop_executable(args.desktop_executable)
     cli, archive, source, go = (p.resolve(strict=True) for p in
                                 [args.cli, args.runtime_archive, args.client2_source, args.go])
@@ -150,7 +173,8 @@ def main():
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version,
-                         'ordinary_cli_cold_start': args.ordinary_cli_cold_start},
+                         'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
+                         'coverage_profile_file': profile},
               'desktop_headless': {'enabled': desktop is not None, 'client2_source': CLIENT2_SHA,
                                    'run_id': '42458504861', 'artifact_id': '13609150108',
                                    'artifact_sha256': DESKTOP_ARTIFACT_SHA256,
@@ -267,6 +291,8 @@ def main():
         env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root), RSRS_BIN_DIR=str(root/'bin'),
                    RSRS_RPC_PORT=str(port), RSRS_CORE_TEST_MODE='1', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0', RSRS_LANG='en')
+        if profile is not None:
+            env['LLVM_PROFILE_FILE'] = profile
         for key, name in [('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','share'),('XDG_CACHE_HOME','cache'),
                           ('XDG_STATE_HOME','state'),('XDG_RUNTIME_DIR','run'),('APPDATA','appdata'),('LOCALAPPDATA','local')]:
             path = root / name; path.mkdir(); env[key] = str(path)

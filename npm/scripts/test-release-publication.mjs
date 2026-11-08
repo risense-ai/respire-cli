@@ -242,8 +242,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain all prior uploads plus the account-free Client2 prototype result.
-  assert.equal(uploads, 59, 'preserve publication/source evidence and the Client2 fixture result');
+  // Retain prior uploads plus the instrumented, account-free Client2 source result.
+  assert.equal(uploads, 60, 'preserve publication/source evidence and both Client2 fixture results');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(compatibility, /path: \$\{\{ runner.temp \}\}\/client2-launcher-regression\.json/);
@@ -259,6 +259,14 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
   assert.deepEqual(imported.sort(), manifest.targets.map(target => target.triple).sort());
   const ci = readFileSync(new URL('ci.yml', root), 'utf8');
+  const client2SourceRaw = [
+    '          name: client2-source-raw-${{ github.run_id }}-${{ github.run_attempt }}',
+    '          path: ${{ runner.temp }}/client2-coverage.json',
+    '          if-no-files-found: error',
+    '          retention-days: 1',
+  ].join('\n');
+  assert(ci.replace(/\r\n/g, '\n').includes(client2SourceRaw),
+    'instrumented Client2 name, report path and one-day retention must belong to the same upload');
   assert.match(ci, /name: required-tests-raw-cli-core-/);
   assert.match(ci, /name: required-tests-report-/);
   assert.match(ci, /name: private-business-credentials-/);
