@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {TARGETS,cacheKey,planCaches,auditSdkDirectory,canonicalEntry} from './sdk-ci-cache.mjs';
 const version='1.0.2-dev.11';
-function lock(){return {schema_version:1,targets:Object.fromEntries(TARGETS.map(t=>{const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${version}/respire-core-sdk-${t}`;return [t,{sdk_version:version,private_repository:'risense-ai/respire-core',release_tag:'sdk-v'+version,url:base+'.manifest.json',archive_url:base+'.tar.gz',manifest_sha256:'a'.repeat(64),archive_sha256:'b'.repeat(64),redistribution:'approved'}];}))};}
+function lock(version='1.0.2-dev.11'){return {schema_version:1,targets:Object.fromEntries(TARGETS.map(t=>{const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${version}/respire-core-sdk-${t}`;return [t,{sdk_version:version,private_repository:'risense-ai/respire-core',release_tag:'sdk-v'+version,url:base+'.manifest.json',archive_url:base+'.tar.gz',manifest_sha256:'a'.repeat(64),archive_sha256:'b'.repeat(64),redistribution:'approved'}];}))};}
 test('plan emits all canonical SDK identities with immutable target-specific keys',()=>{const a=lock(),b=lock();for(const e of Object.values(a.targets))e.unknown_secret='do-not-forward';const result=planCaches(a,b);assert.equal(result.include.length,TARGETS.length);assert(!JSON.stringify(result).includes('do-not-forward'));assert.equal(new Set(result.include.map(x=>x.key)).size,TARGETS.length);});
 test('foreign repos, URLs, tags, unknown targets, missing hashes and differing locks are rejected',()=>{for(const [field,value] of [['private_repository','risense-ai/other'],['url','https://evil.invalid'],['release_tag','bad'],['archive_sha256','']]){const a=lock();a.targets[TARGETS[0]][field]=value;assert.throws(()=>planCaches(a,lock()));}const a=lock();a.targets.extra=a.targets[TARGETS[0]];assert.throws(()=>planCaches(a,lock()));const b=lock();b.targets[TARGETS[0]].archive_sha256='c'.repeat(64);assert.throws(()=>planCaches(lock(),b),/differ/);});
 test('any pinned hash change gets a different key; no prefix fallback',()=>{const a=lock().targets[TARGETS[0]],b={...a,manifest_sha256:'c'.repeat(64)};assert.notEqual(cacheKey(TARGETS[0],a),cacheKey(TARGETS[0],b));});
@@ -54,3 +54,15 @@ test('every SDK cache consumer rejects primary-key prefix matches before source 
   }
  }
 });
+
+for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
+ test(`approved SDK train ${version} keeps canonical target identities`,()=>{
+  const input=lock(version),plan=planCaches(input,structuredClone(input));
+  assert.equal(plan.include.length,TARGETS.length);
+  assert(plan.include.every(item=>item.entry.sdk_version===version));
+  assert.notEqual(cacheKey(TARGETS[0],input.targets[TARGETS[0]]),cacheKey(TARGETS[0],lock().targets[TARGETS[0]]));
+ });
+}
+for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0-dev.1']) {
+ test(`SDK cache rejects unsupported version ${version}`,()=>assert.throws(()=>planCaches(lock(version),lock(version)),/tag\/version/));
+}
