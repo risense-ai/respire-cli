@@ -26,6 +26,10 @@ CASE = "account::authorization_preserves_and_commits_profiles"
 MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle": 8,
                  "account": 3, "capture_main": 2}
 NATIVE_STOP_CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
+G1_BUSINESS_CASES = (
+    "diary_identity::remember_public_payload_covers_created_appended_and_merged",
+    "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+)
 BASELINE_CASES = (
     CASE,
     "account::space_create_list_use_remove",
@@ -83,6 +87,10 @@ def selected_cases(listing, suite, require_native_stop=False):
     require(names.count(CASE) == 1, "original_account_case_missing")
     if suite == "account":
         return [CASE]
+    if suite == "g1-business":
+        require(all(names.count(case) == 1 for case in G1_BUSINESS_CASES),
+                "g1_business_case_inventory_mismatch")
+        return list(G1_BUSINESS_CASES)
     if suite == "stable-diary-remote":
         require(len(STABLE_DIARY_CASES) == 10
                 and all(names.count(case) == 1 for case in STABLE_DIARY_CASES),
@@ -365,6 +373,24 @@ def safe_failure_diagnostics(captured, failed_cases):
                 blocks[current] = []
         elif in_failures and current is not None:
             blocks[current].append(line)
+    snapshot_stages = []
+    stage_invalid = False
+    allowed_stages = {"candidate_guard", "remote_create", "remote_list", "old_install", "old_start",
+                      "old_create", "old_update", "old_restart", "old_restore", "old_recovery", "old_cleanup"}
+    for case in failed_cases:
+        for line in blocks.get(case, []):
+            if not line.startswith(b"legacy-snapshot-stage "):
+                continue
+            try:
+                if len(line) > 2048 or len(snapshot_stages) >= 64:
+                    raise ValueError
+                event = json.loads(line[len(b"legacy-snapshot-stage "):])
+                if (not isinstance(event, dict) or set(event) != {"case", "stage"}
+                        or event["case"] != case or event["stage"] not in allowed_stages):
+                    raise ValueError
+                snapshot_stages.append(event)
+            except (ValueError, TypeError):
+                stage_invalid = True
     response_reasons = {None, "auth_outcome_unknown", "identity_write_recovery_required",
                         "key_outcome_unknown", "account_handoff_pending", "account_outcome_unknown",
                         "request_outcome_unknown", "invalid_input", "runtime_error"}
@@ -419,7 +445,7 @@ def safe_failure_diagnostics(captured, failed_cases):
         for line in blocks.get(case, []):
             if b"panicked at " not in line or len(line) > 8192:
                 continue
-            for match in re.finditer(rb"[/\\](account\.rs|snapshot_lifecycle\.rs|diary_identity\.rs):([0-9]{1,6}):([0-9]{1,4}):", line):
+            for match in re.finditer(rb"[/\\](account\.rs|snapshot_lifecycle\.rs|diary_identity\.rs|capture_main\.rs|memory_revision\.rs):([0-9]{1,6}):([0-9]{1,4}):", line):
                 number, column = int(match[2]), int(match[3])
                 if not (1 <= number <= 20000 and 1 <= column <= 4096):
                     continue
@@ -447,6 +473,7 @@ def safe_failure_diagnostics(captured, failed_cases):
             checkpoints.append(checkpoint)
     return {"authorization_events": events, "authorization_event_invalid": invalid,
             "failure_codes": codes, "failure_locations": locations,
+            "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,
             "response_events": response_events, "response_event_invalid": response_invalid,
             "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid}
 
@@ -629,6 +656,28 @@ def package_runtime(runtime, staged, destination, version, runtime_sha, cli_sha,
     return archive, metadata_path
 
 
+def frozen_runtime_package(args, runtime, version):
+    # Keep exact compressed candidate bytes. The existing installer/receipt
+    # checks validate archive members and every installed payload byte.
+    archive = args.runtime_archive.resolve(strict=True)
+    metadata_path = args.runtime_metadata.resolve(strict=True)
+    require(archive.is_file() and metadata_path.is_file()
+            and not args.runtime_archive.is_symlink() and not args.runtime_metadata.is_symlink(),
+            "frozen_runtime_files_required")
+    metadata = json.loads(metadata_path.read_text())
+    require(metadata.get("schema_version") == 2 and metadata.get("target_triple") == TARGET
+            and metadata.get("runtime_version") == version
+            and metadata.get("source_commit") == args.runtime_sha
+            and metadata.get("archive_file") == archive.name
+            and metadata.get("archive_sha256") == digest(archive)
+            and metadata.get("binary_sha256") == digest(runtime)
+            and metadata.get("candidate") == {
+                "kind": "unpublished-source-fixture", "cli_source_sha": args.cli_sha,
+                "cli_binary_sha256": digest(args.cli.resolve(strict=True))},
+            "frozen_runtime_identity_mismatch")
+    return archive, metadata_path
+
+
 def private_env(root):
     env = {key: os.environ[key] for key in ("PATH", "GITHUB_ACTIONS", "RUNNER_ENVIRONMENT",
            "RUNNER_TEMP") if key in os.environ}
@@ -658,7 +707,7 @@ def verify_receipt(root, metadata_path):
     return runtime
 
 
-def cleanup_processes(root, hashes):
+def cleanup_processes(root, hashes, observations=None):
     # Detached Runtime children do not necessarily remain in the test process group.
     # A unique inherited TMPDIR plus executable bytes binds only this run's children.
     marker = f"TMPDIR={root / 'tmp'}".encode()
@@ -671,10 +720,15 @@ def cleanup_processes(root, hashes):
             fd = os.pidfd_open(int(proc.name))
             if marker not in (proc / "environ").read_bytes().split(b"\0"):
                 continue
-            if digest(proc / "exe") not in hashes:
+            image_sha256 = digest(proc / "exe")
+            if image_sha256 not in hashes:
                 continue
             signal.pidfd_send_signal(fd, signal.SIGKILL)
             cleaned += 1
+            if observations is not None:
+                # Only existing run-bound executable hashes and a numeric PID.
+                # Never retain environ, command lines, paths or exception text.
+                observations.append({"pid": int(proc.name), "image_sha256": image_sha256})
         except (FileNotFoundError, ProcessLookupError, PermissionError):
             continue
         finally:
@@ -716,6 +770,7 @@ def run(args):
               "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
                        "targeted-failure-diagnostic" if diagnostic else
                        "stable-diary-remote-subset" if stable_remote else
+                       "g1-business-subset" if args.suite == "g1-business" else
                        CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
               "required_native_stop": args.require_native_stop,
@@ -776,8 +831,11 @@ def run(args):
             harness_sha256=digest(harness), sdk_lock_sha256=digest(args.runtime_source / "sdk/core-sdk.lock.json"),
             account_source_sha256=digest(args.runtime_source / "crates/commands/examples/cli_business_tests/account.rs"))
         report["stage"] = "candidate_archive"
-        archive, metadata_path = package_runtime(runtime, runtime.parent, root / "archive",
-            version, args.runtime_sha, args.cli_sha, digest(cli), cli_version)
+        if args.suite == "g1-business":
+            archive, metadata_path = frozen_runtime_package(args, runtime, version)
+        else:
+            archive, metadata_path = package_runtime(runtime, runtime.parent, root / "archive",
+                version, args.runtime_sha, args.cli_sha, digest(cli), cli_version)
         with log.open("wb") as output:
             def invoke(command, timeout=900):
                 return private_command(command, env, args.cli_source, output, timeout)
@@ -811,7 +869,7 @@ def run(args):
             report["required_cases"] = cases
             report["selected_case_count"] = len(cases)
             test_args = ([*cases, "--exact", "--test-threads=1"]
-                         if args.suite in ("account", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
+                         if args.suite in ("account", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
             if args.compatibility_host or diagnostic or stable_remote:
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
@@ -917,10 +975,18 @@ def run(args):
             report["failure_code"] = str(error)
     finally:
         try:
-            cleaned = cleanup_processes(root, hashes)
+            forced_processes = []
+            cleaned = cleanup_processes(root, hashes, forced_processes)
             time.sleep(0.1)
             require(cleanup_processes(root, hashes) == 0, "owned_process_cleanup_incomplete")
-            report["owned_process_cleanup"] = {"passed": True, "forced": cleaned}
+            roles = {report.get("cli_binary_sha256"): "current_cli",
+                     report.get("runtime_binary_sha256"): "candidate_runtime",
+                     report.get("harness_sha256"): "harness",
+                     report.get("stable_business_cli", {}).get("binary_sha256"): "official_stable_cli"}
+            for process in forced_processes:
+                process["image_role"] = roles.get(process["image_sha256"], "run_bound_unknown")
+            report["owned_process_cleanup"] = {"passed": True, "forced": cleaned,
+                                                "forced_processes": forced_processes}
             if cleaned:
                 report["passed"] = False
         except Exception:
@@ -932,6 +998,9 @@ def run(args):
             captured = log.read_bytes()
             lines = captured.splitlines()
             if stable_full:
+                legacy_keyring_path = root / "legacy-keyring/business-keyring-selftest.json"
+                if legacy_keyring_path.is_file():
+                    report["legacy_contracts"]["keyring"] = json.loads(legacy_keyring_path.read_text())
                 report["legacy_contracts"]["current_full31_passed"] = (
                     len(cases) == 31 and all(f"test {case} ... ok".encode() in lines for case in cases)
                     and b"test result: ok. 31 passed; 0 failed;" in captured)
@@ -964,7 +1033,9 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
+    parser.add_argument("--runtime-archive", type=Path)
+    parser.add_argument("--runtime-metadata", type=Path)
     parser.add_argument("--legacy-stable-contracts", action="store_true")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
@@ -976,6 +1047,12 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     args = parser.parse_args()
+    if args.suite == "g1-business":
+        if (not args.runtime_archive or not args.runtime_metadata or args.compatibility_host
+                or args.official_cli_metadata or args.require_native_stop or args.legacy_stable_contracts):
+            parser.error("g1-business requires frozen Runtime archive/metadata and current CLI without compatibility/native-stop/stable-contracts")
+    elif args.runtime_archive or args.runtime_metadata:
+        parser.error("frozen Runtime inputs require --suite g1-business")
     if args.require_native_stop and args.suite != "full":
         parser.error("--require-native-stop requires --suite full")
     stable_paths = (args.stable_business_cli, args.stable_business_cli_metadata,

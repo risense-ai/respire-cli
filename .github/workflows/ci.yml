@@ -673,15 +673,16 @@ jobs:
           assert.ok(runner, 'Runtime business tests cannot be skipped');
           const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
-          const modules = {memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2};
+          const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
             const tests = names.filter(name => name.startsWith(`${module}::`));
             assert.equal(tests.length, count, `Missing migrated ${module} assertions`);
             return tests;
           });
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
+          assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'};
+          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
@@ -1101,15 +1102,16 @@ jobs:
           assert.ok(runner, 'Runtime business tests cannot be skipped');
           const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
-          const modules = {memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2};
+          const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
             const tests = names.filter(name => name.startsWith(`${module}::`));
             assert.equal(tests.length, count, `Missing migrated ${module} assertions`);
             return tests;
           });
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
+          assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'};
+          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
@@ -1359,6 +1361,8 @@ jobs:
       - run: python3 scripts/test-dev-api-contract.py
       - run: python3 scripts/test-dev-model-fixture.py
       - run: python3 scripts/test-native-runtime-install.py
+      - name: Verify native candidate runner isolation and cleanup without products
+        run: python3 -B scripts/test-native-account-candidate.py
       - run: python3 scripts/test-dev-fixture-tty.py
       - run: python3 scripts/test-dev-witness-fixture.py
       - name: Validate release sweep PowerShell syntax
