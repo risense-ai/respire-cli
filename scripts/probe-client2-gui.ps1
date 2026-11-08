@@ -38,6 +38,41 @@ function Descendants([int]$parentId) {
     } while ($added)
     @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
 }
+function Confirm-TrackedAbsent($Item) {
+    for ($probe=0; $probe -lt 2; $probe++) {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
+        if ($current) {
+            if ($current.CreationDate -ne $Item.CreationDate) { throw "Process identity changed during cleanup: $($Item.ProcessId)" }
+            return $false
+        }
+        if ($probe -eq 0) { Start-Sleep -Milliseconds 100 }
+    }
+    return $true
+}
+function Stop-TrackedOwned($Item) {
+    $identityChanged = $false
+    try {
+        $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
+        if ($current) {
+            if ($current.CreationDate -ne $Item.CreationDate) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
+            $owned = Get-Process -Id $Item.ProcessId -ErrorAction Stop
+            $null = $owned.SafeHandle
+            $held = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
+            if ($held) {
+                if ($held.CreationDate -ne $Item.CreationDate) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
+                Stop-Process -InputObject $owned -ErrorAction Stop
+                if (-not $owned.WaitForExit(5000)) { throw "Owned process did not exit: $($Item.ProcessId)" }
+            }
+        }
+    } catch {
+        # A process can exit between CIM/Get-Process/Stop-Process. Confirm absence twice;
+        # never clear an observed birth mismatch, or kill a reused PID.
+        if ($identityChanged) { throw }
+        if (-not (Confirm-TrackedAbsent $Item)) { throw }
+        return
+    }
+    if (-not (Confirm-TrackedAbsent $Item)) { throw "Owned process survived cleanup: $($Item.ProcessId)" }
+}
 try {
     Add-Type -TypeDefinition @'
 using System;
@@ -218,21 +253,10 @@ public static class RespireGuiNative {
                 $report.processes_before_cleanup = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
             }
             foreach ($item in $tracked) {
-                try {
-                    $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId)"
-                    if ($current -and $current.CreationDate -eq $item.CreationDate) {
-                        $owned = Get-Process -Id $item.ProcessId -ErrorAction Stop
-                        $null = $owned.SafeHandle
-                        $held = Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId)"
-                        if (-not $held -or $held.CreationDate -ne $item.CreationDate) { throw "Process identity changed before cleanup: $($item.ProcessId)" }
-                        Stop-Process -InputObject $owned -ErrorAction Stop
-                        if (-not $owned.WaitForExit(5000)) { throw "Owned process did not exit: $($item.ProcessId)" }
-                    }
-                } catch { $report.cleanup_error = $_.Exception.Message }
+                try { Stop-TrackedOwned $item } catch { $report.cleanup_error = $_.Exception.Message }
             }
             foreach ($item in $tracked) {
-                $survivor = Get-CimInstance Win32_Process -Filter "ProcessId=$($item.ProcessId)"
-                if ($survivor -and $survivor.CreationDate -eq $item.CreationDate) { throw "Owned process survived cleanup: $($item.ProcessId)" }
+                if (-not (Confirm-TrackedAbsent $item)) { throw "Owned process survived cleanup: $($item.ProcessId)" }
             }
             $report.cleanup_exit_confirmed = -not $report.cleanup_error
         }
