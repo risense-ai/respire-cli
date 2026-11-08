@@ -17,7 +17,14 @@ func main() {
 		var actionErr error
 		var observedPID uint32
 		diagnostics := map[string]any{}
-		if os.Args[1] == "start" {
+		if os.Args[1] == "host-operations" {
+			passed, checks := checkHostOperations(m)
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"passed": passed, "cases": checks})
+			if !passed {
+				os.Exit(1)
+			}
+			return
+		} else if os.Args[1] == "start" {
 			actionErr = m.Start()
 		} else if os.Args[1] == "stop" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)

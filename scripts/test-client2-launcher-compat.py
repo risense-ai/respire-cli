@@ -234,6 +234,19 @@ def main():
                 if plugin_result != expected_plugin:
                     raise RuntimeError('Original Magpie RPC returned incomplete evidence')
                 case['magpie_rpc'] = plugin_result
+            host_operations = run([executable, 'host-operations'], env)
+            host_result = helper_result(host_operations)
+            checks = host_result.get('cases')
+            required_host_operations = ['auth_register', 'auth_login', 'auth_recover', 'auth_reset', 'inject_targets']
+            if (set(host_result) != {'passed', 'cases'} or type(host_result['passed']) is not bool
+                    or not isinstance(checks, list) or [check.get('name') for check in checks] != required_host_operations
+                    or any(set(check) != {'name', 'passed', 'terminal_envelope', 'repeated_id_stable'}
+                           or any(type(check[key]) is not bool for key in ['passed', 'terminal_envelope', 'repeated_id_stable'])
+                           for check in checks)):
+                raise RuntimeError('Original Client2 host-operation evidence is incomplete')
+            case['host_operations'] = host_result
+            if host_operations.returncode or not host_result['passed'] or not all(check['passed'] for check in checks):
+                raise RuntimeError('Original Client2 host-operation protocol or terminal envelope failed')
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
