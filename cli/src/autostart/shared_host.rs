@@ -89,6 +89,9 @@ impl CliHost {
         let (root, selected) = respire_client_host::config::control_roots()?;
         let root = root.canonicalize()?;
         let selected = selected.canonicalize()?;
+        let canonical_profile =
+            respire_client_host::config::normalize_control_path(profile)?.canonicalize()?;
+        let profile = canonical_profile.as_path();
         anyhow::ensure!(
             selected == profile && &control::identity(profile)? == identity,
             "completed account selection changed before supervisor handoff"

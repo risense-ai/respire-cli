@@ -182,6 +182,13 @@ function Get-SafeFailureReason($Envelope) {
     $message = @($Envelope.errors) -join ' '
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
     foreach ($entry in @(
+        @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
+        @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
+        @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown'),
+        @('auth control response identity mismatch', 'auth_response_identity_mismatch'),
+        @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
+        @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
+        @('invalid auth control result shape|auth control result is missing|unexpected auth control command|auth control result owner mismatch|committed auth result is missing the recovery code', 'auth_result_invalid'),
         @('already registered', 'account_exists'),
         @('runtime owns its boot profile', 'profile_change_requires_host'),
         @('read.only', 'readonly_local_guard'),

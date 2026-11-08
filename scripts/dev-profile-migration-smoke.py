@@ -267,7 +267,7 @@ class Smoke(support.Smoke):
             and session.get("user") == user and session.get("addr") == support.UPSTREAM
             and bool(session.get("token")), "migration_registered_identity_mismatch")
         account.update(token=session["token"], confirmed=True)
-        auth_salt = bytes.fromhex(session["auth_salt"].removeprefix(support.PREFIX))
+        auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
         account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")

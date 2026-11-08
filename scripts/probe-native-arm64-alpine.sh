@@ -31,14 +31,20 @@ test "$(basename "$runtime")" = rsrs-runtime
 echo "$runtime_sha256  $runtime" | sha256sum -c >/dev/null
 bundle="$(dirname "$runtime")"
 test -f "$bundle/core-runtime.json"
+test "$(basename "$bundle")" = "$runtime_version"
+test "$(basename "$(dirname "$bundle")")" = runtime
+receipt="$(dirname "$(dirname "$bundle")")/runtime.json"
+test -f "$receipt"
+test ! -L "$receipt"
+receipt="$(realpath "$receipt")"
 mkdir -p "$profile"
 profile="$(realpath "$profile")"
 docker run --rm --network none --user "$(id -u):$(id -g)" \
   -v "$binary:/rsrs:ro" -v "$models:/models:ro" -v "$cpu:/cpu-model.ort:ro" -v "$profile:/profile" \
-  -v "$bundle:/runtime:ro" \
+  -v "$bundle:/runtime:ro" -v "$receipt:/runtime-selection.json:ro" \
   -e RSRS_ENGINE=cpu -e RSRS_DATA_DIR=/profile -e RSRS_M3_DIR=/models \
   -e RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort \
-  -e RSRS_RUNTIME_BIN=/runtime/rsrs-runtime -e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl \
+  -e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl \
   -e NATIVE_RUNTIME_SHA256="$runtime_sha256" -e NATIVE_RUNTIME_VERSION="$runtime_version" \
   -e RSRS_NO_AUTOSYNC=1 -e RSRS_UPDATE_CHECK=0 \
   alpine:3.23 sh -ec '
@@ -54,6 +60,18 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
       *" $NATIVE_RUNTIME_VERSION") ;;
       *) echo "Runtime version differs from verified installation" >&2; exit 1 ;;
     esac
+    umask 077
+    chmod 700 /profile
+    test ! -e /profile/runtime.json
+    mkdir -p "/profile/runtime/$NATIVE_RUNTIME_VERSION" /profile/bin
+    cp /rsrs /profile/bin/rsrs
+    cmp /rsrs /profile/bin/rsrs
+    cp -R /runtime/. "/profile/runtime/$NATIVE_RUNTIME_VERSION/"
+    cmp /runtime/rsrs-runtime "/profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime"
+    echo "$NATIVE_RUNTIME_SHA256  /profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime" | sha256sum -c >/dev/null
+    cp /runtime-selection.json /profile/runtime.json
+    cmp /runtime-selection.json /profile/runtime.json
+    trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
+    /rsrs --json runtime start
     /rsrs --direct model probe --json
-    /rsrs --runtime-internal --stop --json
   '
