@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import {realpathSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {pathToFileURL} from 'node:url';
 
@@ -17,7 +18,20 @@ async function health() {
     signal: AbortSignal.timeout(5000),
   });
   assert.equal(response.status, 200);
-  return response.json();
+  const value = await response.json();
+  assert.equal(value.server, 'respire');
+  assert.equal(value.v, 1);
+  for (const key of ['pid', 'generation']) {
+    assert.ok(Number.isSafeInteger(value[key]) && value[key] > 0, `Invalid Runtime identity: ${key}`);
+  }
+  for (const key of ['account_id', 'instance_id', 'process_start_id', 'image_sha256',
+    'runtime_version', 'installation_root', 'data_dir']) {
+    assert.equal(typeof value[key], 'string', `Missing Runtime identity: ${key}`);
+    assert.ok(value[key].length > 0, `Empty Runtime identity: ${key}`);
+  }
+  assert.ok(process.env.RSRS_DATA_DIR, 'Isolated installation root is required');
+  assert.equal(realpathSync(value.installation_root), realpathSync(process.env.RSRS_DATA_DIR));
+  return value;
 }
 const before = await health();
 // Observe the real transport before the unchanged plugin unwraps result.envelope.
@@ -55,12 +69,16 @@ assert.deepEqual(envelope, transport.envelope);
 assert.equal(envelope.command, 'status');
 assert.equal(envelope.status, 'ok');
 assert.deepEqual(envelope.errors, []);
-assert.deepEqual(transport.scope, Object.fromEntries(
-  ['account_id', 'instance_id', 'generation'].map(key => [key, before[key]])));
+// legacy_host::project verifies the captured actor internally, then strips these fields.
+for (const key of ['scope', 'operation_id', 'idempotency_key']) {
+  assert.equal(Object.hasOwn(transport, key), false);
+}
+assert.equal(realpathSync(envelope.summary.data_dir), realpathSync(before.data_dir));
 assert.equal(envelope.memory_context?.memory_text_authority, 'untrusted_historical_context');
 const after = await health();
-for (const key of ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'runtime_version']) {
+for (const key of ['pid', 'account_id', 'instance_id', 'generation', 'process_start_id',
+  'image_sha256', 'runtime_version', 'installation_root', 'data_dir']) {
   assert.equal(after[key], before[key], `Plugin request changed Runtime identity: ${key}`);
 }
-console.log(JSON.stringify({passed: true, original_rpc: true, scope_bound: true,
-  memory_authority_preserved: true, same_runtime: true}));
+console.log(JSON.stringify({passed: true, original_rpc: true, legacy_projection_verified: true,
+  same_actor_before_after: true, memory_authority_preserved: true, same_runtime: true}));
