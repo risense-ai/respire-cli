@@ -103,6 +103,27 @@ def selected_cases(listing, suite, require_native_stop=False):
     require(not require_native_stop or NATIVE_STOP_CASE in expected, "native_stop_business_case_missing")
     return names
 
+def stable_legacy_probe_checks(captured):
+    # This marker proves a harness probe's legacy projection, not its sender
+    # being the old CLI. The separately verified binary executes business calls.
+    marker = b"stable-diary-legacy-probe "
+    expected = {"probe_without_scope": True, "legacy_projection_verified": True,
+                "same_actor_before_after": True, "candidate_process_verified": True}
+    checks = []
+    for line in captured.splitlines():
+        if marker not in line:
+            continue
+        try:
+            value = json.loads(line.split(marker, 1)[1])
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if (not isinstance(value, dict) or set(value) != set(expected)
+                or any(value[key] is not True for key in expected) or len(checks) >= 128):
+            return None
+        checks.append(expected.copy())
+    return checks
+
+
 def compatibility_host_checks(captured):
     checks = []
     marker = b"client2-account-host "
@@ -703,7 +724,8 @@ def run(args):
             fixture = diary_source.read_bytes()
             require(all(marker in fixture for marker in (
                 b"RSRS_TEST_STABLE_DIARY_SUITE", b"RSRS_TEST_STABLE_CLI_BIN",
-                b"fn business_command(", b"fn verify_business_owner(", b"fn business_output(")),
+                b"fn business_command(", b"fn verify_business_owner(", b"fn business_output(",
+                b"fn verify_legacy_projection(", b"stable-diary-legacy-probe ")),
                 "stable_business_fixture_support_missing")
             report["diary_source_sha256"] = digest(diary_source)
             stable_cli = args.stable_business_cli.resolve(strict=True)
@@ -769,7 +791,7 @@ def run(args):
             report["selected_case_count"] = len(cases)
             test_args = ([*cases, "--exact", "--test-threads=1"]
                          if args.suite in ("account", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
-            if args.compatibility_host or diagnostic:
+            if args.compatibility_host or diagnostic or stable_remote:
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
@@ -793,6 +815,10 @@ def run(args):
                 "required_business_cases_did_not_pass")
         require(all(f"test {case} ... ok".encode() in captured.splitlines() for case in cases),
                 "required_business_case_result_missing")
+        if stable_remote:
+            probes = stable_legacy_probe_checks(captured)
+            require(probes is not None and len(probes) >= len(cases),
+                    "stable_legacy_projection_not_verified")
         if args.compatibility_host and args.suite != "diagnostic-native-stop":
             checks = compatibility_host_checks(captured)
             expected = {"import-target", "restart-target"}
@@ -824,6 +850,9 @@ def run(args):
         if log.is_file():
             captured = log.read_bytes()
             lines = captured.splitlines()
+            if stable_remote:
+                report["stable_legacy_probe_checks"] = stable_legacy_probe_checks(captured)
+                report["stable_legacy_probe_scope"] = "harness_probe_only_not_old_binary_sender"
             if args.compatibility_host:
                 report["compatibility_host_checks"] = compatibility_host_checks(captured)
             report["passed_cases"] = [case for case in cases if f"test {case} ... ok".encode() in lines]
