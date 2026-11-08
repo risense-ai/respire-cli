@@ -24,7 +24,8 @@ import urllib.request
 CLIENT2_SHA = 'd798d6fb943a1c7515f5bb427f72c6aee0341ffb'
 MAGPIE_SHA = 'a3ae9b3035d02b181ba7a8ddae251495d092dd63'
 MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
-# Desktop workflow run 42458504861, artifact 13609150108, unchanged CLIENT2_SHA.
+# Optional historical desktop fixture: workflow run 42458504861, artifact 13609150108.
+DESKTOP_SOURCE_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
 DESKTOP_SHA256 = '3cacf426d22974aaa53bb20d13b450fb67b56404366050f796cfd4fbad73933a'
 DESKTOP_ARTIFACT_SHA256 = 'b2aaed0a79a4e9eab9fbe7c78ef14c8fd7664960265f66a4923b281213a617be'
 
@@ -175,7 +176,7 @@ def main():
                          'runtime_version': args.runtime_version,
                          'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
                          'coverage_profile_file': profile},
-              'desktop_headless': {'enabled': desktop is not None, 'client2_source': CLIENT2_SHA,
+              'desktop_headless': {'enabled': desktop is not None, 'client2_source': DESKTOP_SOURCE_SHA,
                                    'run_id': '42458504861', 'artifact_id': '13609150108',
                                    'artifact_sha256': DESKTOP_ARTIFACT_SHA256,
                                    'binary_sha256': DESKTOP_SHA256 if desktop else None},
