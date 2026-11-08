@@ -78,6 +78,19 @@ pub fn spawn_binary_with_boot_token(
     args: &[std::ffi::OsString],
     token: Option<&str>,
 ) -> io::Result<std::process::Child> {
+    spawn_detached(exe, args, token, false)
+}
+
+/// A detached, same-user child with one private startup response pipe.
+pub fn spawn_binary_with_readiness(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+) -> io::Result<std::process::Child> {
+    spawn_detached(exe, args, None, true)
+}
+
+fn spawn_detached(exe: &Path, args: &[std::ffi::OsString], token: Option<&str>, readiness: bool)
+    -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
     command
         .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
@@ -89,7 +102,7 @@ pub fn spawn_binary_with_boot_token(
     command
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if readiness { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null());
     #[cfg(windows)]
     {

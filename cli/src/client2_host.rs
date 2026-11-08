@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -47,6 +47,69 @@ fn read_ready(reader: impl Read) -> Result<Value> {
     let ready: Value = serde_json::from_slice(&bytes)?;
     anyhow::ensure!(ready["startup_complete"] == true, "Runtime startup is incomplete");
     Ok(ready)
+}
+
+#[cfg(target_os = "macos")]
+fn receive_ready(child: &mut std::process::Child) -> Result<Value> {
+    let pid = child.id();
+    let reader = child.stdout.take().context("private readiness pipe is missing")?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
+    receiver.recv_timeout(Duration::from_secs(40))
+        .with_context(|| format!("startup is uncertain for child {pid}; inspect before retry"))?
+}
+
+fn publish_ready(ready: &Value) -> Result<()> {
+    let mut output = std::io::stdout().lock();
+    serde_json::to_writer(&mut output, ready)?;
+    output.write_all(b"\n")?;
+    output.flush()?;
+    Ok(())
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn guarded_host_pid(ready: &Value, guardian: u32, executable: &Path, root: &Path, port: u16) -> Result<u32> {
+    let pid = ready["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0 && *pid != guardian).context("invalid guarded host PID")?;
+    anyhow::ensure!(ready["guardian_pid"] == guardian && ready["startup_complete"] == true
+        && ready["bin"] == crate::VERSION && ready["port"] == port
+        && Path::new(ready["exe"].as_str().context("guarded host image missing")?).canonicalize()? == executable.canonicalize()?
+        && Path::new(ready["installation_root"].as_str().context("guarded host root missing")?).canonicalize()? == root.canonicalize()?,
+        "guarded host readiness does not match this launch");
+    Ok(pid)
+}
+
+/// Old Client2 polls kinfo_proc every 100 ms for up to 30 seconds, accepting
+/// SZOMB but turning an already reaped (zero-length) record into EIO. Keep the
+/// actual exited child waitable through that window; no live process, socket,
+/// library lock, or fabricated identity is retained for it.
+#[cfg(target_os = "macos")]
+pub(crate) fn supervise() -> Result<()> {
+    anyhow::ensure!(std::env::args_os().count() == 2, "exit observer accepts no extra arguments");
+    respire_client_host::roots::validate_client_environment()?;
+    crate::runtime_policy::require_host("Client2 exit observation")?;
+    let executable = std::env::current_exe()?.canonicalize()?;
+    let mut command = Command::new(&executable);
+    command.arg("--client2-host-internal").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    let mut child = respire_spawn::spawn_host_control(&mut command)?;
+    let mut ready = receive_ready(&mut child)?;
+    anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
+    ready["guardian_pid"] = json!(std::process::id());
+    guarded_host_pid(&ready, std::process::id(), &executable,
+        &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
+    // A disconnected launcher must not orphan a running host by making its
+    // observer exit. Keep ownership and reap normally even if readiness is lost.
+    let readiness = publish_ready(&ready);
+    // process_birth inspects Darwin's process state without reaping this child.
+    // Unknown/denied inspection remains an error, never evidence of an exit.
+    while crate::autostart::process_birth(child.id())?.is_some() {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(35));
+    let status = child.wait()?;
+    readiness?;
+    anyhow::ensure!(status.success(), "compatibility host did not exit successfully");
+    Ok(())
 }
 
 struct Backend {
@@ -208,6 +271,13 @@ pub(crate) fn serve() -> Result<()> {
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
     let server = tiny_http::Server::from_listener(listener, None)
         .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
+    if let Err(error) = publish_ready(&json!({"startup_complete":true, "pid":std::process::id(),
+        "exe":backend.host_executable, "bin":crate::VERSION, "port":public_port,
+        "installation_root":backend.health.installation_root})) {
+        // The verified host remains available for inspection and normal drain;
+        // losing a startup pipe must not abandon its live Runtime child.
+        eprintln!("compatibility startup response unavailable: {error}");
+    }
     let active = Arc::new(AtomicUsize::new(0));
     let mut exited = None;
     loop {
@@ -267,14 +337,28 @@ pub(crate) fn start_locked() -> Result<()> {
     anyhow::ensure!(Sha256::digest(std::fs::read(&executable)?)
         == Sha256::digest(std::fs::read(std::env::current_exe()?)?),
         "Client2 requires the same verified CLI bytes at the stable bin path");
-    let mut child = respire_spawn::spawn_binary_with_boot_token(&executable,
-        &["--client2-host-internal".into()], None)?;
+    #[cfg(target_os = "macos")]
+    let (mut child, host_pid) = {
+        let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,
+            &["--client2-host-supervisor-internal".into()])?;
+        let ready = receive_ready(&mut guardian)?;
+        let pid = guarded_host_pid(&ready, guardian.id(), &executable,
+            &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
+        (guardian, pid)
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (mut child, host_pid) = {
+        let child = respire_spawn::spawn_binary_with_boot_token(&executable,
+            &["--client2-host-internal".into()], None)?;
+        let pid = child.id();
+        (child, pid)
+    };
     let deadline = Instant::now() + Duration::from_secs(40);
     while Instant::now() < deadline {
         anyhow::ensure!(child.try_wait()?.is_none(), "compatibility host exited before readiness");
         if let Ok(public) = health_at(crate::net_rpc::rpc_port()) {
             anyhow::ensure!(public["compatibility_host"] == "client2-v0256"
-                && public["pid"] == child.id() && public["bin"] == crate::VERSION
+                && public["pid"] == host_pid && public["bin"] == crate::VERSION
                 && public["exe"].as_str().is_some_and(|path| Path::new(path) == executable),
                 "compatibility host readiness identity mismatch");
             anyhow::ensure!(crate::rpc::runtime_acceptable(&crate::net_rpc::health()?)?,
@@ -289,6 +373,25 @@ pub(crate) fn start_locked() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guardian_readiness_is_bound_to_the_owned_launch() -> Result<()> {
+        let executable = std::env::current_exe()?.canonicalize()?;
+        let root = std::env::temp_dir().canonicalize()?;
+        let ready = json!({"startup_complete":true, "pid":123, "guardian_pid":456,
+            "exe":executable, "installation_root":root, "bin":crate::VERSION, "port":15169});
+        assert_eq!(guarded_host_pid(&ready, 456, &executable, &root, 15169)?, 123);
+        for (key, value) in [("pid", json!(0)), ("pid", json!(456)),
+            ("pid", json!(u64::MAX)), ("guardian_pid", json!(789)),
+            ("startup_complete", json!(false)), ("bin", json!("foreign")),
+            ("port", json!(15170)), ("exe", json!(root)),
+            ("installation_root", json!(executable))] {
+            let mut wrong = ready.clone();
+            wrong[key] = value;
+            assert!(guarded_host_pid(&wrong, 456, &executable, &root, 15169).is_err(), "{key}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn compatibility_boundary_rejects_foreign_and_ambiguous_requests() {
         let base = vec![("Host".into(), "127.0.0.1:15169".into())];

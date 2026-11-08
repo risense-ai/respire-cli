@@ -1127,6 +1127,13 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    #[cfg(all(feature = "client2-host-prototype", target_os = "macos"))]
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--client2-host-supervisor-internal") {
+        return match client2_host::supervise() {
+            Ok(()) => 0,
+            Err(error) => { eprintln!("Client2 exit observation failed: {error:#}"); 1 }
+        };
+    }
     #[cfg(feature = "client2-host-prototype")]
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--client2-host-internal") {
         return match client2_host::serve() {
