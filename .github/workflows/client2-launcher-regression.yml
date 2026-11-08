@@ -149,6 +149,7 @@ jobs:
           python scripts/native-model-cache.py restore --model-dir "$env:RUNNER_TEMP/client2-gui-models" --legacy-dir "$env:RUNNER_TEMP/client2-gui-legacy-model"
           if ($LASTEXITCODE -ne 0) { throw 'Pinned public CPU model verification failed' }
       - name: Probe original Windows Client2 GUI and real offline subset (not full GUI acceptance)
+        timeout-minutes: 10
         env:
           RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
         if: runner.os == 'Windows'

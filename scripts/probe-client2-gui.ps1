@@ -198,6 +198,7 @@ public static class RespireGuiNative {
     $install = Child-Start $cliPath @('--json','runtime','install','--file',$archivePath,'--version',$RuntimeVersion)
     if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
     if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
+    Write-Output 'GUI probe: Runtime installed'
     $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'runtime.json') | ConvertFrom-Json
     $managed = Join-Path $taskProfile "client2/runtime/$RuntimeVersion"
     if (-not (Test-Path -LiteralPath (Split-Path $managed))) {
@@ -227,8 +228,10 @@ public static class RespireGuiNative {
         $report.offline_model_hashes = $modelHashes
         $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
     }
+    Write-Output 'GUI probe: starting desktop'
     $desktopProcess = Child-Start $exe @()
     $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
+    Write-Output 'GUI probe: desktop started'
     $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
     if (-not $nativeRoot -or -not [string]::Equals($nativeRoot.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native process does not name the verified original EXE' }
     $report.desktop = @{pid=$desktopProcess.Id; session_id=$desktopProcess.SessionId; path=$nativeRoot.ExecutablePath; started_ticks=$desktopStarted}
@@ -263,13 +266,20 @@ public static class RespireGuiNative {
     }
     $bindingPath = Join-Path $root 'native-binding.json'
     $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+    Write-Output 'GUI probe: window and WebView bound'
     $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
     $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
     $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
     if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
+    Write-Output 'GUI probe: starting UI Automation helper'
     $driver = Child-Start $systemPowerShell $helperArgs
+    Write-Output 'GUI probe: UI Automation helper started'
     $helperDeadline = if ($OfflineAcceptance) { 360000 } else { 45000 }
-    if (-not $driver.WaitForExit($helperDeadline)) { $driver.Kill($true); throw 'System UI Automation helper timed out' }
+    if (-not $driver.WaitForExit($helperDeadline)) {
+        Write-Output 'GUI probe: UI Automation helper timed out; stopping helper'
+        $driver.Kill($true); throw 'System UI Automation helper timed out'
+    }
+    Write-Output 'GUI probe: UI Automation helper exited'
     $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
     $report.native_gui = $native
     if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or
@@ -288,6 +298,7 @@ public static class RespireGuiNative {
 } finally {
     # Stop only the original process tree observed in this fresh hosted VM, with creation-time guards.
     try {
+        Write-Output 'GUI probe: cleaning up tracked processes'
         if ($desktopProcess) {
             if ($OfflineAcceptance -and $report.native_binding) {
               try {
