@@ -157,11 +157,13 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         crate::autostart::restart_stage("restart_start");
         ensure_daemon_locked()?;
     }
-    let ready = crate::net_rpc::health()?;
+    crate::net_rpc::health()?;
     if !respire_client_host::settings::off_mode()? {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
     }
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
+    let ready = crate::net_rpc::health()?;
     crate::autostart::restart_stage("restart_ready");
     Ok(json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
         "forced":false, "data_dir":ready.data_dir, "version":ready.bin}))
@@ -191,6 +193,7 @@ pub fn recover_interrupted_login() -> Result<()> {
     let recovered = crate::autostart::recover_legacy_login_locked(&takeover, &mut maintenance)?;
     maintenance.resume_managed_runtime()?;
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
     if recovered {
         eprintln!(
             "Recovered an interrupted login; the original account and configuration were restored."
@@ -371,6 +374,7 @@ fn change_profile_inner(
             }
         }
         maintenance.finish()?;
+        maintenance.finish_handoff()?;
         return Err(error);
     }
     if let Some(path) = backup {
@@ -382,6 +386,7 @@ fn change_profile_inner(
         }
     }
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
     Ok(())
 }
 

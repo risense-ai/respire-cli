@@ -383,7 +383,7 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
             output.errors.push(warning);
         }
         // Files/config are already accepted. Marker cleanup must not undo them.
-        if let Err(error) = maintenance.finish() {
+        if let Err(error) = maintenance.finish().and_then(|()| maintenance.finish_handoff()) {
             output.status = Status::Warn;
             output.errors.push(format!(
                 "model maintenance completed; marker cleanup pending: {error:#}"

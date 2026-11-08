@@ -405,6 +405,14 @@ pub(crate) fn serve() -> Result<()> {
     }
 }
 
+pub(crate) fn checked_executable() -> Result<PathBuf> {
+    let executable = visible_path(crate::net_rpc::stable_bin_path().canonicalize()?)?;
+    anyhow::ensure!(Sha256::digest(std::fs::read(&executable)?)
+        == Sha256::digest(std::fs::read(std::env::current_exe()?)?),
+        "Client2 requires the same verified CLI bytes at the stable bin path");
+    Ok(executable)
+}
+
 /// Caller retains the existing takeover lock. This never takes over a healthy
 /// strict or managed owner, and never retries an uncertain spawn.
 pub(crate) fn start_locked() -> Result<()> {
@@ -417,10 +425,7 @@ pub(crate) fn start_locked() -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
-    let executable = visible_path(crate::net_rpc::stable_bin_path().canonicalize()?)?;
-    anyhow::ensure!(Sha256::digest(std::fs::read(&executable)?)
-        == Sha256::digest(std::fs::read(std::env::current_exe()?)?),
-        "Client2 requires the same verified CLI bytes at the stable bin path");
+    let executable = checked_executable()?;
     #[cfg(target_os = "macos")]
     let (mut child, host_pid) = {
         let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,

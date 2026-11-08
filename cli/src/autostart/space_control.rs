@@ -218,6 +218,7 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
         }
         Ok(receipt)
     })();
+    if result.is_ok() && finished { maintenance.finish_handoff()?; }
     result.map_err(|error| {
         let error = if finished {
             error.context("space operation committed and maintenance finished; recovery context cleanup failed")

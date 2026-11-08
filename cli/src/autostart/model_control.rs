@@ -112,7 +112,7 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
         Ok(assets)
     })();
     match prepared {
-        Ok(assets) => Ok(assets),
+        Ok(assets) => { maintenance.finish_handoff()?; Ok(assets) },
         Err(error) => {
             if let Err(pause) = maintenance.mark(super::lifecycle::Phase::Paused) {
                 return Err(error.context(format!("model preparation failed; Paused marker publication failed: {pause:#}")));

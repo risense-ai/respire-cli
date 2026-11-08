@@ -232,6 +232,7 @@ fn remove(name: Option<&str>, query: Option<&str>, space: bool) -> Result<Result
         }
         Ok(envelope)
     })();
+    if result.is_ok() && finished { maintenance.finish_handoff()?; }
     result.map_err(|error| {
         let state = if original.receipt.is_some() { "committed; owner/maintenance completion needs recovery" }
             else { "outcome unknown; query only, never replace the original operation" };

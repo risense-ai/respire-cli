@@ -94,10 +94,16 @@ impl CliHost {
             "completed account selection changed before supervisor handoff"
         );
         let config = self.checked_registration(&root)?;
+        #[cfg(feature = "client2-host-prototype")]
+        if config.is_none() && serving {
+            let owner = self.probe_runtime()?
+                .context("verified account owner disappeared before compatibility handoff")?;
+            return lifecycle::finish_compatibility_handoff(&owner);
+        }
         let Some(config) = config.filter(|config| config.enabled && !config.manually_stopped)
         else {
-            // An explicitly stopped service stays stopped. An unregistered host
-            // retains the independently verified direct serving instance.
+            // An explicitly stopped service stays stopped. Ordinary builds retain
+            // the independently verified direct serving instance.
             return Ok(());
         };
         anyhow::ensure!(

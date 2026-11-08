@@ -187,6 +187,7 @@ pub(crate) fn control_metadata(command: &respire_commands::metadata::Command, di
             "metadata_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery",
             original.operation.operation_id))?;
     }
+    if result.is_ok() && finished { maintenance.finish_handoff()?; }
     result.map_err(|_| anyhow::anyhow!("metadata_outcome_unknown operation_id={}; repeat the same metadata command to query; no metadata was replayed", original.operation.operation_id))
 }
 

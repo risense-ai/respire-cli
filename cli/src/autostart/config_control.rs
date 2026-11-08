@@ -312,7 +312,7 @@ fn run_config_control_inner(
             Ok((envelope, Some(validation.target_identity)))
         })();
         match changed {
-            Ok(envelope) => Ok(envelope),
+            Ok(envelope) => { maintenance.finish_handoff()?; Ok(envelope) },
             Err(error) => {
                 // Shared transport makes failed cleanup visible. Never race an unconfirmed child.
                 if error
