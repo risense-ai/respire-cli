@@ -90,13 +90,21 @@ pub(crate) fn supervise() -> Result<()> {
     crate::runtime_policy::require_host("Client2 exit observation")?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&executable);
-    command.arg("--client2-host-internal").stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    command.arg("--client2-host-internal").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
     let mut ready = receive_ready(&mut child)?;
     anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
     ready["guardian_pid"] = json!(std::process::id());
     guarded_host_pid(&ready, std::process::id(), &executable,
         &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
+    let health: crate::net_rpc::Health = serde_json::from_value(ready["backend_health"].clone())?;
+    let port = ready["backend_port"].as_u64().and_then(|port| u16::try_from(port).ok())
+        .filter(|port| *port != 0).context("guarded backend port missing")?;
+    let backend = Backend { port, health: health.clone(),
+        executable: crate::rpc::resolve_runtime_executable()?.canonicalize()?,
+        public_port: crate::net_rpc::rpc_port(), host_executable: visible_path(executable.clone())?,
+        last_health: Mutex::new(health) };
+    backend.verify(&serde_json::from_value(health_at(port)?)?)?;
     // A disconnected launcher must not orphan a running host by making its
     // observer exit. Keep ownership and reap normally even if readiness is lost.
     let readiness = publish_ready(&ready);
@@ -105,6 +113,19 @@ pub(crate) fn supervise() -> Result<()> {
     while crate::autostart::process_birth(child.id())?.is_some() {
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The host can die before it drains its independently running Runtime.
+    // Stop only the backend authenticated through this owned child's pipe.
+    let operation = if crate::autostart::process_birth(backend.health.pid)?.is_some() {
+        let operation = backend.stop_owned()?;
+        while let Some(birth) = crate::autostart::process_birth(backend.health.pid)? {
+            anyhow::ensure!(backend.health.process_start_id == format!("darwin-lstart-{birth}"),
+                "guarded backend process identity changed during shutdown");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Some(operation)
+    } else { None };
+    let final_health = backend.last_health.lock().map_err(|_| anyhow::anyhow!("health state poisoned"))?;
+    crate::net_rpc::final_stop_receipt(&final_health, operation.as_deref())?;
     std::thread::sleep(Duration::from_secs(35));
     let status = child.wait()?;
     readiness?;
@@ -265,6 +286,18 @@ pub(crate) fn serve() -> Result<()> {
         signal_hook::flag::register(signal_hook::consts::SIGTERM, interrupted.clone())?;
         signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())?;
     }
+    #[cfg(target_os = "macos")]
+    {
+        let interrupted = Arc::clone(&interrupted);
+        // Only the guardian holds the write end; EOF also covers its SIGKILL.
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            if let Err(error) = std::io::stdin().read(&mut byte) {
+                eprintln!("compatibility guardian pipe failed: {error}");
+            }
+            interrupted.store(true, Ordering::Release);
+        });
+    }
     let root = respire_client_host::paths::main_data_dir();
     anyhow::ensure!(!root.join("runtime/autostart/registration.json").exists(),
         "compatibility host cannot replace a registered service");
@@ -303,7 +336,8 @@ pub(crate) fn serve() -> Result<()> {
         .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
     if let Err(error) = publish_ready(&json!({"startup_complete":true, "pid":std::process::id(),
         "exe":backend.host_executable, "bin":crate::VERSION, "port":public_port,
-        "installation_root":backend.health.installation_root})) {
+        "installation_root":backend.health.installation_root,
+        "backend_port":backend.port, "backend_health":backend.health})) {
         // The verified host remains available for inspection and normal drain;
         // losing a startup pipe must not abandon its live Runtime child.
         eprintln!("compatibility startup response unavailable: {error}");

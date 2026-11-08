@@ -159,8 +159,10 @@ def main():
     modes = ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']
     if os.name == 'posix':
         modes.append('cli-host-sigterm')
-    if sys.platform == 'linux':
+    if sys.platform in ['linux', 'darwin']:
         modes.append('cli-host-sigkill')
+    if sys.platform == 'darwin':
+        modes.append('cli-guardian-sigkill')
     if os.name == 'nt':
         modes.append('cli-host-terminate')
     for mode in modes:
@@ -200,7 +202,7 @@ def main():
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
-            if mode in ['cli-host-sigterm', 'cli-host-sigkill', 'cli-host-terminate']:
+            if mode in ['cli-host-sigterm', 'cli-host-sigkill', 'cli-host-terminate', 'cli-guardian-sigkill']:
                 _, visible = request(port, '/api/health')
                 _, backend = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
                 assert visible['compatibility_host'] == 'client2-v0256'
@@ -222,6 +224,12 @@ def main():
                         assert kernel.WaitForSingleObject(handle, 15000) == 0, 'Owned backend survived host termination'
                     finally:
                         kernel.CloseHandle(handle)
+                elif mode == 'cli-guardian-sigkill':
+                    guardian = int(subprocess.check_output(
+                        ['ps', '-p', str(visible['pid']), '-o', 'ppid='], text=True).strip())
+                    image = subprocess.check_output(['ps', '-p', str(guardian), '-o', 'comm='], text=True).strip()
+                    assert guardian > 1 and Path(image).resolve() == Path(visible['exe']).resolve()
+                    os.kill(guardian, signal.SIGKILL)
                 else:
                     os.kill(visible['pid'], signal.SIGKILL if mode == 'cli-host-sigkill' else signal.SIGTERM)
                 deadline = time.monotonic() + 90
@@ -239,7 +247,7 @@ def main():
                     assert not receipt_path.exists(), 'Forced cleanup must not claim a normal drain'
                     case['forced_backend_exit'] = True
                     case['signal_drained'] = False
-                elif mode == 'cli-host-sigkill':
+                elif mode == 'cli-host-sigkill' and sys.platform == 'linux':
                     deadline = time.monotonic() + 15
                     stat = Path(f"/proc/{backend['pid']}/stat")
                     while time.monotonic() < deadline:
@@ -257,6 +265,18 @@ def main():
                     case['forced_backend_exit'] = True
                     case['signal_drained'] = False
                 else:
+                    if sys.platform == 'darwin':
+                        deadline = time.monotonic() + 90
+                        while time.monotonic() < deadline:
+                            observed = subprocess.run(['ps', '-p', str(backend['pid']), '-o', 'stat='],
+                                                      capture_output=True, text=True, timeout=5)
+                            assert observed.returncode in [0, 1], observed.stderr
+                            state = observed.stdout.strip()
+                            if not state or state.startswith('Z'):
+                                break
+                            time.sleep(0.1)
+                        else:
+                            raise RuntimeError('Owned backend survived macOS host/guardian termination')
                     receipt = json.loads(receipt_path.read_text())
                     for key in ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'account_id']:
                         assert receipt[key] == backend[key], key
