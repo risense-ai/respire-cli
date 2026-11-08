@@ -179,7 +179,7 @@ public static class RespireGuiNative {
     if ($visible.Count -ne 1) { throw 'Require one unambiguous original visible window' }
     $tracked = @(Descendants $desktopProcess.Id)
     $report.processes = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
-    $expectedProfile = [IO.Path]::GetFullPath((Join-Path $taskProfile 'client2/webview2'))
+    $expectedProfile = [IO.Path]::GetFullPath((Join-Path $taskProfile 'client2/webview2/EBWebView'))
     $profileArg = '--user-data-dir=(?:"' + [regex]::Escape($expectedProfile) + '"|' + [regex]::Escape($expectedProfile) + '(?=\s|$))'
     $browser = @($tracked | Where-Object { [IO.Path]::GetFileName($_.ExecutablePath) -eq 'msedgewebview2.exe' -and $_.CommandLine -match $profileArg -and $_.CommandLine -notmatch '(?:^|\s)--type=' })
     if ($browser.Count -ne 1 -or $browser[0].SessionId -ne $desktopProcess.SessionId) { throw 'Original WebView browser/profile/session binding failed' }
