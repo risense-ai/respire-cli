@@ -260,7 +260,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert(compatibility.replace(/\r\n/g, '\n').includes(launcherRaw),
     'original Client2 raw and exact GUI evidence paths must belong to the same named one-day upload');
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
-  const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
+  const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
   const candidateLines = candidate.split(/\r?\n/);
   assert(candidateLines.includes(`      CANDIDATE_CASE_NAME: ${candidateCase}`));
   assert(candidateLines.includes(`          name: ${candidateCase}-\${{ github.run_id }}-\${{ github.run_attempt }}`));

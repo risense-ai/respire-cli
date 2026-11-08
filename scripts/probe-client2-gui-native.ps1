@@ -126,8 +126,48 @@ function Focus-Target {
 function Send-TargetTab { return [RespireNativeInput]::Tab([IntPtr][long]$binding.hwnd) }
 function Pause-Probe { Start-Sleep -Milliseconds 100 }
 
+function Read-DesktopGeometry($Guard) {
+    $virtual = [Windows.Forms.SystemInformation]::VirtualScreen
+    $work = [Windows.Forms.Screen]::FromHandle([IntPtr][long]$binding.hwnd).WorkingArea
+    $dpi = [RespireNativeInput]::GetDpiForWindow([IntPtr][long]$binding.hwnd)
+    if ($dpi -eq 0) { throw 'Cannot read bound window DPI' }
+    return @{ window_bounds=$Guard.bounds; client_bounds=$Guard.client_bounds; dpi=$dpi
+        virtual_screen=@($virtual.Left,$virtual.Top,$virtual.Right,$virtual.Bottom)
+        working_area=@($work.Left,$work.Top,$work.Right,$work.Bottom) }
+}
+function Move-TargetWindow([int[]]$Bounds) {
+    [RespireNativeInput]::RestoreAndPosition([IntPtr][long]$binding.hwnd, [uint32]$binding.desktop_pid,
+        $Bounds[0],$Bounds[1],$Bounds[2]-$Bounds[0],$Bounds[3]-$Bounds[1])
+}
+function Prepare-TargetWindow {
+    $before = Assert-Target
+    $geometry = Read-DesktopGeometry $before
+    $report.window_placement_before = $geometry
+    $work = $geometry.working_area
+    $width = [Math]::Min($before.bounds[2]-$before.bounds[0],$work[2]-$work[0]-16)
+    $height = [Math]::Min($before.bounds[3]-$before.bounds[1],$work[3]-$work[1]-16)
+    # Fixed Wails WM_GETMINMAXINFO scales the original 800x600 minimum track size by window DPI.
+    $minWidth = [Math]::Ceiling(800*$geometry.dpi/96.0)
+    $minHeight = [Math]::Ceiling(600*$geometry.dpi/96.0)
+    if ($width -lt $minWidth -or $height -lt $minHeight) { throw 'Hosted working area cannot fit the original minimum window size' }
+    $requested = @(($work[0]+8),($work[1]+8),($work[0]+8+$width),($work[1]+8+$height))
+    $report.window_placement_request = @{bounds=$requested; original_min_window_dips=@(800,600)}
+    $null = Assert-Target
+    Move-TargetWindow $requested
+    $after = Assert-Target
+    $placed = Read-DesktopGeometry $after
+    $report.window_placement_after = $placed
+    $client = $after.client_bounds
+    if (($placed.working_area -join ',') -ne ($work -join ',') -or
+        $after.bounds[0] -lt $work[0] -or $after.bounds[1] -lt $work[1] -or $after.bounds[2] -gt $work[2] -or $after.bounds[3] -gt $work[3] -or
+        $client[0] -lt $work[0] -or $client[1] -lt $work[1] -or $client[2] -gt $work[2] -or $client[3] -gt $work[3] -or
+        $after.bounds[2]-$after.bounds[0] -lt [Math]::Ceiling(800*$placed.dpi/96.0) -or
+        $after.bounds[3]-$after.bounds[1] -lt [Math]::Ceiling(600*$placed.dpi/96.0)) { throw 'Restored target did not retain its original minimum window size with client area inside the working area' }
+}
+
 function Capture-Target([int[]]$ExpectedBounds) {
     $before = Assert-Target $true
+    $report.capture_geometry_before = Read-DesktopGeometry $before
     if (($before.client_bounds -join ',') -ne ($ExpectedBounds -join ',')) { throw 'Target client bounds changed before desktop capture' }
     $rectangle = [Drawing.Rectangle]::new($ExpectedBounds[0], $ExpectedBounds[1], $ExpectedBounds[2]-$ExpectedBounds[0], $ExpectedBounds[3]-$ExpectedBounds[1])
     if (-not [Windows.Forms.SystemInformation]::VirtualScreen.Contains($rectangle)) { throw 'Target client area extends outside the visible desktop' }
@@ -137,6 +177,7 @@ function Capture-Target([int[]]$ExpectedBounds) {
         try { $graphics.CopyFromScreen($rectangle.Location, [Drawing.Point]::Empty, $rectangle.Size, [Drawing.CopyPixelOperation]::SourceCopy) }
         finally { $graphics.Dispose() }
         $after = Assert-Target $true
+        $report.capture_geometry_after = Read-DesktopGeometry $after
         if (($after.client_bounds -join ',') -ne ($ExpectedBounds -join ',') -or
             ($after.bounds -join ',') -ne ($before.bounds -join ',')) { throw 'Target client/window bounds changed during desktop capture' }
         $path = Join-Path $OutputDirectory 'workspace.png'
@@ -150,6 +191,7 @@ function Capture-Target([int[]]$ExpectedBounds) {
 function Invoke-NativeGuiProbe {
     $report.initial_guard = Assert-Target
     $report.identity_verified = $true
+    Prepare-TargetWindow
     Focus-Target
     $report.input_guard = Assert-Target $true
     $report.foreground_verified = $true
@@ -205,6 +247,11 @@ public static class RespireNativeInput {
     [DllImport("user32.dll", EntryPoint="GetForegroundWindow")] public static extern IntPtr Foreground();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
     [DllImport("user32.dll", SetLastError=true)] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    [DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hwnd, int command);
+    [DllImport("user32.dll")] static extern bool IsIconic(IntPtr hwnd);
+    [DllImport("user32.dll")] static extern bool IsZoomed(IntPtr hwnd);
+    [DllImport("user32.dll", SetLastError=true)] static extern bool SetWindowPos(IntPtr hwnd,IntPtr after,int x,int y,int width,int height,uint flags);
     [DllImport("user32.dll", SetLastError=true)] static extern uint SendInput(uint count, INPUT[] events, int size);
     public static object Window(IntPtr hwnd) {
         uint pid; RECT rect,client; int cloaked;
@@ -220,6 +267,14 @@ public static class RespireNativeInput {
         var events=new INPUT[2]; events[0].type=1; events[0].input.keyboard.vk=9;
         events[1].type=1; events[1].input.keyboard.vk=9; events[1].input.keyboard.flags=2;
         return SendInput(2,events,Marshal.SizeOf(typeof(INPUT)));
+    }
+    public static void RestoreAndPosition(IntPtr target,uint expectedPid,int x,int y,int width,int height) {
+        uint pid;
+        if(GetWindowThreadProcessId(target,out pid)==0 || pid!=expectedPid) throw new InvalidOperationException("Target HWND owner changed before restore");
+        ShowWindow(target,9); // SW_RESTORE. Return value is prior visibility, not success.
+        if(GetWindowThreadProcessId(target,out pid)==0 || pid!=expectedPid) throw new InvalidOperationException("Target HWND owner changed before positioning");
+        if(!SetWindowPos(target,IntPtr.Zero,x,y,width,height,0x0014)) throw new Win32Exception(); // NOZORDER | NOACTIVATE
+        if(IsIconic(target) || IsZoomed(target)) throw new InvalidOperationException("Target did not restore to a normal window");
     }
 }
 '@
