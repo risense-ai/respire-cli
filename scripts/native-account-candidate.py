@@ -737,6 +737,104 @@ def cleanup_processes(root, hashes, observations=None):
     return cleaned
 
 
+CLIENT2_OWNED_SOURCE_SHA = "57bc070826949994c3f7ce9a64277160704bdfe5"
+OWNED_PROBE_FILES = ("diagnostics_darwin.go", "diagnostics_other.go", "host_operations.go", "main.go")
+
+
+def validate_owned_stop_options(args):
+    if args.owned_stop_mode is None:
+        require(args.client2_source is None, "owned_stop_source_requires_mode")
+        return
+    require(args.owned_stop_mode in ("registered", "client2-owned"), "unknown_owned_stop_mode")
+    require(args.suite == "diagnostic-native-stop" and args.client2_source is not None
+            and not args.official_cli_metadata and not args.legacy_stable_contracts
+            and not any((args.stable_business_cli, args.stable_business_cli_metadata,
+                         args.stable_business_runtime_archive))
+            and not args.runtime_archive and not args.runtime_metadata
+            and not args.require_native_stop, "owned_stop_requires_current_candidate_diagnostic")
+    require(args.cli_sha == os.environ.get("GITHUB_SHA") and re.fullmatch(r"[a-f0-9]{40}", args.cli_sha)
+            and re.fullmatch(r"[a-f0-9]{40}", args.runtime_sha), "owned_stop_workflow_source_mismatch")
+
+
+def build_owned_stop_probe(args, root, output):
+    # Never accept an external executable: derive the probe from both exact Git sources.
+    validate_owned_stop_options(args)
+    source = args.client2_source.resolve(strict=True)
+    verify_source(source, CLIENT2_OWNED_SOURCE_SHA)
+    stage = root / "owned-stop-probe"
+    stage.mkdir(mode=0o700)
+    archive = stage / "client2-source.tar"
+    with archive.open("wb") as stream:
+        subprocess.run(["git", "-C", str(source), "archive", "--format=tar", CLIENT2_OWNED_SOURCE_SHA],
+                       stdout=stream, stderr=output, check=True, timeout=60)
+    extracted = stage / "client2"
+    extracted.mkdir()
+    with tarfile.open(archive) as stream:
+        members = stream.getmembers()
+        require(len(members) < 10000 and sum(row.size for row in members) < 256 * 1024 * 1024
+                and all((row.isfile() or row.isdir()) and not Path(row.name).is_absolute()
+                        and ".." not in Path(row.name).parts and "\\" not in row.name
+                        for row in members), "owned_stop_source_archive_rejected")
+        stream.extractall(extracted, filter="data")
+    probe = stage / "probe"
+    probe.mkdir()
+    fixture_hashes = {}
+    for name in OWNED_PROBE_FILES:
+        tracked = "scripts/fixtures/client2-v0256-probe/" + name
+        content = subprocess.check_output(["git", "-C", str(args.cli_source), "show", args.cli_sha + ":" + tracked])
+        require(content == (args.cli_source / tracked).read_bytes(), "owned_stop_probe_fixture_changed")
+        (probe / name).write_bytes(content)
+        fixture_hashes[tracked] = hashlib.sha256(content).hexdigest()
+    (probe / "go.mod").write_text("module respire-client2/regression\n\ngo 1.26.0\n\n"
+        "require respire-client2 v0.0.0\nreplace respire-client2 => " + json.dumps(str(extracted)) + "\n")
+    (probe / "go.sum").write_bytes((extracted / "go.sum").read_bytes())
+    build_env = {name: os.environ[name] for name in ("PATH", "SystemRoot", "WINDIR") if name in os.environ}
+    build_env.update(GOPATH=str(stage / "go-path"), GOCACHE=str(stage / "go-cache"),
+                     GOMODCACHE=str(stage / "go-mod"), GOTOOLCHAIN="local", GOENV="off", GOWORK="off")
+    binary = probe / "probe"
+    subprocess.run(["go", "build", "-buildvcs=false", "-mod=mod", "-o", str(binary), "."],
+                   cwd=probe, env=build_env, stdout=output, stderr=output, check=True, timeout=600)
+    require(binary.is_file() and not binary.is_symlink(), "owned_stop_probe_binary_missing")
+    identity = {"client2_source_sha": CLIENT2_OWNED_SOURCE_SHA,
+        "client2_source_archive_sha256": digest(archive), "probe_fixture_cli_sha": args.cli_sha,
+        "probe_fixture_sha256": fixture_hashes, "generated_go_mod_sha256": digest(probe / "go.mod"),
+        "source_go_sum_sha256": digest(extracted / "go.sum"), "resolved_go_sum_sha256": digest(probe / "go.sum"),
+        "probe_binary_sha256": digest(binary), "mode": args.owned_stop_mode,
+        "workflow_source_sha": os.environ.get("GITHUB_SHA"), "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT")}
+    return binary, identity
+
+
+def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
+    marker = b"NATIVE_REGISTERED_STOP_RAW " if mode == "registered" else b"NATIVE_CLIENT2_STOP_RAW "
+    rows = [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
+    require(len(rows) == 3 and {row["case"] for row in rows} == {"normal", "caller-timeout", "explicit-force"},
+            "owned_stop_case_inventory_mismatch")
+    expected_mode = "cli-supervised" if mode == "registered" else "client2-owned"
+    for row in rows:
+        require(row.get("startup_mode") == expected_mode and row.get("passed") is True
+                and row.get("probe_sha256") == probe_sha256 and row.get("business_sender") == "modern-harness"
+                and row.get("provider_http_status") == 200 and row.get("provider_requests") == 1
+                and row.get("credential_cleanup_verified") is True
+                and row.get("runtime_compatibility_timeout_claimed") is False
+                and row["runtime_identity"]["image_sha256"] == runtime_sha256,
+                "owned_stop_real_consumer_evidence_mismatch")
+        expected_sender = ("modern-cli" if row["case"] == "normal" else "original-go-client2-managed") if mode == "registered" else "original-go-client2"
+        require(row.get("stop_sender") == expected_sender, "owned_stop_sender_mismatch")
+        timeout = row.get("caller_timeout_ms")
+        require(timeout is None if row["case"] == "normal" else
+                type(timeout) is int and (35000 if mode == "registered" else 30000) <= timeout <= 60000,
+                "owned_stop_caller_timeout_invalid")
+        forced = row["case"] == "explicit-force"
+        require(row.get("encrypted_write_committed") is (not forced)
+                and row.get("forced_operation_remains_unknown") is forced,
+                "owned_stop_write_outcome_mismatch")
+    # Only source-defined scalar observations leave the private business log.
+    return [{key: row.get(key) for key in ("case", "startup_mode", "business_sender", "stop_sender",
+        "caller_timeout_ms", "provider_http_status", "provider_requests", "encrypted_write_committed",
+        "forced_operation_remains_unknown", "credential_cleanup_verified")} for row in rows]
+
+
 def private_command(command, env, cwd, output, timeout):
     with subprocess.Popen([str(item) for item in command], env=env, cwd=cwd,
                           stdout=output, stderr=subprocess.STDOUT, start_new_session=True) as child:
@@ -778,6 +876,7 @@ def run(args):
               "cli_source_sha": args.cli_sha, "runtime_source_sha": args.runtime_sha,
               "run_id": os.environ.get("GITHUB_RUN_ID"), "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
               "target": TARGET, "stage": "source_identity"}
+    validate_owned_stop_options(args)
     env = private_env(root)
     for name in ("home", "data", "config", "cache", "runtime", "tmp", "installation"):
         (root / name).mkdir(mode=0o700)
@@ -839,6 +938,11 @@ def run(args):
         with log.open("wb") as output:
             def invoke(command, timeout=900):
                 return private_command(command, env, args.cli_source, output, timeout)
+            if args.owned_stop_mode:
+                probe, probe_identity = build_owned_stop_probe(args, root, output)
+                report["owned_stop"] = {"source_binding": probe_identity, "passed": False}
+                hashes.add(probe_identity["probe_binary_sha256"])
+                env.update(RSRS_TEST_NATIVE_OWNED_STOP=args.owned_stop_mode, RSRS_CLIENT2_PROBE_BIN=str(probe))
             for binary, expected in ((cli, cli_version), (runtime, version)):
                 actual = subprocess.check_output([str(binary), "--version"], env=env, timeout=30)
                 require(expected.encode() in actual.split(), "compiled_version_mismatch")
@@ -966,6 +1070,13 @@ def run(args):
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
                     "legacy_host_transitions_not_verified")
+        if args.owned_stop_mode:
+            require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
+            report["owned_stop"]["observations"] = owned_stop_checks(captured, args.owned_stop_mode,
+                probe_identity["probe_binary_sha256"], report["runtime_binary_sha256"])
+            report["owned_stop"].update(passed=True, runtime_archive_sha256=report["runtime_archive_sha256"],
+                runtime_metadata_sha256=report["runtime_metadata_sha256"], runtime_source_sha=args.runtime_sha,
+                cli_source_sha=args.cli_sha, harness_sha256=report["harness_sha256"])
         report["stage"] = "complete"
         report["passed"] = True
     except Exception as error:
@@ -982,6 +1093,7 @@ def run(args):
             roles = {report.get("cli_binary_sha256"): "current_cli",
                      report.get("runtime_binary_sha256"): "candidate_runtime",
                      report.get("harness_sha256"): "harness",
+                     report.get("owned_stop", {}).get("source_binding", {}).get("probe_binary_sha256"): "original_client2_probe",
                      report.get("stable_business_cli", {}).get("binary_sha256"): "official_stable_cli"}
             for process in forced_processes:
                 process["image_role"] = roles.get(process["image_sha256"], "run_bound_unknown")
@@ -1036,6 +1148,8 @@ def main():
     parser.add_argument("--suite", choices=("account", "full", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
     parser.add_argument("--runtime-archive", type=Path)
     parser.add_argument("--runtime-metadata", type=Path)
+    parser.add_argument("--owned-stop-mode", choices=("registered", "client2-owned"))
+    parser.add_argument("--client2-source", type=Path)
     parser.add_argument("--legacy-stable-contracts", action="store_true")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
@@ -1067,6 +1181,7 @@ def main():
             parser.error("stable-diary-remote requires three stable assets and the current manager without compatibility/native-stop")
     elif any(stable_paths):
         parser.error("stable business assets require --suite stable-diary-remote")
+    validate_owned_stop_options(args)
     return run(args)
 
 

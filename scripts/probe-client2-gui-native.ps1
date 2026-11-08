@@ -272,7 +272,7 @@ function Send-OfflineKey([int]$Key) {
     $null = Assert-Target $true
     $focus = Read-TargetFocus
     if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen) { throw 'Offline input focus escaped the original visible document' }
-    if ([RespireNativeInput]::Key([IntPtr][long]$binding.hwnd, [ushort]$Key) -ne 2) { throw 'Offline SendInput key was rejected' }
+    if ([RespireNativeInput]::Key([IntPtr][long]$binding.hwnd, [uint16]$Key) -ne 2) { throw 'Offline SendInput key was rejected' }
     $null = Assert-Target $true
 }
 function Press-OfflineButton([string]$Name) {

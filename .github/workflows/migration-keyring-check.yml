@@ -32,6 +32,15 @@ on:
           - diagnostic-failures
           - diagnostic-native-stop
           - stable-diary-remote
+      owned_stop_mode:
+        description: Isolated owned-stop diagnostic only; none preserves all existing suites
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - registered
+          - client2-owned
       compatibility_host:
         description: Require the Client2 host identity across account/space maintenance
         required: false
@@ -244,6 +253,7 @@ jobs:
     env:
       CLI_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '387ed1c560fd3bf336400f29119b6a577fa3f3d9' || inputs.runtime_candidate_sha }}
+      OWNED_STOP_MODE: ${{ inputs.owned_stop_mode || 'none' }}
       COMPATIBILITY_HOST: ${{ inputs.compatibility_host && 'true' || 'false' }}
       CLI_CONSUMER: ${{ inputs.cli_consumer || 'current-source' }}
       CANDIDATE_CASE_NAME: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}
@@ -272,6 +282,17 @@ jobs:
             test "$CLI_HEAD_REF" = integrate/shared-host-frontend-20261107
             test "$RUNTIME_SHA" = 387ed1c560fd3bf336400f29119b6a577fa3f3d9
           fi
+          case "$OWNED_STOP_MODE" in
+            none) ;;
+            registered|client2-owned)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test "$CLI_CONSUMER" = current-source
+              test '${{ inputs.business_suite }}' = diagnostic-native-stop
+              test '${{ inputs.require_native_stop }}' != true
+              test '${{ inputs.release_run_id }}' = ''
+              ;;
+            *) echo 'Unknown owned-stop diagnostic mode' >&2; exit 1 ;;
+          esac
           test "$RUNNER_ARCH" = X64
           test "$(uname -m)" = x86_64
           case "$CLI_CONSUMER" in
@@ -392,6 +413,18 @@ jobs:
               bundle.extractall(root, filter='data')
           binary.chmod(0o700)
           PY
+      - uses: actions/checkout@v5
+        if: env.OWNED_STOP_MODE != 'none'
+        with:
+          repository: risense-ai/respire-client2
+          ref: 57bc070826949994c3f7ce9a64277160704bdfe5
+          path: .owned-stop-client2
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        if: env.OWNED_STOP_MODE != 'none'
+        with:
+          go-version: '1.26.0'
+          cache: false
       - name: Bind the candidate Runtime and SDK locks
         run: |
           set -euo pipefail
@@ -453,6 +486,9 @@ jobs:
           host_args=()
           if [ "$COMPATIBILITY_HOST" = true ]; then host_args=(--compatibility-host); fi
           if [ '${{ inputs.require_native_stop }}' = true ]; then host_args+=(--require-native-stop); fi
+          if [ "$OWNED_STOP_MODE" != none ]; then
+            host_args+=(--owned-stop-mode "$OWNED_STOP_MODE" --client2-source "$PWD/.owned-stop-client2")
+          fi
           consumer_source="$PWD"
           consumer_sha="$CLI_SHA"
           consumer_binary="$RUNNER_TEMP/account-cli-target/debug/rsrs"
