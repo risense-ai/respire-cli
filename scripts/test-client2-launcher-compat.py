@@ -7,12 +7,15 @@ Client2 source. This is not GUI, account, model-inference or G1 acceptance.
 import argparse
 import hashlib
 import json
+import errno
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 
@@ -152,7 +155,10 @@ def main():
             status, body = request(port, path, headers={'Accept': 'text/event-stream'}, raw=True)
             assert status == 200 and body == f'event: endpoint\ndata: http://127.0.0.1:{port}/mcp\n\n'.encode()
         return {'initialize': True, 'tools_list': True, 'real_status': True, 'public_sse_endpoint': True}
-    for mode in ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']:
+    modes = ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']
+    if os.name == 'posix':
+        modes.append('cli-host-sigterm')
+    for mode in modes:
         root = base / mode; root.mkdir(); home = root / 'home'; home.mkdir()
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0)); port = listener.getsockname()[1]
@@ -189,11 +195,33 @@ def main():
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
-            stopped = run([executable, 'stop'], env)
-            case['client2_stop_exit'] = stopped.returncode
-            if stopped.returncode:
-                case['errors']['stop_error'] = helper_result(stopped)
-                raise RuntimeError('Client2 cannot stop its visible service')
+            if mode == 'cli-host-sigterm':
+                _, visible = request(port, '/api/health')
+                _, backend = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+                assert visible['compatibility_host'] == 'client2-v0256'
+                assert Path(visible['exe']).resolve() == (root / 'bin' / 'rsrs').resolve()
+                assert Path(visible['installation_root']).resolve() == root.resolve()
+                os.kill(visible['pid'], signal.SIGTERM)
+                deadline = time.monotonic() + 90
+                while time.monotonic() < deadline:
+                    with socket.socket() as connection:
+                        connection.settimeout(1)
+                        if connection.connect_ex(('127.0.0.1', port)) == errno.ECONNREFUSED:
+                            break
+                    time.sleep(0.1)
+                else:
+                    raise RuntimeError('Signaled compatibility host did not close its listener')
+                receipt = json.loads((root / 'runtime' / f"stop-{backend['instance_id']}.json").read_text())
+                for key in ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'account_id']:
+                    assert receipt[key] == backend[key], key
+                assert receipt['state'] == 'drained' and receipt['unfinished'] == []
+                case['signal_drained'] = True
+            else:
+                stopped = run([executable, 'stop'], env)
+                case['client2_stop_exit'] = stopped.returncode
+                if stopped.returncode:
+                    case['errors']['stop_error'] = helper_result(stopped)
+                    raise RuntimeError('Client2 cannot stop its visible service')
             case['passed'] = True
         except Exception as error:
             case['failure'] = str(error)

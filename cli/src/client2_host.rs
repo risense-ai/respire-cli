@@ -122,6 +122,27 @@ struct Backend {
 }
 
 impl Backend {
+    fn stop_owned(&self) -> Result<String> {
+        crate::runtime_policy::require_host("compatibility host shutdown")?;
+        let health: crate::net_rpc::Health = serde_json::from_value(health_at(self.port)?)?;
+        self.verify(&health)?;
+        *self.last_health.lock().map_err(|_| anyhow::anyhow!("health state poisoned"))? = health.clone();
+        let expected = json!({"installation_id":health.installation_id,
+            "instance_id":health.instance_id, "account_id":health.account_id, "generation":health.generation});
+        let response = agent().post(&format!("http://127.0.0.1:{}/api/runtime/stop", self.port))
+            .set("Content-Type", "application/json").set("X-Respire-Lifecycle", "coordinator-v1")
+            .send_string(&expected.to_string())?;
+        let mut bytes = Vec::new();
+        response.into_reader().take(64 * 1024 + 1).read_to_end(&mut bytes)?;
+        anyhow::ensure!(bytes.len() <= 64 * 1024, "oversized stop acknowledgement");
+        let reply: Value = serde_json::from_slice(&bytes)?;
+        anyhow::ensure!(reply["ok"] == true && reply["state"] == "accepted"
+            && reply["request_id"].as_str().is_some_and(|id| !id.is_empty()),
+            "owned Runtime did not acknowledge shutdown");
+        reply["operation_id"].as_str().filter(|id| !id.is_empty()).map(str::to_owned)
+            .context("owned Runtime stop operation ID missing")
+    }
+
     fn verify(&self, current: &crate::net_rpc::Health) -> Result<()> {
         anyhow::ensure!(current.server == "respire" && current.v == 1
             && current.pid == self.health.pid && current.instance_id == self.health.instance_id
@@ -235,6 +256,12 @@ pub(crate) fn serve() -> Result<()> {
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     crate::autostart::check_direct_access()?;
+    let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, interrupted.clone())?;
+        signal_hook::flag::register(signal_hook::consts::SIGINT, interrupted.clone())?;
+    }
     let root = respire_client_host::paths::main_data_dir();
     anyhow::ensure!(!root.join("runtime/autostart/registration.json").exists(),
         "compatibility host cannot replace a registered service");
@@ -280,6 +307,9 @@ pub(crate) fn serve() -> Result<()> {
     }
     let active = Arc::new(AtomicUsize::new(0));
     let mut exited = None;
+    let mut shutdown_requested = false;
+    let mut stop_operation = None;
+    let mut shutdown_error = None;
     loop {
         if exited.is_none() { exited = child.try_wait()?; }
         if let Some(status) = exited {
@@ -288,11 +318,28 @@ pub(crate) fn serve() -> Result<()> {
                 continue;
             }
             let final_health = backend.last_health.lock().map_err(|_| anyhow::anyhow!("health state poisoned"))?;
-            crate::net_rpc::final_stop_receipt(&final_health, None)?;
+            crate::net_rpc::final_stop_receipt(&final_health, stop_operation.as_deref())?;
             anyhow::ensure!(status.success(), "Runtime exited unsuccessfully after drain");
+            if let Some(error) = shutdown_error { return Err(error); }
             return Ok(());
         }
+        if interrupted.load(Ordering::Acquire) && !shutdown_requested {
+            // One signal-driven stop request only. Unknown outcomes remain
+            // inspectable; never replay or abandon the still-owned child.
+            shutdown_requested = true;
+            match backend.stop_owned() {
+                Ok(operation) => stop_operation = Some(operation),
+                Err(error) => {
+                    eprintln!("compatibility shutdown is unconfirmed; inspect before retry: {error:#}");
+                    shutdown_error = Some(error);
+                }
+            }
+        }
         let Some(mut request) = server.recv_timeout(Duration::from_millis(50))? else { continue; };
+        if shutdown_requested && !matches!(request.url(), "/api/health" | "/api/runtime/stop") {
+            let _ = request.respond(tiny_http::Response::from_string("host is draining").with_status_code(503));
+            continue;
+        }
         let headers: Vec<_> = request.headers().iter().map(|header|
             (header.field.to_string(), header.value.to_string())).collect();
         if validate_request(request.method().as_str(), request.url(),
