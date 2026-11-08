@@ -227,7 +227,8 @@ def main():
                 deadline = time.monotonic() + 90
                 while time.monotonic() < deadline:
                     with socket.socket() as connection:
-                        connection.settimeout(1)
+                        # Windows can take about two seconds to report a refused connection.
+                        connection.settimeout(5)
                         if connection.connect_ex(('127.0.0.1', port)) == errno.ECONNREFUSED:
                             break
                     time.sleep(0.1)
