@@ -126,6 +126,20 @@ class FixtureInstallationTests(unittest.TestCase):
 
     def test_fixture_receives_its_own_verified_installation(self):
         self.run_fixture()
+        startup = Path(__file__).with_name('test-windows-host-startup.ps1').read_text(encoding='utf-8-sig')
+        self.assertIn('--installation-root $profileRoot', startup)
+        self.assertLess(startup.index('Copy-Item -LiteralPath $nativeExecutable -Destination $stableCli'),
+                        startup.index('Start-ScheduledTask -TaskName $taskName'))
+        self.assertIn('Get-FileHash -LiteralPath $stableCli -Algorithm SHA256', startup)
+        self.assertIn("('runtime/' + $managedReceipt.version + '/rsrs-runtime.exe')", startup)
+        self.assertEqual(startup.count("-Headers @{'X-Respire-Health' = 'runtime-v1'}"), 3)
+        self.assertIn('task_result_parsed = ($null -ne $taskEnvelope); task_error_code = $taskErrorCode;', startup)
+        bundle = ast.parse(Path(__file__).with_name('runtime-acceptance-bundle.py').read_text(encoding='utf-8'))
+        entrypoint = next(node for node in bundle.body if isinstance(node, ast.If))
+        call = next(node for node in ast.walk(entrypoint) if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name) and node.func.id == 'stage_runtime')
+        self.assertTrue(any(arg.arg == 'installation_root' and isinstance(arg.value, ast.Attribute)
+                            and arg.value.attr == 'installation_root' for arg in call.keywords))
 
     def test_invalid_installation_never_rebinds_runtime(self):
         for fault in ('exit', 'image', 'target', 'proof', 'version', 'existing', 'host', 'outside'):
