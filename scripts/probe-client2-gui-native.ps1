@@ -233,7 +233,10 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
         $walk = [Diagnostics.Stopwatch]::StartNew()
         while ($queue.Count -and $visited -lt 512 -and $walk.Elapsed.TotalSeconds -lt 5) {
             $next = $queue.Dequeue(); $visited++; $current = $next.element.Current
-            if (-not $ownedIds.Contains([int]$current.ProcessId)) { throw 'Offline UIA node escaped the bound process tree' }
+            if (-not $ownedIds.Contains([int]$current.ProcessId)) {
+                $report.offline.foreign_node_matches_selector = ($current.ControlType.ProgrammaticName -eq $Type -and $current.Name -match $Name)
+                throw 'Offline UIA node escaped the bound process tree'
+            }
             $document = $next.document -or $current.ControlType -eq [Windows.Automation.ControlType]::Document
             # Only a selector match is retained. Never serialize arbitrary UIA names or values:
             # the normal key-generation dialog contains recovery material.
@@ -418,6 +421,7 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.onboarding_stage = 'choose_offline'
     # Normal first-run route; do not use the separate \u201cskip wizard\u201d action or edit completion markers.
     Press-OfflineButton ([regex]::Unescape('\u005e\u4ec5\u5728\u6b64\u8bbe\u5907\u4f7f\u7528\u0028\u003f\u003a\u005c\u0073\u007c\u0024\u0029'))
+    $report.offline.onboarding_stage = 'advance_sync'
     Press-OfflineButton ([regex]::Unescape('\u005e\u4e0b\u4e00\u6b65\u0024'))
     $report.offline.onboarding_stage = 'await_model_step'
     Wait-OfflinePreferences 'onboardingStep' 'model'
