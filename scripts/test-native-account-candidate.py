@@ -136,6 +136,20 @@ class CandidateFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown_business_suite"):
             candidate.selected_cases(listing, "unknown")
 
+    def test_compatibility_host_checkpoints_do_not_publish_private_fields(self):
+        checks = [{"stage": "space-profile", "passed": True},
+                  {"stage": "import-target", "passed": False}]
+        captured = b"private auth output never published\n" + b"\n".join(
+            b"test prefix ... client2-account-host " + json.dumps(check).encode() for check in checks)
+        self.assertEqual(candidate.compatibility_host_checks(captured), checks)
+        self.assertEqual(candidate.compatibility_host_checks(b"unrelated private output"), [])
+        for invalid in ({"stage": "space-profile", "passed": True, "secret": "private"},
+                        {"stage": "private-value", "passed": True},
+                        {"stage": "import-target", "passed": 1}):
+            self.assertIsNone(candidate.compatibility_host_checks(
+                b"client2-account-host " + json.dumps(invalid).encode()))
+        self.assertIsNone(candidate.compatibility_host_checks(b"client2-account-host malformed"))
+
     def test_credentials_and_bus_not_inherited(self):
         ambient = {"PATH": "/bin", "CORE_SDK_READ_TOKEN": "secret", "GITHUB_TOKEN": "secret",
             "GH_TOKEN": "secret", "DBUS_SESSION_BUS_ADDRESS": "unix:old", "RSRS_SUPER": "secret",

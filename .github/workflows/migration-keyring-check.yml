@@ -19,6 +19,11 @@ on:
         options:
           - account
           - full
+      compatibility_host:
+        description: Build the opt-in Client2 host and require its identity across account/space maintenance
+        required: false
+        type: boolean
+        default: false
       release_run_id:
         description: Optional validated Release run for targeted native migration; blank runs credential fixtures only
         required: false
@@ -221,6 +226,7 @@ jobs:
     env:
       CLI_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '387ed1c560fd3bf336400f29119b6a577fa3f3d9' || inputs.runtime_candidate_sha }}
+      COMPATIBILITY_HOST: ${{ inputs.compatibility_host && 'true' || 'false' }}
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RSRS_ENGINE: cpu
@@ -293,7 +299,9 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/x86_64-unknown-linux-gnu"
-          cargo build --locked -p respire --bin rsrs --target-dir "$RUNNER_TEMP/account-cli-target"
+          cli_features=()
+          if [ "$COMPATIBILITY_HOST" = true ]; then cli_features=(--features client2-host-prototype); fi
+          cargo build --locked -p respire --bin rsrs "${cli_features[@]}" --target-dir "$RUNNER_TEMP/account-cli-target"
           cargo build --locked --manifest-path .account-runtime/Cargo.toml -p respire_runtime --bin rsrs-runtime --target-dir "$RUNNER_TEMP/account-runtime-target"
           cargo test --locked --manifest-path .account-runtime/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir "$RUNNER_TEMP/account-runtime-target" > "$RUNNER_TEMP/account-harness-build.jsonl"
           node .account-runtime/scripts/stage-core-runtime.mjs "$RUNNER_TEMP/account-runtime-target/debug"
@@ -314,7 +322,10 @@ jobs:
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
       - name: Execute the original account regression with the offline candidate
         run: |
-          python -B scripts/native-account-candidate.py \
+          set -euo pipefail
+          host_args=()
+          if [ "$COMPATIBILITY_HOST" = true ]; then host_args=(--compatibility-host); fi
+          python -B scripts/native-account-candidate.py "${host_args[@]}" \
             --root "$RUNNER_TEMP/source-account-regression" \
             --cli-source "$PWD" --cli-sha "$CLI_SHA" \
             --runtime-source "$PWD/.account-runtime" --runtime-sha "$RUNTIME_SHA" \

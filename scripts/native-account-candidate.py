@@ -39,6 +39,24 @@ def selected_cases(listing, suite):
                 "business_module_inventory_mismatch")
     return names
 
+def compatibility_host_checks(captured):
+    checks = []
+    marker = b"client2-account-host "
+    for line in captured.splitlines():
+        if marker not in line:
+            continue
+        try:
+            value = json.loads(line.split(marker, 1)[1])
+        except (ValueError, UnicodeDecodeError):
+            return None
+        if (not isinstance(value, dict) or set(value) != {"stage", "passed"}
+                or value["stage"] not in ("space-profile", "import-target", "restart-target")
+                or type(value["passed"]) is not bool):
+            return None
+        checks.append(value)
+    return checks
+
+
 MODEL_HASHES = {
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
     "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
@@ -212,6 +230,7 @@ def run(args):
     root.mkdir(mode=0o700)
     report = {"schema_version": 1, "kind": "unpublished-source-fixture",
               "case": CASE if args.suite == "account" else "full-business-suite", "suite": args.suite,
+              "client2_host_prototype": args.compatibility_host,
               "passed": False, "release_acceptance": False, "test_executed": False,
               "cli_source_sha": args.cli_sha, "runtime_source_sha": args.runtime_sha,
               "run_id": os.environ.get("GITHUB_RUN_ID"), "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
@@ -264,6 +283,8 @@ def run(args):
                 RSRS_CLI_SOURCE_SHA=args.cli_sha, RSRS_RUNTIME_BIN=str(installed),
                 RSRS_RUNTIME_SOURCE_SHA=args.runtime_sha, RSRS_RUNTIME_CANDIDATE_METADATA=str(metadata_path),
                 RSRS_CORE_TEST_MODEL_DIR=str(root / "model"), RSRS_CORE_TEST_MODE="1")
+            if args.compatibility_host:
+                env["RSRS_TEST_EXPECT_CLIENT2_HOST"] = "1"
             listing = subprocess.check_output([str(harness), "--list"], env=env, timeout=30, stderr=output)
             cases = selected_cases(listing.decode(), args.suite)
             report["required_cases"] = cases
@@ -286,6 +307,14 @@ def run(args):
                 "required_business_cases_did_not_pass")
         require(all(f"test {case} ... ok".encode() in captured.splitlines() for case in cases),
                 "required_business_case_result_missing")
+        if args.compatibility_host:
+            checks = compatibility_host_checks(captured)
+            expected = {"import-target", "restart-target"}
+            if args.suite == "full":
+                expected.add("space-profile")
+            require(checks is not None and checks and all(check["passed"] for check in checks)
+                    and expected.issubset({check["stage"] for check in checks}),
+                    "legacy_host_transitions_not_verified")
         report["stage"] = "complete"
         report["passed"] = True
     except Exception as error:
@@ -309,6 +338,8 @@ def run(args):
         if log.is_file():
             captured = log.read_bytes()
             lines = captured.splitlines()
+            if args.compatibility_host:
+                report["compatibility_host_checks"] = compatibility_host_checks(captured)
             report["passed_cases"] = [case for case in cases if f"test {case} ... ok".encode() in lines]
             report["missing_or_failed_cases"] = [case for case in cases if case not in report["passed_cases"]]
             report["test_executed"] = bool(cases) and all(
@@ -326,6 +357,7 @@ def main():
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
     parser.add_argument("--suite", choices=("account", "full"), default="account")
+    parser.add_argument("--compatibility-host", action="store_true")
     def interrupted(_number, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
