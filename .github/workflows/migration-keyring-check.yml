@@ -334,7 +334,8 @@ jobs:
               'git_sha': source_sha, 'version': version, 'target': 'x86_64-unknown-linux-gnu',
               'binary_file': binary_name, 'binary_size': 14133456, 'binary_sha256': binary_hash}
           assert all(metadata[key] == value for key, value in expected.items())
-          assert tomllib.loads((source / 'cli/Cargo.toml').read_text())['package']['version'] == version
+          # The release workflow applies dev.6 only to its temporary build tree.
+          assert tomllib.loads((source / 'cli/Cargo.toml').read_text())['package']['version'] == '1.0.21-dev.5'
           assert (source / 'sdk/core-sdk.lock.json').read_bytes() == pathlib.Path('sdk/core-sdk.lock.json').read_bytes()
           (root / binary_name).chmod(0o700)
           PY
@@ -406,6 +407,7 @@ jobs:
             consumer_source="$PWD/.account-cli-dev6"
             consumer_sha=425f397db2a64347d3d27fa93db630fad6b9b520
             consumer_binary="$RUNNER_TEMP/official-dev6-cli/rsrs-x86_64-unknown-linux-gnu"
+            host_args+=(--official-cli-metadata "$RUNNER_TEMP/official-dev6-cli/cli-build-x86_64-unknown-linux-gnu.json")
           fi
           python -B scripts/native-account-candidate.py "${host_args[@]}" \
             --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \

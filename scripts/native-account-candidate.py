@@ -288,6 +288,32 @@ def source_version(source, package):
     return version
 
 
+def official_cli_version(metadata_path, cli, source_sha, env):
+    # Official publication applies an ephemeral version without editing the tagged source.
+    require(source_sha == "425f397db2a64347d3d27fa93db630fad6b9b520",
+            "official_cli_source_mismatch")
+    metadata_path = Path(metadata_path)
+    require(metadata_path.name == "cli-build-x86_64-unknown-linux-gnu.json"
+            and not metadata_path.is_symlink() and metadata_path.is_file()
+            and metadata_path.stat().st_size == 427
+            and digest(metadata_path) == "243a679da8b9436b7a6e5e09a5e4f113ad09e4d64e9166f50e6a10105c45619b",
+            "official_cli_metadata_digest_mismatch")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    expected = {"schema_version": 2, "artifact_layout": "cli-frontend-v2",
+                "git_sha": source_sha, "version": "1.0.21-dev.6", "target": TARGET,
+                "binary_file": "rsrs-x86_64-unknown-linux-gnu", "binary_size": 14133456,
+                "binary_sha256": "f82eef533b906dd5ed5e96ebe17321571084ff138c29acdc92f55ebb8a8ecf2e"}
+    require(all(metadata.get(key) == value for key, value in expected.items()),
+            "official_cli_metadata_identity_mismatch")
+    require(cli.stat().st_size == metadata["binary_size"]
+            and digest(cli) == metadata["binary_sha256"], "official_cli_binary_mismatch")
+    version = metadata["version"]
+    actual = subprocess.check_output([str(cli), "--version"], env=env,
+                                     stderr=subprocess.PIPE, timeout=30)
+    require(version.encode() in actual.split(), "official_cli_version_mismatch")
+    return version
+
+
 def safe_file(root, relative):
     require(isinstance(relative, str) and relative and not relative.startswith("/")
             and not any(part in ("", ".", "..") for part in relative.split("/"))
@@ -446,7 +472,13 @@ def run(args):
         verify_source(args.cli_source, args.cli_sha)
         verify_source(args.runtime_source, args.runtime_sha)
         version = source_version(args.runtime_source, "runtime")
-        cli_version = source_version(args.cli_source, "cli")
+        cli_source_version = source_version(args.cli_source, "cli")
+        cli_version = (official_cli_version(args.official_cli_metadata, cli, args.cli_sha, env)
+                       if args.official_cli_metadata else cli_source_version)
+        report.update(cli_source_version=cli_source_version,
+                      cli_version_origin="official-release-metadata" if args.official_cli_metadata else "source-manifest")
+        if args.official_cli_metadata:
+            report["official_cli_metadata_sha256"] = digest(args.official_cli_metadata)
         pin = json.loads((args.cli_source / "runtime-pin.json").read_text())["required"]
         require(version != pin, "candidate_must_not_impersonate_official_pin")
         require((args.cli_source / "sdk/core-sdk.lock.json").read_bytes()
@@ -567,6 +599,8 @@ def main():
     parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures"), default="account")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
+    parser.add_argument("--official-cli-metadata", type=Path,
+                        help="Verified fixed official dev.6 GNU sidecar; preserves its release version")
     def interrupted(_number, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
