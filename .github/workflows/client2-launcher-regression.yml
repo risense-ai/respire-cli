@@ -43,6 +43,15 @@ jobs:
           ref: 57bc070826949994c3f7ce9a64277160704bdfe5
           path: .client2-source
           persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: risense-ai/respire-magpie
+          ref: a3ae9b3035d02b181ba7a8ddae251495d092dd63
+          path: .magpie-source
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.0'
@@ -84,6 +93,7 @@ jobs:
             --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
             --runtime-version "$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')" \
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
+            --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
             --report "$RUNNER_TEMP/client2-launcher-regression.json"
       - name: Preserve actual host results (not G1 evidence)
         if: always()

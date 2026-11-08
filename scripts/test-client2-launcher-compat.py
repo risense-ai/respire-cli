@@ -2,7 +2,8 @@
 """Real unchanged Client2 v0.2.56 host calls; account-free temporary installations.
 
 Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
-Client2 source. This is not GUI, account, model-inference or G1 acceptance.
+Client2 source. Optional pinned Magpie source exercises its original legacy RPC.
+This is not GUI, account, model-inference or G1 acceptance.
 """
 import argparse
 import hashlib
@@ -21,6 +22,8 @@ import urllib.error
 import urllib.request
 
 CLIENT2_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
+MAGPIE_SHA = 'a3ae9b3035d02b181ba7a8ddae251495d092dd63'
+MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -47,6 +50,8 @@ def main():
     parser.add_argument('--runtime-version', required=True)
     parser.add_argument('--client2-source', type=Path, required=True)
     parser.add_argument('--go', type=Path, required=True)
+    parser.add_argument('--magpie-source', type=Path)
+    parser.add_argument('--node', type=Path)
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
@@ -57,6 +62,22 @@ def main():
         return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
     if git('rev-parse', 'HEAD') != CLIENT2_SHA or git('status', '--porcelain'):
         raise RuntimeError('Require unchanged Client2 v0.2.56 source')
+    magpie = args.magpie_source.resolve(strict=True) if args.magpie_source else None
+    node = None
+    if magpie:
+        def magpie_git(*argv):
+            return subprocess.check_output(['git', '-C', str(magpie), *argv], text=True).strip()
+        if (magpie_git('rev-parse', 'HEAD') != MAGPIE_SHA or magpie_git('status', '--porcelain')
+                or magpie_git('hash-object', 'runtime.mjs') != MAGPIE_RUNTIME_BLOB):
+            raise RuntimeError('Require unchanged released Magpie v0.3.16 source')
+        node_path = args.node or shutil.which('node')
+        if not node_path:
+            raise RuntimeError('Original Magpie RPC probe requires Node.js')
+        node = Path(node_path).resolve(strict=True)
+        if not node.is_file():
+            raise RuntimeError('Original Magpie RPC probe requires a Node.js executable')
+    elif args.node:
+        raise RuntimeError('--node requires --magpie-source')
     base = Path(tempfile.mkdtemp(prefix='client2-launcher-regression-')).resolve()
     probe = base / 'probe'; probe.mkdir()
     (probe / 'go.mod').write_text('module respire-client2/regression\n\ngo 1.26.0\n\n'
@@ -74,8 +95,11 @@ def main():
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version},
+              'legacy_plugin': {'executed': magpie is not None,
+                                'source_sha': MAGPIE_SHA if magpie else None,
+                                'runtime_blob': MAGPIE_RUNTIME_BLOB if magpie else None},
               'excluded': ['desktop GUI', 'accounts and credentials', 'model inference',
-                           'managed services', 'cross-platform execution']}
+                           'managed services', 'cross-platform execution'] + ([] if magpie else ['original plugin RPC'])}
     def run(argv, env):
         # Go/Rust emit UTF-8, including Chinese errors. Decode captured bytes
         # explicitly instead of using Windows' locale-dependent text reader.
@@ -199,6 +223,17 @@ def main():
                 raise RuntimeError('Unmodified Client2 startup/business calls failed')
             case['boundaries'] = boundaries(port)
             case['mcp'] = mcp_read(port)
+            if magpie:
+                original_plugin = run([node, Path(__file__).parent / 'fixtures/client2-v0256-probe/magpie-rpc.mjs',
+                                       magpie, f'http://127.0.0.1:{port}/'], env)
+                if original_plugin.returncode:
+                    raise RuntimeError('Original Magpie RPC failed: ' + original_plugin.stderr[:2000])
+                plugin_result = helper_result(original_plugin)
+                expected_plugin = {'passed': True, 'original_rpc': True, 'scope_bound': True,
+                                   'memory_authority_preserved': True, 'same_runtime': True}
+                if plugin_result != expected_plugin:
+                    raise RuntimeError('Original Magpie RPC returned incomplete evidence')
+                case['magpie_rpc'] = plugin_result
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
