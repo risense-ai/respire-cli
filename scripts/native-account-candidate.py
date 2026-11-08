@@ -289,6 +289,8 @@ def run(args):
             cases = selected_cases(listing.decode(), args.suite)
             report["required_cases"] = cases
             test_args = [CASE, "--exact", "--test-threads=1"] if args.suite == "account" else ["--test-threads=1"]
+            if args.compatibility_host:
+                test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
                 "--root", root / "keyring", "--", harness, *test_args]

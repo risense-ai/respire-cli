@@ -303,7 +303,7 @@ jobs:
           if [ "$COMPATIBILITY_HOST" = true ]; then cli_features=(--features client2-host-prototype); fi
           cargo build --locked -p respire --bin rsrs "${cli_features[@]}" --target-dir "$RUNNER_TEMP/account-cli-target"
           cargo build --locked --manifest-path .account-runtime/Cargo.toml -p respire_runtime --bin rsrs-runtime --target-dir "$RUNNER_TEMP/account-runtime-target"
-          cargo test --locked --manifest-path .account-runtime/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir "$RUNNER_TEMP/account-runtime-target" > "$RUNNER_TEMP/account-harness-build.jsonl"
+          cargo test --locked --manifest-path .account-runtime/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir "$RUNNER_TEMP/account-runtime-target" > "$RUNNER_TEMP/account-harness-build.jsonl" || { cat "$RUNNER_TEMP/account-harness-build.jsonl"; exit 1; }
           node .account-runtime/scripts/stage-core-runtime.mjs "$RUNNER_TEMP/account-runtime-target/debug"
           node .account-runtime/scripts/stage-core-runtime.mjs "$RUNNER_TEMP/account-runtime-target/debug/examples"
           python - <<'PY'
