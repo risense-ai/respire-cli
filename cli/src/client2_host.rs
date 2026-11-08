@@ -103,6 +103,7 @@ pub(crate) fn supervise() -> Result<()> {
     let backend = Backend { port, health: health.clone(),
         executable: crate::rpc::resolve_runtime_executable()?.canonicalize()?,
         public_port: crate::net_rpc::rpc_port(), host_executable: visible_path(executable.clone())?,
+        host_image_sha256: hex::encode(Sha256::digest(std::fs::read(&executable)?)),
         last_health: Mutex::new(health) };
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
     // A disconnected launcher must not orphan a running host by making its
@@ -139,6 +140,7 @@ struct Backend {
     executable: PathBuf,
     public_port: u16,
     host_executable: PathBuf,
+    host_image_sha256: String,
     last_health: Mutex<crate::net_rpc::Health>,
 }
 
@@ -205,7 +207,12 @@ impl Backend {
                     "pid":std::process::id(), "exe":self.host_executable,
                     "data_dir":health.data_dir, "installation_root":health.installation_root,
                     "inference":health.inference, "rpc":health.rpc, "store_ready":health.store_ready,
-                    "compatibility_host":"client2-v0256", "backend_instance_id":health.instance_id})
+                    "compatibility_host":"client2-v0256", "backend_instance_id":health.instance_id,
+                    "host_birth":crate::autostart::process_birth(std::process::id())?
+                        .context("compatibility host process birth is unavailable")?,
+                    "host_image_sha256":self.host_image_sha256,
+                    "public_port":self.public_port, "backend_pid":health.pid,
+                    "backend_process_start_id":health.process_start_id})
             };
             return Ok((200, "application/json".into(), serde_json::to_vec(&response)?));
         }
@@ -330,6 +337,7 @@ pub(crate) fn serve() -> Result<()> {
         "Runtime readiness does not match the selected child and installation");
     let backend = Arc::new(Backend { port, health, executable, public_port,
         host_executable: visible_path(std::env::current_exe()?)?,
+        host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
         last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
     let server = tiny_http::Server::from_listener(listener, None)
@@ -405,6 +413,152 @@ pub(crate) fn serve() -> Result<()> {
     }
 }
 
+// Unlike runtime_process_identity, this inspects a CLI host without requiring
+// the Runtime role. The caller separately proves that it owns the public socket.
+fn host_process(pid: u32) -> Result<(PathBuf, String)> {
+    let before = crate::autostart::process_birth(pid)?
+        .context("compatibility host process is not running")?;
+    #[cfg(windows)]
+    let executable = respire_spawn::process_identity(pid)?
+        .context("compatibility host process disappeared")?.executable;
+    #[cfg(target_os = "linux")]
+    let executable = std::fs::read_link(format!("/proc/{pid}/exe"))?;
+    #[cfg(all(unix, not(target_os = "linux")))]
+    let executable = {
+        let output = Command::new("/bin/ps").args(["-ww", "-p", &pid.to_string(), "-o", "comm="])
+            .env("LC_ALL", "C").output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect compatibility host image");
+        PathBuf::from(String::from_utf8(output.stdout)?.trim())
+    };
+    anyhow::ensure!(crate::autostart::process_birth(pid)?.as_deref() == Some(before.as_str()),
+        "compatibility host changed during OS identity inspection");
+    Ok((executable.canonicalize()?, before))
+}
+
+// Bind the exact IPv4 loopback endpoint, not an unrelated interface with the
+// same port. Missing OS tooling and ambiguous ownership both fail closed.
+#[cfg(target_os = "linux")]
+fn loopback_listener(port: u16, pid: u32) -> Result<u32> {
+    let loopback = format!("0100007F:{port:04X}");
+    let wildcard = format!("00000000:{port:04X}");
+    let mut inodes = std::collections::BTreeSet::new();
+    for line in std::fs::read_to_string("/proc/net/tcp")?.lines().skip(1) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        anyhow::ensure!(fields.len() >= 10, "invalid OS TCP listener record");
+        if fields[3] == "0A" && (fields[1] == loopback || fields[1] == wildcard) {
+            anyhow::ensure!(fields[9] != "0", "OS listener inode is missing");
+            inodes.insert(fields[9].to_owned());
+        }
+    }
+    anyhow::ensure!(inodes.len() == 1, "compatibility loopback listener is unavailable or ambiguous");
+    let inode = inodes.into_iter().next().context("compatibility listener is missing")?;
+    let socket = format!("socket:[{inode}]");
+    // Inspect only the claimed process: the kernel socket inode, not the health
+    // response, must prove its ownership. No scan of inaccessible foreign PIDs.
+    for entry in std::fs::read_dir(format!("/proc/{pid}/fd"))? {
+        let entry = entry?;
+        match std::fs::read_link(entry.path()) {
+            Ok(target) if target.as_os_str() == std::ffi::OsStr::new(&socket) => return Ok(pid),
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
+    }
+    anyhow::bail!("claimed compatibility host does not own the OS listener")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn loopback_listener(port: u16, _pid: u32) -> Result<u32> {
+    let mut owners = std::collections::BTreeSet::new();
+    #[cfg(windows)]
+    {
+        let output = Command::new("netstat").args(["-ano", "-p", "tcp"]).output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect compatibility listener");
+        let local = format!("127.0.0.1:{port}");
+        let wildcard = format!("0.0.0.0:{port}");
+        for line in String::from_utf8(output.stdout)?.lines() {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() == 5 && fields[0] == "TCP" && fields[3] == "LISTENING"
+                && (fields[1] == local || fields[1] == wildcard) {
+                owners.insert(fields[4].parse::<u32>()?);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let output = Command::new("/usr/sbin/lsof")
+            .args(["-nP", &format!("-i4TCP:{port}"), "-sTCP:LISTEN", "-Fpn"]).output()?;
+        anyhow::ensure!(output.status.success(), "cannot inspect compatibility listener");
+        let local = format!("127.0.0.1:{port}");
+        let wildcard = format!("*:{port}");
+        let mut pid = None;
+        for line in String::from_utf8(output.stdout)?.lines() {
+            if let Some(value) = line.strip_prefix('p') { pid = Some(value.parse::<u32>()?); }
+            if let Some(value) = line.strip_prefix('n') {
+                if value == local || value == wildcard {
+                    owners.insert(pid.context("listener process identity is missing")?);
+                }
+            }
+        }
+    }
+    anyhow::ensure!(owners.len() == 1 && !owners.contains(&0),
+        "compatibility loopback listener ownership is unavailable or ambiguous");
+    owners.into_iter().next().context("compatibility listener is missing")
+}
+
+fn listener_matches(public: &Value, port: u16, listener: Option<u32>) -> Result<u32> {
+    let pid = public["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0).context("compatibility host PID is invalid")?;
+    anyhow::ensure!(listener == Some(pid),
+        "compatibility host is not the verified OS listener; inspect before retry");
+    anyhow::ensure!(public["public_port"] == port, "compatibility host port changed");
+    Ok(pid)
+}
+
+fn verify_host(public: &Value, executable: &Path, expected_pid: Option<u32>) -> Result<()> {
+    let port = crate::net_rpc::rpc_port();
+    let claimed = public["pid"].as_u64().and_then(|pid| u32::try_from(pid).ok())
+        .filter(|pid| *pid > 0).context("compatibility host PID is invalid")?;
+    let pid = listener_matches(public, port, Some(loopback_listener(port, claimed)?))?;
+    anyhow::ensure!(expected_pid.is_none_or(|expected| expected == pid),
+        "compatibility listener is not the launched child");
+    let (image, birth) = host_process(pid)?;
+    let canonical = executable.canonicalize()?;
+    anyhow::ensure!(image == canonical && Sha256::digest(std::fs::read(&image)?)
+        == Sha256::digest(std::fs::read(std::env::current_exe()?)?),
+        "compatibility listener is not the stable CLI image");
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    // Only the same-byte CLI image actually owning the socket can supply these
+    // role/root declarations. A foreign listener cannot borrow a real CLI PID.
+    anyhow::ensure!(public["compatibility_host"] == "client2-v0256"
+        && public["bin"] == crate::VERSION && public["host_birth"] == birth
+        && public["host_image_sha256"] == hex::encode(Sha256::digest(std::fs::read(&image)?))
+        && public["exe"].as_str().is_some_and(|value| Path::new(value).canonicalize().ok().as_ref() == Some(&canonical))
+        && public["installation_root"].as_str().is_some_and(|value| Path::new(value).canonicalize().ok().as_ref() == Some(&root))
+        && public["data_dir"].as_str().is_some_and(|value| Path::new(value).canonicalize().ok().as_ref() == Some(&profile)),
+        "compatibility host identity does not match this installation");
+    let health = crate::net_rpc::health()?;
+    anyhow::ensure!(crate::rpc::runtime_acceptable(&health)?
+        && public["backend_pid"] == health.pid
+        && public["backend_instance_id"] == health.instance_id
+        && public["backend_process_start_id"] == health.process_start_id,
+        "compatibility host backend binding changed");
+    let runtime = crate::rpc::resolve_runtime_executable()?.canonicalize()?;
+    anyhow::ensure!(health.image_sha256 == hex::encode(Sha256::digest(std::fs::read(&runtime)?))
+        && Path::new(&health.installation_root).canonicalize()? == root.canonicalize()?,
+        "compatibility backend image or installation changed");
+    let backend = Backend { port: 0, health: health.clone(), executable: runtime,
+        public_port: port, host_executable: canonical,
+        host_image_sha256: String::new(), last_health: Mutex::new(health.clone()) };
+    backend.verify(&health)?;
+    anyhow::ensure!(host_process(pid)? == (image, birth)
+        && loopback_listener(port, pid)? == pid,
+        "compatibility listener changed during verification");
+    Ok(())
+}
+
 pub(crate) fn checked_executable() -> Result<PathBuf> {
     let executable = visible_path(crate::net_rpc::stable_bin_path().canonicalize()?)?;
     anyhow::ensure!(Sha256::digest(std::fs::read(&executable)?)
@@ -416,16 +570,13 @@ pub(crate) fn checked_executable() -> Result<PathBuf> {
 /// Caller retains the existing takeover lock. This never takes over a healthy
 /// strict or managed owner, and never retries an uncertain spawn.
 pub(crate) fn start_locked() -> Result<()> {
-    if crate::rpc::probe_runtime()?.is_some() {
-        let public = health_at(crate::net_rpc::rpc_port())?;
-        anyhow::ensure!(public["compatibility_host"] == "client2-v0256",
-            "existing Runtime is not a Client2 compatibility host; stop it explicitly before changing mode");
-        return Ok(());
-    }
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
     let executable = checked_executable()?;
+    if crate::rpc::probe_runtime()?.is_some() {
+        return verify_host(&health_at(crate::net_rpc::rpc_port())?, &executable, None);
+    }
     #[cfg(target_os = "macos")]
     let (mut child, host_pid) = {
         let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,
@@ -446,13 +597,7 @@ pub(crate) fn start_locked() -> Result<()> {
     while Instant::now() < deadline {
         anyhow::ensure!(child.try_wait()?.is_none(), "compatibility host exited before readiness");
         if let Ok(public) = health_at(crate::net_rpc::rpc_port()) {
-            anyhow::ensure!(public["compatibility_host"] == "client2-v0256"
-                && public["pid"] == host_pid && public["bin"] == crate::VERSION
-                && public["exe"].as_str().is_some_and(|path| Path::new(path) == executable),
-                "compatibility host readiness identity mismatch");
-            anyhow::ensure!(crate::rpc::runtime_acceptable(&crate::net_rpc::health()?)?,
-                "compatibility host backend is not the selected Runtime");
-            return Ok(());
+            return verify_host(&public, &executable, Some(host_pid));
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -482,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_boundary_rejects_foreign_and_ambiguous_requests() {
+    fn compatibility_boundary_rejects_foreign_and_ambiguous_requests() -> Result<()> {
         let base = vec![("Host".into(), "127.0.0.1:15169".into())];
         assert!(validate_request("POST", "/api/rpc", true, &base, 15169).is_ok());
         for path in ["//other/api/rpc", "/api/rpc?target=other", "http://other/api/rpc", "/admin"] {
@@ -497,7 +642,35 @@ mod tests {
             let mut headers = base.clone(); headers.push((extra.0.into(), extra.1.into()));
             assert!(validate_request("POST", "/api/rpc", true, &headers, 15169).is_err());
         }
+        // An untrusted endpoint cannot borrow the identity of this real process.
+        // OS listener ownership must independently match, even with a valid PID.
+        let pid = std::process::id();
+        let (image, birth) = host_process(pid)?;
+        assert_eq!(image, std::env::current_exe()?.canonicalize()?);
+        assert!(!birth.is_empty());
+        assert_eq!(host_process(pid)?, (image, birth));
+        assert!(host_process(0).is_err());
+        #[cfg(target_os = "linux")]
+        {
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            let port = listener.local_addr()?.port();
+            assert_eq!(loopback_listener(port, pid)?, pid);
+            assert!(loopback_listener(port, 0).is_err());
+            // A genuine socket in this process on another loopback address
+            // cannot prove ownership of the public 127.0.0.1 endpoint.
+            let other = TcpListener::bind(("127.0.0.2", port))?;
+            drop(listener);
+            assert!(loopback_listener(port, pid).is_err());
+            drop(other);
+        }
+        let claimed = json!({"pid":pid, "public_port":15169,
+            "compatibility_host":"client2-v0256"});
+        assert!(listener_matches(&claimed, 15169, None).is_err());
+        assert!(listener_matches(&claimed, 15169, Some(pid.saturating_add(1))).is_err());
+        assert!(listener_matches(&claimed, 15170, Some(pid)).is_err());
+        assert!(listener_matches(&json!({"pid":0,"public_port":15169}), 15169, Some(0)).is_err());
         assert!(read_ready(&b"{}\n"[..]).is_err());
         assert!(read_ready(&b"{\"startup_complete\":true}"[..]).is_err());
+        Ok(())
     }
 }
