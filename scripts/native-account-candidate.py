@@ -57,6 +57,135 @@ def compatibility_host_checks(captured):
     return checks
 
 
+def safe_failure_diagnostics(captured, failed_cases):
+    # Rebuild fixed fields only. Never publish arbitrary errors, paths, journal
+    # values or output text, including when a diagnostic event is malformed.
+    enums = {
+        "reason_code": {None, "account_outcome_unknown", "runtime_error", "redacted"},
+        "error_type": {None, "outcome_unknown", "runtime", "redacted"},
+        "runtime_log_reason_code": {"not_captured_by_fixture"},
+        "journal_reason_code": {"read", "invalid_json", "not_found", "permission_denied", "io_error"},
+        "phase": {None, "admitted", "login_input", "remote_pending", "remote_unknown", "authorized",
+                  "prepared", "awaiting_verification", "rolling_back", "committed", "rolled_back", "redacted"},
+        "backend": {None, "native", "secret_service", "kernel", "redacted"},
+    }
+    booleans = {"journal_schema_v2", "active_present", "active_matches_operation",
+                "root_matches_fixture", "source_matches_fixture", "candidate_present",
+                "candidate_sha256_present", "authorization_present", "vault_present", "target_present"}
+    nullable_booleans = {"published_vault", "vault_pending", "import_started", "sync_started",
+                         "publication_pending", "publication_done", "vault_done", "password_done", "owns_config"}
+    arrays = {"backends", "pass_backends", "totp_backends"}
+    base = {"schema_version", "event", "reason_code", "error_type", "operation_id", "runtime_log_reason_code"}
+    allowed = base | set(enums) | booleans | nullable_booleans | arrays | {"journal_os_error_code", "matching_records"}
+    events, invalid, seen = [], False, 0
+    for line in captured.splitlines():
+        if b'"authorization_failure_evidence"' not in line:
+            continue
+        seen += 1
+        if seen > 16:
+            invalid = True
+            break
+        try:
+            event = json.loads(line[line.index(b"{"):])
+            if (not isinstance(event, dict) or not base.issubset(event) or set(event) - allowed
+                    or type(event["schema_version"]) is not int or event["schema_version"] != 1
+                    or event["event"] != "authorization_failure_evidence"):
+                raise ValueError
+            clean = {"schema_version": 1, "event": "authorization_failure_evidence"}
+            for key, choices in enums.items():
+                if key in event:
+                    value = event[key]
+                    if value is not None and not isinstance(value, str):
+                        raise ValueError
+                    if value not in choices:
+                        raise ValueError
+                    clean[key] = value
+            for key in booleans | nullable_booleans:
+                if key in event:
+                    value = event[key]
+                    if type(value) is not bool and not (key in nullable_booleans and value is None):
+                        raise ValueError
+                    clean[key] = value
+            for key in arrays:
+                if key in event:
+                    value = event[key]
+                    if value is not None and (not isinstance(value, list) or len(value) > 16
+                            or any(item is not None and (not isinstance(item, str)
+                                or item not in enums["backend"]) for item in value)):
+                        raise ValueError
+                    clean[key] = value
+            for key in ("journal_os_error_code", "matching_records"):
+                if key in event:
+                    value = event[key]
+                    if not (key == "journal_os_error_code" and value is None):
+                        if type(value) is not int or not (-2147483648 <= value <= 2147483647):
+                            raise ValueError
+                        if key == "matching_records" and not 0 <= value <= 1024:
+                            raise ValueError
+                    clean[key] = value
+            operation = event["operation_id"]
+            if operation is not None and (not isinstance(operation, str) or not re.fullmatch(
+                    r"[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}", operation)):
+                raise ValueError
+            clean["operation_id_present"] = operation is not None
+            events.append(clean)
+        except (ValueError, TypeError):
+            invalid = True
+
+    known = {
+        b"authorized OAuth login failed": "account_authorized_login_failed",
+        b"owned space command": "account_owned_space_command_failed",
+        b"join never fetched": "account_join_request_not_observed",
+        b"join did not authenticate its ordered GET": "account_join_authorization_mismatch",
+        b"unverifiable witness prevented healthy rescue": "snapshot_unverifiable_rescue_failed",
+        b"restore of witnessed library failed": "snapshot_witness_restore_failed",
+        b"healthy witness snapshot rescue failed": "snapshot_witness_rescue_failed",
+        b"expected witness checkpoint rejection": "snapshot_checkpoint_rejection_mismatch",
+        b"expected diagnostic copy rejection": "snapshot_diagnostic_rejection_mismatch",
+        b"account committed; Runtime host handoff is pending": "account_handoff_pending",
+        b"operation committed and maintenance finished; Client2 compatibility handoff pending": "compatibility_handoff_pending",
+        b"model owner differs from the installed Runtime, account, profile or registration": "compatibility_owner_binding_mismatch",
+        b"compatibility handoff cannot inherit maintenance authorization": "compatibility_maintenance_token_present",
+        b"compatibility handoff requires an unregistered host and completed durable maintenance": "compatibility_maintenance_not_finished",
+        b"Client2 requires the same verified CLI bytes at the stable bin path": "compatibility_stable_cli_mismatch",
+        b"compatibility handoff owner did not fully drain": "compatibility_owner_drain_incomplete",
+        b"compatibility host readiness identity mismatch": "compatibility_host_identity_mismatch",
+        b"compatibility host is not the verified OS listener": "compatibility_listener_mismatch",
+        b"claimed compatibility host does not own the OS listener": "compatibility_listener_mismatch",
+        b"compatibility loopback listener ownership is unavailable or ambiguous": "compatibility_listener_unverified",
+        b"compatibility loopback listener is unavailable or ambiguous": "compatibility_listener_unverified",
+        b"compatibility listener is not the stable CLI image": "compatibility_host_image_mismatch",
+        b"compatibility host identity does not match this installation": "compatibility_host_identity_mismatch",
+        b"compatibility host backend binding changed": "compatibility_backend_binding_mismatch",
+        b"compatibility backend OS process changed": "compatibility_backend_process_mismatch",
+        b"compatibility startup is uncertain for child": "compatibility_startup_uncertain",
+        b"compatibility Runtime failed independent committed-owner handoff verification": "compatibility_restored_owner_mismatch",
+        b"snapshot transaction completed; host maintenance cleanup pending": "snapshot_host_cleanup_pending",
+        b"snapshot transaction completed; cleanup pending": "snapshot_cleanup_pending",
+    }
+    # libtest prints private failure output under exact, known case headers.
+    # Ignore success output and unrelated text, which may contain expected errors.
+    blocks, current, in_failures = {}, None, False
+    for line in captured.splitlines():
+        if line == b"failures:":
+            in_failures, current = True, None
+            continue
+        if line == b"successes:" or line.startswith(b"test result:"):
+            in_failures, current = False, None
+        if in_failures and line.startswith(b"---- ") and line.endswith(b" stdout ----"):
+            current = next((case for case in failed_cases
+                            if line == b"---- " + case.encode() + b" stdout ----"), None)
+            if current is not None:
+                blocks[current] = []
+        elif in_failures and current is not None:
+            blocks[current].append(line)
+    codes = {}
+    for case in failed_cases:
+        block = b"\n".join(blocks.get(case, []))
+        codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block)) or ["unknown_private_failure"]
+    return {"authorization_events": events, "authorization_event_invalid": invalid, "failure_codes": codes}
+
+
 MODEL_HASHES = {
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
     "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
@@ -344,6 +473,7 @@ def run(args):
                 report["compatibility_host_checks"] = compatibility_host_checks(captured)
             report["passed_cases"] = [case for case in cases if f"test {case} ... ok".encode() in lines]
             report["missing_or_failed_cases"] = [case for case in cases if case not in report["passed_cases"]]
+            report["failure_diagnostics"] = safe_failure_diagnostics(captured, report["missing_or_failed_cases"])
             report["test_executed"] = bool(cases) and all(
                 (f"test {case} ... ".encode() in captured) for case in cases)
         report["passed"] = report["passed"] and report["test_executed"]
