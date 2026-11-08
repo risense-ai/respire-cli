@@ -246,7 +246,18 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert.equal(uploads, 60, 'preserve publication/source evidence and both Client2 fixture results');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
-  assert.match(compatibility, /path: \$\{\{ runner.temp \}\}\/client2-launcher-regression\.json/);
+  const launcherRaw = [
+    '          name: client2-launcher-raw-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}',
+    '          path: |',
+    '            ${{ runner.temp }}/client2-launcher-regression.json',
+    '            ${{ runner.temp }}/client2-gui-probe/report.json',
+    '            ${{ runner.temp }}/client2-gui-probe/cdp.json',
+    '            ${{ runner.temp }}/client2-gui-probe/workspace.png',
+    '          if-no-files-found: warn',
+    '          retention-days: 1',
+  ].join('\n');
+  assert(compatibility.replace(/\r\n/g, '\n').includes(launcherRaw),
+    'original Client2 raw and exact GUI evidence paths must belong to the same named one-day upload');
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
   const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
   const candidateLines = candidate.split(/\r?\n/);
