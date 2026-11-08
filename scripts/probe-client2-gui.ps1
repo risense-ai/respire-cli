@@ -10,8 +10,8 @@ $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
     scope = 'original Client2 Windows GUI connectivity only; not candidate/full GUI acceptance'
     source_sha = '57bc070826949994c3f7ce9a64277160704bdfe5'
-    release = 'v0.2.56'; asset_id = 707442960
-    expected_exe_sha256 = 'c04b3941119bfab3a5a436345ecd4442894e40075eb79ab84aeb22e3dd3c65a0'
+    release = 'v2.0.0-dev.1'; asset_id = 724587257
+    expected_exe_sha256 = 'dd8f40cc16dc66f0f16ab50d9590e7c761e67f7277dddb1281e3e46546ab1f81'
     environment_ready = $false; official_exe_verified = $false
     native_window_visible = $false; isolated_webview_bound = $false
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
@@ -130,7 +130,7 @@ public static class RespireGuiNative {
     }
     $report.environment_ready = $true
     $exe = Join-Path $root 'respire-windows-amd64.exe'
-    Invoke-WebRequest -Uri 'https://github.com/risense-ai/respire-client2/releases/download/v0.2.56/respire-windows-amd64.exe' -OutFile $exe -TimeoutSec 60
+    Invoke-WebRequest -Uri 'https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.1/respire-windows-amd64.exe' -OutFile $exe -TimeoutSec 60
     $report.exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($report.exe_sha256 -ne $report.expected_exe_sha256) { throw 'Official original EXE digest mismatch' }
     $report.official_exe_verified = $true
