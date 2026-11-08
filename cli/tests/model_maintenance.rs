@@ -351,12 +351,7 @@ struct OwnedRuntime {
 impl OwnedRuntime {
     fn new() -> Result<Self> {
         let fixture = Fixture::new()?;
-        let bin = fixture.base.join("bin");
-        std::fs::create_dir_all(&bin)?;
-        std::fs::copy(
-            env!("CARGO_BIN_EXE_rsrs"),
-            bin.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }),
-        )?;
+        support::stage_cli_fixture(&fixture.base.join("bin"))?;
         Ok(Self {
             fixture,
             last_owner: None,
