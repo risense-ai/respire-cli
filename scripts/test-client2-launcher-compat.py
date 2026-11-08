@@ -443,6 +443,102 @@ def main():
                         assert receipt[key] == backend[key], key
                     assert receipt['state'] == 'drained' and receipt['unfinished'] == []
                     case['signal_drained'] = True
+                if args.ordinary_cli_cold_start:
+                    # The original shutdown/receipt checks above must finish before recovery.
+                    if sys.platform == 'linux':
+                        deadline = time.monotonic() + 15
+                        while time.monotonic() < deadline:
+                            try:
+                                fields = linux_runtime_record(backend['pid'])
+                            except FileNotFoundError:
+                                break
+                            if fields[0] == 'Z':
+                                break
+                            assert backend['process_start_id'] == 'linux-starttime-' + fields[19]
+                            time.sleep(0.05)
+                        else:
+                            raise RuntimeError('Old backend is still running before crash recovery')
+                    recovery = {'endpoint_exists_before': (root / 'runtime/endpoint.json').exists()}
+                    case['crash_recovery'] = recovery
+                    # Keep the same root, endpoint bytes and public port; do not repair fixture state.
+                    restarted = run([cli, '--json', 'status'], env)
+                    recovery['ordinary_status_exit'] = restarted.returncode
+                    status = helper_result(restarted)
+                    recovery['ordinary_status_errors'] = status.get('errors')
+                    if restarted.returncode:
+                        raise RuntimeError('Ordinary CLI cannot recover after the verified host exit')
+                    assert status['command'] == 'status' and status['status'] == 'ok' and status['errors'] == []
+                    code, recovered = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+                    assert code == 200 and recovered['server'] == 'respire' and recovered['v'] == 1
+                    assert recovered['instance_id'] != backend['instance_id']
+                    assert (recovered['pid'], recovered['process_start_id']) != (backend['pid'], backend['process_start_id'])
+                    assert recovered['runtime_version'] == args.runtime_version
+                    assert Path(recovered['installation_root']).resolve(strict=True) == root
+                    assert recovered['image_sha256'] == selection['sha256']
+                    for key in ['installation_id', 'account_id', 'data_dir']:
+                        assert recovered[key] == backend[key], key
+                    keys = ['pid', 'installation_id', 'instance_id', 'process_start_id', 'image_path', 'image_sha256',
+                            'runtime_version', 'account_id', 'generation', 'installation_root', 'data_dir']
+                    identity = {key: recovered[key] for key in keys}
+                    recovery['new_actor_identity'] = identity
+                    reused = run([executable, 'start'], env)
+                    reused_result = helper_result(reused)
+                    recovery['client2_exit'] = reused.returncode
+                    recovery['legacy_rpc_ok'] = reused_result.get('diagnostic_rpc', {}).get('ok')
+                    recovery['legacy_rpc_code'] = reused_result.get('diagnostic_rpc', {}).get('code')
+                    if reused.returncode or recovery['legacy_rpc_ok'] is not True:
+                        raise RuntimeError('Original Client2 cannot reuse the recovered Runtime')
+                    code, current = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+                    assert code == 200 and {key: current[key] for key in keys} == identity
+                    recovery['same_new_actor_after_client2'] = True
+                    handle = None
+                    if os.name == 'nt':
+                        handle = kernel.OpenProcess(0x00100000, False, recovered['pid'])
+                        assert handle, 'Cannot observe the recovered backend process'
+                    try:
+                        stopped = run([executable, 'stop'], env)
+                        recovery['client2_stop_exit'] = stopped.returncode
+                        if stopped.returncode:
+                            raise RuntimeError('Original Client2 cannot normally stop the recovered Runtime')
+                        if os.name == 'nt':
+                            assert kernel.WaitForSingleObject(handle, 15000) == 0, 'Recovered backend survived normal stop'
+                        else:
+                            deadline = time.monotonic() + (90 if sys.platform == 'darwin' else 15)
+                            while time.monotonic() < deadline:
+                                if sys.platform == 'linux':
+                                    try:
+                                        fields = linux_runtime_record(recovered['pid'])
+                                    except FileNotFoundError:
+                                        break
+                                    if fields[0] == 'Z':
+                                        break
+                                    assert recovered['process_start_id'] == 'linux-starttime-' + fields[19]
+                                else:
+                                    observed = subprocess.run(['ps', '-p', str(recovered['pid']), '-o', 'stat='],
+                                                              capture_output=True, text=True, timeout=5)
+                                    assert observed.returncode in [0, 1], observed.stderr
+                                    state = observed.stdout.strip()
+                                    if not state or state.startswith('Z'):
+                                        break
+                                time.sleep(0.05)
+                            else:
+                                raise RuntimeError('Recovered backend survived normal stop')
+                        recovery['stopped_os_process'] = True
+                    finally:
+                        if handle is not None:
+                            kernel.CloseHandle(handle)
+                    receipt = json.loads((root / 'runtime' / f"stop-{recovered['instance_id']}.json").read_text())
+                    assert receipt['schema_version'] == 1 and receipt['protocol_version'] == 1
+                    assert isinstance(receipt['operation_id'], str) and receipt['operation_id']
+                    for key in ['pid', 'installation_id', 'instance_id', 'process_start_id', 'image_path',
+                                'image_sha256', 'runtime_version', 'account_id', 'generation']:
+                        assert receipt[key] == recovered[key], key
+                    assert receipt['state'] == 'drained' and receipt['unfinished'] == []
+                    with socket.socket() as connection:
+                        connection.settimeout(5)
+                        assert connection.connect_ex(('127.0.0.1', port)) == errno.ECONNREFUSED
+                    recovery['normal_stop_receipt_verified'] = True
+                    recovery['listener_closed_after_stop'] = True
             elif mode == 'desktop-owned':
                 assert verify_desktop_runtime(desktop_action('status', env), root, image, port) == identity
                 desktop_action('stop', env)
