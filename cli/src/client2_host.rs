@@ -80,7 +80,7 @@ impl Backend {
         Ok(())
     }
 
-    fn request(&self, request: &mut tiny_http::Request) -> Result<(u16, Vec<u8>)> {
+    fn request(&self, request: &mut tiny_http::Request) -> Result<(u16, String, Vec<u8>)> {
         let headers: Vec<_> = request.headers().iter().map(|header|
             (header.field.to_string(), header.value.to_string())).collect();
         validate_request(request.method().as_str(), request.url(),
@@ -102,30 +102,46 @@ impl Backend {
                     "inference":health.inference, "rpc":health.rpc, "store_ready":health.store_ready,
                     "compatibility_host":"client2-v0256", "backend_instance_id":health.instance_id})
             };
-            return Ok((200, serde_json::to_vec(&response)?));
+            return Ok((200, "application/json".into(), serde_json::to_vec(&response)?));
         }
         anyhow::ensure!(request.body_length().is_none_or(|length| length as u64 <= LIMIT),
             "request body is too large");
         let mut bytes = Vec::new();
         request.as_reader().take(LIMIT + 1).read_to_end(&mut bytes)?;
         anyhow::ensure!(bytes.len() as u64 <= LIMIT, "request body is too large");
-        let mut outgoing = agent().post(&format!("http://127.0.0.1:{}{}", self.port, request.url()))
+        anyhow::ensure!(request.method() != &tiny_http::Method::Get || bytes.is_empty(),
+            "GET compatibility requests cannot carry a body");
+        let mut outgoing = agent().request(request.method().as_str(), &format!("http://127.0.0.1:{}{}", self.port, request.url()))
             .set("Content-Type", "application/json");
+        if let Some((_, accept)) = headers.iter().find(|(name, _)| name.eq_ignore_ascii_case("Accept")) {
+            outgoing = outgoing.set("Accept", accept);
+        }
         if headers.iter().any(|(name, value)| name.eq_ignore_ascii_case("X-Respire-Lifecycle")
             && value == "coordinator-v1") {
             outgoing = outgoing.set("X-Respire-Lifecycle", "coordinator-v1");
         }
         // Original Host/Origin are validated above. No caller credential or
         // forwarding header is copied, and no scope or operation ID is added.
-        let response = match outgoing.send_bytes(&bytes) {
+        let response = match if request.method() == &tiny_http::Method::Get {
+            outgoing.call()
+        } else { outgoing.send_bytes(&bytes) } {
             Ok(response) | Err(ureq::Error::Status(_, response)) => response,
             Err(error) => return Err(error.into()), // Never replay an uncertain write.
         };
         let status = response.status();
+        let content_type = response.header("Content-Type").unwrap_or("application/octet-stream").to_owned();
         let mut body = Vec::new();
         response.into_reader().take(LIMIT + 1).read_to_end(&mut body)?;
         anyhow::ensure!(body.len() as u64 <= LIMIT, "Runtime response is too large");
-        Ok((status, body))
+        if status == 200 && request.method() == &tiny_http::Method::Get
+            && matches!(request.url(), "/mcp" | "/sse") {
+            // This transport owns the public address. Rewrite only the exact
+            // verified backend's endpoint announcement, never arbitrary data.
+            anyhow::ensure!(body == format!("event: endpoint\ndata: http://127.0.0.1:{}/mcp\n\n", self.port).as_bytes(),
+                "unexpected backend SSE endpoint announcement");
+            body = format!("event: endpoint\ndata: http://127.0.0.1:{}/mcp\n\n", self.public_port).into_bytes();
+        }
+        Ok((status, content_type, body))
     }
 }
 
@@ -133,8 +149,9 @@ fn validate_request(method: &str, path: &str, loopback: bool,
     headers: &[(String, String)], port: u16) -> Result<()> {
     anyhow::ensure!(loopback, "non-loopback peer rejected");
     anyhow::ensure!(matches!((method, path), ("GET", "/api/health")
-        | ("POST", "/api/rpc" | "/api/runtime/stop")), "unsupported compatibility route");
-    for name in ["Host", "Origin", "X-Respire-Health", "X-Respire-Lifecycle"] {
+        | ("POST", "/api/rpc" | "/api/runtime/stop")
+        | ("GET" | "POST", "/mcp" | "/sse")), "unsupported compatibility route");
+    for name in ["Host", "Origin", "Accept", "X-Respire-Health", "X-Respire-Lifecycle"] {
         let values: Vec<_> = headers.iter().filter(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.as_str()).collect();
         anyhow::ensure!(values.len() <= 1, "duplicate compatibility header");
@@ -222,10 +239,10 @@ pub(crate) fn serve() -> Result<()> {
         let backend = Arc::clone(&backend);
         let active = Arc::clone(&active);
         std::thread::spawn(move || {
-            let (status, body) = backend.request(&mut request).unwrap_or_else(|_| (502,
+            let (status, content_type, body) = backend.request(&mut request).unwrap_or_else(|_| (502, "application/json".into(),
                 br#"{"error":"compatibility request failed; outcome may be unknown; do not replay"}"#.to_vec()));
             let mut response = tiny_http::Response::from_data(body).with_status_code(status);
-            if let Ok(header) = tiny_http::Header::from_bytes("Content-Type", "application/json") {
+            if let Ok(header) = tiny_http::Header::from_bytes("Content-Type", content_type.as_bytes()) {
                 response.add_header(header);
             }
             let _ = request.respond(response);
@@ -276,11 +293,13 @@ mod tests {
     fn compatibility_boundary_rejects_foreign_and_ambiguous_requests() {
         let base = vec![("Host".into(), "127.0.0.1:15169".into())];
         assert!(validate_request("POST", "/api/rpc", true, &base, 15169).is_ok());
-        for path in ["//other/api/rpc", "/api/rpc?target=other", "http://other/api/rpc", "/mcp"] {
+        for path in ["//other/api/rpc", "/api/rpc?target=other", "http://other/api/rpc", "/admin"] {
             assert!(validate_request("POST", path, true, &base, 15169).is_err());
         }
         assert!(validate_request("POST", "/api/rpc", false, &base, 15169).is_err());
         assert!(validate_request("GET", "/api/runtime/stop", true, &base, 15169).is_err());
+        assert!(validate_request("GET", "/mcp", true, &base, 15169).is_ok());
+        assert!(validate_request("POST", "/mcp", true, &base, 15169).is_ok());
         for extra in [("Host", "127.0.0.1:15169"), ("Origin", "null"),
             ("Origin", "http://evil.example"), ("Origin", "http://127.0.0.1:15170")] {
             let mut headers = base.clone(); headers.push((extra.0.into(), extra.1.into()));

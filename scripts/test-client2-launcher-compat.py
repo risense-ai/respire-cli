@@ -88,7 +88,7 @@ def main():
         if not result.stdout:
             raise RuntimeError(f'Client2 helper returned no JSON: exit={result.returncode}, stderr={result.stderr[:2000]}')
         return json.loads(result.stdout)
-    def request(port, path, body=None, headers=None):
+    def request(port, path, body=None, headers=None, raw=False):
         request = urllib.request.Request(f'http://127.0.0.1:{port}{path}',
             data=None if body is None else json.dumps(body).encode(),
             headers={'Content-Type': 'application/json', **(headers or {})})
@@ -101,6 +101,7 @@ def main():
         with response:
             data = response.read(8 * 1024 * 1024 + 1)
             if len(data) > 8 * 1024 * 1024: raise RuntimeError('Oversized boundary response')
+            if raw: return response.code, data
             try: value = json.loads(data)
             except json.JSONDecodeError: value = None
             return response.code, value
@@ -125,6 +126,32 @@ def main():
         if status != 200 or not result or result.get('ok') is not False or result.get('code') != 'scope_mismatch':
             raise RuntimeError('Wrong scope was not rejected without rebinding')
         return results
+    def mcp_read(port):
+        status, health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+        assert status == 200
+        scope = {key: health[key] for key in ['account_id', 'instance_id', 'generation']}
+        def call(method, params=None):
+            body = {'jsonrpc': '2.0', 'id': 'compat-'+method, 'method': method, 'params': params or {}}
+            status, reply = request(port, '/mcp', body)
+            assert status == 200 and reply['jsonrpc'] == '2.0' and reply['id'] == body['id'], reply
+            assert 'error' not in reply, reply
+            return reply['result']
+        initialized = call('initialize', {'protocolVersion': '2025-03-26', 'capabilities': {},
+            'clientInfo': {'name': 'client2-host-regression', 'version': '1'}})
+        assert initialized['serverInfo']['name'] == 'respire-runtime'
+        assert initialized['serverInfo']['version'] == args.runtime_version
+        listed = call('tools/list')
+        assert 'memory_status' in [tool['name'] for tool in listed['tools']]
+        result = call('tools/call', {'name': 'memory_status', 'arguments': {}})
+        assert result['isError'] is False
+        envelope = json.loads(result['content'][0]['text'])
+        assert envelope['command'] == 'status' and envelope['status'] == 'ok' and envelope['errors'] == []
+        assert envelope['scope'] == scope
+        assert envelope['memory_context']['memory_text_authority'] == 'untrusted_historical_context'
+        for path in ['/mcp', '/sse']:
+            status, body = request(port, path, headers={'Accept': 'text/event-stream'}, raw=True)
+            assert status == 200 and body == f'event: endpoint\ndata: http://127.0.0.1:{port}/mcp\n\n'.encode()
+        return {'initialize': True, 'tools_list': True, 'real_status': True, 'public_sse_endpoint': True}
     for mode in ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']:
         root = base / mode; root.mkdir(); home = root / 'home'; home.mkdir()
         with socket.socket() as listener:
@@ -158,6 +185,7 @@ def main():
             if result.returncode or case['legacy_rpc_ok'] is not True:
                 raise RuntimeError('Unmodified Client2 startup/business calls failed')
             case['boundaries'] = boundaries(port)
+            case['mcp'] = mcp_read(port)
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
