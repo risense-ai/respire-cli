@@ -242,8 +242,11 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain all prior uploads plus the sanitized source-account candidate result.
-  assert.equal(uploads, 58, 'preserve seven-platform publication evidence, source reports and private credential diagnostics');
+  // Retain all prior uploads plus the account-free Client2 prototype result.
+  assert.equal(uploads, 59, 'preserve publication/source evidence and the Client2 fixture result');
+  const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
+  assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
+  assert.match(compatibility, /path: \$\{\{ runner.temp \}\}\/client2-launcher-regression\.json/);
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
   assert.match(candidate, /name: source-account-regression-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.match(candidate, /path: \$\{\{ runner.temp \}\}\/source-account-regression\/result\.json/);
