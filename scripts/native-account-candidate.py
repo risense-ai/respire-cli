@@ -58,6 +58,17 @@ BASELINE_CASES = (
     "snapshot_lifecycle::queued_direct_resume_rechecks_maintenance_after_library_ownership_wait",
     "snapshot_lifecycle::staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable",
 )
+# This explicit remote subset excludes the diary diagnostic case containing --direct.
+# The concurrent case also checks candidate HTTP idempotency directly; those checks
+# are candidate Runtime evidence, not requests made by the stable CLI.
+STABLE_DIARY_CASES = tuple(case for case in BASELINE_CASES
+    if case.startswith("diary_identity::")
+    and case != "diary_identity::missing_entry_and_usage_failures_have_machine_diagnostics")
+STABLE_ASSETS = {
+    "rsrs-x86_64-unknown-linux-gnu": (52491808, "c03c131c61819a5f4d132cfe328f7c1da82c2f0b21a9c87d2b8870d1541a4c3e"),
+    "cli-build-x86_64-unknown-linux-gnu.json": (437, "e211d241e24408b238d994114d7c89c5e77af89fc185aaf0e4fe1c9c4ff884b2"),
+    "rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz": (546198, "aa4437c33089c79376410af2b83e4889a4a10b2058eed43094ddb1f40406821d"),
+}
 DIAGNOSTIC_CASES = (
     CASE,
     "account::spaces_coordinate_with_the_owned_runtime",
@@ -72,6 +83,11 @@ def selected_cases(listing, suite, require_native_stop=False):
     require(names.count(CASE) == 1, "original_account_case_missing")
     if suite == "account":
         return [CASE]
+    if suite == "stable-diary-remote":
+        require(len(STABLE_DIARY_CASES) == 10
+                and all(names.count(case) == 1 for case in STABLE_DIARY_CASES),
+                "stable_diary_case_inventory_mismatch")
+        return list(STABLE_DIARY_CASES)
     if suite == "diagnostic-failures":
         require(all(names.count(case) == 1 for case in DIAGNOSTIC_CASES), "diagnostic_case_inventory_mismatch")
         return list(DIAGNOSTIC_CASES)
@@ -428,6 +444,53 @@ def official_cli_version(metadata_path, cli, source_sha, env):
     return version
 
 
+def stable_business_identity(cli, metadata_path, archive, env=None):
+    # Fixed schema-1 release only. It never replaces the candidate's manager CLI.
+    paths = (Path(cli), Path(metadata_path), Path(archive))
+    require(len({path.parent.resolve() for path in paths}) == 1,
+            "stable_business_assets_must_be_adjacent")
+    for path, name in zip(paths, STABLE_ASSETS):
+        size, expected_hash = STABLE_ASSETS[name]
+        require(path.name == name and not path.is_symlink() and path.is_file()
+                and path.stat().st_size == size and digest(path) == expected_hash,
+                "stable_business_asset_mismatch")
+    cli, metadata_path, archive = paths
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    expected = {"schema_version": 1, "git_sha": "26ead1ecf5c1a41e6d5e518aeb375e896f6c4c9e",
+                "version": "1.0.20", "target": TARGET, "binary_file": cli.name,
+                "runtime_file": archive.name, "binary_sha256": STABLE_ASSETS[cli.name][1],
+                "runtime_sha256": STABLE_ASSETS[archive.name][1]}
+    require(metadata == expected, "stable_business_metadata_identity_mismatch")
+    with tarfile.open(archive, "r:gz") as bundle:
+        names = set()
+        for member in bundle.getmembers():
+            name = member.name.rstrip("/")
+            require(name and not name.startswith("/")
+                    and not any(part in ("", ".", "..") for part in name.split("/"))
+                    and not any(character in name for character in "\\:\0")
+                    and (member.isfile() or member.isdir())
+                    and (name == "core-runtime.json" or name == "core-notices"
+                         or name.startswith("core-notices/"))
+                    and name not in names, "stable_business_archive_member_rejected")
+            names.add(name)
+        require("core-runtime.json" in names, "stable_business_core_metadata_missing")
+        core_stream = bundle.extractfile("core-runtime.json")
+        require(core_stream is not None, "stable_business_core_metadata_missing")
+        with core_stream:
+            core = json.load(core_stream)
+        require(core.get("schema_version") == 1 and core.get("target") == TARGET,
+                "stable_business_core_identity_mismatch")
+    if env is not None:
+        actual = subprocess.check_output([str(cli), "--version"], env=env,
+                                         stderr=subprocess.PIPE, timeout=30)
+        require(b"1.0.20" in actual.split(), "stable_business_version_mismatch")
+    return {"version": "1.0.20", "source_sha": expected["git_sha"], "target": TARGET,
+            "binary_sha256": digest(cli), "metadata_sha256": digest(metadata_path),
+            "runtime_archive_sha256": digest(archive),
+            "scope": "ten_remote_diary_cases_not_all_stable_features",
+            "concurrent_http_checks": "candidate_runtime_only"}
+
+
 def safe_file(root, relative):
     require(isinstance(relative, str) and relative and not relative.startswith("/")
             and not any(part in ("", ".", "..") for part in relative.split("/"))
@@ -565,10 +628,12 @@ def run(args):
     os.umask(0o077)
     root.mkdir(mode=0o700)
     diagnostic = args.suite in ("diagnostic-failures", "diagnostic-native-stop")
+    stable_remote = args.suite == "stable-diary-remote"
     report = {"schema_version": 1,
               "kind": "unpublished-source-diagnostic" if diagnostic else "unpublished-source-fixture",
               "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
                        "targeted-failure-diagnostic" if diagnostic else
+                       "stable-diary-remote-subset" if stable_remote else
                        CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
               "required_native_stop": args.require_native_stop,
@@ -586,6 +651,22 @@ def run(args):
     try:
         verify_source(args.cli_source, args.cli_sha)
         verify_source(args.runtime_source, args.runtime_sha)
+        if stable_remote:
+            diary_source = args.runtime_source / "crates/commands/examples/cli_business_tests/diary_identity.rs"
+            fixture = diary_source.read_bytes()
+            require(all(marker in fixture for marker in (
+                b"RSRS_TEST_STABLE_DIARY_SUITE", b"RSRS_TEST_STABLE_CLI_BIN",
+                b"fn business_command(", b"fn verify_business_owner(", b"fn business_output(")),
+                "stable_business_fixture_support_missing")
+            report["diary_source_sha256"] = digest(diary_source)
+            stable_cli = args.stable_business_cli.resolve(strict=True)
+            require(stable_cli not in (cli, runtime, harness), "stable_business_binary_not_separate")
+            report["stable_business_cli"] = stable_business_identity(
+                args.stable_business_cli, args.stable_business_cli_metadata,
+                args.stable_business_runtime_archive, env)
+            hashes.add(report["stable_business_cli"]["binary_sha256"])
+            env.update(RSRS_TEST_STABLE_DIARY_SUITE="stable-diary-remote",
+                       RSRS_TEST_STABLE_CLI_BIN=str(stable_cli))
         version = source_version(args.runtime_source, "runtime")
         cli_source_version = source_version(args.cli_source, "cli")
         cli_version = (official_cli_version(args.official_cli_metadata, cli, args.cli_sha, env)
@@ -640,7 +721,7 @@ def run(args):
             report["required_cases"] = cases
             report["selected_case_count"] = len(cases)
             test_args = ([*cases, "--exact", "--test-threads=1"]
-                         if args.suite in ("account", "diagnostic-failures", "diagnostic-native-stop") else ["--test-threads=1"])
+                         if args.suite in ("account", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
             if args.compatibility_host or diagnostic:
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
@@ -656,6 +737,10 @@ def run(args):
                 "private_business_fixture_failed")
         require(digest(cli) == report["cli_binary_sha256"] and digest(runtime) == report["runtime_binary_sha256"]
                 and digest(harness) == report["harness_sha256"], "executed_binaries_changed")
+        if stable_remote:
+            require(stable_business_identity(args.stable_business_cli, args.stable_business_cli_metadata,
+                    args.stable_business_runtime_archive) == report["stable_business_cli"],
+                    "stable_business_assets_changed")
         captured = log.read_bytes()
         require(f"test result: ok. {len(cases)} passed; 0 failed;".encode() in captured,
                 "required_business_cases_did_not_pass")
@@ -711,17 +796,27 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures", "diagnostic-native-stop"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
     parser.add_argument("--official-cli-metadata", type=Path,
                         help="Verified fixed official dev.6 GNU sidecar; preserves its release version")
+    for name in ("stable-business-cli", "stable-business-cli-metadata", "stable-business-runtime-archive"):
+        parser.add_argument("--" + name, type=Path)
     def interrupted(_number, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     args = parser.parse_args()
     if args.require_native_stop and args.suite != "full":
         parser.error("--require-native-stop requires --suite full")
+    stable_paths = (args.stable_business_cli, args.stable_business_cli_metadata,
+                    args.stable_business_runtime_archive)
+    if args.suite == "stable-diary-remote":
+        if (not all(stable_paths) or args.official_cli_metadata or args.compatibility_host
+                or args.require_native_stop):
+            parser.error("stable-diary-remote requires three stable assets and the current manager without compatibility/native-stop")
+    elif any(stable_paths):
+        parser.error("stable business assets require --suite stable-diary-remote")
     return run(args)
 
 

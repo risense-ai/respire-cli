@@ -12,15 +12,16 @@ on:
         default: ''
         type: string
       cli_consumer:
-        description: CLI consumer for source-candidate business tests; official-dev6 uses the unchanged published GNU binary and requires full mode
+        description: CLI consumer; official-dev6 requires full, official-stable-remote requires the ten-case stable-diary-remote subset
         required: false
         type: choice
         default: current-source
         options:
           - current-source
           - official-dev6
+          - official-stable-remote
       business_suite:
-        description: Original source cases; full requires every baseline case; diagnostic suites isolate fixed failures without release acceptance
+        description: Full retains every baseline case; stable-diary-remote verifies ten remote diary cases only; diagnostic suites are not acceptance
         required: false
         type: choice
         default: account
@@ -29,6 +30,7 @@ on:
           - full
           - diagnostic-failures
           - diagnostic-native-stop
+          - stable-diary-remote
       compatibility_host:
         description: Build the opt-in Client2 host and require its identity across account/space maintenance
         required: false
@@ -231,11 +233,11 @@ jobs:
 
   source-account-regression:
     if: >-
-      (github.event_name == 'workflow_dispatch' && (inputs.runtime_candidate_sha != '' || inputs.cli_consumer == 'official-dev6')) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.runtime_candidate_sha != '' || inputs.cli_consumer == 'official-dev6' || inputs.cli_consumer == 'official-stable-remote')) ||
       (github.event_name == 'pull_request' && github.repository == 'risense-ai/respire-cli' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.head.ref == 'integrate/shared-host-frontend-20261107')
-    name: ${{ inputs.cli_consumer == 'official-dev6' && 'Official dev.6 CLI + candidate Runtime business' || 'Original account regression (source candidate)' }}
+    name: ${{ inputs.cli_consumer == 'official-dev6' && 'Official dev.6 CLI + candidate Runtime business' || inputs.cli_consumer == 'official-stable-remote' && 'Official stable CLI remote diary subset' || 'Original account regression (source candidate)' }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -243,7 +245,7 @@ jobs:
       RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '387ed1c560fd3bf336400f29119b6a577fa3f3d9' || inputs.runtime_candidate_sha }}
       COMPATIBILITY_HOST: ${{ inputs.compatibility_host && 'true' || 'false' }}
       CLI_CONSUMER: ${{ inputs.cli_consumer || 'current-source' }}
-      CANDIDATE_CASE_NAME: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || 'source-account-regression' }}
+      CANDIDATE_CASE_NAME: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RSRS_ENGINE: cpu
@@ -272,11 +274,19 @@ jobs:
           test "$RUNNER_ARCH" = X64
           test "$(uname -m)" = x86_64
           case "$CLI_CONSUMER" in
-            current-source) ;;
+            current-source)
+              test '${{ inputs.business_suite }}' != stable-diary-remote
+              ;;
             official-dev6)
               test "$GITHUB_EVENT_NAME" = workflow_dispatch
               test '${{ inputs.business_suite }}' = full
               test "$COMPATIBILITY_HOST" = false
+              ;;
+            official-stable-remote)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test '${{ inputs.business_suite }}' = stable-diary-remote
+              test "$COMPATIBILITY_HOST" = false
+              test '${{ inputs.require_native_stop }}' != true
               ;;
             *) echo 'Unknown CLI consumer' >&2; exit 1 ;;
           esac
@@ -340,6 +350,41 @@ jobs:
           assert (source / 'sdk/core-sdk.lock.json').read_bytes() == pathlib.Path('sdk/core-sdk.lock.json').read_bytes()
           (root / binary_name).chmod(0o700)
           PY
+      - name: Download and verify official stable business assets
+        if: env.CLI_CONSUMER == 'official-stable-remote'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/official-stable-business"
+          gh api repos/risense-ai/respire-cli/releases/tags/v1.0.20 > "$RUNNER_TEMP/official-stable-business/release.json"
+          gh release download v1.0.20 --repo risense-ai/respire-cli \
+            --pattern rsrs-x86_64-unknown-linux-gnu \
+            --pattern cli-build-x86_64-unknown-linux-gnu.json \
+            --pattern rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz \
+            --dir "$RUNNER_TEMP/official-stable-business"
+          python - <<'PY'
+          import importlib.util, json, os, pathlib, tarfile
+          spec = importlib.util.spec_from_file_location('candidate', 'scripts/native-account-candidate.py')
+          candidate = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(candidate)
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'official-stable-business'
+          release = json.loads((root / 'release.json').read_text())
+          candidate.require(release['tag_name'] == 'v1.0.20' and not release['prerelease'] and not release['draft'],
+                            'stable_release_identity_mismatch')
+          for name, (size, expected_hash) in candidate.STABLE_ASSETS.items():
+              asset, = [asset for asset in release['assets'] if asset['name'] == name]
+              candidate.require(asset['size'] == size and asset['digest'] == 'sha256:' + expected_hash,
+                                'stable_release_asset_identity_mismatch')
+          binary = root / 'rsrs-x86_64-unknown-linux-gnu'
+          metadata = root / 'cli-build-x86_64-unknown-linux-gnu.json'
+          archive = root / 'rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz'
+          candidate.stable_business_identity(binary, metadata, archive)
+          # The verifier has rejected links, special files and paths outside the two fixed roots.
+          with tarfile.open(archive, 'r:gz') as bundle:
+              bundle.extractall(root, filter='data')
+          binary.chmod(0o700)
+          PY
       - name: Bind the candidate Runtime and SDK locks
         run: |
           set -euo pipefail
@@ -372,7 +417,7 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           export RSRS_CORE_SDK_DIR="$PWD/.sdk/x86_64-unknown-linux-gnu"
-          if [ "$CLI_CONSUMER" = current-source ]; then
+          if [ "$CLI_CONSUMER" != official-dev6 ]; then
             cli_features=()
             if [ "$COMPATIBILITY_HOST" = true ]; then cli_features=(--features client2-host-prototype); fi
             cargo build --locked -p respire --bin rsrs "${cli_features[@]}" --target-dir "$RUNNER_TEMP/account-cli-target"
@@ -410,6 +455,11 @@ jobs:
             consumer_binary="$RUNNER_TEMP/official-dev6-cli/rsrs-x86_64-unknown-linux-gnu"
             host_args+=(--official-cli-metadata "$RUNNER_TEMP/official-dev6-cli/cli-build-x86_64-unknown-linux-gnu.json")
           fi
+          if [ "$CLI_CONSUMER" = official-stable-remote ]; then
+            host_args+=(--stable-business-cli "$RUNNER_TEMP/official-stable-business/rsrs-x86_64-unknown-linux-gnu"
+              --stable-business-cli-metadata "$RUNNER_TEMP/official-stable-business/cli-build-x86_64-unknown-linux-gnu.json"
+              --stable-business-runtime-archive "$RUNNER_TEMP/official-stable-business/rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz")
+          fi
           python -B scripts/native-account-candidate.py "${host_args[@]}" \
             --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \
             --cli-source "$consumer_source" --cli-sha "$consumer_sha" \
@@ -421,7 +471,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || 'source-account-regression' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 1
           path: ${{ runner.temp }}/${{ env.CANDIDATE_CASE_NAME }}/result.json
           if-no-files-found: error
