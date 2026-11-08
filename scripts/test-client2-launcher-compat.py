@@ -24,6 +24,9 @@ import urllib.request
 CLIENT2_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
 MAGPIE_SHA = 'a3ae9b3035d02b181ba7a8ddae251495d092dd63'
 MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
+# Desktop workflow run 42458504861, artifact 13609150108, unchanged CLIENT2_SHA.
+DESKTOP_SHA256 = '3cacf426d22974aaa53bb20d13b450fb67b56404366050f796cfd4fbad73933a'
+DESKTOP_ARTIFACT_SHA256 = 'b2aaed0a79a4e9eab9fbe7c78ef14c8fd7664960265f66a4923b281213a617be'
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -43,6 +46,53 @@ def annotate_failure(case):
     message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
     print(f'::error title=Client2 fixture failure::{message}', flush=True)
 
+def desktop_executable(value):
+    if value is None:
+        return None
+    if (os.environ.get('GITHUB_ACTIONS') != 'true'
+            or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
+            or sys.platform != 'linux' or os.uname().machine != 'x86_64'):
+        raise RuntimeError('Pinned desktop acceptance requires an isolated Linux x64 hosted runner')
+    path = value.resolve(strict=True)
+    if not path.is_file() or sha256(path) != DESKTOP_SHA256:
+        raise RuntimeError('Require the exact Client2 desktop bytes from run 42458504861')
+    return path
+
+
+def linux_runtime_record(pid):
+    if type(pid) is not int or pid <= 0 or pid == os.getpid():
+        raise RuntimeError('Invalid desktop Runtime PID')
+    return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+
+
+def verify_desktop_runtime(health, root, image, port):
+    pid = health['pid']
+    before = linux_runtime_record(pid)
+    assert before[0] != 'Z'
+    assert health['process_start_id'] == 'linux-starttime-' + before[19]
+    assert health['server'] == 'respire' and health['v'] == 1
+    assert Path(health['installation_root']).resolve(strict=True) == root
+    assert Path(health['data_dir']).resolve(strict=True).is_relative_to(root)
+    assert Path(health['exe']).resolve(strict=True) == image
+    assert Path(health['image_path']).resolve(strict=True) == image
+    assert Path(f'/proc/{pid}/exe').resolve(strict=True) == image
+    assert health['image_sha256'] == sha256(image)
+    # Bind the reported PID to the actual IPv4 loopback listening socket.
+    sockets = set()
+    for fd in Path(f'/proc/{pid}/fd').iterdir():
+        try:
+            sockets.add(os.readlink(fd))
+        except FileNotFoundError:
+            continue  # Other Runtime workers may close unrelated descriptors during inspection.
+    listeners = [line.split() for line in Path('/proc/net/tcp').read_text().splitlines()[1:]]
+    assert any(row[1] == f'0100007F:{port:04X}' and row[3] == '0A'
+               and f'socket:[{row[9]}]' in sockets for row in listeners)
+    after = linux_runtime_record(pid)
+    assert after[0] != 'Z' and after[19] == before[19]
+    return {key: health[key] for key in ['pid', 'installation_id', 'instance_id',
+            'process_start_id', 'image_sha256', 'runtime_version', 'account_id', 'generation']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cli', type=Path, required=True)
@@ -52,10 +102,13 @@ def main():
     parser.add_argument('--go', type=Path, required=True)
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
+    parser.add_argument('--desktop-executable', type=Path,
+                        help='Candidate CI only: pinned original Linux x64 desktop executable')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
     args = parser.parse_args()
+    desktop = desktop_executable(args.desktop_executable)
     cli, archive, source, go = (p.resolve(strict=True) for p in
                                 [args.cli, args.runtime_archive, args.client2_source, args.go])
     def git(*argv):
@@ -95,6 +148,10 @@ def main():
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version},
+              'desktop_headless': {'enabled': desktop is not None, 'client2_source': CLIENT2_SHA,
+                                   'run_id': '42458504861', 'artifact_id': '13609150108',
+                                   'artifact_sha256': DESKTOP_ARTIFACT_SHA256,
+                                   'binary_sha256': DESKTOP_SHA256 if desktop else None},
               'legacy_plugin': {'executed': magpie is not None,
                                 'source_sha': MAGPIE_SHA if magpie else None,
                                 'runtime_blob': MAGPIE_RUNTIME_BLOB if magpie else None},
@@ -180,7 +237,16 @@ def main():
             status, body = request(port, path, headers={'Accept': 'text/event-stream'}, raw=True)
             assert status == 200 and body == f'event: endpoint\ndata: http://127.0.0.1:{port}/mcp\n\n'.encode()
         return {'initialize': True, 'tools_list': True, 'real_status': True, 'public_sse_endpoint': True}
+    def desktop_action(action, env):
+        result = run([desktop, '--headless', action], env)
+        payload = helper_result(result)
+        if result.returncode != 0 or payload.get('ok') is not True:
+            raise RuntimeError(f'Original desktop {action} failed: ' + json.dumps(payload))
+        assert set(payload) == {'ok', 'result', 'task'}
+        return payload['result']
     modes = ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']
+    if desktop:
+        modes.append('desktop-owned')
     if os.name == 'posix':
         modes.append('cli-host-sigterm')
     if sys.platform in ['linux', 'darwin']:
@@ -206,13 +272,34 @@ def main():
             selection = json.loads((root/'runtime.json').read_text())
             (root/'bin').mkdir(exist_ok=True)
             shutil.copy2(cli, root/'bin'/('rsrs.exe' if os.name=='nt' else 'rsrs'))
-            if mode == 'client2-owned':
+            if mode in ['client2-owned', 'desktop-owned']:
                 destination = root/'client2/runtime'/args.runtime_version
                 shutil.copytree(root/'runtime'/args.runtime_version, destination)
                 (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
             if mode == 'reuse-cli-started':
                 started = run([cli, '--json', 'runtime', 'start'], env)
                 if started.returncode: raise RuntimeError('CLI startup failed: '+started.stderr)
+            if mode == 'desktop-owned':
+                env['RSRS_INSTANCE_ID'] = base.name + '-' + mode
+                version = run([desktop, '--version'], env)
+                if version.returncode or helper_result(version) != {
+                        'version': '0.2.56-dev.164', 'platform': 'linux-amd64'}:
+                    raise RuntimeError('Pinned original desktop version identity changed')
+                desktop_action('start', env)
+                health = desktop_action('status', env)
+                assert health['runtime_version'] == args.runtime_version
+                image = (destination / 'rsrs-runtime').resolve(strict=True)
+                identity = verify_desktop_runtime(health, root, image, port)
+                reply = desktop_action('rpc-status', env)
+                assert reply['v'] == 1 and isinstance(reply['id'], str) and reply['id']
+                assert reply['ok'] is True and reply['exit'] == 0
+                assert reply['envelope']['command'] == 'status'
+                assert reply['envelope']['status'] == 'ok' and reply['envelope']['errors'] == []
+                assert Path(reply['envelope']['summary']['data_dir']).resolve(strict=True) == Path(health['data_dir']).resolve(strict=True)
+                desktop_action('start', env)
+                assert verify_desktop_runtime(desktop_action('status', env), root, image, port) == identity
+                case['desktop_headless'] = {'cold_start': True, 'status': True, 'rpc_status': True,
+                                            'reused_same_runtime': True, 'verified_identity': identity}
             result = run([executable, 'start'], env)
             payload = helper_result(result)
             case['client2_exit'] = result.returncode
@@ -330,6 +417,27 @@ def main():
                         assert receipt[key] == backend[key], key
                     assert receipt['state'] == 'drained' and receipt['unfinished'] == []
                     case['signal_drained'] = True
+            elif mode == 'desktop-owned':
+                assert verify_desktop_runtime(desktop_action('status', env), root, image, port) == identity
+                desktop_action('stop', env)
+                receipt = json.loads((root / 'runtime' / f"stop-{identity['instance_id']}.json").read_text())
+                assert receipt['schema_version'] == 1 and receipt['protocol_version'] == 1
+                assert isinstance(receipt['operation_id'], str) and receipt['operation_id']
+                assert Path(receipt['image_path']).resolve(strict=True) == image
+                for key, value in identity.items():
+                    assert receipt[key] == value, key
+                assert receipt['state'] == 'drained' and receipt['unfinished'] == []
+                try:
+                    stopped_process = linux_runtime_record(identity['pid'])
+                except FileNotFoundError:
+                    stopped_process = None
+                assert (stopped_process is None or stopped_process[0] == 'Z'
+                        or identity['process_start_id'] != 'linux-starttime-' + stopped_process[19])
+                with socket.socket() as connection:
+                    connection.settimeout(5)
+                    assert connection.connect_ex(('127.0.0.1', port)) == errno.ECONNREFUSED
+                case['desktop_headless'].update(stop=True, identity_bound_drained_receipt=True,
+                                                stopped_os_process=True, listener_closed=True)
             else:
                 stopped = run([executable, 'stop'], env)
                 case['client2_stop_exit'] = stopped.returncode
@@ -340,7 +448,10 @@ def main():
         except Exception as error:
             case['failure'] = str(error)
         finally:
-            stopped = run([executable, 'stop'] if mode=='client2-owned' else [cli,'--json','runtime','stop'], env)
+            cleanup_command = ([desktop, '--headless', 'stop'] if mode == 'desktop-owned' else
+                               [executable, 'stop'] if mode == 'client2-owned' else
+                               [cli, '--json', 'runtime', 'stop'])
+            stopped = run(cleanup_command, env)
             case['cleanup_exit'] = stopped.returncode
             if stopped.returncode:
                 case['passed'] = False
