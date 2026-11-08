@@ -58,7 +58,8 @@ def main():
     (probe / 'go.mod').write_text('module respire-client2/regression\n\ngo 1.26.0\n\n'
         'require respire-client2 v0.0.0\nreplace respire-client2 => ' + json.dumps(str(source)) + '\n')
     shutil.copyfile(source / 'go.sum', probe / 'go.sum')
-    shutil.copyfile(Path(__file__).parent / 'fixtures/client2-v0256-probe/main.go', probe / 'main.go')
+    for fixture in (Path(__file__).parent / 'fixtures/client2-v0256-probe').glob('*.go'):
+        shutil.copyfile(fixture, probe / fixture.name)
     executable = probe / ('probe.exe' if os.name == 'nt' else 'probe')
     build_env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
     build_env.update(GOPATH=str(base / 'go-path'), GOCACHE=str(base / 'go-cache'), GOMODCACHE=str(args.go_mod_cache.resolve(strict=True) if args.go_mod_cache else base / 'go-mod'))

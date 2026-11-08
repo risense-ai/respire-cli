@@ -15,15 +15,27 @@ func main() {
 	}
 	if len(os.Args) > 1 {
 		var actionErr error
+		var observedPID uint32
+		diagnostics := map[string]any{}
 		if os.Args[1] == "start" {
 			actionErr = m.Start()
 		} else if os.Args[1] == "stop" {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			before, _, err := m.Health(ctx)
+			cancel()
+			if err == nil {
+				observedPID = before.PID
+				diagnostics["before_stop"] = processDiagnostics(observedPID)
+			}
 			actionErr = m.Stop(false)
 		} else {
 			panic("unknown action")
 		}
 		if actionErr != nil {
-			json.NewEncoder(os.Stdout).Encode(map[string]any{"action_error": actionErr.Error()})
+			if observedPID != 0 {
+				diagnostics["after_stop_error"] = processDiagnostics(observedPID)
+			}
+			json.NewEncoder(os.Stdout).Encode(map[string]any{"action_error": actionErr.Error(), "process_diagnostics": diagnostics})
 			os.Exit(1)
 		}
 		if os.Args[1] == "stop" {
