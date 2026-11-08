@@ -55,7 +55,7 @@ test('every SDK cache consumer rejects primary-key prefix matches before source 
  }
 });
 
-for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
+for (const version of ['1.0.2-dev.24','1.1.0-dev.1','2.0.0-dev.1']) {
  test(`approved SDK train ${version} keeps canonical target identities`,()=>{
   const input=lock(version),plan=planCaches(input,structuredClone(input));
   assert.equal(plan.include.length,TARGETS.length);
@@ -63,6 +63,6 @@ for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
   assert.notEqual(cacheKey(TARGETS[0],input.targets[TARGETS[0]]),cacheKey(TARGETS[0],lock().targets[TARGETS[0]]));
  });
 }
-for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0-dev.1']) {
+for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1']) {
  test(`SDK cache rejects unsupported version ${version}`,()=>assert.throws(()=>planCaches(lock(version),lock(version)),/tag\/version/));
 }
