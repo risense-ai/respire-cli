@@ -1075,11 +1075,18 @@ mod tests {
         let append = config.join("oh-my-openagent.json");
         std::fs::write(&append, b"{\"agents\":{\"reviewer\":{\"prompt_append\":\"Keep this user rule\"}}}")?;
         assert!(inject_opencode()?);
+        let installed: serde_json::Value = serde_json::from_slice(&std::fs::read(&append)?)?;
+        assert_eq!(
+            installed["agents"]["reviewer"]["prompt_append"],
+            format!("Keep this user rule\n- Memory rules (respire): {}", entity_abs()?)
+        );
         assert!(remove_opencode()?);
         assert!(entity_path()?.is_file());
         assert_eq!(opencode_state()?, "none");
         let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&append)?)?;
-        assert_eq!(value["agents"]["reviewer"]["prompt_append"], "Keep this user rule");
+        // Adding a managed line separates it from an unterminated user line.
+        // Removal preserves that user line's newline and drops only our reference.
+        assert_eq!(value["agents"]["reviewer"]["prompt_append"], "Keep this user rule\n");
         assert!(!remove_opencode()?);
         Ok(())
     }
