@@ -2,7 +2,9 @@ param(
     [Parameter(Mandatory)][string]$Cli,
     [Parameter(Mandatory)][string]$RuntimeArchive,
     [Parameter(Mandatory)][string]$RuntimeVersion,
-    [Parameter(Mandatory)][string]$OutputDirectory
+    [Parameter(Mandatory)][string]$OutputDirectory,
+    [switch]$OfflineAcceptance,
+    [string]$OfflineModelDirectory
 )
 $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
@@ -194,6 +196,24 @@ public static class RespireGuiNative {
     Copy-Item -LiteralPath (Join-Path $taskProfile "runtime/$RuntimeVersion") -Destination $managed -Recurse
     @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
     Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
+    if ($OfflineAcceptance) {
+        $modelRoot = [IO.Path]::GetFullPath($OfflineModelDirectory)
+        if (-not $modelRoot.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Offline models must be staged under RUNNER_TEMP' }
+        $modelHashes = @{
+            'tokenizer.json'='6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790'
+            'onnx/model_quantized.onnx'='0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d'
+            'onnx/model_quantized.cpu-v1.ort'='7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff'
+        }
+        foreach ($name in $modelHashes.Keys) {
+            $modelFile = Join-Path $modelRoot $name
+            foreach ($checkPath in @($modelRoot,(Split-Path $modelFile),$modelFile)) {
+                if ((Get-Item -LiteralPath $checkPath).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Offline model input may not be linked' }
+            }
+            if ((Get-FileHash -LiteralPath $modelFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $modelHashes[$name]) { throw 'Pinned offline CPU model bytes differ' }
+        }
+        $report.offline_model_hashes = $modelHashes
+        $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
+    }
     $desktopProcess = Child-Start $exe @()
     $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
     $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
@@ -224,15 +244,24 @@ public static class RespireGuiNative {
         session_id=$desktopProcess.SessionId; hwnd=$visible[0].hwnd
         browser_pid=$browser[0].ProcessId; browser_started_ticks=(Get-Process -Id $browser[0].ProcessId).StartTime.ToUniversalTime().Ticks
         webview_profile=$expectedProfile; full_gui_acceptance='not-evaluated'; g1_passed=$false
+        rpc_port=$rpcPort; data_directory=$taskProfile; preferences_path=$preferencesPath
+        runtime_exe=(Join-Path $managed 'rsrs-runtime.exe')
+        runtime_sha256=(Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     }
     $bindingPath = Join-Path $root 'native-binding.json'
     $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
     $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
     $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
-    $driver = Child-Start $systemPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
-    if (-not $driver.WaitForExit(45000)) { $driver.Kill($true); throw 'System UI Automation helper timed out' }
+    $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
+    if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
+    $driver = Child-Start $systemPowerShell $helperArgs
+    $helperDeadline = if ($OfflineAcceptance) { 360000 } else { 45000 }
+    if (-not $driver.WaitForExit($helperDeadline)) { $driver.Kill($true); throw 'System UI Automation helper timed out' }
     $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
     $report.native_gui = $native
+    if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or
+        -not $native.offline.runtime_normal_stop_confirmed -or $native.offline.full_gui_acceptance -ne 'not-evaluated' -or
+        $native.offline.g1_passed -ne $false)) { throw 'Original offline GUI subset failed; full GUI remains not-evaluated' }
     $report.native_accessibility_read = $native.accessibility_tree_read -eq $true
     $report.foreground_verified = $native.foreground_verified -eq $true
     $report.gui_input_observed = $native.native_tab_sent -eq $true -and $native.focus_changed_in_target_document -eq $true
@@ -247,6 +276,21 @@ public static class RespireGuiNative {
     # Stop only the original process tree observed in this fresh hosted VM, with creation-time guards.
     try {
         if ($desktopProcess) {
+            if ($OfflineAcceptance -and $report.native_binding) {
+              try {
+                $checkpointPath = Join-Path $root 'native-gui.json'
+                if (-not (Test-Path -LiteralPath $checkpointPath)) { throw 'No detached Runtime identity checkpoint; cleanup cannot be certified' }
+                $checkpoint = Get-Content -Raw -LiteralPath $checkpointPath | ConvertFrom-Json
+                if ($checkpoint.offline.runtime_process) {
+                    $runtimeRecord = $checkpoint.offline.runtime_process
+                    if (-not [string]::Equals($runtimeRecord.ExecutablePath,$report.native_binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
+                        $runtimeRecord.SessionId -ne $desktopProcess.SessionId) { throw 'Detached cleanup record is not the bound staged Runtime' }
+                    $runtimeRecord.CreationDate = [datetime]$runtimeRecord.CreationDate
+                    if ($runtimeRecord.CreationDate.ToUniversalTime().Ticks -lt $desktopStarted) { throw 'Detached actor predates the original desktop' }
+                    $tracked += $runtimeRecord
+                } elseif ($checkpoint.offline) { $report.cleanup_error = 'Offline Runtime identity not established; detached cleanup is not certified' }
+              } catch { $report.cleanup_error = $_.Exception.Message }
+            }
             $sameRoot = Get-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
             if ($sameRoot -and $sameRoot.StartTime.ToUniversalTime().Ticks -eq $desktopStarted) {
                 $tracked = @($tracked) + @(Descendants $desktopProcess.Id)

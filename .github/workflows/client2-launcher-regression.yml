@@ -98,7 +98,30 @@ jobs:
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
             --report "$RUNNER_TEMP/client2-launcher-regression.json"
-      - name: Probe original Windows Client2 GUI connectivity (not full GUI acceptance)
+      - name: Key the existing pinned public CPU model cache
+        if: runner.os == 'Windows'
+        id: offline-model-key
+        shell: pwsh
+        run: '"key=$(python scripts/native-model-cache.py key)" >> $env:GITHUB_OUTPUT'
+      - uses: actions/cache/restore@v4
+        if: runner.os == 'Windows'
+        id: offline-model-cache
+        with:
+          path: .native-model-cache
+          key: ${{ steps.offline-model-key.outputs.key }}
+          enableCrossOsArchive: true
+      - name: Require exact pinned model cache and verify public bytes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EXPECTED_KEY: ${{ steps.offline-model-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.offline-model-cache.outputs.cache-matched-key }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:MATCHED_KEY -or $env:MATCHED_KEY -ne $env:EXPECTED_KEY) { throw 'Exact public CPU model cache unavailable; offline GUI acceptance environment blocked' }
+          python scripts/native-model-cache.py restore --model-dir "$env:RUNNER_TEMP/client2-gui-models" --legacy-dir "$env:RUNNER_TEMP/client2-gui-legacy-model"
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned public CPU model verification failed' }
+      - name: Probe original Windows Client2 GUI and real offline subset (not full GUI acceptance)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -108,7 +131,8 @@ jobs:
             -Cli "$PWD/target/debug/rsrs.exe" `
             -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `
             -RuntimeVersion $version `
-            -OutputDirectory "$env:RUNNER_TEMP/client2-gui-probe"
+            -OutputDirectory "$env:RUNNER_TEMP/client2-gui-probe" `
+            -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/client2-gui-models"
       - name: Preserve actual host results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
