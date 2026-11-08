@@ -97,8 +97,9 @@ for (const line of lines) {
     if (nativeLines.length < 4096) nativeLines.push(line); else nativeBlockCapped = true;
   }
 }
-const nativeThread = `thread '${nativeName}' panicked at `;
-const panicLines = nativeLines.filter(line => line.length <= 8192 && line.startsWith(nativeThread));
+const nativeThread = `thread '${nativeName}'`;
+const panicLines = nativeLines.filter(line => line.length <= 8192 && line.startsWith(nativeThread)
+  && /^(?: \([0-9]{1,10}\))? panicked at /.test(line.slice(nativeThread.length)));
 const locations = [];
 for (const line of panicLines) {
   const match = line.match(/(?:^|[/\\])diary_identity\.rs:([0-9]{1,6}):([0-9]{1,4}):/);

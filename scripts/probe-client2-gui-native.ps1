@@ -279,8 +279,18 @@ function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
 function Press-OfflineButton([string]$Name) {
     $element = Find-OfflineControl 'ControlType.Button' $Name
     $expected = $element.GetRuntimeId() -join '.'
+    $pattern = $null
+    if (-not $element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+        throw 'Offline button does not support the normal UIA Invoke action'
+    }
     Focus-OfflineControl $element
-    Send-OfflineKey 13 $expected
+    $null = Assert-Target $true
+    $focus = Read-TargetFocus
+    if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen -or $focus.runtime_id -ne $expected) {
+        throw 'Offline button focus changed before UIA Invoke'
+    }
+    $pattern.Invoke()
+    $null = Assert-Target $true
 }
 function Fill-OfflineField([string]$Name, [string]$Text) {
     $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Name) + '$')

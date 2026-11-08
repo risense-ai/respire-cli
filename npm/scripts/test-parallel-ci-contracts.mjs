@@ -100,6 +100,16 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.equal(failedDiagnostic.checkpoint_modes.forced.stages_seen.force_identities_rejected,false);
   assert.equal(failedDiagnostic.native_failure_kind,'native_panic');
   assert.deepEqual(failedDiagnostic.native_failure_locations,[{file:'diary_identity.rs',line:1812,column:7}]);
+  const rust195=failureBlock.replace("' panicked at ","' (1842) panicked at ");
+  assert.deepEqual(runEvidence(rust195,'101').report.safe_native_diagnostic.native_failure_locations,
+    [{file:'diary_identity.rs',line:1812,column:7}]);
+  for(const invalidThreadId of ['-1','synthetic-secret-canary','12345678901']) {
+    const output=failureBlock.replace("' panicked at ",`' (${invalidThreadId}) panicked at `);
+    const report=runEvidence(output,'101').report.safe_native_diagnostic;
+    assert.deepEqual(report.native_failure_locations,[]);
+    assert.equal(report.native_failure_kind,'native_failure_unlocated');
+  }
+
   for(const invalidLocation of ['0:1','20001:1','1:0','1:4097']) {
     const output=failureBlock.replace('1812:7',invalidLocation);
     assert.deepEqual(runEvidence(output,'101').report.safe_native_diagnostic.native_failure_locations,[]);
