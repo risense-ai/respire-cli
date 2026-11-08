@@ -133,9 +133,14 @@ class CandidateFixtureTests(unittest.TestCase):
         extended_listing = "\n".join(name + ": test" for name in extended)
         self.assertEqual(candidate.selected_cases(extended_listing, "full"), extended)
         self.assertEqual(candidate.selected_cases(extended_listing, "full", True), extended)
+        self.assertEqual(candidate.selected_cases(extended_listing, "diagnostic-native-stop"), [candidate.NATIVE_STOP_CASE])
+        with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
+            candidate.selected_cases(listing, "diagnostic-native-stop")
+        with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
+            candidate.selected_cases(extended_listing + "\n" + candidate.NATIVE_STOP_CASE + ": test", "diagnostic-native-stop")
         with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
             candidate.selected_cases(listing, "full", True)
-        for suite in ("account", "diagnostic-failures"):
+        for suite in ("account", "diagnostic-failures", "diagnostic-native-stop"):
             with self.subTest(suite=suite), self.assertRaisesRegex(RuntimeError, "native_stop_requires_full_suite"):
                 candidate.selected_cases(listing, suite, True)
         for broken in (names[:-1], names + [names[0]],

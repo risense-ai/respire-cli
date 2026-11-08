@@ -75,6 +75,9 @@ def selected_cases(listing, suite, require_native_stop=False):
     if suite == "diagnostic-failures":
         require(all(names.count(case) == 1 for case in DIAGNOSTIC_CASES), "diagnostic_case_inventory_mismatch")
         return list(DIAGNOSTIC_CASES)
+    if suite == "diagnostic-native-stop":
+        require(names.count(NATIVE_STOP_CASE) == 1, "native_stop_business_case_missing")
+        return [NATIVE_STOP_CASE]
     require(suite == "full", "unknown_business_suite")
     expected = set(BASELINE_CASES)
     if NATIVE_STOP_CASE in names:
@@ -242,15 +245,35 @@ def safe_failure_diagnostics(captured, failed_cases):
         for line in blocks.get(case, []):
             if b"panicked at " not in line or len(line) > 8192:
                 continue
-            for match in re.finditer(rb"[/\\](account\.rs|snapshot_lifecycle\.rs):([0-9]{1,6}):([0-9]{1,4}):", line):
+            for match in re.finditer(rb"[/\\](account\.rs|snapshot_lifecycle\.rs|diary_identity\.rs):([0-9]{1,6}):([0-9]{1,4}):", line):
                 number, column = int(match[2]), int(match[3])
                 if not (1 <= number <= 20000 and 1 <= column <= 4096):
                     continue
                 location = {"file": match[1].decode("ascii"), "line": number, "column": column}
                 if location not in locations[case] and len(locations[case]) < 8:
                     locations[case].append(location)
+    native_stages = {b"start", b"fixture_ready", b"memory_seeded", b"runtime_ready",
+                     b"provider_received", b"active_verified", b"stop_accepted",
+                     b"force_identities_rejected", b"worker_reaped", b"normal_waited",
+                     b"same_key_checked", b"business_completed", b"runtime_stopped",
+                     b"store_unchanged", b"restarted", b"stale_rejected", b"restart_stopped", b"complete"}
+    checkpoints, checkpoint_invalid = [], False
+    for line in blocks.get(NATIVE_STOP_CASE, []):
+        if b"NATIVE_STOP_CHECKPOINT" not in line:
+            continue
+        match = re.fullmatch(rb"NATIVE_STOP_CHECKPOINT mode=(normal|forced) stage=([a-z_]{1,32})", line)
+        if match is None or match[2] not in native_stages:
+            checkpoint_invalid = True
+            continue
+        checkpoint = {"mode": match[1].decode("ascii"), "stage": match[2].decode("ascii")}
+        if checkpoint not in checkpoints:
+            if len(checkpoints) >= 36:
+                checkpoint_invalid = True
+                continue
+            checkpoints.append(checkpoint)
     return {"authorization_events": events, "authorization_event_invalid": invalid,
-            "failure_codes": codes, "failure_locations": locations}
+            "failure_codes": codes, "failure_locations": locations,
+            "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid}
 
 
 MODEL_HASHES = {
@@ -450,10 +473,11 @@ def run(args):
     require(root.is_relative_to(temp) and root != temp and not root.exists(), "fresh_owned_root_required")
     os.umask(0o077)
     root.mkdir(mode=0o700)
-    diagnostic = args.suite == "diagnostic-failures"
+    diagnostic = args.suite in ("diagnostic-failures", "diagnostic-native-stop")
     report = {"schema_version": 1,
               "kind": "unpublished-source-diagnostic" if diagnostic else "unpublished-source-fixture",
-              "case": ("targeted-failure-diagnostic" if diagnostic else
+              "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
+                       "targeted-failure-diagnostic" if diagnostic else
                        CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
               "required_native_stop": args.require_native_stop,
@@ -525,8 +549,8 @@ def run(args):
             report["required_cases"] = cases
             report["selected_case_count"] = len(cases)
             test_args = ([*cases, "--exact", "--test-threads=1"]
-                         if args.suite in ("account", "diagnostic-failures") else ["--test-threads=1"])
-            if args.compatibility_host:
+                         if args.suite in ("account", "diagnostic-failures", "diagnostic-native-stop") else ["--test-threads=1"])
+            if args.compatibility_host or diagnostic:
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
@@ -546,7 +570,7 @@ def run(args):
                 "required_business_cases_did_not_pass")
         require(all(f"test {case} ... ok".encode() in captured.splitlines() for case in cases),
                 "required_business_case_result_missing")
-        if args.compatibility_host:
+        if args.compatibility_host and args.suite != "diagnostic-native-stop":
             checks = compatibility_host_checks(captured)
             expected = {"import-target", "restart-target"}
             if args.suite in ("full", "diagnostic-failures"):
@@ -596,7 +620,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures", "diagnostic-native-stop"), default="account")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
     parser.add_argument("--official-cli-metadata", type=Path,

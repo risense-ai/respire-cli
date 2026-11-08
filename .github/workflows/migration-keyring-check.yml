@@ -20,7 +20,7 @@ on:
           - current-source
           - official-dev6
       business_suite:
-        description: Original source cases; full requires every baseline case; diagnostic-failures runs four known failures without release acceptance
+        description: Original source cases; full requires every baseline case; diagnostic suites isolate fixed failures without release acceptance
         required: false
         type: choice
         default: account
@@ -28,6 +28,7 @@ on:
           - account
           - full
           - diagnostic-failures
+          - diagnostic-native-stop
       compatibility_host:
         description: Build the opt-in Client2 host and require its identity across account/space maintenance
         required: false
