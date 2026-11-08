@@ -600,13 +600,13 @@ pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Re
     let profile = profile.canonicalize()?;
     anyhow::ensure!(read_registration(&root)?.is_none() && !marker_path(&root).try_exists()?,
         "compatibility handoff requires an unregistered host and completed durable maintenance");
-    let identity = super::control::identity(&profile)?;
+    let identity = super::supervise::handoff_identity(&profile)?;
     let account = match &identity {
         respire_protocol::host_control::HostAuthIdentity::Bound { account_id, .. } => account_id.clone(),
         _ => hash(profile.display().to_string().as_bytes()),
     };
-    let (binary, manifest) = super::model_control::installed_model_runtime()?;
-    super::model_control::verify_model_owner(owner, &root, &profile, None,
+    let (binary, manifest) = super::supervise::installed_model_runtime()?;
+    super::supervise::verify_model_owner(owner, &root, &profile, None,
         &binary, &manifest, Some(&account))?;
     // Verify the stable CLI bytes before stopping the already committed owner.
     crate::client2_host::checked_executable()?;
@@ -615,18 +615,18 @@ pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Re
     anyhow::ensure!(crate::rpc::probe_runtime()?.is_none() && !crate::rpc::endpoint_path().try_exists()?,
         "compatibility handoff owner did not fully drain");
     anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == profile
-        && super::control::identity(&profile)? == identity,
+        && super::supervise::handoff_identity(&profile)? == identity,
         "committed selection changed before compatibility host startup");
     crate::client2_host::start_locked()?;
     let restored = crate::rpc::probe_runtime()?.context("compatibility Runtime did not resume")?;
-    super::model_control::verify_model_owner(&restored, &root, &profile, None,
+    super::supervise::verify_model_owner(&restored, &root, &profile, None,
         &binary, &manifest, Some(&account))?;
-    let (current_binary, current_manifest) = super::model_control::installed_model_runtime()?;
+    let (current_binary, current_manifest) = super::supervise::installed_model_runtime()?;
     anyhow::ensure!(restored.instance_id != owner.instance_id && (!ready || restored.store_ready)
         && current_binary == binary && current_manifest.version == manifest.version
         && current_manifest.sha256.eq_ignore_ascii_case(&manifest.sha256)
         && respire_client_host::config::control_roots()?.1.canonicalize()? == profile
-        && super::control::identity(&profile)? == identity,
+        && super::supervise::handoff_identity(&profile)? == identity,
         "compatibility Runtime failed independent committed-owner handoff verification");
     Ok(())
 }

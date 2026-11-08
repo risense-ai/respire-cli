@@ -29,6 +29,10 @@ pub(crate) use auth_control::{control_account_result, control_account_rollback,
     control_auth_result, control_keygen, control_login, control_login_step, control_register};
 pub(crate) use launch_authorization::secret_control::{control_secret, control_keys_export, control_session_list};
 pub(super) use launch_authorization::control::{installed_auth_runtime, verify_account_target};
+#[cfg(feature = "client2-host-prototype")]
+pub(super) use launch_authorization::control::identity as handoff_identity;
+#[cfg(feature = "client2-host-prototype")]
+pub(super) use launch_authorization::model_control::{installed_model_runtime, verify_model_owner};
 pub(crate) use launch_authorization::control::{login_recovery_status, recover_legacy_login_locked};
 pub(crate) use launch_authorization::model_control::{
     prepare_model_locked, model_install_plan_locked, model_install_verify_locked,

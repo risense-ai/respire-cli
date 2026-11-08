@@ -122,7 +122,7 @@ pub(crate) fn control_prepare_model(intent: &ModelInstallIntent) -> Result<(Asse
     }
 }
 
-pub(super) fn installed_model_runtime() -> Result<(PathBuf, crate::runtime_fetch::ManagedManifest)> {
+pub(in crate::autostart) fn installed_model_runtime() -> Result<(PathBuf, crate::runtime_fetch::ManagedManifest)> {
     let manifest = crate::runtime_fetch::read_manifest()?.context("model control Runtime manifest is missing")?;
     // This verifier authenticates the official metadata, full inventory and binary hash.
     let (binary, image_sha256) = super::control::installed_auth_runtime()?;
@@ -133,7 +133,7 @@ pub(super) fn installed_model_runtime() -> Result<(PathBuf, crate::runtime_fetch
     Ok((binary, manifest))
 }
 
-pub(super) fn verify_model_owner(
+pub(in crate::autostart) fn verify_model_owner(
     health: &crate::net_rpc::Health, root: &Path, profile: &Path,
     managed: Option<&super::super::super::Registration>, binary: &Path,
     manifest: &crate::runtime_fetch::ManagedManifest, expected_account: Option<&str>,
