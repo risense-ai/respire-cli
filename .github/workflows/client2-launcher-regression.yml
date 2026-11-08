@@ -15,8 +15,21 @@ permissions:
 
 jobs:
   real-host:
-    name: Unchanged Client2 host (Linux X64 prototype)
-    runs-on: ubuntu-24.04
+    name: Unchanged Client2 host (${{ matrix.target }} prototype)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            exe: ''
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe: ''
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: '.exe'
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -39,6 +52,7 @@ jobs:
       - name: Download and verify official pinned Runtime bytes
         env:
           GH_TOKEN: ${{ github.token }}
+          RUNTIME_TARGET: ${{ matrix.target }}
         shell: bash
         run: |
           set -euo pipefail
@@ -46,15 +60,16 @@ jobs:
           version="$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')"
           gh api "repos/risense-ai/respire-runtime/releases/tags/v$version" > "$RUNNER_TEMP/client2-runtime/release.json"
           gh release download "v$version" --repo risense-ai/respire-runtime \
-            --pattern 'rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz' \
-            --pattern 'runtime-build-x86_64-unknown-linux-gnu.json' \
+            --pattern "rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
+            --pattern "runtime-build-$RUNTIME_TARGET.json" \
             --dir "$RUNNER_TEMP/client2-runtime"
           python3 - <<'PY'
           import hashlib, json, os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-runtime'
           release = json.loads((root / 'release.json').read_text())
           assert not release['draft'] and release['prerelease']
-          for name in ['rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz', 'runtime-build-x86_64-unknown-linux-gnu.json']:
+          target = os.environ['RUNTIME_TARGET']
+          for name in [f'rsrs-runtime-{target}.tar.gz', f'runtime-build-{target}.json']:
               asset, = [a for a in release['assets'] if a['name'] == name]
               data = (root / name).read_bytes()
               assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
@@ -64,16 +79,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 scripts/test-client2-launcher-compat.py \
-            --cli target/debug/rsrs \
-            --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz" \
+            --cli target/debug/rsrs${{ matrix.exe }} \
+            --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
             --runtime-version "$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')" \
-            --client2-source .client2-source --go "$(command -v go)" \
+            --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --report "$RUNNER_TEMP/client2-launcher-regression.json"
       - name: Preserve actual host results (not G1 evidence)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: client2-launcher-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          name: client2-launcher-raw-${{ matrix.target }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/client2-launcher-regression.json
           if-no-files-found: warn
           retention-days: 7

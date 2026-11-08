@@ -13,6 +13,8 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 
 CLIENT2_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
 
@@ -60,6 +62,43 @@ def main():
                            'managed services', 'cross-platform execution']}
     def run(argv, env):
         return subprocess.run([str(x) for x in argv], env=env, capture_output=True, text=True, timeout=150)
+    def request(port, path, body=None, headers=None):
+        request = urllib.request.Request(f'http://127.0.0.1:{port}{path}',
+            data=None if body is None else json.dumps(body).encode(),
+            headers={'Content-Type': 'application/json', **(headers or {})})
+        # Never inherit proxy settings or replay a failed request.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            response = opener.open(request, timeout=10)
+        except urllib.error.HTTPError as error:
+            response = error
+        with response:
+            data = response.read(8 * 1024 * 1024 + 1)
+            if len(data) > 8 * 1024 * 1024: raise RuntimeError('Oversized boundary response')
+            try: value = json.loads(data)
+            except json.JSONDecodeError: value = None
+            return response.code, value
+    def boundaries(port):
+        results = {}
+        for name, headers in [('foreign_host', {'Host': 'foreign.invalid'}),
+                              ('foreign_origin', {'Origin': 'http://foreign.invalid'})]:
+            status, _ = request(port, '/api/health', headers=headers)
+            results[name] = status
+            if status != 403: raise RuntimeError(f'{name} was not rejected: HTTP {status}')
+        base = {'v': 1, 'id': 'compat-boundary', 'method': 'cli.exec', 'args': ['--json', 'status']}
+        status, _ = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
+        results['mixed_identity'] = status
+        if status != 400: raise RuntimeError(f'Mixed legacy/modern identity was not rejected: HTTP {status}')
+        status, health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
+        if status != 200 or not health: raise RuntimeError('Modern health is unavailable')
+        scope = {key: health[key] for key in ['account_id', 'instance_id', 'generation']}
+        scope['instance_id'] = 'foreign-instance'
+        status, result = request(port, '/api/rpc', {**base, 'scope': scope,
+            'operation_id': 'wrong-scope', 'idempotency_key': 'wrong-scope'})
+        results['wrong_scope'] = result.get('code') if result else None
+        if status != 200 or not result or result.get('ok') is not False or result.get('code') != 'scope_mismatch':
+            raise RuntimeError('Wrong scope was not rejected without rebinding')
+        return results
     for mode in ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']:
         root = base / mode; root.mkdir(); home = root / 'home'; home.mkdir()
         with socket.socket() as listener:
@@ -92,6 +131,7 @@ def main():
             case['legacy_rpc_code'] = payload.get('diagnostic_rpc',{}).get('code')
             if result.returncode or case['legacy_rpc_ok'] is not True:
                 raise RuntimeError('Unmodified Client2 startup/business calls failed')
+            case['boundaries'] = boundaries(port)
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
