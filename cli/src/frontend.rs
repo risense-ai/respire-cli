@@ -12,6 +12,8 @@ use clap::Parser;
 pub mod autostart;
 mod classify_config;
 mod client_config;
+#[cfg(any(test, feature = "client2-host-prototype"))]
+mod client2_host;
 mod doctor;
 mod host_rpc;
 mod login;
@@ -1125,6 +1127,13 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 }
 
 fn main_body() -> i32 {
+    #[cfg(feature = "client2-host-prototype")]
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "--client2-host-internal") {
+        return match client2_host::serve() {
+            Ok(()) => 0,
+            Err(error) => { eprintln!("Client2 compatibility host failed: {error:#}"); 1 }
+        };
+    }
     let roots_requested = std::env::args_os().any(|arg| arg == "--roots");
     if !roots_requested && std::env::args_os().any(|arg| arg == "--host-rpc-stdio") {
         set_json_mode(true);

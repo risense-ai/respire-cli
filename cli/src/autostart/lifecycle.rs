@@ -1007,6 +1007,9 @@ fn start_explicit_locked() -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
+        #[cfg(feature = "client2-host-prototype")]
+        return crate::client2_host::start_locked();
+        #[cfg(not(feature = "client2-host-prototype"))]
         return crate::rpc::ensure_daemon_locked();
     };
     owned(&config)?;

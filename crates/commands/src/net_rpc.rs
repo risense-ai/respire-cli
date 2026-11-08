@@ -325,7 +325,8 @@ pub fn health() -> Result<Health> {
     check_connection()?;
     let url = format!("{}/api/health", rpc_base_url());
     let resp = send_loopback(
-        agent().get(&url).timeout(Duration::from_secs(2)),
+        agent().get(&url).timeout(Duration::from_secs(2))
+            .set("X-Respire-Health", "runtime-v1"),
         |request| request.call(),
     )?;
     let parsed: Value = resp.into_json().context("runtime health is not JSON")?;
