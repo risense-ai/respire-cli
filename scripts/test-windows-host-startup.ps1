@@ -135,9 +135,14 @@ try {
     New-Item -ItemType Directory -Path $selectedProfile -Force | Out-Null
     $bundlePreparation = Join-Path $PSScriptRoot 'runtime-acceptance-bundle.py'
     $candidateArguments = if ($RuntimeArchive) { @('--archive', $RuntimeArchive, '--version', $RuntimeVersion) } else { @('--runtime-binary', $runtimeCandidate) }
-    & python -I -B $bundlePreparation --binary $nativeExecutable --destination $nativeDirectory @candidateArguments
+    & python -I -B $bundlePreparation --binary $nativeExecutable --destination $nativeDirectory --installation-root $profileRoot @candidateArguments
     if ($LASTEXITCODE -ne 0) { throw 'Independent Runtime bundle preparation failed; no startup task registered' }
-    $fixtureRuntime = Join-Path $nativeDirectory 'rsrs-runtime.exe'
+    $stableCli = Join-Path $nativeDirectory 'rsrs.exe'
+    Copy-Item -LiteralPath $nativeExecutable -Destination $stableCli
+    if ((Get-FileHash -LiteralPath $stableCli -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $nativeExecutable -Algorithm SHA256).Hash) { throw 'Stable fixture CLI bytes differ' }
+    $managedReceipt = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'runtime.json') | ConvertFrom-Json
+    $fixtureRuntime = (Get-Item -LiteralPath (Join-Path $profileRoot ('runtime/' + $managedReceipt.version + '/rsrs-runtime.exe'))).FullName
     [IO.File]::WriteAllText((Join-Path $profileRoot 'client.json'),
         (@{data_dir = $selectedProfile; service_mode = 'off'} | ConvertTo-Json -Compress), $utf8)
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -183,7 +188,7 @@ try {
     $health = $null
     $status = $null
     while ([DateTime]::UtcNow -lt $deadline) {
-        try { $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 100; continue }
+        try { $health = Invoke-RestMethod -Uri $healthUrl -Headers @{'X-Respire-Health' = 'runtime-v1'} -TimeoutSec 2 } catch { Start-Sleep -Milliseconds 100; continue }
         if ($health.server -ne 'respire' -or -not (FixturePathEquals $health.data_dir $selectedProfile)) {
             throw 'Fixture port belongs to another runtime/profile; no lifecycle request sent'
         }
@@ -199,10 +204,24 @@ try {
     }
     if (-not $runtimeOwned -or $null -eq $status) {
         try {
+            $taskEnvelope = $null
+            if (Test-Path -LiteralPath $statusFile) {
+                try { $taskEnvelope = Get-Content -Raw -LiteralPath $statusFile | ConvertFrom-Json -ErrorAction Stop } catch { }
+            }
+            $taskErrorCode = 'unclassified'
+            if ($null -ne $taskEnvelope -and $taskEnvelope.command -eq 'cli' -and $taskEnvelope.status -eq 'fail' -and
+                $taskEnvelope.summary.reason -eq 'runtime_error' -and $taskEnvelope.details.error_type -eq 'runtime') {
+                $taskErrorCode = 'runtime_error'
+                if (@($taskEnvelope.errors).Count -eq 1 -and
+                    $taskEnvelope.errors[0] -ceq 'No such file or directory (os error 2)') { $taskErrorCode = 'stable_path_missing' }
+            }
             $taskInfo = Get-ScheduledTaskInfo -TaskName $taskName -TaskPath '\' -ErrorAction Stop
             Write-Output (@{stage = 'startup-timeout'; runtime_identity_verified = $runtimeOwned;
                 result_file_exists = (Test-Path -LiteralPath $statusFile); result_parsed = ($null -ne $status);
-                task_state = [string](FindFixtureTask).State; last_task_result = [long]$taskInfo.LastTaskResult} | ConvertTo-Json -Compress)
+                task_state = [string](FindFixtureTask).State; last_task_result = [long]$taskInfo.LastTaskResult;
+                task_result_parsed = ($null -ne $taskEnvelope); task_error_code = $taskErrorCode;
+                stable_cli_exists = (Test-Path -LiteralPath $stableCli -PathType Leaf);
+                managed_receipt_exists = (Test-Path -LiteralPath (Join-Path $profileRoot 'runtime.json') -PathType Leaf)} | ConvertTo-Json -Compress)
         } catch { Write-Warning 'Startup task diagnostics unavailable; original timeout retained' }
         throw 'Scheduled host startup did not become ready'
     }
@@ -213,7 +232,7 @@ try {
     $runtimePid = $health.pid
     $denied = InvokeFixture '--client-only --runtime-internal --stop --json'
     if ($denied.exit -eq 0 -or ($denied.output | ConvertFrom-Json).status -ne 'fail') { throw 'Client-only lifecycle command was accepted' }
-    if ((Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2).pid -ne $runtimePid) { throw 'Client-only command changed runtime ownership' }
+    if ((Invoke-RestMethod -Uri $healthUrl -Headers @{'X-Respire-Health' = 'runtime-v1'} -TimeoutSec 2).pid -ne $runtimePid) { throw 'Client-only command changed runtime ownership' }
     $stop = InvokeFixture '--runtime-internal --stop --json'
     if ($stop.exit -ne 0) { throw 'Owned host runtime could not be stopped' }
     $runtimeOwned = $false
@@ -228,7 +247,7 @@ try {
   try {
     if ($runtimeOwned) {
         try {
-            $current = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
+            $current = Invoke-RestMethod -Uri $healthUrl -Headers @{'X-Respire-Health' = 'runtime-v1'} -TimeoutSec 2
             if ($current.server -eq 'respire' -and (FixturePathEquals $current.data_dir $selectedProfile) -and
                 (FixturePathEquals $current.exe $fixtureRuntime)) {
                 $cleanupStop = InvokeFixture '--runtime-internal --stop --json'

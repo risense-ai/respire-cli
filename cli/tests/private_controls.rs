@@ -191,7 +191,7 @@ fn absent_session_reads_reject_without_credentials_and_retain_fencing() -> Resul
 #[test]
 fn metadata_enable_without_local_keys_preserves_the_original_failed_operation() -> Result<()> {
     let fixture = Fixture::new()?;
-    let (before, before_result) = fixture.run(&["metadata", "status"])?;
+    let (before, before_result) = fixture.run(&["--direct", "metadata", "status"])?;
     anyhow::ensure!(
         before.status.success(),
         "initial metadata status failed: {before_result}"

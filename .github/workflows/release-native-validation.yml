@@ -200,7 +200,8 @@ jobs:
           const env = {...process.env, RSRS_DATA_DIR: root, HOME: home, USERPROFILE: home, RSRS_RUNTIME_TRIPLE: process.env.CLI_TARGET,
             RSRS_UPDATE_CHECK: '0', RSRS_NO_AUTOSYNC: '1'};
           for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'RSRS_CORE_TEST_MODE', 'RSRS_RUNTIME_BIN']) delete env[key];
-          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, process.env.CLI_TARGET);
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));

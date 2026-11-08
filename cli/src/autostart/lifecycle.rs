@@ -522,6 +522,28 @@ impl Maintenance {
         maintenance_binding(&target, None, false)
     }
 
+    /// Restore only the verified serving owner after durable maintenance completion.
+    pub(crate) fn finish_handoff(&self) -> Result<()> {
+        #[cfg(feature = "client2-host-prototype")]
+        {
+            anyhow::ensure!(self.completed, "compatibility handoff requires completed maintenance");
+            let Some(root) = self.installation.as_deref() else { return Ok(()); };
+            if read_registration(root)?.is_some() { return Ok(()); }
+            anyhow::ensure!(current_boot_token().is_none() && !marker_path(root).try_exists()?,
+                "completed operation cannot hand off while another maintenance owns the installation");
+            anyhow::ensure!(respire_client_host::config::control_roots()?.0.canonicalize()? == root,
+                "completed maintenance installation changed before compatibility handoff");
+            if let Some(health) = crate::rpc::probe_runtime()? {
+                finish_compatibility_handoff(&health).context(
+                    "operation committed and maintenance finished; Client2 compatibility handoff pending; do not repeat the operation")?;
+            } else {
+                anyhow::ensure!(!crate::rpc::endpoint_path().try_exists()?,
+                    "completed maintenance has an unverified recorded owner; no compatibility host was started");
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn finish(&mut self) -> Result<()> {
         if self.completed {
             return Ok(());
@@ -567,6 +589,46 @@ impl Drop for Maintenance {
             });
         }
     }
+}
+
+#[cfg(feature = "client2-host-prototype")]
+pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Result<()> {
+    anyhow::ensure!(current_boot_token().is_none(),
+        "compatibility handoff cannot inherit maintenance authorization");
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(read_registration(&root)?.is_none() && !marker_path(&root).try_exists()?,
+        "compatibility handoff requires an unregistered host and completed durable maintenance");
+    let identity = super::supervise::handoff_identity(&profile)?;
+    let account = match &identity {
+        respire_protocol::host_control::HostAuthIdentity::Bound { account_id, .. } => account_id.clone(),
+        _ => hash(profile.display().to_string().as_bytes()),
+    };
+    let (binary, manifest) = super::supervise::installed_model_runtime()?;
+    super::supervise::verify_model_owner(owner, &root, &profile, None,
+        &binary, &manifest, Some(&account))?;
+    // Verify the stable CLI bytes before stopping the already committed owner.
+    crate::client2_host::checked_executable()?;
+    let ready = owner.store_ready;
+    crate::rpc::drain_occupant(owner, Duration::from_secs(60))?;
+    anyhow::ensure!(crate::rpc::probe_runtime()?.is_none() && !crate::rpc::endpoint_path().try_exists()?,
+        "compatibility handoff owner did not fully drain");
+    anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == profile
+        && super::supervise::handoff_identity(&profile)? == identity,
+        "committed selection changed before compatibility host startup");
+    crate::client2_host::start_locked()?;
+    let restored = crate::rpc::probe_runtime()?.context("compatibility Runtime did not resume")?;
+    super::supervise::verify_model_owner(&restored, &root, &profile, None,
+        &binary, &manifest, Some(&account))?;
+    let (current_binary, current_manifest) = super::supervise::installed_model_runtime()?;
+    anyhow::ensure!(restored.instance_id != owner.instance_id && (!ready || restored.store_ready)
+        && current_binary == binary && current_manifest.version == manifest.version
+        && current_manifest.sha256.eq_ignore_ascii_case(&manifest.sha256)
+        && respire_client_host::config::control_roots()?.1.canonicalize()? == profile
+        && super::supervise::handoff_identity(&profile)? == identity,
+        "compatibility Runtime failed independent committed-owner handoff verification");
+    Ok(())
 }
 
 pub(crate) fn begin_maintenance_locked() -> Result<Maintenance> {
@@ -1007,6 +1069,9 @@ fn start_explicit_locked() -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
+        #[cfg(feature = "client2-host-prototype")]
+        return crate::client2_host::start_locked();
+        #[cfg(not(feature = "client2-host-prototype"))]
         return crate::rpc::ensure_daemon_locked();
     };
     owned(&config)?;
@@ -2015,6 +2080,15 @@ mod tests {
         check_direct_access()?;
         let root = dir.path().canonicalize()?;
         let mut local = begin_maintenance_locked()?;
+        #[cfg(feature = "client2-host-prototype")]
+        {
+            let bytes = fs::read(marker_path(&root))?;
+            let token = current_boot_token();
+            assert!(local.finish_handoff().is_err());
+            assert_eq!(fs::read(marker_path(&root))?, bytes);
+            assert_eq!(current_boot_token(), token);
+            Maintenance::inactive().finish_handoff()?;
+        }
         assert_eq!(local.installation_root()?, root);
         assert!(local.config.is_none() && !control_path(&root).exists());
         let first = marker(&root)?.context("local Paused marker missing")?;
@@ -2031,6 +2105,13 @@ mod tests {
         let mut interrupted = begin_maintenance_locked()?;
         interrupted.auth_launch_binding(&root)?;
         let token = current_boot_token().context("local maintenance token missing")?;
+        #[cfg(feature = "client2-host-prototype")]
+        {
+            let bytes = fs::read(marker_path(&root))?;
+            assert!(local.finish_handoff().is_err());
+            assert_eq!(fs::read(marker_path(&root))?, bytes);
+            assert_eq!(current_boot_token().as_deref(), Some(token.as_str()));
+        }
         drop(local);
         assert_eq!(current_boot_token().as_deref(), Some(token.as_str()));
         let original = fs::read(marker_path(&root))?;

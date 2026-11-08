@@ -84,6 +84,7 @@ impl Runtime {
     fn refresh_controlled_identity(&mut self) -> Result<(), String> {
         self.verify_stop_receipt(None)?;
         let health: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{}/api/health", self.port))
+            .set("X-Respire-Health", "runtime-v1")
             .timeout(Duration::from_secs(3)).call().map_err(|err| err.to_string())?
             .into_json().map_err(|err| err.to_string())?;
         for field in ["server", "v", "installation_id", "account_id", "bin", "runtime_version", "image_sha256"] {

@@ -20,6 +20,13 @@ import time
 import urllib.request
 
 
+def backend_health(port):
+    # These callers verify the native Runtime's OS identity, not the legacy host view.
+    request = urllib.request.Request(f"http://127.0.0.1:{port}/api/health",
+                                     headers={"X-Respire-Health": "runtime-v1"})
+    return urllib.request.urlopen(request, timeout=5)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -89,6 +96,7 @@ def main():
         # original release proof, not an unbound explicit Runtime override.
         needs_managed = args.register or os.name == "nt"
         runtime_binary = stage_runtime(base / "bin", managed_fixture if needs_managed else None)
+        shutil.copy2(binary, base / "bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
         env["RSRS_RUNTIME_BIN"] = str(base / "bin" / runtime_name)
 
         restart_stages={"restart_probe","restart_managed","restart_identity","restart_stop","restart_start","restart_ready"}
@@ -197,6 +205,7 @@ def main():
         (off_root / "client.json").write_text(json.dumps({"service_mode":"off"}))
         off_env = dict(env, RSRS_DATA_DIR=str(off_root), RSRS_BIN_DIR=str(base/"off-bin"))
         stage_runtime(base / "off-bin")
+        shutil.copy2(binary, base / "off-bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
         off_env["RSRS_RUNTIME_BIN"] = str(base / "off-bin" / runtime_name)
         if needs_managed:
             off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture, off_root))
@@ -210,7 +219,7 @@ def main():
                 # suspend only this fixture's verified unmanaged native owner.
                 import ctypes
                 from ctypes import wintypes
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                with backend_health(port) as response:
                     frozen=json.load(response)
                 assert Path(frozen["data_dir"]).resolve()==off_root.resolve()
                 kernel=ctypes.WinDLL("kernel32",use_last_error=True)
@@ -242,7 +251,7 @@ def main():
                     assert not (off_root/"runtime/autostart/registration.json").exists()
                     assert ntdll.NtResumeProcess(owned)>=0, "owned fixture could not be resumed"
                     suspended=False
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                    with backend_health(port) as response:
                         resumed=json.load(response)
                     for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
                         assert resumed[key]==frozen[key], f"suspended owner was replaced: {key}"
@@ -615,7 +624,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     owner_attempted=True
                     owner_start=subprocess.run([binary,"--json","runtime","start"],env=off_env,capture_output=True,text=True,timeout=45)
                     assert owner_start.returncode==0, f"identity fixture startup failed: {owner_start.stdout} {owner_start.stderr}"
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                    with backend_health(port) as response:
                         owner_before=json.load(response)
                     assert Path(owner_before["installation_root"]).resolve()==off_root.resolve()
                     assert Path(owner_before["data_dir"]).resolve()==off_root.resolve()
@@ -627,7 +636,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                     assert "runtime identity/profile does not match" in " ".join(json.loads(failed.stdout)["errors"]), failed.stdout
                     assert (failure_root/"runtime/autostart/maintenance.json").is_file(), "identity failure did not reach persisted maintenance"
                     assert owner_endpoint.read_bytes()==owner_endpoint_before
-                    with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
+                    with backend_health(port) as response:
                         owner_after=json.load(response)
                     for key in ("pid","instance_id","process_start_id","image_sha256","account_id","generation"):
                         assert owner_after[key]==owner_before[key], f"wrong-installation enable replaced owner: {key}"

@@ -51,6 +51,31 @@ pub fn spawn_host_control(command: &mut Command) -> io::Result<std::process::Chi
     }
 }
 
+/// A compatibility host owns this backend for its entire lifetime. Linux's
+/// kernel closes the orphan window even when the host cannot run cleanup.
+/// This is forced containment, never proof of a normal application drain.
+pub fn spawn_owned_runtime(command: &mut Command) -> io::Result<std::process::Child> {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        let parent = std::process::id();
+        // SAFETY: only async-signal-safe system calls run after fork; no locks,
+        // allocation or unrelated process signalling occurs in this callback.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if libc::getppid() as u32 != parent {
+                    return Err(io::Error::from_raw_os_error(libc::ECHILD));
+                }
+                Ok(())
+            });
+        }
+    }
+    spawn_host_control(command)
+}
+
 pub fn spawn_runtime(exe: &Path) -> io::Result<std::process::Child> {
     spawn_runtime_with_boot_token(exe, None)
 }
@@ -78,6 +103,19 @@ pub fn spawn_binary_with_boot_token(
     args: &[std::ffi::OsString],
     token: Option<&str>,
 ) -> io::Result<std::process::Child> {
+    spawn_detached(exe, args, token, false)
+}
+
+/// A detached, same-user child with one private startup response pipe.
+pub fn spawn_binary_with_readiness(
+    exe: &Path,
+    args: &[std::ffi::OsString],
+) -> io::Result<std::process::Child> {
+    spawn_detached(exe, args, None, true)
+}
+
+fn spawn_detached(exe: &Path, args: &[std::ffi::OsString], token: Option<&str>, readiness: bool)
+    -> io::Result<std::process::Child> {
     let mut command = Command::new(exe);
     command
         .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
@@ -89,7 +127,7 @@ pub fn spawn_binary_with_boot_token(
     command
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if readiness { Stdio::piped() } else { Stdio::null() })
         .stderr(Stdio::null());
     #[cfg(windows)]
     {

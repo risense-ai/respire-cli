@@ -118,7 +118,7 @@ fn control_read(kind: ReadKind) -> Result<ReadResult> {
         Ok(read)
     })();
     match result {
-        Ok(read) => Ok(read),
+        Ok(read) => { maintenance.finish_handoff()?; Ok(read) },
         Err(error) => {
             if let Err(pause) = maintenance.mark(super::lifecycle::Phase::Paused) {
                 return Err(error.context(format!("private secret read failed; Paused marker publication failed: {pause:#}")));

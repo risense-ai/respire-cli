@@ -69,3 +69,20 @@ pub(crate) fn install_runtime_fixture(root: &Path) -> anyhow::Result<()> {
     std::fs::copy(receipt, root.join("runtime.json"))?;
     Ok(())
 }
+
+// Normal host startup needs the installed Runtime and the same stable CLI bytes.
+pub(crate) fn install_host_fixture(root: &Path, bin_directory: &Path) -> anyhow::Result<()> {
+    install_runtime_fixture(root)?;
+    stage_cli_fixture(bin_directory)
+}
+
+pub(crate) fn stage_cli_fixture(bin_directory: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(bin_directory)?;
+    let destination = bin_directory.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" });
+    std::fs::copy(env!("CARGO_BIN_EXE_rsrs"), &destination)?;
+    anyhow::ensure!(
+        std::fs::read(&destination)? == std::fs::read(env!("CARGO_BIN_EXE_rsrs"))?,
+        "stable CLI fixture differs from the tested binary"
+    );
+    Ok(())
+}

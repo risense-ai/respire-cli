@@ -10,7 +10,7 @@ import {createHash} from 'node:crypto';
 import {cacheKey,releaseKey} from '../../scripts/rust-ci-cache.mjs';
 const ci=readFileSync(new URL('../../.github/workflows/ci.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const section=name=>ci.split(`\n  ${name}:\n`)[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',()=>{
+test('independent contract checks do not wait for Rust coverage or receive SDK/publish credentials',async()=>{
   const contracts=section('contract-checks'),source=section('coverage-tests'),workspace=section('workspace-tests'),integration=section('runtime-integration');
   assert(contracts && source);assert.doesNotMatch(contracts,/\n    needs:|id-token:|actions: write|secrets\.|fetch-core-sdk|cargo /);
   assert.match(contracts,/persist-credentials: false/);assert.match(contracts,/contents: read/);
@@ -39,21 +39,104 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert(business.indexOf(before)>=0&&business.indexOf(before)<business.indexOf(invoke));
   assert(business.indexOf(after)>business.indexOf(invoke),'the same instrumented CLI must retain its hash');
   assert(business.includes('for module in $RUNTIME_BUSINESS_MODULES; do'));
-  assert(business.includes(`business_status=0
-for module in $RUNTIME_BUSINESS_MODULES; do
-  phase="business module $module"
-  if ${invoke}; then
-    :
-  else
-    module_status=$?
-    if [[ "$business_status" == 0 ]]; then business_status=$module_status; fi
-  fi
-done`),'run every business module and preserve the first failure');
+  assert(business.includes('if [[ "$business_status" == 0 && "$module_status" != 0 ]]; then business_status=$module_status; fi'),
+    'run every module and preserve the first failure');
+  assert(business.includes('if [[ "${RUNTIME_REQUIRE_NATIVE_STOP:-0}" == 1 && "$module" == diary_identity ]]; then'));
+  assert(business.includes(`${invoke} --show-output > "$native_log" 2>&1`));
+  assert.doesNotMatch(business,/tee|cat "\$native_log"|--nocapture/);
+  assert(business.includes('native_log="$(mktemp "$RUNNER_TEMP/native-stop-private.XXXXXX")"'));
+  assert(business.includes('"$native_seen" != 1'),'required native case cannot silently be omitted');
   assert(business.trimEnd().endsWith(`${after}\nexit "$business_status"`),
     'verify the unchanged CLI before returning the retained business status');
   assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')>business.indexOf(before));
   assert(business.indexOf('unset GH_TOKEN GITHUB_TOKEN')<business.indexOf(invoke));
   assert.doesNotMatch(business,/cargo\s+(?:build|test|run|metadata)\b|cargo\s+llvm-cov\s+(?:run|test)\b/);
+  const evidenceProgram=business.split("<<'NODE'\n")[1].split('\nNODE')[0].replace(/^import .+;$/gm,'');
+  const sha='a'.repeat(40),harnessSha='b'.repeat(40),productSha='c'.repeat(40);
+  const hashNative=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const runtimeBytes=Buffer.from('synthetic pinned Runtime');
+  const metadataNative=JSON.stringify({schema_version:2,runtime_version:'synthetic',source_commit:productSha,binary_sha256:hashNative(runtimeBytes)});
+  const receiptNative={sha256:hashNative(runtimeBytes),release:{metadata_json:metadataNative,metadata_sha256:hashNative(metadataNative)}};
+  const prefixNative=['start','fixture_ready','memory_seeded','runtime_ready','provider_received','active_verified','stop_accepted'];
+  const suffixNative=['same_key_checked','business_completed','runtime_stopped','store_unchanged','restarted','stale_rejected','restart_stopped','complete'];
+  const checkpointsNative=['normal','forced'].flatMap(mode=>[...prefixNative,...(mode==='normal'?['normal_waited']:['force_identities_rejected','worker_reaped']),...suffixNative]
+    .map(stage=>`NATIVE_STOP_CHECKPOINT mode=${mode} stage=${stage}`));
+  const testlineNative='test diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay ... ok';
+  const completeNative=[testlineNative,...checkpointsNative,'NATIVE_STOP_RAW synthetic-private-marker','synthetic-secret-canary'].join('\n');
+  const runEvidence=(output,status='0',mutate={})=>{
+    const printed=[],exits=[];
+    const files={'runtime-tests-source.json':JSON.stringify({source_sha:harnessSha}),
+      'runtime-pin.json':JSON.stringify({required:'synthetic'}),'/runtime.json':JSON.stringify(receiptNative),
+      '/runtime/version/rsrs-runtime':runtimeBytes,'/private-log':output,'/cli':'CLI bytes','/harness':'harness bytes',...mutate};
+    runInNewContext(evidenceProgram,{assert,createHash,dirname:path.posix.dirname,join:path.posix.join,
+      realpathSync:value=>value,readFileSync:name=>{assert(Object.hasOwn(files,name),name);return files[name];},
+      execFileSync:(command,args)=>{assert.equal(command,'git');return args[1]==='.'?sha:harnessSha;},
+      console:{log:line=>printed.push(line)},process:{argv:['node','-','/private-log',status],
+        env:{RSRS_CLI_SOURCE_SHA:sha,GITHUB_SHA:sha,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',
+          RSRS_RUNTIME_BIN:'/runtime/version/rsrs-runtime',EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA:productSha,
+          RSRS_CLI_BIN:'/cli',RSRS_RUNTIME_TEST_RUNNER:'/harness'},exit:code=>exits.push(code)}});
+    assert.equal(printed.length,1);assert.doesNotMatch(printed[0],/synthetic-secret|synthetic-private|private-log/);
+    return {report:JSON.parse(printed[0]),exits};
+  };
+  assert.equal(runEvidence(completeNative).report.passed,true);
+  assert.equal(runEvidence(completeNative).report.runtime_tests_source_sha,harnessSha);
+  assert.equal(runEvidence(completeNative).report.runtime_product_source_sha,productSha);
+  assert.equal(runEvidence(completeNative).report.runtime_version,'synthetic');
+  assert.deepEqual(runEvidence(completeNative).exits,[]);
+  const diagnostic = runEvidence(completeNative).report.safe_native_diagnostic;
+  assert.equal(diagnostic.checkpoint_modes.normal.last_stage,'complete');
+  assert.equal(diagnostic.checkpoint_modes.normal.valid_count,16);
+  assert.equal(diagnostic.checkpoint_modes.forced.last_stage,'complete');
+  assert.equal(diagnostic.checkpoint_modes.forced.valid_count,17);
+  assert.equal(diagnostic.native_failure_kind,null);
+  const forcedPrefix=checkpointsNative.slice(0,16+7).join('\n');
+  const failureBlock=[`---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----`,
+    `thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at /synthetic-secret/location/diary_identity.rs:1812:7:`,
+    'synthetic-secret panic body', '---- diary_identity::unrelated stdout ----',
+    `thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at /private-log/diary_identity.rs:999:2:`].join('\n');
+  const failedDiagnostic=runEvidence(forcedPrefix+'\n'+failureBlock,'101').report.safe_native_diagnostic;
+  assert.equal(failedDiagnostic.checkpoint_modes.normal.last_stage,'complete');
+  assert.equal(failedDiagnostic.checkpoint_modes.forced.last_stage,'stop_accepted');
+  assert.equal(failedDiagnostic.checkpoint_modes.forced.stages_seen.force_identities_rejected,false);
+  assert.equal(failedDiagnostic.native_failure_kind,'native_panic');
+  assert.deepEqual(failedDiagnostic.native_failure_locations,[{file:'diary_identity.rs',line:1812,column:7}]);
+  const rust195=failureBlock.replace("' panicked at ","' (1842) panicked at ");
+  assert.deepEqual(runEvidence(rust195,'101').report.safe_native_diagnostic.native_failure_locations,
+    [{file:'diary_identity.rs',line:1812,column:7}]);
+  for(const invalidThreadId of ['-1','synthetic-secret-canary','12345678901']) {
+    const output=failureBlock.replace("' panicked at ",`' (${invalidThreadId}) panicked at `);
+    const report=runEvidence(output,'101').report.safe_native_diagnostic;
+    assert.deepEqual(report.native_failure_locations,[]);
+    assert.equal(report.native_failure_kind,'native_failure_unlocated');
+  }
+
+  for(const invalidLocation of ['0:1','20001:1','1:0','1:4097']) {
+    const output=failureBlock.replace('1812:7',invalidLocation);
+    assert.deepEqual(runEvidence(output,'101').report.safe_native_diagnostic.native_failure_locations,[]);
+  }
+  const unknownDiagnostic=runEvidence(forcedPrefix+'\nNATIVE_STOP_CHECKPOINT mode=forced stage=synthetic-secret-canary','101').report.safe_native_diagnostic;
+  assert.equal(unknownDiagnostic.unknown_checkpoint_count,1);
+  assert.equal(unknownDiagnostic.checkpoint_modes.forced.last_stage,'stop_accepted');
+  const capped=runEvidence(checkpointsNative.concat(Array(100).fill(checkpointsNative[0])).join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(capped.checkpoint_modes.normal.valid_count,64);assert.equal(capped.checkpoint_modes.normal.count_capped,true);
+  const resultError=runEvidence('---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----\nError: synthetic-secret-canary','101').report.safe_native_diagnostic;
+  assert.equal(resultError.native_failure_kind,'native_result_error');
+  const nativeHeader='---- diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay stdout ----';
+  const blockCapped=runEvidence(nativeHeader+'\n'+Array(4097).fill('synthetic-secret-canary').join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(blockCapped.native_block_capped,true);
+  const panicPrefix="thread 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay' panicked at ";
+  const manyLocations=runEvidence(nativeHeader+'\n'+[1,2,3,4,5].map(line=>panicPrefix+`/synthetic-secret/diary_identity.rs:${line}:1:`).join('\n'),'101').report.safe_native_diagnostic;
+  assert.equal(manyLocations.native_failure_locations.length,4);
+
+  for(const [output,status] of [[completeNative.replace(testlineNative,''),'0'],
+    [completeNative.replace('mode=normal stage=normal_waited','mode=normal stage=invalid'),'0'],
+    [completeNative.replace('mode=forced stage=worker_reaped','mode=forced stage=invalid'),'0'],
+    [completeNative+'\n'+checkpointsNative[0],'0'],[completeNative+'\nNATIVE_STOP_CHECKPOINT mode=unknown stage=start','0'],
+    [completeNative,'17']]){
+    const result=runEvidence(output,status);assert.equal(result.report.passed,false);assert.deepEqual(result.exits,[1]);
+  }
+  assert.throws(()=>runEvidence(completeNative,'0',{'runtime-tests-source.json':JSON.stringify({source_sha:sha})}));
+  assert.throws(()=>runEvidence(completeNative,'0',{'/runtime/version/rsrs-runtime':Buffer.from('changed bytes')}));
   const imports=new Set(["import assert from 'node:assert/strict';",
     "import {execFileSync, spawnSync} from 'node:child_process';",
     "import {readFileSync} from 'node:fs';",
@@ -74,8 +157,8 @@ done`),'run every business module and preserve the first failure');
       entry.isDirectory()&&existsSync(new URL(`../../cli/tests/${entry.name}/main.rs`,import.meta.url))?[entry.name]:[]);
   const metadata={packages:[{name:'respire',targets:allTests.map(name=>({name,kind:['test']}))}]};
   const runner='runtime-business-test-runner';
-  const listing=Object.entries({memory_revision:6,diary_identity:11,snapshot_lifecycle:8,account:3,capture_main:2})
-    .flatMap(([module,count])=>Array.from({length:count},(_,i)=>`${module}::case_${i}: test`)).join('\n');
+  const listing=Object.entries({memory_revision:6,diary_identity:12,snapshot_lifecycle:8,account:3,capture_main:2})
+    .flatMap(([module,count])=>Array.from({length:count},(_,i)=>`${module}::${module==='diary_identity'&&i===11?'native_stop_waits_and_explicit_force_reaps_real_core_without_replay':`case_${i}`}: test`)).join('\n');
   const selected=[];
   for(const group of ['core','runtime_smoke','runtime_autostart'])for(const originalStatus of [0,23])for(const businessStatus of [0,17,null]){
     const calls=[],harness=[],exits=[],raw=[],listed=[];
@@ -99,6 +182,7 @@ done`),'run every business module and preserve the first failure');
         }else{
           assert.equal(command,'bash');assert.deepEqual(Array.from(args),['scripts/run-runtime-business-tests.sh']);
         }
+        assert.equal(options.env.RUNTIME_REQUIRE_NATIVE_STOP,group==='core'?'1':'0');
         harness.push(options.env.RUNTIME_BUSINESS_MODULES);
         return {status:businessStatus};
       },
@@ -179,6 +263,7 @@ done`),'run every business module and preserve the first failure');
       spawnSync:(command,args,options)=>{
         assert.equal(command,group==='core'?'bash':'env');
         if(group==='runtime_smoke')assert(Array.from(args).includes('RSRS_SS_FIXTURE_BUS=private'));
+        assert.equal(options.env.RUNTIME_REQUIRE_NATIVE_STOP,group==='core'?'1':'0');
         modules.push(options.env.RUNTIME_BUSINESS_MODULES);return {status};
       },
       process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner'},
@@ -192,6 +277,7 @@ done`),'run every business module and preserve the first failure');
   // Reject unallocated assertions before either dispatcher can execute a module.
   for(const dispatch of [program,jointProgram])for(const invalid of [
     `${listing}\nnew_module::unassigned: test`,
+    listing.replace('native_stop_waits_and_explicit_force_reaps_real_core_without_replay','case_11'),
     listing.replace('account::case_0: test','account::case_1: test'),
     listing.replace('account::case_0: test','new_module::unassigned: test'),
   ]){
@@ -202,10 +288,10 @@ done`),'run every business module and preserve the first failure');
       captureCoverage:()=>0,
       process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner},
         exit:()=>assert.fail('invalid inventory must fail before exit')},
-    }),/Unassigned or duplicate|Missing migrated/);
+    }),/Unassigned or duplicate|Missing migrated|Missing required native stop/);
   }
   const expectedProduct=ci.match(/^  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: ([a-f0-9]{40})$/m)?.[1];
-  assert.equal(expectedProduct,'1d8a1bda4b6c43ec4df0dad8f4578908e13ba322');
+  assert.equal(expectedProduct,'f33fc4e80ea0abea2d0bce1f9ee80755d70beada');
   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
   const binary=Buffer.from('synthetic official runtime'),cliBytes=Buffer.from('instrumented CLI'),archive=Buffer.from('source archive');
   const pinVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url),'utf8')).required;
@@ -222,18 +308,24 @@ done`),'run every business module and preserve the first failure');
   let boundReceipt;
   for(const lane of [source,integration]){
     const fixture=stripImports(lane.split('- name: Prepare official pinned standalone Runtime for lifecycle tests')[1]
-      .split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]);
-    const runFixture=(selected,actualBinary=binary)=>{
+      .split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0])
+      .replace("const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');",'');
+    const runFixture=async(selected,actualBinary=binary)=>{
       let written;
-      runInNewContext(fixture,{assert,createHash,
+      await runInNewContext(`(async()=>{${fixture}\n})()`,{assert,createHash,
         readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:pinVersion}):file==='cli/Cargo.toml'?`version = "${pinVersion}"`:
           file.endsWith('/runtime.json')?JSON.stringify(selected):file.endsWith('.json')?JSON.stringify(initialReceipt('core')):actualBinary,
         mkdtempSync:()=>'/fixture',join:path.posix.join,resolve:file=>`/workspace/${file}`,realpathSync:file=>file,
-        statSync:()=>({isFile:()=>true}),spawnSync:()=>({status:0}),appendFileSync:()=>{},
+        statSync:()=>({isFile:()=>true}),
+        installPinnedRuntime:async(cli,{env},target)=>{
+          assert.equal(cli,lane===source?'/workspace/target/debug/rsrs':'/workspace/target/llvm-cov-target/debug/rsrs');
+          assert.equal(env.RSRS_DATA_DIR,'/fixture');assert.equal(target,'x86_64-unknown-linux-gnu');
+          return {status:0};
+        },appendFileSync:()=>{},
         writeFileSync:(file,value)=>{written=JSON.parse(value);},process:{env:productEnv}});
       return written;
     };
-    const receipt=runFixture(selection());
+    const receipt=await runFixture(selection());
     if(lane===integration){boundReceipt=receipt;assert.equal(receipt.runtime_product_source_sha,expectedProduct);
       assert.equal(receipt.runtime_binary_sha256,hash(binary));assert.equal(receipt.runtime_metadata_sha256,hash(receipt.runtime_metadata_json));}
     for(const change of [
@@ -241,8 +333,8 @@ done`),'run every business module and preserve the first failure');
         value.release.metadata_json=JSON.stringify(metadata);value.release.metadata_sha256=hash(value.release.metadata_json);},
       value=>{value.release.metadata_sha256='0'.repeat(64);},
       value=>{value.sha256='0'.repeat(64);},
-    ]){const value=selection();change(value);assert.throws(()=>runFixture(value));}
-    assert.throws(()=>runFixture(selection(),Buffer.from('wrong binary')));
+    ]){const value=selection();change(value);await assert.rejects(()=>runFixture(value));}
+    await assert.rejects(()=>runFixture(selection(),Buffer.from('wrong binary')));
   }
 
   const report=section('check-complete');assert.match(report,/needs: \[coverage-tests, runtime-integration, workspace-tests, contract-checks, required-tests, commands-frontend\]/);

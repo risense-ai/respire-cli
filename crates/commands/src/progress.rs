@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 struct Entry {
     id: String,
     phase: Mutex<String>,
+    remote_scope: Mutex<Option<respire_protocol::RuntimeRequestScope>>,
     remote: AtomicBool,
     finished: AtomicBool,
 }
@@ -35,6 +36,7 @@ impl Scope {
                 "Preparing command",
             )),
             remote: AtomicBool::new(false),
+            remote_scope: Mutex::new(None),
             finished: AtomicBool::new(false),
         });
         if let Ok(mut active) = ACTIVE.get_or_init(|| Mutex::new(HashMap::new())).lock() {
@@ -223,10 +225,53 @@ pub fn remote_id() -> Option<String> {
                 "\u{8fde}\u{63a5} runtime\u{ff1b}\u{7b49}\u{5f85}\u{547d}\u{4ee4}\u{7ed3}\u{679c}",
                 "Connecting to runtime; waiting for command result",
             );
-            entry.remote.store(true, Ordering::Release);
             entry.id.clone()
         })
     })
+}
+
+pub(crate) struct RemoteScopeGuard(Option<Arc<Entry>>);
+
+impl Drop for RemoteScopeGuard {
+    fn drop(&mut self) {
+        if let Some(entry) = &self.0 {
+            entry.remote.store(false, Ordering::Release);
+            if let Ok(mut scope) = entry.remote_scope.lock() {
+                *scope = None;
+            }
+        }
+    }
+}
+
+pub(crate) fn bind_remote_scope(
+    id: &str,
+    scope: &respire_protocol::RuntimeRequestScope,
+) -> anyhow::Result<RemoteScopeGuard> {
+    CURRENT.with(|current| {
+        let current = current.borrow();
+        let entry = current.as_ref().ok_or_else(|| anyhow::anyhow!("foreground progress is absent"))?;
+        anyhow::ensure!(entry.id == id, "foreground progress ID mismatch");
+        let mut bound = entry.remote_scope.lock()
+            .map_err(|_| anyhow::anyhow!("foreground progress scope lock poisoned"))?;
+        if let Some(previous) = bound.as_ref() {
+            anyhow::ensure!(previous == scope, "foreground progress scope changed");
+            return Ok(RemoteScopeGuard(None));
+        }
+        *bound = Some(scope.clone());
+        // Poll only after the command's original actor scope is available.
+        entry.remote.store(true, Ordering::Release);
+        Ok(RemoteScopeGuard(Some(entry.clone())))
+    })
+}
+
+pub(crate) fn remote_scope(id: &str) -> anyhow::Result<respire_protocol::RuntimeRequestScope> {
+    let active = ACTIVE.get().ok_or_else(|| anyhow::anyhow!("foreground progress is absent"))?
+        .lock().map_err(|_| anyhow::anyhow!("foreground progress lock poisoned"))?;
+    let entry = active.get(id).ok_or_else(|| anyhow::anyhow!("foreground progress ID is absent"))?;
+    let scope = entry.remote_scope.lock()
+        .map_err(|_| anyhow::anyhow!("foreground progress scope lock poisoned"))?
+        .clone();
+    scope.ok_or_else(|| anyhow::anyhow!("foreground progress scope is not bound"))
 }
 
 pub fn status(id: &str) -> serde_json::Value {
@@ -299,6 +344,50 @@ mod tests {
     #[test]
     fn json_is_silent_and_redirected_progress_has_no_terminal_codes() -> anyhow::Result<()> {
         assert!(Scope::start(None, false, false).is_none());
+        let id = uuid::Uuid::new_v4().to_string();
+        let tracked = Scope::start(Some(id.clone()), false, false);
+        let scope = respire_protocol::RuntimeRequestScope {
+            account_id: "progress-account".into(), instance_id: "progress-instance".into(), generation: 1,
+        };
+        assert_eq!(remote_id().as_deref(), Some(id.as_str()));
+        assert!(remote_scope(&id).is_err());
+        assert!(CURRENT.with(|current| current.borrow().as_ref()
+            .is_some_and(|entry| !entry.remote.load(Ordering::Acquire))));
+        assert!(bind_remote_scope("another-progress", &scope).is_err());
+        let first_call = bind_remote_scope(&id, &scope)?;
+        bind_remote_scope(&id, &scope)?;
+        assert_eq!(remote_scope(&id)?, scope);
+        assert!(CURRENT.with(|current| current.borrow().as_ref()
+            .is_some_and(|entry| entry.remote.load(Ordering::Acquire))));
+        let poll_id = id.clone();
+        let polled = std::thread::spawn(move || remote_scope(&poll_id)).join()
+            .map_err(|_| anyhow::anyhow!("progress poll thread panicked"))??;
+        assert_eq!(polled, scope);
+        let changed = respire_protocol::RuntimeRequestScope { generation: 2, ..scope.clone() };
+        assert!(bind_remote_scope(&id, &changed).is_err());
+        assert_eq!(remote_scope(&id)?, scope);
+        drop(first_call);
+        assert!(remote_scope(&id).is_err());
+        assert!(CURRENT.with(|current| current.borrow().as_ref()
+            .is_some_and(|entry| !entry.remote.load(Ordering::Acquire))));
+        // Maintenance can restart Runtime between two calls in the same doctor command.
+        let restarted = respire_protocol::RuntimeRequestScope {
+            instance_id: "restarted-progress-instance".into(), ..scope.clone()
+        };
+        let failed_call = (|| -> anyhow::Result<()> {
+            let _second_call = bind_remote_scope(&id, &restarted)?;
+            assert_eq!(remote_scope(&id)?, restarted);
+            anyhow::bail!("simulated RPC failure after maintenance handoff")
+        })();
+        assert!(failed_call.is_err());
+        assert!(remote_scope(&id).is_err());
+        assert!(CURRENT.with(|current| current.borrow().as_ref()
+            .is_some_and(|entry| !entry.remote.load(Ordering::Acquire))));
+        let final_call = bind_remote_scope(&id, &restarted)?;
+        assert_eq!(remote_scope(&id)?, restarted);
+        drop(final_call);
+        drop(tracked);
+        assert!(remote_scope(&id).is_err());
         let mut plain = Vec::new();
         write_line(&mut plain, "Waiting for server", 5, false);
         assert_eq!(String::from_utf8(plain)?, "Waiting for server (5s)\n");

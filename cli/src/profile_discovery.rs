@@ -280,3 +280,137 @@ pub(crate) fn pending_legacy_profiles() -> Result<Vec<Value>> {
         .cloned()
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Home(Option<std::ffi::OsString>);
+    impl Home {
+        fn at(path: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            std::env::set_var("HOME", path);
+            Self(previous)
+        }
+    }
+    impl Drop for Home {
+        fn drop(&mut self) {
+            match self.0.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn discovery_preserves_legacy_sources_and_verifies_migration_receipts() -> Result<()> {
+        let _isolation = crate::host_ui::test_lock::Isolate::new()?;
+        let home = tempfile::tempdir()?;
+        let _home = Home::at(home.path());
+        let installation = paths::main_data_dir();
+        let legacy = home.path().join(".onememory");
+        fs::create_dir_all(&legacy)?;
+        fs::write(legacy.join("onememory.db"), b"legacy database fixture")?;
+        let account = home.path().join(".respire/accounts/Alice Name");
+        fs::create_dir_all(&account)?;
+        fs::write(account.join("session.json"), br#"{"user":"alice","wrapped_urk":"legacy-key"}"#)?;
+        for (name, value) in [
+            ("current", json!({"user":"new","crypto_namespace":CURRENT_NAMESPACE})),
+            ("wrapped", json!({"wrapped_urk":format!("{CURRENT_NAMESPACE}:fixture")})),
+            ("empty", json!({"user":"empty"})),
+        ] {
+            let directory = home.path().join(".rsrs/accounts").join(name);
+            fs::create_dir_all(&directory)?;
+            fs::write(directory.join("session.json"), serde_json::to_vec(&value)?)?;
+        }
+        let source_id = source_identity(&legacy)?;
+        let destination = installation.join("accounts/migrated");
+        fs::create_dir_all(&destination)?;
+        fs::write(destination.join(RECEIPT), serde_json::to_vec(&json!({
+            "source_identity":source_id,"complete":true
+        }))?)?;
+        fs::write(legacy.join(SOURCE_RECEIPT), br#"{"source_identity":"foreign","complete":true,"destination":"foreign"}"#)?;
+        let result = list_legacy_profiles()?;
+        let rows = result["profiles"].as_array().context("legacy rows missing")?;
+        assert_eq!(rows.len(), 2);
+        let imported = rows.iter().find(|row| row["source_id"] == source_id)
+            .context("legacy database source missing")?;
+        assert_eq!(imported["migrated_to"], json!(destination));
+        assert_eq!(pending_legacy_profiles()?.len(), 1);
+        fs::write(legacy.join(SOURCE_RECEIPT), serde_json::to_vec(&json!({
+            "source_identity":source_id,"complete":true,"destination":account
+        }))?)?;
+        let result = list_legacy_profiles()?;
+        let imported = result["profiles"].as_array().context("legacy rows missing")?
+            .iter().find(|row| row["source_id"] == source_id).context("source missing")?;
+        assert_eq!(imported["migrated_to"], json!(account));
+        fs::write(account.join("session.json"), b"{")?;
+        assert!(list_legacy_profiles().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn account_and_space_lists_keep_display_fallbacks_without_hiding_ambiguity() -> Result<()> {
+        let _isolation = crate::host_ui::test_lock::Isolate::new()?;
+        let root = paths::main_data_dir();
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("session.json"), br#"{"user":"owner"}"#)?;
+        let alice = root.join("accounts/alice");
+        let bob = root.join("accounts/bob");
+        let empty = root.join("accounts/empty");
+        for directory in [&alice, &bob, &empty] {
+            fs::create_dir_all(directory)?;
+        }
+        fs::write(alice.join("session.json"), b"{")?;
+        fs::write(alice.join("space_sessions.json"), b"not json")?;
+        fs::write(bob.join("rsrs.db"), b"database fixture")?;
+        fs::write(bob.join("space_sessions.json"), b"[{},{}]")?;
+        fs::write(bob.join("space_owner.json"), b"owner marker")?;
+        let accounts = account_list()?;
+        let rows = accounts["accounts"].as_array().context("account rows missing")?;
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["user"], "owner");
+        assert_eq!(rows[1]["name"], "alice");
+        assert_eq!(rows[1]["user"], "");
+        let spaces = space_list()?;
+        let rows = spaces["spaces"].as_array().context("space rows missing")?;
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[1]["members"], 0);
+        assert_eq!(rows[2]["members"], 2);
+        assert_eq!(rows[2]["owner"], true);
+        assert_eq!(rows[0]["current"], true);
+        fs::write(bob.join("onememory.db"), b"ambiguous database fixture")?;
+        assert!(account_list().is_err());
+        fs::write(bob.join("session.json"), br#"{"user":"bob"}"#)?;
+        assert_eq!(account_list()?["accounts"][2]["user"], "bob");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_refuses_redirected_directories_sessions_and_receipts() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let actual = directory.path().join("actual");
+        fs::create_dir(&actual)?;
+        let linked = directory.path().join("linked");
+        std::os::unix::fs::symlink(&actual, &linked)?;
+        assert!(metadata(&linked).is_err());
+        assert!(metadata(&linked.join("absent")).is_err());
+        assert!(directories(directory.path(), true).is_err());
+        fs::remove_file(&linked)?;
+        fs::write(actual.join("value"), b"{}")?;
+        for name in ["session.json", RECEIPT] {
+            let path = actual.join(name);
+            std::os::unix::fs::symlink(actual.join("value"), &path)?;
+            assert!(read_receipt(&path).is_err());
+            if name == "session.json" {
+                assert!(display_user(&actual).is_err());
+                assert!(session(&actual).is_err());
+            }
+            fs::remove_file(path)?;
+        }
+        fs::create_dir(actual.join("session.json"))?;
+        assert!(session(&actual).is_err());
+        Ok(())
+    }
+}

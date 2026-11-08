@@ -6,4 +6,4 @@ pub mod prompt;
 pub mod recall_fusion;
 
 #[cfg(test)]
-mod test_lock;
+pub(crate) mod test_lock;

@@ -132,7 +132,8 @@ fn keygen_operation(operation_id: &str, force: bool, query_only: bool) -> Result
         if health.is_some() {
             maintenance.start_account_runtime()?;
         }
-        maintenance.finish()
+        maintenance.finish()?;
+        maintenance.finish_handoff()
     })
 }
 

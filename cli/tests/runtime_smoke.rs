@@ -42,11 +42,19 @@ fn isolated_command(models: Option<&std::path::Path>) -> Command {
     command
 }
 
+fn stage_cli(dir: &std::path::Path) -> std::io::Result<()> {
+    let destination = dir.join("bin");
+    std::fs::create_dir_all(&destination)?;
+    std::fs::copy(bin(), destination.join(if cfg!(windows) { "rsrs.exe" } else { "rsrs" }))?;
+    Ok(())
+}
+
 fn runtime_command(dir: &std::path::Path, port: u16, args: &[&str]) -> Command {
     let mut command = isolated_command(None);
     command
         .args(args)
         .env("RSRS_DATA_DIR", dir)
+        .env("RSRS_BIN_DIR", dir.join("bin"))
         .env("HOME", dir)
         .env("USERPROFILE", dir)
         .env("RSRS_RPC_PORT", port.to_string())
@@ -77,6 +85,7 @@ struct OwnedRuntimeFixture {
 impl OwnedRuntimeFixture {
     fn new(managed: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let directory = tempfile::tempdir()?;
+        stage_cli(directory.path())?;
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?
             .port();
@@ -207,7 +216,9 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let health_url = format!("http://127.0.0.1:{port}/api/health");
-    let owned_runtime: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let owned_runtime: serde_json::Value = ureq::get(&health_url)
+        .set("X-Respire-Health", "runtime-v1")
+        .call()?.into_json()?;
     dir.remember_owner(&owned_runtime)?;
     let executable = owned_runtime["exe"]
         .as_str()
@@ -279,7 +290,9 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .into());
     }
 
-    let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let before: serde_json::Value = ureq::get(&health_url)
+        .set("X-Respire-Health", "runtime-v1")
+        .call()?.into_json()?;
     assert_eq!(
         before["pid"], owned_runtime["pid"],
         "static policy and preview must not replace the owned Runtime"
@@ -301,7 +314,9 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(restarted["summary"]["data_dir"], before["data_dir"]);
     let rejected = dir.run(&["--client-only", "--json", "restart"])?;
     assert_eq!(rejected.status.code(), Some(1));
-    let after: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let after: serde_json::Value = ureq::get(&health_url)
+        .set("X-Respire-Health", "runtime-v1")
+        .call()?.into_json()?;
     dir.remember_owner(&after)?;
     assert_eq!(after["pid"], restarted["summary"]["pid"]);
     assert_ne!(after["instance_id"], before["instance_id"]);
@@ -345,7 +360,9 @@ fn unbound_explicit_runtime_restart_preserves_the_existing_owner(
         "explicit Runtime fixture startup failed"
     );
     let health_url = format!("http://127.0.0.1:{}/api/health", fixture.port);
-    let before: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let before: serde_json::Value = ureq::get(&health_url)
+        .set("X-Respire-Health", "runtime-v1")
+        .call()?.into_json()?;
     fixture.remember_owner(&before)?;
     let endpoint_path = fixture.path().join("runtime/endpoint.json");
     let endpoint = std::fs::read(&endpoint_path)?;
@@ -360,7 +377,9 @@ fn unbound_explicit_runtime_restart_preserves_the_existing_owner(
     assert!(failure["errors"]
         .to_string()
         .contains("legacy_runtime_migration_required"));
-    let after: serde_json::Value = ureq::get(&health_url).call()?.into_json()?;
+    let after: serde_json::Value = ureq::get(&health_url)
+        .set("X-Respire-Health", "runtime-v1")
+        .call()?.into_json()?;
     fixture.remember_owner(&after)?;
     for field in [
         "pid",
@@ -418,6 +437,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     let dir = tempfile::tempdir()?;
+    stage_cli(dir.path())?;
     let port = std::net::TcpListener::bind("127.0.0.1:0")?
         .local_addr()?
         .port();
@@ -451,6 +471,7 @@ fn doctor_reports_the_real_wait_before_completion_and_json_stays_quiet(
             .env("HOME", dir.path())
             .env("USERPROFILE", dir.path())
             .env("RSRS_DATA_DIR", dir.path())
+            .env("RSRS_BIN_DIR", dir.path().join("bin"))
             .env("RSRS_RPC_PORT", port.to_string())
             .env("RSRS_ADDR", &addr)
             .env("RSRS_LANG", "en")

@@ -93,7 +93,7 @@ pub(super) fn validate_executable(platform: Platform, path: &Path) -> Result<()>
     Ok(())
 }
 
-pub(super) fn windows_task_path(raw: &str) -> Result<String> {
+pub(crate) fn windows_task_path(raw: &str) -> Result<String> {
     plain_value(raw)?;
     if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
         return Ok(format!(r"\\{}", unc));

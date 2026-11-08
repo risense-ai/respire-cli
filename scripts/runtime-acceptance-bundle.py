@@ -150,5 +150,7 @@ if __name__ == "__main__":
     parser.add_argument("--archive", type=Path)
     parser.add_argument("--version")
     parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--installation-root", type=Path)
     args = parser.parse_args()
-    stage_runtime(args.binary, args.runtime_binary, args.destination, args.archive, args.version)
+    stage_runtime(args.binary, args.runtime_binary, args.destination, args.archive, args.version,
+                  installation_root=args.installation_root)

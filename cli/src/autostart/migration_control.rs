@@ -188,6 +188,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             "migration_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery",
             original.operation.operation_id))?;
     }
+    if result.is_ok() && finished { maintenance.finish_handoff()?; }
     result.map_err(|_| anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed", original.operation.operation_id))
 }
 

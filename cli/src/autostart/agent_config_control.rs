@@ -153,5 +153,6 @@ pub(crate) fn control_agent_config(kv: &str) -> Result<ResultEnvelope> {
         maintenance.refresh_agent_config()?;
         maintenance.mark(super::lifecycle::Phase::Paused)?;
     }
+    if result.is_ok() && finished { maintenance.finish_handoff()?; }
     result.map_err(|error| error.context(format!("agent config operation_id={operation}; repeat the same command to query original O")))
 }

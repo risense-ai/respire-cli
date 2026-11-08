@@ -913,7 +913,7 @@ fn complete_legacy_snapshot(maintenance: &mut Maintenance, takeover: &LibraryLoc
         anyhow::ensure!(maintenance.snapshot_live_binding(&params.binding, None)? == proof,
             "legacy recovered Runtime changed before completion");
         runtime_verified = true;
-        if maintenance.finish().is_err() {
+        if maintenance.finish().and_then(|()| maintenance.finish_handoff()).is_err() {
             receipt.cleanup_pending = true;
             receipt.cleanup_warning = Some("snapshot recovery completed; host maintenance cleanup pending".to_owned());
         }
@@ -1211,7 +1211,7 @@ pub(crate) fn snapshot_recover_control() -> Result<ResultEnvelope> {
 fn finish_snapshot_terminal(maintenance: &mut Maintenance, receipt: &mut MaintenanceControlResult) {
     // A terminal journal state is already known. Host marker/registration cleanup
     // failure is a warning, never a reason to compensate accepted data.
-    if let Err(error) = maintenance.finish() {
+    if let Err(error) = maintenance.finish().and_then(|()| maintenance.finish_handoff()) {
         receipt.cleanup_pending = true;
         receipt.cleanup_warning = Some(format!(
             "snapshot transaction completed; host maintenance cleanup pending: {error:#}"

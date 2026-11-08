@@ -157,11 +157,13 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         crate::autostart::restart_stage("restart_start");
         ensure_daemon_locked()?;
     }
-    let ready = crate::net_rpc::health()?;
+    crate::net_rpc::health()?;
     if !respire_client_host::settings::off_mode()? {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
     }
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
+    let ready = crate::net_rpc::health()?;
     crate::autostart::restart_stage("restart_ready");
     Ok(json!({"state":"ready", "stopped_pid":stopped_pid, "pid":ready.pid,
         "forced":false, "data_dir":ready.data_dir, "version":ready.bin}))
@@ -191,6 +193,7 @@ pub fn recover_interrupted_login() -> Result<()> {
     let recovered = crate::autostart::recover_legacy_login_locked(&takeover, &mut maintenance)?;
     maintenance.resume_managed_runtime()?;
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
     if recovered {
         eprintln!(
             "Recovered an interrupted login; the original account and configuration were restored."
@@ -371,6 +374,7 @@ fn change_profile_inner(
             }
         }
         maintenance.finish()?;
+        maintenance.finish_handoff()?;
         return Err(error);
     }
     if let Some(path) = backup {
@@ -382,6 +386,7 @@ fn change_profile_inner(
         }
     }
     maintenance.finish()?;
+    maintenance.finish_handoff()?;
     Ok(())
 }
 
@@ -789,6 +794,15 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
             return Ok(());
         }
     }
+    #[cfg(feature = "client2-host-prototype")]
+    if current.is_none()
+        && crate::autostart::lifecycle_boot_token().is_none()
+        && !respire_client_host::paths::main_data_dir()
+            .join("runtime/autostart/registration.json")
+            .exists()
+    {
+        return crate::client2_host::start_locked();
+    }
     // Resolve before stopping the resident owner: a missing or damaged release
     // must fail without replacing it with a CLI shim.
     let executable = resolve_runtime_executable()?;
@@ -855,7 +869,8 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
         health.process_start_id == format!("{prefix}{birth}"),
         "runtime process start identity does not match health"
     );
-    let operation_id = crate::net_rpc::request_stop_for(health, Duration::from_secs(120))?;
+    let operation_id = crate::net_rpc::request_stop_for(health, Duration::from_secs(120))
+        .context("runtime drain stop request failed")?;
     let deadline = Instant::now() + timeout;
     loop {
         if crate::autostart::process_birth(pid)?.as_deref() != Some(birth.as_str()) {
@@ -867,8 +882,10 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
         );
         std::thread::sleep(Duration::from_millis(100));
     }
-    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))?;
-    crate::net_rpc::wait_until_down()?;
+    crate::net_rpc::final_stop_receipt(health, Some(&operation_id))
+        .context("runtime drain final receipt verification failed")?;
+    crate::net_rpc::wait_until_down()
+        .context("runtime drain listener did not close")?;
     let released = respire::lock::LibraryLock::acquire(
         std::path::Path::new(&health.data_dir),
         Duration::from_secs(15),
@@ -880,7 +897,8 @@ pub(crate) fn drain_occupant(health: &crate::net_rpc::Health, timeout: Duration)
             endpoint_pid() == Some(pid) && crate::autostart::process_birth(pid)?.is_none(),
             "runtime endpoint owner changed after drain; record was not removed"
         );
-        std::fs::remove_file(endpoint_path())?;
+        std::fs::remove_file(endpoint_path())
+            .context("runtime drain endpoint removal failed")?;
     }
     drop(released);
     Ok(())

@@ -350,8 +350,10 @@ struct OwnedRuntime {
 
 impl OwnedRuntime {
     fn new() -> Result<Self> {
+        let fixture = Fixture::new()?;
+        support::stage_cli_fixture(&fixture.base.join("bin"))?;
         Ok(Self {
-            fixture: Fixture::new()?,
+            fixture,
             last_owner: None,
             cleanup_required: false,
         })
@@ -362,6 +364,7 @@ impl OwnedRuntime {
             "http://127.0.0.1:{}/api/health",
             self.fixture.port
         ))
+        .set("X-Respire-Health", "runtime-v1")
         .timeout(Duration::from_secs(3))
         .call()?
         .into_json()?;

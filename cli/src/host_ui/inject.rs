@@ -1011,6 +1011,105 @@ mod tests {
     }
 
     #[test]
+    fn opencode_patch_errors_preserve_user_bytes_and_missing_remove_is_noop() -> Result<()> {
+        let _isolation = crate::host_ui::test_lock::Isolate::new()?;
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("nested/opencode.json");
+        assert!(!patch_instructions(&path, false)?);
+        assert!(!path.exists());
+        assert!(patch_instructions(&path, true)?);
+        assert!(!patch_instructions(&path, true)?);
+        for bytes in [b"{".as_slice(), b"[]".as_slice(), b"{\"instructions\":\"user.md\"}".as_slice()] {
+            std::fs::write(&path, bytes)?;
+            assert!(patch_instructions(&path, true).is_err());
+            assert!(patch_instructions(&path, false).is_err());
+            assert_eq!(std::fs::read(&path)?, bytes);
+        }
+        std::fs::write(&path, b"{\"model\":\"user-selected\"}")?;
+        patch_instructions(&path, false)?;
+        assert!(!patch_instructions(&path, false)?);
+        assert!(patch_instructions(&path, true)?);
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+        assert_eq!(value["model"], "user-selected");
+        std::fs::remove_file(&path)?;
+        std::fs::create_dir(&path)?;
+        assert!(patch_instructions(&path, true).is_err());
+        assert!(patch_prompt_append(&path, true).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn opencode_lifecycle_respects_later_config_and_keeps_the_shared_entity() -> Result<()> {
+        let _isolation = crate::host_ui::test_lock::Isolate::new()?;
+        struct RestoreHome(Option<std::ffi::OsString>);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                match self.0.take() {
+                    Some(value) => std::env::set_var("HOME", value),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+        let directory = tempfile::tempdir()?;
+        let _home = RestoreHome(std::env::var_os("HOME"));
+        std::env::set_var("HOME", directory.path());
+        assert_eq!(opencode_state()?, "none");
+        assert!(!remove_opencode()?);
+        assert!(inject_opencode()?);
+        assert_eq!(opencode_state()?, "fresh");
+        assert!(!inject_opencode()?);
+        let config = directory.path().join(".config/opencode");
+        let later = config.join("opencode.jsonc");
+        std::fs::write(&later, b"{\"instructions\":[\"user.md\"]}")?;
+        assert_eq!(opencode_state()?, "none");
+        std::fs::write(&later, b"{\"model\":\"user-model\"}")?;
+        assert_eq!(opencode_state()?, "fresh");
+        std::fs::write(&later, b"{")?;
+        assert_eq!(opencode_state()?, "manual");
+        assert!(inject_opencode().is_err());
+        assert_eq!(std::fs::read(&later)?, b"{");
+        std::fs::remove_file(&later)?;
+        std::fs::create_dir(&later)?;
+        assert_eq!(opencode_state()?, "manual");
+        std::fs::remove_dir(&later)?;
+        let append = config.join("oh-my-openagent.json");
+        std::fs::write(&append, b"{\"agents\":{\"reviewer\":{\"prompt_append\":\"Keep this user rule\"}}}")?;
+        assert!(inject_opencode()?);
+        let installed: serde_json::Value = serde_json::from_slice(&std::fs::read(&append)?)?;
+        assert_eq!(
+            installed["agents"]["reviewer"]["prompt_append"],
+            format!("Keep this user rule\n- Memory rules (respire): {}", entity_abs()?)
+        );
+        assert!(remove_opencode()?);
+        assert!(entity_path()?.is_file());
+        assert_eq!(opencode_state()?, "none");
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&append)?)?;
+        // Adding a managed line separates it from an unterminated user line.
+        // Removal preserves that user line's newline and drops only our reference.
+        assert_eq!(value["agents"]["reviewer"]["prompt_append"], "Keep this user rule\n");
+        assert!(!remove_opencode()?);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cover_replacement_does_not_follow_a_symlink_into_user_source() -> Result<()> {
+        let _isolation = crate::host_ui::test_lock::Isolate::new()?;
+        let directory = tempfile::tempdir()?;
+        let user = directory.path().join("user.md");
+        let cover = directory.path().join("cover.md");
+        std::fs::write(&user, b"user source must remain unchanged")?;
+        std::os::unix::fs::symlink(&user, &cover)?;
+        assert!(write_cover(cover.clone())?);
+        assert!(!std::fs::symlink_metadata(&cover)?.file_type().is_symlink());
+        assert_eq!(std::fs::read(&user)?, b"user source must remain unchanged");
+        assert_eq!(check_state(cover.clone(), "reference")?, "fresh");
+        assert!(remove_cover(cover.clone())?);
+        assert!(!remove_cover(cover)?);
+        Ok(())
+    }
+
+    #[test]
     fn workbuddy_reference_respects_mode_and_does_not_require_full_policy_each_round() -> Result<()>
     {
         let _iso = crate::host_ui::test_lock::Isolate::new()?;

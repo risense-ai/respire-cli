@@ -60,7 +60,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Official product provenance is independent of the business-harness checkout.
-  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: 1d8a1bda4b6c43ec4df0dad8f4578908e13ba322
+  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: f33fc4e80ea0abea2d0bce1f9ee80755d70beada
 jobs:
   platform-build:
     # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.
@@ -579,7 +579,8 @@ jobs:
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
-          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, 'x86_64-unknown-linux-gnu');
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
@@ -672,15 +673,16 @@ jobs:
           assert.ok(runner, 'Runtime business tests cannot be skipped');
           const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
-          const modules = {memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2};
+          const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
             const tests = names.filter(name => name.startsWith(`${module}::`));
             assert.equal(tests.length, count, `Missing migrated ${module} assertions`);
             return tests;
           });
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
+          assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'};
+          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
@@ -693,6 +695,85 @@ jobs:
           if (result.error) throw result.error;
           process.exit(status !== 0 ? status : (result.status ?? 1));
           NODE
+      # Exercise the shipped default features and retain their real CLI counters.
+      - uses: actions/checkout@v4
+        if: matrix.group == 'core'
+        with:
+          repository: risense-ai/respire-client2
+          ref: d798d6fb943a1c7515f5bb427f72c6aee0341ffb
+          path: .client2-source
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        if: matrix.group == 'core'
+        with:
+          go-version: '1.26.0'
+          cache: false
+      - name: Verify Runtime archive for instrumented Client2 regression
+        if: matrix.group == 'core'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          OFFICIAL_RUNTIME_ROOT: ${{ steps.official-runtime-fixture.outputs.root }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/client2-coverage-runtime"
+          version="$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')"
+          gh api "repos/risense-ai/respire-runtime/releases/tags/v$version" > "$RUNNER_TEMP/client2-coverage-runtime/release.json"
+          gh release download "v$version" --repo risense-ai/respire-runtime \
+            --pattern 'rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz' \
+            --pattern 'runtime-build-x86_64-unknown-linux-gnu.json' \
+            --dir "$RUNNER_TEMP/client2-coverage-runtime"
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-coverage-runtime'
+          release = json.loads((root / 'release.json').read_text())
+          receipt = json.loads((pathlib.Path(os.environ['OFFICIAL_RUNTIME_ROOT']) / 'runtime.json').read_text())
+          assert not release['draft'] and release['tag_name'] == 'v' + receipt['version']
+          for name in ['rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz', 'runtime-build-x86_64-unknown-linux-gnu.json']:
+              asset, = [a for a in release['assets'] if a['name'] == name]
+              data = (root / name).read_bytes()
+              assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
+          metadata = (root / 'runtime-build-x86_64-unknown-linux-gnu.json').read_bytes()
+          assert metadata == receipt['release']['metadata_json'].encode('utf-8'), 'Archive metadata differs from verified source fixture'
+          assert hashlib.sha256(metadata).hexdigest() == receipt['release']['metadata_sha256']
+          PY
+      - name: Count original Client2 regression against the default instrumented CLI
+        id: client2-coverage
+        if: matrix.group == 'core'
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, shutil, subprocess
+          source = pathlib.Path.cwd().resolve()
+          coverage = source / 'target' / 'llvm-cov-target'
+          cli = coverage / 'debug' / 'rsrs'
+          template = str(coverage / 'client2-%m-%p.profraw')
+          before = set(coverage.glob('*.profraw'))
+          digest = hashlib.sha256(cli.read_bytes()).hexdigest()
+          report = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-coverage.json'
+          version = json.loads((source / 'runtime-pin.json').read_text())['required']
+          # The validated template reaches only the account-free child fixtures.
+          env = {key: value for key, value in os.environ.items() if key not in ['GH_TOKEN', 'GITHUB_TOKEN', 'LLVM_PROFILE_FILE']}
+          result = subprocess.run(['python3', 'scripts/test-client2-launcher-compat.py',
+              '--cli', str(cli), '--runtime-archive', str(pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-coverage-runtime' / 'rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz'),
+              '--runtime-version', version, '--client2-source', '.client2-source', '--go', shutil.which('go'),
+              '--ordinary-cli-cold-start', '--coverage-profile-file', template, '--report', str(report)], env=env, timeout=900)
+          assert hashlib.sha256(cli.read_bytes()).hexdigest() == digest, 'Instrumented CLI changed during regression'
+          assert result.returncode == 0, 'Original Client2 regression failed'
+          evidence = json.loads(report.read_text())
+          assert evidence['inputs']['cli_sha256'] == digest
+          assert evidence['inputs']['coverage_profile_file'] == template
+          assert evidence['cases'] and all(case['passed'] for case in evidence['cases'])
+          fresh = set(coverage.glob('client2-*.profraw')) - before
+          assert fresh and all(path.is_file() and path.stat().st_size > 0 for path in fresh), 'No current-run Client2 coverage counters'
+          PY
+      - name: Preserve instrumented Client2 raw results
+        if: always() && matrix.group == 'core' && (steps.client2-coverage.outcome == 'success' || steps.client2-coverage.outcome == 'failure')
+        uses: actions/upload-artifact@v4
+        with:
+          name: client2-source-raw-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/client2-coverage.json
+          if-no-files-found: error
+          retention-days: 1
       - name: Preserve private business credential diagnostics
         if: ${{ always() && env.CANDIDATE_MODE == 'true' && matrix.group == 'runtime_smoke' }}
         uses: actions/upload-artifact@v4
@@ -940,7 +1021,8 @@ jobs:
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
-          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, 'x86_64-unknown-linux-gnu');
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
@@ -1020,15 +1102,16 @@ jobs:
           assert.ok(runner, 'Runtime business tests cannot be skipped');
           const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
-          const modules = {memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2};
+          const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
             const tests = names.filter(name => name.startsWith(`${module}::`));
             assert.equal(tests.length, count, `Missing migrated ${module} assertions`);
             return tests;
           });
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
+          assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account'};
+          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
@@ -1278,6 +1361,8 @@ jobs:
       - run: python3 scripts/test-dev-api-contract.py
       - run: python3 scripts/test-dev-model-fixture.py
       - run: python3 scripts/test-native-runtime-install.py
+      - name: Verify native candidate runner isolation and cleanup without products
+        run: python3 -B scripts/test-native-account-candidate.py
       - run: python3 scripts/test-dev-fixture-tty.py
       - run: python3 scripts/test-dev-witness-fixture.py
       - name: Validate release sweep PowerShell syntax
