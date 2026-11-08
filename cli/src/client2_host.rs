@@ -256,6 +256,9 @@ pub(crate) fn serve() -> Result<()> {
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     crate::autostart::check_direct_access()?;
+    #[cfg(windows)]
+    respire_spawn::confine_supervisor_tree()
+        .context("cannot confine compatibility host and its owned Runtime")?;
     let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
     {
@@ -277,7 +280,7 @@ pub(crate) fn serve() -> Result<()> {
         .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     drop(reservation);
-    let mut child = respire_spawn::spawn_host_control(&mut command)?;
+    let mut child = respire_spawn::spawn_owned_runtime(&mut command)?;
     let pid = child.id();
     let reader = child.stdout.take().context("Runtime readiness pipe is missing")?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);

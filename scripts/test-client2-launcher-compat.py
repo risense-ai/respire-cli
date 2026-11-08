@@ -14,6 +14,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -158,6 +159,10 @@ def main():
     modes = ['client2-owned', 'external-cli-cold-start', 'reuse-cli-started']
     if os.name == 'posix':
         modes.append('cli-host-sigterm')
+    if sys.platform == 'linux':
+        modes.append('cli-host-sigkill')
+    if os.name == 'nt':
+        modes.append('cli-host-terminate')
     for mode in modes:
         root = base / mode; root.mkdir(); home = root / 'home'; home.mkdir()
         with socket.socket() as listener:
@@ -195,13 +200,30 @@ def main():
             reused = run([cli, '--json', 'status'], dict(env, RSRS_NO_AUTOSTART='1'))
             case['cli_reuse_exit'] = reused.returncode
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
-            if mode == 'cli-host-sigterm':
+            if mode in ['cli-host-sigterm', 'cli-host-sigkill', 'cli-host-terminate']:
                 _, visible = request(port, '/api/health')
                 _, backend = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
                 assert visible['compatibility_host'] == 'client2-v0256'
-                assert Path(visible['exe']).resolve() == (root / 'bin' / 'rsrs').resolve()
+                assert Path(visible['exe']).resolve() == (root / 'bin' / ('rsrs.exe' if os.name == 'nt' else 'rsrs')).resolve()
                 assert Path(visible['installation_root']).resolve() == root.resolve()
-                os.kill(visible['pid'], signal.SIGTERM)
+                if mode == 'cli-host-terminate':
+                    import ctypes
+                    from ctypes import wintypes
+                    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+                    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+                    kernel.OpenProcess.restype = wintypes.HANDLE
+                    kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+                    kernel.WaitForSingleObject.restype = wintypes.DWORD
+                    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+                    handle = kernel.OpenProcess(0x00100000, False, backend['pid'])
+                    assert handle, 'Cannot observe the owned backend process'
+                    try:
+                        os.kill(visible['pid'], signal.SIGTERM)
+                        assert kernel.WaitForSingleObject(handle, 15000) == 0, 'Owned backend survived host termination'
+                    finally:
+                        kernel.CloseHandle(handle)
+                else:
+                    os.kill(visible['pid'], signal.SIGKILL if mode == 'cli-host-sigkill' else signal.SIGTERM)
                 deadline = time.monotonic() + 90
                 while time.monotonic() < deadline:
                     with socket.socket() as connection:
@@ -211,11 +233,34 @@ def main():
                     time.sleep(0.1)
                 else:
                     raise RuntimeError('Signaled compatibility host did not close its listener')
-                receipt = json.loads((root / 'runtime' / f"stop-{backend['instance_id']}.json").read_text())
-                for key in ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'account_id']:
-                    assert receipt[key] == backend[key], key
-                assert receipt['state'] == 'drained' and receipt['unfinished'] == []
-                case['signal_drained'] = True
+                receipt_path = root / 'runtime' / f"stop-{backend['instance_id']}.json"
+                if mode == 'cli-host-terminate':
+                    assert not receipt_path.exists(), 'Forced cleanup must not claim a normal drain'
+                    case['forced_backend_exit'] = True
+                    case['signal_drained'] = False
+                elif mode == 'cli-host-sigkill':
+                    deadline = time.monotonic() + 15
+                    stat = Path(f"/proc/{backend['pid']}/stat")
+                    while time.monotonic() < deadline:
+                        try:
+                            fields = stat.read_text().rsplit(')', 1)[1].split()
+                        except FileNotFoundError:
+                            break
+                        if fields[0] == 'Z':
+                            break
+                        assert backend['process_start_id'] == 'linux-starttime-' + fields[19]
+                        time.sleep(0.05)
+                    else:
+                        raise RuntimeError('Owned backend survived compatibility host SIGKILL')
+                    assert not receipt_path.exists(), 'Forced cleanup must not claim a normal drain'
+                    case['forced_backend_exit'] = True
+                    case['signal_drained'] = False
+                else:
+                    receipt = json.loads(receipt_path.read_text())
+                    for key in ['pid', 'instance_id', 'process_start_id', 'image_sha256', 'account_id']:
+                        assert receipt[key] == backend[key], key
+                    assert receipt['state'] == 'drained' and receipt['unfinished'] == []
+                    case['signal_drained'] = True
             else:
                 stopped = run([executable, 'stop'], env)
                 case['client2_stop_exit'] = stopped.returncode

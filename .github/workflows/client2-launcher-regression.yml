@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'cli/**'
+      - 'spawn/**'
       - 'crates/commands/src/net_rpc.rs'
       - 'scripts/test-client2-launcher-compat.py'
       - 'scripts/fixtures/client2-v0256-probe/**'
