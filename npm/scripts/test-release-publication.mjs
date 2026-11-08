@@ -252,7 +252,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
     '          path: |',
     '            ${{ runner.temp }}/client2-launcher-regression.json',
     '            ${{ runner.temp }}/client2-gui-probe/report.json',
-    '            ${{ runner.temp }}/client2-gui-probe/cdp.json',
+    '            ${{ runner.temp }}/client2-gui-probe/native-gui.json',
     '            ${{ runner.temp }}/client2-gui-probe/workspace.png',
     '          if-no-files-found: warn',
     '          retention-days: 1',

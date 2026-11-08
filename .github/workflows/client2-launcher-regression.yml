@@ -8,7 +8,7 @@ on:
       - 'crates/commands/src/net_rpc.rs'
       - 'scripts/test-client2-launcher-compat.py'
       - 'scripts/probe-client2-gui.ps1'
-      - 'scripts/probe-client2-gui-cdp.mjs'
+      - 'scripts/probe-client2-gui-native.ps1'
       - 'scripts/fixtures/client2-v0256-probe/**'
       - '.github/workflows/client2-launcher-regression.yml'
   workflow_dispatch:
@@ -117,7 +117,7 @@ jobs:
           path: |
             ${{ runner.temp }}/client2-launcher-regression.json
             ${{ runner.temp }}/client2-gui-probe/report.json
-            ${{ runner.temp }}/client2-gui-probe/cdp.json
+            ${{ runner.temp }}/client2-gui-probe/native-gui.json
             ${{ runner.temp }}/client2-gui-probe/workspace.png
           if-no-files-found: warn
           retention-days: 1

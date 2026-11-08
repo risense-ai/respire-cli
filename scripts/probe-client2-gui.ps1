@@ -12,7 +12,8 @@ $report = [ordered]@{
     expected_exe_sha256 = 'c04b3941119bfab3a5a436345ecd4442894e40075eb79ab84aeb22e3dd3c65a0'
     environment_ready = $false; official_exe_verified = $false
     native_window_visible = $false; isolated_webview_bound = $false
-    cdp_connected_to_original_webview = $false; gui_input_observed = $false
+    native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
+    target_desktop_screenshot_saved = $false
     cleanup_exit_confirmed = $false
     full_gui_acceptance = 'not-evaluated'; g1_passed = $false; status = 'failed'
 }
@@ -126,7 +127,7 @@ public static class RespireGuiNative {
         $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
         $listener.Start(); $number = $listener.LocalEndpoint.Port; $listener.Stop(); return $number
     }
-    $rpcPort = Free-Port; do { $cdpPort = Free-Port } while ($rpcPort -eq $cdpPort)
+    $rpcPort = Free-Port
     # Explicit environment allowlist: never copy GitHub/download/runtime-service tokens into children.
     $childEnv = @{}
     foreach ($key in @('SystemRoot','WINDIR','COMSPEC','PATHEXT','ProgramFiles','ProgramFiles(x86)','ProgramData')) {
@@ -158,7 +159,6 @@ public static class RespireGuiNative {
     Copy-Item -LiteralPath (Join-Path $taskProfile "runtime/$RuntimeVersion") -Destination $managed -Recurse
     @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
     Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
-    $childEnv['WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'] = "--remote-debugging-port=$cdpPort"
     $desktopProcess = Child-Start $exe @()
     $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
     $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
@@ -175,35 +175,36 @@ public static class RespireGuiNative {
     $report.windows = $windows
     $report.native_window_visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count -gt 0
     if (-not $report.native_window_visible) { throw 'No visible uncloaked original native window' }
-    $node = (Get-Command node -ErrorAction Stop).Source
-    $driver = Child-Start $node @((Join-Path $PSScriptRoot 'probe-client2-gui-cdp.mjs'), "$cdpPort", $root, 'discover')
-    if (-not $driver.WaitForExit(50000)) { $driver.Kill($true); throw 'CDP driver timed out' }
-    $discovery = Get-Content -Raw -LiteralPath (Join-Path $root 'cdp-discovery.json') | ConvertFrom-Json
-    $report.cdp_discovery = $discovery
-    if ($driver.ExitCode -ne 0 -or -not $discovery.cdp_connected -or -not $discovery.workspace_loaded) { throw 'CDP discovery failed before any input' }
-    if ($desktopProcess.HasExited) { throw 'Original desktop exited before native binding' }
+    $visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 })
+    if ($visible.Count -ne 1) { throw 'Require one unambiguous original visible window' }
     $tracked = @(Descendants $desktopProcess.Id)
     $report.processes = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
-    $listeners = @(Get-NetTCPConnection -State Listen -LocalPort $cdpPort -ErrorAction SilentlyContinue)
-    $report.listeners = @($listeners | Select-Object LocalAddress,LocalPort,OwningProcess)
-    if (-not $listeners.Count -or @($listeners | Where-Object { $_.LocalAddress -notin @('127.0.0.1','::1') }).Count) { throw 'CDP must listen only on loopback' }
-    $browser = @($tracked | Where-Object { [int]$_.ProcessId -eq [int]$discovery.browser_pid -and [IO.Path]::GetFileName($_.ExecutablePath) -eq 'msedgewebview2.exe' })
-    $expectedProfile = Join-Path $taskProfile 'client2/webview2'
-    $taskProfileArg = '--user-data-dir=(?:"' + [regex]::Escape($expectedProfile) + '"|' + [regex]::Escape($expectedProfile) + '(?=\s|$))'
-    if ($browser.Count -ne 1 -or $browser[0].CommandLine -notmatch $taskProfileArg -or
-        $browser[0].SessionId -ne $desktopProcess.SessionId -or
-        @($listeners | Where-Object { [int]$_.OwningProcess -ne [int]$discovery.browser_pid }).Count) { throw 'CDP browser/parent/profile/session/port binding failed' }
+    $expectedProfile = [IO.Path]::GetFullPath((Join-Path $taskProfile 'client2/webview2'))
+    $profileArg = '--user-data-dir=(?:"' + [regex]::Escape($expectedProfile) + '"|' + [regex]::Escape($expectedProfile) + '(?=\s|$))'
+    $browser = @($tracked | Where-Object { [IO.Path]::GetFileName($_.ExecutablePath) -eq 'msedgewebview2.exe' -and $_.CommandLine -match $profileArg -and $_.CommandLine -notmatch '(?:^|\s)--type=' })
+    if ($browser.Count -ne 1 -or $browser[0].SessionId -ne $desktopProcess.SessionId) { throw 'Original WebView browser/profile/session binding failed' }
     $report.isolated_webview_bound = $true
-    $report.native_binding = @{browser_pid=$discovery.browser_pid; port=$cdpPort; target_id=$discovery.target.id}
-    $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $root 'native-bound.json') -Encoding utf8NoBOM
-    # The second connection must match the native-bound browser and target before emitting input.
-    $driver = Child-Start $node @((Join-Path $PSScriptRoot 'probe-client2-gui-cdp.mjs'), "$cdpPort", $root, 'input')
-    if (-not $driver.WaitForExit(50000)) { $driver.Kill($true); throw 'CDP input driver timed out' }
-    $cdp = Get-Content -Raw -LiteralPath (Join-Path $root 'cdp.json') | ConvertFrom-Json
-    $report.cdp = $cdp
-    $report.cdp_connected_to_original_webview = $cdp.cdp_connected -eq $true -and $cdp.workspace_loaded -eq $true
-    $report.gui_input_observed = $cdp.gui_input_observed -eq $true
-    if ($driver.ExitCode -ne 0 -or -not $report.cdp_connected_to_original_webview -or -not $report.gui_input_observed -or -not $cdp.screenshot_saved) { throw 'Original WebView GUI connectivity probe failed; see cdp.json' }
+    $report.native_binding = @{
+        desktop_pid=$desktopProcess.Id; desktop_started_ticks=$desktopStarted; exe=$exe; exe_sha256=$report.exe_sha256
+        session_id=$desktopProcess.SessionId; hwnd=$visible[0].hwnd
+        browser_pid=$browser[0].ProcessId; browser_started_ticks=(Get-Process -Id $browser[0].ProcessId).StartTime.ToUniversalTime().Ticks
+        webview_profile=$expectedProfile; full_gui_acceptance='not-evaluated'; g1_passed=$false
+    }
+    $bindingPath = Join-Path $root 'native-binding.json'
+    $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+    $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
+    $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
+    $driver = Child-Start $systemPowerShell @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
+    if (-not $driver.WaitForExit(45000)) { $driver.Kill($true); throw 'System UI Automation helper timed out' }
+    $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
+    $report.native_gui = $native
+    $report.native_accessibility_read = $native.accessibility_tree_read -eq $true
+    $report.foreground_verified = $native.foreground_verified -eq $true
+    $report.gui_input_observed = $native.native_tab_sent -eq $true -and $native.focus_changed_in_target_document -eq $true
+    $report.target_desktop_screenshot_saved = $native.target_desktop_screenshot_saved -eq $true
+    if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
+        -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
+        -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
     $report.status = 'connectivity-passed'
 } catch {
     $report.error = $_.Exception.Message
@@ -214,6 +215,7 @@ public static class RespireGuiNative {
             $sameRoot = Get-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
             if ($sameRoot -and $sameRoot.StartTime.ToUniversalTime().Ticks -eq $desktopStarted) {
                 $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
+                $report.processes_before_cleanup = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
             }
             foreach ($item in $tracked) {
                 try {
