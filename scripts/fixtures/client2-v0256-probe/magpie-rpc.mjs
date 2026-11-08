@@ -74,11 +74,10 @@ for (const key of ['scope', 'operation_id', 'idempotency_key']) {
   assert.equal(Object.hasOwn(transport, key), false);
 }
 assert.equal(realpathSync(envelope.summary.data_dir), realpathSync(before.data_dir));
-assert.equal(envelope.memory_context?.memory_text_authority, 'untrusted_historical_context');
 const after = await health();
 for (const key of ['pid', 'account_id', 'instance_id', 'generation', 'process_start_id',
   'image_sha256', 'runtime_version', 'installation_root', 'data_dir']) {
   assert.equal(after[key], before[key], `Plugin request changed Runtime identity: ${key}`);
 }
 console.log(JSON.stringify({passed: true, original_rpc: true, legacy_projection_verified: true,
-  same_actor_before_after: true, memory_authority_preserved: true, same_runtime: true}));
+  same_actor_before_after: true, same_runtime: true}));

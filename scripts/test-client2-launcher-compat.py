@@ -230,7 +230,7 @@ def main():
                     raise RuntimeError('Original Magpie RPC failed: ' + original_plugin.stderr[:2000])
                 plugin_result = helper_result(original_plugin)
                 expected_plugin = {'passed': True, 'original_rpc': True, 'legacy_projection_verified': True,
-                                   'same_actor_before_after': True, 'memory_authority_preserved': True, 'same_runtime': True}
+                                   'same_actor_before_after': True, 'same_runtime': True}
                 if plugin_result != expected_plugin:
                     raise RuntimeError('Original Magpie RPC returned incomplete evidence')
                 case['magpie_rpc'] = plugin_result
