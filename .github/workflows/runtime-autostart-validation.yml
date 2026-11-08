@@ -122,7 +122,8 @@ jobs:
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
-          const result = spawnSync(cli, ['--json', 'runtime', 'install'], {env, stdio: 'inherit'});
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, '${{ matrix.target }}');
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));

@@ -1,3 +1,4 @@
+import {installPinnedRuntime} from '../../scripts/ci-install-pinned-runtime.mjs';
 import test from 'node:test';
 import {gzipSync,gunzipSync} from 'node:zlib';
 import {publishedAssetNames, validatePublishedRelease, validatePublishedMetadata, inspectPublishedRelease, inspectRuntimeProducer, downloadPublishedAsset, verifyPublishedTarget, consumePublishedTarget, extractPublishedArchive, verifyCorePayload, validatePublishedCompatibility, validatePublishedProcessEvidence, validatePublishedFull, validatePublishedPackage} from './extract-artifact.mjs';
@@ -823,4 +824,70 @@ test('published pack adapter retains version, repository, launcher, optional dep
   assert.throws(()=>validatePublishedPackage(native,frontend,native.name,core,frontendFiles));
   assert.throws(()=>validatePublishedPackage(native,frontend,native.name,null,files));
   assert.throws(()=>validatePublishedPackage(native,frontend,native.name,null,new Set(['bin/rsrs'])));
+});
+
+test('official Runtime CI fixture retries only exact pinned metadata or paired archive network failures', async () => {
+  const pin = JSON.parse(readFileSync(new URL('../../runtime-pin.json', import.meta.url), 'utf8'));
+  const target = 'x86_64-unknown-linux-gnu';
+  const url = `https://github.com/risense-ai/respire-runtime/releases/download/v${pin.required}/runtime-build-${target}.json`;
+  const prefix = `release metadata request failed (${url}): ${url}: `;
+  const envelope = error => ({command: 'cli', status: 'fail', summary: {reason: 'runtime_error'},
+    items: [], actions: [], errors: [error], details: {error_type: 'runtime'}, related: []});
+  const result = doc => ({status: 1, signal: null, stdout: Buffer.from(JSON.stringify(doc)), stderr: Buffer.from('first attempt diagnostics\n')});
+  const readTimeout = 'Network Error: Network Error: Error encountered in the status line: timed out reading response: Network Error: Error encountered in the status line: timed out reading response: timed out reading response';
+  const win = 'A connection attempt failed because the connected party did not properly respond after a period of time, or established connection failed because connected host has failed to respond. (os error 10060)';
+  const connectTimeout = `Network Error: Network Error: Error encountered in the status line: ${win}: Network Error: Error encountered in the status line: ${win}: ${win}`;
+  const exercise = async (first, expectedCalls, second = {status: 0, stdout: Buffer.from('{}'), stderr: Buffer.alloc(0)}) => {
+    let calls = 0; const waits = [], output = [], errors = []; const env = {RSRS_DATA_DIR: 'isolated-fixture'};
+    const actual = await installPinnedRuntime('fixture-cli', {env}, target, {
+      spawn(cli, args, options) {
+        calls++; assert.equal(cli, 'fixture-cli'); assert.deepEqual(args, ['--json', 'runtime', 'install']);
+        assert.equal(options.env, env); assert.deepEqual(options.stdio, ['inherit', 'pipe', 'pipe']);
+        return calls === 1 ? first : second;
+      },
+      pause: async ms => { waits.push(ms); },
+      stdout: {write: bytes => output.push(Buffer.from(bytes))},
+      stderr: {write: bytes => errors.push(Buffer.from(bytes))},
+    });
+    assert.equal(calls, expectedCalls); assert.deepEqual(waits, expectedCalls === 2 ? [2000] : []);
+    assert.equal(actual, expectedCalls === 2 ? second : first);
+    assert.deepEqual(output[0], first.stdout); assert.deepEqual(errors[0], first.stderr);
+  };
+  for (const reason of ['status code 429', 'status code 502', 'status code 503', 'status code 504', readTimeout, connectTimeout]) {
+    await exercise(result(envelope(prefix + reason)), 2);
+  }
+  const first = result(envelope(prefix + 'status code 503'));
+  await exercise(first, 2, first); // A second transient failure must stop after two attempts.
+  const archive = url.replace(/\/runtime-build-([^/]+)\.json$/, '/rsrs-runtime-$1.tar.gz');
+  const originFailure = (origin, reason) => {
+    const asset = archive.replace('https://github.com', origin);
+    return `${origin}: download failed (${asset}): ${asset}: ${reason}`;
+  };
+  const pair = [originFailure('https://github.com', 'status code 502'), originFailure('https://gh-proxy.com/https://github.com', readTimeout)];
+  const aggregate = entries => 'runtime download failed: ' + entries.join('; ');
+  await exercise(result(envelope(aggregate(pair))), 2);
+  for (const entries of [[pair[0]], [...pair].reverse(), [...pair, pair[0]],
+    [pair[0], pair[1].replace(readTimeout, 'archive checksum failed')],
+    [pair[0].replace(`v${pin.required}/`, 'v0.0.0/'), pair[1]],
+    [pair[0], pair[1].replace(target, 'aarch64-unknown-linux-gnu')],
+    [pair[0], pair[1].replace(readTimeout, 'Permission denied (os error 13)')]]) await exercise(result(envelope(aggregate(entries))), 1);
+  for (const error of [prefix + 'status code 401', prefix + 'status code 403', prefix + 'status code 404',
+    prefix + 'status code 500', prefix + 'status code 503; archive checksum failed',
+    prefix.replace('https://github.com/', 'https://evil.invalid/') + 'status code 503',
+    prefix.replace(`v${pin.required}/`, 'v0.0.0/') + 'status code 503',
+    prefix.replace(target, 'aarch64-unknown-linux-gnu') + 'status code 503',
+    'runtime download failed: https://github.com: archive checksum failed; https://gh-proxy.com: status code 503',
+    'invalid runtime release metadata', 'archive checksum failed', 'Permission denied (os error 13)']) {
+    await exercise(result(envelope(error)), 1);
+  }
+  for (const mutate of [d => d.errors.push(prefix + 'status code 503'), d => d.details = {},
+    d => d.summary.reason = 'other', d => d.command = 'runtime', d => d.status = 'ok',
+    d => d.items.push({error: 'schema'}), d => d.schema = 2]) {
+    const doc = envelope(prefix + 'status code 503'); mutate(doc); await exercise(result(doc), 1);
+  }
+  await exercise({...first, stdout: Buffer.from('not JSON')}, 1);
+  await exercise({...first, error: new Error('spawn failed')}, 1);
+  await exercise({...first, signal: 'SIGTERM'}, 1);
+  await exercise({...first, status: 2}, 1);
+  await exercise({...first, status: 0}, 1);
 });
