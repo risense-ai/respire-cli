@@ -551,6 +551,7 @@ pub(crate) fn rpc_method_with_timeout(
         method != "runtime.result",
         "runtime.result requires rpc_result with the original operation context"
     );
+    let mut _remote_progress = None;
     let operation = if matches!(
         method,
         "cli.progress" | "runtime.status" | "assets.status" | "model.catalog" | "model.progress"
@@ -558,6 +559,19 @@ pub(crate) fn rpc_method_with_timeout(
         None
     } else {
         let scope = request_scope(&health()?)?;
+        if method == "cli.exec" {
+            let progress_id = args.iter().take_while(|arg| arg.as_str() != "--")
+                .enumerate().find_map(|(index, arg)| {
+                    if arg == "--progress-id" {
+                        args.get(index + 1).map(String::as_str)
+                    } else {
+                        arg.strip_prefix("--progress-id=")
+                    }
+                });
+            if let Some(id) = progress_id {
+                _remote_progress = Some(crate::progress::bind_remote_scope(id, &scope)?);
+            }
+        }
         let operation_id = uuid::Uuid::new_v4().to_string();
         Some(OperationContext {
             scope,
@@ -576,13 +590,19 @@ fn rpc_request(
 ) -> Result<Value> {
     let url = format!("{}/api/rpc", rpc_base_url());
     let request_id = uuid::Uuid::new_v4().to_string();
+    let progress_scope = if method == "cli.progress" {
+        let id = args.first().context("foreground progress ID is missing")?;
+        Some(crate::progress::remote_scope(id)?)
+    } else {
+        None
+    };
     let (operation_id, idempotency_key, scope) = match operation {
         Some(operation) => (
             Some(operation.operation_id.clone()),
             Some(operation.idempotency_key.clone()),
             Some(&operation.scope),
         ),
-        None => (None, None, None),
+        None => (None, None, progress_scope.as_ref()),
     };
     let body = json!({
         "v": crate::rpc_client::PROTOCOL_V,
