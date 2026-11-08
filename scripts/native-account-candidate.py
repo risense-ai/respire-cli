@@ -301,6 +301,12 @@ def safe_failure_diagnostics(captured, failed_cases):
         b"runtime drain final receipt verification failed": "runtime_drain_final_receipt_failed",
         b"runtime drain listener did not close": "runtime_drain_listener_close_failed",
         b"runtime drain endpoint removal failed": "runtime_drain_endpoint_remove_failed",
+        b"runtime stop host policy rejected": "runtime_stop_host_policy_rejected",
+        b"runtime stop HTTP exchange failed": "runtime_stop_http_exchange_failed",
+        b"runtime_unavailable:": "runtime_error_unavailable",
+        b"runtime_token_unreadable:": "runtime_error_token_unreadable",
+        b"runtime_unauthorized:": "runtime_error_unauthorized",
+        b"runtime_transport:": "runtime_error_transport",
         b"runtime stop identity is incomplete": "runtime_stop_identity_incomplete",
         b"invalid stop acknowledgement": "runtime_stop_ack_invalid_json",
         b"runtime did not accept a traceable stop operation": "runtime_stop_ack_untraceable",
@@ -374,7 +380,20 @@ def safe_failure_diagnostics(captured, failed_cases):
     codes, locations = {}, {}
     for case in failed_cases:
         block = b"\n".join(blocks.get(case, []))
-        codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block)) or ["unknown_private_failure"]
+        codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block))
+        # HTTP details can contain URLs and response data. Retain only a fixed
+        # status when the same line identifies this failed stop exchange.
+        for line in blocks.get(case, []):
+            if (b"runtime stop HTTP exchange failed" not in line
+                    or b"runtime_transport:" not in line or len(line) > 65536):
+                continue
+            for status in (b"400", b"401", b"403", b"404", b"409", b"429", b"500", b"502", b"503", b"504"):
+                if re.search(rb"(?:status code |unexpected HTTP )" + status + rb"(?![0-9])", line):
+                    code = "runtime_stop_http_" + status.decode("ascii")
+                    if code not in codes[case]:
+                        codes[case].append(code)
+        if not codes[case]:
+            codes[case] = ["unknown_private_failure"]
         locations[case] = []
         for line in blocks.get(case, []):
             if b"panicked at " not in line or len(line) > 8192:

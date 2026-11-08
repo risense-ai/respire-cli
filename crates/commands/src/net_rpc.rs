@@ -349,7 +349,8 @@ pub fn request_stop_operation(timeout: Duration) -> Result<String> {
 }
 
 pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<String> {
-    crate::runtime_policy::require_host("runtime shutdown")?;
+    crate::runtime_policy::require_host("runtime shutdown")
+        .context("runtime stop host policy rejected")?;
     anyhow::ensure!(
         !health.installation_id.is_empty()
             && !health.instance_id.is_empty()
@@ -371,7 +372,7 @@ pub fn request_stop_for(health: &Health, timeout: Duration) -> Result<String> {
             .timeout(timeout)
             .set("X-Respire-Lifecycle", "coordinator-v1"),
         |request| request.send_string(&expected),
-    )?;
+    ).context("runtime stop HTTP exchange failed")?;
     let receipt: Value = response
         .into_json()
         .context("invalid stop acknowledgement")?;
