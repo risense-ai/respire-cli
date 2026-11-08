@@ -11,6 +11,14 @@ on:
         required: false
         default: ''
         type: string
+      business_suite:
+        description: Original source-candidate business cases; full requires all 30 cases without skips
+        required: false
+        type: choice
+        default: account
+        options:
+          - account
+          - full
       release_run_id:
         description: Optional validated Release run for targeted native migration; blank runs credential fixtures only
         required: false
@@ -310,6 +318,7 @@ jobs:
             --root "$RUNNER_TEMP/source-account-regression" \
             --cli-source "$PWD" --cli-sha "$CLI_SHA" \
             --runtime-source "$PWD/.account-runtime" --runtime-sha "$RUNTIME_SHA" \
+            --suite '${{ inputs.business_suite || 'account' }}' \
             --cli "$RUNNER_TEMP/account-cli-target/debug/rsrs" \
             --runtime "$RUNNER_TEMP/account-runtime-target/debug/rsrs-runtime" \
             --harness "$ACCOUNT_HARNESS"

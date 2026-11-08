@@ -122,6 +122,20 @@ class CandidateFixtureTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaisesRegex(RuntimeError, "offline_receipt_mismatch"):
                 candidate.verify_receipt(self.root / "installation", metadata_path)
 
+    def test_full_suite_requires_every_original_module_and_unique_case(self):
+        names = [f"{module}::case_{index}" for module, count in candidate.MODULE_COUNTS.items()
+                 for index in range(count)]
+        names[names.index("account::case_0")] = candidate.CASE
+        listing = "\n".join(name + ": test" for name in names)
+        self.assertEqual(candidate.selected_cases(listing, "account"), [candidate.CASE])
+        self.assertEqual(candidate.selected_cases(listing, "full"), names)
+        for broken in (names[:-1], names + [names[0]],
+                       ["unassigned::case_0" if name == names[0] else name for name in names]):
+            with self.subTest(broken=broken), self.assertRaises(RuntimeError):
+                candidate.selected_cases("\n".join(name + ": test" for name in broken), "full")
+        with self.assertRaisesRegex(RuntimeError, "unknown_business_suite"):
+            candidate.selected_cases(listing, "unknown")
+
     def test_credentials_and_bus_not_inherited(self):
         ambient = {"PATH": "/bin", "CORE_SDK_READ_TOKEN": "secret", "GITHUB_TOKEN": "secret",
             "GH_TOKEN": "secret", "DBUS_SESSION_BUS_ADDRESS": "unix:old", "RSRS_SUPER": "secret",

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the unchanged Runtime account regression against two exact source commits.
 
+The default retains the account case; --suite full runs every original business case.
 Only sanitized identity and result JSON is publishable. Product output stays in
 private runner-temporary logs, including on failures. This is not release proof.
 """
@@ -21,6 +22,23 @@ import tomllib
 
 TARGET = "x86_64-unknown-linux-gnu"
 CASE = "account::authorization_preserves_and_commits_profiles"
+MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle": 8,
+                 "account": 3, "capture_main": 2}
+
+
+def selected_cases(listing, suite):
+    names = [line[:-6] for line in listing.splitlines() if line.endswith(": test")]
+    require(names.count(CASE) == 1, "original_account_case_missing")
+    if suite == "account":
+        return [CASE]
+    require(suite == "full", "unknown_business_suite")
+    require(len(names) == len(set(names)) == sum(MODULE_COUNTS.values()),
+            "business_case_inventory_mismatch")
+    for module, count in MODULE_COUNTS.items():
+        require(sum(name.startswith(module + "::") for name in names) == count,
+                "business_module_inventory_mismatch")
+    return names
+
 MODEL_HASHES = {
     "tokenizer.json": "6710678b12670bc442b99edc952c4d996ae309a7020c1fa0096dd245c2faf790",
     "onnx/model_quantized.onnx": "0826f8c1ab9edf1801db86c61919d4d108e8bfc0b809ec823ad366882ff0b77d",
@@ -192,7 +210,8 @@ def run(args):
     require(root.is_relative_to(temp) and root != temp and not root.exists(), "fresh_owned_root_required")
     os.umask(0o077)
     root.mkdir(mode=0o700)
-    report = {"schema_version": 1, "kind": "unpublished-source-fixture", "case": CASE,
+    report = {"schema_version": 1, "kind": "unpublished-source-fixture",
+              "case": CASE if args.suite == "account" else "full-business-suite", "suite": args.suite,
               "passed": False, "release_acceptance": False, "test_executed": False,
               "cli_source_sha": args.cli_sha, "runtime_source_sha": args.runtime_sha,
               "run_id": os.environ.get("GITHUB_RUN_ID"), "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
@@ -203,6 +222,7 @@ def run(args):
     cli, runtime, harness = args.cli.resolve(), args.runtime.resolve(), args.harness.resolve()
     hashes = {digest(cli), digest(runtime), digest(harness)}
     log = root / "private.log"
+    cases = []
     try:
         verify_source(args.cli_source, args.cli_sha)
         verify_source(args.runtime_source, args.runtime_sha)
@@ -245,13 +265,15 @@ def run(args):
                 RSRS_RUNTIME_SOURCE_SHA=args.runtime_sha, RSRS_RUNTIME_CANDIDATE_METADATA=str(metadata_path),
                 RSRS_CORE_TEST_MODEL_DIR=str(root / "model"), RSRS_CORE_TEST_MODE="1")
             listing = subprocess.check_output([str(harness), "--list"], env=env, timeout=30, stderr=output)
-            require(listing.decode().splitlines().count(CASE + ": test") == 1, "original_account_case_missing")
+            cases = selected_cases(listing.decode(), args.suite)
+            report["required_cases"] = cases
+            test_args = [CASE, "--exact", "--test-threads=1"] if args.suite == "account" else ["--test-threads=1"]
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
-                "--root", root / "keyring", "--", harness, CASE, "--exact", "--test-threads=1"]
+                "--root", root / "keyring", "--", harness, *test_args]
             report["stage"] = "private_account_test"
             report["test_requested"] = True
-            invoke(command, timeout=1000)
+            invoke(command, timeout=1000 if args.suite == "account" else 2700)
         report["stage"] = "result_verification"
         keyring = json.loads((root / "keyring/business-keyring-selftest.json").read_text())
         report["keyring"] = keyring
@@ -259,7 +281,11 @@ def run(args):
                 "private_business_fixture_failed")
         require(digest(cli) == report["cli_binary_sha256"] and digest(runtime) == report["runtime_binary_sha256"]
                 and digest(harness) == report["harness_sha256"], "executed_binaries_changed")
-        require(b"test result: ok. 1 passed; 0 failed;" in log.read_bytes(), "exact_test_did_not_pass")
+        captured = log.read_bytes()
+        require(f"test result: ok. {len(cases)} passed; 0 failed;".encode() in captured,
+                "required_business_cases_did_not_pass")
+        require(all(f"test {case} ... ok".encode() in captured.splitlines() for case in cases),
+                "required_business_case_result_missing")
         report["stage"] = "complete"
         report["passed"] = True
     except Exception as error:
@@ -282,10 +308,14 @@ def run(args):
             report["keyring"] = json.loads((root / "keyring/business-keyring-selftest.json").read_text())
         if log.is_file():
             captured = log.read_bytes()
-            report["test_executed"] = b"running 1 test" in captured and CASE.encode() in captured
+            lines = captured.splitlines()
+            report["passed_cases"] = [case for case in cases if f"test {case} ... ok".encode() in lines]
+            report["missing_or_failed_cases"] = [case for case in cases if case not in report["passed_cases"]]
+            report["test_executed"] = bool(cases) and all(
+                (f"test {case} ... ".encode() in captured) for case in cases)
         report["passed"] = report["passed"] and report["test_executed"]
         write_json(root / "result.json", report)
-    print(json.dumps({"case": CASE, "passed": report["passed"], "test_executed": report["test_executed"]}))
+    print(json.dumps({"case": report["case"], "passed": report["passed"], "test_executed": report["test_executed"]}))
     return 0 if report["passed"] else 1
 
 
@@ -295,6 +325,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
+    parser.add_argument("--suite", choices=("account", "full"), default="account")
     def interrupted(_number, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
