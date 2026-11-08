@@ -208,6 +208,63 @@ def safe_failure_diagnostics(captured, failed_cases):
         b"compatibility backend OS process changed": "compatibility_backend_process_mismatch",
         b"compatibility startup is uncertain for child": "compatibility_startup_uncertain",
         b"compatibility Runtime failed independent committed-owner handoff verification": "compatibility_restored_owner_mismatch",
+        b"host control request frame exceeds the protocol limit": "control_request_frame_limit",
+        b"cannot start owned host control Runtime": "control_helper_spawn_failed",
+        b"missing host control input pipe": "control_input_pipe_missing",
+        b"missing host control output pipe": "control_output_pipe_missing",
+        b"host control input owner was released": "control_input_owner_released",
+        b"host control request write failed": "control_request_write_failed",
+        b"missing host control response frame": "control_response_frame_missing",
+        b"invalid host control response frame size": "control_response_frame_size_invalid",
+        b"incomplete host control response frame": "control_response_frame_incomplete",
+        b"invalid host control response JSON": "control_response_json_invalid",
+        b"extra host control response bytes": "control_response_extra_bytes",
+        b"host control response deadline or channel failure": "control_response_channel_failed",
+        b"host control response deadline exceeded": "control_response_deadline_exceeded",
+        b"host control exit deadline exceeded": "control_exit_deadline_exceeded",
+        b"host control Runtime exit does not match its response": "control_exit_response_mismatch",
+        b"host control response identity mismatch": "control_response_identity_mismatch",
+        b"host control data directory mismatch": "control_response_profile_mismatch",
+        b"missing host control result envelope": "control_result_envelope_missing",
+        b"host control authorization was not confirmed": "control_authorization_unconfirmed",
+        b"host control I/O worker did not finish": "control_io_cleanup_incomplete",
+        b"host control I/O worker panicked": "control_io_worker_panicked",
+        b"auth control image or identity changed while preparing authorization": "auth_control_grant_identity_changed",
+        b"account control response identity mismatch": "account_control_response_identity_mismatch",
+        b"account launch or parent authorization failed": "account_control_parent_unauthorized",
+        b"account control binding changed or does not match": "account_control_binding_mismatch",
+        b"account controller is unavailable": "account_control_unavailable",
+        b"account deadline or parent authorization ended": "account_control_deadline_or_parent_ended",
+        b"snapshot control requires matching takeover, image and maintenance grant": "snapshot_control_grant_binding_mismatch",
+        b"snapshot maintenance grant missing": "snapshot_control_grant_missing",
+        b"snapshot response identity mismatch": "snapshot_control_response_identity_mismatch",
+        b"snapshot response profile missing": "snapshot_control_response_profile_missing",
+        b"snapshot response profile mismatch": "snapshot_control_response_profile_mismatch",
+        b"snapshot Runtime did not confirm a receipt": "snapshot_remote_receipt_unconfirmed",
+        b"snapshot control readiness mismatch": "snapshot_control_readiness_mismatch",
+        b"snapshot result missing": "snapshot_control_result_missing",
+        b"invalid snapshot receipt shape": "snapshot_control_receipt_invalid",
+        b"snapshot receipt does not identify the original request": "snapshot_control_receipt_request_mismatch",
+        b"snapshot witness checkpoint is unverifiable; diagnostic copy cannot be a restore target": "snapshot_witness_diagnostic_copy_rejected",
+        b"snapshot witness checkpoint mismatch or missing checkpoint": "snapshot_witness_checkpoint_mismatch",
+        b"snapshot witness checkpoint exists without a witness schema": "snapshot_witness_schema_missing",
+        b"snapshot requires this controller's exact Paused marker": "snapshot_paused_marker_mismatch",
+        b"snapshot finalization requires this controller's exact Verified marker": "snapshot_verified_marker_mismatch",
+        b"snapshot maintenance marker missing": "snapshot_marker_missing",
+        b"snapshot maintenance ownership missing": "snapshot_marker_ownership_missing",
+        b"snapshot marker changed during drain": "snapshot_marker_changed_during_drain",
+        b"snapshot operation or drained owner changed": "snapshot_drained_owner_changed",
+        b"snapshot has no authenticated drain capability": "snapshot_drain_capability_missing",
+        b"snapshot drain account differs from original operation": "snapshot_drain_account_mismatch",
+        b"snapshot drained owner is still alive": "snapshot_drained_owner_alive",
+        b"snapshot owner is alive but health is unavailable; drain proof required": "snapshot_live_owner_without_health",
+        b"snapshot supervisor is still running; explicit drain is required": "snapshot_supervisor_still_running",
+        b"snapshot endpoint is not a bounded regular file": "snapshot_endpoint_invalid_file",
+        b"snapshot endpoint too large": "snapshot_endpoint_too_large",
+        b"snapshot endpoint owner PID missing": "snapshot_endpoint_pid_missing",
+        b"snapshot endpoint changed since offline fencing": "snapshot_endpoint_changed",
+        b"drained runtime supervisor is still active or its endpoint changed": "runtime_supervisor_or_endpoint_changed",
+        b"runtime endpoint owner changed after drain": "runtime_endpoint_changed_after_drain",
         b"snapshot restore exchange failed": "snapshot_restore_exchange_failed",
         b"snapshot restore is not Installed": "snapshot_restore_not_installed",
         b"snapshot startup/verification failed": "snapshot_startup_verification_failed",
@@ -237,6 +294,39 @@ def safe_failure_diagnostics(captured, failed_cases):
                 blocks[current] = []
         elif in_failures and current is not None:
             blocks[current].append(line)
+    response_reasons = {None, "auth_outcome_unknown", "identity_write_recovery_required",
+                        "key_outcome_unknown", "account_handoff_pending", "account_outcome_unknown",
+                        "request_outcome_unknown", "invalid_input", "runtime_error"}
+    response_error_types = {None, "outcome_unknown", "identity_write_recovery_required",
+                            "handoff_pending", "user", "runtime"}
+    response_events, response_invalid, response_seen = [], False, 0
+    response_marker = b"account-response-evidence "
+    for case in failed_cases:
+        for line in blocks.get(case, []):
+            if response_marker not in line:
+                continue
+            response_seen += 1
+            if response_seen > 16:
+                response_invalid = True
+                break
+            try:
+                if not line.startswith(response_marker) or len(line) > 16384:
+                    raise ValueError
+                response = json.loads(line[len(response_marker):])
+                if (not isinstance(response, dict)
+                        or set(response) != {"stage", "reason_code", "error_type"}
+                        or not isinstance(response["stage"], str)
+                        or response["stage"] not in {"required_input", "wrong_super", "space_command"}):
+                    raise ValueError
+                clean = {"case": case, "stage": response["stage"]}
+                for key, choices in (("reason_code", response_reasons), ("error_type", response_error_types)):
+                    value = response[key]
+                    if value is not None and not isinstance(value, str):
+                        raise ValueError
+                    clean[key] = value if value in choices else "redacted"
+                response_events.append(clean)
+            except (ValueError, TypeError):
+                response_invalid = True
     codes, locations = {}, {}
     for case in failed_cases:
         block = b"\n".join(blocks.get(case, []))
@@ -273,6 +363,7 @@ def safe_failure_diagnostics(captured, failed_cases):
             checkpoints.append(checkpoint)
     return {"authorization_events": events, "authorization_event_invalid": invalid,
             "failure_codes": codes, "failure_locations": locations,
+            "response_events": response_events, "response_event_invalid": response_invalid,
             "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid}
 
 
