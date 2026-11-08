@@ -31,7 +31,8 @@ def annotate_failure(case):
     # Only the current account-free fixture's errors. Do not copy files,
     # credentials, downloaded logs, or another run's evidence into annotations.
     message = json.dumps({'case': case['name'], 'failure': case.get('failure'),
-                          'errors': case.get('errors'), 'cleanup_exit': case.get('cleanup_exit')})
+                          'errors': case.get('errors'), 'cleanup_exit': case.get('cleanup_exit'),
+                          'cleanup_error': case.get('cleanup_error')})
     message = message.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
     print(f'::error title=Client2 fixture failure::{message}', flush=True)
 
@@ -71,7 +72,21 @@ def main():
               'excluded': ['desktop GUI', 'accounts and credentials', 'model inference',
                            'managed services', 'cross-platform execution']}
     def run(argv, env):
-        return subprocess.run([str(x) for x in argv], env=env, capture_output=True, text=True, timeout=150)
+        # Go/Rust emit UTF-8, including Chinese errors. Decode captured bytes
+        # explicitly instead of using Windows' locale-dependent text reader.
+        with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+            result = subprocess.run([str(x) for x in argv], env=env, stdout=output,
+                                    stderr=errors, timeout=150)
+            output.seek(0); errors.seek(0)
+            result.stdout = output.read(8 * 1024 * 1024 + 1).decode('utf-8', errors='replace')
+            result.stderr = errors.read(8 * 1024 * 1024 + 1).decode('utf-8', errors='replace')
+            if len(result.stdout) > 8 * 1024 * 1024 or len(result.stderr) > 8 * 1024 * 1024:
+                raise RuntimeError('Fixture process output exceeded 8 MiB')
+            return result
+    def helper_result(result):
+        if not result.stdout:
+            raise RuntimeError(f'Client2 helper returned no JSON: exit={result.returncode}, stderr={result.stderr[:2000]}')
+        return json.loads(result.stdout)
     def request(port, path, body=None, headers=None):
         request = urllib.request.Request(f'http://127.0.0.1:{port}{path}',
             data=None if body is None else json.dumps(body).encode(),
@@ -134,7 +149,7 @@ def main():
                 started = run([cli, '--json', 'runtime', 'start'], env)
                 if started.returncode: raise RuntimeError('CLI startup failed: '+started.stderr)
             result = run([executable, 'start'], env)
-            payload = json.loads(result.stdout)
+            payload = helper_result(result)
             case['client2_exit'] = result.returncode
             case['errors'] = {k:v for k,v in payload.items() if k.endswith('_error')}
             case['legacy_rpc_ok'] = payload.get('diagnostic_rpc',{}).get('ok')
@@ -147,14 +162,18 @@ def main():
             if reused.returncode: raise RuntimeError('CLI cannot reuse Client2-compatible service')
             stopped = run([executable, 'stop'], env)
             case['client2_stop_exit'] = stopped.returncode
-            if stopped.returncode: raise RuntimeError('Client2 cannot stop its visible service')
+            if stopped.returncode:
+                case['errors']['stop_error'] = helper_result(stopped)
+                raise RuntimeError('Client2 cannot stop its visible service')
             case['passed'] = True
         except Exception as error:
             case['failure'] = str(error)
         finally:
             stopped = run([executable, 'stop'] if mode=='client2-owned' else [cli,'--json','runtime','stop'], env)
             case['cleanup_exit'] = stopped.returncode
-            if stopped.returncode: case['passed'] = False
+            if stopped.returncode:
+                case['passed'] = False
+                case['cleanup_error'] = (stopped.stdout + stopped.stderr)[:2000]
             if not case['passed']: annotate_failure(case)
             args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(json.dumps(report, indent=2)+'\n')

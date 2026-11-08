@@ -14,6 +14,17 @@ use std::time::{Duration, Instant};
 const LIMIT: u64 = 32 * 1024 * 1024;
 const READY_LIMIT: u64 = 64 * 1024;
 
+fn visible_path(path: PathBuf) -> Result<PathBuf> {
+    // Client2 compares QueryFullProcessImageName's DOS/UNC spelling literally.
+    // Retain canonical comparisons for authority; expose the same actual image
+    // without Rust's extended-path namespace in the legacy representation.
+    #[cfg(windows)]
+    return Ok(crate::autostart::windows_task_path(path.to_str()
+        .context("host executable path is not UTF-8")?)?.into());
+    #[cfg(not(windows))]
+    Ok(path)
+}
+
 fn agent() -> ureq::Agent {
     ureq::AgentBuilder::new().redirects(0).timeout_connect(Duration::from_secs(2))
         .timeout(Duration::from_secs(120)).build()
@@ -175,7 +186,7 @@ pub(crate) fn serve() -> Result<()> {
         && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
         "Runtime readiness does not match the selected child and installation");
     let backend = Arc::new(Backend { port, health, executable, public_port,
-        host_executable: std::env::current_exe()?.canonicalize()?,
+        host_executable: visible_path(std::env::current_exe()?)?,
         last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
     let server = tiny_http::Server::from_listener(listener, None)
@@ -235,7 +246,7 @@ pub(crate) fn start_locked() -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
-    let executable = crate::net_rpc::stable_bin_path().canonicalize()?;
+    let executable = visible_path(crate::net_rpc::stable_bin_path().canonicalize()?)?;
     anyhow::ensure!(Sha256::digest(std::fs::read(&executable)?)
         == Sha256::digest(std::fs::read(std::env::current_exe()?)?),
         "Client2 requires the same verified CLI bytes at the stable bin path");
