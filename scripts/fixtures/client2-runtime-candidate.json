@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "status": "draft/unready",
+  "repository": "risense-ai/respire-runtime",
+  "target": "x86_64-pc-windows-msvc",
+  "workflow_head_sha": null,
+  "runtime_source_sha": null,
+  "runtime_version": null,
+  "run_id": null,
+  "run_attempt": null,
+  "build_job_id": null,
+  "artifact_id": null,
+  "artifact_size": null,
+  "artifact_sha256": null,
+  "archive_sha256": null,
+  "metadata_sha256": null,
+  "binary_sha256": null,
+  "core_runtime_sha256": null,
+  "sdk_lock_sha256": null,
+  "sdk": {
+    "sdk_version": null,
+    "release_tag": null,
+    "manifest_sha256": null,
+    "archive_sha256": null
+  }
+}

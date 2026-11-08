@@ -138,6 +138,16 @@ public static class RespireGuiNative {
     $archivePath = (Resolve-Path -LiteralPath $RuntimeArchive).Path
     $report.cli_sha256 = (Get-FileHash -LiteralPath $cliPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $report.runtime_archive_sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $candidateProofPath = Join-Path (Split-Path $archivePath) 'candidate-source.json'
+    if (Test-Path -LiteralPath $candidateProofPath) {
+        if ((Get-Item -LiteralPath $candidateProofPath).Length -gt 65536) { throw 'Candidate provenance exceeds its bound' }
+        $candidateProof = Get-Content -Raw -LiteralPath $candidateProofPath | ConvertFrom-Json
+        if ($candidateProof.mode -ne 'frozen-runtime-candidate' -or $candidateProof.target -ne 'x86_64-pc-windows-msvc' -or
+            $candidateProof.runtime_version -ne $RuntimeVersion -or $candidateProof.archive_sha256 -ne $report.runtime_archive_sha256 -or
+            $candidateProof.actual_native_sdk_archive -ne 'not-evaluated' -or $candidateProof.full_gui_acceptance -ne 'not-evaluated' -or
+            $candidateProof.g1_passed -ne $false) { throw 'Candidate archive/provenance binding differs' }
+        $report.runtime_candidate = $candidateProof
+    }
     if ($RuntimeVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') { throw 'Invalid pinned Runtime version' }
     $taskProfile = Join-Path $root 'profile'
     foreach ($dir in @('home','appdata','local','temp','bin')) { New-Item -ItemType Directory -Path (Join-Path $taskProfile $dir) | Out-Null }
@@ -196,6 +206,9 @@ public static class RespireGuiNative {
     Copy-Item -LiteralPath (Join-Path $taskProfile "runtime/$RuntimeVersion") -Destination $managed -Recurse
     @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
     Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
+    if ($candidateProof -and (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -ne $candidateProof.binary_sha256) {
+        throw 'Installed candidate binary differs from the frozen original archive'
+    }
     if ($OfflineAcceptance) {
         $modelRoot = [IO.Path]::GetFullPath($OfflineModelDirectory)
         if (-not $modelRoot.StartsWith($tempRoot,[StringComparison]::OrdinalIgnoreCase)) { throw 'Offline models must be staged under RUNNER_TEMP' }

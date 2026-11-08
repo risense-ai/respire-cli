@@ -9,9 +9,17 @@ on:
       - 'scripts/test-client2-launcher-compat.py'
       - 'scripts/probe-client2-gui.ps1'
       - 'scripts/probe-client2-gui-native.ps1'
+      - 'scripts/fetch-client2-runtime-candidate.py'
+      - 'scripts/test-fetch-client2-runtime-candidate.py'
+      - 'scripts/fixtures/client2-runtime-candidate.json'
       - 'scripts/fixtures/client2-v0256-probe/**'
       - '.github/workflows/client2-launcher-regression.yml'
   workflow_dispatch:
+    inputs:
+      use_runtime_candidate:
+        description: Use the reviewed fixed Windows Runtime candidate; draft freeze refuses before downloads
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +47,12 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Verify fixed candidate artifact checks without network or products
+        run: python3 -B scripts/test-fetch-client2-runtime-candidate.py
+      - name: Reject an unready candidate freeze before other downloads or product work
+        if: github.event_name == 'workflow_dispatch' && inputs.use_runtime_candidate
+        shell: bash
+        run: python3 scripts/fetch-client2-runtime-candidate.py check-freeze --freeze scripts/fixtures/client2-runtime-candidate.json
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-client2
@@ -61,13 +75,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Compile the opt-in transport prototype
         run: cargo build --locked -p respire --features client2-host-prototype
-      - name: Download and verify official pinned Runtime bytes
+      - name: Stage authenticated official Runtime or frozen Windows candidate
+        id: runtime-input
         env:
           GH_TOKEN: ${{ github.token }}
           RUNTIME_TARGET: ${{ matrix.target }}
+          USE_RUNTIME_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.use_runtime_candidate && runner.os == 'Windows' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "$USE_RUNTIME_CANDIDATE" == true ]]; then
+            python3 scripts/fetch-client2-runtime-candidate.py fetch \
+              --freeze scripts/fixtures/client2-runtime-candidate.json \
+              --output-directory "$RUNNER_TEMP/client2-runtime"
+            version="$(python3 -c 'import json; print(json.load(open("scripts/fixtures/client2-runtime-candidate.json"))["runtime_version"])')"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           mkdir -p "$RUNNER_TEMP/client2-runtime"
           version="$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')"
           gh api "repos/risense-ai/respire-runtime/releases/tags/v$version" > "$RUNNER_TEMP/client2-runtime/release.json"
@@ -86,7 +110,10 @@ jobs:
               data = (root / name).read_bytes()
               assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
           PY
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Exercise original Client2 host and all startup orders
+        env:
+          RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -94,7 +121,7 @@ jobs:
             --ordinary-cli-cold-start \
             --cli target/debug/rsrs${{ matrix.exe }} \
             --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
-            --runtime-version "$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')" \
+            --runtime-version "$RUNTIME_VERSION" \
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
             --report "$RUNNER_TEMP/client2-launcher-regression.json"
@@ -122,11 +149,13 @@ jobs:
           python scripts/native-model-cache.py restore --model-dir "$env:RUNNER_TEMP/client2-gui-models" --legacy-dir "$env:RUNNER_TEMP/client2-gui-legacy-model"
           if ($LASTEXITCODE -ne 0) { throw 'Pinned public CPU model verification failed' }
       - name: Probe original Windows Client2 GUI and real offline subset (not full GUI acceptance)
+        env:
+          RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $version = (Get-Content -Raw -LiteralPath runtime-pin.json | ConvertFrom-Json).required
+          $version = $env:RUNTIME_VERSION
           ./scripts/probe-client2-gui.ps1 `
             -Cli "$PWD/target/debug/rsrs.exe" `
             -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `
