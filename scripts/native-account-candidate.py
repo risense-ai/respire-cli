@@ -512,7 +512,7 @@ def official_cli_version(metadata_path, cli, source_sha, env):
     return version
 
 
-def stable_business_identity(cli, metadata_path, archive, env=None):
+def stable_business_identity(cli, metadata_path, archive, env=None, *, full_contracts=False):
     # Fixed schema-1 release only. It never replaces the candidate's manager CLI.
     paths = (Path(cli), Path(metadata_path), Path(archive))
     require(len({path.parent.resolve() for path in paths}) == 1,
@@ -545,7 +545,19 @@ def stable_business_identity(cli, metadata_path, archive, env=None):
         core_stream = bundle.extractfile("core-runtime.json")
         require(core_stream is not None, "stable_business_core_metadata_missing")
         with core_stream:
-            core = json.load(core_stream)
+            core_bytes = core_stream.read()
+            core = json.loads(core_bytes)
+        if full_contracts:
+            require(safe_file(cli.parent, "core-runtime.json").read_bytes() == core_bytes,
+                    "stable_staged_core_metadata_changed")
+            require(isinstance(core.get("files"), list), "stable_staged_core_inventory_missing")
+            for row in core["files"]:
+                require(isinstance(row, dict) and isinstance(row.get("path"), str)
+                        and row["path"].startswith("core-notices/")
+                        and re.fullmatch(r"[0-9a-f]{64}", row.get("sha256", "")),
+                        "stable_staged_notice_identity_invalid")
+                require(digest(safe_file(cli.parent, row["path"])) == row["sha256"],
+                        "stable_staged_notice_changed")
         require(core.get("schema_version") == 1 and core.get("target") == TARGET,
                 "stable_business_core_identity_mismatch")
     if env is not None:
@@ -555,7 +567,8 @@ def stable_business_identity(cli, metadata_path, archive, env=None):
     return {"version": "1.0.20", "source_sha": expected["git_sha"], "target": TARGET,
             "binary_sha256": digest(cli), "metadata_sha256": digest(metadata_path),
             "runtime_archive_sha256": digest(archive),
-            "scope": "ten_remote_diary_cases_not_all_stable_features",
+            "scope": ("fixed_existing_stable_contracts_in_full31_not_all_product_features" if full_contracts
+                      else "ten_remote_diary_cases_not_all_stable_features"),
             "concurrent_http_checks": "candidate_runtime_only"}
 
 
@@ -697,6 +710,7 @@ def run(args):
     root.mkdir(mode=0o700)
     diagnostic = args.suite in ("diagnostic-failures", "diagnostic-native-stop")
     stable_remote = args.suite == "stable-diary-remote"
+    stable_full = args.legacy_stable_contracts
     report = {"schema_version": 1,
               "kind": "unpublished-source-diagnostic" if diagnostic else "unpublished-source-fixture",
               "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
@@ -719,7 +733,7 @@ def run(args):
     try:
         verify_source(args.cli_source, args.cli_sha)
         verify_source(args.runtime_source, args.runtime_sha)
-        if stable_remote:
+        if stable_remote or stable_full:
             diary_source = args.runtime_source / "crates/commands/examples/cli_business_tests/diary_identity.rs"
             fixture = diary_source.read_bytes()
             require(all(marker in fixture for marker in (
@@ -732,10 +746,17 @@ def run(args):
             require(stable_cli not in (cli, runtime, harness), "stable_business_binary_not_separate")
             report["stable_business_cli"] = stable_business_identity(
                 args.stable_business_cli, args.stable_business_cli_metadata,
-                args.stable_business_runtime_archive, env)
+                args.stable_business_runtime_archive, env, full_contracts=stable_full)
             hashes.add(report["stable_business_cli"]["binary_sha256"])
-            env.update(RSRS_TEST_STABLE_DIARY_SUITE="stable-diary-remote",
-                       RSRS_TEST_STABLE_CLI_BIN=str(stable_cli))
+            if stable_remote:
+                env.update(RSRS_TEST_STABLE_DIARY_SUITE="stable-diary-remote",
+                           RSRS_TEST_STABLE_CLI_BIN=str(stable_cli))
+            if stable_full:
+                report["legacy_contracts"] = {"passed":False,
+                    "scope":"existing_stable_contracts_in_full31_not_all_product_features",
+                    "current_full31_is_separate":True,"modern_only":[NATIVE_STOP_CASE,
+                        "runtime.account-result","runtime.account-rollback","scoped_http_fingerprint_matrix"],
+                    "required_cases":list(BASELINE_CASES),"executed_cases":[],"missing_cases":list(BASELINE_CASES)}
         version = source_version(args.runtime_source, "runtime")
         cli_source_version = source_version(args.cli_source, "cli")
         cli_version = (official_cli_version(args.official_cli_metadata, cli, args.cli_sha, env)
@@ -799,6 +820,66 @@ def run(args):
             report["stage"] = "private_diagnostic_test" if diagnostic else "private_account_test"
             report["test_requested"] = True
             invoke(command, timeout=1000 if args.suite == "account" else 2700)
+            if stable_full:
+                # Separate output and private keyring prevent the second pass from
+                # satisfying any original current31 result or credential assertion.
+                legacy_cases = list(BASELINE_CASES)
+                legacy_env = dict(env, RSRS_TEST_LEGACY_STABLE_CONTRACTS="stable-contracts-v1",
+                    RSRS_TEST_STABLE_DIARY_SUITE="stable-diary-remote",
+                    RSRS_TEST_STABLE_CLI_BIN=str(stable_cli))
+                legacy_log = root / "legacy-private.log"
+                legacy_command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
+                    sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
+                    "--root", root / "legacy-keyring", "--", harness, *legacy_cases,
+                    "--exact", "--test-threads=1", "--show-output"]
+                with legacy_log.open("wb") as private_output:
+                    private_command(legacy_command, legacy_env, args.cli_source, private_output, 2700)
+                legacy_keyring = json.loads((root / "legacy-keyring/business-keyring-selftest.json").read_text())
+                require(legacy_keyring.get("passed") is True and legacy_keyring.get("business_passed") is True,
+                        "legacy_private_business_fixture_failed")
+                legacy_output = legacy_log.read_bytes()
+                roles = {"diary_identity":"candidate_runtime", "memory_revision":"old_embedded",
+                         "capture_main":"host_local", "account":"old_embedded",
+                         "snapshot_lifecycle":"old_embedded"}
+                receipts = []
+                for line in legacy_output.splitlines():
+                    if b"legacy-stable-contract " not in line:
+                        continue
+                    value = json.loads(line.split(b"legacy-stable-contract ", 1)[1])
+                    require(isinstance(value, dict) and set(value) == {"case","sender","execution","passed"}
+                            and value["case"] in legacy_cases and value["sender"] == "old_cli"
+                            and value["execution"] == roles[value["case"].split("::")[0]]
+                            and value["passed"] is True and len(receipts) < 30,
+                            "legacy_contract_receipt_invalid")
+                    receipts.append(value)
+                executed = [value["case"] for value in receipts]
+                require(len(executed) == len(set(executed)) == len(legacy_cases)
+                        and set(executed) == set(legacy_cases)
+                        and all(f"test {case} ... ok".encode() in legacy_output.splitlines() for case in legacy_cases),
+                        "legacy_contract_case_result_missing")
+                api_features = {"snapshot.create", "snapshot.list", "witness.verify", "feedback.mark", "recall.empty"}
+                observed_apis = []
+                for line in legacy_output.splitlines():
+                    if b"legacy-stable-api " not in line:
+                        continue
+                    value = json.loads(line.split(b"legacy-stable-api ", 1)[1])
+                    require(isinstance(value, dict) and set(value) == {"feature","sender","execution","passed"}
+                            and value["feature"] in api_features and value["sender"] == "old_cli"
+                            and value["execution"] == "candidate_runtime" and value["passed"] is True
+                            and len(observed_apis) < 64, "legacy_remote_api_receipt_invalid")
+                    observed_apis.append(value)
+                require({value["feature"] for value in observed_apis} == api_features,
+                        "legacy_remote_api_contract_missing")
+                report["legacy_contracts"]["recovery_input_origin"] = "harness_original_schema_with_old_snapshot_bytes"
+                report["legacy_contracts"]["recovery_interruption_by_old_binary"] = False
+                report["legacy_contracts"]["candidate_api_receipts"] = observed_apis
+                report["legacy_contracts"]["modern_substeps_not_claimed_as_old"] = [
+                    "snapshot_staged_store_fault_injection", "queued_direct_rpc_resume",
+                    "scoped_idempotency_matrix", "account_awaiting_input_result_and_rollback"]
+                missing = [case for case in BASELINE_CASES if case not in executed]
+                report["legacy_contracts"].update(executed_cases=executed, missing_cases=missing,
+                    receipts=receipts, keyring=legacy_keyring, passed=not missing)
+                require(not missing, "legacy_contract_case_missing")
         report["stage"] = "result_verification"
         keyring = json.loads((root / "keyring/business-keyring-selftest.json").read_text())
         report["keyring"] = keyring
@@ -806,9 +887,9 @@ def run(args):
                 "private_business_fixture_failed")
         require(digest(cli) == report["cli_binary_sha256"] and digest(runtime) == report["runtime_binary_sha256"]
                 and digest(harness) == report["harness_sha256"], "executed_binaries_changed")
-        if stable_remote:
+        if stable_remote or stable_full:
             require(stable_business_identity(args.stable_business_cli, args.stable_business_cli_metadata,
-                    args.stable_business_runtime_archive) == report["stable_business_cli"],
+                    args.stable_business_runtime_archive, full_contracts=stable_full) == report["stable_business_cli"],
                     "stable_business_assets_changed")
         captured = log.read_bytes()
         require(f"test result: ok. {len(cases)} passed; 0 failed;".encode() in captured,
@@ -850,6 +931,17 @@ def run(args):
         if log.is_file():
             captured = log.read_bytes()
             lines = captured.splitlines()
+            if stable_full:
+                report["legacy_contracts"]["current_full31_passed"] = (
+                    len(cases) == 31 and all(f"test {case} ... ok".encode() in lines for case in cases)
+                    and b"test result: ok. 31 passed; 0 failed;" in captured)
+                legacy_log = root / "legacy-private.log"
+                if legacy_log.is_file():
+                    private = legacy_log.read_bytes()
+                    passed = [case for case in BASELINE_CASES if f"test {case} ... ok".encode() in private.splitlines()]
+                    failed = [case for case in BASELINE_CASES if case not in passed]
+                    report["legacy_contracts"].update(passed_cases=passed, missing_or_failed_cases=failed,
+                        failure_diagnostics=safe_failure_diagnostics(private, failed))
             if stable_remote:
                 report["stable_legacy_probe_checks"] = stable_legacy_probe_checks(captured)
                 report["stable_legacy_probe_scope"] = "harness_probe_only_not_old_binary_sender"
@@ -873,6 +965,7 @@ def main():
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
     parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
+    parser.add_argument("--legacy-stable-contracts", action="store_true")
     parser.add_argument("--compatibility-host", action="store_true")
     parser.add_argument("--require-native-stop", action="store_true")
     parser.add_argument("--official-cli-metadata", type=Path,
@@ -887,7 +980,11 @@ def main():
         parser.error("--require-native-stop requires --suite full")
     stable_paths = (args.stable_business_cli, args.stable_business_cli_metadata,
                     args.stable_business_runtime_archive)
-    if args.suite == "stable-diary-remote":
+    if args.legacy_stable_contracts:
+        if (args.suite != "full" or not all(stable_paths) or args.official_cli_metadata
+                or args.compatibility_host or not args.require_native_stop):
+            parser.error("legacy stable contracts require full31, three fixed stable assets and the current manager")
+    elif args.suite == "stable-diary-remote":
         if (not all(stable_paths) or args.official_cli_metadata or args.compatibility_host
                 or args.require_native_stop):
             parser.error("stable-diary-remote requires three stable assets and the current manager without compatibility/native-stop")

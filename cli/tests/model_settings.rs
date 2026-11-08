@@ -67,7 +67,7 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
         );
         Ok(output)
     };
-    let mut cleanup = RuntimeCleanup { run: &run, profile, port, cleaned: false };
+    let mut cleanup = RuntimeCleanup { run: &run, profile, port, cleaned: false, owner_before_maintenance: None };
     // Pin the public names independently of the implementation and its response.
     const MODEL_VARIANTS: [&str; 6] = ["quantized", "fp16", "int8", "uint8", "q4", "q4f16"];
     for variant in MODEL_VARIANTS {
@@ -115,21 +115,6 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
     assert!(!failed_load.status.success());
     assert_eq!(std::fs::read(&settings)?, before);
     assert!(!profile_path.as_path().join("models").exists());
-    assert!(!run(&[
-        "model",
-        "install",
-        "--model",
-        "invalid",
-        "--for-engine",
-        "cpu"
-    ])?
-    .status
-    .success());
-    assert!(
-        !profile_path.as_path().join("models").exists(),
-        "invalid download request must fail before fetching baseline"
-    );
-
     // Tiny baseline fixtures permit directory resolution, but no valid weights
     // are present and no model bytes can be executed.
     let models = profile_path.as_path().join("models");
@@ -148,8 +133,44 @@ fn model_weights_persist_read_back_and_drive_the_next_load() -> Result<()> {
         String::from_utf8_lossy(&probe.stderr)
     );
     assert!(diagnostic.contains("q4f16"), "{diagnostic}");
-    assert_eq!(std::fs::read(settings)?, before);
+    assert_eq!(std::fs::read(&settings)?, before);
     assert!(!models.join("onnx/model_q4f16.onnx").exists());
+
+    // Remove only the synthetic baseline before checking that rejection downloads nothing.
+    std::fs::remove_file(models.join("tokenizer.json"))?;
+    std::fs::remove_file(models.join("onnx/model_quantized.onnx"))?;
+    std::fs::remove_dir(models.join("onnx"))?;
+    std::fs::remove_dir(&models)?;
+    // A rejected maintenance plan is deliberately terminal for this fixture.
+    // Capture the verified owner before that transaction drains it and fences access.
+    cleanup.owner_before_maintenance = Some(cleanup.health()?);
+    let rejected = run(&[
+        "model", "install", "--model", "invalid", "--for-engine", "cpu",
+    ])?;
+    assert!(!rejected.status.success());
+    let rejected_value: Value = serde_json::from_slice(&rejected.stdout)?;
+    let rejection = rejected_value["errors"][0].as_str().context("model plan rejection")?;
+    assert!(rejection.contains("private Runtime model plan was rejected"));
+    assert!(rejection.contains("maintenance remains Paused"));
+    assert_eq!(std::fs::read(&settings)?, before);
+    assert!(
+        !profile_path.as_path().join("models").exists(),
+        "invalid download request must fail before fetching baseline"
+    );
+
+    let marker_path = root.join("runtime/autostart/maintenance.json");
+    let marker = std::fs::read(&marker_path)?;
+    let paused: Value = serde_json::from_slice(&marker)?;
+    assert_eq!(paused["phase"], "Paused");
+    assert_eq!(paused["expected_profile"], serde_json::json!(root.canonicalize()?));
+    let fenced = run(&["model", "probe", "--model", "m3"])?;
+    assert!(!fenced.status.success());
+    let fenced_value: Value = serde_json::from_slice(&fenced.stdout)?;
+    assert!(fenced_value["errors"][0].as_str().context("maintenance fence")?
+        .contains("runtime maintenance is incomplete"));
+    assert_eq!(std::fs::read(&marker_path)?, marker);
+    assert_eq!(std::fs::read(&settings)?, before);
+    assert!(!models.exists());
     cleanup.stop()?;
     Ok(())
 }
@@ -160,6 +181,7 @@ struct RuntimeCleanup<'a> {
     profile: tempfile::TempDir,
     port: u16,
     cleaned: bool,
+    owner_before_maintenance: Option<Health>,
 }
 
 impl RuntimeCleanup<'_> {
@@ -236,14 +258,23 @@ impl RuntimeCleanup<'_> {
     }
 
     fn stop(&mut self) -> Result<()> {
+        if let Some(owner) = self.owner_before_maintenance.clone() {
+            // Maintenance already requested a normal drain. Verify its original owner,
+            // rather than treating a closed listener as proof or trying to restart it.
+            return self.verify_drained(&owner);
+        }
         let health = self.health()?;
         let output = (self.run)(&["runtime", "stop"])?;
         anyhow::ensure!(output.status.success(), "owned Runtime stop failed");
+        self.verify_drained(&health)
+    }
+
+    fn verify_drained(&mut self, health: &Health) -> Result<()> {
         let receipt: Value = serde_json::from_slice(&std::fs::read(
             self.profile.path().join("data/runtime")
                 .join(format!("stop-{}.json", health.instance_id)),
         )?)?;
-        net_rpc::validate_final_stop_receipt(&health, None, &receipt)?;
+        net_rpc::validate_final_stop_receipt(health, None, &receipt)?;
         net_rpc::wait_until_exited(health.pid)?;
         anyhow::ensure!(!net_rpc::port_is_open_on(self.port), "Runtime port remains open after stop");
         self.cleaned = true;

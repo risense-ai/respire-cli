@@ -20,6 +20,7 @@ on:
           - current-source
           - official-dev6
           - official-stable-remote
+          - official-stable-contracts
       business_suite:
         description: Full retains every baseline case; stable-diary-remote verifies ten remote diary cases only; diagnostic suites are not acceptance
         required: false
@@ -245,7 +246,7 @@ jobs:
       RUNTIME_SHA: ${{ github.event_name == 'pull_request' && '387ed1c560fd3bf336400f29119b6a577fa3f3d9' || inputs.runtime_candidate_sha }}
       COMPATIBILITY_HOST: ${{ inputs.compatibility_host && 'true' || 'false' }}
       CLI_CONSUMER: ${{ inputs.cli_consumer || 'current-source' }}
-      CANDIDATE_CASE_NAME: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}
+      CANDIDATE_CASE_NAME: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       RSRS_ENGINE: cpu
@@ -281,6 +282,12 @@ jobs:
               test "$GITHUB_EVENT_NAME" = workflow_dispatch
               test '${{ inputs.business_suite }}' = full
               test "$COMPATIBILITY_HOST" = false
+              ;;
+            official-stable-contracts)
+              test "$GITHUB_EVENT_NAME" = workflow_dispatch
+              test '${{ inputs.business_suite }}' = full
+              test "$COMPATIBILITY_HOST" = false
+              test '${{ inputs.require_native_stop }}' = true
               ;;
             official-stable-remote)
               test "$GITHUB_EVENT_NAME" = workflow_dispatch
@@ -351,7 +358,7 @@ jobs:
           (root / binary_name).chmod(0o700)
           PY
       - name: Download and verify official stable business assets
-        if: env.CLI_CONSUMER == 'official-stable-remote'
+        if: env.CLI_CONSUMER == 'official-stable-remote' || env.CLI_CONSUMER == 'official-stable-contracts'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -455,10 +462,13 @@ jobs:
             consumer_binary="$RUNNER_TEMP/official-dev6-cli/rsrs-x86_64-unknown-linux-gnu"
             host_args+=(--official-cli-metadata "$RUNNER_TEMP/official-dev6-cli/cli-build-x86_64-unknown-linux-gnu.json")
           fi
-          if [ "$CLI_CONSUMER" = official-stable-remote ]; then
+          if [ "$CLI_CONSUMER" = official-stable-remote ] || [ "$CLI_CONSUMER" = official-stable-contracts ]; then
             host_args+=(--stable-business-cli "$RUNNER_TEMP/official-stable-business/rsrs-x86_64-unknown-linux-gnu"
               --stable-business-cli-metadata "$RUNNER_TEMP/official-stable-business/cli-build-x86_64-unknown-linux-gnu.json"
               --stable-business-runtime-archive "$RUNNER_TEMP/official-stable-business/rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz")
+          fi
+          if [ "$CLI_CONSUMER" = official-stable-contracts ]; then
+            host_args+=(--legacy-stable-contracts)
           fi
           python -B scripts/native-account-candidate.py "${host_args[@]}" \
             --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \
@@ -471,7 +481,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 1
           path: ${{ runner.temp }}/${{ env.CANDIDATE_CASE_NAME }}/result.json
           if-no-files-found: error
