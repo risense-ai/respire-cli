@@ -36,6 +36,7 @@ fn main() -> ExitCode {
     // and it must never leak into child processes.
     let boot_token = consume_boot_token();
     let _ = boot_token;
+    install_panic_hook();
     // The owned Core worker is spawned as `current_exe --core-worker-internal`
     // (crates/core-sdk worker.rs), so this host must recognise the entry the
     // same way the CLI does; otherwise every write/embed command dies with
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         return match respire_app::core_sdk::worker::run() {
             Ok(()) => ExitCode::from(0),
             Err(error) => {
+                respire_logging::error(format_args!("Core worker stopped: {error:#}"));
                 eprintln!("Core worker stopped: {error:#}");
                 ExitCode::from(1)
             }
@@ -57,10 +59,26 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
+            // Serving failures happen after stdio is detached, so the log file
+            // is the only place this chain survives.
+            respire_logging::error(format_args!("rsrs-runtime failed: {error:#}"));
             eprintln!("rsrs-runtime: {error:#}");
             ExitCode::from(2)
         }
     }
+}
+
+/// Mirror panics into the error log while keeping the default stderr report.
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| location.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        respire_logging::log_panic(info.payload(), &location);
+        previous(info);
+    }));
 }
 
 /// This binary is a host: its dispatch face executes argv through the shared
@@ -220,6 +238,12 @@ fn publish_identity() {
 fn serve_command(flags: &Flags) -> Result<i32> {
     publish_identity();
     apply_data_dir(flags);
+    // The detached serve process loses stderr entirely (spawn nulls stdio);
+    // errors from this point survive only in the data-root log file.
+    let log_path = respire_app::service::main_data_dir()
+        .join("logs")
+        .join("runtime.log");
+    let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
     if flags.json {
         // client2 fires this argv shape and then polls /api/health; stdout is
         // detached from the supervisor, so the envelope is best-effort.

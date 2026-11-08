@@ -1212,6 +1212,9 @@ fn main_body() -> i32 {
     };
     if let Err(error) = result {
         let (failure, code) = command_failure(&error);
+        // Persist the failure chain next to the data root; the interactive
+        // stderr/envelope behavior below stays unchanged.
+        respire_logging::error(format_args!("command failed: {error:#}"));
         if output_emitted() {
             eprintln!("ERROR: {error:#}");
         } else {
@@ -1235,7 +1238,27 @@ fn prepare_command_runtime() -> Result<()> {
         respire_client_host::paths::ensure_default_home()
             .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
     }
+    install_error_logging();
     Ok(())
+}
+
+/// Point the error log at the resolved data root. The sink is best effort:
+/// a failure here keeps every record call a no-op and stderr stays the only
+/// diagnostic surface, so the result is deliberately ignored.
+fn install_error_logging() {
+    let log_path = respire_client_host::paths::main_data_dir()
+        .join("logs")
+        .join("cli.log");
+    let _ = respire_logging::init(respire_logging::LoggingConfig::new(log_path));
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let location = info
+            .location()
+            .map(|location| location.to_string())
+            .unwrap_or_else(|| "unknown".to_owned());
+        respire_logging::log_panic(info.payload(), &location);
+        previous(info);
+    }));
 }
 
 enum Preparsed {

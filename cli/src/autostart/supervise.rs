@@ -111,6 +111,7 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
         let binary = match resolve_child_plan() {
             Ok(binary) => binary,
             Err(error) => {
+                respire_logging::error(format_args!("runtime resolution failed: {error:#}"));
                 eprintln!("runtime resolution failed: {error:#}");
                 if error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>() {
                     lifecycle::record_supervise_event(&config, "exit_error");
@@ -145,12 +146,18 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
                 }
             }
             Ok(Err(error)) => {
+                respire_logging::error(format_args!(
+                    "runtime child supervision failed: {error:#}"
+                ));
                 eprintln!("runtime child supervision failed: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
                     return Ok(());
                 }
             }
             Err(error) => {
+                respire_logging::error(format_args!(
+                    "runtime child could not be started: {error:#}"
+                ));
                 eprintln!("runtime child could not be started: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
                     return Ok(());
