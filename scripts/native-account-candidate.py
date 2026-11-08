@@ -2,6 +2,7 @@
 """Run the unchanged Runtime account regression against two exact source commits.
 
 The default retains the account case; --suite full runs every original business case.
+The fixed diagnostic-failures suite isolates four known failures and is not release acceptance.
 Only sanitized identity and result JSON is publishable. Product output stays in
 private runner-temporary logs, including on failures. This is not release proof.
 """
@@ -24,6 +25,12 @@ TARGET = "x86_64-unknown-linux-gnu"
 CASE = "account::authorization_preserves_and_commits_profiles"
 MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle": 8,
                  "account": 3, "capture_main": 2}
+DIAGNOSTIC_CASES = (
+    CASE,
+    "account::spaces_coordinate_with_the_owned_runtime",
+    "snapshot_lifecycle::healthy_snapshot_rescue_preserves_unparseable_current_witness",
+    "snapshot_lifecycle::public_witness_verifies_restored_chain_and_reports_tamper_without_writes",
+)
 
 
 def selected_cases(listing, suite):
@@ -31,6 +38,9 @@ def selected_cases(listing, suite):
     require(names.count(CASE) == 1, "original_account_case_missing")
     if suite == "account":
         return [CASE]
+    if suite == "diagnostic-failures":
+        require(all(names.count(case) == 1 for case in DIAGNOSTIC_CASES), "diagnostic_case_inventory_mismatch")
+        return list(DIAGNOSTIC_CASES)
     require(suite == "full", "unknown_business_suite")
     require(len(names) == len(set(names)) == sum(MODULE_COUNTS.values()),
             "business_case_inventory_mismatch")
@@ -160,6 +170,16 @@ def safe_failure_diagnostics(captured, failed_cases):
         b"compatibility backend OS process changed": "compatibility_backend_process_mismatch",
         b"compatibility startup is uncertain for child": "compatibility_startup_uncertain",
         b"compatibility Runtime failed independent committed-owner handoff verification": "compatibility_restored_owner_mismatch",
+        b"snapshot restore exchange failed": "snapshot_restore_exchange_failed",
+        b"snapshot restore is not Installed": "snapshot_restore_not_installed",
+        b"snapshot startup/verification failed": "snapshot_startup_verification_failed",
+        b"snapshot startup failed; recovery remains pending": "snapshot_startup_recovery_pending",
+        b"snapshot commit outcome unknown": "snapshot_commit_outcome_unknown",
+        b"snapshot commit not confirmed": "snapshot_commit_unconfirmed",
+        b"compatibility request failed; outcome may be unknown; do not replay": "compatibility_proxy_outcome_unknown",
+        b"runtime process start identity does not match health": "runtime_stop_identity_mismatch",
+        b"runtime drain is still pending; no process was forced to exit": "runtime_drain_pending",
+        b"stopped runtime has not released its library lock": "runtime_library_lock_retained",
         b"snapshot transaction completed; host maintenance cleanup pending": "snapshot_host_cleanup_pending",
         b"snapshot transaction completed; cleanup pending": "snapshot_cleanup_pending",
     }
@@ -179,11 +199,23 @@ def safe_failure_diagnostics(captured, failed_cases):
                 blocks[current] = []
         elif in_failures and current is not None:
             blocks[current].append(line)
-    codes = {}
+    codes, locations = {}, {}
     for case in failed_cases:
         block = b"\n".join(blocks.get(case, []))
         codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block)) or ["unknown_private_failure"]
-    return {"authorization_events": events, "authorization_event_invalid": invalid, "failure_codes": codes}
+        locations[case] = []
+        for line in blocks.get(case, []):
+            if b"panicked at " not in line or len(line) > 8192:
+                continue
+            for match in re.finditer(rb"[/\\](account\.rs|snapshot_lifecycle\.rs):([0-9]{1,6}):([0-9]{1,4}):", line):
+                number, column = int(match[2]), int(match[3])
+                if not (1 <= number <= 20000 and 1 <= column <= 4096):
+                    continue
+                location = {"file": match[1].decode("ascii"), "line": number, "column": column}
+                if location not in locations[case] and len(locations[case]) < 8:
+                    locations[case].append(location)
+    return {"authorization_events": events, "authorization_event_invalid": invalid,
+            "failure_codes": codes, "failure_locations": locations}
 
 
 MODEL_HASHES = {
@@ -357,8 +389,11 @@ def run(args):
     require(root.is_relative_to(temp) and root != temp and not root.exists(), "fresh_owned_root_required")
     os.umask(0o077)
     root.mkdir(mode=0o700)
-    report = {"schema_version": 1, "kind": "unpublished-source-fixture",
-              "case": CASE if args.suite == "account" else "full-business-suite", "suite": args.suite,
+    diagnostic = args.suite == "diagnostic-failures"
+    report = {"schema_version": 1,
+              "kind": "unpublished-source-diagnostic" if diagnostic else "unpublished-source-fixture",
+              "case": ("targeted-failure-diagnostic" if diagnostic else
+                       CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
               "passed": False, "release_acceptance": False, "test_executed": False,
               "cli_source_sha": args.cli_sha, "runtime_source_sha": args.runtime_sha,
@@ -417,13 +452,14 @@ def run(args):
             listing = subprocess.check_output([str(harness), "--list"], env=env, timeout=30, stderr=output)
             cases = selected_cases(listing.decode(), args.suite)
             report["required_cases"] = cases
-            test_args = [CASE, "--exact", "--test-threads=1"] if args.suite == "account" else ["--test-threads=1"]
+            test_args = ([*cases, "--exact", "--test-threads=1"]
+                         if args.suite in ("account", "diagnostic-failures") else ["--test-threads=1"])
             if args.compatibility_host:
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
                 "--root", root / "keyring", "--", harness, *test_args]
-            report["stage"] = "private_account_test"
+            report["stage"] = "private_diagnostic_test" if diagnostic else "private_account_test"
             report["test_requested"] = True
             invoke(command, timeout=1000 if args.suite == "account" else 2700)
         report["stage"] = "result_verification"
@@ -441,7 +477,7 @@ def run(args):
         if args.compatibility_host:
             checks = compatibility_host_checks(captured)
             expected = {"import-target", "restart-target"}
-            if args.suite == "full":
+            if args.suite in ("full", "diagnostic-failures"):
                 expected.add("space-profile")
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
@@ -488,7 +524,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "diagnostic-failures"), default="account")
     parser.add_argument("--compatibility-host", action="store_true")
     def interrupted(_number, _frame):
         raise KeyboardInterrupt

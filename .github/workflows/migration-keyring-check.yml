@@ -12,13 +12,14 @@ on:
         default: ''
         type: string
       business_suite:
-        description: Original source-candidate business cases; full requires all 30 cases without skips
+        description: Original source cases; full requires all 30; diagnostic-failures runs four known failures without release acceptance
         required: false
         type: choice
         default: account
         options:
           - account
           - full
+          - diagnostic-failures
       compatibility_host:
         description: Build the opt-in Client2 host and require its identity across account/space maintenance
         required: false
