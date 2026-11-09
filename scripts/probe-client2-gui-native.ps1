@@ -404,7 +404,7 @@ function Bind-OfflineRuntime {
     }
     $script:offlineRuntime = @{pid=$process.Id; started_ticks=$process.StartTime.ToUniversalTime().Ticks; record=$record}
     # Store process identity only, never the session/keygen payload.
-    $report.offline.runtime_process = $record | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,SessionId
+    $report.offline.runtime_process = $record | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,SessionId,@{Name="creation_utc_ticks";Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)}}
     $report.offline.runtime_bound = $true
     # Persist only the guarded actor record before credential verification or business action.
     # The parent can still clean this detached actor if this helper reaches its watchdog.
@@ -446,6 +446,7 @@ function Wait-OfflinePreferences([string]$Field, $Expected) {
     throw "Original preferences did not persist the visible action: $Field"
 }
 function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
+    $report.offline.action_stage = $(if ($Diary) { 'diary_editor_open' } else { 'important_editor_open' })
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bb0\u5fc6\u0028\u003f\u003a\u005c\u0073\u007c\u0024\u0029'))
     Press-OfflineButton ([regex]::Unescape('\u005e\u65b0\u5efa\u8bb0\u5fc6\u0024'))
     Fill-OfflineField ([regex]::Unescape('\u6807\u9898')) $Title
@@ -457,11 +458,38 @@ function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
     }
     Focus-OfflineControl (Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u660e\u786e\u65b0\u5efa\uff0c\u8df3\u8fc7\u5224\u91cd')))
     Send-OfflineKey 32
+    $report.offline.action_stage = $(if ($Diary) { 'diary_save' } else { 'important_save' })
     Press-OfflineButton ([regex]::Unescape('\u005e\u4fdd\u5b58\u0024'))
     # Wait for the editor to close and the actual reader to render the supplied content.
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u7f16\u8f91\u0024')) 60
+    $report.offline.action_stage = $(if ($Diary) { 'diary_created_reader' } else { 'important_created_reader' })
     $body = Find-OfflineControl 'ControlType.Text' ([regex]::Escape($Content))
     if ($body.Current.IsOffscreen) { throw 'Synthetic memory body is present in UIA but not visible' }
+}
+function Assert-OfflineDiaryReader([string]$Title, [string]$Content) {
+    # Only the exact synthetic diary dialog is readable, never arbitrary Edit values.
+    Wait-OfflineRecoveryDismissed
+    $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Title) + '$')
+    if ($element.Current.IsOffscreen) { throw 'Synthetic diary reader is not visible' }
+    $null = Assert-Target $true
+    $pattern = $null
+    if (-not $element.TryGetCurrentPattern([Windows.Automation.ValuePattern]::Pattern, [ref]$pattern)) { throw 'Synthetic diary reader has no value pattern' }
+    if (-not $pattern.Current.IsReadOnly) { throw 'Synthetic diary reader is not read-only' }
+    $value = [string]$pattern.Current.Value
+    if (-not $value.Contains($Content)) { throw 'Synthetic diary reader does not contain the saved body' }
+    $null = Assert-Target $true
+}
+function Close-OfflineDiaryReader([string]$Title) {
+    $selector = '^' + [regex]::Escape($Title) + '$'
+    $null = Find-OfflineControl 'ControlType.Edit' $selector
+    Press-OfflineButton ([regex]::Unescape('\u005e\u5173\u95ed\u0024'))
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $null = Assert-Target $true
+        if (-not (Find-OfflineControl 'ControlType.Edit' $selector 1 -AllowAbsent)) { return }
+        Pause-Probe
+    } while ($clock.Elapsed.TotalSeconds -lt 10)
+    throw 'Synthetic diary dialog did not close'
 }
 function Wait-OfflineRecoveryDismissed {
     $selector = '^' + [regex]::Escape([regex]::Unescape('\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599')) + '$'
@@ -554,18 +582,23 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.important_id = $entry.id
     $diaryContent = $marker + ' diary body'
     Create-OfflineMemory ($marker + '-diary') $diaryContent $true
+    $report.offline.action_stage = 'diary_runtime_readback'
     $diary = Read-OfflineRpc @('--json','diary')
     if (-not ($diary.details -is [Array])) { throw 'Runtime diary details is not the original array contract' }
     $days = @($diary.details | ForEach-Object { Convert-OfflineEntry $_ } | Where-Object { $_.importance -eq 'trivial' -and $_.content -like ('*'+$diaryContent+'*') })
     if ($days.Count -ne 1) { throw 'Trivial UI write did not appear exactly once in the real diary' }
+    if ($days[0].title -cne ($marker + '-diary')) { throw 'Diary title differs from the explicit synthetic UI write' }
     Press-OfflineButton ([regex]::Unescape('\u005e\u65e5\u8bb0\u0024'))
+    $report.offline.action_stage = 'diary_select_saved_day'
     Press-OfflineButton ('^' + [regex]::Escape($days[0].title) + '$')
-    $body = Find-OfflineControl 'ControlType.Text' ([regex]::Escape($diaryContent))
-    if ($body.Current.IsOffscreen) { throw 'Synthetic diary body is present in UIA but not visible' }
+    $report.offline.action_stage = 'diary_saved_reader'
+    Assert-OfflineDiaryReader $days[0].title $diaryContent
     $report.offline.diary_readback = $true; $report.offline.diary_id = $days[0].id
     $guard = Assert-Target $true
     $report.screenshot = Capture-Target $guard.client_bounds
     $report.offline.screenshot_stage = 'real diary UI after synthetic write and Runtime readback; recovery dialog closed'
+    $report.offline.action_stage = 'diary_close_reader'
+    Close-OfflineDiaryReader $days[0].title
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bbe\u7f6e\u0024'))
     $preference = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $toggle = $preference.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)

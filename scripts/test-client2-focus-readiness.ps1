@@ -182,3 +182,6 @@ if ($bindings.Count -ne 1 -or $dismissals.Count -ne 1 -or $persist.Count -ne 1 -
     $bindings[0].Extent.StartOffset -ge $persist[0].Extent.StartOffset -or
     $persist[0].Extent.StartOffset -ge $writes[0].Extent.StartOffset) { throw 'Offline acceptance must bind once after keygen and verify persistence before business writes' }
 Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
+
+& (Join-Path $PSScriptRoot 'test-client2-diary-readback.ps1')
+& (Join-Path $PSScriptRoot 'test-client2-cleanup-identity.ps1')

@@ -40,11 +40,25 @@ function Descendants([int]$parentId) {
     } while ($added)
     @($all | Where-Object { $ids.Contains([int]$_.ProcessId) })
 }
+# Checkpoint dates from Windows PowerShell 5 JSON lose sub-millisecond precision.
+# Only a decimal string preserves the full CIM UTC birth identity across hosts.
+function Read-CheckpointCreationDate($Record) {
+    $text = $Record.creation_utc_ticks
+    if ($text -isnot [string] -or $text -cnotmatch '\A[1-9][0-9]{0,18}\z') { throw 'Detached cleanup requires exact creation ticks' }
+    $ticks = [long]0
+    if (-not [long]::TryParse($text, [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$ticks) -or
+        $ticks -gt [datetime]::MaxValue.Ticks) { throw 'Detached cleanup creation ticks out of range' }
+    return [datetime]::new($ticks, [DateTimeKind]::Utc)
+}
+function Test-TrackedCreationIdentity($Current, $Expected) {
+    if ($Current.CreationDate -isnot [datetime] -or $Expected.CreationDate -isnot [datetime]) { throw 'Cleanup process birth evidence is not typed' }
+    return $Current.CreationDate.ToUniversalTime().Ticks -eq $Expected.CreationDate.ToUniversalTime().Ticks
+}
 function Confirm-TrackedAbsent($Item) {
     for ($probe=0; $probe -lt 2; $probe++) {
         $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
         if ($current) {
-            if ($current.CreationDate -ne $Item.CreationDate) { throw "Process identity changed during cleanup: $($Item.ProcessId)" }
+            if (-not (Test-TrackedCreationIdentity $current $Item)) { throw "Process identity changed during cleanup: $($Item.ProcessId)" }
             return $false
         }
         if ($probe -eq 0) { Start-Sleep -Milliseconds 100 }
@@ -56,12 +70,12 @@ function Stop-TrackedOwned($Item) {
     try {
         $current = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
         if ($current) {
-            if ($current.CreationDate -ne $Item.CreationDate) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
+            if (-not (Test-TrackedCreationIdentity $current $Item)) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
             $owned = Get-Process -Id $Item.ProcessId -ErrorAction Stop
             $null = $owned.SafeHandle
             $held = Get-CimInstance Win32_Process -Filter "ProcessId=$($Item.ProcessId)"
             if ($held) {
-                if ($held.CreationDate -ne $Item.CreationDate) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
+                if (-not (Test-TrackedCreationIdentity $held $Item)) { $identityChanged = $true; throw "Process identity changed before cleanup: $($Item.ProcessId)" }
                 Stop-Process -InputObject $owned -ErrorAction Stop
                 if (-not $owned.WaitForExit(5000)) { throw "Owned process did not exit: $($Item.ProcessId)" }
             }
@@ -309,7 +323,7 @@ public static class RespireGuiNative {
                     $runtimeRecord = $checkpoint.offline.runtime_process
                     if (-not [string]::Equals($runtimeRecord.ExecutablePath,$report.native_binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
                         $runtimeRecord.SessionId -ne $desktopProcess.SessionId) { throw 'Detached cleanup record is not the bound staged Runtime' }
-                    $runtimeRecord.CreationDate = [datetime]$runtimeRecord.CreationDate
+                    $runtimeRecord.CreationDate = Read-CheckpointCreationDate $runtimeRecord
                     if ($runtimeRecord.CreationDate.ToUniversalTime().Ticks -lt $desktopStarted) { throw 'Detached actor predates the original desktop' }
                     $tracked += $runtimeRecord
                 } elseif ($checkpoint.offline) { $report.cleanup_error = 'Offline Runtime identity not established; detached cleanup is not certified' }
