@@ -1032,13 +1032,124 @@ fn download_agent(timeouts: DownloadTimeouts) -> ureq::Agent {
         .build()
 }
 
+#[derive(Deserialize)]
+struct PublicRelease {
+    tag_name: String,
+    draft: bool,
+    assets: Vec<PublicAsset>,
+}
+
+#[derive(Deserialize)]
+struct PublicAsset {
+    id: u64,
+    name: String,
+    size: u64,
+    state: String,
+    digest: String,
+}
+
+fn official_asset_identity(url: &str) -> Option<(&str, &str)> {
+    let path =
+        url.strip_prefix("https://github.com/risense-ai/respire-runtime/releases/download/v")?;
+    let (version, name) = path.split_once('/')?;
+    (valid_version(version) && safe_metadata_path(name) && !name.contains(['/', '?', '#', '%']))
+        .then_some((version, name))
+}
+
+fn public_asset(
+    release: PublicRelease,
+    version: &str,
+    name: &str,
+    limit: u64,
+) -> Result<PublicAsset> {
+    anyhow::ensure!(
+        !release.draft && release.tag_name == format!("v{version}"),
+        "invalid official Runtime release identity"
+    );
+    let mut matches = release
+        .assets
+        .into_iter()
+        .filter(|asset| asset.name == name);
+    let asset = matches
+        .next()
+        .context("official Runtime asset is missing")?;
+    anyhow::ensure!(
+        matches.next().is_none()
+            && asset.id > 0
+            && asset.size > 0
+            && asset.size <= limit
+            && asset.state == "uploaded"
+            && asset
+                .digest
+                .strip_prefix("sha256:")
+                .is_some_and(valid_sha256),
+        "invalid or ambiguous official Runtime asset identity"
+    );
+    Ok(asset)
+}
+
+// Only the official browser route's explicit transient HTTP failures use the
+// public API for the same asset. TLS, transport and mirror failures stay errors.
+fn release_response(
+    url: &str,
+    limit: u64,
+    timeout: Option<Duration>,
+) -> Result<(ureq::Response, Option<PublicAsset>)> {
+    let request = download_agent(DownloadTimeouts::default())
+        .get(url)
+        .set("Accept-Encoding", "identity");
+    let request = match timeout {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
+    match request.call() {
+        Ok(response) => Ok((response, None)),
+        Err(error) => {
+            if !matches!(&error, ureq::Error::Status(429 | 502 | 503 | 504, _)) {
+                return Err(error.into());
+            }
+            let Some((version, name)) = official_asset_identity(url) else {
+                return Err(error.into());
+            };
+            let api = format!("https://api.github.com/repos/{RUNTIME_REPO}/releases");
+            let response = download_agent(DownloadTimeouts::default())
+                .get(&format!("{api}/tags/v{version}"))
+                .set("Accept", "application/vnd.github+json")
+                .set("User-Agent", "respire-cli")
+                .timeout(Duration::from_secs(30))
+                .call()?;
+            let mut bytes = Vec::new();
+            response
+                .into_reader()
+                .take((MAX_METADATA_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= MAX_METADATA_BYTES,
+                "official Runtime release metadata too large"
+            );
+            let asset = public_asset(serde_json::from_slice(&bytes)?, version, name, limit)?;
+            let request = download_agent(DownloadTimeouts::default())
+                .get(&format!("{api}/assets/{}", asset.id))
+                .set("Accept", "application/octet-stream")
+                .set("Accept-Encoding", "identity")
+                .set("User-Agent", "respire-cli");
+            let request = match timeout {
+                Some(timeout) => request.timeout(timeout),
+                None => request,
+            };
+            Ok((request.call()?, Some(asset)))
+        }
+    }
+}
+
 /// Fetch a small release metadata document, bounded like client2 `fetchJSON`.
 fn fetch_metadata(url: &str) -> Result<Vec<u8>> {
-    let response = download_agent(DownloadTimeouts::default())
-        .get(url)
-        .timeout(Duration::from_secs(30))
-        .call()
-        .with_context(|| format!("release metadata request failed ({url})"))?;
+    let (response, asset) = release_response(
+        url,
+        MAX_METADATA_BYTES as u64,
+        Some(Duration::from_secs(30)),
+    )
+    .with_context(|| format!("release metadata request failed ({url})"))?;
     let mut reader = response.into_reader().take((MAX_METADATA_BYTES + 1) as u64);
     let mut bytes = Vec::new();
     reader
@@ -1048,6 +1159,14 @@ fn fetch_metadata(url: &str) -> Result<Vec<u8>> {
         bytes.len() <= MAX_METADATA_BYTES,
         "release metadata too large"
     );
+    if let Some(asset) = asset {
+        anyhow::ensure!(
+            bytes.len() as u64 == asset.size
+                && format!("sha256:{:x}", Sha256::digest(&bytes))
+                    .eq_ignore_ascii_case(&asset.digest),
+            "official Runtime metadata asset checksum mismatch"
+        );
+    }
     Ok(bytes)
 }
 
@@ -1061,10 +1180,7 @@ fn download_archive(url: &str, dest: &Path) -> Result<String> {
     }
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, 0, None)?;
-    let response = download_agent(DownloadTimeouts::default())
-        .get(url)
-        .set("Accept-Encoding", "identity")
-        .call()
+    let (response, asset) = release_response(url, MAX_ARCHIVE_BYTES, None)
         .with_context(|| format!("download failed ({url})"))?;
     model_progress::check()?;
     let mut reader = response.into_reader();
@@ -1106,7 +1222,14 @@ fn download_archive(url: &str, dest: &Path) -> Result<String> {
         .with_context(|| format!("failed to flush {}", dest.display()))?;
     drop(file);
     model_progress::update("verify", &item, written, Some(written))?;
-    Ok(hex::encode(hasher.finalize()))
+    let actual = hex::encode(hasher.finalize());
+    if let Some(asset) = asset {
+        anyhow::ensure!(
+            written == asset.size && format!("sha256:{actual}").eq_ignore_ascii_case(&asset.digest),
+            "official Runtime archive asset checksum mismatch"
+        );
+    }
+    Ok(actual)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1978,7 +2101,7 @@ mod revision4_install_validation {
     }
 
     #[test]
-    fn paths_and_mirrors_fail_closed() {
+    fn paths_and_mirrors_fail_closed() -> Result<()> {
         for name in [
             "../escape",
             "a/../b",
@@ -1996,5 +2119,50 @@ mod revision4_install_validation {
         }
         assert!(safe_metadata_path("core-notices/models/LICENSE.txt"));
         assert!(download_origins(Some("https://unapproved.invalid")).is_err());
+        let version = "2.0.0-dev.4";
+        let name = "runtime-build-x86_64-unknown-linux-gnu.json";
+        let official = release_asset(RELEASE_BASE, &format!("v{version}/{name}"));
+        assert_eq!(official_asset_identity(&official), Some((version, name)));
+        for url in [
+            format!("{MIRROR_PREFIX}/{official}"),
+            format!("{official}?redirect=1"),
+            official.replace("github.com/", "github.com.evil.invalid/"),
+            official.replace(name, "../escape"),
+        ] {
+            assert!(official_asset_identity(&url).is_none());
+        }
+        let asset = serde_json::json!({"id":1,"name":name,"size":32,"state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))});
+        let release = serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"assets":[asset.clone()]});
+        assert_eq!(
+            public_asset(serde_json::from_value(release.clone())?, version, name, 32)?.id,
+            1
+        );
+        let mut invalid = Vec::new();
+        for (field, value) in [
+            ("tag_name", serde_json::json!("v2.0.0-dev.3")),
+            ("draft", serde_json::json!(true)),
+            ("assets", serde_json::json!([])),
+            ("assets", serde_json::json!([asset.clone(), asset.clone()])),
+        ] {
+            let mut changed = release.clone();
+            changed[field] = value;
+            invalid.push(changed);
+        }
+        for (field, value) in [
+            ("id", serde_json::json!(0)),
+            ("name", serde_json::json!("wrong.json")),
+            ("size", serde_json::json!(0)),
+            ("size", serde_json::json!(33)),
+            ("state", serde_json::json!("new")),
+            ("digest", serde_json::json!("sha256:invalid")),
+        ] {
+            let mut changed = release.clone();
+            changed["assets"][0][field] = value;
+            invalid.push(changed);
+        }
+        for changed in invalid {
+            assert!(public_asset(serde_json::from_value(changed)?, version, name, 32).is_err());
+        }
+        Ok(())
     }
 }
