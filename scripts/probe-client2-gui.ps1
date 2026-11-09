@@ -346,3 +346,4 @@ public static class RespireGuiNative {
     Save-Report
 }
 if ($report.status -ne 'connectivity-passed' -or -not $report.cleanup_exit_confirmed -or $report.cleanup_error) { exit 1 }
+exit 0

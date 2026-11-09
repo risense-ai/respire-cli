@@ -735,3 +735,4 @@ finally {
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'), $json + "`n", [Text.UTF8Encoding]::new($false))
 }
 if ($report.status -ne 'native-connectivity-passed' -or ($OfflineAcceptance -and $report.offline.status -ne 'offline-subset-passed')) { exit 1 }
+exit 0
