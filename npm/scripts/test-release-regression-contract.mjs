@@ -536,9 +536,32 @@ test('published consumers declare every condition dependency and cannot execute 
   assert.match(validation,/--pack-published published-raw/);
   assert.match(validation,/pattern: published-assets-verification-\*/);
   const native=text('release-native-validation.yml');
-  assert.doesNotMatch(native.split('\njobs:\n')[0],/GH_TOKEN:|GITHUB_TOKEN:/);
-  assert.match(native,/permissions:\n      contents: read\n      actions: read/);
-  assert.doesNotMatch(native,/contents: write/);
+  const nativeDefault=native.split('\njobs:\n')[0];
+  assert.doesNotMatch(nativeDefault,/GH_TOKEN:|GITHUB_TOKEN:|contents: write/);
+  assert.match(nativeDefault,/permissions:\n  contents: read/);
+  const nativeJobs=Object.fromEntries([...native.split('\njobs:\n')[1].matchAll(/^  ([a-z][a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]+:|$(?![\s\S]))/gm)].map(m=>[m[1],m[2]]));
+  assert.deepEqual(Object.keys(nativeJobs).filter(name=>/contents: write/.test(nativeJobs[name])),['historical-draft-download']);
+  assert.match(nativeJobs.native,/permissions:\n      contents: read\n      actions: read/);
+  assert.doesNotMatch(nativeJobs.native,/contents: write|actions: write|id-token:/);
+  const draft=nativeJobs['historical-draft-download'];
+  assert.match(draft,/if: inputs.validation_profile == 'full'/);
+  assert.match(draft,/permissions:\n      contents: write/);
+  assert.doesNotMatch(draft,/actions: write|id-token:/);
+  assert.match(draft,/ref: \$\{\{ github.sha \}\}/);assert.match(draft,/persist-credentials: false/);
+  assert.deepEqual([...draft.matchAll(/^      - uses: (.+)$/gm)].map(m=>m[1]),['actions/checkout@v5','actions/setup-python@v5','actions/upload-artifact@v4']);
+  assert.deepEqual([...draft.matchAll(/^        run: (.+)$/gm)].map(m=>m[1]),["python scripts/test-published-upgrades.py --download-only --target '${{ matrix.target }}' --output-dir '${{ runner.temp }}/historical-draft'"]);
+  const draftName='name: historical-draft-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}';
+  assert(draft.includes(draftName));assert(nativeJobs.native.includes(draftName));
+  assert.match(nativeJobs.native,/needs: historical-draft-download/);
+  const nativeCondition=nativeJobs.native.match(/^    if: \$\{\{ (.+) \}\}$/m)[1];
+  for(const artifact_source of ['build','published-assets'])for(const validation_profile of ['critical','full'])for(const result of ['success','skipped','failure','cancelled']){
+    const context={cancelled:()=>false,inputs:{artifact_source,validation_profile},needs:{'historical-draft-download':{result}}};
+    assert.equal(Boolean(runInNewContext(js(nativeCondition),context)),result==='success'||validation_profile==='critical'&&result==='skipped');
+  }
+  const upgrade=readFileSync(new URL('../../scripts/test-published-upgrades.py',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.match(upgrade,/if args.download_only:\n        assert tag=='v1\.0\.10' and release\['draft'\][\s\S]*?\n        return\n    with tarfile\.open/);
+  assert.match(upgrade,/if args.download_only:\n    assert args.profile=='full' and not args.draft_baseline_cache[\s\S]*?\n    sys.exit\(0\)\n\ntry:/);
+  assert.match(upgrade,/if release\['draft'\] and args.draft_baseline_cache:\n        assert not needed/);
   const extract=native.split('      - name: Verify and extract the release binary\n')[1].split('\n      - ')[0];
   assert.match(extract,/GH_TOKEN: \$\{\{ github.token \}\}/);
   const account=readFileSync(new URL('../../scripts/test-real-m3-account-switch.py',import.meta.url),'utf8');

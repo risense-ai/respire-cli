@@ -243,8 +243,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain prior uploads plus the instrumented, account-free Client2 source result.
-  assert.equal(uploads, 60, 'preserve publication/source evidence and both Client2 fixture results');
+  // Retain prior uploads plus the isolated historical draft input cache.
+  assert.equal(uploads, 61, 'preserve publication/source evidence, both Client2 results and the historical draft cache');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
