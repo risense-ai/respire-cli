@@ -240,7 +240,7 @@ pub(super) fn control_memory_revision() -> Result<ResultEnvelope> {
         grant.image_path == binary && grant.image_sha256.eq_ignore_ascii_case(&manifest.sha256),
         "host control image changed while preparing authorization"
     );
-    let expected_account_id = respire_client_host::identity::session_user_of_dir(&profile)?
+    let expected_account_id = respire_client_host::identity::host_session_user_of_dir(&profile, hash)?
         .map(|user| hash(user.as_bytes()));
     anyhow::ensure!(
         grant.account_id

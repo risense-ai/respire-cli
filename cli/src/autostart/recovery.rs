@@ -52,15 +52,9 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub(super) fn account_identity_source(profile: &Path) -> Result<String> {
-    use respire_client_host::identity::{auth_session_identity, AuthSessionIdentity};
-    if matches!(auth_session_identity(profile, super::hash)?, AuthSessionIdentity::Unbound { .. }) {
-        // This is a launch identity claim, not authorization. Runtime rechecks
-        // the committed receipt and persistent credential before opening its store.
-        return Ok(profile.display().to_string());
-    }
-    match respire_client_host::identity::session_user_of_dir(profile)? {
+    match respire_client_host::identity::host_session_user_of_dir(profile, super::hash)? {
         Some(user) => Ok(user),
-        // Only an absent session retains the existing profile-based identity.
+        // Absent sessions and strict local claims share the profile identity.
         None => Ok(profile.display().to_string()),
     }
 }
