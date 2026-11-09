@@ -833,7 +833,7 @@
     "config-settings-persisted",
     "diary-filter-contains-marker",
     "doctor-mcp-bin-item",
-    "doctor-mcp-http-item",
+    "doctor-mcp-bin-path",
     "doctor-remote-health-reachable",
     "exact-artifact-version",
     "forget-hides-entry",
