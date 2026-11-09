@@ -238,6 +238,7 @@ class Smoke:
         account.update(token=session["token"], confirmed=True)
         code = registered["summary"].get("super")
         require(isinstance(code, str) and bool(code), "registered_super_missing")
+        self.keys.track_created_login(session, user, code, password)
         env["RSRS_SUPER"] = code
         self.diagnostic_secrets.update((code, session["token"]))
         vault = self.api(account, "GET", "/api/self/vault")
@@ -481,7 +482,10 @@ class Smoke:
         self.report["server_sha"] = expected_server
         import cryptography
         require(cryptography.__version__ == "46.0.3", "cryptography_version_not_pinned")
-        spec = importlib.util.spec_from_file_location("legacy_vault_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+        keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+            and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+            and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+        spec = importlib.util.spec_from_file_location("legacy_vault_keyring", Path(__file__).with_name(keyring_script))
         backend = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backend)
         self.keys = backend.create(self.root / "keyring-home")

@@ -21,7 +21,10 @@ import uuid
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(support)
-keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+    and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name(keyring_script))
 keyring_backend = importlib.util.module_from_spec(keyring_spec)
 keyring_spec.loader.exec_module(keyring_backend)
 require, digest = support.require, support.digest
