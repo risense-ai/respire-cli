@@ -526,7 +526,7 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
     $walker = Get-OfflineReplacementWalker
     $queue = [Collections.Generic.Queue[object]]::new()
     $queue.Enqueue(@{element=$window; depth=0; document=$false})
-    $visited = 0; $candidate = $null; $candidateId = ''; $matches = 0
+    $visited = 0; $candidate = $null; $candidateId = ''; $replacementMatchCount = 0
     while ($queue.Count -gt 0) {
         if ($visited -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
         $next = $queue.Dequeue(); $visited++
@@ -549,8 +549,8 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
         }
         # Disabled/hidden matches still count: they must not hide ambiguity.
         if ($matchesName) {
-            $matches++
-            if ($matches -gt 1) { return $false }
+            $replacementMatchCount++
+            if ($replacementMatchCount -gt 1) { return $false }
             $candidate = $next.element; $candidateId = $runtimeId
         }
         $child = $walker.GetFirstChild($next.element)
@@ -561,7 +561,7 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
             $child = $walker.GetNextSibling($child)
         }
     }
-    if ($matches -ne 1 -or $candidateId -ceq $OriginalId -or
+    if ($replacementMatchCount -ne 1 -or $candidateId -ceq $OriginalId -or
         $walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
     $null = Assert-Target $true
     foreach ($knownPid in $ids) {
