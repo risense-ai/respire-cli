@@ -1372,6 +1372,7 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/dev-release-sweep.ps1'), [ref]$parseTokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
+          & ./scripts/test-account-failure-diagnostics.ps1
 
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}
