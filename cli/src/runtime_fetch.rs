@@ -534,6 +534,24 @@ pub fn managed_runtime_path() -> Result<Option<PathBuf>> {
     }
 }
 
+/// Read-only, release-proof-bound capability check before offline keygen admission.
+/// Embeddings without authenticated capability metadata deliberately fail closed.
+pub(crate) fn require_offline_keygen_handoff() -> Result<(PathBuf, String)> {
+    let manifest = read_manifest()?.context("offline_keygen_handoff_unsupported: installed Runtime required")?;
+    let binary = validate_installed(&manifest)?.canonicalize()?;
+    let metadata = manifest.bound_metadata(&release_triple()?)
+        .context("offline_keygen_handoff_unsupported: authenticated capability metadata required")?;
+    require_handoff_capability(&metadata.capabilities)?;
+    anyhow::ensure!(version_in_accept(&manifest.version), "offline_keygen_handoff_unsupported: Runtime incompatible");
+    Ok((binary, manifest.sha256))
+}
+
+fn require_handoff_capability(capabilities: &BTreeMap<String, String>) -> Result<()> {
+    anyhow::ensure!(capabilities.get("offline_keygen_handoff").map(String::as_str) == Some("1"),
+        "offline_keygen_handoff_unsupported: upgrade Runtime before generating local keys");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Discovery
 // ---------------------------------------------------------------------------
@@ -2164,5 +2182,18 @@ mod revision4_install_validation {
             assert!(public_asset(serde_json::from_value(changed)?, version, name, 32).is_err());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod offline_keygen_capability_tests {
+    use super::*;
+    #[test]
+    fn capability_requires_exact_version_not_truthiness() {
+        assert!(require_handoff_capability(&BTreeMap::new()).is_err());
+        for value in ["", "true", "0", "2", "01", "1 "] {
+            assert!(require_handoff_capability(&BTreeMap::from([("offline_keygen_handoff".into(),value.into())])).is_err());
+        }
+        assert!(require_handoff_capability(&BTreeMap::from([("offline_keygen_handoff".into(),"1".into())])).is_ok());
     }
 }

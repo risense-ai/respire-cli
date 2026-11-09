@@ -226,6 +226,7 @@ impl Maintenance {
     }
 
     fn begin(mut config: Registration, recover: bool) -> Result<Self> {
+        super::supervise::offline_keygen::reject_generic_recovery(&config.installation)?;
         owned(&config)?;
         ensure_control_endpoint(&config)?;
         let registration = manager::inspect(&config)?;
@@ -285,6 +286,7 @@ impl Maintenance {
     }
 
     fn begin_local(root: PathBuf, config: Option<Registration>, recover: bool) -> Result<Self> {
+        super::supervise::offline_keygen::reject_generic_recovery(&root)?;
         let id = if let Some(config) = config.as_ref() {
             owned(config)?;
             anyhow::ensure!(config.installation == root, "maintenance installation changed");
@@ -522,6 +524,46 @@ impl Maintenance {
         maintenance_binding(&target, None, false)
     }
 
+    /// Narrow offline-keygen completion: verify the live actor before advancing.
+    pub(crate) fn offline_keygen_target_verified(&mut self, profile: &Path, operation: &str, session: &str) -> Result<()> {
+        let root = self.installation_root()?.to_path_buf();
+        super::supervise::offline_keygen::verify_target(&root, profile, operation, session)?;
+        self.offline_keygen_starting_verified(profile)
+    }
+
+    pub(crate) fn offline_keygen_rollback_verified(&mut self, profile: &Path,
+        identity: &respire_protocol::HostAuthIdentity, store_ready: bool) -> Result<()> {
+        let root = self.installation_root()?.to_path_buf();
+        super::supervise::offline_keygen::verify_original_target(&root, profile, identity, store_ready)?;
+        self.offline_keygen_starting_verified(profile)
+    }
+
+    fn offline_keygen_starting_verified(&mut self, profile: &Path) -> Result<()> {
+        let root = self.installation_root()?.to_path_buf();
+        let actual = marker(&root)?.context("offline keygen marker missing")?;
+        let held = self.marker.as_ref().context("offline keygen ownership missing")?;
+        anyhow::ensure!(actual.phase == Phase::Starting && held.phase == Phase::Starting
+            && actual.id == held.id && actual.token == held.token && actual.owner_birth == held.owner_birth
+            && actual.owner_pid == std::process::id() && controller_alive(&actual)?
+            && actual.expected_profile.as_deref() == Some(profile)
+            && current_boot_token().as_deref() == Some(held.token.as_str())
+            && hash(&fs::read(marker_path(&root))?) == self.marker_digest.as_deref().context("offline keygen marker digest missing")?,
+            "offline keygen starting marker changed");
+        self.mark(Phase::Verified)
+    }
+
+    pub(crate) fn offline_keygen_complete_binding(&self, profile: &Path) -> Result<Option<Value>> {
+        let (root, selected) = respire_client_host::config::control_roots()?;
+        let root = root.canonicalize()?;
+        anyhow::ensure!(self.installation_root()? == root && selected.canonicalize()? == profile,
+            "offline keygen selection changed before completion");
+        let actual = marker(&root)?.context("offline keygen completion marker missing")?;
+        let held = self.marker.as_ref().context("offline keygen completion ownership missing")?;
+        verified_account_marker(&actual, held, profile, &fs::read(marker_path(&root))?,
+            self.marker_digest.as_deref().context("offline keygen completion digest missing")?)?;
+        maintenance_binding(profile, None, false)
+    }
+
     /// Restore only the verified serving owner after durable maintenance completion.
     pub(crate) fn finish_handoff(&self) -> Result<()> {
         #[cfg(feature = "client2-host-prototype")]
@@ -654,15 +696,71 @@ pub(crate) fn begin_maintenance_locked() -> Result<Maintenance> {
     }
 }
 
+/// Prepare one exact Paused controller, durably recording its original operation
+/// through `admit` before either marker or managed-registration state is changed.
+pub(crate) fn begin_offline_keygen_maintenance(
+    root: &Path, profile: &Path, admit: impl FnOnce(&str, &str, &str) -> Result<()>,
+) -> Result<Maintenance> {
+    anyhow::ensure!(current_boot_token().is_none(), "offline keygen controller already active");
+    let (selected_root, selected_profile) = respire_client_host::config::control_roots()?;
+    anyhow::ensure!(selected_root.canonicalize()? == root && selected_profile.canonicalize()? == profile
+        && marker(root)?.is_none(), "offline keygen selection changed or maintenance already exists");
+    let registration = read_registration(root)?;
+    if let Some(config) = registration.as_ref() {
+        owned(config)?;
+        anyhow::ensure!(config.installation == root, "offline keygen registration changed");
+        ensure_control_endpoint(config)?;
+        let inspected = manager::inspect(config)?;
+        anyhow::ensure!(!inspected.registered || config.artifact_hashes.contains_key("service"),
+            "offline keygen registration is not owned");
+    }
+    let id = registration.as_ref().map(|config| config.id.clone())
+        .unwrap_or_else(|| format!("host-{}", hash(root.display().to_string().as_bytes())));
+    let value = Marker { schema: 1, id, token: uuid::Uuid::new_v4().to_string(), phase: Phase::Paused,
+        expected_profile: Some(profile.to_path_buf()), expected_version: env!("CARGO_PKG_VERSION").into(),
+        owner_pid: std::process::id(), owner_birth: manager::process_birth(std::process::id())?
+            .context("offline keygen controller birth unavailable")?, snapshot: None, agent_config: None };
+    let bytes = serde_json::to_vec(&value)?;
+    let digest = hash(&bytes);
+    admit(&value.token, &value.id, &digest)?;
+    private_write(&marker_path(root), &bytes, None)?;
+    let mut config = registration.filter(|config| config.enabled && !config.manually_stopped);
+    if let Some(config) = config.as_mut() { config.maintenance = true; save(config)?; reset_attempts(config)?; }
+    ACTIVE.with(|slot| *slot.borrow_mut() = Some(value.token.clone()));
+    Ok(Maintenance { installation: Some(root.to_path_buf()), config, marker: Some(value),
+        marker_digest: Some(digest), completed: false })
+}
+
 /// Reattach only the original identity-write controller, retaining its stable token.
 pub(crate) fn resume_identity_write_maintenance(
     root: &Path, profile: &Path, token: &str, coordinator: &str,
 ) -> Result<Maintenance> {
+    super::supervise::offline_keygen::reject_generic_recovery(root)?;
     resume_key_maintenance(root, profile, profile, token, coordinator)
 }
 
 /// A key receipt can move selection before its private response reaches CLI.
 /// Keep the original token/controller checks, allowing only source or selection.
+pub(crate) fn verify_offline_keygen_finished(root: &Path) -> Result<()> {
+    anyhow::ensure!(marker_bytes(root)?.is_none() && current_boot_token().is_none(),
+        "offline keygen completed marker is still present; no spawn attempted");
+    Ok(())
+}
+
+pub(crate) fn verify_offline_keygen_marker(root: &Path, profile: &Path, token: &str,
+    coordinator: &str, digest: &str) -> Result<()> {
+    let bytes = marker_bytes(root)?.context("offline keygen marker missing; no replacement created")?;
+    let actual = marker(root)?.context("offline keygen marker missing")?;
+    anyhow::ensure!(hash(&bytes) == digest && actual.phase == Phase::Paused
+        && actual.token == token && actual.id == coordinator
+        && actual.expected_profile.as_deref() == Some(profile)
+        && actual.expected_version == env!("CARGO_PKG_VERSION")
+        && actual.snapshot.is_none() && actual.agent_config.is_none()
+        && (!controller_alive(&actual)? || actual.owner_pid == std::process::id()),
+        "offline keygen original Paused marker changed");
+    Ok(())
+}
+
 pub(crate) fn resume_key_maintenance(
     root: &Path, profile: &Path, source: &Path, token: &str, coordinator: &str,
 ) -> Result<Maintenance> {
@@ -676,6 +774,7 @@ pub(crate) fn pending_agent_config(root: &Path) -> Result<Option<(respire_protoc
 }
 
 pub(crate) fn resume_agent_config_maintenance(root: &Path, profile: &Path, token: &str, coordinator: &str) -> Result<Maintenance> {
+    super::supervise::offline_keygen::reject_generic_recovery(root)?;
     resume_key_maintenance_inner(root, profile, profile, token, coordinator, true)
 }
 
@@ -1066,6 +1165,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
 }
 
 fn start_explicit_locked() -> Result<()> {
+    super::supervise::offline_keygen::reject_generic_recovery(&respire_client_host::paths::main_data_dir())?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
@@ -1460,8 +1560,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         }
         RuntimeCommand::Start => {
             crate::runtime_fetch::require_automatic_migration_safe()?;
-            let _ownership = crate::runtime_policy::takeover_lock()?;
-            start_explicit_locked()?;
+            let ownership = crate::runtime_policy::takeover_lock()?;
+            if !super::supervise::offline_keygen::start_explicit(&ownership)? {
+                start_explicit_locked()?;
+            }
             emit("runtime.start", status()?)
         }
         RuntimeCommand::Autostart {
@@ -1896,6 +1998,37 @@ fn supervise_windows_runtime(config: &Registration) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn offline_keygen_admission_failure_cannot_create_maintenance() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+        struct Restore(Option<std::ffi::OsString>, Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                ACTIVE.with(|slot| *slot.borrow_mut() = None);
+                for (name, value) in [("RSRS_DATA_DIR", &self.0), ("RSRS_RUNTIME_BOOT_TOKEN", &self.1)] {
+                    match value { Some(value) => std::env::set_var(name, value), None => std::env::remove_var(name) }
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RSRS_DATA_DIR"), std::env::var_os("RSRS_RUNTIME_BOOT_TOKEN"));
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        std::env::set_var("RSRS_DATA_DIR", &root);
+        std::env::remove_var("RSRS_RUNTIME_BOOT_TOKEN");
+        ACTIVE.with(|slot| *slot.borrow_mut() = None);
+        let mut admitted = false;
+        let result = begin_offline_keygen_maintenance(&root, &root, |token, coordinator, digest| {
+            assert!(!marker_path(&root).exists() && !control_path(&root).exists());
+            assert!(!token.is_empty() && !coordinator.is_empty() && digest.len() == 64);
+            admitted = true;
+            anyhow::bail!("synthetic admission publication failure")
+        });
+        assert!(admitted && result.is_err());
+        assert!(!marker_path(&root).exists() && !control_path(&root).exists() && current_boot_token().is_none());
+        assert!(verify_offline_keygen_marker(&root, &root, "absent", "absent", "absent").is_err());
+        Ok(())
+    }
+
     #[test]
     fn foreground_supervisor_retries_are_bounded_and_reset_only_after_stability() -> Result<()> {
         let mut failures = 0;
