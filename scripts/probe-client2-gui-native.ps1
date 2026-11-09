@@ -410,7 +410,8 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
     throw "Expected offline control unavailable: $Type / $Name"
 }
 
-function Focus-OfflineControl($Element) {
+function Focus-OfflineControl($Element, [ref]$MismatchEvidence) {
+    if ($null -ne $MismatchEvidence) { $MismatchEvidence.Value = $null }
     $diagnostic = @{phase='target_before'; kind='pending'}
     $report.offline.focus_diagnostic = $diagnostic
     try {
@@ -429,6 +430,13 @@ function Focus-OfflineControl($Element) {
             offscreen=[bool]$focus.offscreen}
         if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.runtime_id -ne $expected -or $focus.offscreen) {
             $diagnostic.kind = 'focus_mismatch'
+            if ($null -ne $MismatchEvidence -and $expected -and
+                $focus.belongs_to_target -is [bool] -and $focus.belongs_to_target -and
+                $focus.in_document -is [bool] -and $focus.in_document -and
+                $focus.offscreen -is [bool] -and -not $focus.offscreen -and $focus.runtime_id -ne $expected) {
+                # Private evidence only; never include RuntimeIds in the report.
+                $MismatchEvidence.Value = @{original_id=$expected}
+            }
             $detail = @{requested_id_available=$false; requested_id_matches_original=$false
                 requested_focus_available=$false; requested_has_keyboard_focus=$false
                 focused_type_available=$false; focused_is_button=$false}
@@ -485,14 +493,109 @@ function Test-OfflineFocusRetryable($Exception) {
     }
     return $false
 }
+function Get-OfflineReplacementRoot {
+    return [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$binding.hwnd)
+}
+function Get-OfflineReplacementWalker { return [Windows.Automation.TreeWalker]::ControlViewWalker }
+function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $AttemptClock, [double]$Seconds = 10) {
+    if (-not $OriginalId -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+    $null = Assert-Target $true
+    if ($AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+    $held = [Collections.Generic.List[object]]::new()
+    $identities = @{}
+    $walk = [Diagnostics.Stopwatch]::StartNew()
+    try {
+    $ids = [Collections.Generic.HashSet[int]]::new()
+    foreach ($knownPid in $ownedIds) {
+        if ($walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+        $process = Get-Process -Id $knownPid -ErrorAction Stop
+        $held.Add($process)
+        Assert-DocumentProcessHandle $process
+        $identities[[int]$knownPid] = @{process=$process; birth=$process.StartTime.ToUniversalTime().Ticks
+            session=$process.SessionId; image=$process.Path}
+        [void]$ids.Add([int]$knownPid)
+    }
+    # Ancestry is resampled while these exact process lifetimes remain held.
+    $null = Assert-Target $true
+    foreach ($knownPid in $ids) {
+        if (-not $ownedIds.Contains($knownPid)) { return $false }
+        Assert-DocumentNodeIdentity $knownPid $identities
+    }
+    if ($walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+    $window = Get-OfflineReplacementRoot
+    $walker = Get-OfflineReplacementWalker
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue(@{element=$window; depth=0; document=$false})
+    $visited = 0; $candidate = $null; $candidateId = ''; $matches = 0
+    while ($queue.Count -gt 0) {
+        if ($visited -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+        $next = $queue.Dequeue(); $visited++
+        $current = $next.element.Current
+        # Foreign processes fail before any Name or other diagnostic value is read.
+        if (-not $ids.Contains([int]$current.ProcessId)) { return $false }
+        Assert-DocumentNodeIdentity ([int]$current.ProcessId) $identities
+        $runtimeParts = @($next.element.GetRuntimeId())
+        if ($runtimeParts.Count -eq 0 -or @($runtimeParts | Where-Object { $_ -isnot [int] }).Count -gt 0) { return $false }
+        $runtimeId = $runtimeParts -join '.'
+        if ($runtimeId -ceq $OriginalId) { return $false }
+        $controlType = $current.ControlType
+        if ($controlType -isnot [Windows.Automation.ControlType]) { return $false }
+        $document = $next.document -or $controlType -eq [Windows.Automation.ControlType]::Document
+        $matchesName = $false
+        if ($document -and $controlType -eq [Windows.Automation.ControlType]::Button) {
+            $nodeName = $current.Name
+            if ($nodeName -isnot [string]) { return $false }
+            $matchesName = $nodeName -match $Name
+        }
+        # Disabled/hidden matches still count: they must not hide ambiguity.
+        if ($matchesName) {
+            $matches++
+            if ($matches -gt 1) { return $false }
+            $candidate = $next.element; $candidateId = $runtimeId
+        }
+        $child = $walker.GetFirstChild($next.element)
+        if ($child -and $next.depth -ge 32) { return $false }
+        while ($child) {
+            if ($visited + $queue.Count -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+            $queue.Enqueue(@{element=$child; depth=$next.depth+1; document=$document})
+            $child = $walker.GetNextSibling($child)
+        }
+    }
+    if ($matches -ne 1 -or $candidateId -ceq $OriginalId -or
+        $walk.Elapsed.TotalSeconds -ge 5 -or $AttemptClock.Elapsed.TotalSeconds -ge $Seconds) { return $false }
+    $null = Assert-Target $true
+    foreach ($knownPid in $ids) {
+        if (-not $ownedIds.Contains($knownPid)) { return $false }
+        Assert-DocumentNodeIdentity $knownPid $identities
+    }
+    $current = $candidate.Current
+    if (-not $ids.Contains([int]$current.ProcessId) -or -not $ownedIds.Contains([int]$current.ProcessId)) { return $false }
+    Assert-DocumentNodeIdentity ([int]$current.ProcessId) $identities
+    $controlType = $current.ControlType
+    if ($controlType -isnot [Windows.Automation.ControlType] -or $controlType -ne [Windows.Automation.ControlType]::Button) { return $false }
+    $nodeName = $current.Name
+    if ($nodeName -isnot [string]) { return $false }
+    if (($candidate.GetRuntimeId() -join '.') -cne $candidateId -or
+        $nodeName -notmatch $Name -or
+        $current.IsEnabled -isnot [bool] -or -not $current.IsEnabled -or
+        $current.IsKeyboardFocusable -isnot [bool] -or -not $current.IsKeyboardFocusable -or
+        $current.IsOffscreen -isnot [bool] -or $current.IsOffscreen) { return $false }
+    foreach ($knownPid in $ids) { Assert-DocumentNodeIdentity $knownPid $identities }
+    return ($walk.Elapsed.TotalSeconds -lt 5 -and $AttemptClock.Elapsed.TotalSeconds -lt $Seconds)
+    } finally { foreach ($process in $held) { $process.Dispose() } }
+}
 function Find-FocusedOfflineButton([string]$Name) {
     $scrollAttempts = 0
     for ($attempt=0; $attempt -lt 5; $attempt++) {
+        $attemptClock = [Diagnostics.Stopwatch]::StartNew()
+        $mismatchEvidence = $null
         $report.offline.focus_diagnostic = $null
         $null = Assert-Target $true
         # Selector traversal still proves ownership and uniqueness. Selector errors,
         # including ambiguity, are deliberately outside the retry handler.
-        $element = Find-OfflineControl 'ControlType.Button' $Name 10
+        $remaining = 10 - $attemptClock.Elapsed.TotalSeconds
+        if ($remaining -le 0) { throw 'Offline button focus failed without a retryable UIA readiness condition' }
+        $element = Find-OfflineControl 'ControlType.Button' $Name $remaining
         try {
             $state = $element.Current
             $report.offline.focus_readiness = @{ enabled=[bool]$state.IsEnabled
@@ -520,10 +623,20 @@ function Find-FocusedOfflineButton([string]$Name) {
                 continue
             }
             if ($scrollAttempts -gt 0) { $report.offline.focus_scroll = 'visible' }
-            Focus-OfflineControl $element
+            Focus-OfflineControl $element ([ref]$mismatchEvidence)
             return $element
         } catch {
-            if (-not (Test-OfflineFocusRetryable $_.Exception)) {
+            $primaryException = $_.Exception
+            if ($null -ne $mismatchEvidence -and $attempt -lt 4 -and $attemptClock.Elapsed.TotalSeconds -lt 10) {
+                $replacement = $false
+                try { $replacement = Test-OfflineButtonReplacement $Name $mismatchEvidence.original_id $attemptClock 10 } catch {}
+                if ($replacement -is [bool] -and $replacement) {
+                    # No effect was dispatched. Consume this existing attempt and
+                    # reacquire through the ordinary full selector on the next one.
+                    continue
+                }
+            }
+            if (-not (Test-OfflineFocusRetryable $primaryException)) {
                 throw 'Offline button focus failed without a retryable UIA readiness condition'
             }
         }

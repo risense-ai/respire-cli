@@ -11,6 +11,8 @@ foreach ($name in @('Focus-OfflineControl','Test-OfflineFocusRetryable','Find-Fo
 }
 function Assert-Target { param($Foreground) $script:guardCalls++; if ($script:foreign -or $script:guardCalls -eq $script:failGuard) { throw 'synthetic foreign target' } }
 function Pause-Probe {}
+# Replacement traversal is exercised separately; these existing cases retain their original failure boundaries.
+function Test-OfflineButtonReplacement { return $false }
 function Read-TargetFocus { $script:focusReads++; if ($script:failRead) { throw 'synthetic-private-secret' }; return $script:focus }
 function Find-OfflineControl {
     param($Type,$Name,$Seconds)
@@ -267,3 +269,5 @@ Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
 & (Join-Path $PSScriptRoot 'test-client2-gui-exit-code.ps1')
 & (Join-Path $PSScriptRoot 'test-client2-document-readiness.ps1')
 & (Join-Path $PSScriptRoot 'test-client2-document-descendants.ps1')
+
+& (Join-Path $PSScriptRoot 'test-client2-focus-replacement.ps1')
