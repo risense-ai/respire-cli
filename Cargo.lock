@@ -1570,6 +1570,7 @@ dependencies = [
  "respire_client_host",
  "respire_commands",
  "respire_host_control",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "rpassword",
@@ -1673,6 +1674,7 @@ dependencies = [
  "hex",
  "respire_app",
  "respire_client_host",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "serde",
@@ -1744,6 +1746,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "respire_logging"
+version = "0.1.0-dev.1"
+dependencies = [
+ "tempfile",
+]
+
+[[package]]
 name = "respire_protocol"
 version = "2.0.0-dev.7"
 dependencies = [
@@ -1759,6 +1768,7 @@ dependencies = [
  "anyhow",
  "respire_app",
  "respire_commands",
+ "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "serde_json",

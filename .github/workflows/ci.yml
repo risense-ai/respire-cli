@@ -348,7 +348,7 @@ jobs:
           if [ "$CANDIDATE_MODE" = true ]; then
             cargo test --workspace --exclude respire --locked
           else
-            cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands
+            cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging
           fi
       # This offline ownership fixture requires the dependencies cached above.
       - if: env.CANDIDATE_MODE == 'true'

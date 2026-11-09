@@ -1572,6 +1572,9 @@ pub fn dispatch_loop(
                 store
             }
             Err(error) => {
+                respire_logging::error(format_args!(
+                    "runtime failed to initialize the library: {error:#}"
+                ));
                 eprintln!("runtime failed to initialize the library: {error:#}");
                 stop_process(1);
             }
@@ -1579,6 +1582,9 @@ pub fn dispatch_loop(
     };
     respire_app::service::install_runtime_profile(respire_app::service::data_dir());
     if let Err(error) = respire_app::read_heat::reload() {
+        respire_logging::error(format_args!(
+            "runtime failed to load read_heat configuration: {error:#}"
+        ));
         eprintln!("runtime failed to load read_heat configuration: {error:#}");
         stop_process(1);
     }
@@ -1618,13 +1624,18 @@ pub fn dispatch_loop(
                 let _ = job.reply.send(result);
             }
         });
-    if classifier.is_err() {
+    if let Err(error) = classifier.as_ref() {
+        respire_logging::error(format_args!(
+            "runtime failed to start the classifier worker: {error}"
+        ));
+        eprintln!("runtime failed to start the classifier worker: {error}");
         stop_process(1);
     }
     let (write_tx, write_rx) = mpsc::sync_channel::<WriteJob>(256);
     if let Ok(mut installed) = WRITE_TX.lock() {
         *installed = Some(write_tx.clone());
     } else {
+        respire_logging::error(format_args!("runtime failed to install the write queue"));
         eprintln!("runtime failed to install the write queue");
         stop_process(1);
     }
@@ -1658,6 +1669,9 @@ pub fn dispatch_loop(
                             }
                             Err(error) => {
                                 STATS_FAILED.fetch_add(1, Ordering::AcqRel);
+                                respire_logging::error(format_args!(
+                                    "recall statistics writeback failed: {error:#}"
+                                ));
                                 eprintln!("recall statistics writeback failed: {error:#}");
                             }
                         }
@@ -1719,7 +1733,11 @@ pub fn dispatch_loop(
                 let _ = job.reply.send(Ok(captured));
             }
         });
-    if writer.is_err() {
+    if let Err(error) = writer.as_ref() {
+        respire_logging::error(format_args!(
+            "runtime failed to start the writer worker: {error}"
+        ));
+        eprintln!("runtime failed to start the writer worker: {error}");
         stop_process(1);
     }
     respire_app::service::install_autosync_notifier(kick_autosync);
@@ -1730,6 +1748,9 @@ pub fn dispatch_loop(
         .stack_size(16 * 1024 * 1024)
         .spawn(index_loop);
     if let Err(error) = indexer.as_ref() {
+        respire_logging::error(format_args!(
+            "runtime failed to start the index worker: {error}"
+        ));
         eprintln!("runtime failed to start the index worker: {error}");
         stop_process(1);
     }
@@ -1959,6 +1980,7 @@ pub fn dispatch_loop(
         std::thread::sleep(Duration::from_millis(25));
     }
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
+        respire_logging::error(format_args!("Core worker shutdown failed: {error:#}"));
         eprintln!("Core worker shutdown failed: {error:#}");
         // This stack still owns LibraryLock. Never reach drop(_lock) while a
         // native child has not been confirmed dead.
@@ -1972,6 +1994,9 @@ pub fn dispatch_loop(
     }
     if let Ok(indexer) = indexer {
         if indexer.join().is_err() {
+            respire_logging::error(format_args!(
+                "background index worker panicked during shutdown"
+            ));
             eprintln!("background index worker panicked during shutdown");
         }
     }
