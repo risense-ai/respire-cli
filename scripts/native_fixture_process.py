@@ -15,6 +15,7 @@ import time
 import traceback
 import secrets
 import shutil
+import runpy
 
 
 def add_runtime_arguments(parser):
@@ -161,17 +162,18 @@ def install_published_runtime(binary, env):
                 or len(binary_hash) != 64 or any(c not in '0123456789abcdef' for c in binary_hash)):
             raise ValueError('source fixture differs from the independently pinned Runtime identity')
         if not (root / 'runtime.json').exists():
-            install_env = {key: value for key, value in env.items()
-                           if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
-                           and not key.endswith(('_TOKEN', '_API_KEY'))}
-            install_env['RSRS_DATA_DIR'] = str(root)
-            result = subprocess.run(['node', '--input-type=module', '-e',
-                "import {installPinnedRuntime} from './scripts/ci-install-pinned-runtime.mjs';"
-                "const result = await installPinnedRuntime(process.argv[1], {env:process.env}, process.env.RSRS_RUNTIME_TRIPLE, {stdout:process.stderr});"
-                "if(result.error) throw result.error; process.exit(result.status ?? 1);", str(pathlib.Path(binary).resolve(strict=True))],
-                cwd=repository, env=install_env, stdout=sys.stderr, timeout=365)
-            if result.returncode:
-                raise RuntimeError('pinned Runtime fixture install failed: exit ' + str(result.returncode))
+            source = pathlib.Path(os.environ['NATIVE_RUNTIME_BIN']).resolve(strict=True)
+            if source.parent.name != version or source.parent.parent.name != 'runtime':
+                raise ValueError('official managed Runtime source required')
+            source_root = source.parent.parent.parent
+            if source_root == root or not (source_root / 'runtime.json').is_file():
+                raise ValueError('independent official Runtime source receipt required')
+            source_env = dict(env, RSRS_DATA_DIR=str(source_root))
+            verified = install_official_runtime(binary, source_env, version, binary_hash)
+            if not source.samefile(verified):
+                raise ValueError('official Runtime source differs from the selected image')
+            bundle = runpy.run_path(str(repository / 'scripts/runtime-acceptance-bundle.py'))
+            bundle['copy_managed_installation'](source_root, root)
         install_env = dict(env, RSRS_DATA_DIR=str(root))
         installed = install_official_runtime(binary, install_env, version, binary_hash)
         env['RSRS_RUNTIME_BIN'] = install_env['RSRS_RUNTIME_BIN']
