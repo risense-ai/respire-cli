@@ -551,6 +551,7 @@ class WorkerInspector:
                                         stdin=subprocess.PIPE, stdout=self.log, stderr=self.log)
 
     def inspect(self, request):
+        """Check one identity within the deadline; every helper error fails closed."""
         self.sequence += 1
         request = {**request, 'sequence': self.sequence}
         response = self.directory / ('response-' + str(self.sequence) + '.json')
@@ -558,9 +559,13 @@ class WorkerInspector:
             self.process.stdin.write((json.dumps(request) + '\n').encode())
             self.process.stdin.flush()
         except OSError as error:
-            self.record_failure('worker inspector request pipe failed: ' + str(error))
-            raise RuntimeError('worker inspector request pipe failed; see ' +
-                               str(self.directory / 'inspector.log')) from error
+            failure = RuntimeError('worker inspector request pipe failed; see ' +
+                                   str(self.directory / 'inspector.log'))
+            try:
+                self.record_failure('worker inspector request pipe failed: ' + str(error))
+            except OSError as recording_error:
+                failure.add_note('failure record could not be written: ' + str(recording_error))
+            raise failure from error
         deadline = time.monotonic() + self.timeout
         while True:
             if self.process.poll() is not None:
@@ -591,6 +596,7 @@ class WorkerInspector:
         }, indent=2), encoding='utf-8')
 
     def close(self):
+        """Reap the helper and close streams without masking a broken-pipe cause."""
         try:
             if self.process.poll() is None:
                 self.process.kill()
@@ -610,6 +616,7 @@ class WorkerInspector:
 
 
 def serve(directory):
+    """Publish boundary results; the parent enforces the inspection deadline."""
     import faulthandler
     faulthandler.enable()
     directory = pathlib.Path(directory)
