@@ -1228,9 +1228,9 @@ fn main_body() -> i32 {
     };
     if let Err(error) = result {
         let (failure, code) = command_failure(&error);
-        // Persist the failure chain next to the data root; the interactive
-        // stderr/envelope behavior below stays unchanged.
-        respire_logging::error(format_args!("command failed: {error:#}"));
+        // Persist only the fixed event: error chains can contain OAuth codes
+        // or user input. Keep the interactive stderr/envelope unchanged.
+        respire_logging::error(format_args!("command failed"));
         if output_emitted() {
             eprintln!("ERROR: {error:#}");
         } else {

@@ -1573,7 +1573,7 @@ pub fn dispatch_loop(
             }
             Err(error) => {
                 respire_logging::error(format_args!(
-                    "runtime failed to initialize the library: {error:#}"
+                    "runtime failed to initialize the library"
                 ));
                 eprintln!("runtime failed to initialize the library: {error:#}");
                 stop_process(1);
@@ -1583,7 +1583,7 @@ pub fn dispatch_loop(
     respire_app::service::install_runtime_profile(respire_app::service::data_dir());
     if let Err(error) = respire_app::read_heat::reload() {
         respire_logging::error(format_args!(
-            "runtime failed to load read_heat configuration: {error:#}"
+            "runtime failed to load read_heat configuration"
         ));
         eprintln!("runtime failed to load read_heat configuration: {error:#}");
         stop_process(1);
@@ -1626,7 +1626,7 @@ pub fn dispatch_loop(
         });
     if let Err(error) = classifier.as_ref() {
         respire_logging::error(format_args!(
-            "runtime failed to start the classifier worker: {error}"
+            "runtime failed to start the classifier worker"
         ));
         eprintln!("runtime failed to start the classifier worker: {error}");
         stop_process(1);
@@ -1670,7 +1670,7 @@ pub fn dispatch_loop(
                             Err(error) => {
                                 STATS_FAILED.fetch_add(1, Ordering::AcqRel);
                                 respire_logging::error(format_args!(
-                                    "recall statistics writeback failed: {error:#}"
+                                    "recall statistics writeback failed"
                                 ));
                                 eprintln!("recall statistics writeback failed: {error:#}");
                             }
@@ -1735,7 +1735,7 @@ pub fn dispatch_loop(
         });
     if let Err(error) = writer.as_ref() {
         respire_logging::error(format_args!(
-            "runtime failed to start the writer worker: {error}"
+            "runtime failed to start the writer worker"
         ));
         eprintln!("runtime failed to start the writer worker: {error}");
         stop_process(1);
@@ -1749,7 +1749,7 @@ pub fn dispatch_loop(
         .spawn(index_loop);
     if let Err(error) = indexer.as_ref() {
         respire_logging::error(format_args!(
-            "runtime failed to start the index worker: {error}"
+            "runtime failed to start the index worker"
         ));
         eprintln!("runtime failed to start the index worker: {error}");
         stop_process(1);
@@ -1980,7 +1980,7 @@ pub fn dispatch_loop(
         std::thread::sleep(Duration::from_millis(25));
     }
     if let Err(error) = respire_app::core_sdk::worker::shutdown() {
-        respire_logging::error(format_args!("Core worker shutdown failed: {error:#}"));
+        respire_logging::error(format_args!("Core worker shutdown failed"));
         eprintln!("Core worker shutdown failed: {error:#}");
         // This stack still owns LibraryLock. Never reach drop(_lock) while a
         // native child has not been confirmed dead.

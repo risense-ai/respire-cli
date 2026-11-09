@@ -111,7 +111,7 @@ Use isolated test data. `RSRS_CORE_TEST_MODE` selects existing test fixtures, no
 
 ## Error logging
 
-The CLI and the resident runtime append errors to `<data root>/logs/`: `cli.log` for command failures and panics, `runtime.log` for the serving process (its stderr is detached, so this file is the only surviving record). The level defaults to `error`; set `RSRS_LOG` to `off`, `error`, `warn`, `info` or `debug` to change it. The file is owner-only (0600 on unix), appends one line per record, and rotates to `<name>.1` at 1 MiB. Log calls never fail commands, and the stdout/stderr contract is unchanged.
+The CLI and the resident runtime append fixed failure events to `<data root>/logs/`: `cli.log` for commands and `runtime.log` for the serving process. Persistent records exclude raw error chains and panic payloads; panics retain their code location, and existing stderr diagnostics remain unchanged. The level defaults to `error`; set `RSRS_LOG` to `off`, `error`, `warn`, `info` or `debug` to change it. New log files request owner-only mode (0600 on Unix); existing permissions and the parent directory follow the data root's policy. Rotation at 1 MiB retains one previous file and is best effort across processes; these files are diagnostic records, not an audit trail. Logging failures do not fail commands, and stdout contracts are unchanged.
 
 ## License
 

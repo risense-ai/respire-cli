@@ -13,8 +13,8 @@
 //!   contract; this file is only a persistent tail for support.
 //! - Best effort by design: write or rotation failures are swallowed and
 //!   never panic, never block business paths.
-//! - One file per process (`cli.log` / `runtime.log` under the data root) so
-//!   two writers never rotate the same file concurrently.
+//! - Separate CLI/runtime files under the data root. The mutex serializes
+//!   threads in one process; rotation across processes is best effort.
 //!
 //! The caller resolves the log directory (CLI: `respire_client_host::paths`,
 //! runtime: `respire_app::service`) and passes the full file path to
@@ -156,17 +156,10 @@ pub fn debug(args: Arguments<'_>) {
     write_record(Level::Debug, args);
 }
 
-/// Format a panic payload for the log; non-string payloads keep only the
-/// fact and location, never an arbitrary `Debug` dump.
-pub fn log_panic(payload: &(dyn Any + Send), location: &str) {
-    let message = if let Some(text) = payload.downcast_ref::<&str>() {
-        (*text).to_owned()
-    } else if let Some(text) = payload.downcast_ref::<String>() {
-        text.clone()
-    } else {
-        "panic without a string payload".to_owned()
-    };
-    error(format_args!("panic at {location}: {message}"));
+/// Persist the panic event and its code location, never the arbitrary payload.
+/// Production callers pass only PanicHookInfo::location, not request input.
+pub fn log_panic(_payload: &(dyn Any + Send), location: &str) {
+    error(format_args!("panic at {location}"));
 }
 
 fn write_record(level: Level, args: Arguments<'_>) {
