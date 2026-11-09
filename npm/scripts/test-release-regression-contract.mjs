@@ -117,9 +117,9 @@ test('both Linux ARM targets require native runners, every source feedback phase
   for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
   assert.match(alpine,/--network none/);assert.match(alpine,/--direct model probe --json/);
-  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,3);
+  assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,4);
   assert.doesNotMatch(alpine,/--check|--status/);
-  assert.match(alpine,/--runtime-internal --stop --json/);
+  assert.match(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
   assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model probe'),'mounted CPU artifact must be checked before inference');
   assert.match(alpine,/test -z "\$\{RSRS_CORE_TEST_MODE:-\}"/);assert.doesNotMatch(alpine,/-e (?:GH_TOKEN|GITHUB_TOKEN|CORE_SDK_READ_TOKEN|RSRS_CORE_TEST_MODE)/);
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
@@ -180,7 +180,7 @@ test('both Linux ARM targets require native runners, every source feedback phase
   assert.match(probe,/test -n "\$NATIVE_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
   assert.match(probe,/native_fixture_process.py --install-published "\$exe"/);
   assert.match(probe,/probe-native-arm64-alpine.sh[^\n]+"\$RSRS_RUNTIME_BIN" "\$NATIVE_RUNTIME_SHA256" "\$NATIVE_RUNTIME_VERSION"/);
-  assert.match(alpine,/-v "\$bundle:\/runtime:ro"/);assert.match(alpine,/-e RSRS_RUNTIME_BIN=\/runtime\/rsrs-runtime/);
+  assert.match(alpine,/-v "\$bundle:\/runtime:ro"/);assert.match(alpine,/-v "\$receipt:\/runtime-selection\.json:ro"/);assert.doesNotMatch(alpine,/-e RSRS_RUNTIME_BIN=/);
   assert.match(alpine,/-e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl/);
   assert.match(alpine,/\$NATIVE_RUNTIME_SHA256  \/runtime\/rsrs-runtime/);
   assert.match(alpine,/case "\$\(\/runtime\/rsrs-runtime --version\)"/);
@@ -240,8 +240,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     const bin=path.join(root,'bin'),models=path.join(root,'models with spaces'),data=path.join(root,'host profile'),capture=path.join(root,'docker.json');
     mkdirSync(bin);mkdirSync(path.join(models,'onnx'),{recursive:true});mkdirSync(path.join(data,'models/bge-m3/onnx'),{recursive:true});
     const exe=path.join(root,'rsrs'),cached=path.join(data,'models/bge-m3/onnx/model_quantized.cpu-v1.ort'),local=path.join(models,'onnx/model_quantized.cpu-v1.ort'),custom=path.join(root,'explicit cpu.ort');
-    const bundle=path.join(root,'complete musl runtime'),runtime=path.join(bundle,'rsrs-runtime');mkdirSync(bundle);
-    writeFileSync(runtime,'fixture');writeFileSync(path.join(bundle,'core-runtime.json'),'fixture');
+    const installed=path.join(root,'complete musl runtime'),bundle=path.join(installed,'runtime','1.0.21-dev.5'),runtime=path.join(bundle,'rsrs-runtime'),receipt=path.join(installed,'runtime.json');mkdirSync(bundle,{recursive:true});
+    writeFileSync(runtime,'fixture');writeFileSync(path.join(bundle,'core-runtime.json'),'fixture');writeFileSync(receipt,'fixture');
     for(const file of [exe,cached,custom,path.join(models,'tokenizer.json'),path.join(models,'onnx/model_quantized.onnx')])writeFileSync(file,'fixture');
     const stub=(name,body)=>writeFileSync(path.join(bin,name),body,{mode:0o755});
     stub('uname','#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n');
@@ -254,7 +254,7 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     for(const [extra,selected] of [[{},cached],[{RSRS_CPU_OWNED_ORT_FILE:custom},custom]]){
       const result=run(extra);assert.equal(result.status,0,result.stderr);const args=JSON.parse(readFileSync(capture));
       assert(args.includes(selected+':/cpu-model.ort:ro'));assert(args.includes(models+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
-      assert(args.includes(bundle+':/runtime:ro'));assert(args.includes('RSRS_RUNTIME_BIN=/runtime/rsrs-runtime'));
+      assert(args.includes(bundle+':/runtime:ro'));assert(args.includes(receipt+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
       assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
