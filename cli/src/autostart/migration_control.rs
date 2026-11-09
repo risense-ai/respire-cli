@@ -142,6 +142,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
     };
     let mut finished = false;
     let mut stage = "paused_grant";
+    let mut exchange_failure = "unclassified";
     let result: Result<ResultEnvelope> = (|| {
         maintenance.auth_launch_binding(&profile)?.context("migration lost its actual Paused grant")?;
         stage = "owner_check";
@@ -164,7 +165,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         };
         // A saved sent request always queries. A timeout never admits a replacement operation.
         stage = "exchange";
-        let receipt = exchange(&takeover, &mut maintenance, &original.operation, method)?;
+        let receipt = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
         if receipt.outcome == HostMigrationOutcome::Unknown {
             stage = "encode_unknown";
             let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown"}), Vec::new());
@@ -207,12 +208,16 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             original.operation.operation_id))?;
     }
     if result.is_ok() && finished { maintenance.finish_handoff()?; }
-    result.map_err(|_| anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed; migration_stage={}", original.operation.operation_id, stage))
+    result.map_err(|_| {
+        let exchange = if stage == "exchange" { format!("; migration_exchange={exchange_failure}") } else { String::new() };
+        anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed; migration_stage={}{}", original.operation.operation_id, stage, exchange)
+    })
 }
 
 
 fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintenance,
-    original: &HostMigrationOperation, method: &str) -> Result<HostMigrationResult> {
+    original: &HostMigrationOperation, method: &str, failure: &mut &'static str) -> Result<HostMigrationResult> {
+    let mut runtime_code = None;
     let envelope = super::control::auth_exchange(takeover, maintenance,
         Instant::now() + Duration::from_secs(185), None, |binding, identity| {
             anyhow::ensure!(binding.installation_root == original.installation_root && binding.profile == original.profile
@@ -222,9 +227,53 @@ fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintena
                 method: method.to_owned(), args: vec![serde_json::to_string(&params)?], scope: None,
                 operation_id: Some(original.operation_id.clone()), idempotency_key: Some(original.key.clone()),
                 parent_operation_id: None, queue_wait_ms: None, lifecycle: None })
-        }, |response, request, profile, pid| validate_response(response, request, profile, pid, original),
-        |_| anyhow::anyhow!("private migration exchange failed; query the original operation"))?;
-    serde_json::from_value(envelope.summary).map_err(|_| anyhow::anyhow!("invalid private migration result"))
+        }, |response, request, profile, pid| {
+            runtime_code = match response.code.as_deref() {
+                Some("invalid_request") => Some("runtime_invalid_request"),
+                Some("protocol_version_mismatch") => Some("runtime_protocol_version_mismatch"),
+                Some("control_unavailable") => Some("runtime_control_unavailable"),
+                Some("auth_recovery_pending") => Some("runtime_auth_recovery_pending"),
+                Some("unauthorized") => Some("runtime_unauthorized"),
+                Some("auth_ownership_unavailable") => Some("runtime_auth_ownership_unavailable"),
+                Some("scope_mismatch") => Some("runtime_scope_mismatch"),
+                Some("migration_outcome_unknown") => Some("runtime_migration_outcome_unknown"),
+                Some("control_outcome_unknown") => Some("runtime_control_outcome_unknown"),
+                _ => None,
+            };
+            validate_response(response, request, profile, pid, original)
+        }, |error| error).map_err(|error| {
+            *failure = error.chain().find_map(|cause| match cause.to_string().as_str() {
+                "cannot start owned host control Runtime" => Some("spawn"),
+                "missing host control input pipe" | "missing host control output pipe"
+                | "host control input owner was released" | "host control request write failed" => Some("channel"),
+                "host control request frame exceeds the protocol limit" | "missing host control response frame"
+                | "invalid host control response frame size" | "incomplete host control response frame"
+                | "extra host control response bytes" => Some("frame"),
+                "invalid host control response JSON" | "invalid private migration result" => Some("encoding"),
+                "host control deadline exceeded" | "host control response deadline or channel failure"
+                | "host control response deadline exceeded" | "host control exit deadline exceeded" => Some("deadline"),
+                "host control Runtime exit does not match its response" => Some("child_exit"),
+                "migration response binding mismatch" => Some("response_binding"),
+                "migration response profile mismatch" => Some("response_profile"),
+                "private migration envelope missing" | "invalid private migration envelope" => Some("response_envelope"),
+                "migration readiness mismatch" => Some("response_readiness"),
+                "migration result changed its original operation or identity"
+                | "terminal migration receipt changed its original operation or identity" => Some("result_identity"),
+                "invalid unknown migration result" => Some("unknown_receipt"),
+                "invalid terminal migration result" | "unknown migration result is not a terminal receipt" => Some("terminal_receipt"),
+                "migration completion directory missing" | "migration completion differs from its intent"
+                | "query cannot adopt an unbound legacy receipt" => Some("terminal_details"),
+                _ => None,
+            }).unwrap_or("unclassified");
+            if *failure == "response_envelope" {
+                *failure = runtime_code.unwrap_or(*failure);
+            }
+            anyhow::anyhow!("private migration exchange failed; query the original operation")
+        })?;
+    serde_json::from_value(envelope.summary).map_err(|_| {
+        *failure = "encoding";
+        anyhow::anyhow!("invalid private migration result")
+    })
 }
 
 fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest, profile: &Path,

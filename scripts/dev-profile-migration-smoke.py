@@ -110,6 +110,16 @@ class Smoke(support.Smoke):
             stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", "\n".join(
                 error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
             self.report["cli_failure"]["migration_stage"] = stage[1] if stage and stage[1] in migration_stages else None
+            exchange_categories = ("spawn", "channel", "frame", "encoding", "deadline", "child_exit",
+                "response_binding", "response_profile", "response_envelope", "response_readiness", "result_identity",
+                "unknown_receipt", "terminal_receipt", "terminal_details", "unclassified", "runtime_invalid_request",
+                "runtime_protocol_version_mismatch", "runtime_control_unavailable", "runtime_auth_recovery_pending",
+                "runtime_unauthorized", "runtime_auth_ownership_unavailable", "runtime_scope_mismatch",
+                "runtime_migration_outcome_unknown", "runtime_control_outcome_unknown")
+            exchange = re.search(r"\bmigration_exchange=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_exchange"] = exchange[1] if stage and stage[1] == "exchange" \
+                and exchange and exchange[1] in exchange_categories else None
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),
                 ("startup_identity_changed", "runtime owner changed during startup"),
