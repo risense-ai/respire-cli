@@ -639,7 +639,7 @@ mod tests {
         assert!(matches!(auth_session_identity(&profile, hash)?,
             AuthSessionIdentity::Unbound { operation_id: id, session_sha256 }
                 if id == operation_id && session_sha256 == hash(&candidate)));
-        assert!(account_identity_source(&profile).is_err());
+        assert_eq!(account_identity_source(&profile)?, profile.display().to_string());
         for invalid in ["{}", "{", r#"{"user":null}"#, r#"{"user":""}"#] {
             fs::write(&session, invalid)?;
             assert!(auth_session_identity(&profile, hash).is_err());
