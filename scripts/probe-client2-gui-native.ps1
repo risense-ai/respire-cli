@@ -272,6 +272,42 @@ function Focus-OfflineControl($Element) {
         throw 'Offline control did not receive real target-document keyboard focus'
     }
 }
+# Only known UIA stale/disabled failures permit reacquisition; arbitrary provider
+# exceptions remain failures. Never serialize exception messages or control values.
+function Test-OfflineFocusRetryable($Exception) {
+    $current = $Exception
+    for ($depth=0; $current -and $depth -lt 4; $depth++) {
+        if ($current -is [Windows.Automation.ElementNotAvailableException] -or
+            $current -is [Windows.Automation.ElementNotEnabledException]) { return $true }
+        $current = $current.InnerException
+    }
+    return $false
+}
+function Find-FocusedOfflineButton([string]$Name) {
+    for ($attempt=0; $attempt -lt 5; $attempt++) {
+        $null = Assert-Target $true
+        # Selector traversal still proves ownership and uniqueness. Selector errors,
+        # including ambiguity, are deliberately outside the retry handler.
+        $element = Find-OfflineControl 'ControlType.Button' $Name 10
+        try {
+            $state = $element.Current
+            $report.offline.focus_readiness = @{ enabled=[bool]$state.IsEnabled
+                focusable=[bool]$state.IsKeyboardFocusable; offscreen=[bool]$state.IsOffscreen }
+            if (-not $state.IsEnabled -or -not $state.IsKeyboardFocusable -or $state.IsOffscreen) {
+                Pause-Probe
+                continue
+            }
+            Focus-OfflineControl $element
+            return $element
+        } catch {
+            if (-not (Test-OfflineFocusRetryable $_.Exception)) {
+                throw 'Offline button focus failed without a retryable UIA readiness condition'
+            }
+        }
+        Pause-Probe
+    }
+    throw 'Offline button did not become focus-ready within the bounded attempts'
+}
 function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
     $null = Assert-Target $true
     $focus = Read-TargetFocus
@@ -281,13 +317,12 @@ function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
     $null = Assert-Target $true
 }
 function Press-OfflineButton([string]$Name) {
-    $element = Find-OfflineControl 'ControlType.Button' $Name
+    $element = Find-FocusedOfflineButton $Name
     $expected = $element.GetRuntimeId() -join '.'
     $pattern = $null
     if (-not $element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         throw 'Offline button does not support the normal UIA Invoke action'
     }
-    Focus-OfflineControl $element
     $null = Assert-Target $true
     $focus = Read-TargetFocus
     if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen -or $focus.runtime_id -ne $expected) {
@@ -437,7 +472,9 @@ function Invoke-OfflineGuiAcceptance {
     Wait-OfflinePreferences 'onboardingSyncChoice' 'offline'
     $report.offline.onboarding_completed = $true
     $report.offline.onboarding_stage = 'completed'
+    $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
+    $report.offline.action_stage = 'runtime_start'
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60
     Bind-OfflineRuntime
