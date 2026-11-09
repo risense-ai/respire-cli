@@ -515,6 +515,49 @@ mod tests {
             assert!(error.contains(&format!("Runtime rejected account control ({code})")));
             assert!(!error.contains(diagnostic));
         }
+        let mut register_request = prepare_auth_account_request(binding.clone(), respire_protocol::HostAuthIdentity::Absent,
+            &operation_id, AuthAccountControl::Register { addr: "https://fixture.invalid".into(),
+                user: "fixture".into(), password: "fixture-password".into(), super_password: None })?;
+        register_request.id = request.id.clone();
+        let validate_register = |response: respire_protocol::RpcResponse<ResultEnvelope>, register| {
+            launch_authorization::control::validate_account_response(
+                response, &register_request, &binding.profile, 5252, &binding.profile, register)
+        };
+        for (head, class) in [
+            ("registration outcome unknown; query the original operation, do not resend", "register_remote_unknown"),
+            ("migration keyring write/readback failed; no snapshot was published", "register_native_credentials"),
+            ("auth idempotency conflict", "register_state_conflict"),
+            ("authorization did not return a token", "register_material_invalid"),
+            ("local key compatibility could not be verified; original data was preserved", "register_local_compatibility"),
+        ] {
+            for (private, expected) in [
+                (head.to_owned(), class),
+                (format!("{head}: {diagnostic}"), class),
+                (format!("{head}-suffix: {diagnostic}"), "register_unclassified"),
+                (format!("outer: {head}: {diagnostic}"), "register_unclassified"),
+                (format!("{head}:{diagnostic}"), "register_unclassified"),
+            ] {
+                let mut rejected = rejection("account_outcome_unknown")?;
+                rejected.error = Some(private.clone());
+                rejected.envelope.as_mut().context("account rejection fixture envelope missing")?.errors = vec![private];
+                let error = validate_register(rejected.clone(), true).err().context("register rejection was accepted")?.to_string();
+                assert_eq!(error, format!("Runtime rejected account control (account_outcome_unknown): account outcome is unknown; query the original operation without replaying; register_kind={expected}"));
+                assert!(!error.contains(diagnostic));
+                assert!(!validate_register(rejected.clone(), false).err().context("register rejection was accepted")?
+                    .to_string().contains("register_kind="));
+                assert!(!validate(rejected).err().context("result rejection was accepted")?
+                    .to_string().contains("register_kind="));
+            }
+        }
+        let error = validate_register(rejection("account_outcome_unknown")?, true)
+            .err().context("unknown register rejection was accepted")?.to_string();
+        assert!(error.ends_with("register_kind=register_unclassified"));
+        assert!(!error.contains(diagnostic));
+        for code in ["unauthorized", "scope_mismatch", "auth_ownership_unavailable", "control_unavailable", "control_outcome_unknown"] {
+            let error = validate_register(rejection(code)?, true).err().context("register rejection was accepted")?.to_string();
+            assert!(!error.contains("register_kind="));
+            assert!(!error.contains(diagnostic));
+        }
         let mut valid_rejection = serde_json::to_value(rejection("unauthorized")?)?;
         valid_rejection["scope"] = serde_json::Value::Null;
         for (pointer, value) in [
@@ -541,10 +584,22 @@ mod tests {
             ("/envelope/items/1/value", serde_json::json!("true")),
         ] {
             let mut malformed = valid_rejection.clone();
-            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value;
+            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value.clone();
             let error = validate(serde_json::from_value(malformed)?)
                 .err().context("malformed rejection was accepted")?.to_string();
             assert!(!error.contains("Runtime rejected account control"), "accepted malformed field {pointer}");
+            assert!(!error.contains(diagnostic));
+            let mut register_rejection = rejection("account_outcome_unknown")?;
+            let private = format!("auth idempotency conflict: {diagnostic}");
+            register_rejection.error = Some(private.clone());
+            register_rejection.envelope.as_mut().context("account rejection fixture envelope missing")?.errors = vec![private];
+            let mut malformed = serde_json::to_value(register_rejection)?;
+            malformed["scope"] = serde_json::Value::Null;
+            let value = if pointer == "/envelope/items/0/value" { serde_json::json!("false") } else { value };
+            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value;
+            let error = validate_register(serde_json::from_value(malformed)?, true)
+                .err().context("malformed register rejection was accepted")?.to_string();
+            assert!(!error.contains("Runtime rejected account control"), "accepted malformed register field {pointer}");
             assert!(!error.contains(diagnostic));
         }
         let mut awaiting = response.clone();
