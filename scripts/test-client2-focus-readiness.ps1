@@ -18,8 +18,21 @@ function Find-OfflineControl {
     if ($script:ambiguous) { throw 'synthetic ambiguous selector' }
     return $script:elements[[Math]::Min($script:lookups-1,$script:elements.Count-1)]
 }
-function New-SyntheticElement([bool]$Visible=$true,[bool]$Focusable=$true,[string]$Failure='') {
-    $element=[pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true;IsKeyboardFocusable=$Focusable;IsOffscreen=(-not $Visible)};Failure=$Failure}
+function New-SyntheticElement([bool]$Visible=$true,[bool]$Focusable=$true,[string]$Failure='', [string]$ScrollMode='unsupported') {
+    $element=[pscustomobject]@{Current=[pscustomobject]@{IsEnabled=$true;IsKeyboardFocusable=$Focusable;IsOffscreen=(-not $Visible)};Failure=$Failure;ScrollMode=$ScrollMode}
+    $element | Add-Member ScriptMethod TryGetCurrentPattern {
+        param($Pattern, $Result)
+        if ($Pattern -ne [Windows.Automation.ScrollItemPattern]::Pattern) { throw 'Unexpected synthetic pattern' }
+        if ($this.ScrollMode -eq 'unsupported') { return $false }
+        $scroll=[pscustomobject]@{Mode=$this.ScrollMode}
+        $scroll | Add-Member ScriptMethod ScrollIntoView {
+            $script:scrollCalls++
+            if ($this.Mode -eq 'throws') { throw 'synthetic-private-secret' }
+            if ($this.Mode -eq 'foreign') { $script:foreign=$true }
+        }
+        $Result.Value=$scroll
+        return $true
+    }
     $element | Add-Member ScriptMethod GetRuntimeId { return @(7,11) }
     $element | Add-Member ScriptMethod SetFocus {
         $script:focusCalls++
@@ -30,7 +43,7 @@ function New-SyntheticElement([bool]$Visible=$true,[bool]$Focusable=$true,[strin
     return $element
 }
 function Reset-Synthetic {
-    $script:lookups=0; $script:focusCalls=0; $script:foreign=$false; $script:ambiguous=$false
+    $script:lookups=0; $script:focusCalls=0; $script:scrollCalls=0; $script:foreign=$false; $script:ambiguous=$false
     $script:report=@{offline=@{}}
     $script:focus=@{belongs_to_target=$true;in_document=$true;runtime_id='7.11';offscreen=$false}
 }
@@ -50,11 +63,27 @@ Reset-Synthetic
 $script:elements=@((New-SyntheticElement -Failure 'stale'))
 Expect-Failure
 if ($lookups -ne 5) { throw 'Stale retry bound failed' }
-foreach ($kind in @('hidden','notfocusable')) {
+foreach ($kind in @('notfocusable')) {
     Reset-Synthetic
     $script:elements=@((New-SyntheticElement -Visible ($kind -ne 'hidden') -Focusable ($kind -ne 'notfocusable')))
     Expect-Failure
     if ($lookups -ne 5 -or $focusCalls -ne 0) { throw 'Readiness bound or focus guard failed' }
+}
+# Real scrolling is modeled only here; the production helper uses UIA itself.
+Reset-Synthetic
+$script:elements=@((New-SyntheticElement -Visible $false -ScrollMode 'normal'),(New-SyntheticElement))
+$result=Find-FocusedOfflineButton '^synthetic$'
+if ($lookups -ne 2 -or $scrollCalls -ne 1 -or $focusCalls -ne 1 -or $result -ne $elements[1]) {
+    throw 'Scrolled button was not freshly reacquired and focused'
+}
+foreach ($mode in @('unsupported','normal','throws','foreign')) {
+    Reset-Synthetic
+    $script:elements=@((New-SyntheticElement -Visible $false -ScrollMode $mode))
+    Expect-Failure
+    if ($focusCalls -ne 0) { throw 'Offscreen button received focus without visibility proof' }
+    if ($mode -eq 'normal') {
+        if ($scrollCalls -ne 2 -or $lookups -ne 3) { throw 'Ineffective scroll exceeded bounds' }
+    } elseif ($lookups -ne 1) { throw 'Unsupported/failed/foreign scroll was retried' }
 }
 foreach ($kind in @('unknown','wrongid','foreignfocus','offscreen','foreigntarget','ambiguous')) {
     Reset-Synthetic
