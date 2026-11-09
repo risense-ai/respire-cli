@@ -184,7 +184,6 @@ function Get-SafeFailureReason($Envelope) {
     foreach ($entry in @(
         @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
         @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
-        @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown'),
         @('auth control response identity mismatch', 'auth_response_identity_mismatch'),
         @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
         @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
@@ -200,7 +199,8 @@ function Get-SafeFailureReason($Envelope) {
         @('TLS|certificate', 'tls'),
         @('DNS|resolve', 'dns'),
         @('connect|timeout|transport', 'transport'),
-        @('runtime.*token|runtime.*auth', 'runtime_auth')
+        @('runtime.*token|runtime.*auth', 'runtime_auth'),
+        @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown')
     )) {
         if ($message -match $entry[0]) { return $entry[1] }
     }
