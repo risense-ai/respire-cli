@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$BindingPath,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [switch]$OfflineAcceptance
+    [switch]$OfflineAcceptance,
+    [switch]$SourceCandidateStability
 )
 $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
@@ -373,7 +374,8 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
     $clock = [Diagnostics.Stopwatch]::StartNew()
     do {
         $null = Assert-Target $true
-        $window = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$binding.hwnd)
+        $window = Get-OfflineReplacementRoot
+        $walker = Get-OfflineReplacementWalker
         $queue = [Collections.Generic.Queue[object]]::new()
         $queue.Enqueue(@{element=$window; depth=0; document=$false})
         $found = [Collections.Generic.List[object]]::new(); $visited = 0
@@ -391,13 +393,13 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
             if ($document -and $current.ControlType.ProgrammaticName -eq $Type -and
                 $current.Name -match $Name -and ($AllowAbsent -or $current.IsEnabled)) { $found.Add($next.element) }
             if ($next.depth -lt 32) {
-                $child = [Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($next.element)
+                $child = $walker.GetFirstChild($next.element)
                 while ($child -and $visited + $queue.Count -lt 512 -and $walk.Elapsed.TotalSeconds -lt 5) {
                     $queue.Enqueue(@{element=$child; depth=$next.depth+1; document=$document})
-                    $child = [Windows.Automation.TreeWalker]::ControlViewWalker.GetNextSibling($child)
+                    $child = $walker.GetNextSibling($child)
                 }
                 if ($child) { throw 'Offline selector traversal truncated before uniqueness could be established' }
-            } elseif ([Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($next.element)) {
+            } elseif ($walker.GetFirstChild($next.element)) {
                 throw 'Offline selector depth limit prevents uniqueness verification'
             }
         }
@@ -575,11 +577,12 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
     if ($controlType -isnot [Windows.Automation.ControlType] -or $controlType -ne [Windows.Automation.ControlType]::Button) { return $false }
     $nodeName = $current.Name
     if ($nodeName -isnot [string]) { return $false }
+    $enabled=$current.IsEnabled; $focusable=$current.IsKeyboardFocusable; $offscreen=$current.IsOffscreen
     if (($candidate.GetRuntimeId() -join '.') -cne $candidateId -or
         $nodeName -notmatch $Name -or
-        $current.IsEnabled -isnot [bool] -or -not $current.IsEnabled -or
-        $current.IsKeyboardFocusable -isnot [bool] -or -not $current.IsKeyboardFocusable -or
-        $current.IsOffscreen -isnot [bool] -or $current.IsOffscreen) { return $false }
+        $enabled -isnot [bool] -or -not $enabled -or
+        $focusable -isnot [bool] -or -not $focusable -or
+        $offscreen -isnot [bool] -or $offscreen) { return $false }
     foreach ($knownPid in $ids) { Assert-DocumentNodeIdentity $knownPid $identities }
     return ($walk.Elapsed.TotalSeconds -lt 5 -and $AttemptClock.Elapsed.TotalSeconds -lt $Seconds)
     } finally { foreach ($process in $held) { $process.Dispose() } }
@@ -652,8 +655,136 @@ function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
     if ([RespireNativeInput]::Key([IntPtr][long]$binding.hwnd, [uint16]$Key) -ne 2) { throw 'Offline SendInput key was rejected' }
     $null = Assert-Target $true
 }
-function Press-OfflineButton([string]$Name) {
+function New-AccountStabilityClock { return [Diagnostics.Stopwatch]::StartNew() }
+function Pause-AccountStability { Start-Sleep -Milliseconds 100 }
+function Read-AccountStabilityButton([string]$Name, $Identities, $WindowClock) {
+    $null=Assert-Target $true
+    $window=Get-OfflineReplacementRoot; $walker=Get-OfflineReplacementWalker
+    $walk=[Diagnostics.Stopwatch]::StartNew()
+    $queue=[Collections.Generic.Queue[object]]::new(); $queue.Enqueue(@{element=$window;depth=0;document=$false})
+    $visited=0; $found=$null; $foundId=''; $buttonCount=0
+    while ($queue.Count -gt 0) {
+        if ($visited -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability traversal exceeded its bound' }
+        $next=$queue.Dequeue(); $visited++
+        $current=$next.element.Current; $nodePid=[int]$current.ProcessId
+        if (-not $ownedIds.Contains($nodePid)) { throw 'Candidate stability process left the bound tree' }
+        Assert-DocumentNodeIdentity $nodePid $Identities
+        $type=$current.ControlType
+        if ($type -isnot [Windows.Automation.ControlType]) { throw 'Candidate stability control type unavailable' }
+        $document=$next.document -or $type -eq [Windows.Automation.ControlType]::Document
+        if ($document -and $type -eq [Windows.Automation.ControlType]::Button) {
+            $nodeName=$current.Name
+            if ($nodeName -isnot [string]) { throw 'Candidate stability button name unavailable' }
+            if ($nodeName -match $Name) {
+                $buttonCount++
+                if ($buttonCount -gt 1) { throw 'Candidate stability selector is ambiguous' }
+                $parts=@($next.element.GetRuntimeId())
+                if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'Candidate stability RuntimeId unavailable' }
+                $enabled=$current.IsEnabled; $focusable=$current.IsKeyboardFocusable; $offscreen=$current.IsOffscreen
+                if ($enabled -isnot [bool] -or -not $enabled -or
+                    $focusable -isnot [bool] -or -not $focusable -or
+                    $offscreen -isnot [bool] -or $offscreen) { throw 'Candidate stability button is not focus-ready' }
+                $found=$next.element; $foundId=$parts -join '.'
+            }
+        }
+        $child=$walker.GetFirstChild($next.element)
+        if ($child -and $next.depth -ge 32) { throw 'Candidate stability depth bound reached' }
+        while ($child) {
+            if ($visited+$queue.Count -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability traversal exceeded its bound' }
+            $queue.Enqueue(@{element=$child;depth=$next.depth+1;document=$document})
+            $child=$walker.GetNextSibling($child)
+        }
+    }
+    if ($buttonCount -ne 1 -or $walk.Elapsed.TotalSeconds -ge 5 -or $WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability unique button unavailable' }
+    foreach ($id in $Identities.Keys) { Assert-DocumentNodeIdentity ([int]$id) $Identities }
+    return @{element=$found;runtime_id=$foundId}
+}
+function Get-AccountStabilityFocusedElement { return [Windows.Automation.AutomationElement]::FocusedElement }
+function Get-AccountStabilityRawWalker { return [Windows.Automation.TreeWalker]::RawViewWalker }
+function Read-AccountStabilityFocus($Identities, $WindowClock) {
+    if ($WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability focus observation exceeded its bound' }
+    $null=Assert-Target $true
+    $window=Get-OfflineReplacementRoot
+    $rootPid=[int]$window.Current.ProcessId
+    if (-not $ownedIds.Contains($rootPid)) { throw 'Candidate stability root is foreign' }
+    Assert-DocumentNodeIdentity $rootPid $Identities
+    $rootParts=@($window.GetRuntimeId())
+    if ($rootParts.Count -eq 0 -or @($rootParts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'Candidate stability root identity unavailable' }
+    $rootId=$rootParts -join '.'
+    $element=Get-AccountStabilityFocusedElement
+    if ($null -eq $element) { throw 'Candidate stability has no focused element' }
+    $walker=Get-AccountStabilityRawWalker
+    $focusedId=''; $offscreen=$null; $inDocument=$false; $belongs=$false
+    for ($depth=0; $null -ne $element -and $depth -lt 32; $depth++) {
+        if ($WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability focus observation exceeded its bound' }
+        # Only PID is read before the held lifetime is verified. No Name, Value,
+        # AutomationId or ClassName is read anywhere in this focus observer.
+        $current=$element.Current; $nodePid=[int]$current.ProcessId
+        if (-not $ownedIds.Contains($nodePid)) { throw 'Candidate stability focused ancestry is foreign' }
+        Assert-DocumentNodeIdentity $nodePid $Identities
+        $parts=@($element.GetRuntimeId())
+        if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'Candidate stability focused identity unavailable' }
+        $id=$parts -join '.'
+        if ($depth -eq 0) {
+            $focusedId=$id; $offscreen=$current.IsOffscreen
+            if ($offscreen -isnot [bool]) { throw 'Candidate stability focused visibility unavailable' }
+        }
+        $type=$current.ControlType
+        if ($type -isnot [Windows.Automation.ControlType]) { throw 'Candidate stability focused control type unavailable' }
+        if ($type -eq [Windows.Automation.ControlType]::Document) { $inDocument=$true }
+        if ($id -ceq $rootId) { $belongs=$true; break }
+        $element=$walker.GetParent($element)
+    }
+    if (-not $belongs -or -not $inDocument) { throw 'Candidate stability focus is outside the original document' }
+    foreach ($id in $Identities.Keys) { Assert-DocumentNodeIdentity ([int]$id) $Identities }
+    if ($WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability focus observation exceeded its bound' }
+    return @{runtime_id=$focusedId;belongs_to_target=$belongs;in_document=$inDocument;offscreen=$offscreen}
+}
+function Assert-AccountFocusStable($Element, [string]$Name) {
+    $observation=@{status='observing';requested_seconds=10;completed_poll_count='not-observed';observations=0
+        scope='source-candidate timed UI stability only';pending_error_cancel='not-evaluated'}
+    $report.offline.account_focus_stability=$observation
+    $parts=@($Element.GetRuntimeId())
+    if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'Candidate initial RuntimeId unavailable' }
+    $expected=$parts -join '.'
+    $clock=New-AccountStabilityClock
+    $observedStart=$null
+    $held=[Collections.Generic.List[object]]::new(); $identities=@{}
+    try {
+        $null=Assert-Target $true
+        foreach ($id in $ownedIds) {
+            if ($clock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability identity acquisition exceeded its bound' }
+            $process=Get-Process -Id $id -ErrorAction Stop; $held.Add($process)
+            Assert-DocumentProcessHandle $process
+            $identities[[int]$id]=@{process=$process;birth=$process.StartTime.ToUniversalTime().Ticks;session=$process.SessionId;image=$process.Path}
+        }
+        $null=Assert-Target $true
+        foreach ($id in $identities.Keys) {
+            if (-not $ownedIds.Contains([int]$id)) { throw 'Candidate stability initial ancestry changed' }
+            Assert-DocumentNodeIdentity ([int]$id) $identities
+        }
+        do {
+            $button=Read-AccountStabilityButton $Name $identities $clock
+            if ($button.runtime_id -cne $expected) { throw 'Candidate account button was replaced during stability window' }
+            $null=Assert-Target $true
+            $focus=Read-AccountStabilityFocus $identities $clock
+            if ($focus.belongs_to_target -isnot [bool] -or -not $focus.belongs_to_target -or
+                $focus.in_document -isnot [bool] -or -not $focus.in_document -or
+                $focus.offscreen -isnot [bool] -or $focus.offscreen -or $focus.runtime_id -cne $expected) { throw 'Candidate account focus changed during stability window' }
+            foreach ($id in $identities.Keys) { Assert-DocumentNodeIdentity ([int]$id) $identities }
+            if ($clock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability observation exceeded its bound' }
+            if ($null -eq $observedStart) { $observedStart=$clock.Elapsed.TotalSeconds }
+            $observation.observations++
+            if ($clock.Elapsed.TotalSeconds-$observedStart -ge 10) { break }
+            Pause-AccountStability
+        } while ($true)
+        $observation.status='timed-window-passed'; $observation.elapsed_ms=$clock.Elapsed.TotalMilliseconds
+        $observation.observed_window_ms=($clock.Elapsed.TotalSeconds-$observedStart)*1000
+    } finally { foreach ($process in $held) { $process.Dispose() } }
+}
+function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability) {
     $element = Find-FocusedOfflineButton $Name
+    if ($VerifySourceStability) { Assert-AccountFocusStable $element $Name }
     $expected = $element.GetRuntimeId() -join '.'
     $pattern = $null
     if (-not $element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
@@ -781,6 +912,11 @@ function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
     $body = Find-OfflineControl 'ControlType.Text' ([regex]::Escape($Content))
     if ($body.Current.IsOffscreen) { throw 'Synthetic memory body is present in UIA but not visible' }
 }
+function Get-OfflineDiaryNavigationPattern {
+    # Default Latin-digit locale counts: zero or comma-grouped positive integers.
+    # Other separators/digit scripts remain unproven and fail closed.
+    return ('\A' + [regex]::Unescape('\u65e5\u8bb0') + '(?: (?:0|[1-9][0-9]{0,2}(?:,[0-9]{3})*))?\z')
+}
 function Assert-OfflineDiaryReader([string]$Title, [string]$Content) {
     # Only the exact synthetic diary dialog is readable, never arbitrary Edit values.
     Wait-OfflineRecoveryDismissed
@@ -862,7 +998,7 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.action_stage = 'account_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8d26\u6237\u4e0e\u7a7a\u95f4\u0024'))
     $report.offline.action_stage = 'offline_initialization'
-    Press-OfflineButton ([regex]::Unescape('\u005e\u521d\u59cb\u5316\u79bb\u7ebf\u8bb0\u5fc6\u5e93\u0024'))
+    Press-OfflineButton ([regex]::Unescape('\u005e\u521d\u59cb\u5316\u79bb\u7ebf\u8bb0\u5fc6\u5e93\u0024')) -VerifySourceStability:$SourceCandidateStability
     $report.offline.action_stage = 'key_generation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u521b\u5efa\u672c\u673a\u5bc6\u94a5\u0024'))
     # Never read arbitrary tree nodes/values, capture a screenshot, copy or archive recovery material.
@@ -903,7 +1039,8 @@ function Invoke-OfflineGuiAcceptance {
     $days = @($diary.details | ForEach-Object { Convert-OfflineEntry $_ } | Where-Object { $_.importance -eq 'trivial' -and $_.content -like ('*'+$diaryContent+'*') })
     if ($days.Count -ne 1) { throw 'Trivial UI write did not appear exactly once in the real diary' }
     if ($days[0].title -cne ($marker + '-diary')) { throw 'Diary title differs from the explicit synthetic UI write' }
-    Press-OfflineButton ([regex]::Unescape('\u005e\u65e5\u8bb0\u0024'))
+    $report.offline.action_stage = 'diary_navigation'
+    Press-OfflineButton (Get-OfflineDiaryNavigationPattern)
     $report.offline.action_stage = 'diary_select_saved_day'
     Press-OfflineButton ('^' + [regex]::Escape($days[0].title) + '$')
     $report.offline.action_stage = 'diary_saved_reader'
@@ -942,6 +1079,11 @@ function Invoke-OfflineGuiAcceptance {
 try {
     if ($PSVersionTable.PSVersion.Major -ne 5 -or $PSVersionTable.PSVersion.Minor -ne 1 -or -not [Environment]::Is64BitProcess) { throw 'Require the system 64-bit Windows PowerShell 5.1 helper' }
     $binding = Get-Content -Raw -LiteralPath $BindingPath | ConvertFrom-Json
+    if ($SourceCandidateStability) {
+        if (-not $OfflineAcceptance -or $binding.fixture_mode -cne 'source-client2-ui-candidate' -or
+            $binding.source_commit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Candidate stability requires an explicit source binding and offline subset' }
+        $report.fixture_mode='source-client2-ui-candidate'
+    } elseif ($binding.fixture_mode -eq 'source-client2-ui-candidate') { throw 'Candidate source binding requires stability verification' }
     if ($binding.full_gui_acceptance -ne 'not-evaluated' -or $binding.g1_passed -ne $false -or
         (Get-Process -Id $PID).SessionId -ne $binding.session_id) { throw 'Invalid isolated native binding/session' }
     if ((Get-FileHash -LiteralPath $binding.exe -Algorithm SHA256).Hash.ToLowerInvariant() -ne $binding.exe_sha256) { throw 'Original EXE bytes changed' }

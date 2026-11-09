@@ -271,3 +271,7 @@ Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
 & (Join-Path $PSScriptRoot 'test-client2-document-descendants.ps1')
 
 & (Join-Path $PSScriptRoot 'test-client2-focus-replacement.ps1')
+& (Join-Path $PSScriptRoot 'test-client2-source-candidate-binding.ps1')
+& (Join-Path $PSScriptRoot 'test-client2-account-focus-stability.ps1')
+
+& (Join-Path $PSScriptRoot 'test-client2-diary-navigation.ps1')

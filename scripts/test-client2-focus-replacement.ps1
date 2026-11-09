@@ -145,6 +145,24 @@ foreach ($field in @('ControlType','Name')) {
         if (($report | ConvertTo-Json -Depth 8) -match 'synthetic-private-secret') { throw 'Unreadable node detail escaped' }
     }
 }
+# Each final-candidate state getter is sampled once, never type-checked then reread.
+foreach ($field in @('IsEnabled','IsKeyboardFocusable','IsOffscreen')) {
+    foreach ($fault in @('second_throw','first_throw','null','wrong_type')) {
+        Reset-Proof
+        $script:stateReads=0; $script:stateField=$field; $script:stateFault=$fault
+        $button.Current.PSObject.Properties.Remove($field)
+        $button.Current | Add-Member ScriptProperty $field {
+            $script:stateReads++
+            if ($script:stateFault -eq 'first_throw' -or ($script:stateFault -eq 'second_throw' -and $script:stateReads -gt 1)) { throw 'synthetic-private-secret' }
+            if ($script:stateFault -eq 'null') { return $null }
+            if ($script:stateFault -eq 'wrong_type') { return 'false' }
+            return ($script:stateField -ne 'IsOffscreen')
+        }
+        $accepted=$false
+        try { $accepted=Test-OfflineButtonReplacement '^synthetic$' '9' ([Diagnostics.Stopwatch]::StartNew()) } catch {}
+        if ($accepted -ne ($fault -eq 'second_throw') -or $stateReads -ne 1 -or $disposed -ne $acquired -or $focusCalls -ne 0) { throw 'Replacement state getter was reread or unknown state accepted' }
+    }
+}
 # The real caller can reacquire only after the complete proof, before any effect.
 Reset-Proof
 $result=Find-FocusedOfflineButton '^synthetic$'
