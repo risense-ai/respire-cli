@@ -75,7 +75,8 @@ class UpgradeProfileTest(unittest.TestCase):
                 select_upgrade_sources(sources, self.target, "critical")
 
     def run_fixture(self, profile=None, missing_latest=False, registry=None, empty_checks=False,
-                    checks_transform=None, standalone=False, standalone_mode="published-assets"):
+                    checks_transform=None, standalone=False, standalone_mode="published-assets",
+                    cache_draft=False, download_only=False, corrupt_draft=False):
         # Execute the real orchestration with local artifact bytes and a fake upgrade child.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -93,6 +94,7 @@ class UpgradeProfileTest(unittest.TestCase):
                         for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045"]]
             releases[-1]["prerelease"] = True
             releases.append(self.release("v1.0.10", draft=True))
+            releases[-1]["id"] = 403872621
             files = {}
             for release in releases:
                 tag = release["tag_name"]
@@ -107,6 +109,7 @@ class UpgradeProfileTest(unittest.TestCase):
                 if command[0] == "npm":
                     return json.dumps(registry if registry is not None else ["1.0.12", "1.0.18"])
                 if command[-1].endswith("/403872621"):
+                    self.assertFalse(cache_draft, "cached draft must not require authenticated metadata access")
                     return json.dumps(releases[-1])
                 return json.dumps(releases)
             upgraded = []
@@ -123,6 +126,7 @@ class UpgradeProfileTest(unittest.TestCase):
                             if source == tag:
                                 (folder / name).write_bytes(value)
                 else:
+                    self.assertFalse(download_only, "download-only must never execute a product fixture")
                     if standalone:
                         self.assertEqual(command[command.index("--runtime-binary") + 1], str(runtime))
                         self.assertEqual(command[command.index("--runtime-sha256") + 1], runtime_digest)
@@ -156,6 +160,19 @@ class UpgradeProfileTest(unittest.TestCase):
                     "--output-dir", str(root / "reports")]
             if profile is not None:
                 argv += ["--profile", profile]
+            if cache_draft:
+                folder = root / "reports" / "v1.0.10"
+                folder.mkdir(parents=True)
+                (folder.parent / "draft-baseline.json").write_text(json.dumps(releases[-1]), encoding="utf-8")
+                for (tag, name), value in files.items():
+                    if tag == "v1.0.10":
+                        (folder / name).write_bytes(value)
+                if corrupt_draft:
+                    (folder / f"rsrs-{self.target}").write_bytes(b"corrupt cached seed")
+                argv += ["--draft-baseline-cache", str(folder.parent)]
+            if download_only:
+                argv = [argv[0], "--download-only", "--target", self.target,
+                        "--output-dir", str(root / "reports")]
             env = {key: value for key, value in os.environ.items()
                    if key not in ("RSRS_RUNTIME_BIN", "RSRS_ARTIFACT_SOURCE")
                    and not key.startswith("RSRS_PUBLISHED_")}
@@ -171,11 +188,17 @@ class UpgradeProfileTest(unittest.TestCase):
             with patch.object(sys, "argv", argv), patch("shutil.which", side_effect=lambda name: name), \
                     patch("subprocess.check_output", side_effect=output), patch("subprocess.run", side_effect=run), \
                     patch.dict(os.environ, env, clear=True):
-                if missing_latest or registry is not None or empty_checks or checks_transform is not None:
+                if missing_latest or registry is not None or empty_checks or checks_transform is not None or corrupt_draft:
                     with self.assertRaises((ValueError, AssertionError)):
                         runpy.run_path(str(Path(__file__).with_name("test-published-upgrades.py")), run_name="__main__")
                 else:
-                    runpy.run_path(str(Path(__file__).with_name("test-published-upgrades.py")), run_name="__main__")
+                    if download_only:
+                        with self.assertRaises(SystemExit) as exited:
+                            runpy.run_path(str(Path(__file__).with_name("test-published-upgrades.py")), run_name="__main__")
+                        self.assertEqual(exited.exception.code, 0)
+                        self.assertEqual(json.loads((root / "reports/draft-baseline.json").read_text()), releases[-1])
+                    else:
+                        runpy.run_path(str(Path(__file__).with_name("test-published-upgrades.py")), run_name="__main__")
             report = root / "reports/published-upgrades.json"
             return upgraded, json.loads(report.read_text()) if report.exists() else None
 
@@ -196,6 +219,14 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
+        cached_upgrades, cached_report = self.run_fixture(cache_draft=True)
+        self.assertEqual(set(cached_upgrades), set(upgraded))
+        self.assertTrue(cached_report["all_published_sources_covered"])
+        failed_upgrades, failed_report = self.run_fixture(cache_draft=True, corrupt_draft=True)
+        self.assertNotIn("v1.0.10", failed_upgrades)
+        self.assertFalse(failed_report["passed"])
+        downloaded_upgrades, _ = self.run_fixture(download_only=True)
+        self.assertEqual(downloaded_upgrades, [])
 
     def test_critical_missing_latest_fails_without_running_older(self):
         upgraded, report = self.run_fixture("critical", missing_latest=True)
