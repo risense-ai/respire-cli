@@ -42,9 +42,11 @@ function Assert-Target([bool]$RequireForeground = $false) {
 
 function Element-Info($Element) {
     $current = $Element.Current
+    # UIA may expose an unnamed transient node; diagnostic names are optional.
+    $name = if ($current.IsPassword) { '' } else { [string]$current.Name }
     return @{ runtime_id = ($Element.GetRuntimeId() -join '.'); process_id = $current.ProcessId
         control_type = $current.ControlType.ProgrammaticName; automation_id = $current.AutomationId
-        class_name = $current.ClassName; name = $(if ($current.IsPassword) { '' } else { $current.Name.Substring(0, [Math]::Min(128, $current.Name.Length)) })
+        class_name = $current.ClassName; name = $name.Substring(0, [Math]::Min(128, $name.Length))
         keyboard_focusable = $current.IsKeyboardFocusable; offscreen = $current.IsOffscreen }
 }
 
@@ -88,19 +90,25 @@ function Wait-TargetDocument([double]$Seconds = 15) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $attempts = [Collections.Generic.List[object]]::new()
     while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
+        $report.document_readiness_phase = 'target_guard'
         $null = Assert-Target $true
+        $report.document_readiness_phase = 'read_tree'
         $tree = Read-TargetTree
         $report.accessibility_tree = $tree
+        $report.document_readiness_phase = 'record_tree'
         $attempts.Add(@{ document_count=$tree.document_count; focusable_count=$tree.focusable_count
             traversal_complete=$tree.traversal_complete; truncation_reasons=$tree.truncation_reasons; elapsed_ms=$tree.elapsed_ms })
         $report.document_readiness = @{ attempts=@($attempts.ToArray()); budget_seconds=$Seconds
             elapsed_ms=$clock.ElapsedMilliseconds; ready=$false }
         if ($tree.document_count -ge 1 -and $tree.focusable_count -ge 1) {
             $report.document_readiness.ready = $true
+            $report.document_readiness_phase = 'ready'
             return
         }
+        $report.document_readiness_phase = 'wait_document'
         Pause-Probe
     }
+    $report.document_readiness_phase = 'budget_exhausted'
     throw 'Original WebView UIA Document/focusable controls not observed within readiness budget; inspect traversal truncation reasons'
 }
 
