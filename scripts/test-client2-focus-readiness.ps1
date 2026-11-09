@@ -9,9 +9,9 @@ foreach ($name in @('Focus-OfflineControl','Test-OfflineFocusRetryable','Find-Fo
     if ($nodes.Count -ne 1) { throw 'Missing unique policy function' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
 }
-function Assert-Target { param($Foreground) $script:guardCalls++; if ($script:foreign) { throw 'synthetic foreign target' } }
+function Assert-Target { param($Foreground) $script:guardCalls++; if ($script:foreign -or $script:guardCalls -eq $script:failGuard) { throw 'synthetic foreign target' } }
 function Pause-Probe {}
-function Read-TargetFocus { $script:focusReads++; return $script:focus }
+function Read-TargetFocus { $script:focusReads++; if ($script:failRead) { throw 'synthetic-private-secret' }; return $script:focus }
 function Find-OfflineControl {
     param($Type,$Name,$Seconds)
     $script:lookups++
@@ -33,7 +33,7 @@ function New-SyntheticElement([bool]$Visible=$true,[bool]$Focusable=$true,[strin
         $Result.Value=$scroll
         return $true
     }
-    $element | Add-Member ScriptMethod GetRuntimeId { return @(7,11) }
+    $element | Add-Member ScriptMethod GetRuntimeId { if ($this.Failure -eq 'runtimeid') { throw 'synthetic-private-secret' }; return @(7,11) }
     $element | Add-Member ScriptMethod SetFocus {
         $script:focusCalls++
         if ($this.Failure -eq 'stale') { throw [Windows.Automation.ElementNotAvailableException]::new() }
@@ -44,6 +44,7 @@ function New-SyntheticElement([bool]$Visible=$true,[bool]$Focusable=$true,[strin
 }
 function Reset-Synthetic {
     $script:guardCalls=0; $script:focusReads=0; $script:lookups=0; $script:focusCalls=0; $script:scrollCalls=0; $script:foreign=$false; $script:ambiguous=$false
+    $script:failGuard=0; $script:failRead=$false
     $script:report=@{offline=@{}}
     $script:focus=@{belongs_to_target=$true;in_document=$true;runtime_id='7.11';offscreen=$false}
 }
@@ -111,6 +112,35 @@ foreach ($kind in @('unknown','wrongid','foreignfocus','offscreen','foreigntarge
     }
     if ($lookups -gt 1) { throw 'Non-readiness failure was retried' }
 }
+# Exercise every failing focus phase without retrying or exposing exception text.
+foreach ($phase in @('target_before','expected_id','set_focus','target_after','read_focus','match_focus')) {
+    Reset-Synthetic
+    $failure = switch ($phase) { 'set_focus' {'unknown'} 'expected_id' {'runtimeid'} default {''} }
+    $script:elements=@((New-SyntheticElement -Failure $failure))
+    switch ($phase) {
+        'target_before' { $script:failGuard=2; $guards=2; $calls=0; $reads=0 }
+        'expected_id' { $guards=2; $calls=0; $reads=0 }
+        'set_focus' { $guards=2; $calls=1; $reads=0 }
+        'target_after' { $script:failGuard=3; $guards=3; $calls=1; $reads=0 }
+        'read_focus' { $script:failRead=$true; $guards=3; $calls=1; $reads=1 }
+        'match_focus' { $script:focus.runtime_id='wrong'; $guards=3; $calls=1; $reads=1 }
+    }
+    Expect-Failure $unretryableFailure $guards 1 $calls $reads
+    $d=$report.offline.focus_diagnostic
+    $kind=if ($phase -eq 'match_focus') {'focus_mismatch'} else {'other_exception'}
+    if ($d.phase -cne $phase -or $d.kind -cne $kind) { throw 'Focus diagnostic phase/class mismatch' }
+    if ($phase -eq 'match_focus') {
+        if (-not $d.observed.belongs_to_target -or -not $d.observed.in_document -or
+            $d.observed.expected_id_match -or $d.observed.offscreen -or $d.observed.Count -ne 4) { throw 'Focus diagnostic predicates mismatch' }
+    } elseif ($d.ContainsKey('observed')) { throw 'Focus evidence recorded before it was observed' }
+}
+foreach ($failure in @('stale','disabled')) {
+    Reset-Synthetic
+    $script:elements=@((New-SyntheticElement -Failure $failure))
+    Expect-Failure $boundedFailure 10 5 5 0
+    if ($report.offline.focus_diagnostic.phase -cne 'set_focus' -or
+        $report.offline.focus_diagnostic.kind -cne $failure) { throw 'Known readiness classification changed' }
+}
 # No raw exception, selector, UI value or identity is stored by readiness diagnostics.
 if (($report | ConvertTo-Json -Depth 8) -match 'synthetic-private-secret') { throw 'Private diagnostic escaped' }
 Write-Host 'PASS: synthetic focus readiness policy; real GUI acceptance remains required'
@@ -131,6 +161,7 @@ function Find-OfflineControl {
     return $null
 }
 foreach ($mode in @('absent','edit','title','ambiguous')) {
+    $script:failGuard=0; $script:failRead=$false
     $script:report=@{offline=@{}}; $script:recoveryMode=$mode; $script:recoveryQueries=0
     $failure=$null
     try { Wait-OfflineRecoveryDismissed } catch { $failure=$_.Exception.Message }
@@ -151,6 +182,7 @@ foreach ($inputCase in @(
     @{value=@($true); expected='Offline status local-key flag is missing or not boolean'},
     @{value=@{secret='synthetic-private-secret'}; expected='Offline status local-key flag is missing or not boolean'}
 )) {
+    $script:failGuard=0; $script:failRead=$false
     $script:report=@{offline=@{}}; $failure=$null
     $envelope=[pscustomobject]@{summary=[pscustomobject]@{session=[pscustomobject]@{has_local_keys=$inputCase.value; secret='synthetic-private-secret'}}}
     try { Assert-OfflineLocalKeys $envelope } catch { $failure=$_.Exception.Message }

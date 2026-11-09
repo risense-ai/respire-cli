@@ -264,13 +264,40 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
 }
 
 function Focus-OfflineControl($Element) {
-    $null = Assert-Target $true
-    $expected = $Element.GetRuntimeId() -join '.'
-    $Element.SetFocus()
-    $null = Assert-Target $true
-    $focus = Read-TargetFocus
-    if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.runtime_id -ne $expected -or $focus.offscreen) {
-        throw 'Offline control did not receive real target-document keyboard focus'
+    $diagnostic = @{phase='target_before'; kind='pending'}
+    $report.offline.focus_diagnostic = $diagnostic
+    try {
+        $null = Assert-Target $true
+        $diagnostic.phase = 'expected_id'
+        $expected = $Element.GetRuntimeId() -join '.'
+        $diagnostic.phase = 'set_focus'
+        $Element.SetFocus()
+        $diagnostic.phase = 'target_after'
+        $null = Assert-Target $true
+        $diagnostic.phase = 'read_focus'
+        $focus = Read-TargetFocus
+        $diagnostic.phase = 'match_focus'
+        $diagnostic.observed = @{belongs_to_target=[bool]$focus.belongs_to_target
+            in_document=[bool]$focus.in_document; expected_id_match=($focus.runtime_id -eq $expected)
+            offscreen=[bool]$focus.offscreen}
+        if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.runtime_id -ne $expected -or $focus.offscreen) {
+            $diagnostic.kind = 'focus_mismatch'
+            throw 'Offline control did not receive real target-document keyboard focus'
+        }
+        $diagnostic.kind = 'verified'
+    } catch {
+        # Closed categories only. Preserve the original exception for the existing
+        # stale/disabled retry policy, never serialize its message or UI properties.
+        if ($diagnostic.kind -ne 'focus_mismatch') {
+            $diagnostic.kind = 'other_exception'
+            $current = $_.Exception
+            for ($depth=0; $current -and $depth -lt 4; $depth++) {
+                if ($current -is [Windows.Automation.ElementNotAvailableException]) { $diagnostic.kind='stale'; break }
+                if ($current -is [Windows.Automation.ElementNotEnabledException]) { $diagnostic.kind='disabled'; break }
+                $current = $current.InnerException
+            }
+        }
+        throw
     }
 }
 # Only known UIA stale/disabled failures permit reacquisition; arbitrary provider
@@ -287,6 +314,7 @@ function Test-OfflineFocusRetryable($Exception) {
 function Find-FocusedOfflineButton([string]$Name) {
     $scrollAttempts = 0
     for ($attempt=0; $attempt -lt 5; $attempt++) {
+        $report.offline.focus_diagnostic = $null
         $null = Assert-Target $true
         # Selector traversal still proves ownership and uniqueness. Selector errors,
         # including ambiguity, are deliberately outside the retry handler.
