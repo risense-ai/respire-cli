@@ -1329,6 +1329,28 @@ jobs:
           CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
         run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$COMMANDS_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$INTEGRATION_RESULT" = skipped; else test "$INTEGRATION_RESULT" = success; fi; } && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
 
+  native-fixture-contracts:
+    # Isolated Python-only checks; full native Runtime acceptance remains required.
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --only-binary=:all: psutil==7.1.0
+      - name: Verify inspector failures, deadlines and owned-process cleanup
+        run: python scripts/test-native-fixture-process.py --output-dir "${{ runner.temp }}/native-fixture-contracts"
+
   contract-checks:
     # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK
     # execution. Keep their own runner and fail the same whole CI workflow.
