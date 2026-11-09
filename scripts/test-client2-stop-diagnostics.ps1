@@ -8,11 +8,14 @@ $press=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.Function
 $accept=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-OfflineGuiAcceptance'},$true))
 if ($press.Count -ne 1 -or $accept.Count -ne 1) { throw 'Stop diagnostic source functions missing' }
 . ([scriptblock]::Create($press[0].Extent.Text))
+$prepare=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Prepare-OfflineButtonInvoke'},$true))
+if ($prepare.Count -ne 1) { throw 'Stop preparation function missing' }
+. ([scriptblock]::Create($prepare[0].Extent.Text))
 function Record-Step([string]$Name) {
     $script:calls.Add($Name)
     if ($script:fail -ceq $Name -or ($script:fail -ceq 'post_guard' -and $Name -ceq 'guard' -and @($script:calls | Where-Object { $_ -ceq 'guard' }).Count -eq 2)) { throw 'Synthetic observation failure' }
 }
-function Find-FocusedOfflineButton { param($Name) Record-Step 'select'; return $script:element }
+function Find-FocusedOfflineButton { param($Name,[switch]$PrepareInvoke,$DiagnosticStage) Record-Step 'select'; if ($PrepareInvoke) { $evidence=$null; $diag=@{}; if ($DiagnosticStage) { $diag.DiagnosticStage=$DiagnosticStage }; return (Prepare-OfflineButtonInvoke $script:element ([ref]$evidence) @diag) }; return $script:element }
 function Assert-Target { param($Foreground) Record-Step 'guard' }
 function Read-TargetFocus { Record-Step 'focus'; return @{belongs_to_target=$true;in_document=$true;offscreen=$false;runtime_id='7'} }
 function Assert-AccountFocusStable { throw 'Stop diagnostics unexpectedly requested stability' }

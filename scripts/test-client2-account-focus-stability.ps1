@@ -4,7 +4,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Candidate stability source parse failed' }
-foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Press-OfflineButton')) {
+foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Candidate stability function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -95,7 +95,16 @@ function Read-TargetFocus {
     $script:focusReads++
     return @{belongs_to_target=$true;in_document=$true;offscreen=$false;runtime_id=$(if ($script:mode -eq 'focus' -and $script:pauses -gt 0) {'4'} else {'3'})}
 }
-function Find-FocusedOfflineButton { param($Name) $script:lookups++; $script:focusCalls++; return $script:button }
+function Find-FocusedOfflineButton {
+    param($Name,[switch]$PrepareInvoke,$DiagnosticStage)
+    $script:lookups++; $script:focusCalls++
+    if ($PrepareInvoke) {
+        $evidence=$null; $diag=@{}
+        if ($DiagnosticStage) { $diag.DiagnosticStage=$DiagnosticStage }
+        return (Prepare-OfflineButtonInvoke $script:button ([ref]$evidence) @diag)
+    }
+    return $script:button
+}
 function Send-OfflineKey { throw 'No input permitted in stability observation' }
 # Execute the actual minimal reader, including ancestry walking, without mocking it.
 foreach ($case in @('valid','foreign','exited','reused','foreignparent','outside','hidden','untyped_visibility')) {

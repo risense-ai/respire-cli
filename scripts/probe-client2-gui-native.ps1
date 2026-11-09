@@ -53,16 +53,35 @@ function Element-Info($Element) {
 
 function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.HashSet[int]]$AdmittedIds = $null, $LiveIdentities = $null) {
     if ($null -eq $AdmittedIds) { $AdmittedIds = $ownedIds }
-    $window = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$binding.hwnd)
-    $walker = [Windows.Automation.TreeWalker]::ControlViewWalker
+    $window = Get-OfflineReplacementRoot
+    $walker = Get-OfflineReplacementWalker
     $queue = [Collections.Generic.Queue[object]]::new(); $queue.Enqueue(@{element=$window; depth=0})
     $rows = [Collections.Generic.List[object]]::new(); $clock = [Diagnostics.Stopwatch]::StartNew()
     $nodeLimited = $false; $depthLimited = $false; $timeLimited = $false
     while ($queue.Count -gt 0 -and $rows.Count -lt 256 -and $clock.Elapsed.TotalSeconds -lt 5) {
         $next = $queue.Dequeue()
         # Never inspect diagnostic names/values of a node whose process is unproven.
-        $nodePid = [int]$next.element.Current.ProcessId
+        # Cache once: null/missing or a PS5-suppressed getter fault is unknown,
+        # never a usable PID. Diagnostics contain only this closed classification.
+        try { $rawPid = $next.element.Current.ProcessId } catch {
+            $report.document_pid_diagnostic = 'unavailable'
+            throw
+        }
+        if ($null -eq $rawPid) {
+            $report.document_pid_diagnostic = 'unavailable'
+            throw 'UIA node belongs to an unbound process'
+        }
+        if ($rawPid -isnot [int]) {
+            $report.document_pid_diagnostic = 'invalid_type'
+            throw 'UIA node belongs to an unbound process'
+        }
+        $nodePid = $rawPid
+        if ($nodePid -le 0) {
+            $report.document_pid_diagnostic = 'nonpositive'
+            throw 'UIA node belongs to an unbound process'
+        }
         if (-not $AdmittedIds.Contains($nodePid)) {
+            $report.document_pid_diagnostic = 'unbound_positive'
             # Private typed result: an Int32 means discard this entire traversal.
             if ($ReportUnknownProcess -and $nodePid -gt 0) { return [int]$nodePid }
             throw 'UIA node belongs to an unbound process'
@@ -587,11 +606,15 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
     return ($walk.Elapsed.TotalSeconds -lt 5 -and $AttemptClock.Elapsed.TotalSeconds -lt $Seconds)
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
-function Find-FocusedOfflineButton([string]$Name) {
+function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    $diagnosticArgs = @{}
+    if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
     $scrollAttempts = 0
     for ($attempt=0; $attempt -lt 5; $attempt++) {
         $attemptClock = [Diagnostics.Stopwatch]::StartNew()
         $mismatchEvidence = $null
+        $preparingInvoke = $false
+        if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
         $report.offline.focus_diagnostic = $null
         $null = Assert-Target $true
         # Selector traversal still proves ownership and uniqueness. Selector errors,
@@ -627,6 +650,15 @@ function Find-FocusedOfflineButton([string]$Name) {
             }
             if ($scrollAttempts -gt 0) { $report.offline.focus_scroll = 'visible' }
             Focus-OfflineControl $element ([ref]$mismatchEvidence)
+            if ($PrepareInvoke) {
+                # Continue this same attempt, never start a second retry budget.
+                $preparingInvoke = $true
+                $mismatchEvidence = $null
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { throw 'Offline button preparation exceeded its existing attempt budget' }
+                $prepared = Prepare-OfflineButtonInvoke $element ([ref]$mismatchEvidence) @diagnosticArgs
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { throw 'Offline button preparation exceeded its existing attempt budget' }
+                return $prepared
+            }
             return $element
         } catch {
             $primaryException = $_.Exception
@@ -639,6 +671,9 @@ function Find-FocusedOfflineButton([string]$Name) {
                     continue
                 }
             }
+            # Preparation is not a generic stale/disabled retry region. Only the
+            # complete replacement proof above can consume another attempt.
+            if ($preparingInvoke) { throw $primaryException }
             if (-not (Test-OfflineFocusRetryable $primaryException)) {
                 throw 'Offline button focus failed without a retryable UIA readiness condition'
             }
@@ -782,24 +817,56 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
         $observation.observed_window_ms=($clock.Elapsed.TotalSeconds-$observedStart)*1000
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
-function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
-    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
-    $element = Find-FocusedOfflineButton $Name
-    if ($VerifySourceStability) { Assert-AccountFocusStable $element $Name }
+function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    $MismatchEvidence.Value = $null
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
-    $expected = $element.GetRuntimeId() -join '.'
+    $parts = @($Element.GetRuntimeId())
+    $expected = $parts -join '.'
     $pattern = $null
-    if (-not $element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
+    if (-not $Element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         throw 'Offline button does not support the normal UIA Invoke action'
     }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_focus_guard' }
     $null = Assert-Target $true
     $focus = Read-TargetFocus
-    if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen -or $focus.runtime_id -ne $expected) {
+    # Read each observation exactly once: PS5 may suppress a failing property
+    # getter to null. Missing, unknown or malformed observations fail closed.
+    $belongs = $focus.belongs_to_target
+    $inDocument = $focus.in_document
+    $offscreen = $focus.offscreen
+    $focusedId = $focus.runtime_id
+    if ($belongs -isnot [bool] -or $inDocument -isnot [bool] -or $offscreen -isnot [bool] -or
+        $focusedId -isnot [string] -or $focusedId -cnotmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z' -or
+        $parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) {
         throw 'Offline button focus changed before UIA Invoke'
     }
+    if (-not $belongs -or -not $inDocument -or $offscreen -or $focusedId -cne $expected) {
+        # A mismatch alone is not replacement evidence. Only permit a complete
+        # fresh-tree proof when focus remains in the original visible document.
+        if ($belongs -and $inDocument -and -not $offscreen) {
+            $MismatchEvidence.Value = @{original_id=$expected}
+        }
+        throw 'Offline button focus changed before UIA Invoke'
+    }
+    return @{element=$Element;pattern=$pattern}
+}
+function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    $diagnosticArgs = @{}
+    if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
+    if ($VerifySourceStability) {
+        # Candidate stability remains a separate observation window. Never refocus
+        # or retry after this window and never borrow its time for replacement.
+        $element = Find-FocusedOfflineButton $Name
+        Assert-AccountFocusStable $element $Name
+        $mismatchEvidence = $null
+        $prepared = Prepare-OfflineButtonInvoke $element ([ref]$mismatchEvidence) @diagnosticArgs
+    } else {
+        $prepared = Find-FocusedOfflineButton $Name -PrepareInvoke @diagnosticArgs
+    }
+    # Effects and their postcondition checks are outside every retry handler.
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_invoke' }
-    $pattern.Invoke()
+    $prepared.pattern.Invoke()
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_post_invoke_guard' }
     $null = Assert-Target $true
 }
