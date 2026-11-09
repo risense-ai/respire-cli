@@ -782,20 +782,25 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
         $observation.observed_window_ms=($clock.Elapsed.TotalSeconds-$observedStart)*1000
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
-function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability) {
+function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
     $element = Find-FocusedOfflineButton $Name
     if ($VerifySourceStability) { Assert-AccountFocusStable $element $Name }
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
     $expected = $element.GetRuntimeId() -join '.'
     $pattern = $null
     if (-not $element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         throw 'Offline button does not support the normal UIA Invoke action'
     }
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_focus_guard' }
     $null = Assert-Target $true
     $focus = Read-TargetFocus
     if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen -or $focus.runtime_id -ne $expected) {
         throw 'Offline button focus changed before UIA Invoke'
     }
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_invoke' }
     $pattern.Invoke()
+    if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_post_invoke_guard' }
     $null = Assert-Target $true
 }
 function Fill-OfflineField([string]$Name, [string]$Text) {
@@ -973,7 +978,7 @@ function Convert-OfflineEntry($Value) {
 function Invoke-OfflineGuiAcceptance {
     $report.offline = [ordered]@{status='failed'; onboarding_completed=$false; runtime_bound=$false
         local_keys_initialized=$false; important_memory_readback=$false; diary_readback=$false
-        settings_persisted=$false; runtime_normal_stop_confirmed=$false
+        settings_persisted=$false; runtime_normal_stop_confirmed=$false; failure_kind='unknown'
         full_gui_acceptance='not-evaluated'; g1_passed=$false}
     $report.offline.onboarding_stage = 'choose_offline'
     # Normal first-run route; do not use the separate \u201cskip wizard\u201d action or edit completion markers.
@@ -1051,27 +1056,41 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.screenshot_stage = 'real diary UI after synthetic write and Runtime readback; recovery dialog closed'
     $report.offline.action_stage = 'diary_close_reader'
     Close-OfflineDiaryReader $days[0].title
+    $report.offline.action_stage = 'settings_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bbe\u7f6e\u0024'))
+    $report.offline.action_stage = 'settings_locate'
     $preference = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
+    $report.offline.action_stage = 'settings_initial_state'
     $toggle = $preference.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
     if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { throw 'AutoRuntime was not initially disabled' }
+    $report.offline.action_stage = 'settings_enable'
     Focus-OfflineControl $preference; Send-OfflineKey 32
+    $report.offline.action_stage = 'settings_enable_persist'
     Wait-OfflinePreferences 'autoRuntime' $true
+    $report.offline.action_stage = 'settings_disable'
     Focus-OfflineControl (Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))); Send-OfflineKey 32
+    $report.offline.action_stage = 'settings_disable_persist'
     Wait-OfflinePreferences 'autoRuntime' $false
     $report.offline.settings_persisted = $true
+    $report.offline.action_stage = 'runtime_pre_stop_check'
     Assert-OfflineRuntime
+    $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
-    Press-OfflineButton ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
+    Press-OfflineButton ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) -DiagnosticStage 'normal_stop'
+    $report.offline.action_stage = 'normal_stop_process_lookup'
     $process = Get-Process -Id $offlineRuntime.pid -ErrorAction SilentlyContinue
     if ($process) {
-        if ($process.StartTime.ToUniversalTime().Ticks -ne $offlineRuntime.started_ticks) { throw 'Runtime PID reused before normal-stop observation' }
-        if (-not $process.WaitForExit(30000)) { throw 'Runtime did not exit after visible normal Stop' }
+        $report.offline.action_stage = 'normal_stop_birth_check'
+        if ($process.StartTime.ToUniversalTime().Ticks -ne $offlineRuntime.started_ticks) { $report.offline.failure_kind = 'pid_reused'; throw 'Runtime PID reused before normal-stop observation' }
+        $report.offline.action_stage = 'normal_stop_wait_exit'
+        if (-not $process.WaitForExit(30000)) { $report.offline.failure_kind = 'exit_timeout'; throw 'Runtime did not exit after visible normal Stop' }
     }
     for ($attempt=0; $attempt -lt 2; $attempt++) {
-        if (Get-CimInstance Win32_Process -Filter "ProcessId=$($offlineRuntime.pid)") { throw 'Runtime PID still exists or was reused after normal Stop' }
+        if ($attempt -eq 0) { $report.offline.action_stage = 'normal_stop_cim_first' } else { $report.offline.action_stage = 'normal_stop_cim_second' }
+        if (Get-CimInstance Win32_Process -Filter "ProcessId=$($offlineRuntime.pid)") { $report.offline.failure_kind = 'pid_present_after_stop'; throw 'Runtime PID still exists or was reused after normal Stop' }
         Pause-Probe
     }
+    $report.offline.action_stage = 'normal_stop_confirmed'
     $report.offline.runtime_normal_stop_confirmed = $true
     $report.offline.status = 'offline-subset-passed'
 }
