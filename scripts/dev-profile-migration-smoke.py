@@ -368,11 +368,14 @@ class Smoke(support.Smoke):
         self.save()
         self.keys.put(service, "super:" + user, code)
         self.keys.put(service, "pass:" + user, password)
+        # The old service stores credentials by user, not by the new login alias.
+        login_alias = session.pop("keyring_account")
+        session.pop("keyring_backend", None)
         # The old service is the only credential source, not an environment override.
         self.report["fixture_operation"] = "remove_current_native_credentials"
         self.save()
-        self.keys.remove("rsrs", "super:" + user)
-        self.keys.remove("rsrs", "pass:" + user)
+        self.keys.remove("rsrs", "super:" + login_alias)
+        self.keys.remove("rsrs", "pass:" + login_alias)
         env.pop("RSRS_SUPER", None)
         self.report["fixture_operation"] = "rewrite_legacy_endpoint"
         self.save()
