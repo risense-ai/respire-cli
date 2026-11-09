@@ -222,7 +222,7 @@ function Invoke-NativeGuiProbe {
 }
 
 # Inserted into the existing system-PS5 helper. These functions do not execute when parsed.
-function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10) {
+function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10, [switch]$AllowAbsent) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     do {
         $null = Assert-Target $true
@@ -242,7 +242,7 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
             # Only a selector match is retained. Never serialize arbitrary UIA names or values:
             # the normal key-generation dialog contains recovery material.
             if ($document -and $current.ControlType.ProgrammaticName -eq $Type -and
-                $current.Name -match $Name -and $current.IsEnabled) { $found.Add($next.element) }
+                $current.Name -match $Name -and ($AllowAbsent -or $current.IsEnabled)) { $found.Add($next.element) }
             if ($next.depth -lt 32) {
                 $child = [Windows.Automation.TreeWalker]::ControlViewWalker.GetFirstChild($next.element)
                 while ($child -and $visited + $queue.Count -lt 512 -and $walk.Elapsed.TotalSeconds -lt 5) {
@@ -257,6 +257,7 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
         if ($queue.Count) { throw 'Offline selector traversal exceeded its node/time bound' }
         if ($found.Count -gt 1) { throw 'Offline selector is ambiguous' }
         if ($found.Count -eq 1) { return $found[0] }
+        if ($AllowAbsent) { return $null }
         Pause-Probe
     } while ($clock.Elapsed.TotalSeconds -lt $Seconds)
     throw "Expected offline control unavailable: $Type / $Name"
@@ -421,7 +422,7 @@ function Assert-OfflineRuntime {
 }
 function Read-OfflineRpc([string[]]$Arguments) {
     # Read-only oracle: no CLI/API writes may stand in for visible UI operations.
-    if (($Arguments -join '|') -notmatch '^--json\|(list\|--limit\|100|show\|[A-Za-z0-9_-]+|diary)$') { throw 'Offline oracle command is not allowlisted' }
+    if (($Arguments -join '|') -notmatch '^--json\|(list\|--limit\|100|show\|[A-Za-z0-9_-]+|diary|status)$') { throw 'Offline oracle command is not allowlisted' }
     Assert-OfflineRuntime
     $id = 'offline-gui-' + [Guid]::NewGuid().ToString('N')
     $reply = Read-OfflineHttp '/api/rpc' @{v=1; id=$id; method='cli.exec'; args=$Arguments}
@@ -462,6 +463,27 @@ function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
     $body = Find-OfflineControl 'ControlType.Text' ([regex]::Escape($Content))
     if ($body.Current.IsOffscreen) { throw 'Synthetic memory body is present in UIA but not visible' }
 }
+function Wait-OfflineRecoveryDismissed {
+    $selector = '^' + [regex]::Escape([regex]::Unescape('\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599')) + '$'
+    # Only fixed-name existence is inspected. Never read Edit.Value or arbitrary
+    # tree text; a disabled recovery field still means the dialog is not dismissed.
+    for ($attempt=0; $attempt -lt 10; $attempt++) {
+        $edit = Find-OfflineControl 'ControlType.Edit' $selector 1 -AllowAbsent
+        $title = Find-OfflineControl 'ControlType.Text' $selector 1 -AllowAbsent
+        if ($null -eq $edit -and $null -eq $title) {
+            $report.offline.recovery_controls_absent = $true
+            return
+        }
+        Pause-Probe
+    }
+    throw 'Original recovery dialog controls did not disappear within the bounded checks'
+}
+function Assert-OfflineLocalKeys($Envelope) {
+    $value = $Envelope.summary.session.has_local_keys
+    if ($value -isnot [bool]) { throw 'Offline status local-key flag is missing or not boolean' }
+    $report.offline.has_local_keys = $value
+    if (-not $value) { throw 'Offline status does not confirm local keys' }
+}
 function Convert-OfflineEntry($Value) {
     # The fixed frontend memory/model.js::entry accepts these exact envelope/entry shapes.
     if ($Value.details.entry) { $Value = $Value.details.entry }
@@ -498,12 +520,19 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60
     Bind-OfflineRuntime
+    $report.offline.action_stage = 'account_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8d26\u6237\u4e0e\u7a7a\u95f4\u0024'))
+    $report.offline.action_stage = 'offline_initialization'
     Press-OfflineButton ([regex]::Unescape('\u005e\u521d\u59cb\u5316\u79bb\u7ebf\u8bb0\u5fc6\u5e93\u0024'))
+    $report.offline.action_stage = 'key_generation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u521b\u5efa\u672c\u673a\u5bc6\u94a5\u0024'))
     # Never read arbitrary tree nodes/values, capture a screenshot, copy or archive recovery material.
     $null = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('\u005e\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599\u0024')) 60
+    $report.offline.action_stage = 'recovery_dismiss'
     Send-OfflineKey 27 # Normal Escape closes the recovery display; generated VM keys are disposable.
+    Wait-OfflineRecoveryDismissed
+    $report.offline.action_stage = 'credential_persistence'
+    Assert-OfflineLocalKeys (Read-OfflineRpc @('--json','status'))
     $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u5df2\u4fdd\u5b58\u0024'))
     $report.offline.local_keys_initialized = $true
     $marker = 'gui-offline-' + [Guid]::NewGuid().ToString('N')
