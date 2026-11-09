@@ -284,6 +284,7 @@ function Test-OfflineFocusRetryable($Exception) {
     return $false
 }
 function Find-FocusedOfflineButton([string]$Name) {
+    $scrollAttempts = 0
     for ($attempt=0; $attempt -lt 5; $attempt++) {
         $null = Assert-Target $true
         # Selector traversal still proves ownership and uniqueness. Selector errors,
@@ -293,10 +294,29 @@ function Find-FocusedOfflineButton([string]$Name) {
             $state = $element.Current
             $report.offline.focus_readiness = @{ enabled=[bool]$state.IsEnabled
                 focusable=[bool]$state.IsKeyboardFocusable; offscreen=[bool]$state.IsOffscreen }
+            if ($state.IsEnabled -and $state.IsKeyboardFocusable -and $state.IsOffscreen) {
+                if ($scrollAttempts -ge 2) { $report.offline.focus_scroll = 'ineffective'; throw 'Offline button remained offscreen after bounded normal scrolling' }
+                $scroll = $null
+                if (-not $element.TryGetCurrentPattern([Windows.Automation.ScrollItemPattern]::Pattern, [ref]$scroll)) {
+                    $report.offline.focus_scroll = 'unsupported'
+                    throw 'Offline offscreen button does not support normal UIA scrolling'
+                }
+                $null = Assert-Target $true
+                $scrollAttempts++
+                $report.offline.focus_scroll = 'requested'
+                $report.offline.focus_scroll_attempts = $scrollAttempts
+                $scroll.ScrollIntoView()
+                $null = Assert-Target $true
+                # Never focus or invoke the pre-scroll element: reacquire it through
+                # the complete ownership/document/uniqueness traversal next time.
+                Pause-Probe
+                continue
+            }
             if (-not $state.IsEnabled -or -not $state.IsKeyboardFocusable -or $state.IsOffscreen) {
                 Pause-Probe
                 continue
             }
+            if ($scrollAttempts -gt 0) { $report.offline.focus_scroll = 'visible' }
             Focus-OfflineControl $element
             return $element
         } catch {
