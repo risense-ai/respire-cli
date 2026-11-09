@@ -10,6 +10,7 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -195,6 +196,9 @@ class Fixture:
                if not key.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
                and not key.endswith(("_TOKEN", "_API_KEY"))
                and key not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private" and bus.startswith("unix:"):
+            env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
         env.update(HOME=str(profile / "home"), USERPROFILE=str(profile / "home"),
                    XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),

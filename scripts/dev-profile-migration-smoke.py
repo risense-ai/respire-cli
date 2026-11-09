@@ -59,7 +59,7 @@ class Smoke(support.Smoke):
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             self.report["cli_failure"] = {"command": args[0], "timeout_seconds": timeout,
-                "error_class": "timeout"}
+                "error_class": "timeout", "has_source": "--source" in args, "has_account": "--account" in args}
             self.save()
             raise
         finally:
@@ -77,6 +77,10 @@ class Smoke(support.Smoke):
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
             categories = (
                 ("argument_contract", ("unexpected argument", "required arguments were not provided", "a value is required")),
+                ("host_required", ("client_only: explicit legacy migration is host-managed",)),
+                ("host_control", ("host control deadline exceeded", "missing host control response frame", "migration_outcome_unknown", "migration response binding mismatch", "migration response profile mismatch")),
+                ("profile_discovery", ("migration discovery did not return profiles", "legacy profile has no name", "profile root is not a directory", "invalid session metadata file")),
+                ("discovery_path", ("discovery path contains parent traversal", "discovery path contains a symlink", "discovery path contains a reparse point", "discovery ancestor is not a directory")),
                 ("rate_limited", ("too many requests", "rate limit", "http 429", "status: 429")),
                 ("native_credentials", ("keyring", "keychain", "credential manager", "osstatus")),
                 ("vault_unlock", ("failed to decrypt", "vault could not be unlocked", "super password required", "secret key required")),
@@ -96,6 +100,7 @@ class Smoke(support.Smoke):
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict),
+                "has_source": "--source" in args, "has_account": "--account" in args,
                 "error": self.redacted_cli_error(env, output)}
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),

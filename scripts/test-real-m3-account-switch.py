@@ -181,10 +181,11 @@ for binary in BINARIES:
                 assert time.monotonic()<deadline, 'owned Core worker survived its host: '+str(pid)
                 time.sleep(.02)
     try:
-        run('--direct','model','engine','cpu')
-        stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
-        assert stopped.returncode==0,'direct engine preparation runtime stop failed'
-        global_engine=(main/'inference.json').read_bytes()
+        if not (args.seed_binary and args.runtime_binary):
+            run('--direct','model','engine','cpu')
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            assert stopped.returncode==0,'direct engine preparation runtime stop failed'
+            global_engine=(main/'inference.json').read_bytes()
         for profile in [main,alternate]:
             select(profile)
             if args.seed_binary:
@@ -277,6 +278,13 @@ for binary in BINARIES:
                         path.unlink()
                 old_runtime=None
                 legacy_handoff_actor='fixture'
+        if args.seed_binary and args.runtime_binary:
+            # Historical binaries must create their own libraries before a
+            # candidate Runtime can initialize the selected profile's schema.
+            run('--direct','model','engine','cpu')
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            assert stopped.returncode==0,'direct engine preparation runtime stop failed'
+            global_engine=(main/'inference.json').read_bytes()
         statuses=[]
         visited=set()
         generation_changes={}
