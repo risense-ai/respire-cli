@@ -158,3 +158,27 @@ foreach ($inputCase in @(
     if (($report | ConvertTo-Json -Depth 8) -match 'synthetic-private-secret') { throw 'Status copied private material' }
 }
 Write-Host 'PASS: recovery dismissal and strict status boolean diagnostics'
+
+# Guard the real acceptance setup order, not a duplicate model of the sequence.
+# A completed host keygen drains any old owner and does not auto-start a new one.
+$acceptance=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-OfflineGuiAcceptance'},$true))
+if ($acceptance.Count -ne 1) { throw 'Missing unique offline acceptance function' }
+$source=$acceptance[0].Extent.Text
+$stages=@('key_generation','recovery_dismiss','runtime_start','account_verification','credential_persistence')
+$previous=-1
+foreach ($stage in $stages) {
+    $marker="`$report.offline.action_stage = '$stage'"
+    $position=$source.IndexOf($marker,[StringComparison]::Ordinal)
+    if ($position -le $previous -or $source.IndexOf($marker,$position+1,[StringComparison]::Ordinal) -ge 0) { throw 'Offline setup stage order changed' }
+    $previous=$position
+}
+$commands=@($acceptance[0].FindAll({param($n) $n -is [Management.Automation.Language.CommandAst]},$true))
+$bindings=@($commands | Where-Object { $_.GetCommandName() -ceq 'Bind-OfflineRuntime' })
+$dismissals=@($commands | Where-Object { $_.GetCommandName() -ceq 'Wait-OfflineRecoveryDismissed' })
+$persist=@($commands | Where-Object { $_.GetCommandName() -ceq 'Assert-OfflineLocalKeys' })
+$writes=@($commands | Where-Object { $_.GetCommandName() -ceq 'Create-OfflineMemory' })
+if ($bindings.Count -ne 1 -or $dismissals.Count -ne 1 -or $persist.Count -ne 1 -or $writes.Count -ne 2 -or
+    $dismissals[0].Extent.StartOffset -ge $bindings[0].Extent.StartOffset -or
+    $bindings[0].Extent.StartOffset -ge $persist[0].Extent.StartOffset -or
+    $persist[0].Extent.StartOffset -ge $writes[0].Extent.StartOffset) { throw 'Offline acceptance must bind once after keygen and verify persistence before business writes' }
+Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
