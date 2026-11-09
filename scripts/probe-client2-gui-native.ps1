@@ -429,6 +429,33 @@ function Focus-OfflineControl($Element) {
             offscreen=[bool]$focus.offscreen}
         if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.runtime_id -ne $expected -or $focus.offscreen) {
             $diagnostic.kind = 'focus_mismatch'
+            $detail = @{requested_id_available=$false; requested_id_matches_original=$false
+                requested_focus_available=$false; requested_has_keyboard_focus=$false
+                focused_type_available=$false; focused_is_button=$false}
+            $diagnostic.mismatch_detail = $detail
+            # Independent best-effort observations never replace the primary failure
+            # or turn a mismatch into a retryable stale/disabled exception.
+            try {
+                $requestedId = @($Element.GetRuntimeId())
+                if ($requestedId.Count -gt 0 -and @($requestedId | Where-Object { $_ -isnot [int] }).Count -eq 0) {
+                    $detail.requested_id_available = $true
+                    $detail.requested_id_matches_original = (($requestedId -join '.') -ceq $expected)
+                }
+            } catch {}
+            try {
+                $requestedFocus = $Element.Current.HasKeyboardFocus
+                if ($requestedFocus -is [bool]) {
+                    $detail.requested_focus_available = $true
+                    $detail.requested_has_keyboard_focus = $requestedFocus
+                }
+            } catch {}
+            try {
+                $focusedType = $focus.control_type
+                if ($focusedType -is [string] -and $focusedType.Length -gt 0) {
+                    $detail.focused_type_available = $true
+                    $detail.focused_is_button = ($focusedType -ceq 'ControlType.Button')
+                }
+            } catch {}
             throw 'Offline control did not receive real target-document keyboard focus'
         }
         $diagnostic.kind = 'verified'

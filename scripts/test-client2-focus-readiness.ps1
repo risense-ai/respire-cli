@@ -141,6 +141,53 @@ foreach ($failure in @('stale','disabled')) {
     if ($report.offline.focus_diagnostic.phase -cne 'set_focus' -or
         $report.offline.focus_diagnostic.kind -cne $failure) { throw 'Known readiness classification changed' }
 }
+# Mismatch observations must remain independent, boolean-only, and non-retryable.
+foreach ($case in @('unchanged','idchanged','idthrows','focusmissing','focusnonboolean','focusthrows','focusedother')) {
+    Reset-Synthetic
+    $script:focus.runtime_id='wrong'; $script:focus.control_type='ControlType.Button'
+    $element=New-SyntheticElement
+    $element.Current | Add-Member NoteProperty HasKeyboardFocus $true
+    $script:idReads=0
+    $element | Add-Member -Force ScriptMethod GetRuntimeId {
+        $script:idReads++
+        if ($script:idReads -gt 1 -and $script:observationCase -eq 'idchanged') { return @(7,12) }
+        if ($script:idReads -gt 1 -and $script:observationCase -eq 'idthrows') { throw [Windows.Automation.ElementNotAvailableException]::new('synthetic-private-secret') }
+        return @(7,11)
+    }
+    $script:observationCase=$case
+    switch ($case) {
+        'focusmissing' { $element.Current.PSObject.Properties.Remove('HasKeyboardFocus') }
+        'focusnonboolean' { $element.Current.HasKeyboardFocus='synthetic-private-secret' }
+        'focusthrows' {
+            $element.Current.PSObject.Properties.Remove('HasKeyboardFocus')
+            $element.Current | Add-Member ScriptProperty HasKeyboardFocus { throw [Windows.Automation.ElementNotEnabledException]::new('synthetic-private-secret') }
+        }
+        'focusedother' { $script:focus.control_type='synthetic-private-secret' }
+    }
+    $script:elements=@($element)
+    Expect-Failure $unretryableFailure 3 1 1 1
+    $d=$report.offline.focus_diagnostic
+    if ($d.phase -cne 'match_focus' -or $d.kind -cne 'focus_mismatch' -or $d.observed.Count -ne 4) { throw 'Observation changed primary focus failure' }
+    $detail=$d.mismatch_detail
+    $keys=@('requested_id_available','requested_id_matches_original','requested_focus_available','requested_has_keyboard_focus','focused_type_available','focused_is_button')
+    if ($detail.Count -ne $keys.Count) { throw 'Mismatch observation schema changed' }
+    foreach ($key in $keys) { if (-not $detail.ContainsKey($key) -or $detail[$key] -isnot [bool]) { throw 'Mismatch observation is not a fixed boolean' } }
+    $focusAvailable=$case -notin @('focusmissing','focusnonboolean','focusthrows')
+    if ($detail.requested_id_available -ne ($case -ne 'idthrows') -or
+        $detail.requested_id_matches_original -ne ($case -notin @('idchanged','idthrows')) -or
+        $detail.requested_focus_available -ne $focusAvailable -or $detail.requested_has_keyboard_focus -ne $focusAvailable -or
+        -not $detail.focused_type_available -or $detail.focused_is_button -ne ($case -ne 'focusedother') -or $idReads -ne 2) { throw 'Mismatch observations did not distinguish the fixed cases' }
+}
+# The direct helper also retains the exact original mismatch exception.
+Reset-Synthetic
+$script:focus.runtime_id='wrong'
+$caught=$null
+try { Focus-OfflineControl (New-SyntheticElement) } catch { $caught=$_.Exception.Message }
+if ($caught -cne 'Offline control did not receive real target-document keyboard focus' -or
+    $guardCalls -ne 2 -or $focusCalls -ne 1 -or $focusReads -ne 1 -or $lookups -ne 0) { throw 'Mismatch observation masked the primary failure' }
+Reset-Synthetic
+Focus-OfflineControl (New-SyntheticElement)
+if ($report.offline.focus_diagnostic.ContainsKey('mismatch_detail')) { throw 'Mismatch observations ran on successful focus' }
 # No raw exception, selector, UI value or identity is stored by readiness diagnostics.
 if (($report | ConvertTo-Json -Depth 8) -match 'synthetic-private-secret') { throw 'Private diagnostic escaped' }
 Write-Host 'PASS: synthetic focus readiness policy; real GUI acceptance remains required'
