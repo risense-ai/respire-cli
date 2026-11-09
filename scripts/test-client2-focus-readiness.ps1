@@ -219,3 +219,4 @@ Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
 & (Join-Path $PSScriptRoot 'test-client2-cleanup-identity.ps1')
 & (Join-Path $PSScriptRoot 'test-client2-gui-exit-code.ps1')
 & (Join-Path $PSScriptRoot 'test-client2-document-readiness.ps1')
+& (Join-Path $PSScriptRoot 'test-client2-document-descendants.ps1')

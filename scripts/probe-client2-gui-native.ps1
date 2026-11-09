@@ -50,15 +50,25 @@ function Element-Info($Element) {
         keyboard_focusable = $current.IsKeyboardFocusable; offscreen = $current.IsOffscreen }
 }
 
-function Read-TargetTree {
+function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.HashSet[int]]$AdmittedIds = $null, $LiveIdentities = $null) {
+    if ($null -eq $AdmittedIds) { $AdmittedIds = $ownedIds }
     $window = [Windows.Automation.AutomationElement]::FromHandle([IntPtr][long]$binding.hwnd)
     $walker = [Windows.Automation.TreeWalker]::ControlViewWalker
     $queue = [Collections.Generic.Queue[object]]::new(); $queue.Enqueue(@{element=$window; depth=0})
     $rows = [Collections.Generic.List[object]]::new(); $clock = [Diagnostics.Stopwatch]::StartNew()
     $nodeLimited = $false; $depthLimited = $false; $timeLimited = $false
     while ($queue.Count -gt 0 -and $rows.Count -lt 256 -and $clock.Elapsed.TotalSeconds -lt 5) {
-        $next = $queue.Dequeue(); $info = Element-Info $next.element; $info.depth = $next.depth
-        if (-not $ownedIds.Contains([int]$info.process_id)) { throw 'UIA node belongs to an unbound process' }
+        $next = $queue.Dequeue()
+        # Never inspect diagnostic names/values of a node whose process is unproven.
+        $nodePid = [int]$next.element.Current.ProcessId
+        if (-not $AdmittedIds.Contains($nodePid)) {
+            # Private typed result: an Int32 means discard this entire traversal.
+            if ($ReportUnknownProcess -and $nodePid -gt 0) { return [int]$nodePid }
+            throw 'UIA node belongs to an unbound process'
+        }
+        if ($null -ne $LiveIdentities) { Assert-DocumentNodeIdentity $nodePid $LiveIdentities }
+        $info = Element-Info $next.element; $info.depth = $next.depth
+        if ($info.process_id -ne $nodePid) { throw 'UIA node process changed during inspection' }
         $rows.Add($info)
         if ($next.depth -lt 32) {
             $child = $walker.GetFirstChild($next.element)
@@ -86,21 +96,137 @@ function Read-TargetTree {
         focusable_count = @($rows | Where-Object { $_.keyboard_focusable -and -not $_.offscreen }).Count }
 }
 
+function Assert-DocumentNodeIdentity([int]$NodePid, $LiveIdentities) {
+    if (-not $LiveIdentities.ContainsKey($NodePid)) { throw 'Document node has no held process identity' }
+    $identity = $LiveIdentities[$NodePid]
+    $process = $identity.process
+    if ($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $identity.birth -or
+        $process.SessionId -ne $identity.session -or
+        -not [string]::Equals($process.Path,$identity.image,[StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Document node process identity changed after admission'
+    }
+}
+function Read-ProvenWebViewChain([int]$NodePid, [Diagnostics.Stopwatch]$BudgetClock, [double]$Seconds, $RetainedHandles = $null) {
+    $transferred = $false
+    $held = [Collections.Generic.List[object]]::new()
+    try {
+    $browser = Get-Process -Id $binding.browser_pid -ErrorAction Stop
+    $held.Add($browser)
+    $null = $browser.SafeHandle
+    if ($browser.HasExited -or $browser.StartTime.ToUniversalTime().Ticks -ne $binding.browser_started_ticks -or
+        $browser.SessionId -ne $binding.session_id -or
+        [IO.Path]::GetFileName($browser.Path) -ne 'msedgewebview2.exe') { throw 'WebView chain browser identity changed' }
+    $chain = [Collections.Generic.List[object]]::new()
+    $seen = [Collections.Generic.HashSet[int]]::new()
+    $cursor = $NodePid
+      for ($depth=0; $depth -lt 32; $depth++) {
+        if ($BudgetClock.Elapsed.TotalSeconds -ge $Seconds) { throw 'Document readiness budget exhausted during descendant verification' }
+        if (-not $seen.Add($cursor)) { throw 'WebView process chain contains a cycle' }
+        $live = Get-Process -Id $cursor -ErrorAction Stop
+        $held.Add($live)
+        $null = $live.SafeHandle
+        if ($live.HasExited) { throw 'WebView chain process exited during verification' }
+        $matches = @(Get-CimInstance Win32_Process -Filter "ProcessId=$cursor")
+        if ($matches.Count -ne 1 -or $matches[0].ProcessId -ne $cursor) { throw 'WebView process chain is missing or ambiguous' }
+        $item = $matches[0]
+        # Keep the live process handle across CIM sampling. Its uninterrupted
+        # lifetime binds PID to this sample without equating API time precision.
+        if ($live.HasExited) { throw 'WebView chain process exited during verification' }
+        if ($item.CreationDate -isnot [datetime] -or
+            $item.SessionId -ne $binding.session_id -or $live.SessionId -ne $binding.session_id -or
+            -not [string]::Equals($item.ExecutablePath,$browser.Path,[StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals($live.Path,$browser.Path,[StringComparison]::OrdinalIgnoreCase)) { throw 'WebView process chain identity is unproven' }
+        $birth = $live.StartTime.ToUniversalTime().Ticks
+        if ($chain.Count -gt 0 -and $birth -gt $chain[$chain.Count-1].birth) { throw 'WebView process parent is younger than its child' }
+        $chain.Add(@{pid=$cursor; parent=[int]$item.ParentProcessId; birth=$birth
+            cim_birth=$item.CreationDate.ToUniversalTime().Ticks; image=$live.Path; session=$live.SessionId; process=$live})
+        if ($cursor -eq $binding.browser_pid) {
+            if ($birth -ne $binding.browser_started_ticks -or $chain.Count -lt 2) { throw 'Unknown node is not a new WebView descendant' }
+            foreach ($process in $held) { if ($process.HasExited) { throw 'WebView chain process exited during verification' } }
+            if ($null -ne $RetainedHandles) {
+                foreach ($process in $held) { $RetainedHandles.Add($process) }
+                $transferred = $true
+            }
+            return $chain.ToArray()
+        }
+        $cursor = [int]$item.ParentProcessId
+      }
+      throw 'WebView process chain exceeds its bound'
+    } finally { if (-not $transferred) { foreach ($process in $held) { $process.Dispose() } } }
+}
+function Confirm-NewWebViewDescendant([int]$NodePid, [Diagnostics.Stopwatch]$BudgetClock, [double]$Seconds, $RetainedHandles) {
+    $null = Assert-Target $true
+    $before = @(Read-ProvenWebViewChain $NodePid $BudgetClock $Seconds)
+    $null = Assert-Target $true
+    $after = @(Read-ProvenWebViewChain $NodePid $BudgetClock $Seconds $RetainedHandles)
+    if ($before.Count -ne $after.Count) { throw 'WebView process chain changed during verification' }
+    for ($i=0; $i -lt $before.Count; $i++) {
+        foreach ($field in @('pid','parent','birth','cim_birth','image','session')) {
+            if ($before[$i][$field] -cne $after[$i][$field]) { throw 'WebView process chain changed during verification' }
+        }
+    }
+    $null = Assert-Target $true
+    return $after
+}
+
 function Wait-TargetDocument([double]$Seconds = 15) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $attempts = [Collections.Generic.List[object]]::new()
+    $refreshed = $false
+    $admitted = $null
+    $held = [Collections.Generic.List[object]]::new()
+    $identities = @{}
+    try {
     while ($clock.Elapsed.TotalSeconds -lt $Seconds) {
         $report.document_readiness_phase = 'target_guard'
         $null = Assert-Target $true
+        if ($null -eq $admitted) {
+            $admitted = [Collections.Generic.HashSet[int]]::new()
+            foreach ($knownPid in $ownedIds) {
+                if ($clock.Elapsed.TotalSeconds -ge $Seconds) { throw 'Document readiness budget exhausted during identity acquisition' }
+                $process = Get-Process -Id $knownPid -ErrorAction Stop
+                $held.Add($process)
+                $null = $process.SafeHandle
+                $identities[[int]$knownPid] = @{process=$process; birth=$process.StartTime.ToUniversalTime().Ticks
+                    session=$process.SessionId; image=$process.Path}
+                Assert-DocumentNodeIdentity ([int]$knownPid) $identities
+                [void]$admitted.Add([int]$knownPid)
+            }
+            # Sample ancestry while these exact process lifetimes remain held.
+            $null = Assert-Target $true
+            foreach ($knownPid in $admitted) {
+                if (-not $ownedIds.Contains($knownPid)) { throw 'Initial document process ancestry changed' }
+                Assert-DocumentNodeIdentity $knownPid $identities
+            }
+        }
         $report.document_readiness_phase = 'read_tree'
-        $tree = Read-TargetTree
+        if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
+        $tree = Read-TargetTree -ReportUnknownProcess -AdmittedIds $admitted -LiveIdentities $identities
+        if ($tree -is [int]) {
+            if ($refreshed) { throw 'UIA node belongs to an unbound process after one verified refresh' }
+            if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
+            $refreshed = $true
+            $report.document_readiness_phase = 'verify_new_descendant'
+            $proven = @(Confirm-NewWebViewDescendant $tree $clock $Seconds $held)
+            foreach ($identity in $proven) {
+                $identities[[int]$identity.pid] = $identity
+                [void]$admitted.Add([int]$identity.pid)
+            }
+            $report.document_descendant_refresh = 'verified_discard_and_rescan'
+            # No partial rows survive. The next iteration revalidates and starts at HWND.
+            continue
+        }
+        if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
+        foreach ($knownPid in $admitted) { Assert-DocumentNodeIdentity $knownPid $identities }
+        if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
         $report.accessibility_tree = $tree
         $report.document_readiness_phase = 'record_tree'
         $attempts.Add(@{ document_count=$tree.document_count; focusable_count=$tree.focusable_count
             traversal_complete=$tree.traversal_complete; truncation_reasons=$tree.truncation_reasons; elapsed_ms=$tree.elapsed_ms })
         $report.document_readiness = @{ attempts=@($attempts.ToArray()); budget_seconds=$Seconds
             elapsed_ms=$clock.ElapsedMilliseconds; ready=$false }
-        if ($tree.document_count -ge 1 -and $tree.focusable_count -ge 1) {
+        if ($tree.traversal_complete -eq $true -and @($tree.truncation_reasons).Count -eq 0 -and
+            $tree.document_count -ge 1 -and $tree.focusable_count -ge 1) {
             $report.document_readiness.ready = $true
             $report.document_readiness_phase = 'ready'
             return
@@ -110,6 +236,7 @@ function Wait-TargetDocument([double]$Seconds = 15) {
     }
     $report.document_readiness_phase = 'budget_exhausted'
     throw 'Original WebView UIA Document/focusable controls not observed within readiness budget; inspect traversal truncation reasons'
+    } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 
 function Read-TargetFocus {

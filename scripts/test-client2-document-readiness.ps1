@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Document readiness source parse failed' }
-foreach ($name in @('Element-Info','Wait-TargetDocument')) {
+foreach ($name in @('Element-Info','Assert-DocumentNodeIdentity','Wait-TargetDocument')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Document readiness function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -23,9 +23,10 @@ function Read-TargetTree {
     if ($script:treeFailure) { throw 'fixed tree failure' }
     return @{document_count=$(if ($script:reads -eq 1) {0} else {1});focusable_count=1;traversal_complete=$true;truncation_reasons=@();elapsed_ms=1}
 }
+$script:ownedIds=[Collections.Generic.HashSet[int]]::new()
 $script:report=@{}; $script:guards=0; $script:reads=0; $script:pauses=0; $script:foreign=$false; $script:treeFailure=$false
 Wait-TargetDocument
-if ($guards -ne 2 -or $reads -ne 2 -or $pauses -ne 1 -or $report.document_readiness.attempts.Count -ne 2 -or
+if ($guards -ne 3 -or $reads -ne 2 -or $pauses -ne 1 -or $report.document_readiness.attempts.Count -ne 2 -or
     -not $report.document_readiness.ready -or $report.document_readiness.budget_seconds -ne 15 -or $report.document_readiness_phase -cne 'ready') { throw 'Empty document did not wait under original guards and budget' }
 foreach ($kind in @('guard','tree','budget')) {
     $script:report=@{}; $script:guards=0; $script:reads=0; $script:pauses=0
