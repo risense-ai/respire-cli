@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Descendant policy source parse failed' }
-foreach ($name in @('Assert-DocumentNodeIdentity','Read-ProvenWebViewChain','Confirm-NewWebViewDescendant','Wait-TargetDocument')) {
+foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-ProvenWebViewChain','Confirm-NewWebViewDescendant','Wait-TargetDocument')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Descendant policy function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -44,6 +44,7 @@ function Read-TargetTree {
     if ($script:scans -gt 1 -and -not $AdmittedIds.Contains(30)) { throw 'Proven descendant was not admitted' }
     if ($script:scans -gt 1) {
         if ($script:disposed -ne 3 -or $script:acquired -ne 7) { throw 'Process handles were not retained across the rescan' }
+        if ($script:mode -eq 'postproofclosed') { $script:lives[30].SafeHandle.IsClosed=$true }
         if ($script:mode -eq 'postproofexit') { $script:lives[30].HasExited=$true }
         if ($script:mode -eq 'postproofreuse') { $script:lives[30].StartTime=$script:lives[30].StartTime.AddTicks(1) }
         if ($script:mode -eq 'initialexit') { $script:lives[20].HasExited=$true }
@@ -63,8 +64,8 @@ function Reset-Descendant {
     $script:browser=[pscustomobject]@{ProcessId=20;ParentProcessId=10;CreationDate=$birth;SessionId=2;ExecutablePath=$image}
     $script:child=[pscustomobject]@{ProcessId=30;ParentProcessId=20;CreationDate=$birth.AddSeconds(1);SessionId=2;ExecutablePath=$image}
     $script:lives=@{
-        20=[pscustomobject]@{StartTime=$birth;SessionId=2;Path=$image;SafeHandle=1;HasExited=$false}
-        30=[pscustomobject]@{StartTime=$birth.AddSeconds(1).AddTicks(7);SessionId=2;Path=$image;SafeHandle=1;HasExited=$false}
+        20=[pscustomobject]@{StartTime=$birth;SessionId=2;Path=$image;SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false};HasExited=$false}
+        30=[pscustomobject]@{StartTime=$birth.AddSeconds(1).AddTicks(7);SessionId=2;Path=$image;SafeHandle=[pscustomobject]@{IsInvalid=$false;IsClosed=$false};HasExited=$false}
     }
     $script:disposed=0; $script:acquired=0
     foreach ($live in $script:lives.Values) { $live | Add-Member ScriptMethod Dispose { $script:disposed++ } }
@@ -74,7 +75,7 @@ Wait-TargetDocument
 if ($acquired -ne 7 -or $disposed -ne $acquired) { throw 'Successful proof leaked process handles' }
 if ($scans -ne 2 -or $snapshots -ne 4 -or $guards -ne 6 -or -not $report.document_readiness.ready -or
     $report.document_descendant_refresh -cne 'verified_discard_and_rescan' -or $report.document_readiness.budget_seconds -ne 15) { throw 'Proven descendant did not force one complete rescan' }
-foreach ($kind in @('foreignparent','reusedpid','handlefailure','exitduring','youngerparent','session','image','changedbrowser','changedroot','changedbinding','changedchain','secondunknown','newsibling','postproofexit','postproofreuse','initialexit','initialreuse')) {
+foreach ($kind in @('foreignparent','reusedpid','handlefailure','nullhandle','invalidhandle','closedhandle','untypedhandle','exitduring','youngerparent','session','image','changedbrowser','changedroot','changedbinding','changedchain','secondunknown','newsibling','postproofclosed','postproofexit','postproofreuse','initialexit','initialreuse')) {
     Reset-Descendant; $script:mode=$kind
     $expected=switch ($kind) {
         { $_ -in @('postproofexit','postproofreuse','initialexit','initialreuse') } { 'Document node process identity changed after admission' }
@@ -83,8 +84,13 @@ foreach ($kind in @('foreignparent','reusedpid','handlefailure','exitduring','yo
         'handlefailure' {
             $lives[30].PSObject.Properties.Remove('SafeHandle')
             $lives[30] | Add-Member ScriptProperty SafeHandle { throw 'fixed safe handle failure' }
-            'fixed safe handle failure'
+            'Document process handle acquisition failed'
         }
+        'postproofclosed' { 'Document process handle acquisition failed' }
+        'nullhandle' { $lives[30].SafeHandle=$null; 'Document process handle acquisition failed' }
+        'invalidhandle' { $lives[30].SafeHandle.IsInvalid=$true; 'Document process handle acquisition failed' }
+        'closedhandle' { $lives[30].SafeHandle.IsClosed=$true; 'Document process handle acquisition failed' }
+        'untypedhandle' { $lives[30].SafeHandle.IsInvalid='false'; 'Document process handle acquisition failed' }
         'exitduring' { 'WebView chain process exited during verification' }
         'youngerparent' { $child.CreationDate=$browser.CreationDate.AddTicks(-1);$lives[30].StartTime=$child.CreationDate; 'WebView process parent is younger than its child' }
         'session' { $child.SessionId=3; 'WebView process chain identity is unproven' }
@@ -99,18 +105,37 @@ foreach ($kind in @('foreignparent','reusedpid','handlefailure','exitduring','yo
     $caught=$null
     try { Wait-TargetDocument } catch {
         $caught=$_.Exception.Message
-        if ($kind -eq 'handlefailure') {
-            $cause=$_.Exception
-            for ($depth=0; $cause -and $depth -lt 8; $depth++) {
-                if ($cause.Message -ceq 'fixed safe handle failure') { $caught='fixed safe handle failure'; break }
-                $cause=$cause.InnerException
-            }
-        }
+
     }
     if ($disposed -ne $acquired) { throw 'Held process handles were not all disposed' }
-    if ($caught -cne $expected -or $report.document_readiness.ready -or $pauses -ne 0) { throw 'Unproven descendant did not fail closed at expected boundary' }
-    if ($kind -in @('postproofexit','postproofreuse','initialexit','initialreuse') -and $diagnostics -ne 0) { throw 'Changed identity reached node diagnostics' }
-    if ($kind -in @('secondunknown','newsibling','postproofexit','postproofreuse','initialexit','initialreuse')) { if ($scans -ne 2 -or $snapshots -ne 4) { throw 'Second unknown was refreshed again' } }
+    if ($kind -in @('handlefailure','nullhandle','invalidhandle','closedhandle','untypedhandle') -and
+        ($acquired -ne 3 -or $snapshots -ne 0 -or $scans -ne 1 -or $diagnostics -ne 0)) { throw 'Invalid handle crossed the acquisition boundary' }
+    if ($caught -cne $expected -or $report.document_readiness.ready -or $pauses -ne 0) {
+        # Only fixed synthetic case labels, closed error classes, and booleans escape.
+        $caseLabel='unknown_case'
+        if ($kind -cin @('foreignparent','reusedpid','handlefailure','nullhandle','invalidhandle','closedhandle','untypedhandle','exitduring','youngerparent','session','image','changedbrowser','changedroot','changedbinding','changedchain','secondunknown','newsibling','postproofclosed','postproofexit','postproofreuse','initialexit','initialreuse')) { $caseLabel=$kind }
+        $errorClass='other_or_absent'
+        switch -CaseSensitive ($caught) {
+            'WebView process chain is missing or ambiguous' { $errorClass='missing_chain' }
+            'WebView process chain changed during verification' { $errorClass='changed_chain' }
+            'Document process handle acquisition failed' { $errorClass='safe_handle_failure' }
+            'WebView chain process exited during verification' { $errorClass='exited_during_proof' }
+            'WebView process parent is younger than its child' { $errorClass='younger_parent' }
+            'WebView process chain identity is unproven' { $errorClass='unproven_identity' }
+            'WebView chain browser identity changed' { $errorClass='changed_browser' }
+            'fixed binding changed' { $errorClass='changed_binding' }
+            'UIA node belongs to an unbound process after one verified refresh' { $errorClass='second_unknown' }
+            'Document node process identity changed after admission' { $errorClass='changed_admitted_identity' }
+            'Process handles were not retained across the rescan' { $errorClass='retention_count' }
+            'Unproven sibling was admitted' { $errorClass='sibling_admitted' }
+            'Proven descendant was not admitted' { $errorClass='descendant_missing' }
+        }
+        Write-Host ('Descendant negative diagnostic: case={0}; error_class={1}; expected_match={2}; caught_present={3}; ready={4}; paused={5}; rescanned={6}; diagnostics_read={7}' -f
+            $caseLabel,$errorClass,($caught -ceq $expected),($null -ne $caught),[bool]$report.document_readiness.ready,($pauses -ne 0),($scans -gt 1),($diagnostics -ne 0))
+        throw 'Unproven descendant did not fail closed at expected boundary'
+    }
+    if ($kind -in @('postproofclosed','postproofexit','postproofreuse','initialexit','initialreuse') -and $diagnostics -ne 0) { throw 'Changed identity reached node diagnostics' }
+    if ($kind -in @('secondunknown','newsibling','postproofclosed','postproofexit','postproofreuse','initialexit','initialreuse')) { if ($scans -ne 2 -or $snapshots -ne 4) { throw 'Second unknown was refreshed again' } }
     elseif ($scans -gt 1) { throw 'Unproven tree was rescanned' }
 }
 # A document in a truncated traversal is not readiness evidence.

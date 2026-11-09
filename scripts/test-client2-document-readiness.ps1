@@ -3,7 +3,7 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Document readiness source parse failed' }
-foreach ($name in @('Element-Info','Assert-DocumentNodeIdentity','Wait-TargetDocument')) {
+foreach ($name in @('Element-Info','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Wait-TargetDocument')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Document readiness function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))

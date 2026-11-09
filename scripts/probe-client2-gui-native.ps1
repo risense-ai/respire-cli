@@ -96,10 +96,22 @@ function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.Has
         focusable_count = @($rows | Where-Object { $_.keyboard_focusable -and -not $_.offscreen }).Count }
 }
 
+function Assert-DocumentProcessHandle($Process) {
+    try {
+        $handle = $Process.SafeHandle
+        if ($null -eq $handle) { throw 'Document process handle acquisition failed' }
+        $invalid = $handle.IsInvalid
+        $closed = $handle.IsClosed
+        if ($invalid -isnot [bool] -or $closed -isnot [bool] -or $invalid -or $closed) {
+            throw 'Document process handle acquisition failed'
+        }
+    } catch { throw 'Document process handle acquisition failed' }
+}
 function Assert-DocumentNodeIdentity([int]$NodePid, $LiveIdentities) {
     if (-not $LiveIdentities.ContainsKey($NodePid)) { throw 'Document node has no held process identity' }
     $identity = $LiveIdentities[$NodePid]
     $process = $identity.process
+    Assert-DocumentProcessHandle $process
     if ($process.HasExited -or $process.StartTime.ToUniversalTime().Ticks -ne $identity.birth -or
         $process.SessionId -ne $identity.session -or
         -not [string]::Equals($process.Path,$identity.image,[StringComparison]::OrdinalIgnoreCase)) {
@@ -112,7 +124,7 @@ function Read-ProvenWebViewChain([int]$NodePid, [Diagnostics.Stopwatch]$BudgetCl
     try {
     $browser = Get-Process -Id $binding.browser_pid -ErrorAction Stop
     $held.Add($browser)
-    $null = $browser.SafeHandle
+    Assert-DocumentProcessHandle $browser
     if ($browser.HasExited -or $browser.StartTime.ToUniversalTime().Ticks -ne $binding.browser_started_ticks -or
         $browser.SessionId -ne $binding.session_id -or
         [IO.Path]::GetFileName($browser.Path) -ne 'msedgewebview2.exe') { throw 'WebView chain browser identity changed' }
@@ -124,7 +136,7 @@ function Read-ProvenWebViewChain([int]$NodePid, [Diagnostics.Stopwatch]$BudgetCl
         if (-not $seen.Add($cursor)) { throw 'WebView process chain contains a cycle' }
         $live = Get-Process -Id $cursor -ErrorAction Stop
         $held.Add($live)
-        $null = $live.SafeHandle
+        Assert-DocumentProcessHandle $live
         if ($live.HasExited) { throw 'WebView chain process exited during verification' }
         $matches = @(Get-CimInstance Win32_Process -Filter "ProcessId=$cursor")
         if ($matches.Count -ne 1 -or $matches[0].ProcessId -ne $cursor) { throw 'WebView process chain is missing or ambiguous' }
@@ -186,7 +198,7 @@ function Wait-TargetDocument([double]$Seconds = 15) {
                 if ($clock.Elapsed.TotalSeconds -ge $Seconds) { throw 'Document readiness budget exhausted during identity acquisition' }
                 $process = Get-Process -Id $knownPid -ErrorAction Stop
                 $held.Add($process)
-                $null = $process.SafeHandle
+                Assert-DocumentProcessHandle $process
                 $identities[[int]$knownPid] = @{process=$process; birth=$process.StartTime.ToUniversalTime().Ticks
                     session=$process.SessionId; image=$process.Path}
                 Assert-DocumentNodeIdentity ([int]$knownPid) $identities
