@@ -21,7 +21,10 @@ import uuid
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(support)
-keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+    and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name(keyring_script))
 keyring_backend = importlib.util.module_from_spec(keyring_spec)
 keyring_spec.loader.exec_module(keyring_backend)
 require, digest = support.require, support.digest
@@ -368,11 +371,14 @@ class Smoke(support.Smoke):
         self.save()
         self.keys.put(service, "super:" + user, code)
         self.keys.put(service, "pass:" + user, password)
+        # The old service stores credentials by user, not by the new login alias.
+        login_alias = session.pop("keyring_account")
+        session.pop("keyring_backend", None)
         # The old service is the only credential source, not an environment override.
         self.report["fixture_operation"] = "remove_current_native_credentials"
         self.save()
-        self.keys.remove("rsrs", "super:" + user)
-        self.keys.remove("rsrs", "pass:" + user)
+        self.keys.remove("rsrs", "super:" + login_alias)
+        self.keys.remove("rsrs", "pass:" + login_alias)
         env.pop("RSRS_SUPER", None)
         self.report["fixture_operation"] = "rewrite_legacy_endpoint"
         self.save()

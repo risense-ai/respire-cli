@@ -278,6 +278,10 @@ class Smoke:
             RSRS_M3_DIR=str(self.model), RSRS_ENGINE="cpu", RSRS_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(self.root / "tmp/missing-keyring.sock"),
             DS_API_KEY="ci-local-fixture", NO_PROXY="127.0.0.1,localhost")
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if (sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+                and bus.startswith("unix:")):
+            self.env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             self.env.pop(name, None)
         with socket.socket() as listener:

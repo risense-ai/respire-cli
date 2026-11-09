@@ -194,6 +194,7 @@ def main():
 
         original_rows = ciphertexts()
         require(len(original_rows) == 1, "ciphertext_fixture_missing")
+        cli("--runtime-internal", "--stop")
         for barrier in ("before_publish", "after_publish"):
             state.update(vault=dict(v2), gets=0, posts=0, barrier=barrier)
             # Transaction barriers start after full library conversion, which is

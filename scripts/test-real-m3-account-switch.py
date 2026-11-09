@@ -194,6 +194,10 @@ for binary in BINARIES:
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
+                if args.runtime_binary:
+                    # --direct forwards to a resident owner; drain it before raw fixture profile selection.
+                    stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+                    assert stopped.returncode==0,'direct seed runtime stop failed'
         stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
         assert stopped.returncode==0,'direct seed runtime stop failed'
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}

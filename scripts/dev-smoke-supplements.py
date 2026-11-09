@@ -37,7 +37,13 @@ def main():
     ]
     def run_suite(command):
         name, script, flags = command
-        process = subprocess.Popen([sys.executable, str(scripts / script), *flags],
+        argv = [sys.executable, str(scripts / script), *flags]
+        if (sys.platform.startswith("linux") and name in ("legacy_vault", "profile_migration")
+                and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+                and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:")):
+            # Each native manager must own its own initially empty private service.
+            argv = ["dbus-run-session", "--", *argv]
+        process = subprocess.Popen(argv,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
             process.communicate(timeout=1500)

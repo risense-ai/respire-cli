@@ -312,11 +312,16 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
         if ($Method -eq 'health') {
             return Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec $TimeoutSec
         }
+        $health = Get-OwnedRuntimeHealth $DataDir -TimeoutSec $TimeoutSec
+        $scope = @{ account_id = $health.account_id; instance_id = $health.instance_id; generation = $health.generation }
         $requestId = [Guid]::NewGuid().ToString('N')
-        $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
+        $body = @{ v = 1; id = $requestId; scope = $scope; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
         $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
             -Body $body -TimeoutSec 5
-        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne $ExpectVersion) {
+        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne [string]$health.bin `
+            -or [string]$response.scope.account_id -cne [string]$scope.account_id `
+            -or [string]$response.scope.instance_id -cne [string]$scope.instance_id `
+            -or $response.scope.generation -cne $scope.generation) {
             throw 'Owned runtime RPC response identity failed.'
         }
         return $response.envelope.summary
@@ -328,11 +333,29 @@ function Get-OwnedRuntimeHealth([string]$DataDir, [int]$TimeoutSec = 5) {
     $profile = [IO.Path]::GetFullPath([string]$health.data_dir)
     $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $nativeName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+    $runtimeVersion = $ExpectVersion
+    $runtimeHash = $script:BinarySha256
     $ownedExecutable = [IO.Path]::GetFullPath((Join-Path $DataDir "bin/$nativeName"))
-    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $ExpectVersion -or [int]$health.pid -le 0 `
+    if ($script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+        $ownedExecutable = [IO.Path]::GetFullPath($script:PublishedRuntimePaths[$DataDir])
+        $runtimeVersion = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_VERSION } else { $env:NATIVE_RUNTIME_VERSION }
+        $runtimeHash = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_SHA256 } else { $env:NATIVE_RUNTIME_SHA256 }
+        if ([string]$health.runtime_version -cne $runtimeVersion) { throw 'Owned runtime version differs from the selected installation.' }
+    }
+    $reportedExecutable = [IO.Path]::GetFullPath([string]$health.exe)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+        $ownedExecutable = $ownedExecutable -replace '^\\\\\?\\', ''
+        $reportedExecutable = $reportedExecutable -replace '^\\\\\?\\', ''
+    }
+    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $runtimeVersion -or [int]$health.pid -le 0 `
         -or ($profile -ne $device -and -not $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar)) `
-        -or [IO.Path]::GetFullPath([string]$health.exe) -ne $ownedExecutable `
-        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:BinarySha256) {
+        -or $reportedExecutable -ne $ownedExecutable `
+        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $runtimeHash `
+        -or [string]::IsNullOrWhiteSpace([string]$health.account_id) `
+        -or [string]::IsNullOrWhiteSpace([string]$health.instance_id) `
+        -or ($health.generation -isnot [long] -and $health.generation -isnot [int]) -or $health.generation -le 0) {
         throw 'Owned runtime health identity failed.'
     }
     return $health
