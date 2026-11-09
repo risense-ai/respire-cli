@@ -123,7 +123,7 @@ for binary in BINARIES:
         return (rows,artifacts,(profile/'session.json').read_bytes())
     def observe_runtime(health=None):
         if health is None:
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                 health=json.load(response)
         profile=pathlib.Path(json.loads((main/'client.json').read_text())['data_dir']) if (main/'client.json').exists() else main
         verify_runtime_health(runtime_config,health,main,profile)
@@ -310,7 +310,7 @@ for binary in BINARIES:
                     while pending.poll() is None:
                         assert time.monotonic()<deadline,'native probe exceeded the acceptance deadline'
                         start=time.monotonic()
-                        with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                        with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                             health=json.load(response)
                         assert time.monotonic()-start < 2,'health blocked behind native inference'
                         if args.expect_supervised_worker:
@@ -339,7 +339,7 @@ for binary in BINARIES:
                 deadline=time.monotonic()+10
                 policy=None
                 while policy is None and time.monotonic()<deadline:
-                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                    with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                         thread_health=json.load(response)
                     policy=thread_health.get('inference',{}).get('intra_threads')
                     if policy is None: time.sleep(.05)
@@ -348,7 +348,7 @@ for binary in BINARIES:
             recalled=run('recall','Real account return fixture','--titles')
             assert recalled.get('items'),'real recall returned no seeded entry'
             if args.expect_supervised_worker:
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                     assert checked_worker(json.load(response))==probe_worker,'warm recall replaced its worker'
             doctor=run('doctor',allow_failure=True)
             rows={item['name']:item for item in doctor['items'] if item['name'] in ['embedder','model index']}
@@ -373,7 +373,7 @@ for binary in BINARIES:
         stress = None
         if args.resident_stress:
             import concurrent.futures, contextlib, psutil, threading
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}), timeout=2) as response:
                 health = json.load(response)
             owned = psutil.Process(health['pid'])
             if args.runtime_binary:
@@ -419,7 +419,7 @@ for binary in BINARIES:
                     raise RuntimeError('continuous health observer failed: '+str(observer_errors))
                 sample_started=time.monotonic()
                 sample_unix=time.time()
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}), timeout=2) as response:
                     current = json.load(response)
                 health_completed=time.monotonic()
                 assert current['pid'] == owned.pid, 'stress changed runtime ownership'
@@ -578,7 +578,7 @@ for binary in BINARIES:
         restart_checked=False
         if args.expect_in_process or args.expect_supervised_worker:
             import psutil
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                 health=json.load(response)
             owned=psutil.Process(health['pid'])
             retired_workers=[checked_worker(health)] if args.expect_supervised_worker else []
@@ -641,7 +641,7 @@ for binary in BINARIES:
                 assert (ready['pid'],ready['process_start_id'],ready['instance_id'])==(
                     replacement['pid'],replacement['process_start_id'],replacement['instance_id'])
             if args.expect_supervised_worker:
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                     checked_worker(json.load(response))
             restart_checked=True
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
