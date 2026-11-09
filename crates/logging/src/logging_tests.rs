@@ -4,6 +4,7 @@ use super::*;
 // same mutex to stay deterministic under a parallel local `cargo test`; CI
 // already runs the workspace single-threaded.
 static TEST_LOCK: Mutex<()> = Mutex::new(());
+type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 fn level_from_file(path: &std::path::Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
@@ -13,24 +14,28 @@ fn line_count(text: &str) -> usize {
     text.lines().count()
 }
 
-fn init_at(dir: &std::path::Path, name: &str, level: Level, max_bytes: u64) -> std::path::PathBuf {
+fn init_at(
+    dir: &std::path::Path,
+    name: &str,
+    level: Level,
+    max_bytes: u64,
+) -> TestResult<std::path::PathBuf> {
     let path = dir.join(name);
     init(LoggingConfig {
         path: path.clone(),
         level,
         max_bytes,
-    })
-    .expect("test log init should succeed");
-    path
+    })?;
+    Ok(path)
 }
 
 #[test]
-fn default_level_only_writes_errors() {
+fn default_level_only_writes_errors() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "levels.log", Level::Error, DEFAULT_MAX_BYTES);
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "levels.log", Level::Error, DEFAULT_MAX_BYTES)?;
     error(format_args!("first failure: {:#}", "root cause"));
     warn(format_args!("warn suppressed"));
     info(format_args!("info suppressed"));
@@ -38,6 +43,7 @@ fn default_level_only_writes_errors() {
     let text = level_from_file(&path);
     assert!(text.contains(" ERROR first failure: root cause"), "{text}");
     assert_eq!(line_count(&text), 1, "{text}");
+    Ok(())
 }
 
 #[test]
@@ -80,23 +86,24 @@ fn rsrs_log_env_controls_level() {
 }
 
 #[test]
-fn off_level_writes_nothing() {
+fn off_level_writes_nothing() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "off.log", Level::Off, DEFAULT_MAX_BYTES);
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "off.log", Level::Off, DEFAULT_MAX_BYTES)?;
     error(format_args!("must not land"));
     assert_eq!(level_from_file(&path), "");
+    Ok(())
 }
 
 #[test]
-fn rotation_keeps_one_generation() {
+fn rotation_keeps_one_generation() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "rotate.log", Level::Error, 128);
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "rotate.log", Level::Error, 128)?;
     for index in 0..8 {
         error(format_args!(
             "failure {index} with some padding text to exceed the cap quickly"
@@ -115,15 +122,16 @@ fn rotation_keeps_one_generation() {
     // The sink keeps working after rotation.
     error(format_args!("post-rotation failure"));
     assert!(level_from_file(&path).contains("post-rotation failure"));
+    Ok(())
 }
 
 #[test]
-fn concurrent_writers_all_land() {
+fn concurrent_writers_all_land() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "threads.log", Level::Error, DEFAULT_MAX_BYTES);
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "threads.log", Level::Error, DEFAULT_MAX_BYTES)?;
     let handles: Vec<_> = (0..4)
         .map(|worker| {
             std::thread::spawn(move || {
@@ -134,10 +142,11 @@ fn concurrent_writers_all_land() {
         })
         .collect();
     for handle in handles {
-        handle.join().expect("writer thread");
+        handle.join().map_err(|_| "writer thread panicked")?;
     }
     let text = level_from_file(&path);
     assert_eq!(line_count(&text), 80, "{text}");
+    Ok(())
 }
 
 #[test]
@@ -162,31 +171,28 @@ fn civil_from_days_matches_known_dates() {
 
 #[cfg(unix)]
 #[test]
-fn unix_file_mode_is_owner_only() {
+fn unix_file_mode_is_owner_only() -> TestResult {
     use std::os::unix::fs::PermissionsExt;
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "perms.log", Level::Error, DEFAULT_MAX_BYTES);
-    let mode = std::fs::metadata(&path)
-        .expect("metadata")
-        .permissions()
-        .mode()
-        & 0o777;
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "perms.log", Level::Error, DEFAULT_MAX_BYTES)?;
+    let mode = std::fs::metadata(&path)?.permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "log file must stay owner-only");
+    Ok(())
 }
 
 #[test]
-fn failed_init_leaves_records_as_noop() {
+fn failed_init_leaves_records_as_noop() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // A regular file used as a parent directory fails create_dir_all on
     // every platform, so the failure is deterministic in CI and locally.
-    let base = tempfile::tempdir().expect("tempdir");
+    let base = tempfile::tempdir()?;
     let blocker = base.path().join("blocker");
-    std::fs::write(&blocker, b"x").expect("write blocker file");
+    std::fs::write(&blocker, b"x")?;
     let missing_parent = blocker.join("nested.log");
     let result = init(LoggingConfig {
         path: missing_parent,
@@ -198,29 +204,29 @@ fn failed_init_leaves_records_as_noop() {
     // must not panic whether or not an earlier init installed a sink.
     error(format_args!("after failed init"));
     warn(format_args!("still a noop"));
+    Ok(())
 }
 
 #[test]
-fn panic_payload_formats() {
+fn panic_payload_formats() -> TestResult {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = init_at(dir.path(), "panic.log", Level::Error, DEFAULT_MAX_BYTES);
+    let dir = tempfile::tempdir()?;
+    let path = init_at(dir.path(), "panic.log", Level::Error, DEFAULT_MAX_BYTES)?;
     log_panic(&"explicit str panic", "cli::frontend");
     log_panic(&(String::from("owned string panic")), "runtime::serve");
     log_panic(&(7u32), "somewhere");
     let text = level_from_file(&path);
-    assert!(
-        text.contains("panic at cli::frontend: explicit str panic"),
-        "{text}"
-    );
-    assert!(
-        text.contains("panic at runtime::serve: owned string panic"),
-        "{text}"
-    );
-    assert!(
-        text.contains("panic at somewhere: panic without a string payload"),
-        "{text}"
-    );
+    assert_eq!(line_count(&text), 3, "{text}");
+    for location in ["cli::frontend", "runtime::serve", "somewhere"] {
+        assert!(
+            text.contains(&format!(" ERROR panic at {location}")),
+            "{text}"
+        );
+    }
+    for private in ["explicit str panic", "owned string panic"] {
+        assert!(!text.contains(private), "panic payload persisted");
+    }
+    Ok(())
 }

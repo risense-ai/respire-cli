@@ -49,7 +49,7 @@ fn main() -> ExitCode {
         return match respire_app::core_sdk::worker::run() {
             Ok(()) => ExitCode::from(0),
             Err(error) => {
-                respire_logging::error(format_args!("Core worker stopped: {error:#}"));
+                respire_logging::error(format_args!("Core worker stopped"));
                 eprintln!("Core worker stopped: {error:#}");
                 ExitCode::from(1)
             }
@@ -59,9 +59,9 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
         Err(error) => {
-            // Serving failures happen after stdio is detached, so the log file
-            // is the only place this chain survives.
-            respire_logging::error(format_args!("rsrs-runtime failed: {error:#}"));
+            // Persist a fixed event when detached stderr is unavailable;
+            // keep the original error chain on stderr only.
+            respire_logging::error(format_args!("rsrs-runtime failed"));
             eprintln!("rsrs-runtime: {error:#}");
             ExitCode::from(2)
         }

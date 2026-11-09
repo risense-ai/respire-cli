@@ -89,6 +89,9 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     for (key, value) in &config.environment {
         std::env::set_var(key, value);
     }
+    // Runtime commands bypass the normal CLI bootstrap. Initialize only after
+    // the registration has established this supervisor's owned data root.
+    super::super::install_error_logging();
     // The registered task is the foreground owner. A kill-on-close job keeps a
     // dead supervisor from orphaning the runtime child (Windows 8+ nested jobs
     // preserve the enclosing Task Scheduler job).
@@ -115,7 +118,7 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
         let binary = match resolve_child_plan() {
             Ok(binary) => binary,
             Err(error) => {
-                respire_logging::error(format_args!("runtime resolution failed: {error:#}"));
+                respire_logging::error(format_args!("runtime resolution failed"));
                 eprintln!("runtime resolution failed: {error:#}");
                 if error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>() {
                     lifecycle::record_supervise_event(&config, "exit_error");
@@ -151,7 +154,7 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             }
             Ok(Err(error)) => {
                 respire_logging::error(format_args!(
-                    "runtime child supervision failed: {error:#}"
+                    "runtime child supervision failed"
                 ));
                 eprintln!("runtime child supervision failed: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
@@ -160,7 +163,7 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
             }
             Err(error) => {
                 respire_logging::error(format_args!(
-                    "runtime child could not be started: {error:#}"
+                    "runtime child could not be started"
                 ));
                 eprintln!("runtime child could not be started: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
