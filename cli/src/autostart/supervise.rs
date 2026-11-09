@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(failures, 1);
         use respire_commands::output::{ResultEnvelope, Status};
         use std::cell::Cell;
-        let finished = Cell::new(false);
+        let finished = Cell::new(None);
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = |outcome: &str, secret: serde_json::Value| {
             ResultEnvelope::new("keygen", Status::Ok, serde_json::json!({
@@ -315,24 +315,41 @@ mod tests {
                 "super_password": secret,
             }), Vec::new())
         };
-        let finish = || { finished.set(true); Ok(()) };
+        let finish = |resume| { finished.set(Some(resume)); Ok(()) };
         let output = auth_control::finish_keygen(
             Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, false, false, finish)?;
-        assert!(!finished.get());
+        assert_eq!(finished.get(), Some(false));
+        finished.set(None);
         assert_eq!(output.summary, serde_json::json!({
             "path": "fixture/session.json", "super": "synthetic-recovery-code"}));
         assert_eq!(output.items[0].name, "keys");
         assert_eq!(output.actions, ["login --interactive --user <user> --pass <password>"]);
+        let failed_finish = auth_control::finish_keygen(
+            Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, true, false,
+            |resume| { assert!(!resume); anyhow::bail!("synthetic finish failure") },
+        ).err().context("committed finish failure must remain an error")?;
+        let failure = failed_finish.to_string();
+        assert!(failure.contains("keygen committed") && failure.contains(&operation_id)
+            && failure.contains("force=true") && failure.contains("do not replay keygen"));
+        assert!(!failure.contains("synthetic-recovery-code"));
+        auth_control::finish_keygen(
+            Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, false, true, finish)?;
+        assert_eq!(finished.get(), Some(false));
+        finished.set(None);
         for missing in [serde_json::Value::Null, serde_json::json!("")] {
             assert!(auth_control::finish_keygen(Ok(response("committed", missing)), &operation_id, false, false, finish).is_err());
-            assert!(!finished.get());
+            assert_eq!(finished.get(), None);
         }
+        let mut malformed = response("committed", serde_json::json!("synthetic-recovery-code"));
+        malformed.summary = serde_json::Value::Null;
+        assert!(auth_control::finish_keygen(Ok(malformed), &operation_id, false, false, finish).is_err());
+        assert_eq!(finished.get(), None);
         let unknown = anyhow::Error::new(AuthOutcomeUnknown { operation_id: operation_id.clone(), force: true });
         let error = auth_control::finish_keygen(Err(unknown), &operation_id, true, false, finish)
             .err().context("unknown result must not finish maintenance")?;
         assert_eq!(error.downcast_ref::<AuthOutcomeUnknown>()
             .context("original operation error was lost")?.operation_id, operation_id);
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         for force in [false, true] {
             let error = auth_control::finish_keygen(
                 Ok(response("unknown", serde_json::Value::Null)), &operation_id, force, false, finish,
@@ -341,19 +358,19 @@ mod tests {
                 .context("explicit unknown lost its operation context")?;
             assert_eq!(original.operation_id, operation_id);
             assert_eq!(original.force, force);
-            assert!(!finished.get());
+            assert_eq!(finished.get(), None);
         }
         let refused = auth_control::finish_keygen(
             Err(anyhow::anyhow!("synthetic preflight rejection")), &operation_id, true, false, finish,
         ).err().context("preflight rejection must remain an error")?;
         assert!(refused.downcast_ref::<AuthOutcomeUnknown>().is_none());
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, true, finish)?;
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, false, finish)?;
-        assert!(finished.get());
+        assert_eq!(finished.get(), Some(true));
         assert!(auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, false,
-            || anyhow::bail!("synthetic resume failure")).is_err());
+            |resume| { assert!(resume); anyhow::bail!("synthetic resume failure") }).is_err());
         use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
             HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams, HostAuthAccountParams};
         let binding = respire_protocol::ControlBinding {
