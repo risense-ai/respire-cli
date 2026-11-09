@@ -878,11 +878,10 @@ Assert-Smoke 'memory-revision-reads-stable' ($revisionRepeat.Ok -and [string]$re
 Invoke-Om -Name 'doctor-human' -ArgList @('doctor') -DataDir $DirA -Raw -ExpectExit @(0, 1, 2) -MinStdout 40 -TimeoutSec 180 -Note 'exit 1 means a check failed; allowed on a clean runner' | Out-Null
 $docj = Invoke-Om -Name 'doctor-json' -ArgList @('--json', 'doctor') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail', 'skip') -RequireCommand 'doctor' -Note 'the envelope must be doctor and summary.total must exist'
 $mcpBinItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp bin' } | Select-Object -First 1
-$mcpHttpItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp http' } | Select-Object -First 1
 $binName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
 $mcpBinPath = Join-Path $DirA "bin\$binName"
-Add-SweepRow 'doctor-mcp-bin-item' ($null -ne $mcpBinItem -and [string]$mcpBinItem.status -eq 'ok') ([string]$mcpBinItem.value)
-Add-SweepRow 'doctor-mcp-http-item' ($null -ne $mcpHttpItem -and ([string]$mcpHttpItem.value -like '*/mcp*')) ([string]$mcpHttpItem.value)
+Add-SweepRow 'doctor-mcp-bin-item' ($docj.Ok -and [string]$docj.Envelope.command -ceq 'doctor' -and $null -ne $mcpBinItem -and [string]$mcpBinItem.status -ceq 'ok') ([string]$mcpBinItem.value)
+Add-SweepRow 'doctor-mcp-bin-path' ($null -ne $mcpBinItem -and [string]$mcpBinItem.value -ceq $mcpBinPath) ([string]$mcpBinItem.value)
 Add-SweepRow 'mcp-bin-file' (Test-Path -LiteralPath $mcpBinPath) $mcpBinPath
 $embedder = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'embedder' } | Select-Object -First 1
 if ($embedder -and [string]$embedder.status -eq 'fail') {
@@ -890,7 +889,7 @@ if ($embedder -and [string]$embedder.status -eq 'fail') {
 }
 $remoteDoctor = Invoke-Om -Name 'doctor-remote' -ArgList @('--json', 'doctor', '--remote') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail') -RequireCommand 'doctor'
 $remoteItem = @($remoteDoctor.Envelope.items | Where-Object { [string]$_.name -eq 'remote' } | Select-Object -First 1)
-Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -eq 'ok' -and [string]$remoteItem[0].value -like "$Server /health -> 200*")
+Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -ceq 'ok' -and [string]$remoteItem[0].value -ceq 'Configured remote /health -> 200')
 
 Invoke-Om -Name 'taxonomy' -ArgList @('--json', 'taxonomy') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'taxonomy-list' -ArgList @('--json', 'taxonomy', '--list') -DataDir $DirA | Out-Null
