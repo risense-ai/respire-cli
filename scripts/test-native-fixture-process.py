@@ -186,5 +186,66 @@ except TimeoutError:
                     'seconds': elapsed, 'helper_reaped': True})
 finally:
     inspector.close()
+# Fault injection stays in a disposable helper. The live response loop must
+# retain sequence/identity checks without an asynchronous traceback timer.
+clean_source = directory / 'responsive_inspector.py'
+clean_source.write_text(source.read_text(encoding='utf-8').replace(
+    'identity = inspect_worker(request, phase)',
+    "identity = [request['host_pid'], request['worker_pid']]"), encoding='utf-8')
+spec = importlib.util.spec_from_file_location('responsive_fixture', clean_source)
+responsive = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(responsive)
+serve_tree = ast.parse(source.read_text(encoding='utf-8'))
+assert not any(isinstance(node, ast.Attribute) and node.attr == 'dump_traceback_later'
+               for node in ast.walk(serve_tree)), 'asynchronous traceback timer returned'
+inspector = responsive.WorkerInspector(directory / 'responsive', timeout=2)
+try:
+    for sequence in range(12):
+        assert inspector.inspect({'host_pid': sequence, 'worker_pid': sequence + 1}) == (sequence, sequence + 1)
+    assert inspector.sequence == 12
+finally:
+    inspector.close()
+assert inspector.process.poll() is not None and inspector.log.closed
+results.append({'scenario': 'response loop retains sequence and identity without async dumps', 'passed': True})
+
+# A real boundary assertion still fails immediately, with its evidence intact.
+inspector = responsive.WorkerInspector(directory / 'assertion-failure', timeout=2)
+try:
+    try:
+        inspector.inspect({})  # Missing required identity fields in the disposable helper.
+        raise AssertionError('boundary error was accepted')
+    except AssertionError as error:
+        assert 'KeyError' in str(error)
+        failure = json.loads((inspector.directory / 'inspection-failure.json').read_text(encoding='utf-8'))
+        assert failure['passed'] is False and 'KeyError' in failure['error']
+finally:
+    inspector.close()
+assert inspector.process.poll() is not None and inspector.log.closed
+results.append({'scenario': 'boundary errors still fail acceptance', 'passed': True})
+
+# A reaped helper must fail acceptance and preserve an on-disk cause even if
+# writing/closing its broken request pipe raises the Windows EINVAL form.
+class FailedPipe:
+    def write(self, data): return len(data)
+    def flush(self): raise OSError(22, 'injected broken inspector pipe')
+    def close(self): raise OSError(22, 'injected broken inspector pipe')
+inspector = responsive.WorkerInspector(directory / 'broken-pipe', timeout=2)
+inspector.process.kill()
+inspector.process.wait(timeout=5)
+inspector.process.stdin.close()
+inspector.process.stdin = FailedPipe()
+try:
+    try:
+        inspector.inspect({'host_pid': 1, 'worker_pid': 2})
+        raise AssertionError('dead inspector was accepted')
+    except RuntimeError as error:
+        assert 'request pipe failed' in str(error) and isinstance(error.__cause__, OSError)
+        failure = json.loads((inspector.directory / 'inspection-failure.json').read_text(encoding='utf-8'))
+        assert failure['passed'] is False and 'request pipe failed' in failure['error']
+finally:
+    inspector.close()
+assert inspector.log.closed and inspector.process.poll() is not None
+results.append({'scenario': 'broken request pipe preserves failure through cleanup', 'passed': True})
+
 (output / 'fixture-process-verification.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
 print(json.dumps(results), flush=True)
