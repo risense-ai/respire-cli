@@ -1373,6 +1373,17 @@ jobs:
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
 
+  client2-focus-contract:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test focus readiness policy without product or credentials
+        shell: powershell
+        run: ./scripts/test-client2-focus-readiness.ps1
+
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}
     name: Published M3 (${{ matrix.target }})
