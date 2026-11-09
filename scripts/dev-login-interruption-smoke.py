@@ -369,9 +369,39 @@ def main():
         report["passed"] = True
     finally:
         release.set()
-        if child is not None and child.poll() is None:
-            child.kill()
-            child.communicate(timeout=15)
+        if child is not None:
+            if child.poll() is None:
+                child.kill()
+            try:
+                stdout, _ = child.communicate(timeout=15)
+            except (OSError, subprocess.TimeoutExpired):
+                stdout = b""
+            report["migration_child"] = {"exit_code": child.returncode,
+                "migration_stage": None, "migration_exchange": None, "register_kind": None}
+            try:
+                value = json.loads(stdout)
+            except (ValueError, UnicodeError, RecursionError):
+                value = None
+            errors = value.get("errors") if isinstance(value, dict) else None
+            text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
+            migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+                "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+                "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+                "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+            exchange_categories = ("spawn", "channel", "frame", "encoding", "deadline", "child_exit",
+                "response_binding", "response_profile", "response_envelope", "response_readiness", "result_identity",
+                "unknown_receipt", "terminal_receipt", "terminal_details", "unclassified", "runtime_invalid_request",
+                "runtime_protocol_version_mismatch", "runtime_control_unavailable", "runtime_auth_recovery_pending",
+                "runtime_unauthorized", "runtime_auth_ownership_unavailable", "runtime_scope_mismatch",
+                "runtime_migration_outcome_unknown", "runtime_control_outcome_unknown")
+            register_kinds = ("register_remote_unknown", "register_native_credentials", "register_state_conflict",
+                "register_material_invalid", "register_local_compatibility", "register_unclassified")
+            for name, allowed in (("migration_stage", migration_stages), ("migration_exchange", exchange_categories),
+                                  ("register_kind", register_kinds)):
+                token = re.search(r"\b" + name + r"=([a-z_]+)(?=$|[;\s])", text)
+                if token and token[1] in allowed and (name != "migration_exchange"
+                        or report["migration_child"]["migration_stage"] == "exchange"):
+                    report["migration_child"][name] = token[1]
         stopped = subprocess.run([str(args.binary), "--runtime-internal", "--stop"], env=env, capture_output=True, timeout=60)
         report["runtime_cleanup"] = {"passed": stopped.returncode in (0, 2)}
         if keys:
