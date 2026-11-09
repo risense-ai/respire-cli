@@ -820,6 +820,9 @@ $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'c
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
 $bgeInstall = Invoke-Om -Name 'model-install' -ArgList @('--json', 'model', 'install') -DataDir $DirA -TimeoutSec 900
 Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
+# The installer owns the CPU cache per profile; later profiles use this shared model root.
+python -c "import sys; sys.path.insert(0, sys.argv[1]); from dev_model_fixture import share_cpu_container; share_cpu_container(sys.argv[2], {'RSRS_DATA_DIR': sys.argv[3]}, sys.argv[4])" $PSScriptRoot $Root $DirA (Join-Path $Root 'models/bge-m3')
+if ($LASTEXITCODE -ne 0) { throw 'Shared CPU model fixture preparation failed' }
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
