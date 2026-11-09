@@ -267,17 +267,15 @@ class Smoke(support.Smoke):
             and session.get("user") == user and session.get("addr") == support.UPSTREAM
             and bool(session.get("token")), "migration_registered_identity_mismatch")
         account.update(token=session["token"], confirmed=True)
-        auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
-        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")
-        self.diagnostic_secrets.update((code, session["token"], account["pass_hash"]))
+        self.diagnostic_secrets.update((code, session["token"]))
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
-        if sys.platform != "darwin":
-            require(self.keys.read("rsrs", "super:" + user) == code
-                and self.keys.read("rsrs", "pass:" + user) == password,
-                "registered_native_credentials_not_in_owned_store")
+        self.keys.track_created_login(session, user, code, password)
+        auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
+        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
+        self.diagnostic_secrets.add(account["pass_hash"])
         env["RSRS_SUPER"] = code
         self.report["fixture_operation"] = "seed_local_content"
         self.save()
