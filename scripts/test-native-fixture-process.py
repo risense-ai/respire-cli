@@ -247,5 +247,39 @@ finally:
 assert inspector.log.closed and inspector.process.poll() is not None
 results.append({'scenario': 'broken request pipe preserves failure through cleanup', 'passed': True})
 
+# Exercise the real OS pipe after helper exit, without swapping the stream.
+inspector = responsive.WorkerInspector(directory / 'real-broken-pipe', timeout=2)
+inspector.process.kill()
+inspector.process.wait(timeout=5)
+try:
+    try:
+        inspector.inspect({'host_pid': 1, 'worker_pid': 2})
+        raise AssertionError('exited helper was accepted')
+    except RuntimeError as error:
+        assert 'request pipe failed' in str(error) and isinstance(error.__cause__, OSError)
+        assert (inspector.directory / 'inspection-failure.json').is_file()
+finally:
+    inspector.close()
+assert inspector.log.closed and inspector.process.poll() is not None
+results.append({'scenario': 'real exited-helper pipe remains fail-closed', 'passed': True})
+
+inspector = responsive.WorkerInspector(directory / 'unwritable-record', timeout=2)
+inspector.process.kill()
+inspector.process.wait(timeout=5)
+def cannot_record(reason):
+    raise PermissionError('injected unwritable failure record')
+inspector.record_failure = cannot_record
+try:
+    try:
+        inspector.inspect({'host_pid': 1, 'worker_pid': 2})
+        raise AssertionError('unrecordable pipe failure was accepted')
+    except RuntimeError as error:
+        assert 'request pipe failed' in str(error) and isinstance(error.__cause__, OSError)
+        assert any('failure record could not be written' in note for note in error.__notes__)
+finally:
+    inspector.close()
+assert inspector.log.closed and inspector.process.poll() is not None
+results.append({'scenario': 'unwritable evidence preserves original pipe failure', 'passed': True})
+
 (output / 'fixture-process-verification.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
 print(json.dumps(results), flush=True)
