@@ -128,12 +128,13 @@ fn keygen_operation(operation_id: &str, force: bool, query_only: bool) -> Result
     } else {
         control::auth_keygen_locked(&takeover, &mut maintenance, operation_id, force)
     };
-    finish_keygen(response, operation_id, force, query_only, || {
-        if health.is_some() {
+    finish_keygen(response, operation_id, force, query_only, |resume| {
+        if resume && health.is_some() {
             maintenance.start_account_runtime()?;
         }
         maintenance.finish()?;
-        maintenance.finish_handoff()
+        if resume { maintenance.finish_handoff()?; }
+        Ok(())
     })
 }
 
@@ -142,7 +143,7 @@ pub(super) fn finish_keygen(
     operation_id: &str,
     force: bool,
     query_only: bool,
-    finish_rollback: impl FnOnce() -> Result<()>,
+    finish: impl FnOnce(bool) -> Result<()>,
 ) -> Result<ResultEnvelope> {
     // An exchange error leaves the durable Paused marker intact, including cleanup failures.
     let envelope = response?;
@@ -152,7 +153,9 @@ pub(super) fn finish_keygen(
         HostAuthOutcome::Committed => {
             let secret = result.super_password.filter(|value| !value.is_empty())
                 .context("committed auth result is missing the recovery code")?;
-            // Unbound keys cannot serve business requests. Register/login must resume Paused.
+            // Complete verified keygen maintenance without starting an unbound serving owner.
+            finish(false).with_context(|| format!(
+                "keygen committed but host maintenance completion failed; operation_id={operation_id} force={force}; query the same operation, do not replay keygen"))?;
             let mut output = ResultEnvelope::new("keygen", Status::Ok,
                 serde_json::json!({"path": result.path.to_string_lossy(), "super": secret}),
                 vec![Item::new("keys", Status::Ok, result.path.display().to_string())]);
@@ -162,7 +165,7 @@ pub(super) fn finish_keygen(
         HostAuthOutcome::RolledBack => {
             // A new query process does not know the original serving state. Leave it Paused.
             if !query_only {
-                finish_rollback()?;
+                finish(true)?;
             }
             Ok(envelope)
         }
