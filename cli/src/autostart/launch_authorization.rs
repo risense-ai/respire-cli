@@ -697,7 +697,32 @@ mod tests {
         unknown.ok = false;
         unknown.exit = 2;
         unknown.code = Some("control_outcome_unknown".to_owned());
-        assert!(control::validate_auth_response(unknown, &auth_request, &profile, auth_pid).is_err());
+        for (code, private_error, diagnostic) in [
+            ("control_outcome_unknown", "fixture-private", "auth_runtime_deadline_or_parent_revoked"),
+            ("auth_outcome_unknown", "fixture-private: Secret Service initialization failed", "auth_credential_backend_unavailable"),
+            ("auth_outcome_unknown", "fixture-private: kernel keyring initialization failed", "auth_credential_backend_unavailable"),
+            ("auth_outcome_unknown", "fixture-private: offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction", "auth_credential_backend_not_persistent"),
+            ("auth_outcome_unknown", "fixture-private: migration keyring readback mismatch", "auth_credential_write_readback_failed"),
+            ("auth_outcome_unknown", "fixture-private: migration keyring write/readback failed; no snapshot was published", "auth_credential_write_readback_failed"),
+            ("auth_outcome_unknown", "fixture-private: unknown credential failure", "unclassified"),
+            ("auth_outcome_unknown", "fixture-private: Secret Service initialization failed with extra text", "unclassified"),
+        ] {
+            let mut failed = unknown.clone();
+            failed.code = Some(code.to_owned());
+            failed.error = Some(private_error.to_owned());
+            failed.envelope.as_mut().context("auth fixture envelope missing")?.errors.push(private_error.to_owned());
+            let failure = control::validate_auth_response(failed, &auth_request, &profile, auth_pid)
+                .err().context("unknown auth result must remain rejected")?;
+            assert_eq!(format!("{failure:#}"), format!(
+                "auth control completion is unknown; query the original operation; auth_diagnostic={diagnostic}"));
+        }
+        let mut foreign_unknown = unknown.clone();
+        foreign_unknown.operation_id = Some(uuid::Uuid::new_v4().to_string());
+        assert_eq!(control::validate_auth_response(foreign_unknown, &auth_request, &profile, auth_pid)
+            .err().context("foreign unknown auth result accepted")?.to_string(), "auth control response identity mismatch");
+        unknown.data_dir = Some(installation.to_string_lossy().into_owned());
+        assert_eq!(control::validate_auth_response(unknown, &auth_request, &profile, auth_pid)
+            .err().context("foreign unknown auth profile accepted")?.to_string(), "auth control response profile mismatch");
         fs::remove_file(&session)?;
         fs::create_dir(&session)?;
         assert!(account_identity_source(&profile).is_err());

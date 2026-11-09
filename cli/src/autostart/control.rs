@@ -481,9 +481,23 @@ pub(super) fn validate_auth_response(
     }
     let envelope = response.envelope.context("auth control result is missing")?;
     anyhow::ensure!(envelope.command == "keygen", "unexpected auth control command");
-    anyhow::ensure!(!matches!(response.code.as_deref(),
-        Some("control_outcome_unknown" | "auth_outcome_unknown")),
-        "auth control completion is unknown; query the original operation");
+    if matches!(response.code.as_deref(), Some("control_outcome_unknown" | "auth_outcome_unknown")) {
+        // Keep private Runtime diagnostics inside this boundary; expose only fixed classifications.
+        let diagnostic = if response.code.as_deref() == Some("control_outcome_unknown") {
+            "auth_runtime_deadline_or_parent_revoked"
+        } else {
+            response.error.as_deref().unwrap_or_default().split(": ").find_map(|cause| match cause {
+                "Secret Service initialization failed" | "kernel keyring initialization failed" =>
+                    Some("auth_credential_backend_unavailable"),
+                "offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction" =>
+                    Some("auth_credential_backend_not_persistent"),
+                "migration keyring readback mismatch" | "migration keyring write/readback failed; no snapshot was published" =>
+                    Some("auth_credential_write_readback_failed"),
+                _ => None,
+            }).unwrap_or("unclassified")
+        };
+        anyhow::bail!("auth control completion is unknown; query the original operation; auth_diagnostic={diagnostic}");
+    }
     for (name, value) in [("control_ready", "true"), ("store_ready", "false")] {
         let mut items = envelope.items.iter().filter(|item| item.name == name);
         anyhow::ensure!(items.next().is_some_and(|item| item.value == value

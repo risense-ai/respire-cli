@@ -184,6 +184,12 @@ function Get-SafeFailureReason($Envelope) {
     foreach ($entry in @(
         @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
         @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
+        @('auth_diagnostic=auth_runtime_deadline_or_parent_revoked\b', 'auth_runtime_deadline_or_parent_revoked'),
+        @('auth_diagnostic=auth_credential_backend_unavailable\b', 'auth_credential_backend_unavailable'),
+        @('auth_diagnostic=auth_credential_backend_not_persistent\b', 'auth_credential_backend_not_persistent'),
+        @('auth_diagnostic=auth_credential_write_readback_failed\b', 'auth_credential_write_readback_failed'),
+        @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
+        @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'auth_helper_frame_invalid'),
         @('auth control response identity mismatch', 'auth_response_identity_mismatch'),
         @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
         @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
