@@ -291,7 +291,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     }),/Unassigned or duplicate|Missing migrated|Missing required native stop/);
   }
   const expectedProduct=ci.match(/^  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: ([a-f0-9]{40})$/m)?.[1];
-  assert.equal(expectedProduct,'6739e6b95154a241e8b41dffcee01d7b40e4644b');
+  assert.equal(expectedProduct,'b407e414db66bbecd98133a4addb82d9ea4c00e7');
   const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
   const binary=Buffer.from('synthetic official runtime'),cliBytes=Buffer.from('instrumented CLI'),archive=Buffer.from('source archive');
   const pinVersion=JSON.parse(readFileSync(new URL('../../runtime-pin.json',import.meta.url),'utf8')).required;
