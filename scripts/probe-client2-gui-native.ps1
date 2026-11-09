@@ -406,7 +406,7 @@ function Bind-OfflineRuntime {
     # Store process identity only, never the session/keygen payload.
     $report.offline.runtime_process = $record | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,SessionId
     $report.offline.runtime_bound = $true
-    # Persist only the guarded actor record before any key-generation dialog or business action.
+    # Persist only the guarded actor record before credential verification or business action.
     # The parent can still clean this detached actor if this helper reaches its watchdog.
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'),
         ($report | ConvertTo-Json -Depth 12) + "`n", [Text.UTF8Encoding]::new($false))
@@ -514,12 +514,8 @@ function Invoke-OfflineGuiAcceptance {
     Wait-OfflinePreferences 'onboardingSyncChoice' 'offline'
     $report.offline.onboarding_completed = $true
     $report.offline.onboarding_stage = 'completed'
-    $report.offline.action_stage = 'overview_navigation'
-    Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
-    $report.offline.action_stage = 'runtime_start'
-    Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
-    $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60
-    Bind-OfflineRuntime
+    # Host keygen intentionally completes without automatically starting a serving owner.
+    # Initialize first, then use the normal explicit Start action and bind the first actor.
     $report.offline.action_stage = 'account_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8d26\u6237\u4e0e\u7a7a\u95f4\u0024'))
     $report.offline.action_stage = 'offline_initialization'
@@ -531,6 +527,14 @@ function Invoke-OfflineGuiAcceptance {
     $report.offline.action_stage = 'recovery_dismiss'
     Send-OfflineKey 27 # Normal Escape closes the recovery display; generated VM keys are disposable.
     Wait-OfflineRecoveryDismissed
+    $report.offline.action_stage = 'overview_navigation'
+    Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
+    $report.offline.action_stage = 'runtime_start'
+    Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
+    $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60
+    Bind-OfflineRuntime
+    $report.offline.action_stage = 'account_verification'
+    Press-OfflineButton ([regex]::Unescape('\u005e\u8d26\u6237\u4e0e\u7a7a\u95f4\u0024'))
     $report.offline.action_stage = 'credential_persistence'
     Assert-OfflineLocalKeys (Read-OfflineRpc @('--json','status'))
     $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('\u005e\u5df2\u4fdd\u5b58\u0024'))
