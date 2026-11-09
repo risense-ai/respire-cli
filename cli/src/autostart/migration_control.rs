@@ -141,13 +141,21 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         Ok(())
     };
     let mut finished = false;
+    let mut stage = "paused_grant";
     let result: Result<ResultEnvelope> = (|| {
         maintenance.auth_launch_binding(&profile)?.context("migration lost its actual Paused grant")?;
+        stage = "owner_check";
         maintenance.check_account_runtime()?;
-        if let Some(owner) = owner.as_ref() { maintenance.drain_runtime(owner)?; }
+        if let Some(owner) = owner.as_ref() {
+            stage = "drain_owner";
+            maintenance.drain_runtime(owner)?;
+        }
+        stage = "drained_check";
         anyhow::ensure!(!crate::net_rpc::port_is_open(), "migration requires a drained Runtime");
+        stage = "selection_before_send";
         unchanged()?;
         let method = if original.sent { HOST_MIGRATION_RESULT_METHOD } else {
+            stage = "save_sent";
             original.sent = true;
             let bytes = serde_json::to_vec(&original)?;
             super::private_write(&path, &bytes, Some(&digest))?;
@@ -155,8 +163,10 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             HOST_MIGRATION_PROFILE_METHOD
         };
         // A saved sent request always queries. A timeout never admits a replacement operation.
+        stage = "exchange";
         let receipt = exchange(&takeover, &mut maintenance, &original.operation, method)?;
         if receipt.outcome == HostMigrationOutcome::Unknown {
+            stage = "encode_unknown";
             let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown"}), Vec::new());
             envelope.details = serde_json::to_value(&receipt)?;
             envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
@@ -164,32 +174,40 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             crate::set_exit_code(2);
             return Ok(envelope);
         }
+        stage = "selection_after_receipt";
         unchanged()?;
         let restore_owner = original.was_serving;
         let restore_store = original.store_ready;
         if restore_owner {
+            stage = "restore_owner_start";
             maintenance.start_account_runtime()?;
+            stage = "restore_owner_probe";
             let restored = crate::rpc::probe_runtime()?.context("original migration owner did not resume")?;
+            stage = "restore_owner_verify";
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest, Some(&account_id))?;
+            stage = "restore_store_ready";
             anyhow::ensure!(!restore_store || restored.store_ready, "restored migration owner did not confirm its original store readiness");
         }
+        stage = "selection_before_finish";
         unchanged()?;
+        stage = "finish_maintenance";
         maintenance.finish()?;
         finished = true;
         original.finished = true;
         let mut envelope = ResultEnvelope::new("migrate", Status::Ok, receipt.details.clone(), Vec::new());
         envelope.details = receipt.details.clone();
         original.terminal_receipt = Some(receipt);
+        stage = "save_terminal";
         super::private_write(&path, &serde_json::to_vec(&original)?, Some(&digest))?;
         Ok(envelope)
     })();
     if !finished {
         maintenance.mark(super::lifecycle::Phase::Paused).map_err(|_| anyhow::anyhow!(
-            "migration_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery",
+            "migration_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery; migration_stage=paused_publication",
             original.operation.operation_id))?;
     }
     if result.is_ok() && finished { maintenance.finish_handoff()?; }
-    result.map_err(|_| anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed", original.operation.operation_id))
+    result.map_err(|_| anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed; migration_stage={}", original.operation.operation_id, stage))
 }
 
 

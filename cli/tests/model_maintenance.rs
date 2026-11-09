@@ -1090,7 +1090,7 @@ fn off_mode_migration_failure_preserves_original_operation_and_drains_the_owner(
     // The public adapter deliberately hides the private failure cause. This
     // proves failure fencing, not a terminal rollback or an observed off-guard result.
     assert_eq!(result["errors"], json!([format!(
-        "migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed",
+        "migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed; migration_stage=exchange",
         operation.operation_id)]));
     let marker: Value = serde_json::from_slice(&std::fs::read(runtime.fixture.marker())?)?;
     assert_eq!(marker["phase"], "Paused");

@@ -102,6 +102,14 @@ class Smoke(support.Smoke):
                 "error_class": category, "json_envelope": isinstance(value, dict),
                 "has_source": "--source" in args, "has_account": "--account" in args,
                 "error": self.redacted_cli_error(env, output)}
+            migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+                "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+                "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+                "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+            errors = value.get("errors") if isinstance(value, dict) else None
+            stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_stage"] = stage[1] if stage and stage[1] in migration_stages else None
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),
                 ("startup_identity_changed", "runtime owner changed during startup"),
