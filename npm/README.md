@@ -100,7 +100,7 @@ Windows ARM64 is a DEV-first release candidate and requires a version that
 actually includes its complete package. Stable 1.0.15 and 1.0.16 omit it.
 See the [support matrix](../docs/platform-support.md) for validation status and blockers.
 
-`artifact-manifest.json` defines targets and names. Intel Mac uses `@rsrsai/macos-x64` and requires macOS 13.4 or later.
+`artifact-manifest.json` defines the seven current release targets and names. Intel macOS is deferred for CLI 1.0.21-dev.5: no Intel platform package, optional dependency or release asset is required. Historical Intel packages use `@rsrsai/macos-x64` and require macOS 13.4 or later; the launcher keeps that legacy mapping.
 Linux keeps the static musl package as its default. On a glibc distribution,
 select the GNU build explicitly; the same choice applies to npm and pnpm:
 

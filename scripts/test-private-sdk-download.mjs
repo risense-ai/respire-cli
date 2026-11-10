@@ -4,7 +4,8 @@ import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {downloadPrivateSdk,assertTrustedDownloadContext} from '../crates/core-sdk/private-sdk-download.mjs';
 const target='x86_64-unknown-linux-gnu',version='1.0.2-dev.11',tag=`sdk-v${version}`,token='fake-private-sdk-read-token';
-function fixture(kind='manifest'){
+function fixture(kind='manifest',version='1.0.2-dev.11'){
+ const tag=`sdk-v${version}`;
  const bytes=Buffer.from('verified public-scope native SDK fixture'),digest=createHash('sha256').update(bytes).digest('hex');
  const prefix=`https://github.com/risense-ai/respire-core/releases/download/${tag}/respire-core-sdk-${target}`;
  const f={entry:{private_repository:'risense-ai/respire-core',release_tag:tag,sdk_version:version,manifest_sha256:digest,archive_sha256:digest,url:prefix+'.manifest.json',archive_url:prefix+'.tar.gz'},env:{CORE_SDK_READ_TOKEN:token},calls:[],kind,bytes,redirect:null};
@@ -34,3 +35,19 @@ test('no ambient GitHub token fallback and no request without dedicated read bin
 test('helper is packaged without credential persistence or logging',()=>{const cargo=readFileSync(new URL('../crates/core-sdk/Cargo.toml',import.meta.url),'utf8');assert(cargo.includes('"private-sdk-download.mjs"'));const helper=readFileSync(new URL('../crates/core-sdk/private-sdk-download.mjs',import.meta.url),'utf8');assert(!helper.includes('writeFile'));assert(!helper.includes('console.'));});
 
 test('credential-shaped response bytes are rejected before returning SDK data',async()=>{const f=fixture();f.bytes=Buffer.from(token);await assert.rejects(run(f),e=>!e.message.includes(token));});
+
+for (const version of ['1.0.2-dev.24','1.1.0-dev.1','2.0.0-dev.1']) {
+ test(`approved SDK ${version} downloads only independently pinned bytes`,async()=>{
+  for(const kind of ['manifest','archive']) {
+   const f=fixture(kind,version);assert.deepEqual(await run(f),f.bytes);
+   assert(f.calls[0].url.endsWith(`/releases/tags/sdk-v${version}`));
+   f.entry[kind==='manifest'?'manifest_sha256':'archive_sha256']='c'.repeat(64);
+   await assert.rejects(run(f),/integrity|pinned|SHA256/);
+  }
+ });
+}
+for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1']) {
+ test(`private SDK rejects unsupported version ${version} before network`,async()=>{
+  const f=fixture('manifest',version);await assert.rejects(run(f));assert.equal(f.calls.length,0);
+ });
+}

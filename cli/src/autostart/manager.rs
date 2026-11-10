@@ -24,7 +24,7 @@ struct Output {
 
 /// Creation identity only: never persist a controller command line, which may
 /// contain login material. None means that the controller has exited.
-pub(super) fn process_birth(pid: u32) -> Result<Option<String>> {
+pub(crate) fn process_birth(pid: u32) -> Result<Option<String>> {
     #[cfg(target_os = "linux")]
     {
         let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -52,17 +52,29 @@ pub(super) fn process_birth(pid: u32) -> Result<Option<String>> {
     {
         let output = control(
             "ps",
-            &["-p".into(), pid.to_string(), "-o".into(), "lstart=".into()],
+            &["-p".into(), pid.to_string(), "-o".into(), "stat=".into(), "-o".into(), "lstart=".into()],
         )?;
-        if output.code == 1 && output.stdout.trim().is_empty() {
-            return Ok(None);
-        }
-        anyhow::ensure!(
-            output.code == 0 && !output.stdout.trim().is_empty(),
-            "process identity unavailable"
-        );
-        Ok(Some(output.stdout.trim().into()))
+        darwin_process_birth(output.code, &output.stdout)
     }
+}
+
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
+fn darwin_process_birth(code: i32, stdout: &str) -> Result<Option<String>> {
+    if code == 1 && stdout.trim().is_empty() {
+        return Ok(None);
+    }
+    anyhow::ensure!(code == 0, "process identity unavailable");
+    let line = stdout.trim();
+    anyhow::ensure!(!line.contains('\n'), "ambiguous process identity");
+    let (state, birth) = line.split_once(char::is_whitespace)
+        .context("process state or birth missing")?;
+    anyhow::ensure!(!birth.trim().is_empty(), "process birth missing");
+    // A zombie has already exited and released its resources. Waiting for its
+    // parent (possibly this CLI) to reap it must not block a verified drain.
+    if state.starts_with('Z') {
+        return Ok(None);
+    }
+    Ok(Some(birth.trim().into()))
 }
 
 pub(super) fn validate_executable(platform: Platform, path: &Path) -> Result<()> {
@@ -81,7 +93,7 @@ pub(super) fn validate_executable(platform: Platform, path: &Path) -> Result<()>
     Ok(())
 }
 
-pub(super) fn windows_task_path(raw: &str) -> Result<String> {
+pub(crate) fn windows_task_path(raw: &str) -> Result<String> {
     plain_value(raw)?;
     if let Some(unc) = raw.strip_prefix(r"\\?\UNC\") {
         return Ok(format!(r"\\{}", unc));
@@ -262,9 +274,15 @@ fn control_hresult(text: &str) -> &str {
 fn control_xml_location(text: &str) -> &str {
     text.lines()
         .filter_map(|line| line.strip_prefix("rsrs-control-xml-location:"))
-        .filter(|value| value.split_once(',').is_some_and(|(line, column)| {
-            [line, column].into_iter().all(|part| !part.is_empty() && part.len() <= 8 && part.bytes().all(|byte| byte.is_ascii_digit()))
-        }))
+        .filter(|value| {
+            value.split_once(',').is_some_and(|(line, column)| {
+                [line, column].into_iter().all(|part| {
+                    !part.is_empty()
+                        && part.len() <= 8
+                        && part.bytes().all(|byte| byte.is_ascii_digit())
+                })
+            })
+        })
         .last()
         .unwrap_or("unreported")
 }
@@ -447,10 +465,8 @@ fn verify_systemd_loaded(
     let expected = [
         executable,
         "runtime",
-        "run",
-        "--managed",
-        &config.id,
-        "--installation-root",
+        "supervise",
+        "--data-dir",
         config
             .installation
             .to_str()
@@ -544,8 +560,7 @@ pub(super) fn windows_argument(value: &str) -> Result<String> {
 
 fn arguments(config: &Registration) -> Result<String> {
     Ok(format!(
-        "runtime run --managed {} --installation-root {}",
-        windows_argument(&config.id)?,
+        "runtime supervise --data-dir {}",
         windows_argument(
             config
                 .installation
@@ -731,10 +746,8 @@ pub(super) fn inspect(config: &Registration) -> Result<State> {
             let expected = [
                 config.executable.to_str().context("non-UTF8 executable")?,
                 "runtime",
-                "run",
-                "--managed",
-                &config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config
                     .installation
                     .to_str()
@@ -1011,7 +1024,7 @@ pub(super) mod test_adapter {
                     match args.last().map(String::as_str) {
                         Some("DropInPaths") => ok(serde_json::json!({"data":if state.dropin {vec!["/tmp/unknown.conf"]}else{vec![]}}).to_string()),
                         Some("WorkingDirectory") => ok(serde_json::json!({"data":config.installation}).to_string()),
-                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","run","--managed",config.id,"--installation-root",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
+                        Some("ExecStart") => ok(serde_json::json!({"data":[[config.executable,[config.executable,"runtime","supervise","--data-dir",config.installation],false,0,0,0,0,0,0,0]]}).to_string()),
                         _ => bail!("unexpected fake property"),
                     }
                 },
@@ -1026,6 +1039,37 @@ pub(super) mod test_adapter {
 mod tests {
     use super::*;
     #[test]
+    fn darwin_birth_distinguishes_live_exited_and_unavailable_processes() -> Result<()> {
+        let birth = "Sat Nov  7 14:00:00 2026";
+        assert_eq!(darwin_process_birth(0, &format!("S+ {birth}\n"))?, Some(birth.into()));
+        for state in ["Z", "Z+"] {
+            assert_eq!(darwin_process_birth(0, &format!("{state} {birth}"))?, None);
+        }
+        assert_eq!(darwin_process_birth(1, "")?, None);
+        for (code, text) in [(2, ""), (0, ""), (0, "S"), (0, "S \n"), (0, "S first\nS second")] {
+            assert!(darwin_process_birth(code, text).is_err());
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn exited_unreaped_child_is_not_a_live_drain_owner() -> Result<()> {
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn()?;
+        let result: Result<()> = (|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while process_birth(child.id())?.is_some() {
+                anyhow::ensure!(Instant::now() < deadline, "exited child remained a live owner");
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Ok(())
+        })();
+        let status = child.wait()?;
+        result?;
+        anyhow::ensure!(status.success());
+        Ok(())
+    }
+    #[test]
     fn loaded_systemd_configuration_must_match_disk_identity_without_overrides() -> Result<()> {
         let config = super::super::tests::fixture(Platform::Linux);
         let row = serde_json::json!([
@@ -1033,10 +1077,8 @@ mod tests {
             [
                 config.executable,
                 "runtime",
-                "run",
-                "--managed",
-                config.id,
-                "--installation-root",
+                "supervise",
+                "--data-dir",
                 config.installation
             ],
             false,
@@ -1237,7 +1279,10 @@ mod tests {
         anyhow::ensure!(control_hresult("rsrs-control-hresult:secret-material") == "unreported");
         anyhow::ensure!(control_xml_location("rsrs-control-xml-location:1,39") == "1,39");
         for unsafe_value in ["1,secret", "123456789,2", "1,2,3", ",2"] {
-            anyhow::ensure!(control_xml_location(&format!("rsrs-control-xml-location:{unsafe_value}")) == "unreported");
+            anyhow::ensure!(
+                control_xml_location(&format!("rsrs-control-xml-location:{unsafe_value}"))
+                    == "unreported"
+            );
         }
         #[cfg(target_os = "linux")]
         {
@@ -1255,8 +1300,10 @@ mod tests {
     }
     #[cfg(windows)]
     #[test]
-    fn scheduler_default_runlevel_requires_effective_limited_and_rejects_unknown_values() -> Result<()> {
-        let script = format!(r#"{}
+    fn scheduler_default_runlevel_requires_effective_limited_and_rejects_unknown_values(
+    ) -> Result<()> {
+        let script = format!(
+            r#"{}
 $cases=@(
  @{{xml='';value=0;allowed=$true}},@{{xml='LeastPrivilege';value=0;allowed=$true}},
  @{{xml='HighestAvailable';value=0;allowed=$false}},@{{xml='';value=1;allowed=$false}},
@@ -1264,7 +1311,9 @@ $cases=@(
  @{{xml='';value='0';allowed=$false}},@{{xml='';value=$false;allowed=$false}},
  @{{xml='unknown';value=0;allowed=$false}},@{{xml='LeastPrivilege';value=-1;allowed=$false}});
 foreach($case in $cases){{$accepted=$true;try{{RequireLimited $case.xml $case.value}}catch{{$accepted=$false}};if($accepted -ne $case.allowed){{throw 'Effective task run-level contract failed'}}}};
-[Console]::Out.WriteLine('limited-runlevel-contract:passed');"#,task_runlevel_guard());
+[Console]::Out.WriteLine('limited-runlevel-contract:passed');"#,
+            task_runlevel_guard()
+        );
         anyhow::ensure!(powershell(script)?.trim() == "limited-runlevel-contract:passed");
         Ok(())
     }
@@ -1283,15 +1332,23 @@ foreach($case in $cases){{$accepted=$true;try{{RequireLimited $case.xml $case.va
         let encoded = base64::engine::general_purpose::STANDARD.encode(xml.as_bytes());
         // TASK_VALIDATE_ONLY=1 checks the identical payload without registering,
         // updating, enabling or running a task. Compare only the declaration.
-        let script = format!(r#"{guard};if($null -ne $t){{throw 'Validation fixture task already exists'}};
+        let script = format!(
+            r#"{guard};if($null -ne $t){{throw 'Validation fixture task already exists'}};
 $xml=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded}'));
 $utf8=$xml.Replace('<?xml version="1.0"?>','<?xml version="1.0" encoding="UTF-8"?>');
 try{{[void]$folder.RegisterTask({task},$utf8,1,{owner},$null,3,$null);[Console]::Out.WriteLine('utf8:valid')}}catch{{$failure=$_.Exception;while($null -ne $failure.InnerException){{$failure=$failure.InnerException}};[Console]::Out.WriteLine('utf8:hresult:'+$failure.HResult.ToString('X8'))}};
 [void]$folder.RegisterTask({task},$xml,1,{owner},$null,3,$null);[Console]::Out.WriteLine('neutral:valid');
 {guard};if($null -ne $t){{throw 'Validation-only unexpectedly created a task'}};
-"#,guard=task_guard(&config)?,task=ps_literal(&name(&config))?,owner=ps_literal(&config.owner)?);
+"#,
+            guard = task_guard(&config)?,
+            task = ps_literal(&name(&config))?,
+            owner = ps_literal(&config.owner)?
+        );
         let result = powershell(script)?;
-        anyhow::ensure!(result.lines().any(|line| line == "neutral:valid"), "encoding-neutral task XML did not validate");
+        anyhow::ensure!(
+            result.lines().any(|line| line == "neutral:valid"),
+            "encoding-neutral task XML did not validate"
+        );
         // Fixed protocol fields only; never print XML, paths or arbitrary COM errors.
         println!("Task Scheduler validation-only comparison: {result}");
         Ok(())

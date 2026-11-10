@@ -24,6 +24,14 @@ The matching short npm entry is dispatched automatically. A completed Release
 automatically starts read-only public package and isolated-install verification.
 Tag CI has its own concurrency group, so a later `main` push cannot cancel it.
 
+CLI 1.0.21-dev.5 defers Intel macOS. Its seven native gates remain mandatory;
+the SDK locks retain eight platforms. Historical G1 candidates used eight
+targets; current release scope is seven, and complete G1 remains unproven.
+Source CI success does not certify G1. Release planning rejects `latest` and
+`stable` until complete G1 evidence verification is implemented and separately
+authorized. DEV keeps its source and native gates. This scope adjustment does
+not authorize stable publication or phase 2.
+
 For a source manifest with `npmScope: "rsrs-cli"`, packaging validates eight
 packages. Release submits the seven platform packages, then records their real
 npm acknowledgements and a separate launcher identity. `npm-alias.yml` keeps its

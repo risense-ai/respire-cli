@@ -9,7 +9,7 @@ export const TARGETS=['x86_64-pc-windows-msvc','aarch64-pc-windows-msvc','aarch6
 const required=(ok,message)=>{if(!ok)throw Error(message);};
 export function canonicalEntry(target,input){
  required(TARGETS.includes(target)&&input&&input.private_repository==='risense-ai/respire-core','Only approved private Core SDK targets are accepted');
- const v=input.sdk_version;required(/^1\.0\.2-dev\.[1-9][0-9]*$/.test(v||'')&&input.release_tag===`sdk-v${v}`,'Invalid private SDK tag/version');
+ const v=input.sdk_version;required(/^(?:1\.0\.2|1\.1\.0|2\.0\.0)-dev\.[1-9][0-9]*$/.test(v||'')&&input.release_tag===`sdk-v${v}`,'Invalid private SDK tag/version');
  const base=`https://github.com/risense-ai/respire-core/releases/download/sdk-v${v}/respire-core-sdk-${target}`;
  required(input.url===base+'.manifest.json'&&input.archive_url===base+'.tar.gz'&&/^[a-f0-9]{64}$/.test(input.manifest_sha256||'')&&/^[a-f0-9]{64}$/.test(input.archive_sha256||'')&&input.redistribution==='approved','Invalid SDK cache identity/hash/license');
  // Never forward unknown source-controlled fields into a credential-bearing job.
@@ -27,7 +27,7 @@ export function auditSdkDirectory(directory,target,entry){
  const raw=readFileSync(join(directory,'manifest.json'));required(createHash('sha256').update(raw).digest('hex')===entry.manifest_sha256,'Cached SDK manifest hash mismatch');const m=JSON.parse(raw);
  required(m.target===target&&m.sdk_version===entry.sdk_version&&m.abi_version===0x10002&&m.inference_thread_contract===1&&m.association_contract===1&&m.models_bundled===false&&m.redistribution==='permitted-under-included-license','Cached SDK contract/license mismatch');
  const expected=new Map([['manifest.json',entry.manifest_sha256]]);
- for(const f of m.files){required(typeof f.path==='string'&&!/\.(?:rs|cpp|cc|c|py|onnx|pt|safetensors|pdb|bc|ll|key|pem|env)$/i.test(f.path)&&!f.path.includes('\\')&&f.path.split('/').every(p=>p&&p!=='.'&&p!=='..')&&(f.path==='LICENSE.txt'||f.path==='include/respire_core.h'||/^lib\/[^/]+\.(a|lib)$/.test(f.path)||/^runtime\/[^/]+\.(dll|dylib|so(?:\.[0-9.]+)?)$/.test(f.path)||/^notices\//.test(f.path))&&!expected.has(f.path),'Unsafe/duplicate SDK cache path');expected.set(f.path,f.sha256);}
+ for(const f of m.files){required(typeof f.path==='string'&&!/\.(?:rs|cpp|cc|c|py|onnx|pt|safetensors|pdb|bc|ll|key|pem|env)$/i.test(f.path)&&!f.path.includes('\\')&&f.path.split('/').every(p=>p&&p!=='.'&&p!=='..')&&(f.path==='LICENSE.txt'||f.path==='include/respire_core.h'||/^lib\/[^/]+\.(a|lib)$/.test(f.path)||/^runtime\/[^/]+\.(dll|dylib|so(?:\.[0-9.]+)?)$/.test(f.path)||(m.mlx_backend_contract===1&&f.path==='runtime/mlx.metallib')||/^notices\//.test(f.path))&&!expected.has(f.path),'Unsafe/duplicate SDK cache path');expected.set(f.path,f.sha256);}
  const seen=new Set();const visit=(dir,prefix='')=>{for(const name of readdirSync(dir)){const path=prefix+name,full=join(dir,name),stat=lstatSync(full);required(!stat.isSymbolicLink(),'SDK cache link forbidden');if(stat.isDirectory())visit(full,path+'/');else{required(stat.isFile()&&expected.has(path)&&createHash('sha256').update(readFileSync(full)).digest('hex')===expected.get(path),'Unexpected/corrupt SDK cache file');seen.add(path);}}};visit(directory);required(seen.size===expected.size,'Incomplete SDK cache');return m;
 }
 function readLock(path){required(lstatSync(path).isFile()&&lstatSync(path).size<=65536,'SDK lock file must be bounded ordinary JSON');return JSON.parse(readFileSync(path,'utf8'));}

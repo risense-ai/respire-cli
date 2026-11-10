@@ -33,29 +33,68 @@ impl LocalStore {
         use respire_protocol::Verification;
 
         self.write_transaction(|| {
-            anyhow::ensure!(self.memory_metadata_v1_enabled()?, "memory_metadata_v1_disabled");
-            anyhow::ensure!(self.memory_revision()? == expected_memory_revision, "review_conflict");
-            anyhow::ensure!(history.entry_id == memory.id && history.seq.is_none(), "invalid review history target");
+            anyhow::ensure!(
+                self.memory_metadata_v1_enabled()?,
+                "memory_metadata_v1_disabled"
+            );
+            anyhow::ensure!(
+                self.memory_revision()? == expected_memory_revision,
+                "review_conflict"
+            );
+            anyhow::ensure!(
+                history.entry_id == memory.id && history.seq.is_none(),
+                "invalid review history target"
+            );
             validate_revision(&history.record_revision)?;
             validate_timestamp(&history.happened_at)?;
             memory.local_meta.validate()?;
-            anyhow::ensure!(memory.local_meta.memory_contract == 1, "review requires memory contract 1");
-            let actor: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&history.actor)?;
-
-            let (old_verification, old_review_at, old_ciphertext, old_owner, deleted):
-                (Option<String>, Option<String>, String, String, bool) = self.connection.query_row(
-                "SELECT verification,review_at,ciphertext,user,deleted FROM memories WHERE id=?1",
-                [&memory.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
-            )?;
-            anyhow::ensure!(!deleted && !memory.deleted && old_owner == memory.user, "review target is unavailable");
-            let old_verification = old_verification.as_deref()
-                .map(serde_json::from_str::<Verification>).transpose()?;
-            let previous_verification = history.previous_verification.as_deref()
-                .map(serde_json::from_str::<Verification>).transpose()?;
-            let next_verification = history.next_verification.as_deref()
-                .map(serde_json::from_str::<Verification>).transpose()?;
             anyhow::ensure!(
-                previous_verification == old_verification && history.previous_review_at == old_review_at,
+                memory.local_meta.memory_contract == 1,
+                "review requires memory contract 1"
+            );
+            let actor: serde_json::Map<String, serde_json::Value> =
+                serde_json::from_str(&history.actor)?;
+
+            let (old_verification, old_review_at, old_ciphertext, old_owner, deleted): (
+                Option<String>,
+                Option<String>,
+                String,
+                String,
+                bool,
+            ) = self.connection.query_row(
+                "SELECT verification,review_at,ciphertext,user,deleted FROM memories WHERE id=?1",
+                [&memory.id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )?;
+            anyhow::ensure!(
+                !deleted && !memory.deleted && old_owner == memory.user,
+                "review target is unavailable"
+            );
+            let old_verification = old_verification
+                .as_deref()
+                .map(serde_json::from_str::<Verification>)
+                .transpose()?;
+            let previous_verification = history
+                .previous_verification
+                .as_deref()
+                .map(serde_json::from_str::<Verification>)
+                .transpose()?;
+            let next_verification = history
+                .next_verification
+                .as_deref()
+                .map(serde_json::from_str::<Verification>)
+                .transpose()?;
+            anyhow::ensure!(
+                previous_verification == old_verification
+                    && history.previous_review_at == old_review_at,
                 "review_conflict: previous review state changed"
             );
             anyhow::ensure!(
@@ -65,12 +104,17 @@ impl LocalStore {
             );
             match history.action.as_str() {
                 "confirm" => anyhow::ensure!(
-                    next_verification.as_ref().is_some_and(|value| value.record_revision == history.record_revision),
+                    next_verification
+                        .as_ref()
+                        .is_some_and(|value| value.record_revision == history.record_revision),
                     "confirmation must match the target record revision"
                 ),
                 "revoke" => anyhow::ensure!(
                     next_verification.is_none()
-                        && history.reason.as_ref().is_some_and(|reason| !reason.trim().is_empty()),
+                        && history
+                            .reason
+                            .as_ref()
+                            .is_some_and(|reason| !reason.trim().is_empty()),
                     "revocation requires a nonempty reason and cleared verification"
                 ),
                 "reschedule" => anyhow::ensure!(
@@ -86,25 +130,43 @@ impl LocalStore {
             if history.action == "confirm" {
                 let actor: respire_protocol::ConfirmedBy = serde_json::from_str(&history.actor)?;
                 anyhow::ensure!(
-                    next_verification.as_ref().is_some_and(|value| value.confirmed_by == actor),
+                    next_verification
+                        .as_ref()
+                        .is_some_and(|value| value.confirmed_by == actor),
                     "confirmation actor does not match verification"
                 );
             } else {
                 anyhow::ensure!(
                     actor.get("kind").and_then(|value| value.as_str()) == Some("owner_client")
-                        && actor.get("id").and_then(|value| value.as_str()) == Some(old_owner.as_str()),
+                        && actor.get("id").and_then(|value| value.as_str())
+                            == Some(old_owner.as_str()),
                     "review action requires the owner_client actor"
                 );
             }
-            anyhow::ensure!(memory.ciphertext != old_ciphertext, "review requires a newly sealed payload");
-            anyhow::ensure!(self.put_inner(memory, true)?, "review_conflict: target write was rejected");
+            anyhow::ensure!(
+                memory.ciphertext != old_ciphertext,
+                "review requires a newly sealed payload"
+            );
+            anyhow::ensure!(
+                self.put_inner(memory, true)?,
+                "review_conflict: target write was rejected"
+            );
             self.connection.execute(
                 "INSERT INTO review_history(entry_id,record_revision,action,actor,happened_at,
                  previous_verification,next_verification,previous_review_at,next_review_at,reason)
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
-                params![history.entry_id,history.record_revision,history.action,history.actor,history.happened_at,
-                    history.previous_verification,history.next_verification,
-                    history.previous_review_at,history.next_review_at,history.reason],
+                params![
+                    history.entry_id,
+                    history.record_revision,
+                    history.action,
+                    history.actor,
+                    history.happened_at,
+                    history.previous_verification,
+                    history.next_verification,
+                    history.previous_review_at,
+                    history.next_review_at,
+                    history.reason
+                ],
             )?;
             Ok(())
         })

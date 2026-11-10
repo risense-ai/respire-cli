@@ -16,6 +16,10 @@ use rusqlite::{
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+// WP-2c: internally_configured_root sank into the domain service module; the
+// engine side must classify the internally configured default home.
+use crate::service::internally_configured_root;
+
 const RECEIPT: &str = ".rsrs-migration.json";
 const SOURCE_RECEIPT: &str = ".rsrs-migrated.json";
 const DEFAULT_ENV: &str = "RSRS_DEFAULT_DATA_DIR";
@@ -25,54 +29,6 @@ struct Profile {
     destination: PathBuf,
     identity: String,
     services: [&'static str; 3],
-}
-
-/// The SDK accepts the original data-root environment variable. This marker lets
-/// app configuration retain its default-home and active-profile semantics.
-pub(crate) fn internally_configured_root(value: &str) -> bool {
-    crate::env::var(DEFAULT_ENV).ok().is_some_and(|marker| {
-        equivalent_path(
-            &crate::service::expand_tilde(&marker),
-            &crate::service::expand_tilde(value),
-        ) && equivalent_path(
-            &crate::service::expand_tilde(value),
-            &crate::service::default_data_dir(),
-        )
-    })
-}
-
-fn equivalent_path(left: &Path, right: &Path) -> bool {
-    let absolute = |path: &Path| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|root| root.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    };
-    let normalize = |path: PathBuf| {
-        let mut normalized = PathBuf::new();
-        for component in path.components() {
-            match component {
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                    normalized.pop();
-                }
-                _ => normalized.push(component.as_os_str()),
-            }
-        }
-        normalized
-    };
-    let left = normalize(absolute(left));
-    let right = normalize(absolute(right));
-    if cfg!(windows) {
-        left.to_string_lossy()
-            .replace('/', "\\")
-            .eq_ignore_ascii_case(&right.to_string_lossy().replace('/', "\\"))
-    } else {
-        left == right
-    }
 }
 
 /// Configure the current home before parsing. Legacy import is always explicit.
@@ -111,13 +67,18 @@ fn legacy_profiles(home: &Path) -> Result<Vec<Profile>> {
         ("rsrs", ["rsrs", "respire", "1memory"]),
     ] {
         let root = home.join(format!(".{label}"));
-        if root.exists() { meaningful(&root)?; }
+        if root.exists() {
+            meaningful(&root)?;
+        }
         let mut candidates = vec![("main".to_owned(), root.clone())];
         if root.join("accounts").is_dir() {
             meaningful(&root.join("accounts"))?;
             for entry in std::fs::read_dir(root.join("accounts"))? {
                 let entry = entry?;
-                candidates.push((entry.file_name().to_string_lossy().into_owned(), entry.path()));
+                candidates.push((
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                ));
             }
         }
         candidates.sort_by(|left, right| left.0.cmp(&right.0));
@@ -132,7 +93,10 @@ fn legacy_profiles(home: &Path) -> Result<Vec<Profile>> {
             if session_path.is_file() {
                 let value: Value = serde_json::from_slice(&std::fs::read(&session_path)?)?;
                 if value["crypto_namespace"].as_str() == Some(crate::memory::crypto::RSRS_PREFIX)
-                    || value["wrapped_urk"].as_str().is_some_and(|wrapped| wrapped.starts_with(crate::memory::crypto::RSRS_PREFIX)) {
+                    || value["wrapped_urk"].as_str().is_some_and(|wrapped| {
+                        wrapped.starts_with(crate::memory::crypto::RSRS_PREFIX)
+                    })
+                {
                     continue;
                 }
             }
@@ -140,15 +104,26 @@ fn legacy_profiles(home: &Path) -> Result<Vec<Profile>> {
                 let session = source.join("session.json");
                 let legacy_vault = if session.is_file() {
                     let value: Value = serde_json::from_slice(&std::fs::read(&session)?)?;
-                    value["wrapped_urk"].as_str().is_some_and(|wrapped|
-                        !wrapped.is_empty() && !wrapped.starts_with(crate::memory::crypto::RSRS_PREFIX))
-                } else { false };
-                if !source.join("onememory.db").is_file() && !legacy_vault { continue; }
+                    value["wrapped_urk"].as_str().is_some_and(|wrapped| {
+                        !wrapped.is_empty()
+                            && !wrapped.starts_with(crate::memory::crypto::RSRS_PREFIX)
+                    })
+                } else {
+                    false
+                };
+                if !source.join("onememory.db").is_file() && !legacy_vault {
+                    continue;
+                }
             }
             let source_id = identity(&source)?;
             result.push(Profile {
-                identity: source_id.clone(), source,
-                destination: crate::service::accounts_root().join(format!("imported-{}-{}", &source_id[..8], safe_name(&name))),
+                identity: source_id.clone(),
+                source,
+                destination: crate::service::accounts_root().join(format!(
+                    "imported-{}-{}",
+                    &source_id[..8],
+                    safe_name(&name)
+                )),
                 services,
             });
         }
@@ -167,7 +142,9 @@ fn migrated_destination(source_id: &str) -> Result<Option<PathBuf>> {
     for destination in destinations {
         if destination.is_dir() {
             meaningful(&destination)?;
-            if receipt_matches(&destination, source_id)? { return Ok(Some(destination)); }
+            if receipt_matches(&destination, source_id)? {
+                return Ok(Some(destination));
+            }
         }
     }
     Ok(None)
@@ -184,8 +161,12 @@ pub fn list_legacy_profiles() -> Result<Value> {
             let receipt: Value = serde_json::from_slice(&std::fs::read(source_receipt)?)?;
             if receipt["complete"] == true && receipt["source_identity"] == profile.identity {
                 receipt["destination"].as_str().map(PathBuf::from)
-            } else { None }
-        } else { None };
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         rows.push(json!({"source_id":profile.identity,"source":profile.source,
             "user":crate::service::session_user_of_dir(&profile.source),
             "account":profile.destination.file_name().map(|name| name.to_string_lossy().into_owned()),
@@ -197,26 +178,38 @@ pub fn list_legacy_profiles() -> Result<Value> {
 /// Discovery is read-only. A completed receipt suppresses repeated suggestions.
 pub fn pending_legacy_profiles() -> Result<Vec<Value>> {
     let report = list_legacy_profiles()?;
-    let profiles = report["profiles"].as_array()
+    let profiles = report["profiles"]
+        .as_array()
         .ok_or_else(|| anyhow!("migration discovery did not return profiles"))?;
-    Ok(profiles.iter().filter(|profile| profile["migrated_to"].is_null()).cloned().collect())
+    Ok(profiles
+        .iter()
+        .filter(|profile| profile["migrated_to"].is_null())
+        .cloned()
+        .collect())
 }
 
 /// Copy only the selected profile into a new account, keeping current selection intact.
 pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
     crate::service::require_profile_change_host()?;
-    anyhow::ensure!(!account.is_empty() && account != "main" && safe_name(account) == account,
-        "migration needs a new account name containing letters, digits, '-' or '_'");
+    anyhow::ensure!(
+        !account.is_empty() && account != "main" && safe_name(account) == account,
+        "migration needs a new account name containing letters, digits, '-' or '_'"
+    );
     let home = crate::service::home_dir()?;
     let lock_root = home.join(".rsrs-migration-lock");
     private_directory(&lock_root)?;
     let _lock = crate::lock::LibraryLock::acquire(&lock_root, Duration::from_secs(30))?;
     let mut profiles = legacy_profiles(&home)?;
-    let selected = profiles.iter().position(|profile| profile.identity == source_id)
+    let selected = profiles
+        .iter()
+        .position(|profile| profile.identity == source_id)
         .ok_or_else(|| anyhow!("legacy source is no longer available; list sources again"))?;
     let source_receipt = profiles[selected].source.join(SOURCE_RECEIPT);
     if let Ok(metadata) = std::fs::symlink_metadata(&source_receipt) {
-        anyhow::ensure!(!metadata.file_type().is_symlink(), "source migration marker is a symbolic link; nothing was migrated");
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "source migration marker is a symbolic link; nothing was migrated"
+        );
         let receipt: Value = serde_json::from_slice(&std::fs::read(&source_receipt)?)?;
         if receipt["complete"] == true && receipt["source_identity"].as_str() == Some(source_id) {
             return Ok(json!({"state":"already_migrated","dir":receipt["destination"]}));
@@ -227,11 +220,18 @@ pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
     }
     let accounts = crate::service::accounts_root();
     if accounts.exists() {
-        anyhow::ensure!(!std::fs::symlink_metadata(&accounts)?.file_type().is_symlink(),
-            "account root is a symbolic link; no external data was written");
+        anyhow::ensure!(
+            !std::fs::symlink_metadata(&accounts)?
+                .file_type()
+                .is_symlink(),
+            "account root is a symbolic link; no external data was written"
+        );
     }
     profiles[selected].destination = accounts.join(account);
-    anyhow::ensure!(!profiles[selected].destination.exists(), "migration account already exists; nothing was overwritten");
+    anyhow::ensure!(
+        !profiles[selected].destination.exists(),
+        "migration account already exists; nothing was overwritten"
+    );
     let staging_root = home.join(".rsrs-migration-staging");
     private_directory(&staging_root)?;
     let stage = staging_root.join(uuid::Uuid::new_v4().to_string());
@@ -242,12 +242,16 @@ pub fn migrate_profile(source_id: &str, account: &str) -> Result<Value> {
         .context("migration destination changed; nothing was overwritten")?;
     std::fs::remove_dir(&profiles[selected].destination)?;
     std::fs::rename(&stage, &profiles[selected].destination)?;
-    write_json(&source_receipt,
+    write_json(
+        &source_receipt,
         &json!({"schema":1,"complete":true,"source_identity":source_id,
             "destination":profiles[selected].destination,"original_preserved":true,
-            "snapshot_at":chrono::Utc::now().to_rfc3339()}))?;
-    Ok(json!({"state":"migrated","account":account,"dir":profiles[selected].destination,
-        "source":profiles[selected].source,"original_preserved":true}))
+            "snapshot_at":chrono::Utc::now().to_rfc3339()}),
+    )?;
+    Ok(
+        json!({"state":"migrated","account":account,"dir":profiles[selected].destination,
+        "source":profiles[selected].source,"original_preserved":true}),
+    )
 }
 
 fn meaningful(path: &Path) -> Result<bool> {
@@ -271,7 +275,13 @@ fn meaningful(path: &Path) -> Result<bool> {
 fn excluded(name: &str) -> bool {
     matches!(
         name,
-        "runtime" | "bin" | "bak" | ".rsrs-migrated.json" | "lock.db" | "lock.db-wal" | "lock.db-shm"
+        "runtime"
+            | "bin"
+            | "bak"
+            | ".rsrs-migrated.json"
+            | "lock.db"
+            | "lock.db-wal"
+            | "lock.db-shm"
     ) || name.ends_with("-wal")
         || name.ends_with("-shm")
         || name.ends_with(".pid")
@@ -471,7 +481,12 @@ fn migrate_home(home: &Path) -> Result<()> {
     Ok(())
 }
 
-fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile], current_namespace: bool) -> Result<()> {
+fn snapshot_profile(
+    profile: &Profile,
+    stage: &Path,
+    profiles: &[Profile],
+    current_namespace: bool,
+) -> Result<()> {
     // Reading a held SQLite library lock detects an active original writer without
     // stopping it or modifying its lock file.
     let old_lock = profile.source.join("lock.db");
@@ -513,15 +528,22 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile], curre
         if current_namespace {
             if let Some(keys) = recovered.as_ref() {
                 migrate_namespace_database(&database, keys)?;
-                let alias = session["keyring_account"].as_str().context("migrated credential alias is missing")?;
+                let alias = session["keyring_account"]
+                    .as_str()
+                    .context("migrated credential alias is missing")?;
                 let (salt, wrapped, nonce) = rewrap_namespace(&session, alias, keys)?;
                 session["kdf_salt"] = json!(salt);
                 session["wrapped_urk"] = json!(wrapped);
                 session["urk_nonce"] = json!(nonce);
                 let version = session["vault_version"].as_i64().unwrap_or(1);
                 if let Some(fields) = session.as_object_mut() {
-                    for field in ["super", "pass"] { fields.remove(field); }
-                    if version >= 4 { fields.remove("secret_key"); fields.remove("secret"); }
+                    for field in ["super", "pass"] {
+                        fields.remove(field);
+                    }
+                    if version >= 4 {
+                        fields.remove("secret_key");
+                        fields.remove("secret");
+                    }
                 }
             }
             session["crypto_namespace"] = json!(crate::memory::crypto::RSRS_PREFIX);
@@ -574,7 +596,10 @@ fn snapshot_profile(profile: &Profile, stage: &Path, profiles: &[Profile], curre
             bail!("legacy identity changed during migration; retry after closing the old runtime");
         }
     }
-    if current_namespace && database.is_file() && database.file_name().is_some_and(|name| name != "rsrs.db") {
+    if current_namespace
+        && database.is_file()
+        && database.file_name().is_some_and(|name| name != "rsrs.db")
+    {
         std::fs::rename(&database, stage.join("rsrs.db"))?;
     }
     write_json(
@@ -688,12 +713,19 @@ fn validate_live_memories(path: &Path, keys: Option<&crate::memory::SessionKeys>
     let mut statement = database.prepare(query)?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
-        let keys = keys.ok_or_else(|| anyhow!(
-            "legacy live ciphertext requires usable session keys; migration was not published"
-        ))?;
-        let mut stored = crate::memory::model::StoredMemory::new_pending(String::new(), String::new());
-        stored.ciphertext = row.get(0).context("legacy live ciphertext is missing or invalid; migration was not published")?;
-        stored.nonce = row.get(1).context("legacy live ciphertext nonce is missing or invalid; migration was not published")?;
+        let keys = keys.ok_or_else(|| {
+            anyhow!(
+                "legacy live ciphertext requires usable session keys; migration was not published"
+            )
+        })?;
+        let mut stored =
+            crate::memory::model::StoredMemory::new_pending(String::new(), String::new());
+        stored.ciphertext = row
+            .get(0)
+            .context("legacy live ciphertext is missing or invalid; migration was not published")?;
+        stored.nonce = row.get(1).context(
+            "legacy live ciphertext nonce is missing or invalid; migration was not published",
+        )?;
         // Reuse normal supported payload decoding, including legacy defaults.
         // Do not include decrypted content or identifiers in a failure report.
         crate::memory::MemoryEngine::open(keys, &stored).map_err(|_| anyhow!(
@@ -753,7 +785,10 @@ fn candidate_values(
             values.push(value.to_owned());
         }
     }
-    let account = if let Some(alias) = session["keyring_account"].as_str().filter(|value| !value.is_empty()) {
+    let account = if let Some(alias) = session["keyring_account"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+    {
         alias
     } else if user.trim().is_empty() {
         "local"
@@ -778,8 +813,16 @@ fn candidate_values(
     values
 }
 
-fn migrate_credentials(profile: &Profile, database: &Path, session: &mut Value) -> Result<Option<crate::memory::SessionKeys>> {
-    if session["wrapped_urk"].as_str().filter(|value| !value.is_empty()).is_none() {
+fn migrate_credentials(
+    profile: &Profile,
+    database: &Path,
+    session: &mut Value,
+) -> Result<Option<crate::memory::SessionKeys>> {
+    if session["wrapped_urk"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .is_none()
+    {
         if encrypted_count(database)? > 0 {
             bail!("legacy session has no wrapped key; recover the original keys before migration");
         }
@@ -836,7 +879,11 @@ fn migrate_credentials(profile: &Profile, database: &Path, session: &mut Value) 
 
 /// Recalculate internal keys while retaining every original user factor. Older
 /// two-factor vaults keep their version and factors; migration is not a reset.
-fn rewrap_namespace(session: &Value, alias: &str, keys: &crate::memory::SessionKeys) -> Result<(String, String, String)> {
+fn rewrap_namespace(
+    session: &Value,
+    alias: &str,
+    keys: &crate::memory::SessionKeys,
+) -> Result<(String, String, String)> {
     use crate::memory::crypto;
     let version = session["vault_version"].as_i64().unwrap_or(1);
     let salt = crypto::random_hex(16);
@@ -845,17 +892,29 @@ fn rewrap_namespace(session: &Value, alias: &str, keys: &crate::memory::SessionK
             .into_iter().next().ok_or_else(|| anyhow!("the original migration credential is missing; no replacement Key was generated"))
     };
     let kek = match version {
-        1 => crypto::derive_rsrs_password_kek(&credential("pass")?,
-            session["secret"].as_str().context("original Account Secret is missing")?, &salt)?,
+        1 => crypto::derive_rsrs_password_kek(
+            &credential("pass")?,
+            session["secret"]
+                .as_str()
+                .context("original Account Secret is missing")?,
+            &salt,
+        )?,
         2 => crypto::derive_super_kek(&credential("super")?, &salt)?,
-        3 => crypto::derive_rsrs_vault_kek(&credential("super")?,
-            session["secret_key"].as_str().context("original Secret Key is missing")?, &salt)?,
+        3 => crypto::derive_rsrs_vault_kek(
+            &credential("super")?,
+            session["secret_key"]
+                .as_str()
+                .context("original Secret Key is missing")?,
+            &salt,
+        )?,
         4 => crypto::derive_rsrs_kek(&credential("super")?, &salt)?,
         _ => bail!("unsupported vault version; original credentials were preserved"),
     };
     let (nonce, wrapped) = crypto::wrap_key(&keys.urk, &kek)?;
-    anyhow::ensure!(crypto::unwrap_key(&wrapped, &nonce, &kek)? == keys.urk,
-        "new key wrap did not round-trip; migration was not completed");
+    anyhow::ensure!(
+        crypto::unwrap_key(&wrapped, &nonce, &kek)? == keys.urk,
+        "new key wrap did not round-trip; migration was not completed"
+    );
     Ok((salt, format!("{}{wrapped}", crypto::RSRS_PREFIX), nonce))
 }
 
@@ -863,22 +922,37 @@ fn rewrap_namespace(session: &Value, alias: &str, keys: &crate::memory::SessionK
 /// journal remains in the old library; changing its operation bodies would
 /// invalidate retries. The new projection queues fresh operations on normal open.
 fn migrate_namespace_database(path: &Path, source: &crate::memory::SessionKeys) -> Result<()> {
-    if !path.is_file() { return Ok(()); }
+    if !path.is_file() {
+        return Ok(());
+    }
     let mut database = Connection::open(path)?;
     crate::transport::local::register_witness_functions(&database)?;
-    let tables = database.prepare("SELECT name FROM sqlite_master WHERE type='table'")?
+    let tables = database
+        .prepare("SELECT name FROM sqlite_master WHERE type='table'")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
-    if !tables.contains("memories") { return Ok(()); }
-    let columns = database.prepare("PRAGMA table_info(memories)")?
+    if !tables.contains("memories") {
+        return Ok(());
+    }
+    let columns = database
+        .prepare("PRAGMA table_info(memories)")?
         .query_map([], |row| row.get::<_, String>(1))?
         .collect::<rusqlite::Result<BTreeSet<_>>>()?;
     let query = if columns.contains("embedding_enc") {
         "SELECT id,ciphertext,nonce,embedding_enc FROM memories ORDER BY id"
-    } else { "SELECT id,ciphertext,nonce,'' FROM memories ORDER BY id" };
-    let rows = database.prepare(query)?.query_map([], |row| Ok((
-        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-        row.get::<_, String>(2)?, row.get::<_, String>(3)?)))?
+    } else {
+        "SELECT id,ciphertext,nonce,'' FROM memories ORDER BY id"
+    };
+    let rows = database
+        .prepare(query)?
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let target = crate::memory::SessionKeys::from_urk(source.urk)?;
     let mut converted = Vec::with_capacity(rows.len());
@@ -886,31 +960,55 @@ fn migrate_namespace_database(path: &Path, source: &crate::memory::SessionKeys) 
         let plaintext = source.decrypt_content(&ciphertext, &nonce)
             .map_err(|_| anyhow!("a source record cannot be decrypted; full migration was not published; original library and keys were preserved"))?;
         let (new_nonce, new_ciphertext) = target.encrypt_content(&plaintext)?;
-        anyhow::ensure!(target.decrypt_content(&new_ciphertext, &new_nonce)? == plaintext,
-            "migrated ciphertext did not round-trip; no completion marker was written");
+        anyhow::ensure!(
+            target.decrypt_content(&new_ciphertext, &new_nonce)? == plaintext,
+            "migrated ciphertext did not round-trip; no completion marker was written"
+        );
         let embedding = source.migrate_embedding(&embedding)?;
         converted.push((id, ciphertext, new_ciphertext, new_nonce, embedding));
     }
     let transaction = database.transaction()?;
-    transaction.execute_batch("DROP TRIGGER IF EXISTS sync_capture_insert; DROP TRIGGER IF EXISTS sync_capture_update;")?;
-    for table in ["sync_outbox", "sync_inbox", "sync_remote_heads", "sync_conflict_analysis", "sync_resolution_outbox"] {
-        if tables.contains(table) { transaction.execute(&format!("DELETE FROM {table}"), [])?; }
+    transaction.execute_batch(
+        "DROP TRIGGER IF EXISTS sync_capture_insert; DROP TRIGGER IF EXISTS sync_capture_update;",
+    )?;
+    for table in [
+        "sync_outbox",
+        "sync_inbox",
+        "sync_remote_heads",
+        "sync_conflict_analysis",
+        "sync_resolution_outbox",
+    ] {
+        if tables.contains(table) {
+            transaction.execute(&format!("DELETE FROM {table}"), [])?;
+        }
     }
     if tables.contains("meta") {
         transaction.execute("DELETE FROM meta WHERE key IN ('sync_v2_cursor','sync_v2_snapshot_done','sync_v2_snapshot_until','sync_cursor')", [])?;
     }
     for (id, old, ciphertext, nonce, embedding) in converted {
-        let sql = format!("UPDATE memories SET ciphertext=?1,nonce=?2{}{} WHERE id=?3",
-            if columns.contains("dirty") { ",dirty=1" } else { "" },
-            if columns.contains("embedding_enc") { ",embedding_enc=?4" } else { "" });
+        let sql = format!(
+            "UPDATE memories SET ciphertext=?1,nonce=?2{}{} WHERE id=?3",
+            if columns.contains("dirty") {
+                ",dirty=1"
+            } else {
+                ""
+            },
+            if columns.contains("embedding_enc") {
+                ",embedding_enc=?4"
+            } else {
+                ""
+            }
+        );
         if columns.contains("embedding_enc") {
             transaction.execute(&sql, rusqlite::params![ciphertext, nonce, id, embedding])?;
         } else {
             transaction.execute(&sql, rusqlite::params![ciphertext, nonce, id])?;
         }
         if tables.contains("core_artifacts") {
-            transaction.execute("UPDATE core_artifacts SET source=?1 WHERE memory_id=?2 AND source=?3",
-                rusqlite::params![ciphertext, id, old])?;
+            transaction.execute(
+                "UPDATE core_artifacts SET source=?1 WHERE memory_id=?2 AND source=?3",
+                rusqlite::params![ciphertext, id, old],
+            )?;
         }
     }
     if tables.contains("sync_outbox") && tables.contains("sync_base") {
@@ -923,7 +1021,10 @@ fn migrate_namespace_database(path: &Path, source: &crate::memory::SessionKeys) 
     transaction.commit()?;
     database.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE;")?;
     let integrity: String = database.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
-    anyhow::ensure!(integrity == "ok", "migrated database failed integrity validation");
+    anyhow::ensure!(
+        integrity == "ok",
+        "migrated database failed integrity validation"
+    );
     Ok(())
 }
 
@@ -952,13 +1053,18 @@ fn rewrite_address(value: &mut Value) {
 
 fn write_json(path: &Path, value: &Value) -> Result<()> {
     use std::io::Write;
-    anyhow::ensure!(!std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
-        "migration metadata must not be a symbolic link");
-    let parent = path.parent().context("migration metadata has no parent directory")?;
+    anyhow::ensure!(
+        !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink()),
+        "migration metadata must not be a symbolic link"
+    );
+    let parent = path
+        .parent()
+        .context("migration metadata has no parent directory")?;
     let temporary = parent.join(format!(".rsrs-metadata-{}.tmp", uuid::Uuid::new_v4()));
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
@@ -968,10 +1074,13 @@ fn write_json(path: &Path, value: &Value) -> Result<()> {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&temporary, path)?;
-        #[cfg(unix)] std::fs::File::open(parent)?.sync_all()?;
+        #[cfg(unix)]
+        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
-    if result.is_err() && temporary.is_file() { let _ = std::fs::remove_file(&temporary); }
+    if result.is_err() && temporary.is_file() {
+        let _ = std::fs::remove_file(&temporary);
+    }
     result
 }
 
@@ -1010,23 +1119,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn namespace_conversion_registers_witness_functions_and_preserves_original()->Result<()> {
+    fn namespace_conversion_registers_witness_functions_and_preserves_original() -> Result<()> {
         use crate::transport::MemoryTransport;
-        let root=tempfile::tempdir()?;let original=root.path().join("original.db");let staged=root.path().join("staged.db");
-        let keys=crate::SessionKeys::from_legacy_urk([7;32])?;
-        let (nonce,ciphertext)=keys.encrypt_content("synthetic namespace content")?;
-        let mut memory=crate::StoredMemory::new_pending("synthetic-entry".into(),"account".into());
-        memory.ciphertext=ciphertext.clone();memory.nonce=nonce;memory.updated_at="2026-01-01T00:00:00Z".into();
-        {let store=crate::transport::local::LocalStore::open(&original)?;assert!(store.put(&memory)?);assert_eq!(store.witness_verify()?.count,1);}
-        std::fs::copy(&original,&staged)?;
-        migrate_namespace_database(&staged,&keys)?;
-        let converted=crate::transport::local::LocalStore::open_read_only(&staged)?;
-        let rows=converted.all(false)?;assert_eq!(rows.len(),1);
-        assert!(rows[0].ciphertext.starts_with(crate::memory::crypto::RSRS_PREFIX));
-        assert_eq!(crate::SessionKeys::from_urk([7;32])?.decrypt_content(&rows[0].ciphertext,&rows[0].nonce)?,"synthetic namespace content");
-        let proof=converted.witness_verify()?;assert!(proof.intact);assert_eq!(proof.count,2);
-        let retained=crate::transport::local::LocalStore::open_read_only(&original)?;
-        assert_eq!(retained.all(false)?[0].ciphertext,ciphertext);assert_eq!(retained.witness_verify()?.count,1);
+        let root = tempfile::tempdir()?;
+        let original = root.path().join("original.db");
+        let staged = root.path().join("staged.db");
+        let keys = crate::SessionKeys::from_legacy_urk([7; 32])?;
+        let (nonce, ciphertext) = keys.encrypt_content("synthetic namespace content")?;
+        let mut memory =
+            crate::StoredMemory::new_pending("synthetic-entry".into(), "account".into());
+        memory.ciphertext = ciphertext.clone();
+        memory.nonce = nonce;
+        memory.updated_at = "2026-01-01T00:00:00Z".into();
+        {
+            let store = crate::transport::local::LocalStore::open(&original)?;
+            assert!(store.put(&memory)?);
+            assert_eq!(store.witness_verify()?.count, 1);
+        }
+        std::fs::copy(&original, &staged)?;
+        migrate_namespace_database(&staged, &keys)?;
+        let converted = crate::transport::local::LocalStore::open_read_only(&staged)?;
+        let rows = converted.all(false)?;
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0]
+            .ciphertext
+            .starts_with(crate::memory::crypto::RSRS_PREFIX));
+        assert_eq!(
+            crate::SessionKeys::from_urk([7; 32])?
+                .decrypt_content(&rows[0].ciphertext, &rows[0].nonce)?,
+            "synthetic namespace content"
+        );
+        let proof = converted.witness_verify()?;
+        assert!(proof.intact);
+        assert_eq!(proof.count, 2);
+        let retained = crate::transport::local::LocalStore::open_read_only(&original)?;
+        assert_eq!(retained.all(false)?[0].ciphertext, ciphertext);
+        assert_eq!(retained.witness_verify()?.count, 1);
         Ok(())
     }
 
@@ -1035,12 +1163,7 @@ mod tests {
         let _isolate = crate::test_lock::Isolate::new()?;
         let home = tempfile::tempdir()?;
         plaintext_profile(&home.path().join(".onememory"), "client-fixture")?;
-        let variables = [
-            "HOME",
-            "RSRS_DATA_DIR",
-            "RSRS_CLIENT_ONLY",
-            DEFAULT_ENV,
-        ];
+        let variables = ["HOME", "RSRS_DATA_DIR", "RSRS_CLIENT_ONLY", DEFAULT_ENV];
         let saved = variables.map(|name| (name, crate::env::var_os(name)));
         std::env::set_var("HOME", home.path());
         std::env::remove_var("RSRS_DATA_DIR");
@@ -1087,7 +1210,8 @@ mod tests {
         let payload = json!({"kind":"context","tags":"","title":"committed",
                 "content":"committed fixture","user":"wal-owner","computer":"fixture",
                 "project":"","created_at":"2026-10-04T00:00:00Z","updated_at":"2026-10-04T00:00:00Z"});
-        let (nonce, ciphertext) = crate::memory::crypto::encrypt_item(&data_key, &payload.to_string())?;
+        let (nonce, ciphertext) =
+            crate::memory::crypto::encrypt_item(&data_key, &payload.to_string())?;
         db.execute(
             "UPDATE memories SET ciphertext=?1,nonce=?2 WHERE id='committed'",
             rusqlite::params![ciphertext, nonce],
@@ -1143,11 +1267,14 @@ mod tests {
         let salt = crate::memory::crypto::random_hex(16);
         let kek = crate::memory::crypto::derive_kek_v4(&secret, &salt)?;
         let (urk_nonce, wrapped_urk) = crate::memory::crypto::wrap_key(&urk, &kek)?;
-        write_json(&source.join("session.json"), &json!({
-            "user":"wal-owner","addr":"https://1memory.ai","token":"fixture-token",
-            "vault_version":4,"secret_key":secret,"kdf_salt":salt,
-            "urk_nonce":urk_nonce,"wrapped_urk":wrapped_urk
-        }))?;
+        write_json(
+            &source.join("session.json"),
+            &json!({
+                "user":"wal-owner","addr":"https://1memory.ai","token":"fixture-token",
+                "vault_version":4,"secret_key":secret,"kdf_salt":salt,
+                "urk_nonce":urk_nonce,"wrapped_urk":wrapped_urk
+            }),
+        )?;
         std::fs::create_dir_all(source.join("runtime"))?;
         std::fs::write(source.join("runtime/token"), "must-not-copy")?;
         std::fs::create_dir_all(source.join("models"))?;
@@ -1231,9 +1358,15 @@ mod tests {
             let current = fresh_home.path().join(label);
             std::fs::create_dir_all(&current)?;
             std::fs::write(current.join("onememory.db"), b"")?;
-            write_json(&current.join("session.json"), &json!({"wrapped_urk":format!("{}fixture",crate::memory::crypto::RSRS_PREFIX),"vault_version":4}))?;
+            write_json(
+                &current.join("session.json"),
+                &json!({"wrapped_urk":format!("{}fixture",crate::memory::crypto::RSRS_PREFIX),"vault_version":4}),
+            )?;
         }
-        assert!(legacy_profiles(fresh_home.path())?.is_empty(), "current vaults were reported as legacy");
+        assert!(
+            legacy_profiles(fresh_home.path())?.is_empty(),
+            "current vaults were reported as legacy"
+        );
         Ok(())
     }
 

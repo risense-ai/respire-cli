@@ -1,6 +1,6 @@
 //! Host-owned attribution and per-request feedback. No process-global counters.
 use super::*;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Debug, Default, serde::Serialize)]
 pub struct FeedbackCounts {
@@ -213,6 +213,31 @@ impl LocalStore {
         transaction.commit()?;
         Ok(counts)
     }
+
+    /// Explicit `query-log mark --good` totals per memory over the same
+    /// 180-day window as `feedback_counts`: `query_feedback` keeps one
+    /// latest-wins row per (query, entry), so a query counts only when its
+    /// latest mark is good. Tree float reads these nods instead of
+    /// recall_count (P0-2) — being often recalled must not decide tree shape.
+    pub fn query_good_counts(&self, now: i64) -> Result<HashMap<String, i64>> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let mut statement = transaction.prepare(
+            "SELECT memory_id, COUNT(*) FROM query_feedback \
+             WHERE good = 1 AND marked_at >= ?1 AND marked_at <= ?2 \
+             GROUP BY memory_id",
+        )?;
+        let rows = statement.query_map(params![now - 180 * 86400, now], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut counts = HashMap::new();
+        for row in rows {
+            let (id, count) = row?;
+            counts.insert(id, count);
+        }
+        drop(statement);
+        transaction.commit()?;
+        Ok(counts)
+    }
 }
 
 #[cfg(test)]
@@ -383,30 +408,63 @@ mod tests {
 
     #[test]
     fn unicode_short_queries_window_and_legacy_marks_are_supported() -> Result<()> {
-        assert_eq!(similarity("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}"), 1.0);
+        assert_eq!(
+            similarity(
+                "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}",
+                "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}"
+            ),
+            1.0
+        );
         assert_eq!(similarity("\u{4e2d}", "\u{4e2d}"), 1.0);
         assert_eq!(similarity("", ""), 0.0);
         assert!(similarity("enable feature", "do not enable feature") < 1.0); // Not semantic negation detection.
         let root = tempfile::tempdir()?;
         let store = LocalStore::open(&root.path().join("db"))?;
         let id = "full-entry".to_string();
-        store.log_query("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &[id.clone()], &[1.0])?;
+        store.log_query(
+            "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}",
+            "p",
+            "s",
+            &[id.clone()],
+            &[1.0],
+        )?;
         store.mark_verdict(&[id.clone()], true)?;
         let now = chrono::Utc::now().timestamp();
         let allowed = BTreeSet::from([id.clone()]);
         assert_eq!(
             store
-                .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, 0.5, now)?
+                .feedback_counts(
+                    "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}",
+                    "p",
+                    "s",
+                    &allowed,
+                    0.5,
+                    now
+                )?
                 .good
                 .get(&id),
             Some(&1)
         );
         assert!(store
-            .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, 0.5, now + 181 * 86400)?
+            .feedback_counts(
+                "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}",
+                "p",
+                "s",
+                &allowed,
+                0.5,
+                now + 181 * 86400
+            )?
             .good
             .is_empty());
         assert!(store
-            .feedback_counts("\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}", "p", "s", &allowed, f64::NAN, now)
+            .feedback_counts(
+                "\u{4e2d}\u{6587}\u{8bb0}\u{5fc6}",
+                "p",
+                "s",
+                &allowed,
+                f64::NAN,
+                now
+            )
             .is_err());
         Ok(())
     }

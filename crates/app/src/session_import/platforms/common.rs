@@ -84,20 +84,33 @@ pub fn jsonl_session(platform: &str, path: &Path, fallback_id: String) -> Sessio
         } else {
             None
         };
-        if let Some(value) = data.get("sessionId").and_then(Value::as_str).or(session_line_id) {
+        if let Some(value) = data
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .or(session_line_id)
+        {
             sid = value.to_owned();
         }
         if cwd.is_none() {
-            cwd = data.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned);
+            cwd = data
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
         }
         if created.is_none() {
-            created = data.get("timestamp").and_then(Value::as_str).map(ToOwned::to_owned);
+            created = data
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
         }
         if let Some(stamp) = data.get("timestamp").and_then(Value::as_str) {
             updated = Some(stamp.to_owned());
         }
         if provider.is_none() {
-            provider = data.get("provider").and_then(Value::as_str).map(ToOwned::to_owned);
+            provider = data
+                .get("provider")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned);
         }
         if model.is_none() {
             model = data
@@ -113,7 +126,10 @@ pub fn jsonl_session(platform: &str, path: &Path, fallback_id: String) -> Sessio
                     sid = value.to_owned();
                 }
                 if cwd.is_none() {
-                    cwd = payload.get("cwd").and_then(Value::as_str).map(ToOwned::to_owned);
+                    cwd = payload
+                        .get("cwd")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned);
                 }
                 if provider.is_none() {
                     provider = payload
@@ -121,9 +137,8 @@ pub fn jsonl_session(platform: &str, path: &Path, fallback_id: String) -> Sessio
                         .and_then(Value::as_str)
                         .map(ToOwned::to_owned);
                 }
-                let (source_parent, source_agent) = spawn_info(
-                    payload.get("source").unwrap_or(&Value::Null),
-                );
+                let (source_parent, source_agent) =
+                    spawn_info(payload.get("source").unwrap_or(&Value::Null));
                 if parent.is_none() {
                     parent = source_parent;
                 }
@@ -137,16 +152,19 @@ pub fn jsonl_session(platform: &str, path: &Path, fallback_id: String) -> Sessio
                 }
             }
         }
-        let message = data
-            .get("message")
-            .and_then(Value::as_object)
-            .or(payload);
+        let message = data.get("message").and_then(Value::as_object).or(payload);
         if let Some(message) = message {
             if provider.is_none() {
-                provider = message.get("provider").and_then(Value::as_str).map(ToOwned::to_owned);
+                provider = message
+                    .get("provider")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
             }
             if model.is_none() {
-                model = message.get("model").and_then(Value::as_str).map(ToOwned::to_owned);
+                model = message
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned);
             }
         }
         let prompt = user_text(&data, message);
@@ -238,7 +256,14 @@ pub fn spawn_info(source: &Value) -> (Option<String>, Option<String>) {
 
 /// Copy token/cost usage fields, mirroring the finder's `merge_usage`.
 pub fn merge_usage(target: &mut Map<String, Value>, value: &Map<String, Value>) {
-    for key in ["totalTokens", "total_tokens", "input", "output", "cacheRead", "cacheWrite"] {
+    for key in [
+        "totalTokens",
+        "total_tokens",
+        "input",
+        "output",
+        "cacheRead",
+        "cacheWrite",
+    ] {
         if let Some(field) = value.get(key) {
             if field.is_number() {
                 target.insert(key.to_owned(), field.clone());
@@ -372,7 +397,9 @@ pub fn sqlite_rows(connection: &Connection, sql: &str) -> Vec<Vec<SqlVal>> {
                 Ok(ValueRef::Null) | Err(_) => SqlVal::Null,
                 Ok(ValueRef::Integer(value)) => SqlVal::Int(value),
                 Ok(ValueRef::Real(value)) => SqlVal::Real(value),
-                Ok(ValueRef::Text(text)) => SqlVal::Text(String::from_utf8_lossy(text).into_owned()),
+                Ok(ValueRef::Text(text)) => {
+                    SqlVal::Text(String::from_utf8_lossy(text).into_owned())
+                }
                 Ok(ValueRef::Blob(_)) => SqlVal::Null,
             });
         }
@@ -405,7 +432,11 @@ mod tests {
         assert_eq!(session.parent_id.as_deref(), Some("p-0"));
         assert_eq!(session.agent.as_deref(), Some("Tesla (explorer)"));
         assert!(session.usage.contains_key("total_tokens"));
-        assert!(session.updated_at.as_deref().ok_or("updated_at")?.starts_with("2026-10-01"));
+        assert!(session
+            .updated_at
+            .as_deref()
+            .ok_or("updated_at")?
+            .starts_with("2026-10-01"));
         Ok(())
     }
 
@@ -435,6 +466,9 @@ mod tests {
             (Some("p1".to_owned()), Some("Ada (reviewer)".to_owned()))
         );
         let named = serde_json::json!({"subagent": "memory_consolidation"});
-        assert_eq!(spawn_info(&named), (None, Some("memory_consolidation".to_owned())));
+        assert_eq!(
+            spawn_info(&named),
+            (None, Some("memory_consolidation".to_owned()))
+        );
     }
 }

@@ -1,5 +1,5 @@
-use serde::{Serialize, Deserialize};
 use respire_protocol::MemoryEntry;
+use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScoredEntry {
     pub score: f32,

@@ -10,12 +10,15 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dev_model_fixture import share_cpu_container
+from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
 
 UPSTREAM = "https://api-dev.rsrs.rs"
 
@@ -193,17 +196,29 @@ class Fixture:
                if not key.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
                and not key.endswith(("_TOKEN", "_API_KEY"))
                and key not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private" and bus.startswith("unix:"):
+            env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
         env.update(HOME=str(profile / "home"), USERPROFILE=str(profile / "home"),
                    XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
                    RSRS_DATA_DIR=str(profile / "library"), RSRS_BIN_DIR=str(profile / "bin"),
                    RSRS_M3_DIR=str(self.args.model_dir), RSRS_ENGINE="cpu",
                    RSRS_NO_AUTOSYNC="1")
+        env['RSRS_RUNTIME_BIN'] = str(self.args.runtime_binary or self.args.binary)
+        if self.args.runtime_binary:
+            env['LC_ALL'] = 'C'
         for key in ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "TMPDIR", "RSRS_DATA_DIR", "RSRS_BIN_DIR"):
             Path(env[key]).mkdir(parents=True, exist_ok=True, mode=0o700)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
+        installed = install_published_runtime(self.args.binary, env)
+        if installed is not None and os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
+            receipt = json.loads((Path(env['RSRS_DATA_DIR']) / 'runtime.json').read_text(encoding='utf-8'))
+            self.args.runtime_binary = installed
+            self.args.runtime_version, self.args.runtime_sha256 = receipt['version'], receipt['sha256']
+            runtime_inputs(self.args, [self.args.binary])
         return env
 
     def direct(self, env, command, allow_pending=False, timeout=150):
@@ -228,6 +243,11 @@ class Fixture:
         except ValueError:
             raise RuntimeError("direct_" + command[0] + "_invalid_json") from None
         require(not data.get("errors"), "direct_" + command[0] + "_errors")
+        if self.args.runtime_binary and command[0] in ('remember', 'show', 'sync'):
+            with urllib.request.urlopen('http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', timeout=5) as response:
+                health = json.load(response)
+            profile = Path(env['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, profile, profile)
         return data
 
     def prepare(self):
@@ -258,6 +278,10 @@ class Fixture:
         session_path.chmod(0o600)
 
     def start(self, automatic=True):
+        if self.args.runtime_binary:
+            stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                     env=self.a, capture_output=True, timeout=90)
+            require(stopped.returncode == 0, 'preparation_runtime_stop_failed')
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
@@ -265,7 +289,10 @@ class Fixture:
         if automatic:
             env.pop("RSRS_NO_AUTOSYNC", None)
         env["RSRS_RPC_PORT"] = str(self.port)
-        self.child = subprocess.Popen([str(self.args.binary), "--runtime-internal", "--no-open", "--port", str(self.port)],
+        launch = ([env['RSRS_RUNTIME_BIN'], 'serve'] if self.args.runtime_binary else
+                  [str(self.args.binary), '--runtime-internal', '--no-open'])
+        self.runtime_env = env
+        self.child = subprocess.Popen([*launch, '--port', str(self.port)],
                                       env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         data_dir = Path(env["RSRS_DATA_DIR"])
         token_path = data_dir / "runtime" / "token"
@@ -284,7 +311,10 @@ class Fixture:
                 raise RuntimeError("runtime_health_status_failed") from None
             except (OSError, urllib.error.URLError):
                 return False
-            require(health.get("v") == 1 and health.get("bin") == self.args.version
+            if self.args.runtime_binary:
+                verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
+            else:
+                require(health.get("v") == 1 and health.get("bin") == self.args.version
                     and health.get("pid") == self.child.pid
                     and Path(health.get("exe", "")).resolve() == self.args.binary
                     and Path(health.get("data_dir", "")).resolve() == data_dir.resolve(),
@@ -295,12 +325,22 @@ class Fixture:
         wait_for(lambda: self.rpc(["status"]).get("ok"), 30, "runtime_ready_timeout")
 
     def rpc(self, command):
+        body = {"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}
+        if self.args.runtime_binary:
+            with urllib.request.urlopen('http://127.0.0.1:' + str(self.port) + '/api/health', timeout=5) as response:
+                health = json.load(response)
+            data_dir = Path(self.a['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
+            body = scoped_rpc_request(health, ['--json', *command])
         request = urllib.request.Request("http://127.0.0.1:" + str(self.port) + "/api/rpc",
-            json.dumps({"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}).encode(),
+            json.dumps(body).encode(),
             {"Content-Type": "application/json"})
         try:
             with urllib.request.urlopen(request, timeout=45) as response:
-                return json.load(response)
+                reply = json.load(response)
+            if self.args.runtime_binary:
+                verify_rpc_receipt(body, reply)
+            return reply
         except Exception:
             raise RuntimeError("local_rpc_failed") from None
 
@@ -367,12 +407,22 @@ class Fixture:
         try:
             self.gate.release.set()
             if self.child is not None:
-                self.child.terminate()
+                if self.args.runtime_binary and self.child.poll() is None:
+                    acknowledgement = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                             env=self.runtime_env, capture_output=True, timeout=90)
+                    require(acknowledgement.returncode == 0, 'owned_runtime_drain_failed')
+                elif self.child.poll() is None:
+                    self.child.terminate()
                 try:
                     self.child.wait(10)
                 except subprocess.TimeoutExpired:
                     self.child.kill()
                     self.child.wait(10)
+            if self.args.runtime_binary:
+                for env in (self.a, self.b):
+                    acknowledgement = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+                                                     env=env, capture_output=True, timeout=90)
+                    require(acknowledgement.returncode == 0, 'owned_profile_runtime_drain_failed')
             self.gate.close()
             stopped = True
         except Exception:
@@ -416,6 +466,7 @@ class Fixture:
 def run(args, report):
     require(os.environ.get("GITHUB_ACTIONS") == "true", "github_actions_required")
     args.binary = args.binary.resolve(strict=True)
+    runtime_inputs(args, [args.binary])
     require(args.binary.is_file(), "invalid_artifact_inputs")
     require(hashlib.sha256(args.binary.read_bytes()).hexdigest() == args.binary_sha256.lower(), "binary_hash_mismatch")
     runner_temp = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True)
@@ -561,6 +612,7 @@ def main():
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--model-dir", type=Path, required=True)
+    add_runtime_arguments(parser)
     args = parser.parse_args()
     required = ["foreground_save_during_network_wait", "independent_pull_decrypt", "scheduled_transport_retry", "finite_manual_boundary", "reset_old_response_rejection"]
     report = {"passed": False, "cases": {}, "required": required,
@@ -577,6 +629,9 @@ def main():
     report["remaining"] = [name for name in required if report["cases"].get(name, {}).get("passed") is not True]
     cleanup = report["cleanup"]
     cleanup["passed"] = not cleanup["remaining_users"] and not cleanup["unconfirmed_users"] and all(event["passed"] for event in cleanup["events"])
+    report.update(runtime_report(args, report['passed']))
+    if args.runtime_binary and not report['standalone_runtime_evidence']:
+        report['passed'] = False
     runner_temp = os.environ.get("RUNNER_TEMP")
     safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
     if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():

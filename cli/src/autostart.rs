@@ -5,68 +5,56 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 mod lifecycle;
+mod snapshot_control;
+pub(crate) use snapshot_control::{SnapshotOperation, SnapshotOutcomeUnknown, SnapshotRemoteFailure};
+mod recovery;
+pub(crate) use recovery::StaleOwner;
 mod manager;
+pub(crate) use manager::process_birth;
+#[cfg(all(windows, any(test, feature = "client2-host-prototype")))]
+pub(crate) use manager::windows_task_path;
+mod supervise;
+pub(crate) use supervise::control_migrate_profile;
+pub(crate) use supervise::{login_recovery_status, recover_legacy_login_locked};
+pub(crate) use supervise::{control_metadata, control_offline_read};
+pub(crate) use supervise::control_agent_config;
+pub(crate) use supervise::{
+    control_super_reset, control_super_reset_step, control_key_result, control_key_rollback,
+    control_fivekeys,
+    KeyRecoveryRequired,
+};
+pub(crate) use supervise::{control_logout, control_session_revoke, IdentityWriteRecoveryRequired};
+pub(crate) use supervise::{control_space_invite, control_space_join, control_space_kick};
+pub(crate) use supervise::{control_account_remove, control_space_remove, run_space_config_control};
+pub(crate) use supervise::control_prepare_model;
+pub(crate) use supervise::{
+    control_install_engines, control_reset_cpu, control_uninstall_m3,
+};
+pub(crate) use supervise::{run_config_control, run_profile_config_control};
+pub(crate) use supervise::{control_secret, control_keys_export, control_session_list, control_login_step};
+pub(crate) use lifecycle::{snapshot_recover_control, snapshot_restore_control};
+pub(crate) use supervise::{
+    auth_keygen_locked, auth_result_locked, control_auth_result, control_keygen,
+    control_memory_revision, spawn_authorized_runtime,
+    control_account_result, control_account_rollback, control_login, control_register,
+    prepare_model_locked, model_install_plan_locked, model_install_verify_locked,
+    prepare_auth_account_request, validate_auth_account_receipt, AuthAccountControl, AccountOutcomeUnknown, AuthOutcomeUnknown,
+};
 pub(crate) use lifecycle::current_boot_token as lifecycle_boot_token;
 pub(crate) use lifecycle::{
     authorize_detached_boot_locked, background_paused, begin_maintenance_locked,
     check_direct_access, check_managed_request, coordinate_materialization, credential_state,
     ensure_managed_locked, execute, managed_enabled, managed_id, may_reuse_runtime,
-    note_credential_access, record_exit, restart_maintenance_locked, restart_stage, stop_managed_locked,
-    verify_managed_boot, with_explicit_recovery,
+    note_credential_access, record_exit, restart_maintenance_locked, restart_stage,
+    stop_managed_locked, verify_managed_boot, with_explicit_recovery,
 };
 
-#[derive(Debug, Subcommand)]
-pub enum RuntimeCommand {
-    /// Serve in the foreground; service managers supervise this process.
-    Run {
-        #[arg(long, hide = true)]
-        managed: Option<String>,
-        #[arg(long, hide = true)]
-        installation_root: Option<PathBuf>,
-        #[arg(long, hide = true)]
-        supervised_child: bool,
-    },
-    /// Start the host through its configured lifecycle owner.
-    Start,
-    /// Stop the owned host without automatic resurrection.
-    Stop,
-    /// Drain and restart the owned host through its configured lifecycle owner.
-    Restart,
-    /// Inspect the existing host without creating a profile or starting it.
-    Status,
-    /// Manage opt-in current-user sign-in startup; never installs a system service.
-    Autostart {
-        #[command(subcommand)]
-        command: AutostartCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum AutostartCommand {
-    /// Register current-user sign-in startup; start now only with --now.
-    Enable {
-        #[arg(long)]
-        now: bool,
-    },
-    /// Disable future sign-in startup; stop the existing host only with --stop.
-    Disable {
-        #[arg(long)]
-        stop: bool,
-    },
-    /// Remove only this installation's startup registration; preserve data and keys.
-    Remove {
-        #[arg(long)]
-        stop: bool,
-    },
-    /// Read registration and runtime status without changing either.
-    Status,
-}
+pub use respire_commands::autostart::{AutostartCommand, RuntimeCommand};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -253,7 +241,7 @@ const ENVIRONMENT: &[&str] = &[
 ];
 
 fn disabled_status() -> Result<Value> {
-    let root = respire::service::main_data_dir();
+    let (root, _) = respire_client_host::config::control_roots()?;
     match read_registration(&root)? {
         None => Ok(
             json!({"schema_version":1,"enabled":false,"registered":false,
@@ -313,12 +301,14 @@ fn render(config: &Registration) -> Result<String> {
         .to_str()
         .context("installation path is not UTF-8")?;
     match config.platform {
-        Platform::Linux => Ok(format!("# Respire user runtime {}\n[Unit]\nDescription=Respire current-user runtime\nStartLimitIntervalSec=120\nStartLimitBurst=3\n[Service]\nType=simple\nExecStart=:{} runtime run --managed {} --installation-root {}\nWorkingDirectory={}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=60\nKillMode=control-group\nStandardOutput=null\nStandardError=null\n[Install]\nWantedBy=default.target\n",
-            config.id, systemd_quote(executable)?, config.id, systemd_quote(root)?, systemd_path(root)?)),
-        Platform::Macos => Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>ai.risense.respire.runtime.{}</string><key>ProgramArguments</key><array><string>{}</string><string>runtime</string><string>run</string><string>--managed</string><string>{}</string><string>--installation-root</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
-            config.id, xml(executable)?, config.id, xml(root)?, xml(root)?)),
+        // The registered task starts the CLI supervisor (`runtime supervise`),
+        // which owns and restarts the separate rsrs-runtime child process.
+        Platform::Linux => Ok(format!("# Respire user runtime {}\n[Unit]\nDescription=Respire current-user runtime\nStartLimitIntervalSec=120\nStartLimitBurst=3\n[Service]\nType=simple\nExecStart=:{} runtime supervise --data-dir {}\nWorkingDirectory={}\nRestart=on-failure\nRestartSec=10\nTimeoutStopSec=60\nKillMode=control-group\nStandardOutput=null\nStandardError=null\n[Install]\nWantedBy=default.target\n",
+            config.id, systemd_quote(executable)?, systemd_quote(root)?, systemd_path(root)?)),
+        Platform::Macos => Ok(format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict><key>Label</key><string>ai.risense.respire.runtime.{}</string><key>ProgramArguments</key><array><string>{}</string><string>runtime</string><string>supervise</string><string>--data-dir</string><string>{}</string></array><key>WorkingDirectory</key><string>{}</string><key>RunAtLoad</key><true/><key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict><key>ThrottleInterval</key><integer>10</integer><key>StandardOutPath</key><string>/dev/null</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>\n",
+            config.id, xml(executable)?, xml(root)?, xml(root)?)),
         Platform::Windows => {
-            let arguments=format!("runtime run --managed {} --installation-root {}",manager::windows_argument(&config.id)?,manager::windows_argument(root)?);
+            let arguments=format!("runtime supervise --data-dir {}",manager::windows_argument(root)?);
             Ok(format!("<?xml version=\"1.0\"?><Task version=\"1.2\" xmlns=\"http://schemas.microsoft.com/windows/2004/02/mit/task\"><RegistrationInfo><Description>Respire current-user runtime {}</Description></RegistrationInfo><Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{}</UserId></LogonTrigger></Triggers><Principals><Principal id=\"CurrentUser\"><UserId>{}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled><StartWhenAvailable>true</StartWhenAvailable><RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure></Settings><Actions Context=\"CurrentUser\"><Exec><Command>{}</Command><Arguments>{}</Arguments><WorkingDirectory>{}</WorkingDirectory></Exec></Actions></Task>\n",config.id,xml(&config.owner)?,xml(&config.owner)?,xml(&manager::windows_task_path(executable)?)?,xml(&arguments)?,xml(&manager::windows_task_path(root)?)?))
         },
     }
@@ -367,7 +357,9 @@ mod tests {
         let mut config = fixture(Platform::current()?);
         config.installation = root.clone();
         config.id = identity(&root, &config.owner);
-        config.environment.insert("RSRS_RPC_PORT".into(), "45678".into());
+        config
+            .environment
+            .insert("RSRS_RPC_PORT".into(), "45678".into());
         let original = serde_json::to_value(&config)?;
         let bytes = serde_json::to_vec(&original)?;
         fs::write(&path, &bytes)?;
@@ -378,7 +370,14 @@ mod tests {
         let mut cases = Vec::new();
         for (field, value) in [
             ("schema", json!(2)),
-            ("platform", json!(if config.platform == Platform::Linux { "windows" } else { "linux" })),
+            (
+                "platform",
+                json!(if config.platform == Platform::Linux {
+                    "windows"
+                } else {
+                    "linux"
+                }),
+            ),
             ("installation", json!(root.join("other"))),
             ("id", json!("foreign-installation")),
             ("unexpected", json!(true)),
@@ -392,7 +391,10 @@ mod tests {
             changed["environment"]["RSRS_RPC_PORT"] = port;
             cases.push(changed);
         }
-        for (key, value) in [("RSRS_SUPER", "synthetic-only"), ("RSRS_ENGINE", "cpu\nforeign")] {
+        for (key, value) in [
+            ("RSRS_SUPER", "synthetic-only"),
+            ("RSRS_ENGINE", "cpu\nforeign"),
+        ] {
             let mut changed = original.clone();
             changed["environment"][key] = json!(value);
             cases.push(changed);
@@ -400,8 +402,14 @@ mod tests {
         for changed in cases {
             let evidence = serde_json::to_vec(&changed)?;
             fs::write(&path, &evidence)?;
-            anyhow::ensure!(read_registration(&root).is_err(), "tampered registration accepted");
-            anyhow::ensure!(fs::read(&path)? == evidence, "read rewrote rejected evidence");
+            anyhow::ensure!(
+                read_registration(&root).is_err(),
+                "tampered registration accepted"
+            );
+            anyhow::ensure!(
+                fs::read(&path)? == evidence,
+                "read rewrote rejected evidence"
+            );
         }
         for evidence in [b"invalid-json".to_vec(), vec![b' '; 65537]] {
             fs::write(&path, &evidence)?;
@@ -428,11 +436,13 @@ mod tests {
         // RegisterTask receives a Unicode BSTR, not the UTF-8 file bytes.
         // Keep its declaration encoding-neutral after ReadAllText.
         let windows = render(&fixture(Platform::Windows))?;
-        anyhow::ensure!(windows.starts_with("<?xml version=\"1.0\"?>") && !windows.contains("encoding="));
+        anyhow::ensure!(
+            windows.starts_with("<?xml version=\"1.0\"?>") && !windows.contains("encoding=")
+        );
         let linux = render(&fixture(Platform::Linux))?;
         anyhow::ensure!(
             linux.contains("Type=simple")
-                && linux.contains("runtime run")
+                && linux.contains("runtime supervise --data-dir")
                 && !linux.contains("status --json")
         );
         anyhow::ensure!(!linux.contains("User=root") && !linux.contains("linger"));

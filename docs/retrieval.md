@@ -310,8 +310,11 @@ The next request rebuilds its authorized resident view from the host store and
 loads the model once in the replacement process. Old generation replies and
 leases cannot be used by the replacement. The native execution watchdog retains
 its SDK timeout; this is recovery after cancellation, not a faster native model.
-If termination cannot be confirmed, replacement is prohibited; health/control
-remain available and the host retains its library lock during shutdown.
+If termination cannot be confirmed, replacement is prohibited. A later new Core
+request retries bounded cleanup through the retained child handle before spawning;
+the failed request is never replayed. Persistent cleanup failure still requires
+host recovery. Health/control remain available and the host retains its library
+lock during shutdown.
 
 `native-fault-tests` is a non-default fixture feature. Its explicitly marked SDK
 can inject holds at the real Run boundary with a two-second watchdog. The fixture

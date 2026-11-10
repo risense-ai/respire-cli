@@ -2,36 +2,44 @@
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
 from published_upgrade_policy import platform_applicability, select_upgrade_sources
+from native_fixture_process import add_runtime_arguments, runtime_inputs
 
 parser=argparse.ArgumentParser()
-parser.add_argument('--binary',required=True)
+download_only='--download-only' in sys.argv
+parser.add_argument('--download-only',action='store_true',help='Download and verify only the fixed draft baseline; never execute product binaries')
+parser.add_argument('--draft-baseline-cache',type=pathlib.Path,help='Same-run verified fixed draft assets and metadata; missing or corrupt cache fails closed')
+parser.add_argument('--binary',required=not download_only)
 parser.add_argument('--target',required=True)
-parser.add_argument('--model-dir',required=True)
-parser.add_argument('--legacy-model-dir',required=True)
+parser.add_argument('--model-dir',required=not download_only)
+parser.add_argument('--legacy-model-dir',required=not download_only)
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
+add_runtime_arguments(parser)
 args=parser.parse_args()
+if not args.download_only: runtime_inputs(args,[args.binary])
+upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
 def command(*values):
     executable=shutil.which(values[0])
     assert executable,'required tool missing: '+values[0]
     return subprocess.check_output([executable,*values[1:]],text=True,encoding='utf-8',timeout=60).strip()
 releases=[]
-for page in range(1,101):
-    batch=json.loads(command('gh','api',f'repos/risense-ai/respire-cli/releases?per_page=100&page={page}'))
-    releases.extend(batch)
-    if len(batch)<100: break
-else: raise RuntimeError('release inventory pagination limit exceeded')
+if not args.download_only:
+    for page in range(1,101):
+        batch=json.loads(command('gh','api',f'repos/risense-ai/respire-cli/releases?per_page=100&page={page}'))
+        releases.extend(batch)
+        if len(batch)<100: break
+    else: raise RuntimeError('release inventory pagination limit exceeded')
 def stable(tag):
     return bool(re.fullmatch(r'v\d+\.\d+\.\d+',tag)) and tuple(map(int,tag[1:].split('.'))) >= (1,0,6)
 sources={item['tag_name']:item for item in releases if not item['draft'] and not item['prerelease'] and stable(item['tag_name'])}
 formal_sources=sorted(sources, key=lambda tag: tuple(map(int,tag[1:].split('.'))))
-registry=sorted(set(json.loads(command('npm','view','@rsrsai/cli','versions','--json'))) |
+registry=[] if args.download_only else sorted(set(json.loads(command('npm','view','@rsrsai/cli','versions','--json'))) |
                 set(json.loads(command('npm','view','rsrs-cli','versions','--json'))))
 missing=[version for version in registry if stable('v'+version) and 'v'+version not in sources]
 assert not missing,'published npm stable has no verifiable GitHub artifact: '+str(missing)
 # No formal 1.0.6 was published in either registry. Keep its last actual DEV as an extra baseline.
-if args.profile=='full' and 'v1.0.6' not in sources:
+if not args.download_only and args.profile=='full' and 'v1.0.6' not in sources:
     baseline=next((item for item in releases if item['tag_name']=='v1.0.6-dev.37075716045' and not item['draft']),None)
     assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
     sources[baseline['tag_name']]=baseline
@@ -39,12 +47,18 @@ if args.profile=='full' and 'v1.0.6' not in sources:
 additional_draft_baselines=[]
 if args.profile=='full' and 'v1.0.10' not in formal_sources:
     # Draft assets retain their release/asset IDs even when the tag endpoint omits them.
-    baseline=json.loads(command('gh','api','repos/risense-ai/respire-cli/releases/403872621'))
+    if args.draft_baseline_cache:
+        assert args.draft_baseline_cache.resolve()==root,'draft cache must use the upgrade output directory'
+        baseline=json.loads((root/'draft-baseline.json').read_text(encoding='utf-8'))
+    else:
+        baseline=json.loads(command('gh','api','repos/risense-ai/respire-cli/releases/403872621'))
+    assert baseline['id']==403872621,'fixed draft release ID mismatch'
     assert baseline['tag_name']=='v1.0.10' and baseline['draft'],'1.0.10 compatibility baseline identity mismatch'
     sources[baseline['tag_name']]=baseline
     additional_draft_baselines.append(baseline['tag_name'])
 assert sources,'no upgrade source versions discovered'
-report={'passed':False,'target':args.target,'candidate_sha256':hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
+report={'passed':False,'target':args.target,'candidate_sha256':None if args.download_only else hashlib.sha256(pathlib.Path(args.binary).read_bytes()).hexdigest(),
+        'upgrade_contract':upgrade_contract,
         'profile':args.profile,'selected_sources':[],'full_coverage':False,'all_published_sources_covered':False,
         'published_formal_sources':formal_sources,
         'additional_draft_baselines':additional_draft_baselines,
@@ -69,6 +83,8 @@ def verify_upgrade(source):
         else:
             with path.open('rb') as stream:
                 if hashlib.file_digest(stream,'sha256').hexdigest()!=digest[7:]: needed.append(name)
+    if release['draft'] and args.draft_baseline_cache:
+        assert not needed,'fixed draft cache missing or corrupt; authenticated download is isolated'
     if needed:
         if release['draft']:
             for name in needed:
@@ -85,20 +101,46 @@ def verify_upgrade(source):
     assert manifest['version']==tag[1:] and manifest['target']==args.target
     for name,key in zip(names[:2],['binary_sha256','runtime_sha256']):
         with (folder/name).open('rb') as stream: assert hashlib.file_digest(stream,'sha256').hexdigest()==manifest[key]
+    if args.download_only:
+        assert tag=='v1.0.10' and release['draft'],'download-only must retain the fixed draft baseline'
+        (root/'draft-baseline.json').write_text(json.dumps(release),encoding='utf-8')
+        return
     with tarfile.open(folder/names[1]) as bundle: bundle.extractall(folder,filter='data')
     old=folder/('rsrs'+extension)
     shutil.copyfile(folder/names[0],old); old.chmod(old.stat().st_mode | 0o111)
     result=folder/'results'
+    runtime_args=(['--runtime-binary',str(args.runtime_binary),'--runtime-sha256',args.runtime_sha256,
+                   '--runtime-version',args.runtime_version] if args.runtime_binary else [])
     subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py')),
         '--binary',args.binary,'--seed-binary',str(old),'--expect-supervised-worker','--model-dir',args.model_dir,
-        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result)],check=True)
+        '--legacy-model-dir',args.legacy_model_dir,'--output-dir',str(result),*runtime_args],check=True)
     checks=json.loads((result/'real-account-return-verification.json').read_text())
     assert isinstance(checks,list) and len(checks)==1,'expected one candidate upgrade report'
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
-        'source_and_keys_unchanged','compatible_index_reused','forced_restart_checked','old_rpc_checked',
+        'source_and_keys_unchanged','compatible_index_reused',
     ]),'required real upgrade checks missing or failed'
+    assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
+    if upgrade_contract=='standalone-v1':
+        assert all(check.get(name) is True for name in [
+            'source_rpc_checked','legacy_client_rejected','live_owner_restart_rejected','safe_restart_checked',
+            'standalone_runtime_evidence',
+        ]),'required standalone upgrade checks missing or failed'
+        assert all(check.get(name) is False for name in [
+            'old_rpc_checked','forced_restart_checked',
+        ]),'standalone upgrade must not claim unsafe legacy behavior'
+        assert check.get('legacy_handoff_actor')=='fixture','legacy seed handoff was not fixture-owned'
+        assert check.get('runtime_mode')=='standalone_runtime','standalone Runtime mode missing'
+        assert check.get('runtime_binary_sha256')==args.runtime_sha256,'upgrade Runtime digest differs'
+        assert check.get('runtime_version')==args.runtime_version,'upgrade Runtime version differs'
+        receipts=check.get('runtime_identity_receipts')
+        assert isinstance(receipts,list) and receipts and all(isinstance(item,dict) for item in receipts),\
+            'upgrade Runtime identity receipts missing'
+    else:
+        assert all(check.get(name) is True for name in [
+            'forced_restart_checked','old_rpc_checked',
+        ]),'required legacy shim upgrade checks missing or failed'
     assert check.get('binary_sha256')==report['candidate_sha256'],'candidate changed during upgrade validation'
     assert check.get('engine')=='cpu','upgrade did not verify real CPU inference'
     sequence=check.get('sequence')
@@ -107,7 +149,13 @@ def verify_upgrade(source):
         rows=step.get('model_rows')
         assert isinstance(rows,dict) and set(rows)=={'embedder','model index'} and all(
             row.get('status')=='ok' for row in rows.values()),'upgrade model readiness checks missing or failed'
-    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'report':str(result/'real-account-return-verification.json')}
+    return {'version':tag[1:],'formal':tag in formal_sources,'passed':True,'upgrade_contract':upgrade_contract,
+            'report':str(result/'real-account-return-verification.json')}
+
+if args.download_only:
+    assert args.profile=='full' and not args.draft_baseline_cache,'download-only requires the fixed full draft source'
+    verify_upgrade(('v1.0.10',sources['v1.0.10']))
+    sys.exit(0)
 
 try:
     selected=select_upgrade_sources(sources,args.target,args.profile)

@@ -64,16 +64,30 @@ pub fn generate_key() -> [u8; KEY_BYTES] {
 // ── KDF: password + Secret → KEK ──
 /// Argon2id(password, kdf_salt) → intermediate; HKDF mixes in Account Secret → KEK.
 /// KEK only wraps/unwraps URK; stays in memory after unlock, never on disk.
-pub fn derive_kek(password: &str, account_secret: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+pub fn derive_kek(
+    password: &str,
+    account_secret: &str,
+    kdf_salt_hex: &str,
+) -> AnyResult<[u8; KEY_BYTES]> {
     derive_password_kek(password, account_secret, kdf_salt_hex, b"onememory:kek:v1")
 }
 
-pub fn derive_rsrs_password_kek(password: &str, account_secret: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+pub fn derive_rsrs_password_kek(
+    password: &str,
+    account_secret: &str,
+    kdf_salt_hex: &str,
+) -> AnyResult<[u8; KEY_BYTES]> {
     derive_password_kek(password, account_secret, kdf_salt_hex, b"rsrs:kek:v1")
 }
 
-fn derive_password_kek(password: &str, account_secret: &str, kdf_salt_hex: &str, info: &[u8]) -> AnyResult<[u8; KEY_BYTES]> {
-    let salt_bytes = hex::decode(kdf_salt_hex).map_err(|e| anyhow::anyhow!("KDF salt hex decode failed: {e}"))?;
+fn derive_password_kek(
+    password: &str,
+    account_secret: &str,
+    kdf_salt_hex: &str,
+    info: &[u8],
+) -> AnyResult<[u8; KEY_BYTES]> {
+    let salt_bytes = hex::decode(kdf_salt_hex)
+        .map_err(|e| anyhow::anyhow!("KDF salt hex decode failed: {e}"))?;
     let argon2 = Argon2::default();
     let mut intermediate = [0u8; KEY_BYTES];
     argon2
@@ -97,13 +111,20 @@ pub fn derive_subkey(urk: &[u8; KEY_BYTES], info: &[u8]) -> AnyResult<[u8; KEY_B
 
 // ── wrap / unwrap (AES-256-GCM) ──
 /// wrapping_key wraps plaintext_key. Returns (nonce_hex, wrapped_hex).
-pub fn wrap_key(plaintext_key: &[u8; KEY_BYTES], wrapping_key: &[u8; KEY_BYTES]) -> AnyResult<(String, String)> {
+pub fn wrap_key(
+    plaintext_key: &[u8; KEY_BYTES],
+    wrapping_key: &[u8; KEY_BYTES],
+) -> AnyResult<(String, String)> {
     let (nonce, ct) = encrypt_raw(plaintext_key, wrapping_key)?;
     Ok((nonce, ct))
 }
 
 /// unwrapping_key unwraps. Returns the plaintext key.
-pub fn unwrap_key(wrapped_hex: &str, nonce_hex: &str, unwrapping_key: &[u8; KEY_BYTES]) -> AnyResult<[u8; KEY_BYTES]> {
+pub fn unwrap_key(
+    wrapped_hex: &str,
+    nonce_hex: &str,
+    unwrapping_key: &[u8; KEY_BYTES],
+) -> AnyResult<[u8; KEY_BYTES]> {
     let plain = decrypt_raw(wrapped_hex, nonce_hex, unwrapping_key)?;
     if plain.len() != KEY_BYTES {
         anyhow::bail!("unwrapped key has unexpected length: {}", plain.len());
@@ -118,7 +139,8 @@ pub fn unwrap_key(wrapped_hex: &str, nonce_hex: &str, unwrapping_key: &[u8; KEY_
 pub const SUPER_KDF_ITERS: u32 = 210_000;
 
 pub fn derive_super_kek(super_pass: &str, salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
-    let salt = hex::decode(salt_hex).map_err(|e| anyhow::anyhow!("super salt hex decode failed: {e}"))?;
+    let salt =
+        hex::decode(salt_hex).map_err(|e| anyhow::anyhow!("super salt hex decode failed: {e}"))?;
     let mut out = [0u8; KEY_BYTES];
     pbkdf2::pbkdf2_hmac::<Sha256>(super_pass.as_bytes(), &salt, SUPER_KDF_ITERS, &mut out);
     Ok(out)
@@ -128,7 +150,8 @@ pub fn derive_super_kek(super_pass: &str, salt_hex: &str) -> AnyResult<[u8; KEY_
 /// Super password left the crypto domain — Secret Key (144-bit random) alone protects URK, held in the OS keyring.
 pub fn derive_kek_v4(secret_key: &str, kdf_salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
     let ikm = secret_key_bytes(secret_key)?;
-    let salt = hex::decode(kdf_salt_hex).map_err(|e| anyhow::anyhow!("kdf_salt hex decode failed: {e}"))?;
+    let salt = hex::decode(kdf_salt_hex)
+        .map_err(|e| anyhow::anyhow!("kdf_salt hex decode failed: {e}"))?;
     let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
     let mut kek = [0u8; KEY_BYTES];
     hk.expand(b"onememory:kek:v4", &mut kek)
@@ -175,15 +198,28 @@ pub fn generate_secret_key() -> String {
     )
 }
 
-pub fn derive_vault_kek(super_pass: &str, secret_key: &str, salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+pub fn derive_vault_kek(
+    super_pass: &str,
+    secret_key: &str,
+    salt_hex: &str,
+) -> AnyResult<[u8; KEY_BYTES]> {
     derive_two_factor_kek(super_pass, secret_key, salt_hex, b"onememory:kek:v1")
 }
 
-pub fn derive_rsrs_vault_kek(super_pass: &str, secret_key: &str, salt_hex: &str) -> AnyResult<[u8; KEY_BYTES]> {
+pub fn derive_rsrs_vault_kek(
+    super_pass: &str,
+    secret_key: &str,
+    salt_hex: &str,
+) -> AnyResult<[u8; KEY_BYTES]> {
     derive_two_factor_kek(super_pass, secret_key, salt_hex, b"rsrs:kek:v1")
 }
 
-fn derive_two_factor_kek(super_pass: &str, secret_key: &str, salt_hex: &str, info: &[u8]) -> AnyResult<[u8; KEY_BYTES]> {
+fn derive_two_factor_kek(
+    super_pass: &str,
+    secret_key: &str,
+    salt_hex: &str,
+    info: &[u8],
+) -> AnyResult<[u8; KEY_BYTES]> {
     let intermediate = derive_super_kek(super_pass, salt_hex)?;
     let hk = Hkdf::<Sha256>::new(Some(secret_key.as_bytes()), &intermediate);
     let mut kek = [0u8; KEY_BYTES];
@@ -228,7 +264,11 @@ pub fn encrypt_item(data_key: &[u8; KEY_BYTES], plaintext: &str) -> AnyResult<(S
 }
 
 /// data_key decrypts content.
-pub fn decrypt_item(data_key: &[u8; KEY_BYTES], ciphertext_hex: &str, nonce_hex: &str) -> AnyResult<String> {
+pub fn decrypt_item(
+    data_key: &[u8; KEY_BYTES],
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+) -> AnyResult<String> {
     let plain = decrypt_raw(ciphertext_hex, nonce_hex, data_key)?;
     String::from_utf8(plain).map_err(|e| anyhow::anyhow!("decrypt result is not UTF-8: {e}"))
 }
@@ -240,7 +280,11 @@ pub fn encrypt_bytes(key: &[u8; KEY_BYTES], plaintext: &[u8]) -> AnyResult<(Stri
 }
 
 /// key decrypts arbitrary bytes.
-pub fn decrypt_bytes(key: &[u8; KEY_BYTES], ciphertext_hex: &str, nonce_hex: &str) -> AnyResult<Vec<u8>> {
+pub fn decrypt_bytes(
+    key: &[u8; KEY_BYTES],
+    ciphertext_hex: &str,
+    nonce_hex: &str,
+) -> AnyResult<Vec<u8>> {
     decrypt_raw(ciphertext_hex, nonce_hex, key)
 }
 
@@ -258,15 +302,19 @@ fn encrypt_raw(plaintext: &[u8], key: &[u8; KEY_BYTES]) -> AnyResult<(String, St
 
 fn decrypt_raw(ciphertext_hex: &str, nonce_hex: &str, key: &[u8; KEY_BYTES]) -> AnyResult<Vec<u8>> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
-    let nonce_bytes = hex::decode(nonce_hex).map_err(|e| anyhow::anyhow!("nonce hex decode failed: {e}"))?;
+    let nonce_bytes =
+        hex::decode(nonce_hex).map_err(|e| anyhow::anyhow!("nonce hex decode failed: {e}"))?;
     if nonce_bytes.len() != NONCE_BYTES {
         anyhow::bail!("nonce length must be {NONCE_BYTES} bytes");
     }
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ct_bytes = hex::decode(ciphertext_hex).map_err(|e| anyhow::anyhow!("ciphertext hex decode failed: {e}"))?;
+    let ct_bytes = hex::decode(ciphertext_hex)
+        .map_err(|e| anyhow::anyhow!("ciphertext hex decode failed: {e}"))?;
     cipher
         .decrypt(nonce, ct_bytes.as_ref())
-        .map_err(|e: AeadError| anyhow::anyhow!("decrypt failed (wrong key or corrupted data): {e}"))
+        .map_err(|e: AeadError| {
+            anyhow::anyhow!("decrypt failed (wrong key or corrupted data): {e}")
+        })
 }
 
 #[cfg(test)]
@@ -355,15 +403,14 @@ mod tests {
         assert!(unwrap_key(
             &wrapped,
             &nonce,
-            &derive_vault_kek("master-pass", "A3-000000-000000-000000-000000-000000-000000", &salt)?
+            &derive_vault_kek(
+                "master-pass",
+                "A3-000000-000000-000000-000000-000000-000000",
+                &salt
+            )?
         )
         .is_err());
-        assert!(unwrap_key(
-            &wrapped,
-            &nonce,
-            &derive_super_kek("master-pass", &salt)?
-        )
-        .is_err());
+        assert!(unwrap_key(&wrapped, &nonce, &derive_super_kek("master-pass", &salt)?).is_err());
         Ok(())
     }
 
@@ -374,8 +421,16 @@ mod tests {
         let kek = derive_kek_v4(&super_pass, &salt)?;
         let urk = generate_key();
         let (nonce, wrapped) = wrap_key(&urk, &kek)?;
-        assert_eq!(unwrap_key(&wrapped, &nonce, &derive_kek_v4(&super_pass, &salt)?)?, urk);
-        assert!(unwrap_key(&wrapped, &nonce, &derive_kek_v4("A3-000000-000000-000000-000000-000000-000000", &salt)?).is_err());
+        assert_eq!(
+            unwrap_key(&wrapped, &nonce, &derive_kek_v4(&super_pass, &salt)?)?,
+            urk
+        );
+        assert!(unwrap_key(
+            &wrapped,
+            &nonce,
+            &derive_kek_v4("A3-000000-000000-000000-000000-000000-000000", &salt)?
+        )
+        .is_err());
         assert!(unwrap_key(&wrapped, &nonce, &derive_super_kek(&super_pass, &salt)?).is_err());
         Ok(())
     }

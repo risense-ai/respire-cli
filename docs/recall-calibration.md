@@ -7,6 +7,13 @@ lexical coverage, Latin token boundaries, diagnostic receipts and read-heat caps
 Core performs all scoring; the host only supplies controls and persists opaque
 indexes. No extra model inference or remote selector request is introduced.
 
+Five-axis fusion settings additionally require `recall_fusion_contract=1` in the
+paired SDK. The TUI model page provides a persistent editor; `agent-config`
+reports saved and effective settings under `recall_fusion_runtime`. Environment
+overrides take priority and saved changes apply to the next recall without
+reindexing. See [client2gui integration](client2gui-recall-fusion.md) for the
+shared settings contract and GUI implementation steps.
+
 ## Controls
 
 Set variables in the process that runs retrieval. Restart an existing runtime to

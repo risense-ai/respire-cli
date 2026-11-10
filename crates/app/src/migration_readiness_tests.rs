@@ -140,7 +140,8 @@ impl Fixture {
         std::env::set_var("USERPROFILE", self.home.path());
         std::env::set_var("RSRS_DATA_DIR", self.home.path().join(".rsrs"));
         std::env::set_var(DEFAULT_ENV, self.home.path().join(".rsrs"));
-        let result = identity(&self.source).and_then(|id| migrate_profile(&id, "namespace-fixture").map(|_| ()));
+        let result = identity(&self.source)
+            .and_then(|id| migrate_profile(&id, "namespace-fixture").map(|_| ()));
         for (name, value) in saved {
             match value {
                 Some(value) => std::env::set_var(name, value),
@@ -163,21 +164,37 @@ impl Fixture {
         let rows = self.copied_rows()?;
         assert_eq!(rows.len(), expected.len());
         let plaintext = self.keys.decrypt_content(&self.good.0, &self.good.1)?;
-        for ((id, ciphertext, nonce, deleted), (expected_id, expected_deleted)) in rows.iter().zip(expected) {
+        for ((id, ciphertext, nonce, deleted), (expected_id, expected_deleted)) in
+            rows.iter().zip(expected)
+        {
             assert_eq!(id, expected_id);
             assert_eq!(deleted, expected_deleted);
             assert!(ciphertext.starts_with(crate::memory::crypto::RSRS_PREFIX));
             assert_ne!((ciphertext, nonce), (&self.good.0, &self.good.1));
             assert_eq!(self.keys.decrypt_content(ciphertext, nonce)?, plaintext);
         }
-        let session: Value = serde_json::from_slice(&std::fs::read(self.target().join("session.json"))?)?;
-        let original: Value = serde_json::from_slice(&std::fs::read(self.source.join("session.json"))?)?;
-        let alias = session["keyring_account"].as_str().context("migrated alias missing")?;
+        let session: Value =
+            serde_json::from_slice(&std::fs::read(self.target().join("session.json"))?)?;
+        let original: Value =
+            serde_json::from_slice(&std::fs::read(self.source.join("session.json"))?)?;
+        let alias = session["keyring_account"]
+            .as_str()
+            .context("migrated alias missing")?;
         let super_key = crate::keystore::load_super(alias).context("original super Key missing")?;
-        assert_eq!(super_key, original["secret_key"].as_str().context("source Key missing")?);
-        assert_eq!(crate::auth::unlock_session_keys(&session, "", Some(&super_key), alias)?.urk, self.keys.urk);
+        assert_eq!(
+            super_key,
+            original["secret_key"]
+                .as_str()
+                .context("source Key missing")?
+        );
+        assert_eq!(
+            crate::auth::unlock_session_keys(&session, "", Some(&super_key), alias)?.urk,
+            self.keys.urk
+        );
         assert_eq!(session["vault_version"], original["vault_version"]);
-        assert!(session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with(crate::memory::crypto::RSRS_PREFIX)));
+        assert!(session["wrapped_urk"]
+            .as_str()
+            .is_some_and(|value| value.starts_with(crate::memory::crypto::RSRS_PREFIX)));
         Ok(())
     }
 
@@ -249,8 +266,10 @@ fn readable_rows_are_reencrypted_and_unreadable_tombstones_block_full_migration(
     assert!(fixture.migrate().is_err());
     assert!(!fixture.target().exists());
     assert!(!fixture.source.join(SOURCE_RECEIPT).exists());
-    fixture.database.execute("UPDATE memories SET ciphertext=?1,nonce=?2 WHERE id='old-local'",
-        rusqlite::params![fixture.good.0, fixture.good.1])?;
+    fixture.database.execute(
+        "UPDATE memories SET ciphertext=?1,nonce=?2 WHERE id='old-local'",
+        rusqlite::params![fixture.good.0, fixture.good.1],
+    )?;
     fixture.migrate()?;
     fixture.assert_converted(&[("live", 0), ("old-local", 1)])?;
     let store = crate::transport::local::LocalStore::open(&fixture.target().join("rsrs.db"))?;

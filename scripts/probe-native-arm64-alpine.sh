@@ -19,13 +19,33 @@ if [ -z "$cpu" ]; then
 fi
 cpu="$(realpath "$cpu")"
 test -f "$cpu"
-echo '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '"$cpu" | sha256sum --check --status
+echo '7ff152e912bc234f5c90e4012f99897a7b2ce180f016db2321304057756b64ff  '"$cpu" | sha256sum -c >/dev/null
+runtime="$(realpath "${5:?pass verified musl Runtime binary}")"
+runtime_sha256="${6:?pass verified Runtime digest}"
+runtime_version="${7:?pass verified Runtime version}"
+test -f "$runtime"
+test "$runtime" != "$binary"
+test "$(basename "$runtime")" = rsrs-runtime
+[[ "$runtime_sha256" =~ ^[0-9a-f]{64}$ ]]
+[[ "$runtime_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?$ ]]
+echo "$runtime_sha256  $runtime" | sha256sum -c >/dev/null
+bundle="$(dirname "$runtime")"
+test -f "$bundle/core-runtime.json"
+test "$(basename "$bundle")" = "$runtime_version"
+test "$(basename "$(dirname "$bundle")")" = runtime
+receipt="$(dirname "$(dirname "$bundle")")/runtime.json"
+test -f "$receipt"
+test ! -L "$receipt"
+receipt="$(realpath "$receipt")"
 mkdir -p "$profile"
 profile="$(realpath "$profile")"
 docker run --rm --network none --user "$(id -u):$(id -g)" \
   -v "$binary:/rsrs:ro" -v "$models:/models:ro" -v "$cpu:/cpu-model.ort:ro" -v "$profile:/profile" \
+  -v "$bundle:/runtime:ro" -v "$receipt:/runtime-selection.json:ro" \
   -e RSRS_ENGINE=cpu -e RSRS_DATA_DIR=/profile -e RSRS_M3_DIR=/models \
   -e RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort \
+  -e RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl \
+  -e NATIVE_RUNTIME_SHA256="$runtime_sha256" -e NATIVE_RUNTIME_VERSION="$runtime_version" \
   -e RSRS_NO_AUTOSYNC=1 -e RSRS_UPDATE_CHECK=0 \
   alpine:3.23 sh -ec '
     test "$(uname -m)" = aarch64
@@ -34,5 +54,24 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     test -r /cpu-model.ort
     test -r /models/tokenizer.json
     test -r /models/onnx/model_quantized.onnx
+    test -r /runtime/core-runtime.json
+    echo "$NATIVE_RUNTIME_SHA256  /runtime/rsrs-runtime" | sha256sum -c >/dev/null
+    case "$(/runtime/rsrs-runtime --version)" in
+      *" $NATIVE_RUNTIME_VERSION") ;;
+      *) echo "Runtime version differs from verified installation" >&2; exit 1 ;;
+    esac
+    umask 077
+    chmod 700 /profile
+    test ! -e /profile/runtime.json
+    mkdir -p "/profile/runtime/$NATIVE_RUNTIME_VERSION" /profile/bin
+    cp /rsrs /profile/bin/rsrs
+    cmp /rsrs /profile/bin/rsrs
+    cp -R /runtime/. "/profile/runtime/$NATIVE_RUNTIME_VERSION/"
+    cmp /runtime/rsrs-runtime "/profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime"
+    echo "$NATIVE_RUNTIME_SHA256  /profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime" | sha256sum -c >/dev/null
+    cp /runtime-selection.json /profile/runtime.json
+    cmp /runtime-selection.json /profile/runtime.json
+    trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
+    /rsrs --json runtime start
     /rsrs --direct model probe --json
   '

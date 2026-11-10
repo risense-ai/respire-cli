@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """CI-only real CPU/tree smoke and deterministic local provider contract smoke."""
+from native_fixture_process import install_published_runtime
 import argparse
 import hashlib
 import json
@@ -277,11 +278,16 @@ class Smoke:
             RSRS_M3_DIR=str(self.model), RSRS_ENGINE="cpu", RSRS_NO_AUTOSYNC="1",
             DBUS_SESSION_BUS_ADDRESS="unix:path=" + str(self.root / "tmp/missing-keyring.sock"),
             DS_API_KEY="ci-local-fixture", NO_PROXY="127.0.0.1,localhost")
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if (sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+                and bus.startswith("unix:")):
+            self.env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
         for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             self.env.pop(name, None)
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             self.env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
+        install_published_runtime(args.binary, self.env)
         self.report = {"binary_sha256": args.binary_sha256, "source_sha": args.source_sha,
             "workflow_sha": os.environ.get("GITHUB_SHA"),
             "version": args.version, "target": "https://api-dev.rsrs.rs", "cases": {},

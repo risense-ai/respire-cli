@@ -13,6 +13,26 @@ backend = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(backend)
 
 
+def roundtrips(manager, report):
+    account = "ci-migrate-" + secrets.token_hex(8)
+    for service in ("1memory", "memocap", "respire", "rsrs"):
+        for kind in ("super", "pass"):
+            slot = kind + ":" + account
+            manager.reserve(service, slot)
+            value = secrets.token_urlsafe(32)
+            manager.put(service, slot, value)
+            backend.require(manager.read(service, slot) == value, "native_credential_roundtrip_failed")
+            manager.remove(service, slot)
+            manager.remove(service, slot)
+            try:
+                manager.read(service, slot)
+            except RuntimeError as error:
+                backend.require(str(error) == "fixture_credential_missing", "native_absence_wrong_failure")
+            else:
+                raise RuntimeError("native_credential_still_readable")
+            report[service + "_" + kind + "_roundtrip_delete_twice"] = {"passed": True}
+
+
 def main():
     backend.require(os.environ.get("GITHUB_ACTIONS") == "true"
         and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted", "disposable_hosted_runner_required")
@@ -33,23 +53,7 @@ def main():
         second_home.mkdir()
         manager.configure_env({"HOME": str(second_home)})
         report["cases"]["independent_home_configured"] = {"passed": True}
-        account = "ci-migrate-" + secrets.token_hex(8)
-        for service in ("1memory", "memocap", "respire", "rsrs"):
-            for kind in ("super", "pass"):
-                slot = kind + ":" + account
-                manager.reserve(service, slot)
-                value = secrets.token_urlsafe(32)
-                manager.put(service, slot, value)
-                backend.require(manager.read(service, slot) == value, "native_credential_roundtrip_failed")
-                manager.remove(service, slot)
-                manager.remove(service, slot)
-                try:
-                    manager.read(service, slot)
-                except RuntimeError as error:
-                    backend.require(str(error) == "fixture_credential_missing", "native_absence_wrong_failure")
-                else:
-                    raise RuntimeError("native_credential_still_readable")
-                report["cases"][service + "_" + kind + "_roundtrip_delete_twice"] = {"passed": True}
+        roundtrips(manager, report["cases"])
         report["status"] = "passed"
     except Exception as error:
         report.update(status="failed", failure_code=str(error) if isinstance(error, RuntimeError) else type(error).__name__)

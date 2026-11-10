@@ -109,6 +109,10 @@ cargo test --locked --workspace
 
 Use isolated test data. `RSRS_CORE_TEST_MODE` selects existing test fixtures, not a production inference provider. Preserve protocol fields, user data formats and third-party notices. Do not commit credentials, databases, model files or build artifacts.
 
+## Error logging
+
+The CLI and the resident runtime append fixed failure events to `<data root>/logs/`: `cli.log` for commands and `runtime.log` for the serving process. Persistent records exclude raw error chains and panic payloads; panics retain their code location, and existing stderr diagnostics remain unchanged. The level defaults to `error`; set `RSRS_LOG` to `off`, `error`, `warn`, `info` or `debug` to change it. New log files request owner-only mode (0600 on Unix); existing permissions and the parent directory follow the data root's policy. Rotation at 1 MiB retains one previous file and is best effort across processes; these files are diagnostic records, not an audit trail. Logging failures do not fail commands, and stdout contracts are unchanged.
+
 ## License
 
 First-party material uses the [Respire Noncommercial License 1.0](LICENSE).

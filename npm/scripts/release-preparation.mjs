@@ -8,6 +8,7 @@ import {execFileSync} from 'node:child_process';
 import {regressionContract,validateRegressionContract,validationProfile,regressionStatus,regressionCompletedAt,parseTimestamp} from './release-regression-contract.mjs';
 import {api,pages,output as setOutput} from './release-publication.mjs';
 import {readVerifiedReceipt} from './verified-receipt.mjs';
+import {frontendLayout, releaseAssetNames, validateBuildMetadata} from './verify-binary.mjs';
 
 const REPO='risense-ai/respire-cli',WORKFLOW='.github/workflows/release.yml';
 const SHA=/^[a-f0-9]{40}$/,HASH=/^[a-f0-9]{64}$/;
@@ -34,13 +35,16 @@ export function validatePreparationRun(run,source,{producing=false}={}){
 // Hash committed inputs, not a checkout whose version has been changed for packing.
 export function preparationInputs(sha,version,{cwd=process.cwd()}={}){
   requireValue(SHA.test(sha||''),'Invalid preparation source SHA');
-  const files=['Cargo.lock','rust-toolchain.toml','sdk/core-sdk.lock.json','crates/core-sdk/core-sdk.lock.json',
-    '.github/workflows/release.yml','.github/workflows/release-validation.yml','.github/workflows/release-native-validation.yml'];
   const load=file=>execFileSync('git',['show',`${sha}:${file}`],{cwd,maxBuffer:1024*1024});
-  const hashes=Object.fromEntries(files.map(file=>[file,digest(load(file))]));
   const manifest=JSON.parse(load('npm/artifact-manifest.json'));
+  const frontend=frontendLayout(manifest);
+  const files=['Cargo.lock','rust-toolchain.toml',
+    ...(frontend?['runtime-pin.json']:['sdk/core-sdk.lock.json','crates/core-sdk/core-sdk.lock.json']),
+    '.github/workflows/release.yml','.github/workflows/release-validation.yml','.github/workflows/release-native-validation.yml'];
+  const hashes=Object.fromEntries(files.map(file=>[file,digest(load(file))]));
   manifest.cliVersion=version;
   hashes['npm/artifact-manifest.json']=digest(JSON.stringify(manifest));
+  if(frontend)return {manifest,identity:{hashes,artifact_layout:manifest.artifactLayout}};
   const lock=JSON.parse(load('sdk/core-sdk.lock.json')),other=JSON.parse(load('crates/core-sdk/core-sdk.lock.json'));
   requireValue(same(lock,other),'Prepared SDK lock copies differ');
   const sdk=manifest.targets.map(({triple})=>{
@@ -100,11 +104,10 @@ export function preparedAssets(folder,source,manifest){
   const assets=[];
   for(const t of manifest.targets){
     const binary=`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,runtime=`rsrs-${t.triple}-runtime.tar.gz`,metadata=`cli-build-${t.triple}.json`;
-    const b=ordinaryFile(folder,binary),r=ordinaryFile(folder,runtime),m=ordinaryFile(folder,metadata,65536);
+    const b=ordinaryFile(folder,binary),r=frontendLayout(manifest)?undefined:ordinaryFile(folder,runtime),m=ordinaryFile(folder,metadata,65536);
     const info=JSON.parse(readFileSync(join(folder,metadata)));
-    requireValue(info.schema_version===1&&info.git_sha===source.sha&&info.version===source.version&&info.target===t.triple&&
-      info.binary_file===binary&&info.runtime_file===runtime&&info.binary_sha256===b.sha256&&info.runtime_sha256===r.sha256,'Prepared bytes differ from source/version/platform metadata');
-    assets.push(b,r,m);
+    validateBuildMetadata(info,manifest,t.triple,source,b,r);
+    assets.push(b,...(r?[r]:[]),m);
   }
   requireValue(same(readdirSync(folder).sort(),assets.map(a=>a.file).sort()),'Unexpected or missing prepared release asset');
   return assets;
@@ -144,7 +147,7 @@ export function createPreparation({source,identity,manifest,run,jobs,ci,artifact
     origin_artifacts:preparationArtifacts(artifacts,source,manifest),assets,packs,prepared_at:now});
 }
 export function validatePreparedBytes(assets,packs,source,manifest){
-  const names=manifest.targets.flatMap(t=>[`rsrs-${t.triple}${t.triple.includes('windows')?'.exe':''}`,`rsrs-${t.triple}-runtime.tar.gz`,`cli-build-${t.triple}.json`]).sort();
+  const names=manifest.targets.flatMap(t=>releaseAssetNames(manifest,t.triple)).sort();
   requireValue(Array.isArray(assets)&&same(assets.map(a=>a.file).sort(),names)&&assets.every(a=>positive(a.size)&&HASH.test(a.sha256||'')), 'Prepared asset inventory/digests are incomplete');
   const packages=[...manifest.targets.map(t=>t.pkg),manifest.npmScope].sort();
   requireValue(Array.isArray(packs)&&same(packs.map(p=>p.name).sort(),packages)&&new Set(packs.map(p=>p.file)).size===packs.length&&

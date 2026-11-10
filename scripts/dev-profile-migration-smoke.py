@@ -3,6 +3,7 @@
 import argparse
 import base64
 from contextlib import contextmanager
+from dev_migration_diagnostics import migration_failure_diagnostics
 import hashlib
 import importlib.util
 import json
@@ -21,7 +22,10 @@ import uuid
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(support)
-keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+    and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name(keyring_script))
 keyring_backend = importlib.util.module_from_spec(keyring_spec)
 keyring_spec.loader.exec_module(keyring_backend)
 require, digest = support.require, support.digest
@@ -59,7 +63,7 @@ class Smoke(support.Smoke):
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             self.report["cli_failure"] = {"command": args[0], "timeout_seconds": timeout,
-                "error_class": "timeout"}
+                "error_class": "timeout", "has_source": "--source" in args, "has_account": "--account" in args}
             self.save()
             raise
         finally:
@@ -77,6 +81,10 @@ class Smoke(support.Smoke):
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
             categories = (
                 ("argument_contract", ("unexpected argument", "required arguments were not provided", "a value is required")),
+                ("host_required", ("client_only: explicit legacy migration is host-managed",)),
+                ("host_control", ("host control deadline exceeded", "missing host control response frame", "migration_outcome_unknown", "migration response binding mismatch", "migration response profile mismatch")),
+                ("profile_discovery", ("migration discovery did not return profiles", "legacy profile has no name", "profile root is not a directory", "invalid session metadata file")),
+                ("discovery_path", ("discovery path contains parent traversal", "discovery path contains a symlink", "discovery path contains a reparse point", "discovery ancestor is not a directory")),
                 ("rate_limited", ("too many requests", "rate limit", "http 429", "status: 429")),
                 ("native_credentials", ("keyring", "keychain", "credential manager", "osstatus")),
                 ("vault_unlock", ("failed to decrypt", "vault could not be unlocked", "super password required", "secret key required")),
@@ -96,7 +104,27 @@ class Smoke(support.Smoke):
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict),
+                "has_source": "--source" in args, "has_account": "--account" in args,
                 "error": self.redacted_cli_error(env, output)}
+            self.report["cli_failure"].update(migration_failure_diagnostics(value))
+            migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+                "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+                "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+                "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+            errors = value.get("errors") if isinstance(value, dict) else None
+            stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_stage"] = stage[1] if stage and stage[1] in migration_stages else None
+            exchange_categories = ("spawn", "channel", "frame", "encoding", "deadline", "child_exit",
+                "response_binding", "response_profile", "response_envelope", "response_readiness", "result_identity",
+                "unknown_receipt", "terminal_receipt", "terminal_details", "unclassified", "runtime_invalid_request",
+                "runtime_protocol_version_mismatch", "runtime_control_unavailable", "runtime_auth_recovery_pending",
+                "runtime_unauthorized", "runtime_auth_ownership_unavailable", "runtime_scope_mismatch",
+                "runtime_migration_outcome_unknown", "runtime_control_outcome_unknown")
+            exchange = re.search(r"\bmigration_exchange=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_exchange"] = exchange[1] if stage and stage[1] == "exchange" \
+                and exchange and exchange[1] in exchange_categories else None
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),
                 ("startup_identity_changed", "runtime owner changed during startup"),
@@ -193,7 +221,9 @@ class Smoke(support.Smoke):
         # Consume the migration's actual configuration. Do not repair its path
         # spelling here: runtime verification must exercise the published result.
         try:
-            yield dict(default, RSRS_DATA_DIR=str(profile))
+            env = dict(default, RSRS_DATA_DIR=str(profile))
+            support.install_published_runtime(self.args.binary, env)
+            yield env
         finally:
             if original is None:
                 config_path.unlink()
@@ -239,12 +269,15 @@ class Smoke(support.Smoke):
         result = dict(env)
         result.pop("RSRS_DATA_DIR", None)
         result.pop("RSRS_SUPER", None)
+        if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets':
+            result.pop('RSRS_RUNTIME_BIN', None)
         return result
 
     def seed(self, env, path, service, label):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         path.mkdir(parents=True, exist_ok=True)
         env = dict(env, RSRS_DATA_DIR=str(path))
+        support.install_published_runtime(self.args.binary, env)
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
         self.diagnostic_secrets.add(password)
@@ -262,17 +295,15 @@ class Smoke(support.Smoke):
             and session.get("user") == user and session.get("addr") == support.UPSTREAM
             and bool(session.get("token")), "migration_registered_identity_mismatch")
         account.update(token=session["token"], confirmed=True)
-        auth_salt = bytes.fromhex(session["auth_salt"].removeprefix(support.PREFIX))
-        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")
-        self.diagnostic_secrets.update((code, session["token"], account["pass_hash"]))
+        self.diagnostic_secrets.update((code, session["token"]))
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
-        if sys.platform != "darwin":
-            require(self.keys.read("rsrs", "super:" + user) == code
-                and self.keys.read("rsrs", "pass:" + user) == password,
-                "registered_native_credentials_not_in_owned_store")
+        self.keys.track_created_login(session, user, code, password)
+        auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
+        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
+        self.diagnostic_secrets.add(account["pass_hash"])
         env["RSRS_SUPER"] = code
         self.report["fixture_operation"] = "seed_local_content"
         self.save()
@@ -342,11 +373,14 @@ class Smoke(support.Smoke):
         self.save()
         self.keys.put(service, "super:" + user, code)
         self.keys.put(service, "pass:" + user, password)
+        # The old service stores credentials by user, not by the new login alias.
+        login_alias = session.pop("keyring_account")
+        session.pop("keyring_backend", None)
         # The old service is the only credential source, not an environment override.
         self.report["fixture_operation"] = "remove_current_native_credentials"
         self.save()
-        self.keys.remove("rsrs", "super:" + user)
-        self.keys.remove("rsrs", "pass:" + user)
+        self.keys.remove("rsrs", "super:" + login_alias)
+        self.keys.remove("rsrs", "pass:" + login_alias)
         env.pop("RSRS_SUPER", None)
         self.report["fixture_operation"] = "rewrite_legacy_endpoint"
         self.save()
@@ -444,6 +478,7 @@ class Smoke(support.Smoke):
             current_env = dict(env, RSRS_DATA_DIR=str(current["source"]))
             current_session = self.session(current_env)
         default = self.default_env(env)
+        support.install_published_runtime(self.args.binary, default)
         self.cli(default, "status")
         root = home / ".rsrs"
         require(not list(root.rglob(".rsrs-migration.json")), "startup_automatically_migrated_profiles")

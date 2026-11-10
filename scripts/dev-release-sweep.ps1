@@ -132,6 +132,7 @@ $script:SweepReportClock = [Diagnostics.Stopwatch]::StartNew()
 trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport -Force; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
+$script:PublishedRuntimePaths = @{}
 
 function Write-SweepReport([switch]$Force) {
     # Keep periodic diagnostics without rebuilding the entire report after every assertion.
@@ -177,10 +178,29 @@ function Get-SafeReportNote([string]$Text) {
 }
 
 function Get-SafeFailureReason($Envelope) {
+    # These structured account outcomes survive shared-host error wrapping.
+    # Require a scalar string and emit constants, never stringify/copy private data.
+    $reason = $Envelope.summary.reason
+    if ($reason -is [string]) {
+        if ($reason -ceq 'account_outcome_unknown') { return 'account_outcome_unknown' }
+        if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
+    }
     # Report fixed classifications only, never raw authentication responses.
     $message = @($Envelope.errors) -join ' '
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
     foreach ($entry in @(
+        @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
+        @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
+        @('auth_diagnostic=auth_runtime_deadline_or_parent_revoked\b', 'auth_runtime_deadline_or_parent_revoked'),
+        @('auth_diagnostic=auth_credential_backend_unavailable\b', 'auth_credential_backend_unavailable'),
+        @('auth_diagnostic=auth_credential_backend_not_persistent\b', 'auth_credential_backend_not_persistent'),
+        @('auth_diagnostic=auth_credential_write_readback_failed\b', 'auth_credential_write_readback_failed'),
+        @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
+        @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'auth_helper_frame_invalid'),
+        @('auth control response identity mismatch', 'auth_response_identity_mismatch'),
+        @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
+        @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
+        @('invalid auth control result shape|auth control result is missing|unexpected auth control command|auth control result owner mismatch|committed auth result is missing the recovery code', 'auth_result_invalid'),
         @('already registered', 'account_exists'),
         @('runtime owns its boot profile', 'profile_change_requires_host'),
         @('read.only', 'readonly_local_guard'),
@@ -192,7 +212,8 @@ function Get-SafeFailureReason($Envelope) {
         @('TLS|certificate', 'tls'),
         @('DNS|resolve', 'dns'),
         @('connect|timeout|transport', 'transport'),
-        @('runtime.*token|runtime.*auth', 'runtime_auth')
+        @('runtime.*token|runtime.*auth', 'runtime_auth'),
+        @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown')
     )) {
         if ($message -match $entry[0]) { return $entry[1] }
     }
@@ -298,11 +319,16 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
         if ($Method -eq 'health') {
             return Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec $TimeoutSec
         }
+        $health = Get-OwnedRuntimeHealth $DataDir -TimeoutSec $TimeoutSec
+        $scope = @{ account_id = $health.account_id; instance_id = $health.instance_id; generation = $health.generation }
         $requestId = [Guid]::NewGuid().ToString('N')
-        $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
+        $body = @{ v = 1; id = $requestId; scope = $scope; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
         $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
             -Body $body -TimeoutSec 5
-        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne $ExpectVersion) {
+        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne [string]$health.bin `
+            -or [string]$response.scope.account_id -cne [string]$scope.account_id `
+            -or [string]$response.scope.instance_id -cne [string]$scope.instance_id `
+            -or $response.scope.generation -cne $scope.generation) {
             throw 'Owned runtime RPC response identity failed.'
         }
         return $response.envelope.summary
@@ -314,11 +340,29 @@ function Get-OwnedRuntimeHealth([string]$DataDir, [int]$TimeoutSec = 5) {
     $profile = [IO.Path]::GetFullPath([string]$health.data_dir)
     $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $nativeName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+    $runtimeVersion = $ExpectVersion
+    $runtimeHash = $script:BinarySha256
     $ownedExecutable = [IO.Path]::GetFullPath((Join-Path $DataDir "bin/$nativeName"))
-    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $ExpectVersion -or [int]$health.pid -le 0 `
+    if ($script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+        $ownedExecutable = [IO.Path]::GetFullPath($script:PublishedRuntimePaths[$DataDir])
+        $runtimeVersion = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_VERSION } else { $env:NATIVE_RUNTIME_VERSION }
+        $runtimeHash = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_SHA256 } else { $env:NATIVE_RUNTIME_SHA256 }
+        if ([string]$health.runtime_version -cne $runtimeVersion) { throw 'Owned runtime version differs from the selected installation.' }
+    }
+    $reportedExecutable = [IO.Path]::GetFullPath([string]$health.exe)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+        $ownedExecutable = $ownedExecutable -replace '^\\\\\?\\', ''
+        $reportedExecutable = $reportedExecutable -replace '^\\\\\?\\', ''
+    }
+    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $runtimeVersion -or [int]$health.pid -le 0 `
         -or ($profile -ne $device -and -not $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar)) `
-        -or [IO.Path]::GetFullPath([string]$health.exe) -ne $ownedExecutable `
-        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:BinarySha256) {
+        -or $reportedExecutable -ne $ownedExecutable `
+        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $runtimeHash `
+        -or [string]::IsNullOrWhiteSpace([string]$health.account_id) `
+        -or [string]::IsNullOrWhiteSpace([string]$health.instance_id) `
+        -or ($health.generation -isnot [long] -and $health.generation -isnot [int]) -or $health.generation -le 0) {
         throw 'Owned runtime health identity failed.'
     }
     return $health
@@ -416,6 +460,9 @@ function Invoke-Om {
     $psi.StandardErrorEncoding = $utf8
     $psi.StandardInputEncoding = $utf8
     foreach ($a in $ArgList) { $psi.ArgumentList.Add([string]$a) }
+    foreach ($tokenName in @('GH_TOKEN', 'GITHUB_TOKEN')) {
+        [void]$psi.Environment.Remove($tokenName)
+    }
     $psi.Environment['RSRS_DATA_DIR'] = $DataDir
     $psi.Environment['RSRS_LANG'] = 'en'
     $psi.Environment['HOME'] = $SmokeHome
@@ -424,6 +471,34 @@ function Invoke-Om {
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
+    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets' -or
+        ($env:ARTIFACT_SOURCE -ceq 'build' -and $env:VALIDATION_PROFILE -ceq 'full' -and
+         $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted')) {
+        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir) -or $env:RSRS_ARTIFACT_SOURCE -cne 'published-assets') {
+            $install = [System.Diagnostics.ProcessStartInfo]::new()
+            $install.FileName = 'python'
+            $install.UseShellExecute = $false
+            $install.CreateNoWindow = $true
+            $install.RedirectStandardOutput = $true
+            $install.RedirectStandardError = $true
+            $install.Environment.Clear()
+            foreach ($pair in $psi.Environment.GetEnumerator()) { $install.Environment[$pair.Key] = $pair.Value }
+            $install.ArgumentList.Add((Join-Path $PSScriptRoot 'native_fixture_process.py'))
+            $install.ArgumentList.Add('--install-published')
+            $install.ArgumentList.Add($script:ExePath)
+            $child = [System.Diagnostics.Process]::Start($install)
+            try {
+                if (-not $child.WaitForExit(210000)) {
+                    $child.Kill($true)
+                    $child.WaitForExit()
+                    throw 'Selected Runtime offline installation timed out.'
+                }
+                if ($child.ExitCode -ne 0) { throw 'Selected Runtime offline installation failed.' }
+                $script:PublishedRuntimePaths[$DataDir] = $child.StandardOutput.ReadToEnd().Trim()
+            } finally { $child.Dispose() }
+        }
+        $psi.Environment['RSRS_RUNTIME_BIN'] = $script:PublishedRuntimePaths[$DataDir]
+    }
     # Only this disposable child may opt into the three named lifecycle tools.
     # Parent environment and all normal/default-policy calls remain unchanged.
     foreach ($policyPrefix in @('RSRS_', 'ONEMEMORY_', 'RESPIRE_')) {
@@ -775,6 +850,9 @@ $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'c
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
 $bgeInstall = Invoke-Om -Name 'model-install' -ArgList @('--json', 'model', 'install') -DataDir $DirA -TimeoutSec 900
 Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
+# The installer owns the CPU cache per profile; later profiles use this shared model root.
+python -c "import sys; sys.path.insert(0, sys.argv[1]); from dev_model_fixture import share_cpu_container; share_cpu_container(sys.argv[2], {'RSRS_DATA_DIR': sys.argv[3]}, sys.argv[4])" $PSScriptRoot $Root $DirA (Join-Path $Root 'models/bge-m3')
+if ($LASTEXITCODE -ne 0) { throw 'Shared CPU model fixture preparation failed' }
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
@@ -830,11 +908,10 @@ Assert-Smoke 'memory-revision-reads-stable' ($revisionRepeat.Ok -and [string]$re
 Invoke-Om -Name 'doctor-human' -ArgList @('doctor') -DataDir $DirA -Raw -ExpectExit @(0, 1, 2) -MinStdout 40 -TimeoutSec 180 -Note 'exit 1 means a check failed; allowed on a clean runner' | Out-Null
 $docj = Invoke-Om -Name 'doctor-json' -ArgList @('--json', 'doctor') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail', 'skip') -RequireCommand 'doctor' -Note 'the envelope must be doctor and summary.total must exist'
 $mcpBinItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp bin' } | Select-Object -First 1
-$mcpHttpItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp http' } | Select-Object -First 1
 $binName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
 $mcpBinPath = Join-Path $DirA "bin\$binName"
-Add-SweepRow 'doctor-mcp-bin-item' ($null -ne $mcpBinItem -and [string]$mcpBinItem.status -eq 'ok') ([string]$mcpBinItem.value)
-Add-SweepRow 'doctor-mcp-http-item' ($null -ne $mcpHttpItem -and ([string]$mcpHttpItem.value -like '*/mcp*')) ([string]$mcpHttpItem.value)
+Add-SweepRow 'doctor-mcp-bin-item' ($docj.Ok -and [string]$docj.Envelope.command -ceq 'doctor' -and $null -ne $mcpBinItem -and [string]$mcpBinItem.status -ceq 'ok') ([string]$mcpBinItem.value)
+Add-SweepRow 'doctor-mcp-bin-path' ($null -ne $mcpBinItem -and [string]$mcpBinItem.value -ceq $mcpBinPath) ([string]$mcpBinItem.value)
 Add-SweepRow 'mcp-bin-file' (Test-Path -LiteralPath $mcpBinPath) $mcpBinPath
 $embedder = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'embedder' } | Select-Object -First 1
 if ($embedder -and [string]$embedder.status -eq 'fail') {
@@ -842,7 +919,7 @@ if ($embedder -and [string]$embedder.status -eq 'fail') {
 }
 $remoteDoctor = Invoke-Om -Name 'doctor-remote' -ArgList @('--json', 'doctor', '--remote') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail') -RequireCommand 'doctor'
 $remoteItem = @($remoteDoctor.Envelope.items | Where-Object { [string]$_.name -eq 'remote' } | Select-Object -First 1)
-Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -eq 'ok' -and [string]$remoteItem[0].value -like "$Server /health -> 200*")
+Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -ceq 'ok' -and [string]$remoteItem[0].value -ceq 'Configured remote /health -> 200')
 
 Invoke-Om -Name 'taxonomy' -ArgList @('--json', 'taxonomy') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'taxonomy-list' -ArgList @('--json', 'taxonomy', '--list') -DataDir $DirA | Out-Null

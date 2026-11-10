@@ -26,16 +26,63 @@ flowchart LR
 ```sh
 # Hosted dashboard (does not start the local runtime)
 rsrs web
-# Host lifecycle diagnostics
+# Explicit legacy CLI shim (compatibility diagnostics only)
 rsrs --runtime-internal
 rsrs --runtime-internal --stop
 # Sandbox
 rsrs --client-only recall "query" --titles --json
 ```
 
+Ordinary host commands and the startup supervisor require an independent
+`rsrs-runtime`. Resolution, integrity and download failures are returned to the
+caller; they never start the CLI as a business runtime. A damaged managed
+installation reports `repair required` and does not fall through to portable
+discovery. Restore it with a trusted complete release and its schema-2 metadata.
+
+The explicit `--runtime-internal` entry remains a legacy compatibility mode.
+Legacy CLI regressions that also need automatic restarts explicitly set
+`RSRS_RUNTIME_BIN` to that test's CLI executable. This override is a deliberate
+selection, not a response to a failed download. Existing overrides to independent
+Runtime binaries and portable discovery retain their selection rules.
+
+Independent Runtime acceptance and candidate/G1 harnesses must use the actual
+Runtime artifact, without a CLI shim override or `--runtime-internal`. The legacy
+`runtime_smoke`, diary, snapshot and HTTP shim suites do not supply that evidence.
+
 Client-only mode forbids lifecycle changes, binary copies, upgrades, CPU recovery and
 `--direct` execution. MCP stdio does not copy the executable. A failed request never
 triggers sandbox takeover. An idle runtime stays running until the host stops it.
+
+## Query an uncertain operation
+
+Use the original `scope`, `operation_id` and `idempotency_key` from an
+`outcome_unknown` diagnostic to query the operation without replaying it:
+
+```sh
+rsrs --client-only --json runtime result --context '{"scope":{"account_id":"account-1","instance_id":"instance-1","generation":7},"operation_id":"operation-1","idempotency_key":"key-1"}'
+```
+
+Pass only these three fields, not the entire diagnostic object. JSON parsing
+requires every field and rejects unknown fields, including inside `scope`.
+This command sends `runtime.result` directly with the original context. It does
+not fetch health, start or recover a runtime, migrate data, or take a lifecycle
+lock. It never retries or replays the write.
+
+The shared RPC client checks the transport response ID and protocol version.
+Scoped write responses must echo the original `operation_id` and `scope`.
+Result responses must bind `envelope.summary.request_id` to the query and
+`envelope.summary.operation_id` and `envelope.summary.scope` to the original
+operation. A returned idempotency key must also match. Missing or foreign write
+bindings produce `outcome_unknown` with the original context, never a replay.
+Runtime implementations without these response bindings must be updated;
+the client does not accept an unbound success for compatibility.
+Explicit `scope_required` and `scope_mismatch` refusals remain errors and do
+not prove that an earlier submission did not commit.
+
+The output retains the Runtime response envelope, result state and exit code.
+A `pending` or `unknown` result is not reported as `completed` and does not prove
+that the original write was not committed. An unavailable Runtime or a missing
+response envelope is an error, not a completed result.
 
 ## Opt-in current-user supervision
 
@@ -64,6 +111,17 @@ A non-inheritable, process-owned Windows job also removes the child tree if the
 supervisor itself exits unexpectedly; automatic parent recovery is not promised,
 and an explicit host restart may be needed. Normal CLI stop drains the runtime
 before stopping the supervisor or replacing its executable.
+Ordinary restart never escalates a drain timeout into process termination. A
+failed health query blocks replacement. If an endpoint record exists without
+verifiable health, restart reports that repair is required, even if its PID has
+disappeared: PID absence does not prove a normal drain or a final receipt. This
+path does not delete the record, kill its owner, or start a replacement. Explicit
+forced recovery is not implemented by this ordinary restart command.
+After a verified normal stop, the CLI removes only the matching dead owner's
+endpoint record while it holds the released library lock. A changed record or
+reused PID blocks cleanup; it is not reclaimed as an absent owner. Managed cold
+startup skips stopping only when the manager is not running and no endpoint
+record exists; it never stops an unverified live supervisor to make startup work.
 They do not install a system service, enable linger, elevate privileges, store a
 Windows password, or start before anyone signs in. Missing user service-manager
 support is an error, without an automatic system-wide fallback.
@@ -301,3 +359,23 @@ Add `--legacy` to exercise borrowed ONNX instead of streamed owned ORT. The prob
 reports background prepare and concurrent foreground latency for background
 counts 1 and 4; it also checks cache-policy rejection and native pool creation.
 These fixture timings are measurements, not a production speedup guarantee.
+
+
+### Recover private account control
+
+Private account recovery is distinct from a business `runtime result` query:
+
+```sh
+rsrs --json runtime auth-result --operation-id ORIGINAL_KEYGEN_UUID
+rsrs --json runtime account-result --operation-id ORIGINAL_ACCOUNT_UUID --source-profile ORIGINAL_PROFILE
+rsrs --json runtime account-rollback --operation-id ORIGINAL_ACCOUNT_UUID --source-profile ORIGINAL_PROFILE --confirm
+```
+
+For keygen, preserve the original `--force` value. For account registration,
+include `--register`; omit it for login. Keep the operation ID and source profile
+from the unknown-outcome diagnostic. These host-only commands use the original
+journaled operation; they never issue another keygen, registration or login.
+Account recovery may finish an interrupted transaction only after independently
+verifying its target Runtime. Rollback is explicit and the original receipt
+must permit compensation. An unknown result retains maintenance ownership.
+Never place passwords, tokens or recovery codes in the operation arguments.

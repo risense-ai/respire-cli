@@ -38,6 +38,7 @@ impl axum::serve::Listener for Listener {
                     )
                 }
                 Err(error) => {
+                    respire_logging::error(format_args!("runtime HTTP accept failed"));
                     eprintln!("runtime HTTP accept failed: {error}");
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }

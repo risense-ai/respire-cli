@@ -1,6 +1,7 @@
 //! One-shot host RPC survives the memory Runtime's profile transition.
 //! Credentials arrive only on stdin; normal Runtime RPC retains its host gates.
 use anyhow::{bail, ensure, Context, Result};
+use respire_commands::output_state::HOST_RPC_OUTPUT;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -76,9 +77,16 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
         crate::login::origin(addr).context("invalid authentication server origin")?;
     }
     if request.method == "auth.recover" {
-        let present = |key: &str| request.params.get(key).is_some_and(|value| !value.is_empty());
-        ensure!(present("super") || (present("password") && present("secret")),
-            "recovery requires a super password or the legacy password and Account Secret");
+        let present = |key: &str| {
+            request
+                .params
+                .get(key)
+                .is_some_and(|value| !value.is_empty())
+        };
+        ensure!(
+            present("super") || (present("password") && present("secret")),
+            "recovery requires a super password or the legacy password and Account Secret"
+        );
     }
     if let Some(code) = request.params.get("totp") {
         ensure!(
@@ -153,11 +161,11 @@ pub(crate) fn serve() -> Result<i32> {
     }) {
         Ok(args) => {
             // Preserve existing host lifecycle, access gates and profile transactions.
-            crate::HOST_RPC_OUTPUT.set(true);
+            HOST_RPC_OUTPUT.set(true);
             TOTP.with(|value| *value.borrow_mut() = request.params.get("totp").cloned());
             let result = crate::capture_run(args);
             TOTP.with(|value| *value.borrow_mut() = None);
-            crate::HOST_RPC_OUTPUT.set(false);
+            HOST_RPC_OUTPUT.set(false);
             result
         }
         Err(error) => {
@@ -188,4 +196,89 @@ pub(crate) fn serve() -> Result<i32> {
     stdout.write_all(b"\n")?;
     stdout.flush()?;
     Ok(captured.exit)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(method: &str, params: &[(&str, &str)]) -> Request {
+        Request {
+            v: 1,
+            id: "original-client2-request".into(),
+            method: method.into(),
+            params: params
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn original_offline_recovery_keeps_empty_server_and_user() -> Result<()> {
+        let command = arguments(&request(
+            "auth.recover",
+            &[
+                ("super", "synthetic-super"),
+                ("kdf_salt", "synthetic-salt"),
+                ("wrapped_urk", "synthetic-wrap"),
+                ("urk_nonce", "synthetic-nonce"),
+            ],
+        ))?;
+        assert_eq!(command[1], "fivekeys");
+        assert!(command.iter().any(|value| value == "--pass="));
+        assert!(!command
+            .iter()
+            .any(|value| value.starts_with("--addr=") || value.starts_with("--user=")));
+        Ok(())
+    }
+
+    #[test]
+    fn original_password_totp_form_retains_its_existing_fields() -> Result<()> {
+        let command = arguments(&request(
+            "auth.login",
+            &[
+                ("addr", "http://127.0.0.1:9"),
+                ("user", "synthetic-user"),
+                ("password", "synthetic-password"),
+                ("totp", "123456"),
+            ],
+        ))?;
+        assert!(command.iter().any(|value| value == "--interactive"));
+        assert!(!command.iter().any(|value| value.contains("123456")));
+        assert!(arguments(&request(
+            "auth.login",
+            &[
+                ("user", "synthetic-user"),
+                ("password", "synthetic-password"),
+                ("totp", "invalid")
+            ]
+        ))
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn existing_transport_rejects_unknown_method_fields_and_missing_inputs() {
+        assert!(arguments(&request("auth.unknown", &[])).is_err());
+        assert!(arguments(&request("auth.login", &[("user", "synthetic-user")])).is_err());
+        assert!(arguments(&request("auth.reset", &[("unexpected", "value")])).is_err());
+        assert!(arguments(&request(
+            "auth.recover",
+            &[
+                ("kdf_salt", "salt"),
+                ("wrapped_urk", "wrap"),
+                ("urk_nonce", "nonce")
+            ]
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn existing_failure_scrubber_removes_synthetic_values() {
+        let mut value =
+            json!({"errors":["synthetic-secret", {"detail":"prefix synthetic-secret suffix"}]});
+        scrub(&mut value, &["synthetic-secret"]);
+        assert!(!value.to_string().contains("synthetic-secret"));
+    }
 }

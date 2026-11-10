@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use std::io::stdout;
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEventKind},
     execute,
@@ -18,10 +18,31 @@ use ratatui::{
     widgets::{Block, BorderType, Gauge, List, ListItem, ListState, Paragraph, Wrap},
 };
 
-use crate::session_import::{self, Source};
-
 const ACCENT: Color = Color::Rgb(86, 156, 214);
 const BAR_BG: Color = Color::Rgb(22, 26, 34);
+
+#[derive(serde::Deserialize)]
+struct Source {
+    id: String,
+    name: String,
+    installed: bool,
+}
+
+type SourceQuery = fn(Vec<String>) -> Result<crate::output::ResultEnvelope>;
+
+fn load_sources(query: SourceQuery) -> Result<Vec<Source>> {
+    let envelope = query(vec![
+        "--json".to_owned(),
+        "extract".to_owned(),
+        "--targets".to_owned(),
+    ])
+    .context("list extract sources")?;
+    anyhow::ensure!(
+        envelope.command == "extract" && matches!(envelope.status, crate::output::Status::Ok),
+        "extract sources did not complete: {envelope:?}"
+    );
+    serde_json::from_value(envelope.details).context("extract sources: invalid Runtime source list")
+}
 
 enum Work {
     Progress(String, usize, usize),
@@ -30,6 +51,7 @@ enum Work {
 }
 
 struct App {
+    query: SourceQuery,
     rows: Vec<Source>,
     checked: HashSet<String>,
     cursor: usize,
@@ -44,20 +66,22 @@ struct App {
 }
 
 impl App {
-    fn new() -> Self {
-        let rows = session_import::source_list();
+    fn new(query: SourceQuery) -> Result<Self> {
+        let rows = load_sources(query)?;
         let checked: HashSet<String> = rows
             .iter()
             .filter(|source| source.installed)
             .map(|source| source.id.clone())
             .collect();
         let mut app = Self {
+            query,
             rows,
             checked,
             cursor: 0,
             list_state: ListState::default(),
             log: vec![Line::styled(
-                "Check sources to import, press e to extract; installed sources are pre-checked.".to_owned(),
+                "Check sources to import, press e to extract; installed sources are pre-checked."
+                    .to_owned(),
                 Style::default().fg(Color::DarkGray),
             )],
             receiver: None,
@@ -68,7 +92,7 @@ impl App {
             should_exit: false,
         };
         app.sync_list_state();
-        app
+        Ok(app)
     }
 
     fn sync_list_state(&mut self) {
@@ -102,7 +126,10 @@ impl App {
         }
         let ids = self.selected_ids();
         if ids.is_empty() {
-            self.log_line("no source checked - Space to check, then press e".to_owned(), Color::Yellow);
+            self.log_line(
+                "no source checked - Space to check, then press e".to_owned(),
+                Color::Yellow,
+            );
             return;
         }
         let (sender, receiver) = mpsc::channel();
@@ -111,7 +138,10 @@ impl App {
         self.done = 0;
         self.total = 0;
         self.phase = "scanning".to_owned();
-        self.log_line(format!("extracting {} source(s)\u{2026}", ids.len()), ACCENT);
+        self.log_line(
+            format!("extracting {} source(s)\u{2026}", ids.len()),
+            ACCENT,
+        );
         spawn_worker(ids, sender);
     }
 
@@ -150,7 +180,10 @@ impl App {
         }
         if disconnected && self.running {
             self.running = false;
-            self.log_line("extraction worker stopped unexpectedly".to_owned(), Color::Red);
+            self.log_line(
+                "extraction worker stopped unexpectedly".to_owned(),
+                Color::Red,
+            );
         }
         if !self.running {
             self.receiver = None;
@@ -158,85 +191,83 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.rows = session_import::source_list();
-        self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
-        self.sync_list_state();
-        self.log_line("source status refreshed".to_owned(), ACCENT);
+        match load_sources(self.query) {
+            Ok(rows) => {
+                self.rows = rows;
+                self.cursor = self.cursor.min(self.rows.len().saturating_sub(1));
+                self.sync_list_state();
+                self.log_line("source status refreshed".to_owned(), ACCENT);
+            }
+            Err(error) => self.log_line(format!("source refresh failed: {error:#}"), Color::Red),
+        }
     }
 }
 
 fn spawn_worker(ids: Vec<String>, sender: Sender<Work>) {
     std::thread::spawn(move || {
-        let options = session_import::ScanOptions::default();
-        let mut sessions = Vec::new();
-        for id in &ids {
-            let _ = sender.send(Work::Progress(format!("scanning {id}"), 0, 0));
-            if let Some(scanner) = session_import::find_scanner(id) {
-                let mut found = scanner.scan(&options);
-                found.retain(|session| options.matches(session));
-                sessions.extend(found);
+        let result = (|| -> Result<u64> {
+            let mut imported = 0;
+            for (index, id) in ids.iter().enumerate() {
+                let _ = sender.send(Work::Progress(
+                    format!("extracting {id}"),
+                    index,
+                    ids.len(),
+                ));
+                // Only the picker runs here; scanning, cursor and writes stay in Runtime.
+                let response = crate::net_rpc::rpc_exec(vec![
+                    "--json".to_owned(),
+                    "extract".to_owned(),
+                    "--id".to_owned(),
+                    id.clone(),
+                ])
+                .with_context(|| format!("extract {id}"))?;
+                anyhow::ensure!(
+                    response["ok"] == true && response["exit"] == 0,
+                    "extract {id} failed: {response}"
+                );
+                let envelope: crate::output::ResultEnvelope =
+                    serde_json::from_value(response["envelope"].clone()).with_context(|| {
+                        format!("extract {id}: invalid Runtime envelope: {response}")
+                    })?;
+                anyhow::ensure!(
+                    envelope.command == "extract"
+                        && matches!(
+                            envelope.status,
+                            crate::output::Status::Ok | crate::output::Status::Skip
+                        ),
+                    "extract {id} did not complete: {response}"
+                );
+                imported += envelope.summary["imported"]
+                    .as_u64()
+                    .with_context(|| format!("extract {id}: missing imported count: {response}"))?;
+                let _ = sender.send(Work::Progress(
+                    format!("{id}: {}", envelope.summary),
+                    index + 1,
+                    ids.len(),
+                ));
             }
-        }
-        let sessions = session_import::dedupe(sessions);
-        let cursor = session_import::Cursor::load();
-        let fresh: Vec<_> = sessions
-            .into_iter()
-            .filter(|session| !cursor.is_imported(session))
-            .collect();
-        let pending = session_import::cap_per_platform(fresh, options.limit);
-        if pending.is_empty() {
-            let _ = sender.send(Work::Done("no new sessions to import".to_owned()));
-            return;
-        }
-
-        let convert = session_import::ConvertOptions {
-            kind: crate::Kind::Context,
-            importance: "important".to_owned(),
-            parent: String::new(),
-            user: crate::service::current_user(),
-            device: crate::service::device_tag(),
-            project: String::new(),
-        };
-        let mut entries: Vec<_> = pending
-            .iter()
-            .map(|session| session_import::session_entry(session, &convert))
-            .collect();
-        let mut cursor = cursor;
-        let result = session_import::import_entries(
-            &mut entries,
-            "",
-            |done, total| {
-                let _ = sender.send(Work::Progress("storing memories".to_owned(), done, total));
-            },
-            |start, completed| {
-                for (offset, ok) in completed.iter().enumerate() {
-                    if *ok {
-                        cursor.mark(&pending[start + offset]);
-                    }
-                }
-                cursor.save()?;
-                Ok(())
-            },
-        );
+            Ok(imported)
+        })();
         match result {
-            Ok(outcome) => {
-                let _ = sender.send(Work::Done(format!("imported {} memory(ies)", outcome.imported)));
+            Ok(imported) => {
+                let _ = sender.send(Work::Done(format!("imported {imported} memory(ies)")));
             }
             Err(error) => {
-                let _ = sender.send(Work::Failed(format!("{error}")));
+                let _ = sender.send(Work::Failed(format!("{error:#}")));
             }
         }
     });
 }
 
-pub fn run() -> Result<()> {
+/// The host callback must prepare the managed Runtime and validate its RPC response.
+pub fn run(query: fn(Vec<String>) -> Result<crate::output::ResultEnvelope>) -> Result<()> {
     if !std::io::IsTerminal::is_terminal(&std::io::stdin())
         || !std::io::IsTerminal::is_terminal(&std::io::stdout())
     {
         anyhow::bail!("extract --tui needs a real terminal (stdin/stdout must both be tty)");
     }
+    let mut app = App::new(query)?;
     enable_raw_mode()?;
-    let mut app = App::new();
     let mut terminal = match setup_terminal() {
         Ok(terminal) => terminal,
         Err(error) => {
@@ -336,7 +367,10 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .split(frame.area());
 
     let top = Paragraph::new(Line::from(vec![
-        Span::styled(" rsrs ", Style::default().fg(Color::Black).bg(ACCENT).bold()),
+        Span::styled(
+            " rsrs ",
+            Style::default().fg(Color::Black).bg(ACCENT).bold(),
+        ),
         Span::styled(" extract ", Style::default().fg(Color::White).bg(BAR_BG)),
         Span::styled(
             "  Space check   a all   e extract   r refresh   q quit  ",
@@ -355,7 +389,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .rows
         .iter()
         .map(|source| {
-            let mark = if app.checked.contains(&source.id) { "[x]" } else { "[ ]" };
+            let mark = if app.checked.contains(&source.id) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
             let detect = if source.installed {
                 Span::styled(" detected", Style::default().fg(Color::Green))
             } else {
@@ -406,7 +444,11 @@ fn ui(frame: &mut Frame, app: &mut App) {
         .collect();
     frame.render_widget(Paragraph::new(show).wrap(Wrap { trim: true }), log_area);
 
-    let ratio = if app.total == 0 { 0.0 } else { app.done as f64 / app.total as f64 };
+    let ratio = if app.total == 0 {
+        0.0
+    } else {
+        app.done as f64 / app.total as f64
+    };
     let label = if app.running {
         format!("{} {}/{}", app.phase, app.done, app.total)
     } else {

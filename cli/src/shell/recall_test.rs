@@ -8,8 +8,11 @@ use ratatui::{
 };
 use serde_json::Value;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Instant;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 pub(super) struct Form {
     mode: &'static str,
@@ -62,7 +65,10 @@ impl Form {
         }
         let query = self.query.text.trim().to_owned();
         if query.is_empty() {
-            self.result = vec![fail_line(t("\u{8bf7}\u{8f93}\u{5165}\u{6d4b}\u{8bd5}\u{67e5}\u{8be2}", "Enter a query to test"))];
+            self.result = vec![fail_line(t(
+                "\u{8bf7}\u{8f93}\u{5165}\u{6d4b}\u{8bd5}\u{67e5}\u{8be2}",
+                "Enter a query to test",
+            ))];
             return;
         }
         let mode = self.mode;
@@ -90,18 +96,27 @@ impl Form {
         let result = match receiver.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => Err(t("\u{6d4b}\u{8bd5}\u{7ebf}\u{7a0b}\u{4e2d}\u{65ad}", "Test worker disconnected")),
+            Err(TryRecvError::Disconnected) => Err(t(
+                "\u{6d4b}\u{8bd5}\u{7ebf}\u{7a0b}\u{4e2d}\u{65ad}",
+                "Test worker disconnected",
+            )),
         };
         let elapsed = started.elapsed().as_secs_f32();
         self.pending = None;
-        self.result
-            .push(line(format!("{}: {elapsed:.2}s", t("\u{8017}\u{65f6}", "Elapsed"))));
+        self.result.push(line(format!(
+            "{}: {elapsed:.2}s",
+            t("\u{8017}\u{65f6}", "Elapsed")
+        )));
         match result {
             Err(error) => self.result.push(fail_line(error)),
             Ok(value) => {
                 if self.mode == "benchmark" {
                     if let Some(rows) = value["rows"].as_array() {
-                        self.result.extend(rows.iter().filter_map(Value::as_str).map(|row| line(row.to_owned())));
+                        self.result.extend(
+                            rows.iter()
+                                .filter_map(Value::as_str)
+                                .map(|row| line(row.to_owned())),
+                        );
                     }
                     return;
                 }
@@ -142,7 +157,7 @@ impl Form {
                     );
                 }
                 if let Some(related) = value.get("related") {
-                    match serde_json::from_value::<Vec<respire::memory::model::RelatedMemory>>(
+                    match serde_json::from_value::<Vec<respire_protocol::RelatedMemory>>(
                         related.clone(),
                     ) {
                         Ok(related) => self.result.extend(
@@ -159,11 +174,20 @@ impl Form {
 
     pub fn draw(&self, frame: &mut Frame, area: Rect) {
         let title = if self.mode == "benchmark" {
-            t("\u{63a8}\u{7406} / Recall Benchmark", "Inference / Recall Benchmark")
+            t(
+                "\u{63a8}\u{7406} / Recall Benchmark",
+                "Inference / Recall Benchmark",
+            )
         } else if self.mode == "quality" {
-            t("\u{6d4b}\u{8bd5}\u{9ad8}\u{8d28}\u{91cf}\u{53ec}\u{56de}", "Test high-quality recall")
+            t(
+                "\u{6d4b}\u{8bd5}\u{9ad8}\u{8d28}\u{91cf}\u{53ec}\u{56de}",
+                "Test high-quality recall",
+            )
         } else {
-            t("\u{6d4b}\u{8bd5}\u{5feb}\u{901f}\u{53ec}\u{56de}", "Test fast recall")
+            t(
+                "\u{6d4b}\u{8bd5}\u{5feb}\u{901f}\u{53ec}\u{56de}",
+                "Test fast recall",
+            )
         };
         let block = Block::default().borders(Borders::ALL).title(title);
         let inner = block.inner(area);
@@ -242,38 +266,56 @@ fn run_benchmark(query: &str, cancel: &AtomicBool) -> Result<Value, String> {
     let mut first_probe = 0.0;
     let mut first_recall = 0.0;
     for round in 0..=ROUNDS {
-        if cancel.load(Ordering::Acquire) { return Err(t("Benchmark \u{5df2}\u{505c}\u{6b62}", "Benchmark stopped")); }
+        if cancel.load(Ordering::Acquire) {
+            return Err(t("Benchmark \u{5df2}\u{505c}\u{6b62}", "Benchmark stopped"));
+        }
         let probe_text = format!("{query} [benchmark {round}]");
         let started = Instant::now();
         let probe = retrieval_action(&["model", "probe", "--text", &probe_text])
             .map_err(|error| format!("Benchmark probe {round}: {error}"))?;
         let wall = started.elapsed().as_secs_f64() * 1000.0;
         let summary = &probe["summary"];
-        let elapsed = summary["elapsed_ms"].as_f64()
+        let elapsed = summary["elapsed_ms"]
+            .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
             .ok_or_else(|| "Benchmark: missing probe elapsed_ms".to_owned())?;
-        let engine = summary["selected"].as_str()
+        let engine = summary["selected"]
+            .as_str()
             .ok_or_else(|| "Benchmark: missing selected engine".to_owned())?;
         if !selected.is_empty() && selected != engine {
             return Err(t("\u{63a8}\u{7406}\u{5f15}\u{64ce}\u{5728}\u{6d4b}\u{8bd5}\u{671f}\u{95f4}\u{53d1}\u{751f}\u{53d8}\u{5316}\u{ff0c}\u{8bf7}\u{91cd}\u{65b0}\u{6d4b}\u{8bd5}", "Inference engine changed during the benchmark; run again"));
         }
         selected = engine.to_owned();
-        if round == 0 { first_probe = wall; }
-        else { inference.push(elapsed); probe_wall.push(wall); }
-        if cancel.load(Ordering::Acquire) { return Err(t("Benchmark \u{5df2}\u{505c}\u{6b62}", "Benchmark stopped")); }
+        if round == 0 {
+            first_probe = wall;
+        } else {
+            inference.push(elapsed);
+            probe_wall.push(wall);
+        }
+        if cancel.load(Ordering::Acquire) {
+            return Err(t("Benchmark \u{5df2}\u{505c}\u{6b62}", "Benchmark stopped"));
+        }
         let started = Instant::now();
-        let recalled = retrieval_action(&["recall", query, "--mode", "fast", "--titles", "--limit", "20"])
-            .map_err(|error| format!("Benchmark recall {round}: {error}"))?;
+        let recalled = retrieval_action(&[
+            "recall", query, "--mode", "fast", "--titles", "--limit", "20",
+        ])
+        .map_err(|error| format!("Benchmark recall {round}: {error}"))?;
         let wall = started.elapsed().as_secs_f64() * 1000.0;
         let summary = &recalled["summary"];
-        let indexed = summary["indexed_candidates"].as_u64()
-            .ok_or_else(|| "Benchmark: runtime does not report indexed_candidates; update the runtime".to_owned())?;
-        let pending = summary["index_pending"].as_u64()
-            .ok_or_else(|| "Benchmark: runtime does not report index_pending; update the runtime".to_owned())?;
+        let indexed = summary["indexed_candidates"].as_u64().ok_or_else(|| {
+            "Benchmark: runtime does not report indexed_candidates; update the runtime".to_owned()
+        })?;
+        let pending = summary["index_pending"].as_u64().ok_or_else(|| {
+            "Benchmark: runtime does not report index_pending; update the runtime".to_owned()
+        })?;
         indexed_min = indexed_min.min(indexed);
         indexed_max = indexed_max.max(indexed);
         pending_max = pending_max.max(pending);
-        if round == 0 { first_recall = wall; } else { recall_wall.push(wall); }
+        if round == 0 {
+            first_recall = wall;
+        } else {
+            recall_wall.push(wall);
+        }
     }
     let mut rows = vec![
         format!("{}: {selected}; {ROUNDS} {}", t("\u{5b9e}\u{9645}\u{5f15}\u{64ce}", "Selected engine"), t("\u{91cd}\u{590d}\u{8f6e}\u{6b21}", "repeated rounds")),
@@ -296,12 +338,20 @@ fn run_benchmark(query: &str, cancel: &AtomicBool) -> Result<Value, String> {
 }
 
 fn benchmark_row(label: &str, samples: &[f64]) -> Result<String, String> {
-    if samples.is_empty() { return Err("Benchmark: no samples".to_owned()); }
+    if samples.is_empty() {
+        return Err("Benchmark: no samples".to_owned());
+    }
     let mut sorted = samples.to_vec();
     sorted.sort_by(f64::total_cmp);
     let mean = sorted.iter().sum::<f64>() / sorted.len() as f64;
     let p50 = sorted[(sorted.len() * 50).div_ceil(100) - 1];
     let p95 = sorted[(sorted.len() * 95).div_ceil(100) - 1];
-    let rate = if mean > 0.0 { format!("{:.2}", 1000.0 / mean) } else { "n/a".to_owned() };
-    Ok(format!("{label}: mean {mean:.1} ms  P50 {p50:.1} ms  P95 {p95:.1} ms  {rate}/s"))
+    let rate = if mean > 0.0 {
+        format!("{:.2}", 1000.0 / mean)
+    } else {
+        "n/a".to_owned()
+    };
+    Ok(format!(
+        "{label}: mean {mean:.1} ms  P50 {p50:.1} ms  P95 {p95:.1} ms  {rate}/s"
+    ))
 }

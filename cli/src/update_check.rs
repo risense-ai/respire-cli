@@ -19,8 +19,6 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 
-use crate::service::data_dir;
-
 /// Query timeout in seconds - this is a side action; do not make the user wait.
 const TIMEOUT_SECS: u64 = 5;
 /// Throttle window in seconds: 24 hours.
@@ -30,20 +28,20 @@ const DEFAULT_REGISTRY: &str = "https://registry.npmjs.org";
 /// npm package name for this repo (OIDC publish in the release workflow).
 const PACKAGE: &str = "rsrs-cli";
 
-pub fn cache_path() -> PathBuf {
-    data_dir().join("update_check.json")
+pub fn cache_path() -> Result<PathBuf> {
+    Ok(respire_client_host::config::control_roots()?.1.join("update_check.json"))
 }
 
 /// Version-check switch: `RSRS_UPDATE_CHECK=0` turns it off.
 pub fn enabled() -> bool {
     !matches!(
-        respire_app::env::var("RSRS_UPDATE_CHECK").as_deref(),
+        respire_client_host::env::var("RSRS_UPDATE_CHECK").as_deref(),
         Ok("0") | Ok("false") | Ok("off")
     )
 }
 
 fn registry() -> String {
-    respire_app::env::var("RSRS_REGISTRY")
+    respire_client_host::env::var("RSRS_REGISTRY")
         .ok()
         .map(|s| s.trim().trim_end_matches('/').to_owned())
         .filter(|s| !s.is_empty())
@@ -124,8 +122,18 @@ pub fn fetch_dist_tags() -> Option<(String, String)> {
         .ok()?;
     let value: serde_json::Value = resp.into_json().ok()?;
     let tags = value.get("dist-tags")?;
-    let latest = tags.get("latest").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
-    let dev = tags.get("dev").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+    let latest = tags
+        .get("latest")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    let dev = tags
+        .get("dev")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_owned();
     if latest.is_empty() && dev.is_empty() {
         return None;
     }
@@ -164,7 +172,10 @@ impl UpdateStatus {
         if self.outdated {
             format!("{} -> {}", self.current, self.latest)
         } else if is_newer(&self.current, &self.latest) {
-            format!("{} (ahead of published latest {})", self.current, self.latest)
+            format!(
+                "{} (ahead of published latest {})",
+                self.current, self.latest
+            )
         } else {
             format!("{} (up to date)", self.current)
         }
@@ -187,7 +198,8 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
     if !enabled() {
         return None;
     }
-    let path = cache_path();
+    // Optional update hints must not fall back to another profile on invalid config.
+    let path = cache_path().ok()?;
     let current = crate::VERSION.to_owned();
     let now = chrono::Utc::now().timestamp();
     let cached = read_cache(&path);
@@ -225,7 +237,10 @@ pub fn check(force: bool) -> Option<UpdateStatus> {
 /// Convenience: one hint line when needed (Some only if outdated).
 /// `RSRS_UPDATE_HINT=0` silences it.
 pub fn hint(force: bool) -> Option<String> {
-    if matches!(respire_app::env::var("RSRS_UPDATE_HINT").as_deref(), Ok("0")) {
+    if matches!(
+        respire_client_host::env::var("RSRS_UPDATE_HINT").as_deref(),
+        Ok("0")
+    ) {
         return None;
     }
     check(force).filter(|s| s.outdated).map(|s| s.message())
@@ -233,7 +248,7 @@ pub fn hint(force: bool) -> Option<String> {
 
 /// For tests and troubleshooting: clear the cache.
 pub fn clear_cache() -> Result<()> {
-    let p = cache_path();
+    let p = cache_path()?;
     if p.exists() {
         std::fs::remove_file(&p)?;
     }
@@ -267,11 +282,23 @@ mod tests {
         for (current, latest, expected) in [
             ("1.0.9", "1.0.10", "1.0.9 -> 1.0.10"),
             ("1.0.10", "1.0.10", "1.0.10 (up to date)"),
-            ("1.0.10", "1.0.9", "1.0.10 (ahead of published latest 1.0.9)"),
-            ("1.0.11-dev.6", "1.0.11-dev.5", "1.0.11-dev.6 (ahead of published latest 1.0.11-dev.5)"),
+            (
+                "1.0.10",
+                "1.0.9",
+                "1.0.10 (ahead of published latest 1.0.9)",
+            ),
+            (
+                "1.0.11-dev.6",
+                "1.0.11-dev.5",
+                "1.0.11-dev.6 (ahead of published latest 1.0.11-dev.5)",
+            ),
         ] {
-            let status = UpdateStatus { current: current.into(), latest: latest.into(),
-                outdated: is_newer(latest, current), cached: false };
+            let status = UpdateStatus {
+                current: current.into(),
+                latest: latest.into(),
+                outdated: is_newer(latest, current),
+                cached: false,
+            };
             assert_eq!(status.comparison(), expected);
         }
     }

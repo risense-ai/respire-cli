@@ -4,13 +4,25 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/runtime-autostart-validation.yml'
+      - 'runtime-pin.json'
       - 'scripts/test-runtime-autostart.py'
+      - 'scripts/native_fixture_process.py'
+      - 'scripts/test-native-runtime-install.py'
       - 'cli/src/autostart.rs'
       - 'cli/src/autostart/**'
+      - 'cli/tests/model_maintenance.rs'
+      - 'cli/tests/support/**'
       - 'cli/src/main.rs'
+      - 'cli/src/lib.rs'
+      - 'cli/src/frontend.rs'
       - 'cli/src/rpc.rs'
       - 'cli/src/net_rpc.rs'
+      - 'crates/commands/src/net_rpc.rs'
       - 'cli/src/runtime_http.rs'
+      - 'crates/commands/src/runtime_http.rs'
+      - 'crates/commands/src/admission.rs'
+      - 'crates/commands/src/rpc_serve.rs'
+      - 'crates/commands/src/rpc_worker.rs'
       - 'cli/src/mcp.rs'
       - 'spawn/**'
   workflow_dispatch:
@@ -41,6 +53,11 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify fixture Runtime installation and native path identity
+        run: python scripts/test-native-runtime-install.py
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ matrix.target }}
@@ -83,8 +100,48 @@ jobs:
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
           cargo test --locked -p respire_spawn --target "$SDK_TARGET" --target-dir target/autostart-validation
-          cargo test --locked -p respire --bin rsrs autostart:: --target "$SDK_TARGET" --target-dir target/autostart-validation -- --test-threads=1 --show-output
+          cargo test --locked -p respire --lib autostart:: --target "$SDK_TARGET" --target-dir target/autostart-validation -- --test-threads=1 --show-output
           cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
+      - name: Prepare official pinned standalone Runtime for supervision validation
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+          EXE_SUFFIX: ${{ matrix.suffix }}
+          RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
+          import {join, resolve} from 'node:path';
+          import {spawnSync} from 'node:child_process';
+          assert.equal(process.env.GITHUB_ACTIONS, 'true');
+          assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
+          const cli = resolve('target/autostart-validation', process.env.SDK_TARGET, 'debug', `rsrs${process.env.EXE_SUFFIX}`);
+          const env = {...process.env, RSRS_DATA_DIR: root};
+          // Keep the test environment intact; only the official installer may download.
+          delete env.RSRS_CORE_TEST_MODE;
+          const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
+          const result = await installPinnedRuntime(cli, {env}, '${{ matrix.target }}');
+          if (result.error) throw result.error;
+          assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
+          const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const runtime = join(root, 'runtime', pin.required, `rsrs-runtime${process.env.EXE_SUFFIX}`);
+          assert.ok(statSync(runtime).isFile());
+          assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
+          NODE
+      - name: Verify anonymous owner model maintenance on the native platform
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          test_case=anonymous_owner_cpu_reset_drains_and_restores_verified_runtime
+          cargo test --locked -p respire --test model_maintenance --target "$SDK_TARGET" --target-dir target/autostart-validation "$test_case" -- --exact --test-threads=1 --show-output | tee "$RUNNER_TEMP/anonymous-owner-test.log"
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/anonymous-owner-test.log"
       - name: Fetch immutable previous public native version without install scripts
         shell: bash
         env:

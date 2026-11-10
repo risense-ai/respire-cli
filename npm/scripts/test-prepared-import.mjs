@@ -38,7 +38,7 @@ test('actual helper processes bind preparation, registered import, readiness and
   assert.notEqual(result.source_sha,result.workflow_sha);
 });
 test('six-platform prepared publication checks both ARM copies and every original gate through finalization',()=>{
-  const result=preparedConsumerFlow({arm64:true});
+  const result=preparedConsumerFlow({arm64:true,frontend:true});
   assert.equal(result.platform_count,6);assert.equal(result.finalized,true);assert.equal(result.rejected.length,9);
 });
 

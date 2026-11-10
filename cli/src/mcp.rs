@@ -1,12 +1,13 @@
 //! MCP server: stdio JSON-RPC and HTTP/SSE helpers used by the authenticated runtime.
 //!
-//! Tool calls go through the resident runtime (`rpc::query_json`). This process
-//! never `spawn`s another `rsrs` to re-invoke the CLI. `current_exe` is only
+//! Stdio tool calls use Runtime RPC; Runtime HTTP handlers keep their local queue.
+//! Neither path spawns another `rsrs` to re-invoke the CLI. `current_exe` is only
 //! used to copy the native binary into `<data_dir>/bin`. Spec: 2025-03-26.
 
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 
 use crate::rpc;
@@ -22,11 +23,11 @@ struct ServiceAccess {
     off: bool,
 }
 impl ServiceAccess {
-    fn current() -> Self {
-        Self {
-            readonly: respire::service::readonly_mode(),
-            off: respire::service::off_mode(),
-        }
+    fn current() -> anyhow::Result<Self> {
+        Ok(Self {
+            readonly: respire_client_host::settings::readonly_mode()?,
+            off: respire_client_host::settings::off_mode()?,
+        })
     }
 }
 
@@ -95,11 +96,28 @@ impl ToolPolicy {
         Self::parse(allow.as_deref(), deny.as_deref())
     }
     fn denial_reason(&self, name: &str, access: ServiceAccess) -> String {
-        if !self.catalog.contains(name) { return "Unknown MCP tool; consult tools/list for supported names".to_owned(); }
+        if !self.catalog.contains(name) {
+            return "Unknown MCP tool; consult tools/list for supported names".to_owned();
+        }
         if access.off && name != "memory_status" {
             return "MCP tool disabled: memory is paused; ALLOW cannot override service mode. Ask the host operator to review the intended service mode".to_owned();
         }
-        if access.readonly && !matches!(name,"memory_status"|"memory_recall"|"memory_list"|"memory_show"|"memory_tree"|"memory_history"|"memory_diary"|"memory_diary_search"|"memory_diary_fragment"|"memory_chain"|"memory_taxonomy") {
+        if access.readonly
+            && !matches!(
+                name,
+                "memory_status"
+                    | "memory_recall"
+                    | "memory_list"
+                    | "memory_show"
+                    | "memory_tree"
+                    | "memory_history"
+                    | "memory_diary"
+                    | "memory_diary_search"
+                    | "memory_diary_fragment"
+                    | "memory_chain"
+                    | "memory_taxonomy"
+            )
+        {
             return "MCP tool disabled: read-only service mode forbids this write; ALLOW cannot grant write access".to_owned();
         }
         if self.deny_all || self.deny.contains(name) {
@@ -152,15 +170,7 @@ pub struct HttpIn {
 
 /// Native daemon directory. Default: `~/.rsrs/bin` (profile root, not the
 /// current account `data_dir()`). Isolation: `RSRS_DATA_DIR` / `RSRS_BIN_DIR`.
-pub fn bin_dir() -> PathBuf {
-    if let Ok(raw) = respire::env::var("RSRS_BIN_DIR") {
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            return PathBuf::from(trimmed);
-        }
-    }
-    respire::service::main_data_dir().join("bin")
-}
+pub use respire_client_host::paths::bin_dir;
 
 pub fn stable_bin_path() -> PathBuf {
     let name = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
@@ -173,6 +183,10 @@ pub fn mcp_http_url(web_url: &str) -> String {
 
 /// Copy this process's native binary to `stable_bin_path()` when missing or stale.
 pub fn materialize_bin() -> Result<PathBuf, String> {
+    if let Some(selected) = crate::embedding::selection() {
+        return selected.verify().map(|runtime| runtime.path().to_path_buf())
+            .map_err(|error| error.to_string());
+    }
     crate::runtime_policy::require_host("runtime binary installation")
         .map_err(|error| error.to_string())?;
     let dest = stable_bin_path();
@@ -190,19 +204,23 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
     {
         return Ok(src);
     }
-    if let Some(path) = crate::autostart::coordinate_materialization().map_err(|error| error.to_string())? { return Ok(path); }
-    install_binary(&src, &dest, respire::core_sdk::RUNTIME_FILES)?;
+    crate::runtime_fetch::require_automatic_migration_safe()
+        .map_err(|error| format!("{error:#}"))?;
+    if let Some(path) =
+        crate::autostart::coordinate_materialization().map_err(|error| error.to_string())?
+    {
+        return Ok(path);
+    }
+    install_binary(&src, &dest)?;
     Ok(dest)
 }
 
-// Production receives only the SDK's compile-time verified runtime inventory.
-// An explicit list also lets filesystem failure tests cover static SDK builds.
-fn install_binary(src: &Path, dest: &Path, runtime_files: &[(&str, &str)]) -> Result<(), String> {
+// The CLI is standalone; Runtime and its native libraries use their own verified installer.
+fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     }
-    stage_runtime_libraries(src, dest, runtime_files)?;
     if !bin_needs_refresh(src, dest)? {
         return Ok(());
     }
@@ -213,43 +231,6 @@ fn install_binary(src: &Path, dest: &Path, runtime_files: &[(&str, &str)]) -> Re
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
             .map_err(|err| format!("cannot set execute bit on {}: {err}", dest.display()))?;
-    }
-    Ok(())
-}
-
-fn stage_runtime_libraries(
-    src: &Path,
-    dest: &Path,
-    runtime_files: &[(&str, &str)],
-) -> Result<(), String> {
-    let source_dir = src.parent().ok_or("binary has no source directory")?;
-    let destination_dir = dest.parent().ok_or("binary has no destination directory")?;
-    for &(name, expected) in runtime_files {
-        let source = source_dir.join(name);
-        let bytes = std::fs::read(&source)
-            .map_err(|err| format!("cannot read SDK runtime {}: {err}", source.display()))?;
-        if format!("{:x}", Sha256::digest(&bytes)) != expected {
-            return Err(format!(
-                "SDK runtime checksum mismatch: {}",
-                source.display()
-            ));
-        }
-        let destination = destination_dir.join(name);
-        if std::fs::read(&destination)
-            .is_ok_and(|existing| format!("{:x}", Sha256::digest(&existing)) == expected)
-        {
-            continue;
-        }
-        let temporary = destination_dir.join(format!(".{name}.{}", uuid::Uuid::new_v4()));
-        std::fs::write(&temporary, &bytes)
-            .map_err(|err| format!("cannot stage SDK runtime: {err}"))?;
-        if let Err(error) = std::fs::rename(&temporary, &destination) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(format!(
-                "cannot install SDK runtime {}: {error}",
-                destination.display()
-            ));
-        }
     }
     Ok(())
 }
@@ -287,8 +268,7 @@ fn file_sha256(path: &Path) -> Result<[u8; 32], String> {
 
 fn reader_sha256(mut file: impl Read) -> Result<[u8; 32], String> {
     let mut hasher = Sha256::new();
-    // Executables include the static Core SDK. Bound transient memory rather
-    // than allocating one executable-sized Vec on every runtime health check.
+    // Bound transient memory rather than allocating one executable-sized Vec.
     let mut buffer = [0u8; 64 * 1024];
     loop {
         let count = match file.read(&mut buffer) {
@@ -514,13 +494,22 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
     };
     let opt_u64 = |key: &str| args.get(key).and_then(|v| v.as_u64());
     let opt_bool = |key: &str| args.get(key).and_then(|v| v.as_bool());
-    let bounded = |key: &str, min: u64, max: u64| -> Result<Option<u64>,String> {
-        args.get(key).map(|v|v.as_u64().filter(|v|(min..=max).contains(v))
-            .ok_or_else(||format!("{key} must be an integer in {min}..={max}"))).transpose()
+    let bounded = |key: &str, min: u64, max: u64| -> Result<Option<u64>, String> {
+        args.get(key)
+            .map(|v| {
+                v.as_u64()
+                    .filter(|v| (min..=max).contains(v))
+                    .ok_or_else(|| format!("{key} must be an integer in {min}..={max}"))
+            })
+            .transpose()
     };
-    let only_fields = |allowed: &[&str]| -> Result<(),String> {
-        let fields=args.as_object().ok_or("diary arguments must be an object")?;
-        if fields.keys().any(|key|!allowed.contains(&key.as_str())) {return Err("unsupported diary tool argument".into());}
+    let only_fields = |allowed: &[&str]| -> Result<(), String> {
+        let fields = args
+            .as_object()
+            .ok_or("diary arguments must be an object")?;
+        if fields.keys().any(|key| !allowed.contains(&key.as_str())) {
+            return Err("unsupported diary tool argument".into());
+        }
         Ok(())
     };
     match name {
@@ -573,11 +562,19 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
             if let Some(merge_ids) = opt_str("merge_ids") {
                 cmd.extend(["--merge-ids".to_owned(), merge_ids.to_owned()]);
             }
-            if let Some(id) = opt_str("supersedes") { cmd.extend(["--supersedes".to_owned(),id.to_owned()]); }
+            if let Some(id) = opt_str("supersedes") {
+                cmd.extend(["--supersedes".to_owned(), id.to_owned()]);
+            }
             if let Some(value) = args.get("see_also") {
-                let ids = value.as_array().ok_or("see_also must be an array")?.iter()
-                    .map(|v| v.as_str().ok_or("see_also IDs must be strings")).collect::<Result<Vec<_>,_>>()?;
-                if !ids.is_empty() { cmd.extend(["--see-also".to_owned(),ids.join(",")]); }
+                let ids = value
+                    .as_array()
+                    .ok_or("see_also must be an array")?
+                    .iter()
+                    .map(|v| v.as_str().ok_or("see_also IDs must be strings"))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if !ids.is_empty() {
+                    cmd.extend(["--see-also".to_owned(), ids.join(",")]);
+                }
             }
             if opt_bool("force") == Some(true) {
                 cmd.push("--force".to_owned());
@@ -587,7 +584,9 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
         "memory_recall" => {
             let query = opt_str("query").ok_or("missing query")?;
             let mut cmd = vec!["recall".to_owned(), query.to_owned()];
-            if opt_bool("related") == Some(false) { cmd.push("--no-related".to_owned()); }
+            if opt_bool("related") == Some(false) {
+                cmd.push("--no-related".to_owned());
+            }
             if let Some(limit) = opt_u64("limit") {
                 cmd.extend(["--limit".to_owned(), limit.to_string()]);
             }
@@ -659,29 +658,42 @@ fn tool_argv(name: &str, args: &serde_json::Value) -> Result<Vec<String>, String
             Ok(cmd)
         }
         "memory_diary_search" => {
-            only_fields(&["query","mode","limit","max_chars"])?;
-            let query=opt_str("query").filter(|q|!q.trim().is_empty() && q.chars().count()<=500)
+            only_fields(&["query", "mode", "limit", "max_chars"])?;
+            let query = opt_str("query")
+                .filter(|q| !q.trim().is_empty() && q.chars().count() <= 500)
                 .ok_or("query must contain 1..=500 Unicode characters")?;
-            let mut cmd=vec!["diary-search".to_owned()];
-            for (key,flag,min,max) in [("limit","--limit",1,20),("max_chars","--max-chars",512,12000)] {
-                if let Some(value)=bounded(key,min,max)? {cmd.extend([flag.to_owned(),value.to_string()]);}
+            let mut cmd = vec!["diary-search".to_owned()];
+            for (key, flag, min, max) in [
+                ("limit", "--limit", 1, 20),
+                ("max_chars", "--max-chars", 512, 12000),
+            ] {
+                if let Some(value) = bounded(key, min, max)? {
+                    cmd.extend([flag.to_owned(), value.to_string()]);
+                }
             }
             if args.get("mode").is_some() {
-                let mode=opt_str("mode").filter(|m|matches!(*m,"lexical"|"hybrid")).ok_or("mode must be lexical or hybrid")?;
-                cmd.extend(["--mode".to_owned(),mode.to_owned()]);
+                let mode = opt_str("mode")
+                    .filter(|m| matches!(*m, "lexical" | "hybrid"))
+                    .ok_or("mode must be lexical or hybrid")?;
+                cmd.extend(["--mode".to_owned(), mode.to_owned()]);
             }
-            cmd.extend(["--".to_owned(),query.to_owned()]);
+            cmd.extend(["--".to_owned(), query.to_owned()]);
             Ok(cmd)
         }
         "memory_diary_fragment" => {
-            only_fields(&["source_id","fragment_id","neighbors","max_chars"])?;
-            let source=opt_str("source_id").ok_or("missing source_id")?;
-            let fragment=opt_str("fragment_id").ok_or("missing fragment_id")?;
-            let mut cmd=vec!["diary-fragment".to_owned()];
-            for (key,flag,min,max) in [("neighbors","--neighbors",0,1),("max_chars","--max-chars",512,12000)] {
-                if let Some(value)=bounded(key,min,max)? {cmd.extend([flag.to_owned(),value.to_string()]);}
+            only_fields(&["source_id", "fragment_id", "neighbors", "max_chars"])?;
+            let source = opt_str("source_id").ok_or("missing source_id")?;
+            let fragment = opt_str("fragment_id").ok_or("missing fragment_id")?;
+            let mut cmd = vec!["diary-fragment".to_owned()];
+            for (key, flag, min, max) in [
+                ("neighbors", "--neighbors", 0, 1),
+                ("max_chars", "--max-chars", 512, 12000),
+            ] {
+                if let Some(value) = bounded(key, min, max)? {
+                    cmd.extend([flag.to_owned(), value.to_string()]);
+                }
             }
-            cmd.extend(["--".to_owned(),source.to_owned(),fragment.to_owned()]);
+            cmd.extend(["--".to_owned(), source.to_owned(), fragment.to_owned()]);
             Ok(cmd)
         }
         "memory_diary" => {
@@ -760,6 +772,23 @@ fn ensure_envelope(value: &serde_json::Value) -> Result<(), String> {
 }
 
 fn invoke_cli(args: Vec<String>) -> Result<serde_json::Value, String> {
+    let mut full = Vec::with_capacity(args.len() + 1);
+    full.push("--json".to_owned());
+    full.extend(args);
+    // The stdio frontend must not enter the Runtime's in-process job queue.
+    let response = rpc::call_method("cli.exec", full, true).map_err(|err| err.to_string())?;
+    if let Some(mut envelope) = response.envelope {
+        envelope.ensure_failure_diagnostics();
+        return serde_json::to_value(envelope)
+            .context("runtime envelope could not be encoded")
+            .map_err(|err| err.to_string());
+    }
+    Err(response
+        .error
+        .unwrap_or_else(|| "runtime returned an empty response".to_owned()))
+}
+
+fn invoke_runtime_cli(args: Vec<String>) -> Result<serde_json::Value, String> {
     rpc::query_json(args).map_err(|err| err.to_string())
 }
 
@@ -788,7 +817,10 @@ fn call_tool(
             .is_some_and(|ids| ids.as_str().is_none_or(|v| !v.trim().is_empty()))
         && !policy.allows("memory_forget", access)
     {
-        return Err(format!("MCP merge requires memory_forget permission: {}",policy.denial_reason("memory_forget",access)));
+        return Err(format!(
+            "MCP merge requires memory_forget permission: {}",
+            policy.denial_reason("memory_forget", access)
+        ));
     }
     let argv = tool_argv(name, &arguments)?;
     let mut envelope = invoke(argv)?;
@@ -860,8 +892,12 @@ fn handle_rpc_with(
 }
 
 fn handle_rpc_live(req: &serde_json::Value) -> Option<serde_json::Value> {
-    match ToolPolicy::from_env() {
-        Ok(policy) => handle_rpc_with(req, &invoke_cli, &policy, ServiceAccess::current()),
+    match ToolPolicy::from_env().and_then(|policy| {
+        ServiceAccess::current()
+            .map(|access| (policy, access))
+            .map_err(|error| format!("{error:#}"))
+    }) {
+        Ok((policy, access)) => handle_rpc_with(req, &invoke_runtime_cli, &policy, access),
         Err(message) => req.get("id").map(|id| {
             serde_json::json!({
                 "jsonrpc":"2.0","id":id,"error":{"code":-32603,"message":message}
@@ -970,7 +1006,7 @@ pub fn serve() -> anyhow::Result<()> {
             Ok(value) => value,
             Err(_) => continue,
         };
-        if let Some(frame) = handle_rpc_with(&req, &invoke_cli, &policy, ServiceAccess::current()) {
+        if let Some(frame) = handle_rpc_with(&req, &invoke_cli, &policy, ServiceAccess::current()?) {
             writeln!(out, "{frame}")?;
             out.flush()?;
         }
@@ -1031,18 +1067,25 @@ mod tests {
         impl Read for Reader {
             fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
                 self.calls += 1;
-                if self.calls == 1 { return Err(std::io::ErrorKind::Interrupted.into()); }
+                if self.calls == 1 {
+                    return Err(std::io::ErrorKind::Interrupted.into());
+                }
                 if self.cursor.position() >= 65536 && self.fail {
                     return Err(std::io::Error::other("injected mid-read failure"));
                 }
                 // Deterministically model a source growing/truncating while read.
                 if self.cursor.position() == 65536 {
-                    if self.grow { self.cursor.get_mut().resize(150000, 7); }
-                    else { self.cursor.get_mut().truncate(70000); }
+                    if self.grow {
+                        self.cursor.get_mut().resize(150000, 7);
+                    } else {
+                        self.cursor.get_mut().truncate(70000);
+                    }
                 }
                 let until_boundary = if self.cursor.position() < 65536 {
                     65536 - self.cursor.position() as usize
-                } else { 4096 };
+                } else {
+                    4096
+                };
                 let limit = out.len().min(4096).min(until_boundary);
                 self.cursor.read(&mut out[..limit])
             }
@@ -1055,11 +1098,16 @@ mod tests {
         };
         for grow in [false, true] {
             let mut reference = Vec::new();
-            make(false, grow).read_to_end(&mut reference).map_err(|error| error.to_string())?;
+            make(false, grow)
+                .read_to_end(&mut reference)
+                .map_err(|error| error.to_string())?;
             let expected: [u8; 32] = Sha256::digest(&reference).into();
             assert_eq!(reader_sha256(make(false, grow))?, expected);
         }
-        assert_eq!(reader_sha256(make(true, false)), Err("injected mid-read failure".into()));
+        assert_eq!(
+            reader_sha256(make(true, false)),
+            Err("injected mid-read failure".into())
+        );
         Ok(())
     }
 
@@ -1089,10 +1137,38 @@ mod tests {
     #[test]
     fn source_does_not_reinvoke_cli_binary() -> Result<(), String> {
         let src = include_str!("mcp.rs");
-        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
+        let (prod, _) = src
+            .split_once("\nmod tests {")
+            .ok_or("missing MCP test-module boundary")?;
         if prod.contains("spawnSync") || prod.contains("std::process::Command") {
             return Err("production mcp.rs must not spawn a CLI process".to_owned());
         }
+        let section = |start: &str, end: &str| -> Result<String, String> {
+            prod.split_once(start)
+                .and_then(|(_, rest)| rest.split_once(end).map(|(body, _)| body))
+                .map(|body| body.split_whitespace().collect())
+                .ok_or_else(|| format!("missing MCP source section: {start}"))
+        };
+        let stdio = section("fn invoke_cli(", "fn invoke_runtime_cli(")?;
+        let runtime = section("fn invoke_runtime_cli(", "fn call_tool(")?;
+        let http = section("fn handle_rpc_live(", "#[cfg(test)]")?;
+        let serve = section("pub fn serve(", "#[cfg(test)]")?;
+        assert!(stdio.contains("rpc::call_method(\"cli.exec\",full,true)"));
+        assert!(!stdio.contains("rpc::query_json(") && !stdio.contains("execute_json("));
+        assert!(serve.contains(
+            "handle_rpc_with(&req,&invoke_cli,&policy,ServiceAccess::current()?)"
+        ));
+        assert!(!serve.contains("&invoke_runtime_cli"));
+        assert!(http.contains(
+            "handle_rpc_with(req,&invoke_runtime_cli,&policy,access)"
+        ));
+        assert!(!http.contains("&invoke_cli,"));
+        assert!(runtime.contains("rpc::query_json(args)"));
+        assert!(
+            !runtime.contains("rpc::call_method(")
+                && !runtime.contains("net_rpc::")
+                && !runtime.contains("invoke_cli(")
+        );
         Ok(())
     }
 
@@ -1233,40 +1309,58 @@ mod tests {
     }
 
     #[test]
-    fn refusal_diagnostics_explain_configuration_without_overriding_modes() -> Result<(),String> {
-        let policy=ToolPolicy::parse(None,None)?;
-        assert!(policy.denial_reason("memory_forget",ServiceAccess::default()).contains("RSRS_MCP_ALLOW"));
-        assert!(policy.denial_reason("memory_forget",ServiceAccess{readonly:true,off:false}).contains("read-only"));
-        assert!(policy.denial_reason("memory_recall",ServiceAccess{readonly:false,off:true}).contains("paused"));
-        assert!(ToolPolicy::parse(Some("all"),Some("memory_recall"))?.denial_reason("memory_recall",ServiceAccess::default()).contains("RSRS_MCP_DENY"));
-        assert!(!policy.denial_reason("untrusted-secret-like-tool-name",ServiceAccess::default()).contains("untrusted-secret"));
+    fn refusal_diagnostics_explain_configuration_without_overriding_modes() -> Result<(), String> {
+        let policy = ToolPolicy::parse(None, None)?;
+        assert!(policy
+            .denial_reason("memory_forget", ServiceAccess::default())
+            .contains("RSRS_MCP_ALLOW"));
+        assert!(policy
+            .denial_reason(
+                "memory_forget",
+                ServiceAccess {
+                    readonly: true,
+                    off: false
+                }
+            )
+            .contains("read-only"));
+        assert!(policy
+            .denial_reason(
+                "memory_recall",
+                ServiceAccess {
+                    readonly: false,
+                    off: true
+                }
+            )
+            .contains("paused"));
+        assert!(ToolPolicy::parse(Some("all"), Some("memory_recall"))?
+            .denial_reason("memory_recall", ServiceAccess::default())
+            .contains("RSRS_MCP_DENY"));
+        assert!(!policy
+            .denial_reason("untrusted-secret-like-tool-name", ServiceAccess::default())
+            .contains("untrusted-secret"));
         Ok(())
     }
 
     #[test]
-    fn readonly_taxonomy_dispatch_reaches_the_real_read_only_command() -> anyhow::Result<()> {
-        let _lock=crate::TEST_ENV_LOCK.lock().map_err(|e|anyhow::anyhow!("{e}"))?;
-        let directory=tempfile::tempdir()?;
-        struct Reset { data:Option<std::ffi::OsString>,worker:bool }
-        impl Drop for Reset { fn drop(&mut self) {
-            match self.data.take(){Some(value)=>std::env::set_var("RSRS_DATA_DIR",value),None=>std::env::remove_var("RSRS_DATA_DIR")};
-            crate::rpc::set_worker_active(self.worker);
-        }}
-        let _reset=Reset{data:std::env::var_os("RSRS_DATA_DIR"),worker:crate::rpc::worker_active()};
-        std::env::set_var("RSRS_DATA_DIR",directory.path());
-        std::fs::write(directory.path().join("agent.json"),r#"{"readonly":true}"#)?;
-        crate::rpc::set_worker_active(true);
-        let policy=ToolPolicy::parse(None,None).map_err(anyhow::Error::msg)?;
-        let access=ServiceAccess::current();assert!(access.readonly);
-        assert!(policy.allows("memory_taxonomy",access));
-        let invoke=|args|serde_json::to_value(crate::capture_run(args).envelope).map_err(|e|e.to_string());
-        let text=call_tool(&serde_json::json!({"name":"memory_taxonomy"}),&invoke,&policy,access).map_err(anyhow::Error::msg)?;
-        let result:serde_json::Value=serde_json::from_str(&text)?;
-        assert_eq!(result["status"],"ok");
-        assert!(result["summary"]["count"].as_u64().is_some_and(|n|n>0));
-        let write=crate::capture_run(vec!["taxonomy".into(),"--ensure".into(),"synthetic".into()]);
-        assert_ne!(write.exit,0);
-        assert!(!directory.path().join("rsrs.db").exists());
+    fn readonly_taxonomy_dispatch_preserves_read_only_argv() -> anyhow::Result<()> {
+        let policy = ToolPolicy::parse(None, None).map_err(anyhow::Error::msg)?;
+        let access = ServiceAccess { readonly: true, off: false };
+        assert!(access.readonly);
+        assert!(policy.allows("memory_taxonomy", access));
+        let observed = std::cell::RefCell::new(Vec::new());
+        let invoke = |args| {
+            *observed.borrow_mut() = args;
+            Err("independent Runtime callback reached".to_owned())
+        };
+        let error = call_tool(
+            &serde_json::json!({"name":"memory_taxonomy"}),
+            &invoke,
+            &policy,
+            access,
+        )
+        .err().ok_or_else(|| anyhow::anyhow!("callback failure was swallowed"))?;
+        assert!(error.contains("independent Runtime callback reached"));
+        assert_eq!(*observed.borrow(), vec!["taxonomy".to_owned(), "--list".to_owned()]);
         Ok(())
     }
 
@@ -1611,7 +1705,9 @@ mod tests {
 
     #[test]
     fn default_bin_dir_is_under_data_dir() -> Result<(), String> {
-        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev_data = respire::env::var("RSRS_DATA_DIR").ok();
         let prev_bin = respire::env::var("RSRS_BIN_DIR").ok();
@@ -1637,129 +1733,38 @@ mod tests {
         Ok(())
     }
 
-    const RUNTIME_FIXTURE_BYTES: &[u8] = b"synthetic SDK runtime payload";
-    const RUNTIME_FIXTURE_FILES: &[(&str, &str)] = &[(
-        "runtime-fixture.bin",
-        "6373314838dc2830c99fc325c2c956aad4630bc6e12a83b8e8f290c01701e4de",
-    )];
-
-    fn runtime_library_fixture() -> anyhow::Result<(tempfile::TempDir, PathBuf, PathBuf)> {
+    #[test]
+    fn binary_installation_keeps_a_current_executable_without_sdk_libraries() -> anyhow::Result<()> {
         let temporary = tempfile::tempdir()?;
-        let source = temporary.path().join("source");
-        let destination = temporary.path().join("destination");
-        std::fs::create_dir(&source)?;
-        std::fs::create_dir(&destination)?;
-        std::fs::write(
-            source.join(RUNTIME_FIXTURE_FILES[0].0),
-            RUNTIME_FIXTURE_BYTES,
-        )?;
-        std::fs::write(source.join("rsrs"), b"synthetic executable payload")?;
-        Ok((temporary, source.join("rsrs"), destination.join("rsrs")))
-    }
-
-    #[test]
-    fn runtime_libraries_reject_corruption_and_repair_destination() -> anyhow::Result<()> {
-        let (_temporary, source, destination) = runtime_library_fixture()?;
-        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
-        let source_file = source.parent().unwrap().join(name);
-        let installed = destination.parent().unwrap().join(name);
-        std::fs::write(&source_file, b"corrupt")?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).is_err());
-        std::fs::write(source_file, RUNTIME_FIXTURE_BYTES)?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        std::fs::write(&installed, b"stale")?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(installed)?)), expected);
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_libraries_keep_identical_readonly_files_and_native_identity() -> anyhow::Result<()> {
-        let (_temporary, source, destination) = runtime_library_fixture()?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        let path = destination.parent().unwrap().join(RUNTIME_FIXTURE_FILES[0].0);
-        let original_permissions = std::fs::metadata(&path)?.permissions();
-        let mut readonly = original_permissions.clone();
-        readonly.set_readonly(true);
-        std::fs::set_permissions(&path, readonly)?;
-        let before = std::fs::metadata(&path)?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        let after = std::fs::metadata(&path)?;
-        assert!(after.permissions().readonly());
+        let source_dir = temporary.path().join("source");
+        let destination_dir = temporary.path().join("destination");
+        std::fs::create_dir(&source_dir)?;
+        let source = source_dir.join("rsrs");
+        let executable = destination_dir.join("rsrs");
+        std::fs::write(&source, b"synthetic standalone CLI payload")?;
+        let library = source_dir.join("unrelated-native-library.bin");
+        std::fs::write(&library, b"not a CLI dependency")?;
+        install_binary(&source, &executable).map_err(anyhow::Error::msg)?;
+        assert_eq!(std::fs::read(&executable)?, b"synthetic standalone CLI payload");
+        assert!(!destination_dir.join("unrelated-native-library.bin").exists());
+        let before = std::fs::metadata(&executable)?;
+        std::fs::remove_file(library)?;
+        install_binary(&source, &executable).map_err(anyhow::Error::msg)?;
+        let after = std::fs::metadata(&executable)?;
         assert_eq!(after.modified()?, before.modified()?);
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
-            assert_eq!(after.ino(), before.ino(), "mapped library inode changed");
-        }
-        std::fs::set_permissions(path, original_permissions)?;
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_library_failures_preserve_inputs_and_remove_atomic_temporary_files() -> anyhow::Result<()> {
-        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
-        let (_temporary, source, destination) = runtime_library_fixture()?;
-        let source_file = source.parent().unwrap().join(name);
-        std::fs::remove_file(&source_file)?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot read SDK runtime"));
-        std::fs::write(&source_file, RUNTIME_FIXTURE_BYTES)?;
-        let directory = destination.parent().unwrap();
-        std::fs::remove_dir(directory)?;
-        std::fs::write(directory, b"unrelated blocker")?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot stage SDK runtime"));
-        assert_eq!(std::fs::read(directory)?, b"unrelated blocker");
-        std::fs::remove_file(directory)?;
-        std::fs::create_dir(directory)?;
-        std::fs::create_dir(directory.join(name))?;
-        assert!(stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).unwrap_err().contains("cannot install SDK runtime"));
-        assert!(directory.join(name).is_dir());
-        assert_eq!(std::fs::read_dir(directory)?.count(), 1, "failed rename left a temporary file");
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&source_file)?)), expected);
-        std::fs::remove_dir(directory.join(name))?;
-        stage_runtime_libraries(&source, &destination, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(directory.join(name))?)), expected);
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_library_staging_rejects_missing_parent_paths() {
-        let root = Path::new(std::path::MAIN_SEPARATOR_STR);
-        let file = Path::new("fixture/rsrs");
-        assert_eq!(stage_runtime_libraries(root, file, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no source directory");
-        assert_eq!(stage_runtime_libraries(file, root, RUNTIME_FIXTURE_FILES).unwrap_err(), "binary has no destination directory");
-    }
-
-    #[test]
-    fn binary_installation_repairs_runtime_without_replacing_a_current_executable() -> anyhow::Result<()> {
-        let (_temporary, source, executable) = runtime_library_fixture()?;
-        let (name, expected) = RUNTIME_FIXTURE_FILES[0];
-        install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-        let before = std::fs::metadata(&executable)?;
-        let library = executable.parent().unwrap().join(name);
-        for corrupt in [false, true] {
-            if corrupt {
-                std::fs::write(&library, b"damaged installed runtime")?;
-            } else {
-                std::fs::remove_file(&library)?;
-            }
-            install_binary(&source, &executable, RUNTIME_FIXTURE_FILES).map_err(anyhow::Error::msg)?;
-            assert_eq!(std::fs::read(&executable)?, b"synthetic executable payload");
-            assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(&library)?)), expected);
-            let after = std::fs::metadata(&executable)?;
-            assert_eq!(after.modified()?, before.modified()?);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                assert_eq!(after.ino(), before.ino());
-            }
+            assert_eq!(after.ino(), before.ino());
         }
         Ok(())
     }
 
     #[test]
     fn materialize_bin_honors_override_dir() -> Result<(), String> {
-        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|err| err.into_inner());
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         let dir = tempfile::tempdir().map_err(|err| err.to_string())?;
         let prev = respire::env::var("RSRS_BIN_DIR").ok();
         std::env::set_var("RSRS_BIN_DIR", dir.path());
@@ -1813,3 +1818,7 @@ mod tests {
 #[cfg(test)]
 #[path = "mcp_diary_tests.rs"]
 mod diary_tests;
+
+#[cfg(test)]
+#[path = "mcp_contract_tests.rs"]
+mod contract_tests;

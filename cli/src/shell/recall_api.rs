@@ -2,6 +2,7 @@
 use super::text_input::Input;
 use super::{choice, line, retrieval_action, t, KeyCode, Line};
 use anyhow::{anyhow, Result};
+use respire_client_host::classification as provider_settings;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use ratatui::{
     prelude::*,
@@ -17,12 +18,12 @@ pub(super) struct Form {
     saving: Option<(Instant, Receiver<Result<(), String>>)>,
 }
 
-pub(super) fn base() -> String {
-    respire::service::read_agent_config()["recall_api_base"]
+pub(super) fn base() -> Result<String> {
+    Ok(respire_client_host::settings::read_agent_config()?["recall_api_base"]
         .as_str()
         .map(str::to_owned)
-        .or_else(respire::keystore::load_ds_last_base)
-        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned())
+        .or_else(provider_settings::load_ds_last_base)
+        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned()))
 }
 
 fn key_for(base: &str) -> Option<String> {
@@ -30,34 +31,34 @@ fn key_for(base: &str) -> Option<String> {
         .ok()
         .filter(|key| !key.trim().is_empty())
         .or_else(|| {
-            respire::keystore::load_classify_key(&format!(
+            provider_settings::load_classify_key(&format!(
                 "ds@{}",
-                respire::keystore::host_of(base)
+                provider_settings::host_of(base)
             ))
         })
 }
 
-pub(super) fn ready() -> bool {
-    key_for(&base()).is_some()
+pub(super) fn ready() -> Result<bool> {
+    Ok(key_for(&base()?).is_some())
 }
 
 impl Form {
-    pub(super) fn new() -> Self {
-        let config = respire::service::read_agent_config();
+    pub(super) fn new() -> Result<Self> {
+        let config = respire_client_host::settings::read_agent_config()?;
         let values = [
-            base(),
+            base()?,
             config["recall_model"]
                 .as_str()
                 .unwrap_or(crate::classify::DEFAULT_DS_MODEL)
                 .to_owned(),
             String::new(),
         ];
-        Self {
+        Ok(Self {
             values: values.map(Input::new),
             field: 0,
             error: String::new(),
             saving: None,
-        }
+        })
     }
 
     pub(super) fn paste(&mut self, text: &str) {
@@ -143,7 +144,10 @@ impl Form {
         anyhow::ensure!(
             !model.is_empty(),
             "{}",
-            t("\u{6a21}\u{578b}\u{540d}\u{4e0d}\u{80fd}\u{4e3a}\u{7a7a}", "Model name is required")
+            t(
+                "\u{6a21}\u{578b}\u{540d}\u{4e0d}\u{80fd}\u{4e3a}\u{7a7a}",
+                "Model name is required"
+            )
         );
         anyhow::ensure!(
             !key.is_empty() || key_for(base).is_some(),
@@ -154,8 +158,8 @@ impl Form {
             )
         );
         if !key.is_empty() {
-            respire::keystore::save_classify_key(
-                &format!("ds@{}", respire::keystore::host_of(base)),
+            provider_settings::save_classify_key(
+                &format!("ds@{}", provider_settings::host_of(base)),
                 key,
             )?;
         }
@@ -202,7 +206,10 @@ impl Form {
         }
         let mut lines: Vec<Line<'static>> = vec![choice(
             self.field == 3,
-            t("[ \u{4fdd}\u{5b58}\u{914d}\u{7f6e} ]", "[ Save configuration ]"),
+            t(
+                "[ \u{4fdd}\u{5b58}\u{914d}\u{7f6e} ]",
+                "[ Save configuration ]",
+            ),
         )];
         lines.push(line(t(
             "\u{5bc6}\u{94a5}\u{7559}\u{7a7a}\u{4fdd}\u{7559}\u{8be5}\u{5730}\u{5740}\u{5df2}\u{6709}\u{5bc6}\u{94a5}\u{ff1b}\u{65b0}\u{5bc6}\u{94a5}\u{5b58}\u{5165}\u{7cfb}\u{7edf}\u{51ed}\u{636e}\u{5e93}\u{3002}",
@@ -222,7 +229,10 @@ impl Form {
         if let Some((started, _)) = &self.saving {
             lines.push(line(format!(
                 "{} {}s",
-                t("\u{6b63}\u{5728}\u{4fdd}\u{5b58}\u{914d}\u{7f6e}", "Saving configuration"),
+                t(
+                    "\u{6b63}\u{5728}\u{4fdd}\u{5b58}\u{914d}\u{7f6e}",
+                    "Saving configuration"
+                ),
                 started.elapsed().as_secs()
             )));
         }

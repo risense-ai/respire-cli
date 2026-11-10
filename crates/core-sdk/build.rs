@@ -25,6 +25,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     {
         return Err("Test-only SDK requires the non-default native-fault-tests feature".into());
     }
+    if manifest["recall_fusion_contract"].as_u64() != Some(1) {
+        return Err("Core SDK lacks recall fusion contract 1; install the paired SDK".into());
+    }
     if manifest["recall_calibration_contract"].as_u64() != Some(1) {
         return Err("Core SDK lacks recall calibration contract 1; install the paired SDK".into());
     }
@@ -43,7 +46,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     for capability in ["embedding_profile_contract", "embedding_transport_contract"] {
         if manifest[capability].as_u64() != Some(1) {
-            return Err(format!("Core SDK lacks {capability} 1; install and pin the paired multi-model SDK").into());
+            return Err(format!(
+                "Core SDK lacks {capability} 1; install and pin the paired multi-model SDK"
+            )
+            .into());
         }
     }
     let target = env::var("TARGET")?;
@@ -129,7 +135,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Cargo does not stage SDK runtime dependencies next to executables.
     // OUT_DIR is <profile>/build/<package>/out; tests also run in <profile>/deps.
     let out = PathBuf::from(env::var_os("OUT_DIR").ok_or("missing OUT_DIR")?);
-    fs::write(out.join("feedback_contract.rs"),manifest["feedback_contract"].as_u64().unwrap_or(0).to_string())?;
+    fs::write(
+        out.join("feedback_contract.rs"),
+        manifest["feedback_contract"]
+            .as_u64()
+            .unwrap_or(0)
+            .to_string(),
+    )?;
     let profile = out
         .parent()
         .and_then(|path| path.parent())

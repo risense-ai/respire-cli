@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import dev_model_fixture as model
+from dev_migration_diagnostics import migration_failure_diagnostics
 # This existing CI entry covers both native public input caches.
 from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest
 
@@ -17,15 +18,52 @@ model_cache = importlib.util.module_from_spec(cache_spec)
 cache_spec.loader.exec_module(model_cache)
 
 
+class MigrationDiagnosticsTests(unittest.TestCase):
+    def test_only_fixed_outcome_and_phase_are_reported(self):
+        for outcome in ("unknown", "completed", "already_migrated"):
+            for phase in ("initial_request", "result_query"):
+                value = {"command": "migrate", "summary": {"outcome": outcome,
+                    "request_phase": phase, "operation_id": "synthetic-private-id",
+                    "account": "synthetic-private-account", "root": "synthetic-private-root"},
+                    "details": {"token": "synthetic-secret"},
+                    "actions": ["synthetic-secret"], "errors": ["synthetic-secret"]}
+                self.assertEqual(migration_failure_diagnostics(value), {
+                    "migration_outcome": outcome, "migration_request_phase": phase})
+                self.assertNotIn("synthetic", json.dumps(migration_failure_diagnostics(value)))
+
+    def test_untrusted_or_absent_values_cannot_enter_report(self):
+        empty = {"migration_outcome": None, "migration_request_phase": None}
+        for value in (None, [], {}, {"command": "other", "summary": {"outcome": "unknown"}},
+                      {"command": "migrate", "summary": "synthetic-secret"}):
+            self.assertEqual(migration_failure_diagnostics(value), empty)
+        for value in ("unknown synthetic-secret", "synthetic-secret", [], {}, True, 1, None):
+            self.assertEqual(migration_failure_diagnostics({"command": "migrate",
+                "summary": {"outcome": value, "request_phase": value}}), empty)
+
+
 class NativeModelCacheTests(unittest.TestCase):
     def test_public_pins_match_existing_consumers_and_key_covers_every_input(self):
         root = Path(__file__).parents[1]
-        installer = (root / "cli/src/model_install.rs").read_text(encoding="utf-8")
+        installer = (root / "crates/commands/src/model_install.rs").read_text(encoding="utf-8")
+        assets = (root / "crates/commands/src/model_asset_files.rs").read_text(encoding="utf-8")
         cpu = (root / "crates/core-sdk/src/cpu_model.rs").read_text(encoding="utf-8")
         fixture = (root / "scripts/test-real-m3-account-switch.py").read_text(encoding="utf-8")
-        self.assertIn(model_cache.REVISION, installer)
+        self.assertIn(f'pub const MODEL_REVISION: &str = "{model_cache.REVISION}";', assets)
+        self.assertIn('pub const MODEL_REPO: &str = "Xenova/bge-m3";', assets)
+        self.assertIn('pub use crate::model_asset_files::{MODEL_REPO, MODEL_REVISION};', installer)
+        self.assertIn('use crate::model_asset_files::{file_url, replace_file};', installer)
+        self.assertNotIn('const MODEL_REVISION:', installer)
+        self.assertNotIn('const MODEL_REPO:', installer)
+        self.assertIn('install_variant_into(variant, &dest, &origins)', installer)
+        self.assertRegex(installer, (
+            r"crate::model_asset_files::install_variant_into\(\s*"
+            r"variant.name,\s*&file,\s*variant.sha256,\s*variant.size,\s*"
+            r"pinned_size\(variant.sha256\),\s*dest,\s*origins,?\s*\)"
+        ))
         for name, digest in model_cache.FILES.items():
             self.assertIn(digest, cpu if name.endswith(".ort") else fixture)
+            if name in ("tokenizer.json", "onnx/model_quantized.onnx"):
+                self.assertIn(digest, installer)
         self.assertEqual(len(model_cache.FILES), 4)
         key = model_cache.cache_key()
         self.assertRegex(key, r"^native-model-v1-[a-f0-9]{64}$")

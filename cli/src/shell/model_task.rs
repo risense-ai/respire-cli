@@ -10,6 +10,7 @@ pub(super) struct Task {
     pub cancel: Arc<AtomicBool>,
     finished: Arc<AtomicBool>,
     progress: Arc<Mutex<Result<Value, String>>>,
+    cancellation_error: Arc<Mutex<Option<String>>>,
     started: Instant,
 }
 
@@ -20,16 +21,37 @@ impl Task {
             cancel: Arc::new(AtomicBool::new(false)),
             finished: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Mutex::new(Ok(Value::Null))),
+            cancellation_error: Arc::new(Mutex::new(None)),
             started: Instant::now(),
         };
         let cancel = Arc::clone(&task.cancel);
         let finished = Arc::clone(&task.finished);
         let progress = Arc::clone(&task.progress);
+        let cancellation_error = Arc::clone(&task.cancellation_error);
         let id = task.id.clone();
         std::thread::spawn(move || {
+            let mut cancel_sent = false;
             while !finished.load(Ordering::Acquire) {
-                let result = crate::rpc::model_control(&id, cancel.load(Ordering::Acquire))
+                let request_cancel = cancel.load(Ordering::Acquire) && !cancel_sent;
+                // An unconfirmed cancellation must not be replayed as a new operation.
+                cancel_sent |= request_cancel;
+                let result = crate::rpc::model_control(&id, request_cancel)
                     .map_err(|error| error.to_string());
+                if let Ok(mut slot) = cancellation_error.lock() {
+                    if request_cancel {
+                        *slot = match &result {
+                            Err(error) => Some(format!("Cancellation failed or outcome unknown: {error}; not replayed")),
+                            Ok(value) if value["stale"] == true => Some("Cancellation was not accepted: the model task changed".to_owned()),
+                            Ok(value) if value["active"] == true && value["cancelled"] != true => Some("Cancellation was not confirmed; inspect the original operation before retrying".to_owned()),
+                            _ => None,
+                        };
+                    } else if result
+                        .as_ref()
+                        .is_ok_and(|value| value["cancelled"] == true || value["active"] == false)
+                    {
+                        *slot = None;
+                    }
+                }
                 if let Ok(mut slot) = progress.lock() {
                     *slot = result;
                 }
@@ -47,6 +69,7 @@ impl Task {
             .map(|value| value.clone())
             .unwrap_or_else(|_| Err("progress lock poisoned".into()));
         match progress {
+            Ok(value) if value["stale"] == true => lines.push(fail_line("The model task changed; refresh progress".to_owned())),
             Ok(value) if value["active"] == true => {
                 let phase = value["phase"].as_str().unwrap_or("");
                 let label = match phase {
@@ -108,6 +131,15 @@ impl Task {
             t("\u{5df2}\u{7528}\u{65f6}", "Elapsed"),
             self.started.elapsed().as_secs()
         )));
+        let cancellation_error = self
+            .cancellation_error
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| Some("Cancellation state unavailable".to_owned()));
+        if let Some(error) = cancellation_error {
+            lines.push(fail_line(error));
+            return lines;
+        }
         lines.push(line(if self.cancel.load(Ordering::Acquire) {
             t(
                 "\u{5df2}\u{8bf7}\u{6c42}\u{53d6}\u{6d88}\u{ff0c}\u{7b49}\u{5f85}\u{5f53}\u{524d}\u{7f51}\u{7edc}\u{8bfb}\u{53d6}\u{6216}\u{63a8}\u{7406}\u{7ed3}\u{675f}\u{2026}",
