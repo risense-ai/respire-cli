@@ -396,6 +396,38 @@ function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
     throw 'Owned model/index work did not finish within the bounded installation deadline.'
 }
 
+# Host keygen commits keys but deliberately leaves its original operation Paused.
+# Only a positively completed keygen may request the normal explicit Start once.
+function Complete-SmokeKeygen([string]$Name, $Keygen, [string]$DataDir) {
+    Assert-Smoke "$Name-committed" ($Keygen.Ok -eq $true -and $Keygen.Exit -eq 0 `
+        -and [string]$Keygen.Envelope.command -ceq 'keygen' `
+        -and [string]$Keygen.Envelope.status -ceq 'ok' `
+        -and [bool]$Keygen.Envelope.summary.super `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Keygen.Envelope.summary.path) `
+        -and @($Keygen.Envelope.actions) -ccontains 'runtime start')
+    $profile = [IO.Path]::GetFullPath((Split-Path -Parent ([string]$Keygen.Envelope.summary.path)))
+    $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-owned-profile" ($profile -eq $device -or $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar))
+    # No HostProfile stop/direct wrapper and no readiness retry: an uncertain
+    # Start must retain its durable evidence, not replay or replace the operation.
+    $started = Invoke-Om -Name "$Name-explicit-start" -ArgList @('--json', 'runtime', 'start') `
+        -DataDir $DataDir -AllowStatus @('ok') -NoReadyRetry
+    Assert-Smoke "$Name-started" ($started.Ok -eq $true -and $started.Exit -eq 0 `
+        -and [string]$started.Envelope.command -ceq 'runtime.start' `
+        -and [string]$started.Envelope.status -ceq 'ok')
+    $health = Get-OwnedRuntimeHealth $DataDir
+    $activeProfile = [IO.Path]::GetFullPath([string]$health.data_dir)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $activeProfile = $activeProfile -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-ready" ($activeProfile -eq $profile -and $health.store_ready -eq $true)
+}
+
 function Invoke-Om {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -406,6 +438,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [switch]$NoReadyRetry,
         [switch]$AllowDestructiveMcpFixture,
         [switch]$AllowIndexWait,
         [string]$ModelTaskId = '',
@@ -423,8 +456,8 @@ function Invoke-Om {
     }
     $script:ActiveDataDir = $DataDir
     if ($HostProfile) {
-        # Only stop this disposable sweep runtime. The following normal command
-        # autostarts its replacement after the host has switched the profile.
+        # Only stop this disposable sweep runtime. Ordinary profile changes may
+        # autostart a replacement; successful host keygen instead requires explicit Start.
         Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
             -DataDir $DataDir -Raw -ExpectExit @(0, 2) | Out-Null
         Stop-OurRuntimes
@@ -599,7 +632,7 @@ function Invoke-Om {
             $Note = ("command=$got total=$total want $RequireCommand " + $Note).Trim()
         }
     }
-    $readyFail = ($stdout + $stderr) -match 'did not become ready'
+    $readyFail = -not $NoReadyRetry -and (($stdout + $stderr) -match 'did not become ready')
         if ($readyFail -and $readyTries -lt 2) { Stop-OurRuntimes; Start-Sleep -Seconds 1 }
     $retryIndexPending = $AllowIndexWait -and -not $indexRetried -and -not $timedOut `
         -and $exit -eq 2 -and $status -ceq 'pending' -and [string]$envlp.summary.state -ceq 'index_pending' `
@@ -869,6 +902,7 @@ $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
 $offlineKeys = Invoke-Om -Name 'keygen-local-success' -ArgList @('--json', 'keygen', '--pass', (New-Pass)) -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-local-v4-material' ($offlineKeys.Ok -and [bool]$offlineKeys.Envelope.summary.super -and (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
+Complete-SmokeKeygen 'keygen-local' $offlineKeys $offlineDir
 $firstLocalWrap = (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk
 $offlineEntry = Invoke-Om -Name 'keygen-local-write' -ArgList @('--json', 'remember', "offline-$stamp", '--title', "offline-$stamp", '--importance', 'important', '--force') -DataDir $offlineDir
 $offlineId = [string]$offlineEntry.Envelope.summary.id
@@ -878,6 +912,7 @@ $localRefuse = Invoke-Om -Name 'keygen-local-overwrite-refused' -ArgList @('--js
 Assert-Smoke 'keygen-local-overwrite-guard' ($localRefuse.Ok -and $localRefuse.Exit -eq 1 -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -eq $firstLocalWrap)
 $forcedKeys = Invoke-Om -Name 'keygen-force-disposable' -ArgList @('--json', 'keygen', '--force') -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-force-rotates-material' ($forcedKeys.Ok -and [bool]$forcedKeys.Envelope.summary.super -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -ne $firstLocalWrap)
+Complete-SmokeKeygen 'keygen-force' $forcedKeys $offlineDir
 $offlineLogout = Invoke-Om -Name 'offline-full-logout' -ArgList @('--json', 'logout', '--full') -DataDir $offlineDir -HostProfile
 Assert-Smoke 'full-logout-session-file-removed' ($offlineLogout.Ok -and -not (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
 
@@ -1525,6 +1560,7 @@ $resetDir = Join-Path $Root 'reset-vault'
 Invoke-Om -Name 'reset-vault-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $resetDir | Out-Null
 Invoke-Om -Name 'reset-vault-baseline-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile | Out-Null
 $resetKeys = Invoke-Om -Name 'reset-vault-local-keygen' -ArgList @('--json', 'keygen', '--force') -DataDir $resetDir -Secret -HostProfile
+Complete-SmokeKeygen 'reset-vault-keygen' $resetKeys $resetDir
 $mismatched = Invoke-Om -Name 'reset-vault-old-local-write' -ArgList @('--json', 'remember', "reset-local-old-key-$stamp", '--title', "reset-local-$stamp", '--importance', 'important', '--force') -DataDir $resetDir
 $mismatchedId = [string]$mismatched.Envelope.summary.id
 Assert-Smoke 'reset-vault-mismatched-fixture-written' ($resetKeys.Ok -and [bool]$resetKeys.Envelope.summary.super -and $mismatched.Ok -and [bool]$mismatchedId)

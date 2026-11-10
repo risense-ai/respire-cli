@@ -284,13 +284,49 @@ def runtime_scope_ids(root, profile, session):
     return installation, account
 
 
+HEALTH_FAILURE_CODES = frozenset({
+    'runtime_health_verification_failed', 'runtime_health_profile_escape',
+    'runtime_health_installation_not_private_owned', 'runtime_health_fields_mismatch',
+    'runtime_health_os_disk_image_mismatch', 'runtime_health_disk_image_changed',
+    'runtime_health_image_changed_during_inspection', 'runtime_health_digest_mismatch',
+    'runtime_health_os_identity_changed',
+})
+HEALTH_FIELDS = (
+    'protocol', 'pid', 'selected_image', 'exe', 'image_path', 'process_start_id',
+    'runtime_version', 'bin_version', 'installation_root', 'installation_id',
+    'profile', 'account_id', 'instance_id', 'generation',
+)
+
+
+class RuntimeHealthFailure(AssertionError):
+    """Only fixed identifiers, never health values or exception text, leave the verifier."""
+    def __init__(self, code, fields=()):
+        self.code = code if type(code) is str and code in HEALTH_FAILURE_CODES else 'runtime_health_verification_failed'
+        self.fields = tuple(name for name in HEALTH_FIELDS if name in fields)
+        super().__init__(self.code)
+
+    def diagnostic(self):
+        return {'failure_code': self.code, 'failed_fields': list(self.fields)}
+
+
 def verify_runtime_health(args, health, root, profile, pid=None):
+    try:
+        return _verify_runtime_health(args, health, root, profile, pid)
+    except RuntimeHealthFailure:
+        raise
+    except Exception:
+        # Malformed health/session data and OS errors still fail closed. Never
+        # propagate an arbitrary message, path, account, or dynamically named type.
+        raise RuntimeHealthFailure('runtime_health_verification_failed') from None
+
+
+def _verify_runtime_health(args, health, root, profile, pid=None):
     import psutil
     root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
     if not profile.is_relative_to(root):
-        raise AssertionError('Runtime profile escaped the owned fixture installation')
+        raise RuntimeHealthFailure('runtime_health_profile_escape')
     if os.name == 'posix' and (root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
-        raise AssertionError('Runtime fixture installation must be private and owned')
+        raise RuntimeHealthFailure('runtime_health_installation_not_private_owned')
     owner = psutil.Process(health['pid'])
     birth, created = process_start_id(owner.pid), owner.create_time()
     image = pathlib.Path(owner.exe()).resolve(strict=True)
@@ -322,7 +358,7 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
-        raise AssertionError('standalone Runtime process/health/scope mismatch: ' + ', '.join(failed))
+        raise RuntimeHealthFailure('runtime_health_fields_mismatch', failed)
     identity = (owner.pid, birth, health['instance_id'], health['account_id'], health['generation'])
     previous = next((item for item in args.runtime_identity_receipts
                      if item['_identity'] == identity), None)
@@ -337,22 +373,22 @@ def verify_runtime_health(args, health, root, profile, pid=None):
         opened = os.fstat(stream.fileno())
         opened_identity = file_identity(opened)
         if opened_identity != file_identity(image.stat()):
-            raise AssertionError('OS image and verified Runtime disk file differ')
+            raise RuntimeHealthFailure('runtime_health_os_disk_image_mismatch')
         if previous is None:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         else:
             if previous['_file_identity'] != opened_identity:
-                raise AssertionError('Runtime disk file changed after verification')
+                raise RuntimeHealthFailure('runtime_health_disk_image_changed')
             digest = previous['image_sha256']
         if (file_identity(os.fstat(stream.fileno())) != opened_identity
                 or file_identity(image.stat()) != opened_identity):
-            raise AssertionError('Runtime image file changed during digest inspection')
+            raise RuntimeHealthFailure('runtime_health_image_changed_during_inspection')
         if digest != args.runtime_sha256 or health.get('image_sha256') != digest:
-            raise AssertionError('standalone Runtime disk image digest mismatch')
+            raise RuntimeHealthFailure('runtime_health_digest_mismatch')
         # New psutil objects force independent post-inspection OS queries.
         if (process_start_id(owner.pid) != birth or psutil.Process(owner.pid).create_time() != created
                 or pathlib.Path(psutil.Process(owner.pid).exe()).resolve(strict=True) != image):
-            raise AssertionError('Runtime OS identity changed during inspection')
+            raise RuntimeHealthFailure('runtime_health_os_identity_changed')
     if previous is None:
         receipt = {key: health[key] for key in ('installation_root', 'data_dir', 'account_id',
                    'instance_id', 'generation', 'process_start_id')}

@@ -57,6 +57,12 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON((inputs.local_api_only || inputs.auth_salt_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+    # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
+    # of the harness source and never reusable as publication evidence.
+    env:
+      ARTIFACT_SOURCE: build
+      VALIDATION_PROFILE: full
+      RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -117,6 +123,71 @@ jobs:
           cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
           fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\n`);
           NODE
+      - uses: actions/setup-python@v5
+        id: supplement_python
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' }}
+        with:
+          python-version: '3.12'
+      - name: Bind diagnostic fixtures to the CLI's official pinned Runtime
+        id: standalone_runtime
+        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' && steps.supplement_python.outcome == 'success' }}
+        shell: bash
+        env:
+          CLI_SHA: ${{ inputs.cli_sha }}
+          CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          RSRS_DATA_DIR: ${{ runner.temp }}/diagnostic-runtime-proof
+        run: |
+          set -euo pipefail
+          exe=validated-cli/rsrs
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          node scripts/ci-install-pinned-runtime.mjs "$exe"
+          node - "$exe" <<'NODE'
+          const fs=require('fs'),path=require('path'),cp=require('child_process'),assert=require('assert/strict'),{createHash}=require('crypto');
+          const hash=value=>createHash('sha256').update(value).digest('hex');
+          const binary=fs.realpathSync(process.argv[2]),root=process.env.RSRS_DATA_DIR;
+          const env={...process.env,HOME:path.join(root,'home'),USERPROFILE:path.join(root,'home'),RSRS_UPDATE_CHECK:'0',RSRS_NO_AUTOSYNC:'1'};
+          for(const key of Object.keys(env)) if(['RSRS_RUNTIME_BIN','RSRS_CORE_TEST_MODE','GH_TOKEN','GITHUB_TOKEN'].includes(key)||key.endsWith('_TOKEN')||key.endsWith('_API_KEY')) delete env[key];
+          const invoke=args=>cp.execFileSync(binary,args,{env,encoding:'utf8',timeout:30000}).trim();
+          const pin=JSON.parse(fs.readFileSync('runtime-pin.json','utf8'));
+          const inventory=JSON.parse(invoke(['--json','runtime','list']));
+          assert.equal(inventory.command,'runtime.list');assert.equal(inventory.status,'ok');
+          assert.equal(inventory.summary.required,pin.required,'Harness and actual CLI Runtime pins differ');
+          assert.equal(inventory.summary.accept,pin.accept,'Harness and actual CLI Runtime accept ranges differ');
+          const metadata=JSON.parse(fs.readFileSync(`validated-cli/cli-build-${process.env.RSRS_RUNTIME_TRIPLE}.json`,'utf8'));
+          assert.equal(metadata.git_sha,process.env.CLI_SHA);
+          assert.equal(String(metadata.producer.run_id),process.env.CLI_RUN_ID,'CLI artifact producer differs');
+          assert.equal(hash(fs.readFileSync(binary)),metadata.binary_sha256);
+          const version=JSON.parse(invoke(['--json','v'])),display=invoke(['--version']);
+          assert.equal(version.command,'version');assert.equal(version.status,'ok');
+          assert.equal(version.summary.version,metadata.version);assert.equal(display,`rsrs ${metadata.version}`);
+          const receipt=JSON.parse(fs.readFileSync(path.join(root,'runtime.json'),'utf8'));
+          const runtimeMetadata=JSON.parse(receipt.release.metadata_json);
+          assert.equal(receipt.version,pin.required);
+          assert.equal(hash(receipt.release.metadata_json),receipt.release.metadata_sha256);
+          assert.equal(runtimeMetadata.binary_sha256,receipt.sha256);
+          assert.equal(runtimeMetadata.runtime_version,pin.required);
+          assert.equal(runtimeMetadata.target_triple??runtimeMetadata.triple,process.env.RSRS_RUNTIME_TRIPLE);
+          const runtime=fs.realpathSync(path.join(root,'runtime',pin.required,'rsrs-runtime'+(process.platform==='win32'?'.exe':'')));
+          assert.notEqual(runtime,binary);assert.equal(hash(fs.readFileSync(runtime)),receipt.sha256);
+          assert.match(process.env.GITHUB_SHA,/^[a-f0-9]{40}$/);
+          const evidence={schema:1,kind:'standalone-cli-diagnostic',diagnostic_only:true,publication_reusable:false,
+            full_acceptance:false,harness_sha:process.env.GITHUB_SHA,cli_source_sha:metadata.git_sha,
+            diagnostic_run_id:process.env.GITHUB_RUN_ID,diagnostic_run_attempt:process.env.GITHUB_RUN_ATTEMPT,
+            producer:metadata.producer,target:metadata.target,cli:{version:version.summary.version,version_display:display,binary_sha256:metadata.binary_sha256},
+            runtime:{version:receipt.version,binary_sha256:receipt.sha256,required:inventory.summary.required,accept:inventory.summary.accept,
+              release_metadata_sha256:receipt.release.metadata_sha256,release_metadata:runtimeMetadata},
+            limits:['Installation identity only; fixture outcomes are separate','An old CLI producer cannot establish full acceptance or publication of the new harness']};
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'standalone-diagnostic-identity.json'),JSON.stringify(evidence,null,2)+'\n');
+          NODE
+      - name: Prepare persistent native credentials for diagnostic fixtures
+        id: native_credentials
+        if: ${{ !cancelled() && runner.os == 'Linux' && steps.standalone_runtime.outcome == 'success' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+          python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
       - name: Install PowerShell
         if: ${{ !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Windows' }}
         shell: bash
@@ -135,7 +206,7 @@ jobs:
             brew install powershell
           fi
       - name: Sweep the exact CI binary
-        if: ${{ !inputs.local_api_only && !inputs.auth_salt_only }}
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           RSRS_LANG: en
@@ -148,7 +219,13 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
-          ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+          if ($IsLinux) {
+            & dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root (Join-Path $env:RUNNER_TEMP 'base-sweep-credentials') --timeout 6600 -- pwsh -NoProfile -File scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Upload base smoke diagnostics
         if: ${{ always() && !inputs.local_api_only && !inputs.auth_salt_only }}
         uses: actions/upload-artifact@v4
@@ -158,14 +235,10 @@ jobs:
           path: |
             ${{ runner.temp }}/om-sweep/report.md
             ${{ runner.temp }}/om-sweep/coverage.json
+            ${{ runner.temp }}/base-sweep-credentials/business-keyring-selftest.json
           if-no-files-found: warn
-      - uses: actions/setup-python@v5
-        id: supplement_python
-        if: ${{ !cancelled() && steps.verified_artifact.outcome == 'success' }}
-        with:
-          python-version: '3.12'
       - name: Verify all supplementary CLI contracts
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -176,9 +249,9 @@ jobs:
           python3 -m pip install --only-binary=:all: cryptography==46.0.3
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/supplement-credentials" --timeout 6600 -- python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
       - name: Verify historical Secret Service profile migration
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -197,7 +270,7 @@ jobs:
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
       - name: Verify native encrypted profile migration
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -216,7 +289,7 @@ jobs:
           python scripts/dev-smoke-gate.py --migration-only --cli-report (Join-Path $env:RUNNER_TEMP 'om-sweep/coverage.json') --profile-migration (Join-Path $migrationRoot 'migration-coverage.json') --report (Join-Path $env:RUNNER_TEMP 'dev-supplements/migration-platform-gate.json') --binary-sha256 $checksum --version $env:CLI_VERSION --source-sha $env:CLI_SHA
           if ($migrationExit -ne 0 -or $LASTEXITCODE -ne 0) { throw 'Native migration or artifact gate failed.' }
       - name: Verify real legacy authentication salt migration
-        if: ${{ !cancelled() && inputs.auth_salt_only && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && inputs.auth_salt_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -230,7 +303,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/dev-supplements"
           python3 scripts/dev-legacy-vault-smoke.py --auth-salt-only --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements/legacy-vault"
       - name: Diagnose runtime contracts without a full release claim
-        if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' }}
+        if: ${{ !cancelled() && inputs.local_api_only && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -250,6 +323,9 @@ jobs:
           path: |
             ${{ runner.temp }}/om-sweep/report.md
             ${{ runner.temp }}/om-sweep/coverage.json
+            ${{ runner.temp }}/base-sweep-credentials/business-keyring-selftest.json
+            ${{ runner.temp }}/supplement-credentials/business-keyring-selftest.json
+            ${{ runner.temp }}/standalone-diagnostic-identity.json
             ${{ runner.temp }}/dev-supplements/suite-results.json
             ${{ runner.temp }}/dev-supplements/combined-coverage.json
             ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json

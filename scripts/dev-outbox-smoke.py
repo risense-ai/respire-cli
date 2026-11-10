@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dev_model_fixture import share_cpu_container
 from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
-                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt, RuntimeHealthFailure)
 
 UPSTREAM = "https://api-dev.rsrs.rs"
 
@@ -623,6 +623,9 @@ def main():
         require(not report["cleanup"]["remaining_users"] and not report["cleanup"]["unconfirmed_users"]
                 and all(event["passed"] for event in report["cleanup"]["events"]), "fixture_cleanup_failed")
         report["passed"] = True
+    except RuntimeHealthFailure as error:
+        report["failure_code"] = error.code
+        report["failure_diagnostic"] = error.diagnostic()
     except Exception as error:
         # Only harness-owned error codes are safe for public diagnostics.
         report["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
@@ -636,7 +639,7 @@ def main():
     safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
     if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():
         (args.root / "outbox-coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "remaining": report["remaining"], "cleanup": cleanup}))
+    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "failure_diagnostic": report.get("failure_diagnostic"), "remaining": report["remaining"], "cleanup": cleanup}))
     return 0 if report["passed"] else 1
 
 

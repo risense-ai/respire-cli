@@ -148,14 +148,20 @@ class SecretServiceKeys(_base.TrackedKeys):
         return {"target": "default", "service": service, "username": slot,
                 "application": "rust-keyring"}
 
-    def register_current_target(self, user):
-        require(not self.current_target_entries and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user),
+    def register_current_target(self, session, user):
+        # Registration has already created and verified these exact login slots.
+        # Bind normalization to that returned alias, never reserved username slots.
+        alias = session.get("keyring_account")
+        require(not self.current_target_entries
+                and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                and session.get("user") == user
+                and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "fixture_current_target_registration_invalid")
-        entries = {("rsrs", prefix + user) for prefix in ("super:", "pass:")}
+        entries = {("rsrs", prefix + alias) for prefix in ("super:", "pass:")}
         for entry in entries:
-            require(entry in self.entries and entry not in self.attribute_snapshots
-                    and self._find(*entry, check_snapshot=False) is None,
-                    "fixture_current_target_not_fresh_owned_entry")
+            require(entry in self.entries and entry in self.attribute_snapshots
+                    and self._find(*entry) is not None,
+                    "fixture_current_target_not_verified_owned_entry")
         self.current_target_entries.update(entries)
 
     def _find(self, service, slot, check_snapshot=True):

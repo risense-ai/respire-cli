@@ -1387,6 +1387,21 @@ jobs:
         run: python3 -B scripts/test-native-account-candidate.py
       - run: python3 scripts/test-dev-fixture-tty.py
       - run: python3 scripts/test-dev-witness-fixture.py
+      - name: Install pinned offline credential-fixture dependency
+        run: |
+          python3 -m pip install --only-binary=:all: cryptography==46.0.3
+      - name: Verify exact credential alias ownership and legacy vault fixtures
+        run: python3 -B scripts/test-dev-credential-alias-fixtures.py
+      - name: Verify safe full-release failure diagnostics
+        run: python3 -B scripts/test-full-release-diagnostics.py
+      - name: Verify owned login interruption and terminal recovery fixtures
+        run: python3 -B scripts/test-login-interruption-contract.py
+      - name: Verify current native seed readiness before shutdown
+        run: python3 -B scripts/test-native-seed-readiness.py
+      - name: Verify Runtime forwarding rejection and owned cleanup
+        run: python3 -B scripts/test-runtime-forwarding-rejection.py
+      - name: Verify standalone diagnostic sweep identity and failure guards
+        run: node --test npm/scripts/test-dev-sweep-standalone-contract.mjs
       - name: Validate release sweep PowerShell syntax
         shell: pwsh
         run: |
@@ -1395,6 +1410,7 @@ jobs:
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
           & ./scripts/test-account-failure-diagnostics.ps1
+          & ./scripts/test-keygen-fixture-handoff.ps1
 
   client2-focus-contract:
     runs-on: windows-latest

@@ -6,6 +6,9 @@ credentials, command arguments, plaintext responses or raw subprocess logs.
 Legacy mode is explicitly separate from standalone Runtime evidence; neither is G1.
 """
 import argparse
+import ctypes
+import multiprocessing
+import signal
 import hashlib
 import json
 import os
@@ -23,12 +26,32 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
-                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt, RuntimeHealthFailure)
 
 
 REQUIRED = json.loads(Path(__file__).with_name('dev-runtime-required.json').read_text(encoding='utf-8'))['required_cases']
 DEV = 'https://api-dev.rsrs.rs'
 DASH = 'https://dash.rsrs.rs'
+
+
+DIRECT_CASE_IDS = frozenset({'owned_cli', 'nonloopback_unspecified_ipv4',
+                             'nonloopback_documentation_ipv4', 'nonloopback_dns'})
+CLI_REASONS = frozenset({'invalid_input', 'runtime_error', 'request_outcome_unknown'})
+
+
+def exit_diagnostic(case_id, expected, result):
+    reason = 'unknown'
+    try:
+        value = json.loads(result.stdout.strip().splitlines()[-1])
+        candidate = value.get('summary', {}).get('reason')
+        if type(candidate) is str and candidate in CLI_REASONS:
+            reason = candidate
+    except (ValueError, IndexError, AttributeError, TypeError):
+        pass
+    return {'case_id': case_id if type(case_id) is str and case_id in DIRECT_CASE_IDS else 'owned_cli',
+            'expected_exit': expected if type(expected) is int else None,
+            'actual_exit': result.returncode if type(result.returncode) is int else None,
+            'structured_reason': reason}
 
 
 class Failure(Exception):
@@ -38,6 +61,165 @@ class Failure(Exception):
 def require(condition, code):
     if not condition:
         raise Failure(code)
+
+
+def rejection_children():
+    # This is the private subreaper's direct/adopted children, not a PID sweep.
+    pid = os.getpid()
+    return [int(value) for value in Path(f'/proc/{pid}/task/{pid}/children').read_text().split()]
+
+
+def preflight_rejection_pidfd():
+    require(hasattr(os, 'pidfd_open') and hasattr(signal, 'pidfd_send_signal'),
+            'nonloopback_containment_unavailable')
+    fd = os.pidfd_open(os.getpid())
+    try:
+        signal.pidfd_send_signal(fd, 0)
+    finally:
+        os.close(fd)
+
+
+def kill_rejection_child(pid):
+    # This single-threaded supervisor never reaps between identity verification
+    # and signaling. A direct/adopted child's PID cannot be reused until reaped.
+    try:
+        before = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+        fd = None
+        degraded = False
+        try:
+            try:
+                fd = os.pidfd_open(pid)
+            except OSError:
+                degraded = True
+            after = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[19]
+            require(before == after and pid in rejection_children(), 'nonloopback_cleanup_identity_failed')
+            if fd is None:
+                os.kill(pid, signal.SIGKILL)
+            else:
+                try:
+                    signal.pidfd_send_signal(fd, signal.SIGKILL)
+                except OSError:
+                    # Still our unreaped child, with no intervening waitpid.
+                    os.kill(pid, signal.SIGKILL)
+                    degraded = True
+            return degraded
+        finally:
+            if fd is not None:
+                os.close(fd)
+    except (ProcessLookupError, FileNotFoundError):
+        return False
+
+
+def reap_rejection_children(deadline):
+    leaked = False
+    failed = False
+    while True:
+        children = rejection_children()
+        if not children:
+            require(not failed, 'nonloopback_cleanup_failed')
+            return leaked
+        leaked = True
+        for pid in children:
+            try:
+                failed = kill_rejection_child(pid) is True or failed
+            except Exception:
+                # One child failure must not strand the other owned children.
+                failed = True
+        while True:
+            try:
+                pid, _ = os.waitpid(-1, os.WNOHANG)
+            except ChildProcessError:
+                break
+            except OSError:
+                failed = True
+                break
+            if pid == 0:
+                break
+        require(time.monotonic() < deadline, 'nonloopback_cleanup_timeout')
+        time.sleep(0.01)
+
+
+def rejection_supervisor(connection, command, env, root, timeout):
+    # A dedicated subreaper retains even setsid() descendants after CLI exit.
+    # The parent fixture and unrelated children are outside this boundary.
+    response = {'error': 'nonloopback_execution_failed'}
+    process = None
+    def interrupted(signum, frame):
+        raise OSError('supervisor interrupted')
+    signal.signal(signal.SIGTERM, interrupted)
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        require(libc.prctl(36, 1, 0, 0, 0) == 0, 'nonloopback_containment_unavailable')
+        preflight_rejection_pidfd()
+        process = subprocess.Popen(command, env=env, cwd=root, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            # A fast normal exit may already be a zombie, with no /proc exe.
+            if process.poll() is None:
+                try:
+                    image = Path(f'/proc/{process.pid}/exe').resolve(strict=True)
+                except FileNotFoundError:
+                    require(process.poll() is not None, 'nonloopback_process_image_mismatch')
+                else:
+                    require(image == Path(command[0]).resolve(strict=True),
+                            'nonloopback_process_image_mismatch')
+            stdout, stderr = process.communicate(timeout=timeout)
+            response = {'returncode': process.returncode, 'stdout': stdout, 'stderr': stderr}
+        except (OSError, subprocess.TimeoutExpired, Failure):
+            response = {'error': 'nonloopback_execution_failed'}
+    except Exception:
+        response = {'error': 'nonloopback_execution_failed'}
+    finally:
+        # Do not let another parent cancellation interrupt descendant cleanup.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            leaked = reap_rejection_children(time.monotonic() + 5)
+            if leaked:
+                response = {'error': 'nonloopback_descendant_cleanup_required'}
+            if process is not None:
+                # waitpid above can already have reaped the direct child.
+                process.wait(timeout=1)
+                process.stdout.close()
+                process.stderr.close()
+        except Exception:
+            response = {'error': 'nonloopback_cleanup_failed'}
+        try:
+            connection.send(response)
+        finally:
+            connection.close()
+
+
+def contained_rejection_run(command, env, root, timeout=90):
+    require(sys.platform.startswith('linux'), 'nonloopback_containment_unavailable')
+    context = multiprocessing.get_context('fork')
+    reader, writer = context.Pipe(duplex=False)
+    supervisor = context.Process(target=rejection_supervisor,
+                                 args=(writer, command, env, root, timeout))
+    started = False
+    try:
+        supervisor.start()
+        started = True
+        writer.close()
+        cancelled = not reader.poll(timeout + 10)
+        if cancelled:
+            supervisor.terminate()  # SIGTERM requests its finally cleanup, not SIGKILL.
+            require(reader.poll(10), 'nonloopback_cleanup_unconfirmed')
+        response = reader.recv()
+        supervisor.join(5)
+        require(not supervisor.is_alive() and supervisor.exitcode == 0,
+                'nonloopback_cleanup_unconfirmed')
+        require(not cancelled, 'nonloopback_execution_failed')
+        require('error' not in response, response.get('error', 'nonloopback_execution_failed'))
+        return subprocess.CompletedProcess([], response['returncode'], response['stdout'], response['stderr'])
+    except (EOFError, OSError):
+        raise Failure('nonloopback_execution_failed') from None
+    finally:
+        reader.close()
+        writer.close()
+        if started and supervisor.is_alive():
+            supervisor.terminate()
+            supervisor.join(10)
+        # Never forcibly kill a still-cleaning subreaper and abandon its children.
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -69,7 +251,7 @@ class Smoke:
         require(name in REQUIRED, 'unknown_runtime_case')
         self.report['cases'][name] = {'passed': True, **evidence}
 
-    def direct(self, args, timeout=90, stdin=None, expected=0):
+    def direct(self, args, timeout=90, stdin=None, expected=0, case_id='owned_cli'):
         try:
             result = subprocess.run([str(self.args.binary), '--direct', '--json', *args],
                                     env=self.env, cwd=self.root, input=stdin,
@@ -77,7 +259,9 @@ class Smoke:
                                     text=True, timeout=timeout)
         except (OSError, subprocess.TimeoutExpired):
             raise Failure('owned_cli_execution_failed') from None
-        require(result.returncode == expected, 'owned_cli_exit_mismatch')
+        if result.returncode != expected:
+            self.report['failure_diagnostic'] = exit_diagnostic(case_id, expected, result)
+            raise Failure('owned_cli_exit_mismatch')
         try:
             value = json.loads(result.stdout.strip().splitlines()[-1])
         except (ValueError, IndexError):
@@ -88,6 +272,65 @@ class Smoke:
         require(value['status'] in ('ok', 'skip') if expected == 0 else value['status'] == 'fail',
                 'owned_cli_status_mismatch')
         return value
+
+    def nonloopback_no_effects(self):
+        # Check before and after each individual probe, not only after the pair.
+        with socket.socket() as check:
+            check.settimeout(1)
+            require(check.connect_ex(('127.0.0.1', self.port)) != 0,
+                    'nonloopback_runtime_left_listener')
+        require(not (self.root / 'runtime/endpoint.json').exists()
+                and not (self.root / 'runtime/token').exists(),
+                'nonloopback_runtime_created_endpoint_or_token')
+
+    def nonloopback(self, host, case_id):
+        cases = {
+            '0.0.0.0': ('nonloopback_unspecified_ipv4', 'local runtime cannot bind a non-loopback address'),
+            '192.0.2.1': ('nonloopback_documentation_ipv4', 'local runtime cannot bind a non-loopback address'),
+            'example.invalid': ('nonloopback_dns', 'local runtime requires a literal loopback IP or localhost'),
+        }
+        require(host in cases and cases[host][0] == case_id, 'nonloopback_case_invalid')
+        self.nonloopback_no_effects()
+        if not self.args.runtime_binary:
+            # The explicitly selected legacy shim still has its CLI envelope contract.
+            self.direct(['--runtime-internal', '--host', host, '--port', str(self.port)],
+                        expected=1, case_id=case_id)
+            self.nonloopback_no_effects()
+            return
+        # CLI forwarding discards child stdio. Verify the same installed image's
+        # rejection separately via its supported unsupervised serve entry point.
+        # No boot token, grant, registration, or ownership state is manufactured.
+        launches = (
+            ('runtime_host_rejection', [str(self.args.runtime_binary), 'serve',
+             '--host', host, '--port', str(self.port)]),
+            ('cli_runtime_forwarding', [str(self.args.binary), '--direct', '--json',
+             '--runtime-internal', '--host', host, '--port', str(self.port)]),
+        )
+        for probe_id, command in launches:
+            self.nonloopback_no_effects()
+            try:
+                result = contained_rejection_run(command, self.env, self.root)
+            except (OSError, subprocess.TimeoutExpired):
+                raise Failure('nonloopback_execution_failed') from None
+            finally:
+                # The supervisor has already killed/reaped its exact descendants;
+                # check filesystem/listener effects even after launch/timeout errors.
+                self.nonloopback_no_effects()
+            # Only fixed identifiers and integer exits may leave this process.
+            self.report['failure_diagnostic'] = {
+                'case_id': case_id, 'probe_id': probe_id, 'expected_exit': 2,
+                'actual_exit': result.returncode if type(result.returncode) is int else None,
+            }
+            require(type(result.returncode) is int and result.returncode == 2,
+                    'nonloopback_exit_mismatch')
+            if probe_id == 'runtime_host_rejection':
+                require(result.stderr == 'rsrs-runtime: ' + cases[host][1] + '\n'
+                        and result.stdout == f'runtime=starting host={host} port={self.port}\n',
+                        'nonloopback_rejection_reason_mismatch')
+            else:
+                require(result.stdout == '' and result.stderr == '',
+                        'nonloopback_forwarding_output_mismatch')
+            self.report.pop('failure_diagnostic', None)
 
     def http(self, base, method, path, body=None, token=None, headers=None, raw=False):
         fields = {'Content-Type': 'application/json', **(headers or {})}
@@ -254,14 +497,10 @@ class Smoke:
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20)
             require(result.returncode != 0 and not endpoint.exists(), 'legacy_web_flag_was_accepted')
         self.passed('dashboard_legacy_flags_rejected')
-        for host in ('0.0.0.0', '192.0.2.1', 'example.invalid'):
-            self.direct(['--runtime-internal', '--host', host, '--port', str(self.port)], expected=1)
-            with socket.socket() as check:
-                check.settimeout(1)
-                require(check.connect_ex(('127.0.0.1', self.port)) != 0,
-                        'nonloopback_runtime_left_listener')
-            require(not endpoint.exists() and not (self.root / 'runtime/token').exists(),
-                    'nonloopback_runtime_created_endpoint_or_token')
+        for host, case_id in (('0.0.0.0', 'nonloopback_unspecified_ipv4'),
+                              ('192.0.2.1', 'nonloopback_documentation_ipv4'),
+                              ('example.invalid', 'nonloopback_dns')):
+            self.nonloopback(host, case_id)
         self.passed('runtime_nonloopback_rejected')
         client_home = self.root / 'client-only-home'
         old = client_home / '.onememory'
@@ -801,6 +1040,9 @@ def main():
         smoke.validation_errors()
         smoke.host_space_commands()
         smoke.update_check_comparisons()
+    except RuntimeHealthFailure as error:
+        smoke.report['failure_code'] = error.code
+        smoke.report['failure_diagnostic'] = error.diagnostic()
     except Exception as error:
         smoke.report['failure_code'] = str(error) if isinstance(error, Failure) else type(error).__name__
     finally:
@@ -816,6 +1058,7 @@ def main():
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(json.dumps(smoke.report, indent=2) + '\n', encoding='utf-8')
     print(json.dumps({'passed': smoke.report['passed'], 'failure_code': smoke.report.get('failure_code'),
+                      'failure_diagnostic': smoke.report.get('failure_diagnostic'),
                       'missing_cases': smoke.report['missing_cases'], 'cloud_cleanup': smoke.report['cloud_cleanup']}))
     return 0 if smoke.report['passed'] else 1
 
