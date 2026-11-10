@@ -64,6 +64,74 @@ function Get-DocumentUnavailableException([Exception]$Exception) {
     return $null
 }
 function New-DocumentReadinessClock { return [Diagnostics.Stopwatch]::StartNew() }
+function Read-DocumentProperty($Element, $Property, [switch]$Readiness) {
+    try { $value = $Element.GetCurrentPropertyValue($Property, $true) } catch {
+        $unavailable = Get-DocumentUnavailableException $_.Exception
+        if ($Readiness -and $null -ne $unavailable) {
+            $report.document_pid_diagnostic = 'element_unavailable'
+            return $unavailable
+        }
+        throw 'UIA document property method failed'
+    }
+    # Envelope preserves null, arrays and the exact provider type for validation.
+    return @{value=$value}
+}
+function Read-DocumentRuntimeId($Element, [switch]$Readiness) {
+    try { $value = @($Element.GetRuntimeId()) } catch {
+        $unavailable = Get-DocumentUnavailableException $_.Exception
+        if ($Readiness -and $null -ne $unavailable) {
+            $report.document_pid_diagnostic = 'element_unavailable'
+            return $unavailable
+        }
+        throw 'UIA document runtime identity method failed'
+    }
+    return @{value=$value}
+}
+function Assert-DocumentInspectionPid($Value, [int]$ExpectedPid, $AdmittedIds, $LiveIdentities) {
+    if ($Value -isnot [int] -or $Value -le 0 -or $Value -ne $ExpectedPid -or -not $AdmittedIds.Contains($Value)) {
+        throw 'UIA node process changed during inspection'
+    }
+    if ($null -ne $LiveIdentities) { Assert-DocumentNodeIdentity $Value $LiveIdentities }
+}
+function Read-DocumentNodeInfo($Element, [int]$ExpectedPid, $AdmittedIds, $LiveIdentities, [switch]$Readiness) {
+    # Each provider method has its own narrow catch. All validation is outside
+    # those catches and can never become a resample signal.
+    $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::ProcessIdProperty) -Readiness:$Readiness
+    if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+    Assert-DocumentInspectionPid $sample.value $ExpectedPid $AdmittedIds $LiveIdentities
+    $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::IsPasswordProperty) -Readiness:$Readiness
+    if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+    if ($sample.value -isnot [bool]) { throw 'UIA node password state is unknown' }
+    $name = ''
+    if (-not $sample.value) {
+        $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::NameProperty) -Readiness:$Readiness
+        if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+        if ($sample.value -isnot [string]) { throw 'UIA node name type is unknown' }
+        $name = $sample.value
+    }
+    $info = @{name=$name.Substring(0,[Math]::Min(128,$name.Length));process_id=$ExpectedPid}
+    $sample = Read-DocumentRuntimeId $Element -Readiness:$Readiness
+    if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+    if ($sample.value.Count -eq 0 -or @($sample.value | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'UIA node runtime identity is unknown' }
+    $info.runtime_id = $sample.value -join '.'
+    foreach ($field in @(
+        @{key='control_type';property=[Windows.Automation.AutomationElement]::ControlTypeProperty;type=[Windows.Automation.ControlType]},
+        @{key='automation_id';property=[Windows.Automation.AutomationElement]::AutomationIdProperty;type=[string]},
+        @{key='class_name';property=[Windows.Automation.AutomationElement]::ClassNameProperty;type=[string]},
+        @{key='keyboard_focusable';property=[Windows.Automation.AutomationElement]::IsKeyboardFocusableProperty;type=[bool]},
+        @{key='offscreen';property=[Windows.Automation.AutomationElement]::IsOffscreenProperty;type=[bool]}
+    )) {
+        $sample = Read-DocumentProperty $Element $field.property -Readiness:$Readiness
+        if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+        if ($null -eq $sample.value -or -not $field.type.IsInstanceOfType($sample.value)) { throw 'UIA node diagnostic property type is unknown' }
+        if ($field.key -eq 'control_type') { $info[$field.key]=$sample.value.ProgrammaticName }
+        else { $info[$field.key]=$sample.value }
+    }
+    $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::ProcessIdProperty) -Readiness:$Readiness
+    if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
+    Assert-DocumentInspectionPid $sample.value $ExpectedPid $AdmittedIds $LiveIdentities
+    return $info
+}
 function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.HashSet[int]]$AdmittedIds = $null, $LiveIdentities = $null) {
     if ($null -eq $AdmittedIds) { $AdmittedIds = $ownedIds }
     $window = Get-OfflineReplacementRoot
@@ -107,8 +175,9 @@ function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.Has
             throw 'UIA node belongs to an unbound process'
         }
         if ($null -ne $LiveIdentities) { Assert-DocumentNodeIdentity $nodePid $LiveIdentities }
-        $info = Element-Info $next.element; $info.depth = $next.depth
-        if ($info.process_id -ne $nodePid) { throw 'UIA node process changed during inspection' }
+        $info = Read-DocumentNodeInfo $next.element $nodePid $AdmittedIds $LiveIdentities -Readiness:$ReportUnknownProcess
+        if ($info -is [Windows.Automation.ElementNotAvailableException]) { return $info }
+        $info.depth = $next.depth
         $rows.Add($info)
         if ($next.depth -lt 32) {
             $child = $walker.GetFirstChild($next.element)
@@ -422,9 +491,17 @@ function Invoke-NativeGuiProbe {
 }
 
 # Inserted into the existing system-PS5 helper. These functions do not execute when parsed.
-function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10, [switch]$AllowAbsent) {
+function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10, [switch]$AllowAbsent, [switch]$ObserveStartStopSelector) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
+    if ($ObserveStartStopSelector) {
+        # Historical selector observations only, never an acceptance condition.
+        $report.offline.runtime_start_stop_selector = @{state='unobservable';complete_samples=0}
+    }
     do {
+        if ($ObserveStartStopSelector) {
+            $report.offline.runtime_start_stop_selector.state='unobservable'
+            $selectorMatches=0; $lastSelectorEnabled=$null; $selectorFieldsUnknown=$false
+        }
         $null = Assert-Target $true
         $window = Get-OfflineReplacementRoot
         $walker = Get-OfflineReplacementWalker
@@ -434,16 +511,41 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
         $walk = [Diagnostics.Stopwatch]::StartNew()
         while ($queue.Count -and $visited -lt 512 -and $walk.Elapsed.TotalSeconds -lt 5) {
             $next = $queue.Dequeue(); $visited++; $current = $next.element.Current
-            if (-not $ownedIds.Contains([int]$current.ProcessId)) {
-                $report.offline.foreign_node_matches_selector = ($current.ControlType.ProgrammaticName -eq $Type -and $current.Name -match $Name)
+            # Cache each original getter independently at its original short-circuit point.
+            # Never merge the repeated ControlType reads or add diagnostic UIA reads.
+            $unread=[object]::new()
+            $selectorPid=$unread
+            if (-not $ownedIds.Contains([int]($selectorPid=$current.ProcessId))) {
+                $foreignType=$unread; $foreignTypeName=$unread; $foreignName=$unread
+                $report.offline.foreign_node_matches_selector = (($foreignTypeName=($foreignType=$current.ControlType).ProgrammaticName) -eq $Type -and ($foreignName=$current.Name) -match $Name)
+                if ($ObserveStartStopSelector) {
+                    if ($null -eq $current -or $selectorPid -isnot [int] -or $selectorPid -le 0 -or
+                        $foreignType -isnot [Windows.Automation.ControlType] -or $foreignTypeName -isnot [string] -or
+                        (-not [object]::ReferenceEquals($foreignName,$unread) -and $foreignName -isnot [string])) { $selectorFieldsUnknown=$true }
+                }
                 if ($report.offline.foreign_node_matches_selector) { throw 'Offline UIA node escaped the bound process tree' }
                 continue
             }
-            $document = $next.document -or $current.ControlType -eq [Windows.Automation.ControlType]::Document
+            $documentType=$unread
+            $document = $next.document -or ($documentType=$current.ControlType) -eq [Windows.Automation.ControlType]::Document
+            $matchType=$unread; $matchTypeName=$unread; $matchName=$unread; $selectorEnabled=$unread
             # Only a selector match is retained. Never serialize arbitrary UIA names or values:
             # the normal key-generation dialog contains recovery material.
-            if ($document -and $current.ControlType.ProgrammaticName -eq $Type -and
-                $current.Name -match $Name -and ($AllowAbsent -or $current.IsEnabled)) { $found.Add($next.element) }
+            if ($document -and ($matchTypeName=($matchType=$current.ControlType).ProgrammaticName) -eq $Type -and
+                ($matchName=$current.Name) -match $Name) {
+                if ($ObserveStartStopSelector) { $selectorMatches++ }
+                # Cache the original short-circuit getter; retain its original truthiness.
+                if ($AllowAbsent -or ($selectorEnabled=$current.IsEnabled)) { $found.Add($next.element) }
+                if ($ObserveStartStopSelector) { $lastSelectorEnabled=$selectorEnabled }
+            }
+            if ($ObserveStartStopSelector) {
+                if ($null -eq $current -or $selectorPid -isnot [int] -or $selectorPid -le 0 -or
+                    (-not [object]::ReferenceEquals($documentType,$unread) -and $documentType -isnot [Windows.Automation.ControlType]) -or
+                    (-not [object]::ReferenceEquals($matchType,$unread) -and $matchType -isnot [Windows.Automation.ControlType]) -or
+                    (-not [object]::ReferenceEquals($matchTypeName,$unread) -and $matchTypeName -isnot [string]) -or
+                    (-not [object]::ReferenceEquals($matchName,$unread) -and $matchName -isnot [string]) -or
+                    (-not [object]::ReferenceEquals($selectorEnabled,$unread) -and $selectorEnabled -isnot [bool])) { $selectorFieldsUnknown=$true }
+            }
             if ($next.depth -lt 32) {
                 $child = $walker.GetFirstChild($next.element)
                 while ($child -and $visited + $queue.Count -lt 512 -and $walk.Elapsed.TotalSeconds -lt 5) {
@@ -456,6 +558,17 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
             }
         }
         if ($queue.Count) { throw 'Offline selector traversal exceeded its node/time bound' }
+        if ($ObserveStartStopSelector) {
+            $diagnostic=$report.offline.runtime_start_stop_selector
+            # Saturates: counts complete samples, not application poll completions.
+            if ($diagnostic.complete_samples -lt 256) { $diagnostic.complete_samples++ }
+            if ($selectorFieldsUnknown) { $diagnostic.state='unobservable' }
+            elseif ($selectorMatches -eq 0) { $diagnostic.state='absent' }
+            elseif ($selectorMatches -gt 1) { $diagnostic.state='ambiguous' }
+            elseif ($lastSelectorEnabled -is [bool]) {
+                if ($lastSelectorEnabled) { $diagnostic.state='enabled' } else { $diagnostic.state='disabled' }
+            }
+        }
         if ($found.Count -gt 1) { throw 'Offline selector is ambiguous' }
         if ($found.Count -eq 1) { return $found[0] }
         if ($AllowAbsent) { return $null }
@@ -1217,7 +1330,7 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
     $report.offline.action_stage = 'runtime_start'
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
-    $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60
+    $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60 -ObserveStartStopSelector
     Bind-OfflineRuntime
     $report.offline.action_stage = 'account_verification'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8d26\u6237\u4e0e\u7a7a\u95f4\u0024'))

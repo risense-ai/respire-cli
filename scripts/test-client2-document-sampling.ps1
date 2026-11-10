@@ -25,16 +25,25 @@ public sealed class RespireSyntheticPidProvider {
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Sampling source parse failed' }
-foreach ($name in @('Get-DocumentUnavailableException','Read-TargetTree','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Wait-TargetDocument')) {
+foreach ($name in @('Get-DocumentUnavailableException','Read-DocumentProperty','Read-DocumentRuntimeId','Assert-DocumentInspectionPid','Read-DocumentNodeInfo','Read-TargetTree','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Wait-TargetDocument')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Sampling function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
 }
 function Get-OfflineReplacementRoot { return $script:root }
 function Get-OfflineReplacementWalker { return $script:walker }
-function Element-Info { param($Element) if ($Element -ne $script:root) { throw 'Bad node metadata reached' }; return @{process_id=20;control_type='ControlType.Document';keyboard_focusable=$true;offscreen=$false} }
 $script:root=[pscustomobject]@{}
-$root | Add-Member ScriptMethod GetCurrentPropertyValue { param($Property,$IgnoreDefault) return 20 }
+$root | Add-Member ScriptMethod GetCurrentPropertyValue {
+    param($Property,$IgnoreDefault)
+    if ($IgnoreDefault -ne $true) { throw 'Default property value allowed' }
+    if ($Property -eq [Windows.Automation.AutomationElement]::ProcessIdProperty) { return 20 }
+    if ($Property -eq [Windows.Automation.AutomationElement]::IsPasswordProperty -or $Property -eq [Windows.Automation.AutomationElement]::IsOffscreenProperty) { return $false }
+    if ($Property -eq [Windows.Automation.AutomationElement]::IsKeyboardFocusableProperty) { return $true }
+    if ($Property -eq [Windows.Automation.AutomationElement]::ControlTypeProperty) { return [Windows.Automation.ControlType]::Document }
+    if ($Property -eq [Windows.Automation.AutomationElement]::NameProperty -or $Property -eq [Windows.Automation.AutomationElement]::AutomationIdProperty -or $Property -eq [Windows.Automation.AutomationElement]::ClassNameProperty) { return '' }
+    throw 'Unexpected root property'
+}
+$root | Add-Member ScriptMethod GetRuntimeId { return @(1,2) }
 $script:walker=[pscustomobject]@{}
 $walker | Add-Member ScriptMethod GetFirstChild { param($Element) if ($Element -eq $script:root) { return $script:bad }; return $null }
 $walker | Add-Member ScriptMethod GetNextSibling { param($Element) return $null }

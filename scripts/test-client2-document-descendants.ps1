@@ -13,7 +13,7 @@ foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity'
 $treeNode=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Read-TargetTree'},$true))
 $treeText=$treeNode[0].Extent.Text
 if ($treeNode.Count -ne 1 -or $treeText.IndexOf('Assert-DocumentNodeIdentity $nodePid $LiveIdentities') -lt 0 -or
-    $treeText.IndexOf('Assert-DocumentNodeIdentity $nodePid $LiveIdentities') -gt $treeText.IndexOf('Element-Info $next.element')) { throw 'Traversal diagnostic ran before live identity guard' }
+    $treeText.IndexOf('Assert-DocumentNodeIdentity $nodePid $LiveIdentities') -gt $treeText.IndexOf('Read-DocumentNodeInfo $next.element')) { throw 'Traversal diagnostic ran before live identity guard' }
 function Send-TargetTab { throw 'Input is forbidden in descendant proof' }
 function Send-OfflineKey { throw 'Input is forbidden in descendant proof' }
 function Assert-Target {

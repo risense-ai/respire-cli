@@ -285,3 +285,7 @@ Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
 & (Join-Path $PSScriptRoot 'test-client2-document-sampling.ps1')
 
 & (Join-Path $PSScriptRoot 'test-client2-field-postcondition.ps1')
+
+& (Join-Path $PSScriptRoot 'test-client2-document-node-info.ps1')
+
+& (Join-Path $PSScriptRoot 'test-client2-start-stop-selector.ps1')

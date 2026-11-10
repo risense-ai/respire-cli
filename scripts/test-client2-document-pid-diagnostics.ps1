@@ -4,7 +4,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Document PID source parse failed' }
-foreach ($name in @('Get-DocumentUnavailableException','Read-TargetTree','Element-Info')) {
+foreach ($name in @('Get-DocumentUnavailableException','Read-DocumentProperty','Read-DocumentRuntimeId','Assert-DocumentInspectionPid','Read-DocumentNodeInfo','Read-TargetTree','Element-Info')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Document PID function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -60,7 +60,16 @@ foreach ($mode in @('missing','null','wrong_type','throw','zero','negative','pos
     $script:root=[pscustomobject]@{Current=$current}
     $method={
         param($Property,$IgnoreDefault)
-        if ($Property -ne [Windows.Automation.AutomationElement]::ProcessIdProperty -or $IgnoreDefault -ne $true) { throw 'Wrong PID property query' }
+        if ($IgnoreDefault -ne $true) { throw 'Wrong PID property query' }
+        if ($Property -ne [Windows.Automation.AutomationElement]::ProcessIdProperty) {
+            $counts.metadata++
+            if ($mode -ne 'known') { throw 'Unproven node metadata read' }
+            if ($Property -eq [Windows.Automation.AutomationElement]::IsPasswordProperty -or $Property -eq [Windows.Automation.AutomationElement]::IsOffscreenProperty) { return $false }
+            if ($Property -eq [Windows.Automation.AutomationElement]::IsKeyboardFocusableProperty) { return $true }
+            if ($Property -eq [Windows.Automation.AutomationElement]::ControlTypeProperty) { return [Windows.Automation.ControlType]::Document }
+            if ($Property -eq [Windows.Automation.AutomationElement]::NameProperty -or $Property -eq [Windows.Automation.AutomationElement]::AutomationIdProperty -or $Property -eq [Windows.Automation.AutomationElement]::ClassNameProperty) { return '' }
+            throw 'Unexpected diagnostic property'
+        }
         $counts.pid++
         switch ($mode) {
             'missing' { return $null }
@@ -79,7 +88,7 @@ foreach ($mode in @('missing','null','wrong_type','throw','zero','negative','pos
     $caught=$null; $result=$null
     try { $result=Read-TargetTree -ReportUnknownProcess:($mode -ne 'positive_unbound') -AdmittedIds $ownedIds -LiveIdentities @{20=@{}} } catch { $caught=$_.Exception.Message }
     if ($mode -eq 'known') {
-        if ($null -ne $caught -or $result.document_count -ne 1 -or -not $result.traversal_complete -or $identityReads -ne 1 -or $walkerReads -ne 1 -or $report.ContainsKey('document_pid_diagnostic')) { throw 'Known live tree path changed' }
+        if ($null -ne $caught -or $result.document_count -ne 1 -or -not $result.traversal_complete -or $identityReads -ne 3 -or $counts.pid -ne 3 -or $walkerReads -ne 1 -or $report.ContainsKey('document_pid_diagnostic')) { throw 'Known live tree path changed' }
         continue
     }
     $expected='unavailable'; if ($mode -eq 'wrong_type') { $expected='invalid_type' }; if ($mode -in @('zero','negative')) { $expected='nonpositive' }; if ($mode -like 'positive_*') { $expected='unbound_positive' }
