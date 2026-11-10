@@ -113,7 +113,13 @@ function Read-DocumentNodeInfo($Element, [int]$ExpectedPid, $AdmittedIds, $LiveI
     )) {
         $sample = Read-DocumentProperty $Element $field.property -Readiness:$Readiness
         if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
-        if ($null -eq $sample.value -or -not $field.type.IsInstanceOfType($sample.value)) { throw 'UIA node diagnostic property type is unknown' }
+        if ($null -eq $sample.value -or -not $field.type.IsInstanceOfType($sample.value)) {
+            if (-not $Readiness) { throw 'UIA node diagnostic property type is unknown' }
+            # Unknown is not false and cannot supply a readiness witness. Other
+            # nodes may prove readiness, but every node still needs full identity.
+            $info[$field.key] = $null
+            continue
+        }
         if ($field.key -eq 'control_type') { $info[$field.key]=$sample.value.ProgrammaticName }
         else { $info[$field.key]=$sample.value }
     }
@@ -188,11 +194,16 @@ function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.Has
     if ($timeLimited) { $reasons += 'time-budget' }
     if ($nodeLimited) { $reasons += 'node-limit' }
     if ($depthLimited) { $reasons += 'depth-limit' }
+    # Complete traversal proves enumeration, not complete property knowledge.
+    # Unknown observations remain explicit and cannot provide positive witnesses.
     return @{ nodes = @($rows.ToArray()); bounded = $true; truncation_reasons = $reasons
         traversal_complete = $reasons.Count -eq 0; elapsed_ms = $clock.ElapsedMilliseconds
         max_nodes = 256; max_depth = 32; time_budget_seconds = 5
-        document_count = @($rows | Where-Object { $_.control_type -eq 'ControlType.Document' -and -not $_.offscreen }).Count
-        focusable_count = @($rows | Where-Object { $_.keyboard_focusable -and -not $_.offscreen }).Count }
+        document_count = @($rows | Where-Object { $_.control_type -ceq 'ControlType.Document' -and $_.offscreen -is [bool] -and $_.offscreen -eq $false }).Count
+        focusable_count = @($rows | Where-Object { $_.keyboard_focusable -is [bool] -and $_.keyboard_focusable -eq $true -and $_.offscreen -is [bool] -and $_.offscreen -eq $false }).Count
+        unknown_control_type_count = @($rows | Where-Object { $null -eq $_.control_type }).Count
+        unknown_keyboard_focusable_count = @($rows | Where-Object { $null -eq $_.keyboard_focusable }).Count
+        unknown_offscreen_count = @($rows | Where-Object { $null -eq $_.offscreen }).Count }
 }
 
 function Assert-DocumentProcessHandle($Process) {
@@ -346,6 +357,8 @@ function Wait-TargetDocument([double]$Seconds = 15) {
         $report.accessibility_tree = $tree
         $report.document_readiness_phase = 'record_tree'
         $attempts.Add(@{ document_count=$tree.document_count; focusable_count=$tree.focusable_count
+            unknown_control_type_count=$tree.unknown_control_type_count
+            unknown_keyboard_focusable_count=$tree.unknown_keyboard_focusable_count; unknown_offscreen_count=$tree.unknown_offscreen_count
             traversal_complete=$tree.traversal_complete; truncation_reasons=$tree.truncation_reasons; elapsed_ms=$tree.elapsed_ms })
         $report.document_readiness = @{ attempts=@($attempts.ToArray()); budget_seconds=$Seconds
             elapsed_ms=$clock.ElapsedMilliseconds; ready=$false }
