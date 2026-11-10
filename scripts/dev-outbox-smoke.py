@@ -18,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dev_model_fixture import share_cpu_container
 from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
-                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt, RuntimeHealthFailure)
 
 UPSTREAM = "https://api-dev.rsrs.rs"
 
@@ -244,7 +244,8 @@ class Fixture:
             raise RuntimeError("direct_" + command[0] + "_invalid_json") from None
         require(not data.get("errors"), "direct_" + command[0] + "_errors")
         if self.args.runtime_binary and command[0] in ('remember', 'show', 'sync'):
-            with urllib.request.urlopen('http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
             profile = Path(env['RSRS_DATA_DIR'])
             verify_runtime_health(self.args, health, profile, profile)
@@ -304,7 +305,8 @@ class Fixture:
             if not endpoint_path.is_file():
                 return False
             try:
-                with urllib.request.urlopen("http://127.0.0.1:" + str(self.port) + "/api/health", timeout=5) as response:
+                with urllib.request.urlopen(urllib.request.Request(
+                        "http://127.0.0.1:" + str(self.port) + "/api/health", headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                     require(response.status == 200, "runtime_health_status_failed")
                     health = json.load(response)
             except urllib.error.HTTPError:
@@ -327,7 +329,8 @@ class Fixture:
     def rpc(self, command):
         body = {"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}
         if self.args.runtime_binary:
-            with urllib.request.urlopen('http://127.0.0.1:' + str(self.port) + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + str(self.port) + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
             data_dir = Path(self.a['RSRS_DATA_DIR'])
             verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
@@ -623,6 +626,9 @@ def main():
         require(not report["cleanup"]["remaining_users"] and not report["cleanup"]["unconfirmed_users"]
                 and all(event["passed"] for event in report["cleanup"]["events"]), "fixture_cleanup_failed")
         report["passed"] = True
+    except RuntimeHealthFailure as error:
+        report["failure_code"] = error.code
+        report["failure_diagnostic"] = error.diagnostic()
     except Exception as error:
         # Only harness-owned error codes are safe for public diagnostics.
         report["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
@@ -636,7 +642,7 @@ def main():
     safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
     if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():
         (args.root / "outbox-coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "remaining": report["remaining"], "cleanup": cleanup}))
+    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "failure_diagnostic": report.get("failure_diagnostic"), "remaining": report["remaining"], "cleanup": cleanup}))
     return 0 if report["passed"] else 1
 
 

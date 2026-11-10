@@ -378,6 +378,31 @@ function Test-RuntimeChanged($Before, $After, [string]$Profile) {
         -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile)
 }
 
+function Test-RuntimeUnchanged($Before, $After, [string]$Profile) {
+    # Invalid names fail before the coordinator: accepting a replacement actor hides a regression.
+    return [int]$Before.pid -gt 0 -and [int]$Before.pid -eq [int]$After.pid `
+        -and $null -ne (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue) `
+        -and [string]$Before.data_dir -ceq [string]$After.data_dir `
+        -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile) `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.account_id) `
+        -and [string]$Before.account_id -ceq [string]$After.account_id `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.instance_id) `
+        -and [string]$Before.instance_id -ceq [string]$After.instance_id `
+        -and $Before.generation -gt 0 -and $Before.generation -ceq $After.generation `
+        -and [string]$Before.exe -ceq [string]$After.exe `
+        -and [string]$Before.bin -ceq [string]$After.bin `
+        -and [string]$Before.runtime_version -ceq [string]$After.runtime_version `
+        -and $Before.store_ready -eq $true -and $After.store_ready -eq $true
+}
+
+function Get-AccountRejectionSnapshot([string]$Device, [string]$Profile) {
+    # Snapshot only stable control/session state; the serving actor may update its own DB/WAL.
+    $paths = @((Join-Path $Device 'client.json'), (Join-Path $Device 'runtime/endpoint.json'), (Join-Path $Profile 'session.json'))
+    $files = @($paths | ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_)) })
+    $profiles = @(Get-ChildItem -LiteralPath (Join-Path $Device 'accounts') -Force | Sort-Object Name | ForEach-Object { $_.Name })
+    return ([ordered]@{ files = $files; profiles = $profiles; invalid_exists = (Test-Path -LiteralPath (Join-Path $Device 'invalid')) } | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $taskId = [Guid]::NewGuid().ToString('N')
@@ -396,6 +421,38 @@ function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
     throw 'Owned model/index work did not finish within the bounded installation deadline.'
 }
 
+# Host keygen commits keys but deliberately leaves its original operation Paused.
+# Only a positively completed keygen may request the normal explicit Start once.
+function Complete-SmokeKeygen([string]$Name, $Keygen, [string]$DataDir) {
+    Assert-Smoke "$Name-committed" ($Keygen.Ok -eq $true -and $Keygen.Exit -eq 0 `
+        -and [string]$Keygen.Envelope.command -ceq 'keygen' `
+        -and [string]$Keygen.Envelope.status -ceq 'ok' `
+        -and [bool]$Keygen.Envelope.summary.super `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Keygen.Envelope.summary.path) `
+        -and @($Keygen.Envelope.actions) -ccontains 'runtime start')
+    $profile = [IO.Path]::GetFullPath((Split-Path -Parent ([string]$Keygen.Envelope.summary.path)))
+    $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-owned-profile" ($profile -eq $device -or $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar))
+    # No HostProfile stop/direct wrapper and no readiness retry: an uncertain
+    # Start must retain its durable evidence, not replay or replace the operation.
+    $started = Invoke-Om -Name "$Name-explicit-start" -ArgList @('--json', 'runtime', 'start') `
+        -DataDir $DataDir -AllowStatus @('ok') -NoReadyRetry
+    Assert-Smoke "$Name-started" ($started.Ok -eq $true -and $started.Exit -eq 0 `
+        -and [string]$started.Envelope.command -ceq 'runtime.start' `
+        -and [string]$started.Envelope.status -ceq 'ok')
+    $health = Get-OwnedRuntimeHealth $DataDir
+    $activeProfile = [IO.Path]::GetFullPath([string]$health.data_dir)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $activeProfile = $activeProfile -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-ready" ($activeProfile -eq $profile -and $health.store_ready -eq $true)
+}
+
 function Invoke-Om {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -406,6 +463,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [switch]$NoReadyRetry,
         [switch]$AllowDestructiveMcpFixture,
         [switch]$AllowIndexWait,
         [string]$ModelTaskId = '',
@@ -423,8 +481,8 @@ function Invoke-Om {
     }
     $script:ActiveDataDir = $DataDir
     if ($HostProfile) {
-        # Only stop this disposable sweep runtime. The following normal command
-        # autostarts its replacement after the host has switched the profile.
+        # Only stop this disposable sweep runtime. Ordinary profile changes may
+        # autostart a replacement; successful host keygen instead requires explicit Start.
         Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
             -DataDir $DataDir -Raw -ExpectExit @(0, 2) | Out-Null
         Stop-OurRuntimes
@@ -599,7 +657,7 @@ function Invoke-Om {
             $Note = ("command=$got total=$total want $RequireCommand " + $Note).Trim()
         }
     }
-    $readyFail = ($stdout + $stderr) -match 'did not become ready'
+    $readyFail = -not $NoReadyRetry -and (($stdout + $stderr) -match 'did not become ready')
         if ($readyFail -and $readyTries -lt 2) { Stop-OurRuntimes; Start-Sleep -Seconds 1 }
     $retryIndexPending = $AllowIndexWait -and -not $indexRetried -and -not $timedOut `
         -and $exit -eq 2 -and $status -ceq 'pending' -and [string]$envlp.summary.state -ceq 'index_pending' `
@@ -869,6 +927,7 @@ $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
 $offlineKeys = Invoke-Om -Name 'keygen-local-success' -ArgList @('--json', 'keygen', '--pass', (New-Pass)) -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-local-v4-material' ($offlineKeys.Ok -and [bool]$offlineKeys.Envelope.summary.super -and (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
+Complete-SmokeKeygen 'keygen-local' $offlineKeys $offlineDir
 $firstLocalWrap = (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk
 $offlineEntry = Invoke-Om -Name 'keygen-local-write' -ArgList @('--json', 'remember', "offline-$stamp", '--title', "offline-$stamp", '--importance', 'important', '--force') -DataDir $offlineDir
 $offlineId = [string]$offlineEntry.Envelope.summary.id
@@ -878,6 +937,7 @@ $localRefuse = Invoke-Om -Name 'keygen-local-overwrite-refused' -ArgList @('--js
 Assert-Smoke 'keygen-local-overwrite-guard' ($localRefuse.Ok -and $localRefuse.Exit -eq 1 -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -eq $firstLocalWrap)
 $forcedKeys = Invoke-Om -Name 'keygen-force-disposable' -ArgList @('--json', 'keygen', '--force') -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-force-rotates-material' ($forcedKeys.Ok -and [bool]$forcedKeys.Envelope.summary.super -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -ne $firstLocalWrap)
+Complete-SmokeKeygen 'keygen-force' $forcedKeys $offlineDir
 $offlineLogout = Invoke-Om -Name 'offline-full-logout' -ArgList @('--json', 'logout', '--full') -DataDir $offlineDir -HostProfile
 Assert-Smoke 'full-logout-session-file-removed' ($offlineLogout.Ok -and -not (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
 
@@ -1196,9 +1256,12 @@ $otherStatus = Invoke-Om -Name 'account-live-other-status' -ArgList @('--json', 
 Assert-Smoke 'account-live-shorthand-takeover' ($accountOther.Ok -and (Test-RuntimeChanged $mainHealth $switchedHealth (Join-Path $DirA "accounts/$otherUser")))
 Assert-Smoke 'account-live-other-identity' ($otherStatus.Ok -and [string]$otherStatus.Envelope.summary.session.user -ceq $otherUser -and $otherStatus.Envelope.summary.unlocked -eq $true)
 $profileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$rejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")
 $invalidAccount = Invoke-Om -Name 'account-live-invalid-rejected' -ArgList @('--json', 'account', 'use', '../invalid') -DataDir $DirA -AllowStatus @('fail')
+$rejectedStatus = Invoke-Om -Name 'account-live-rejected-status-readback' -ArgList @('--json', 'status') -DataDir $DirA
 $rejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeChanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
+# Keep the established coverage ID, but pre-validation must preserve, not replace, the service.
+Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeUnchanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and $rejectedStatus.Ok -and [string]$rejectedStatus.Envelope.summary.session.user -ceq $otherUser -and $rejectedStatus.Envelope.summary.unlocked -eq $true -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")) -ceq $rejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
 $clientSwitch = Invoke-Om -Name 'account-live-client-only-rejected' -ArgList @('--client-only', '--json', 'account', 'use', 'main') -DataDir $DirA -AllowStatus @('fail')
 $clientHealth = Get-OwnedRuntimeHealth $DirA
 Assert-Smoke 'account-live-client-only-preserves-host' ($clientSwitch.Ok -and $clientSwitch.Exit -eq 1 -and ($clientSwitch.Envelope.errors -join ' ') -match 'client.only' -and [int]$clientHealth.pid -eq [int]$rejectedHealth.pid -and [string]$clientHealth.data_dir -ceq [string]$rejectedHealth.data_dir -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
@@ -1238,10 +1301,12 @@ $spaceReadback = Invoke-Om -Name 'space-live-return-readback' -ArgList @('--json
 Assert-Smoke 'space-live-return-takeover' ($spaceReturn.Ok -and (Test-RuntimeChanged $spaceMainHealth $spaceReturnHealth (Join-Path $DirA 'accounts/sweepspace')))
 Assert-Smoke 'space-live-library-preserved' ($spaceReadback.Ok -and [string]$spaceReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceReadback.Envelope.details.entry.content -ceq $spaceMarker)
 $spaceProfileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$spaceRejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')
 $missingSpace = "missing$stamp"
 $spaceRejected = Invoke-Om -Name 'space-live-missing-rejected' -ArgList @('--json', 'space', 'use', $missingSpace) -DataDir $DirA -AllowStatus @('fail')
+$spaceRejectedReadback = Invoke-Om -Name 'space-live-rejected-library-readback' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $DirA
 $spaceRejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
+Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeUnchanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and $spaceRejectedReadback.Ok -and [string]$spaceRejectedReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceRejectedReadback.Envelope.details.entry.content -ceq $spaceMarker -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')) -ceq $spaceRejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
 $inv = Invoke-Om -Name 'space-invite' -ArgList @('--json', 'space', 'invite', '--note', 'sweep') -DataDir $DirA -Secret
 Invoke-Om -Name 'space-members' -ArgList @('--json', 'space', 'members') -DataDir $DirA | Out-Null
 $inviteCode = ''
@@ -1525,6 +1590,7 @@ $resetDir = Join-Path $Root 'reset-vault'
 Invoke-Om -Name 'reset-vault-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $resetDir | Out-Null
 Invoke-Om -Name 'reset-vault-baseline-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile | Out-Null
 $resetKeys = Invoke-Om -Name 'reset-vault-local-keygen' -ArgList @('--json', 'keygen', '--force') -DataDir $resetDir -Secret -HostProfile
+Complete-SmokeKeygen 'reset-vault-keygen' $resetKeys $resetDir
 $mismatched = Invoke-Om -Name 'reset-vault-old-local-write' -ArgList @('--json', 'remember', "reset-local-old-key-$stamp", '--title', "reset-local-$stamp", '--importance', 'important', '--force') -DataDir $resetDir
 $mismatchedId = [string]$mismatched.Envelope.summary.id
 Assert-Smoke 'reset-vault-mismatched-fixture-written' ($resetKeys.Ok -and [bool]$resetKeys.Envelope.summary.super -and $mismatched.Ok -and [bool]$mismatchedId)

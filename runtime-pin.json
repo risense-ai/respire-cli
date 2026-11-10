@@ -1,4 +1,4 @@
 {
-  "required": "2.0.0-dev.6",
-  "accept": ">=2.0.0-dev.6,<3.0.0"
+  "required": "2.0.0-dev.7",
+  "accept": ">=2.0.0-dev.7,<3.0.0"
 }

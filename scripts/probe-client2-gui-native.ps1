@@ -38,6 +38,7 @@ function Assert-Target([bool]$RequireForeground = $false) {
         $window.client_bounds[2] -le $window.client_bounds[0] -or $window.client_bounds[3] -le $window.client_bounds[1]) { throw 'Target HWND is no longer a visible original window/client area' }
     if ($RequireForeground -and [RespireNativeInput]::Foreground().ToInt64() -ne $binding.hwnd) { throw 'Foreground is not the bound target HWND; no input/capture permitted' }
     $script:ownedIds = $ids
+    $script:candidateProcessSnapshot = $all # Existing successful guard snapshot; diagnostic only.
     return @{ bounds = @($window.bounds); client_bounds = @($window.client_bounds); foreground = [RespireNativeInput]::Foreground().ToInt64() }
 }
 
@@ -864,6 +865,32 @@ function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '', [switch]$Re
 }
 function New-AccountStabilityClock { return [Diagnostics.Stopwatch]::StartNew() }
 function Pause-AccountStability { Start-Sleep -Milliseconds 100 }
+function New-AccountStabilityPidDiagnostic($RawPid, $HeldMember, $Depth, $AncestorDocument, $Snapshot) {
+    # Existing failed sample only: no provider reads, coercion, identity admission or retries.
+    $kind='non_int'
+    if ($null -eq $RawPid) { $kind='null' }
+    elseif ($RawPid -is [int]) {
+        if ($RawPid -le 0) { $kind='nonpositive' } else { $kind='positive_not_in_tree' }
+    }
+    $value=@{pid_kind=$kind;held_member='unknown';depth='unknown';ancestor_document='unknown';in_same_snapshot='unknown'}
+    if ($HeldMember -is [bool]) { $value.held_member=$HeldMember }
+    if ($Depth -is [int] -and $Depth -ge 0 -and $Depth -le 32) { $value.depth=$Depth }
+    if ($AncestorDocument -is [bool]) { $value.ancestor_document=$AncestorDocument }
+    # Inspect only the already captured local CIM objects, and only after rejection.
+    # Absent from this snapshot does not establish a legitimate descendant race.
+    if ($RawPid -is [int] -and $RawPid -gt 0 -and $Snapshot -is [array]) {
+        try {
+            $present=$false; $complete=$true
+            foreach ($item in $Snapshot) {
+                $snapshotPid=$item.ProcessId
+                if (($snapshotPid -isnot [int] -and $snapshotPid -isnot [uint32]) -or $snapshotPid -lt 0) { $complete=$false; continue }
+                if ($snapshotPid -eq $RawPid) { $present=$true }
+            }
+            if ($complete) { $value.in_same_snapshot=$present }
+        } catch { $value.in_same_snapshot='unknown' }
+    }
+    return $value
+}
 function Read-AccountStabilityButton([string]$Name, $Identities, $WindowClock) {
     $null=Assert-Target $true
     $window=Get-OfflineReplacementRoot; $walker=Get-OfflineReplacementWalker
@@ -873,8 +900,11 @@ function Read-AccountStabilityButton([string]$Name, $Identities, $WindowClock) {
     while ($queue.Count -gt 0) {
         if ($visited -ge 512 -or $walk.Elapsed.TotalSeconds -ge 5 -or $WindowClock.Elapsed.TotalSeconds -ge 15) { throw 'Candidate stability traversal exceeded its bound' }
         $next=$queue.Dequeue(); $visited++
-        $current=$next.element.Current; $nodePid=[int]$current.ProcessId
-        if (-not $ownedIds.Contains($nodePid)) { throw 'Candidate stability process left the bound tree' }
+        $current=$next.element.Current; $rawNodePid=$null; $nodePid=[int]($rawNodePid=$current.ProcessId)
+        if (-not $ownedIds.Contains($nodePid)) {
+            $report.offline.account_stability_pid=New-AccountStabilityPidDiagnostic $rawNodePid ($Identities.ContainsKey($nodePid)) $next.depth $next.document $script:candidateProcessSnapshot
+            throw 'Candidate stability process left the bound tree'
+        }
         Assert-DocumentNodeIdentity $nodePid $Identities
         $type=$current.ControlType
         if ($type -isnot [Windows.Automation.ControlType]) { throw 'Candidate stability control type unavailable' }

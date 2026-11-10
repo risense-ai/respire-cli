@@ -195,6 +195,11 @@ for binary in BINARIES:
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
                 if args.runtime_binary:
+                    # Durable remember may return before background embeddings finish.
+                    # Wait on this selected profile's live owner before stopping it.
+                    wait_index_ready()
+                    index_files=list((profile/'core-index').iterdir())
+                    assert index_files and all(path.is_file() and path.stat().st_size>0 for path in index_files), 'seed index artifacts missing or empty'
                     # --direct forwards to a resident owner; drain it before raw fixture profile selection.
                     stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
                     assert stopped.returncode==0,'direct seed runtime stop failed'
