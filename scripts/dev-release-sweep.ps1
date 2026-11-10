@@ -178,6 +178,13 @@ function Get-SafeReportNote([string]$Text) {
 }
 
 function Get-SafeFailureReason($Envelope) {
+    # These structured account outcomes survive shared-host error wrapping.
+    # Require a scalar string and emit constants, never stringify/copy private data.
+    $reason = $Envelope.summary.reason
+    if ($reason -is [string]) {
+        if ($reason -ceq 'account_outcome_unknown') { return 'account_outcome_unknown' }
+        if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
+    }
     # Report fixed classifications only, never raw authentication responses.
     $message = @($Envelope.errors) -join ' '
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }

@@ -168,7 +168,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         let receipt = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
         if receipt.outcome == HostMigrationOutcome::Unknown {
             stage = "encode_unknown";
-            let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown"}), Vec::new());
+            let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown", "request_phase":if method == HOST_MIGRATION_RESULT_METHOD { "result_query" } else { "initial_request" }}), Vec::new());
             envelope.details = serde_json::to_value(&receipt)?;
             envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
                 source_id, account, original.operation.operation_id));

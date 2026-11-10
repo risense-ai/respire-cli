@@ -551,11 +551,21 @@ class WorkerInspector:
                                         stdin=subprocess.PIPE, stdout=self.log, stderr=self.log)
 
     def inspect(self, request):
+        """Check one identity within the deadline; every helper error fails closed."""
         self.sequence += 1
         request = {**request, 'sequence': self.sequence}
         response = self.directory / ('response-' + str(self.sequence) + '.json')
-        self.process.stdin.write((json.dumps(request) + '\n').encode())
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write((json.dumps(request) + '\n').encode())
+            self.process.stdin.flush()
+        except OSError as error:
+            failure = RuntimeError('worker inspector request pipe failed; see ' +
+                                   str(self.directory / 'inspector.log'))
+            try:
+                self.record_failure('worker inspector request pipe failed: ' + str(error))
+            except OSError as recording_error:
+                failure.add_note('failure record could not be written: ' + str(recording_error))
+            raise failure from error
         deadline = time.monotonic() + self.timeout
         while True:
             if self.process.poll() is not None:
@@ -586,42 +596,50 @@ class WorkerInspector:
         }, indent=2), encoding='utf-8')
 
     def close(self):
+        """Reap the helper and close streams without masking a broken-pipe cause."""
         try:
             if self.process.poll() is None:
                 self.process.kill()
             self.process.wait(timeout=5)
         finally:
-            self.process.stdin.close()
-            self.log.close()
+            try:
+                # A dead helper can leave buffered request bytes behind. The
+                # helper has already been reaped; do not let its failed close
+                # flush hide the inspection failure during cleanup.
+                try:
+                    self.process.stdin.close()
+                except OSError:
+                    if self.process.poll() is None:
+                        raise
+            finally:
+                self.log.close()
 
 
 def serve(directory):
+    """Publish boundary results; the parent enforces the inspection deadline."""
     import faulthandler
     faulthandler.enable()
     directory = pathlib.Path(directory)
     import psutil
     print(json.dumps({'inspector_pid': os.getpid(), 'psutil': psutil.__version__}), flush=True)
-    # One watchdog for the helper lifetime; do not create/join a timer thread
-    # for every high-frequency check, and cover response I/O as well as psutil.
-    faulthandler.dump_traceback_later(3, repeat=True)
-    try:
-        for line in sys.stdin:
-            request = json.loads(line)
-            sequence = request['sequence']
-            def phase(name):
-                print(json.dumps({'sequence': sequence, 'phase': name, 'monotonic': time.monotonic()}), flush=True)
-            try:
-                identity = inspect_worker(request, phase)
-                result = {'passed': True, 'identity': identity}
-            except Exception:
-                result = {'passed': False, 'error': traceback.format_exc()}
-            phase('response')
-            temporary = directory / 'response.tmp'
-            temporary.write_text(json.dumps(result), encoding='utf-8')
-            os.replace(temporary, directory / ('response-' + str(sequence) + '.json'))
-            phase('responded')
-    finally:
-        faulthandler.cancel_dump_traceback_later()
+    # Keep fatal-crash diagnostics, but do not schedule asynchronous stack dumps:
+    # they can race live frames on Windows (CPython #116008). The controller's
+    # inspection deadline still kills/reaps a hung helper; phase logs locate it.
+    for line in sys.stdin:
+        request = json.loads(line)
+        sequence = request['sequence']
+        def phase(name):
+            print(json.dumps({'sequence': sequence, 'phase': name, 'monotonic': time.monotonic()}), flush=True)
+        try:
+            identity = inspect_worker(request, phase)
+            result = {'passed': True, 'identity': identity}
+        except Exception:
+            result = {'passed': False, 'error': traceback.format_exc()}
+        phase('response')
+        temporary = directory / 'response.tmp'
+        temporary.write_text(json.dumps(result), encoding='utf-8')
+        os.replace(temporary, directory / ('response-' + str(sequence) + '.json'))
+        phase('responded')
 
 
 if __name__ == '__main__':

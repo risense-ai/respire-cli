@@ -3,6 +3,7 @@
 import argparse
 import base64
 from contextlib import contextmanager
+from dev_migration_diagnostics import migration_failure_diagnostics
 import hashlib
 import importlib.util
 import json
@@ -105,6 +106,7 @@ class Smoke(support.Smoke):
                 "error_class": category, "json_envelope": isinstance(value, dict),
                 "has_source": "--source" in args, "has_account": "--account" in args,
                 "error": self.redacted_cli_error(env, output)}
+            self.report["cli_failure"].update(migration_failure_diagnostics(value))
             migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
                 "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
                 "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",

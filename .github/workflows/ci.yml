@@ -60,7 +60,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Official product provenance is independent of the business-harness checkout.
-  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: f3cf226a62e9eb4cf0888a66c8120c867c858d98
+  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: 8a0bfc2eca82dc9d12faef34624495b9f4ac2ac6
 jobs:
   platform-build:
     # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.
@@ -1329,6 +1329,28 @@ jobs:
           CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
         run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$COMMANDS_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$INTEGRATION_RESULT" = skipped; else test "$INTEGRATION_RESULT" = success; fi; } && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
 
+  native-fixture-contracts:
+    # Isolated Python-only checks; full native Runtime acceptance remains required.
+    if: ${{ !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m pip install --only-binary=:all: psutil==7.1.0
+      - name: Verify inspector failures, deadlines and owned-process cleanup
+        run: python scripts/test-native-fixture-process.py --output-dir "${{ runner.temp }}/native-fixture-contracts"
+
   contract-checks:
     # Packaging/workflow/fixture checks have no dependency on Rust coverage or SDK
     # execution. Keep their own runner and fail the same whole CI workflow.
@@ -1372,6 +1394,18 @@ jobs:
           [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD 'scripts/dev-release-sweep.ps1'), [ref]$parseTokens, [ref]$parseErrors) | Out-Null
           if ($parseErrors.Count -ne 0) { throw ($parseErrors | Out-String) }
           & ./scripts/test-reembed-progress-contract.ps1
+          & ./scripts/test-account-failure-diagnostics.ps1
+
+  client2-focus-contract:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Test focus readiness policy without product or credentials
+        shell: powershell
+        run: ./scripts/test-client2-focus-readiness.ps1
 
   native-published-m3:
     if: ${{ !inputs.research_feedback_only && inputs.native_published_only && !inputs.version_upgrade_only }}
