@@ -330,19 +330,30 @@ fn schema_rejection_requires_exact_operation_and_transport_binding() -> Result<(
 #[test]
 fn rejected_operation_persists_separately_from_success_receipts() -> Result<()> {
     let dir = tempfile::tempdir()?;
-    let original = operation(&dir.path().canonicalize()?)?;
+    let root = dir.path().canonicalize()?;
+    let original = operation(&root)?;
     let saved = Original {
         operation: original.clone(), token: "synthetic-token".into(), coordinator: "synthetic-owner".into(),
         was_serving: true, store_ready: true, sent: true, finished: true,
         terminal_receipt: None, schema_rejection: Some(original.clone()),
     };
-    let path = dir.path().join("rejected.json");
+    let path = root.join("rejected.json");
     let bytes = serde_json::to_vec(&saved)?;
     std::fs::write(&path, &bytes)?;
     let (read, _) = read_original(&path)?.context("missing rejection")?;
     assert!(read.finished && read.sent && read.terminal_receipt.is_none());
     assert!(read.schema_rejection.as_ref() == Some(&original));
-    assert_eq!(std::fs::read(path)?, bytes);
+    assert_eq!(std::fs::read(&path)?, bytes);
+    #[cfg(unix)]
+    {
+        let linked_root = root.join("linked-root");
+        std::os::unix::fs::symlink(&root, &linked_root)?;
+        let error = read_original(&linked_root.join("rejected.json"))
+            .err()
+            .context("symlink ancestor of valid rejection record must be rejected")?;
+        assert_eq!(error.to_string(), "migration recovery path is a symlink");
+        assert_eq!(std::fs::read(&path)?, bytes);
+    }
     let envelope = rejection_envelope();
     assert!(matches!(envelope.status, Status::Fail));
     assert_eq!(envelope.summary["code"], "migration_schema_rejected");
