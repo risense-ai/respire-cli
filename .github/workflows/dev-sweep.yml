@@ -313,7 +313,7 @@ jobs:
           set -euo pipefail
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          python3 scripts/dev-runtime-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/runtime-diagnostics" --report "$RUNNER_TEMP/dev-supplements/runtime-coverage.json"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/runtime-diagnostic-credentials" --timeout 1500 -- python3 scripts/dev-runtime-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/runtime-diagnostics" --report "$RUNNER_TEMP/dev-supplements/runtime-coverage.json"
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4

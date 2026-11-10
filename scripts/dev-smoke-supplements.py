@@ -43,10 +43,21 @@ def main():
                 and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:")):
             # Each native manager must own its own initially empty private service.
             argv = ["dbus-run-session", "--", *argv]
+        timeout = 1500
+        if sys.platform.startswith("linux") and name == "runtime":
+            # Provider settings include fixed slots; the shared supplements bus
+            # cannot safely own them while another suite is running.
+            argv = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
+                    sys.executable, str(scripts / "dev-secret-service-keyring-selftest.py"),
+                    "--root", str(root / "runtime-credentials"), "--timeout", "1500", "--", *argv]
+            # Keep the business deadline. Allow bounded wrapper startup/teardown
+            # time (daemon startup 10s; terminate/kill waits 5s each; native RPCs).
+            # A wedged backend can still exceed this watchdog: report failure.
+            timeout = 1800
         process = subprocess.Popen(argv,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
         try:
-            process.communicate(timeout=1500)
+            process.communicate(timeout=timeout)
             outcome = {"suite": name, "exit": process.returncode, "passed": process.returncode == 0}
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGTERM)

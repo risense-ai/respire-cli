@@ -63,6 +63,78 @@ def require(condition, code):
         raise Failure(code)
 
 
+def private_fixture_bus(env):
+    bus = env.get('DBUS_SESSION_BUS_ADDRESS', '')
+    if (sys.platform.startswith('linux') and env.get('RSRS_SS_FIXTURE_BUS') == 'private'
+            and re.fullmatch(r'unix:(?:path|abstract)=[^,;\s]+(?:,guid=[0-9a-f]{32})?', bus)):
+        return bus
+    return None
+
+
+class RuntimeProviderKeys:
+    """Exact absent-before-write provider slots on a dedicated wrapper-owned bus.
+
+    Login aliases stay alive for resume_session_real and are cleaned by the
+    owning wrapper. Never enumerate/delete host credentials or read secrets.
+    """
+    def __init__(self, env):
+        require(private_fixture_bus(env) is not None
+                and private_fixture_bus(env) == private_fixture_bus(os.environ),
+                'private_runtime_fixture_bus_required')
+        import secretstorage
+        from jeepney import DBusAddress, new_method_call
+        self.connection = secretstorage.dbus_init()
+        self.address = DBusAddress('/org/freedesktop/DBus', 'org.freedesktop.DBus',
+                                   'org.freedesktop.DBus')
+        self.new_method_call = new_method_call
+        self.owner = self.current_owner()
+        self.collection = secretstorage.get_collection_by_alias(self.connection, 'default')
+        require(not self.collection.is_locked() and not list(self.collection.get_all_items()),
+                'runtime_fixture_collection_not_empty_or_locked')
+        self.slots = set()
+
+    def current_owner(self):
+        return self.connection.send_and_get_reply(self.new_method_call(
+            self.address, 'GetNameOwner', 's', ('org.freedesktop.secrets',))).body
+
+    def verify_owner(self):
+        require(self.current_owner() == self.owner, 'runtime_fixture_owner_changed')
+
+    @staticmethod
+    def attributes(slot):
+        return {'service': 'rsrs', 'target': 'default', 'username': slot,
+                'application': 'rust-keyring'}
+
+    def items(self, slot):
+        self.verify_owner()
+        attributes = self.attributes(slot)
+        items = list(self.collection.search_items({k: attributes[k]
+                     for k in ('service', 'target', 'username')}))
+        require(len(items) <= 1, 'runtime_provider_slot_ambiguous')
+        for item in items:
+            require(all(item.get_attributes().get(k) == v for k, v in attributes.items()),
+                    'runtime_provider_slot_attributes_mismatch')
+        return items
+
+    def reserve(self, slot):
+        require(slot in ('classify:last-backend', 'classify:ds-last-base')
+                or re.fullmatch(r'classify:ds(?:-model)?@127\.0\.0\.1:[0-9]{1,5}', slot),
+                'runtime_provider_slot_not_owned')
+        require(slot not in self.slots and not self.items(slot), 'runtime_provider_slot_exists')
+        self.slots.add(slot)
+
+    def cleanup(self):
+        passed = True
+        for slot in sorted(self.slots):
+            try:
+                for item in self.items(slot):
+                    item.delete()
+                require(not self.items(slot), 'runtime_provider_slot_not_removed')
+            except Exception:
+                passed = False
+        return passed
+
+
 def rejection_children():
     # This is the private subreaper's direct/adopted children, not a PID sweep.
     pid = os.getpid()
@@ -237,6 +309,8 @@ class Smoke:
         self.created = False
         self.attempted = False
         self.cloud_clean = True
+        self.provider_keys = None
+        self.provider_clean = True
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
         self.user = 'ci-runtime-' + os.environ.get('GITHUB_RUN_ID', '') + '-' + secrets.token_hex(5)
         self.password = '-' + secrets.token_urlsafe(32)
@@ -441,7 +515,12 @@ class Smoke:
         self.env = {k: v for k, v in os.environ.items()
                     if not k.startswith(('ONEMEMORY_', 'RESPIRE_', 'XDG_', 'DS_', 'JEV_', 'GNOME_'))
                     and not k.endswith(('_TOKEN', '_API_KEY')) and 'TEST_MODE' not in k
-                    and k not in ('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'DBUS_SESSION_BUS_ADDRESS')}
+                    and k not in ('HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'DBUS_SESSION_BUS_ADDRESS',
+                                  'RSRS_SS_FIXTURE_BUS', 'DBUS_STARTER_ADDRESS', 'DBUS_STARTER_BUS_TYPE',
+                                  'DBUS_SESSION_BUS_PID', 'SSH_AUTH_SOCK', 'RSRS_SUPER')}
+        bus = private_fixture_bus(os.environ)
+        if bus is not None:
+            self.env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS='private')
         self.env.update(HOME=str(self.root / 'home'), USERPROFILE=str(self.root / 'home'),
                         XDG_CONFIG_HOME=str(self.root / 'config'), XDG_DATA_HOME=str(self.root / 'data'),
                         XDG_CACHE_HOME=str(self.root / 'cache'), XDG_RUNTIME_DIR=str(self.root / 'runtime'),
@@ -455,6 +534,7 @@ class Smoke:
             self.env['LC_ALL'] = 'C'
         for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy'):
             self.env.pop(key, None)
+        self.provider_keys = RuntimeProviderKeys(self.env)
         with socket.socket() as port:
             port.bind(('127.0.0.1', 0))
             self.port = port.getsockname()[1]
@@ -688,6 +768,7 @@ class Smoke:
         require(not any(item.get('name') == 'reranker' for item in diagnostic.get('items', [])), 'retired_reranker_doctor_entry_present')
         require(any(item.get('name') == 'embedder' and item.get('status') == 'ok' for item in diagnostic.get('items', [])), 'm3_doctor_not_ready')
         self.passed('m3_status_real', retired_command_exit=retired.returncode)
+        self.provider_keys.reserve('classify:last-backend')
         self.direct(['classify-config', '--set', '--backend', 'jev'])
         require(self.direct(['classify-config'])['summary'].get('backend') == 'jev', 'backend_not_persisted')
         self.passed('classify_config_persisted')
@@ -704,6 +785,9 @@ class Smoke:
         thread.start()
         try:
             base = 'http://127.0.0.1:' + str(trap.server_port) + '/v1'
+            for slot in ('classify:ds-last-base', f'classify:ds@127.0.0.1:{trap.server_port}',
+                         f'classify:ds-model@127.0.0.1:{trap.server_port}'):
+                self.provider_keys.reserve(slot)
             value = self.direct(['classify-config', '--set', '--backend', 'ds', '--api-base', base,
                                  '--model', 'ci-unused-model', '--key-stdin'], stdin='ci-unused-runtime-key\n')['summary']
             readback = self.direct(['classify-config'])['summary']
@@ -725,13 +809,18 @@ class Smoke:
             self.stop()
         except Exception:
             self.cloud_clean = False
-        if self.child is not None and self.child.poll() is None:
-            self.child.terminate()
-            try:
-                self.child.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.child.kill()
-                self.child.wait(timeout=5)
+        try:
+            if self.child is not None and self.child.poll() is None:
+                self.child.terminate()
+                try:
+                    self.child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    self.child.kill()
+                    self.child.wait(timeout=5)
+        except Exception:
+            # Preserve teardown failure, but still attempt exact credential and
+            # cloud cleanup. The outer wrapper also owns process containment.
+            self.cloud_clean = False
         if self.attempted:
             try:
                 session = json.loads((self.library / 'session.json').read_text(encoding='utf-8'))
@@ -743,6 +832,12 @@ class Smoke:
                 require(code == 401, 'old_account_token_not_revoked')
             except Exception:
                 self.cloud_clean = False
+        if self.provider_keys is not None:
+            try:
+                self.provider_clean = self.provider_keys.cleanup()
+            except Exception:
+                self.provider_clean = False
+        self.report['provider_credential_cleanup'] = {'passed': self.provider_clean}
         self.report['cloud_cleanup'] = {'passed': self.cloud_clean,
                                         'remaining_users': [] if self.cloud_clean else [self.user] if self.attempted else []}
 
@@ -1048,7 +1143,7 @@ def main():
     finally:
         smoke.cleanup()
     smoke.report['missing_cases'] = [name for name in REQUIRED if smoke.report['cases'].get(name, {}).get('passed') is not True]
-    smoke.report['passed'] = not smoke.report['missing_cases'] and not smoke.report.get('failure_code') and smoke.cloud_clean
+    smoke.report['passed'] = not smoke.report['missing_cases'] and not smoke.report.get('failure_code') and smoke.cloud_clean and smoke.provider_clean
     smoke.report['status'] = 'passed' if smoke.report['passed'] else 'failed'
     smoke.report.update(runtime_report(args, smoke.report['passed']))
     if args.runtime_binary and not smoke.report['standalone_runtime_evidence']:
