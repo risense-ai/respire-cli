@@ -378,6 +378,31 @@ function Test-RuntimeChanged($Before, $After, [string]$Profile) {
         -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile)
 }
 
+function Test-RuntimeUnchanged($Before, $After, [string]$Profile) {
+    # Invalid names fail before the coordinator: accepting a replacement actor hides a regression.
+    return [int]$Before.pid -gt 0 -and [int]$Before.pid -eq [int]$After.pid `
+        -and $null -ne (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue) `
+        -and [string]$Before.data_dir -ceq [string]$After.data_dir `
+        -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile) `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.account_id) `
+        -and [string]$Before.account_id -ceq [string]$After.account_id `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.instance_id) `
+        -and [string]$Before.instance_id -ceq [string]$After.instance_id `
+        -and $Before.generation -gt 0 -and $Before.generation -ceq $After.generation `
+        -and [string]$Before.exe -ceq [string]$After.exe `
+        -and [string]$Before.bin -ceq [string]$After.bin `
+        -and [string]$Before.runtime_version -ceq [string]$After.runtime_version `
+        -and $Before.store_ready -eq $true -and $After.store_ready -eq $true
+}
+
+function Get-AccountRejectionSnapshot([string]$Device, [string]$Profile) {
+    # Snapshot only stable control/session state; the serving actor may update its own DB/WAL.
+    $paths = @((Join-Path $Device 'client.json'), (Join-Path $Device 'runtime/endpoint.json'), (Join-Path $Profile 'session.json'))
+    $files = @($paths | ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_)) })
+    $profiles = @(Get-ChildItem -LiteralPath (Join-Path $Device 'accounts') -Force | Sort-Object Name | ForEach-Object { $_.Name })
+    return ([ordered]@{ files = $files; profiles = $profiles; invalid_exists = (Test-Path -LiteralPath (Join-Path $Device 'invalid')) } | ConvertTo-Json -Depth 5 -Compress)
+}
+
 function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
     $clock = [Diagnostics.Stopwatch]::StartNew()
     $taskId = [Guid]::NewGuid().ToString('N')
@@ -1231,9 +1256,12 @@ $otherStatus = Invoke-Om -Name 'account-live-other-status' -ArgList @('--json', 
 Assert-Smoke 'account-live-shorthand-takeover' ($accountOther.Ok -and (Test-RuntimeChanged $mainHealth $switchedHealth (Join-Path $DirA "accounts/$otherUser")))
 Assert-Smoke 'account-live-other-identity' ($otherStatus.Ok -and [string]$otherStatus.Envelope.summary.session.user -ceq $otherUser -and $otherStatus.Envelope.summary.unlocked -eq $true)
 $profileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$rejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")
 $invalidAccount = Invoke-Om -Name 'account-live-invalid-rejected' -ArgList @('--json', 'account', 'use', '../invalid') -DataDir $DirA -AllowStatus @('fail')
+$rejectedStatus = Invoke-Om -Name 'account-live-rejected-status-readback' -ArgList @('--json', 'status') -DataDir $DirA
 $rejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeChanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
+# Keep the established coverage ID, but pre-validation must preserve, not replace, the service.
+Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeUnchanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and $rejectedStatus.Ok -and [string]$rejectedStatus.Envelope.summary.session.user -ceq $otherUser -and $rejectedStatus.Envelope.summary.unlocked -eq $true -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")) -ceq $rejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
 $clientSwitch = Invoke-Om -Name 'account-live-client-only-rejected' -ArgList @('--client-only', '--json', 'account', 'use', 'main') -DataDir $DirA -AllowStatus @('fail')
 $clientHealth = Get-OwnedRuntimeHealth $DirA
 Assert-Smoke 'account-live-client-only-preserves-host' ($clientSwitch.Ok -and $clientSwitch.Exit -eq 1 -and ($clientSwitch.Envelope.errors -join ' ') -match 'client.only' -and [int]$clientHealth.pid -eq [int]$rejectedHealth.pid -and [string]$clientHealth.data_dir -ceq [string]$rejectedHealth.data_dir -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
@@ -1273,10 +1301,12 @@ $spaceReadback = Invoke-Om -Name 'space-live-return-readback' -ArgList @('--json
 Assert-Smoke 'space-live-return-takeover' ($spaceReturn.Ok -and (Test-RuntimeChanged $spaceMainHealth $spaceReturnHealth (Join-Path $DirA 'accounts/sweepspace')))
 Assert-Smoke 'space-live-library-preserved' ($spaceReadback.Ok -and [string]$spaceReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceReadback.Envelope.details.entry.content -ceq $spaceMarker)
 $spaceProfileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$spaceRejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')
 $missingSpace = "missing$stamp"
 $spaceRejected = Invoke-Om -Name 'space-live-missing-rejected' -ArgList @('--json', 'space', 'use', $missingSpace) -DataDir $DirA -AllowStatus @('fail')
+$spaceRejectedReadback = Invoke-Om -Name 'space-live-rejected-library-readback' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $DirA
 $spaceRejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
+Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeUnchanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and $spaceRejectedReadback.Ok -and [string]$spaceRejectedReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceRejectedReadback.Envelope.details.entry.content -ceq $spaceMarker -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')) -ceq $spaceRejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
 $inv = Invoke-Om -Name 'space-invite' -ArgList @('--json', 'space', 'invite', '--note', 'sweep') -DataDir $DirA -Secret
 Invoke-Om -Name 'space-members' -ArgList @('--json', 'space', 'members') -DataDir $DirA | Out-Null
 $inviteCode = ''

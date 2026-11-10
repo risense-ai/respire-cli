@@ -76,6 +76,109 @@ class DiagnosticsTests(unittest.TestCase):
             self.assertEqual(report['failure_diagnostic'], failure.diagnostic())
             self.assertNotIn(SECRET, output.getvalue())
 
+    def test_real_compatibility_projection_reproduces_nine_field_failure(self):
+        # cli/src/client2_host.rs defaults to the CLI listener's old Client2 view.
+        # Runtime dev.6's rpc_serve::health_body supplies the modern flat view.
+        modern = copy.deepcopy(self.health)
+        host_image = self.root / 'cli-host'
+        host_image.write_bytes(b'not the runtime image')
+        legacy = {key: modern[key] for key in ('v', 'data_dir', 'installation_root')}
+        legacy.update(server='respire', bin='cli-version', pid=123, exe=str(host_image),
+                      compatibility_host='client2-v0256', backend_pid=456,
+                      backend_instance_id=modern['instance_id'],
+                      backend_process_start_id=modern['process_start_id'])
+        self.owner.exe = lambda: str(host_image)
+        self.health = legacy
+        with self.assertRaises(native.RuntimeHealthFailure) as caught:
+            self.verify()
+        self.assertEqual(list(caught.exception.fields), [
+            'selected_image', 'image_path', 'process_start_id', 'runtime_version',
+            'bin_version', 'installation_id', 'account_id', 'instance_id', 'generation'])
+        self.assertEqual(self.args.runtime_identity_receipts, [])
+        self.owner.exe = lambda: str(self.image)
+        self.health = modern
+        self.assertEqual(self.verify()['image_sha256'], self.args.runtime_sha256)
+
+    def test_runtime_http_selects_only_health_representation(self):
+        import io
+        from unittest.mock import Mock
+        smoke = runtime.Smoke.__new__(runtime.Smoke)
+        smoke.opener = Mock()
+        for method, path in [('GET', '/api/health'), ('POST', '/api/rpc'), ('GET', '/api/self')]:
+            response = io.BytesIO(json.dumps(self.health).encode())
+            response.code, response.headers = 200, {}
+            smoke.opener.open.return_value = response
+            self.assertEqual(smoke.http('http://127.0.0.1:1', method, path)[1], self.health)
+            request = smoke.opener.open.call_args.args[0]
+            self.assertEqual(request.get_header('X-respire-health'),
+                             'runtime-v1' if path == '/api/health' else None)
+            self.assertEqual(smoke.opener.open.call_args.kwargs['timeout'], 90)
+
+    def test_outbox_health_selectors_and_scoped_receipt_checks(self):
+        import io
+        from unittest.mock import Mock, MagicMock
+        spec = importlib.util.spec_from_file_location('outbox_selector', Path(__file__).with_name('dev-outbox-smoke.py'))
+        outbox = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(outbox)
+        fixture = outbox.Fixture.__new__(outbox.Fixture)
+        fixture.args = types.SimpleNamespace(binary=self.image, runtime_binary=self.image)
+        fixture.a = {'RSRS_DATA_DIR': str(self.root), 'RSRS_RUNTIME_BIN': str(self.image), 'RSRS_RPC_PORT': '1234'}
+        fixture.direct_failures, fixture.port = [], 1234
+        fixture.child = Mock(pid=123)
+        (self.root / 'runtime').mkdir()
+        (self.root / 'runtime' / 'endpoint.json').write_text('{}')
+        requests = []
+        wrong_receipt = False
+        def response(request, **kwargs):
+            requests.append(request)
+            if request.full_url.endswith('/api/health'):
+                self.assertEqual(request.get_header('X-respire-health'), 'runtime-v1')
+                self.assertEqual(kwargs['timeout'], 5)
+                value = self.health
+            else:
+                body = json.loads(request.data)
+                value = {key: body[key] for key in ('v', 'id', 'operation_id', 'idempotency_key', 'scope')}
+                value.update(ok=True, exit=0)
+                if wrong_receipt:
+                    value['scope'] = dict(value['scope'], instance_id='wrong-instance')
+            stream = io.BytesIO(json.dumps(value).encode())
+            stream.status = 200
+            return stream
+        def wait(action, seconds, code):
+            self.assertTrue(action())
+        fake_socket = MagicMock()
+        fake_socket.__enter__.return_value.getsockname.return_value = ('127.0.0.1', 1234)
+        child = Mock(pid=123)
+        child.poll.return_value = None
+        with patch.object(outbox.urllib.request, 'urlopen', side_effect=response), \
+             patch.object(outbox, 'verify_runtime_health') as verified, \
+             patch.object(outbox.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0, stdout=b'{"errors":[]}')), \
+             patch.object(outbox.subprocess, 'Popen', return_value=child), \
+             patch.object(outbox.socket, 'socket', return_value=fake_socket), \
+             patch.object(outbox, 'wait_for', side_effect=wait):
+            fixture.direct(fixture.a, ['sync'])
+            fixture.start()
+            self.assertTrue(fixture.rpc(['status'])['ok'])
+            self.assertEqual(verified.call_count, 4)  # direct, ready, start-status, explicit status
+            wrong_receipt = True
+            with self.assertRaisesRegex(RuntimeError, '^local_rpc_failed$'):
+                fixture.rpc(['status'])
+            verified.side_effect = native.RuntimeHealthFailure('runtime_health_fields_mismatch', ['selected_image'])
+            before = len(requests)
+            with self.assertRaises(native.RuntimeHealthFailure):
+                fixture.rpc(['remember', 'must-not-replay'])
+            self.assertEqual(len(requests), before + 1)  # Health only; no business RPC.
+        # The header neither bypasses verification nor retries a failed write.
+        self.assertEqual(len([r for r in requests if r.full_url.endswith('/api/rpc')]), 3)
+
+    def test_source_selector_contract_is_the_product_contract(self):
+        root = Path(__file__).resolve().parent.parent
+        host = (root / 'cli/src/client2_host.rs').read_text()
+        transport = (root / 'crates/commands/src/net_rpc.rs').read_text()
+        self.assertIn('name.eq_ignore_ascii_case("X-Respire-Health") && value == "runtime-v1"', host)
+        self.assertIn('let response = if modern { live } else {', host)
+        self.assertIn('.set("X-Respire-Health", "runtime-v1")', transport)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

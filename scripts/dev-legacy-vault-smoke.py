@@ -178,11 +178,28 @@ class Smoke:
             ("  login password: ", password)]
         if version != 1:
             prompts.append(("  super password (A3-…): ", original_super))
-        result = self.cli(env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
-        # Track every successful auth immediately, before API/readback assertions
-        # can fail, including old-salt, fresh-device and repeated v1 logins.
-        self.keys.track_created_login(self.session(env), user,
-            None if version == 1 else original_super, password)
+        login_env = dict(env)
+        if version != 1:
+            # This case proves the original factor through the hidden prompt.
+            # A supplied environment factor bypasses that prompt in the product.
+            login_env.pop("RSRS_SUPER", None)
+        previous_alias = self.session(env).get("keyring_account")
+        completed = False
+        try:
+            result = self.cli(login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
+            completed = True
+        finally:
+            # A committed login can still fail the TTY/JSON/owned-stop checks.
+            # Claim only its new alias from this exact owned session, never an
+            # existing alias or arbitrary credential-store contents. Keep the
+            # original failure fatal while retaining exact cleanup ownership.
+            committed = self.session(env)
+            created = (bool(committed.get("token")) and bool(committed.get("keyring_account"))
+                and committed.get("keyring_account") != previous_alias)
+            if completed or created:
+                require(created, "login_credential_fixture_new_session_missing")
+                self.keys.track_created_login(committed, user,
+                    None if version == 1 else original_super, password)
         return result
 
     def session(self, env):

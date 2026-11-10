@@ -244,7 +244,8 @@ class Fixture:
             raise RuntimeError("direct_" + command[0] + "_invalid_json") from None
         require(not data.get("errors"), "direct_" + command[0] + "_errors")
         if self.args.runtime_binary and command[0] in ('remember', 'show', 'sync'):
-            with urllib.request.urlopen('http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
             profile = Path(env['RSRS_DATA_DIR'])
             verify_runtime_health(self.args, health, profile, profile)
@@ -304,7 +305,8 @@ class Fixture:
             if not endpoint_path.is_file():
                 return False
             try:
-                with urllib.request.urlopen("http://127.0.0.1:" + str(self.port) + "/api/health", timeout=5) as response:
+                with urllib.request.urlopen(urllib.request.Request(
+                        "http://127.0.0.1:" + str(self.port) + "/api/health", headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                     require(response.status == 200, "runtime_health_status_failed")
                     health = json.load(response)
             except urllib.error.HTTPError:
@@ -327,7 +329,8 @@ class Fixture:
     def rpc(self, command):
         body = {"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}
         if self.args.runtime_binary:
-            with urllib.request.urlopen('http://127.0.0.1:' + str(self.port) + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + str(self.port) + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
             data_dir = Path(self.a['RSRS_DATA_DIR'])
             verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)

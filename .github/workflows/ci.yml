@@ -1406,6 +1406,10 @@ jobs:
         run: python3 -B scripts/test-runtime-supplement-isolation.py
       - name: Verify standalone diagnostic sweep identity and failure guards
         run: node --test npm/scripts/test-dev-sweep-standalone-contract.mjs
+      - name: Verify invalid account pre-validation source contract
+        run: python3 -B scripts/test-account-rejection-source.py
+      - name: Verify client-only no-write failure diagnostics
+        run: python3 -B scripts/test-client-only-no-write-diagnostics.py
       - name: Validate release sweep PowerShell syntax
         shell: pwsh
         run: |
@@ -1415,6 +1419,7 @@ jobs:
           & ./scripts/test-reembed-progress-contract.ps1
           & ./scripts/test-account-failure-diagnostics.ps1
           & ./scripts/test-keygen-fixture-handoff.ps1
+          & ./scripts/test-account-rejection-contract.ps1
 
   client2-focus-contract:
     runs-on: windows-latest

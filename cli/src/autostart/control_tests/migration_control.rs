@@ -64,6 +64,7 @@ fn migration_recovery_files_preserve_terminal_details_and_do_not_rewrite_input()
     assert!(read_original(&path)?.is_none());
     let original = operation(&root)?;
     let context = Original {
+        schema_rejection: None,
         terminal_receipt: Some(receipt(&original, HostMigrationOutcome::AlreadyMigrated)),
         operation: original,
         token: "synthetic-token".into(),
@@ -282,5 +283,69 @@ fn migration_responses_keep_unknown_queries_separate_from_terminal_receipts() ->
         &original
     )
     .is_err());
+    Ok(())
+}
+
+#[test]
+fn schema_rejection_requires_exact_operation_and_transport_binding() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?;
+    let original = operation(&root)?;
+    let mut rejected = response(&original, HostMigrationOutcome::Unknown);
+    rejected["exit"] = json!(1);
+    rejected["code"] = json!("migration_schema_rejected");
+    rejected["envelope"]["summary"] = serde_json::to_value(&original)?;
+    for method in [HOST_MIGRATION_PROFILE_METHOD, HOST_MIGRATION_RESULT_METHOD] {
+        validate_response(serde_json::from_value(rejected.clone())?, &request(&original, method)?, &root, 42, &original)?;
+    }
+    for (pointer, value) in [
+        ("/v", json!(999)), ("/id", json!("other")), ("/pid", json!(43)),
+        ("/bin", json!("other")), ("/operation_id", json!("other")),
+        ("/idempotency_key", json!("other")), ("/data_dir", Value::Null),
+        ("/ok", json!(true)), ("/exit", json!(2)), ("/error", json!("untrusted")),
+        ("/code", json!("migration_outcome_unknown")),
+        ("/envelope/status", json!("ok")), ("/envelope/command", json!("migrate")),
+        ("/envelope/items/0/value", json!("false")),
+        ("/envelope/items/1/value", json!("true")),
+        ("/envelope/summary/operation_id", json!("other")),
+        ("/envelope/summary/key", json!("other")),
+        ("/envelope/summary/fingerprint", json!("other")),
+        ("/envelope/summary/source_id", json!("b".repeat(64))),
+        ("/envelope/summary/account", json!("other")),
+        ("/envelope/summary/schema_version", json!(99)),
+    ] {
+        let mut changed = rejected.clone();
+        if pointer == "/error" { changed["error"] = value; }
+        else { *changed.pointer_mut(pointer).context("missing rejection fixture field")? = value; }
+        assert!(validate_response(serde_json::from_value(changed)?,
+            &request(&original, HOST_MIGRATION_PROFILE_METHOD)?, &root, 42, &original).is_err(), "{pointer}");
+    }
+    let mut unknown_field = rejected.clone();
+    unknown_field["envelope"]["summary"]["outcome"] = json!("completed");
+    assert!(validate_response(serde_json::from_value(unknown_field)?,
+        &request(&original, HOST_MIGRATION_PROFILE_METHOD)?, &root, 42, &original).is_err());
+    Ok(())
+}
+
+#[test]
+fn rejected_operation_persists_separately_from_success_receipts() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let original = operation(&dir.path().canonicalize()?)?;
+    let saved = Original {
+        operation: original.clone(), token: "synthetic-token".into(), coordinator: "synthetic-owner".into(),
+        was_serving: true, store_ready: true, sent: true, finished: true,
+        terminal_receipt: None, schema_rejection: Some(original.clone()),
+    };
+    let path = dir.path().join("rejected.json");
+    let bytes = serde_json::to_vec(&saved)?;
+    std::fs::write(&path, &bytes)?;
+    let (read, _) = read_original(&path)?.context("missing rejection")?;
+    assert!(read.finished && read.sent && read.terminal_receipt.is_none());
+    assert!(read.schema_rejection.as_ref() == Some(&original));
+    assert_eq!(std::fs::read(path)?, bytes);
+    let envelope = rejection_envelope();
+    assert!(matches!(envelope.status, Status::Fail));
+    assert_eq!(envelope.summary["code"], "migration_schema_rejected");
+    assert!(!envelope.errors.is_empty());
     Ok(())
 }

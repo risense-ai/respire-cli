@@ -294,6 +294,20 @@ def contained_rejection_run(command, env, root, timeout=90):
         # Never forcibly kill a still-cleaning subreaper and abandon its children.
 
 
+def client_only_diagnostic(result, before, after, profile_exists, endpoint_exists):
+    # Fixed predicates only: never persist captured output, filenames or hashes.
+    return {
+        'case_id': 'client_only_no_profile_writes',
+        'actual_exit': result.returncode if type(result.returncode) is int else None,
+        'failed_checks': [name for name, passed in (
+            ('command_rejected', type(result.returncode) is int and result.returncode != 0),
+            ('home_files_unchanged', before == after),
+            ('profile_absent', not profile_exists),
+            ('endpoint_absent', not endpoint_exists),
+        ) if not passed],
+    }
+
+
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *args):
         return None
@@ -408,6 +422,9 @@ class Smoke:
 
     def http(self, base, method, path, body=None, token=None, headers=None, raw=False):
         fields = {'Content-Type': 'application/json', **(headers or {})}
+        if method == 'GET' and path == '/api/health':
+            # Request backend identity, not the Client2 compatibility-host view.
+            fields['X-Respire-Health'] = 'runtime-v1'
         if token is not None:
             fields['Authorization'] = 'Bearer ' + token
         req = urllib.request.Request(base + path, None if body is None else json.dumps(body).encode(),
@@ -597,8 +614,11 @@ class Smoke:
                                 env=client_env, cwd=self.root, capture_output=True, timeout=25)
         after = {str(path.relative_to(client_home)): hashlib.sha256(path.read_bytes()).hexdigest()
                  for path in client_home.rglob('*') if path.is_file()}
-        require(result.returncode != 0 and before == after and not (client_home / '.rsrs').exists()
-                and not endpoint.exists(), 'client_only_migrated_or_created_profile')
+        diagnostic = client_only_diagnostic(result, before, after,
+                                            (client_home / '.rsrs').exists(), endpoint.exists())
+        if diagnostic['failed_checks']:
+            self.report['failure_diagnostic'] = diagnostic
+            raise Failure('client_only_migrated_or_created_profile')
         self.passed('client_only_no_profile_writes')
 
     def account(self):

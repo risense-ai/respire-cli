@@ -114,7 +114,7 @@ class AliasTests(unittest.TestCase):
                 def cli(env, *args, **kwargs):
                     alias = next(aliases)
                     keys.created(alias, None if version == 1 else SUPER)
-                    current.update(user=USER, keyring_account=alias)
+                    current.update(user=USER, keyring_account=alias, token="synthetic-token")
                     return {'summary': {'ok': True}}
                 smoke.cli = cli
                 smoke.session = lambda env: current
@@ -124,6 +124,84 @@ class AliasTests(unittest.TestCase):
                 self.assertEqual(len(keys.entries), 2 if version == 1 else 4)
                 self.assertTrue(keys.cleanup()['passed'])
                 self.assertFalse(keys.values)
+
+    def test_interactive_factor_env_is_removed_only_from_login_copy(self):
+        for version in (1, 2, 3):
+            keys = MemoryKeys()
+            smoke = object.__new__(legacy.Smoke)
+            smoke.keys = keys
+            current = {'user': USER}
+            env = {'RSRS_SUPER': SUPER, 'RSRS_DATA_DIR': 'owned', 'RSRS_PASS': PASSWORD}
+            before = dict(env)
+            def cli(child_env, *args, **kwargs):
+                self.assertIsNot(child_env, env)
+                self.assertEqual(child_env.get('RSRS_SUPER'), SUPER if version == 1 else None)
+                prompts = kwargs['prompts']
+                self.assertEqual(prompts[1], ('  login password: ', PASSWORD))
+                self.assertEqual(len(prompts), 2 if version == 1 else 3)
+                if version != 1:
+                    self.assertEqual(prompts[2], ('  super password (A3-…): ', SUPER))
+                self.assertNotIn(SUPER, args)
+                self.assertNotIn(PASSWORD, args)
+                keys.created(ALIAS, None if version == 1 else SUPER)
+                current.update(keyring_account=ALIAS, token='synthetic-token')
+                return {'summary': {}}
+            smoke.cli = cli
+            smoke.session = lambda env: dict(current)
+            smoke.password_login(env, USER, PASSWORD, version, SUPER)
+            self.assertEqual(env, before)
+            self.assertTrue(keys.cleanup()['passed'])
+            self.assertFalse(keys.values)
+
+    def test_committed_session_tracked_even_when_post_auth_checks_fail(self):
+        for reason in ('fixture_tty_missing_prompt', 'invalid_cli_json_login', 'owned_runtime_stop_failed'):
+            keys = MemoryKeys()
+            smoke = object.__new__(legacy.Smoke)
+            smoke.keys = keys
+            current = {'user': USER}
+            def cli(*args, **kwargs):
+                keys.created(ALIAS)
+                current.update(keyring_account=ALIAS, token='synthetic-token')
+                raise RuntimeError(reason)
+            smoke.cli = cli
+            smoke.session = lambda env: dict(current)
+            with self.assertRaisesRegex(RuntimeError, '^' + reason + '$'):
+                smoke.password_login({}, USER, PASSWORD, 2, SUPER)
+            self.assertEqual(keys.entries, {('rsrs', 'super:' + ALIAS), ('rsrs', 'pass:' + ALIAS)})
+            report = keys.cleanup()
+            self.assertTrue(report['passed'])
+            self.assertFalse(keys.values)
+            for secret in (PASSWORD, SUPER, ALIAS, USER):
+                self.assertNotIn(secret, json.dumps(report))
+
+    def test_failed_login_does_not_claim_unchanged_alias_or_partial_session(self):
+        for original, after in (({'user': USER, 'keyring_account': ALIAS, 'token': 'old'},
+                                  {'user': USER, 'keyring_account': ALIAS, 'token': 'old'}),
+                                 ({'user': USER}, {'user': USER, 'keyring_account': ALIAS})):
+            keys = MemoryKeys()
+            keys.created(ALIAS)
+            smoke = object.__new__(legacy.Smoke)
+            smoke.keys = keys
+            current = dict(original)
+            def cli(*args, **kwargs):
+                current.clear(); current.update(after)
+                raise RuntimeError('auth_failed')
+            smoke.cli = cli
+            smoke.session = lambda env: dict(current)
+            with self.assertRaisesRegex(RuntimeError, '^auth_failed$'):
+                smoke.password_login({}, USER, PASSWORD, 2, SUPER)
+            self.assertFalse(keys.entries)
+            self.assertFalse(keys.reads)
+            self.assertTrue(keys.values)
+
+    def test_success_without_new_session_is_rejected(self):
+        smoke = object.__new__(legacy.Smoke)
+        smoke.keys = MemoryKeys()
+        smoke.session = lambda env: {'user': USER, 'keyring_account': ALIAS, 'token': 'old'}
+        smoke.cli = lambda *args, **kwargs: {'summary': {}}
+        with self.assertRaisesRegex(RuntimeError, '^login_credential_fixture_new_session_missing$'):
+            smoke.password_login({}, USER, PASSWORD, 2, SUPER)
+        self.assertFalse(smoke.keys.entries)
 
     def test_v1_migration_tracks_before_replacement_super_assertion_fails(self):
         # Execute the actual fixture block, including its assertion, rather
@@ -168,7 +246,7 @@ class AliasTests(unittest.TestCase):
         smoke = object.__new__(legacy.Smoke)
         smoke.keys = MemoryKeys()
         smoke.cli = lambda *a, **kw: (_ for _ in ()).throw(RuntimeError('auth_failed'))
-        smoke.session = lambda env: self.fail('read after failed auth')
+        smoke.session = lambda env: {'user': USER}
         with self.assertRaisesRegex(RuntimeError, 'auth_failed'):
             smoke.password_login({}, USER, PASSWORD, 1, SUPER)
         self.assertFalse(smoke.keys.entries)
