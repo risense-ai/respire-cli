@@ -99,25 +99,15 @@ function Read-DocumentNodeInfo($Element, [int]$ExpectedPid, $AdmittedIds, $LiveI
     $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::ProcessIdProperty) -Readiness:$Readiness
     if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
     Assert-DocumentInspectionPid $sample.value $ExpectedPid $AdmittedIds $LiveIdentities
-    $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::IsPasswordProperty) -Readiness:$Readiness
-    if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
-    if ($sample.value -isnot [bool]) { throw 'UIA node password state is unknown' }
-    $name = ''
-    if (-not $sample.value) {
-        $sample = Read-DocumentProperty $Element ([Windows.Automation.AutomationElement]::NameProperty) -Readiness:$Readiness
-        if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
-        if ($sample.value -isnot [string]) { throw 'UIA node name type is unknown' }
-        $name = $sample.value
-    }
-    $info = @{name=$name.Substring(0,[Math]::Min(128,$name.Length));process_id=$ExpectedPid}
+    # Startup readiness never needs text or descriptive metadata. Do not read
+    # Name, AutomationId, ClassName or IsPassword, even for diagnostics.
+    $info = @{process_id=$ExpectedPid}
     $sample = Read-DocumentRuntimeId $Element -Readiness:$Readiness
     if ($sample -is [Windows.Automation.ElementNotAvailableException]) { return $sample }
     if ($sample.value.Count -eq 0 -or @($sample.value | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'UIA node runtime identity is unknown' }
     $info.runtime_id = $sample.value -join '.'
     foreach ($field in @(
         @{key='control_type';property=[Windows.Automation.AutomationElement]::ControlTypeProperty;type=[Windows.Automation.ControlType]},
-        @{key='automation_id';property=[Windows.Automation.AutomationElement]::AutomationIdProperty;type=[string]},
-        @{key='class_name';property=[Windows.Automation.AutomationElement]::ClassNameProperty;type=[string]},
         @{key='keyboard_focusable';property=[Windows.Automation.AutomationElement]::IsKeyboardFocusableProperty;type=[bool]},
         @{key='offscreen';property=[Windows.Automation.AutomationElement]::IsOffscreenProperty;type=[bool]}
     )) {

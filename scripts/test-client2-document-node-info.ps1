@@ -34,11 +34,11 @@ public sealed class RespireStrictNodeProvider {
             PidCalls++;
             return Read(PidCalls == 1 ? "first_pid" : PidCalls == 2 ? "second_pid" : "final_pid", 20);
         }
-        if (property == AutomationElement.IsPasswordProperty) return Read("password", Password);
-        if (property == AutomationElement.NameProperty) { NameCalls++; return Read("name", "synthetic"); }
+        if (property == AutomationElement.IsPasswordProperty) throw new Exception("Startup password query forbidden");
+        if (property == AutomationElement.NameProperty) { NameCalls++; throw new Exception("Startup Name query forbidden"); }
         if (property == AutomationElement.ControlTypeProperty) return Read("control_type", ControlType.Document);
-        if (property == AutomationElement.AutomationIdProperty) return Read("automation_id", "");
-        if (property == AutomationElement.ClassNameProperty) return Read("class_name", "");
+        if (property == AutomationElement.AutomationIdProperty) throw new Exception("Startup AutomationId query forbidden");
+        if (property == AutomationElement.ClassNameProperty) throw new Exception("Startup ClassName query forbidden");
         if (property == AutomationElement.IsKeyboardFocusableProperty) return Read("focusable", true);
         if (property == AutomationElement.IsOffscreenProperty) return Read("offscreen", false);
         throw new Exception("Unexpected property");
@@ -67,12 +67,13 @@ function Reset-Node {
 foreach ($password in @($false,$true)) {
     Reset-Node; $node.Password=$password
     $tree=Read-TargetTree -ReportUnknownProcess -AdmittedIds $ids -LiveIdentities $identities
-    $names=1; if ($password) { $names=0 }
-    if ($tree.document_count -ne 1 -or -not $tree.traversal_complete -or $tree.nodes.Count -ne 1 -or $node.PidCalls -ne 3 -or $node.NameCalls -ne $names -or $node.GetterCalls -ne 0 -or $walks -ne 1) { throw 'Three-PID strict success path changed' }
-    foreach ($point in @('password','runtime_id','control_type','automation_id','class_name','focusable','offscreen')) {
+    if ($tree.document_count -ne 1 -or -not $tree.traversal_complete -or $tree.nodes.Count -ne 1 -or $node.PidCalls -ne 3 -or $node.NameCalls -ne 0 -or $node.GetterCalls -ne 0 -or $walks -ne 1) { throw 'Three-PID strict success path changed' }
+    foreach ($point in @('runtime_id','control_type','focusable','offscreen')) {
         if (@($node.Calls | Where-Object { $_ -ceq $point }).Count -ne 1) { throw 'Diagnostic method was read more than once' }
     }
-    if ($password -and $tree.nodes[0].name -cne '') { throw 'Password node name was observed' }
+    foreach ($removed in @('name','automation_id','class_name')) {
+        if ($tree.nodes[0].ContainsKey($removed)) { throw 'Startup metadata was emitted' }
+    }
 }
 foreach ($point in @('second_pid','final_pid')) {
     foreach ($fault in @('different','null','nonint','unsupported')) {
@@ -82,17 +83,12 @@ foreach ($point in @('second_pid','final_pid')) {
         if ($point -eq 'second_pid' -and ($node.NameCalls -ne 0 -or $node.Calls.Count -ne 2)) { throw 'Second PID failure reached diagnostics' }
     }
 }
-foreach ($fault in @('null','nonint','wrongbool')) {
-    Reset-Node; $node.Point='password'; $node.Fault=$fault
-    $caught=$null; try { $null=Read-TargetTree -ReportUnknownProcess -AdmittedIds $ids -LiveIdentities $identities } catch { $caught=$_.Exception.Message }
-    if ($caught -cne 'UIA node password state is unknown' -or $node.NameCalls -ne 0 -or $walks -ne 0) { throw 'Unknown password state reached Name' }
-}
-foreach ($point in @('password','name','runtime_id','control_type','automation_id','class_name','focusable','offscreen')) {
+foreach ($point in @('runtime_id','control_type','focusable','offscreen')) {
     Reset-Node; $node.Point=$point; $node.Fault='unsupported'
     $caught=$false; try { $null=Read-TargetTree -ReportUnknownProcess -AdmittedIds $ids -LiveIdentities $identities } catch { $caught=$true }
-    if (-not $caught -or $walks -ne 0 -or $report.document_pid_diagnostic -eq 'element_unavailable' -or ($point -eq 'password' -and $node.NameCalls -ne 0)) { throw 'Unknown diagnostic type was accepted or retried' }
+    if (-not $caught -or $walks -ne 0 -or $report.document_pid_diagnostic -eq 'element_unavailable' -or $node.NameCalls -ne 0) { throw 'Unknown diagnostic type was accepted or retried' }
 }
-foreach ($point in @('second_pid','password','name','runtime_id','control_type','final_pid')) {
+foreach ($point in @('second_pid','runtime_id','control_type','focusable','offscreen','final_pid')) {
     foreach ($fault in @('stale','wrapped','unknown_wrapper','com')) {
         Reset-Node; $node.Point=$point; $node.Fault=$fault
         $result=$null; $caught=$false; $message=$null
@@ -101,14 +97,14 @@ foreach ($point in @('second_pid','password','name','runtime_id','control_type',
         if ($caught -eq $typed -or $walks -ne 0 -or $node.GetterCalls -ne 0) { throw 'Provider exception boundary widened' }
         if (-not $typed -and $message -notin @('UIA document property method failed','UIA document runtime identity method failed')) { throw 'Unknown provider message escaped fixed failure' }
         if ($typed -and ($result.GetType() -ne [Windows.Automation.ElementNotAvailableException] -or $result.PSObject.Properties.Name -contains 'nodes' -or $report.document_pid_diagnostic -cne 'element_unavailable')) { throw 'Typed node failure retained partial tree evidence' }
-        if ($point -in @('second_pid','password') -and $node.NameCalls -ne 0) { throw 'Unproven identity or password reached Name' }
+        if ($node.NameCalls -ne 0) { throw 'Unproven identity or password reached Name' }
         Reset-Node; $node.Point=$point; $node.Fault=$fault; $caught=$false
         try { $null=Read-TargetTree -AdmittedIds $ids -LiveIdentities $identities } catch { $caught=$true }
         if (-not $caught) { throw 'Ordinary traversal returned a readiness signal' }
     }
 }
 foreach ($change in @('exit','reuse')) {
-    foreach ($at in @('second_pid','name','final_pid')) {
+    foreach ($at in @('second_pid','control_type','final_pid')) {
         Reset-Node
         $node.Observe=[Action[string]]({param($point)
             if ($point -ceq $at) {
@@ -132,4 +128,4 @@ function Assert-DocumentNodeIdentity { param($NodePid,$LiveIdentities) throw [Wi
 Reset-Node; $caught=$false
 try { $null=Read-TargetTree -ReportUnknownProcess -AdmittedIds $ids -LiveIdentities $identities } catch { $caught=$true }
 if (-not $caught -or $node.NameCalls -ne 0 -or $node.PidCalls -ne 1 -or $report.document_pid_diagnostic -eq 'element_unavailable') { throw 'Identity assertion entered provider retry scope' }
-Write-Host 'PASS: explicit startup node methods enforce three PID checks, password redaction and narrow typed invalidation'
+Write-Host 'PASS: explicit startup node methods enforce three PID checks, zero startup metadata reads and narrow typed invalidation'
