@@ -640,6 +640,7 @@ function Test-OfflineButtonReplacement([string]$Name, [string]$OriginalId, $Atte
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    if ($PrepareInvoke) { $report.offline.final_preparation_history = @() }
     $diagnosticArgs = @{}
     if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
     $scrollAttempts = 0
@@ -647,6 +648,11 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
         $attemptClock = [Diagnostics.Stopwatch]::StartNew()
         $mismatchEvidence = $null
         $preparingInvoke = $false
+        $preparationTimedOut = $false
+        if ($PrepareInvoke) {
+            $report.offline.final_preparation = @{route='bounded_attempt';attempt=($attempt+1);kind='not_reached';proof='not_eligible'}
+            $report.offline.final_preparation_history = @($report.offline.final_preparation_history) + @($report.offline.final_preparation)
+        }
         if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
         $report.offline.focus_diagnostic = $null
         $null = Assert-Target $true
@@ -687,18 +693,31 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
                 # Continue this same attempt, never start a second retry budget.
                 $preparingInvoke = $true
                 $mismatchEvidence = $null
-                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { throw 'Offline button preparation exceeded its existing attempt budget' }
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
                 $prepared = Prepare-OfflineButtonInvoke $element ([ref]$mismatchEvidence) @diagnosticArgs
-                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { throw 'Offline button preparation exceeded its existing attempt budget' }
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
                 return $prepared
             }
             return $element
         } catch {
             $primaryException = $_.Exception
-            if ($null -ne $mismatchEvidence -and $attempt -lt 4 -and $attemptClock.Elapsed.TotalSeconds -lt 10) {
+            # Mirror the original short-circuit budget checks exactly once.
+            $canProve = $false
+            if ($null -ne $mismatchEvidence) {
+                if ($attempt -lt 4) {
+                    if ($attemptClock.Elapsed.TotalSeconds -lt 10) { $canProve=$true }
+                    elseif ($preparingInvoke) { $report.offline.final_preparation.proof='budget_exhausted' }
+                } elseif ($preparingInvoke) { $report.offline.final_preparation.proof='attempts_exhausted' }
+            }
+            if ($preparingInvoke -and $preparationTimedOut) { $report.offline.final_preparation.proof='budget_exhausted' }
+            if ($canProve) {
                 $replacement = $false
-                try { $replacement = Test-OfflineButtonReplacement $Name $mismatchEvidence.original_id $attemptClock 10 } catch {}
+                if ($preparingInvoke) { $report.offline.final_preparation.proof='false' }
+                try { $replacement = Test-OfflineButtonReplacement $Name $mismatchEvidence.original_id $attemptClock 10 } catch {
+                    if ($preparingInvoke) { $report.offline.final_preparation.proof='exception' }
+                }
                 if ($replacement -is [bool] -and $replacement) {
+                    if ($preparingInvoke) { $report.offline.final_preparation.proof='verified' }
                     # No effect was dispatched. Consume this existing attempt and
                     # reacquire through the ordinary full selector on the next one.
                     continue
@@ -715,12 +734,16 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
     }
     throw 'Offline button did not become focus-ready within the bounded attempts'
 }
-function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '') {
+function Send-OfflineKey([int]$Key, [string]$ExpectedRuntimeId = '', [switch]$RecoveryDismiss) {
+    if ($RecoveryDismiss) { $report.offline.recovery_dismiss_detail = 'before_guard' }
     $null = Assert-Target $true
+    if ($RecoveryDismiss) { $report.offline.recovery_dismiss_detail = 'before_focus' }
     $focus = Read-TargetFocus
     if (-not $focus.belongs_to_target -or -not $focus.in_document -or $focus.offscreen) { throw 'Offline input focus escaped the original visible document' }
     if ($ExpectedRuntimeId -and $focus.runtime_id -ne $ExpectedRuntimeId) { throw 'Offline button focus changed before key dispatch' }
+    if ($RecoveryDismiss) { $report.offline.recovery_dismiss_detail = 'escape_send' }
     if ([RespireNativeInput]::Key([IntPtr][long]$binding.hwnd, [uint16]$Key) -ne 2) { throw 'Offline SendInput key was rejected' }
+    if ($RecoveryDismiss) { $report.offline.recovery_dismiss_detail = 'after_guard' }
     $null = Assert-Target $true
 }
 function New-AccountStabilityClock { return [Diagnostics.Stopwatch]::StartNew() }
@@ -852,6 +875,11 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
 }
 function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
     $MismatchEvidence.Value = $null
+    if ($null -eq $report.offline.final_preparation) {
+        $report.offline.final_preparation = @{route='bounded_attempt';attempt=0;kind='not_reached';proof='not_eligible'}
+    }
+    $report.offline.final_preparation.kind='unknown'
+    $report.offline.final_preparation.proof='not_eligible'
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
     $parts = @($Element.GetRuntimeId())
     $expected = $parts -join '.'
@@ -871,9 +899,18 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
     if ($belongs -isnot [bool] -or $inDocument -isnot [bool] -or $offscreen -isnot [bool] -or
         $focusedId -isnot [string] -or $focusedId -cnotmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z' -or
         $parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) {
+        if ($belongs -isnot [bool] -or $inDocument -isnot [bool] -or $offscreen -isnot [bool]) {
+            $report.offline.final_preparation.kind='invalid_focus_fields'
+        } elseif ($focusedId -isnot [string] -or $focusedId -cnotmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z') {
+            $report.offline.final_preparation.kind='invalid_focused_id'
+        } else { $report.offline.final_preparation.kind='invalid_requested_id' }
         throw 'Offline button focus changed before UIA Invoke'
     }
     if (-not $belongs -or -not $inDocument -or $offscreen -or $focusedId -cne $expected) {
+        if (-not $belongs) { $report.offline.final_preparation.kind='outside_target' }
+        elseif (-not $inDocument) { $report.offline.final_preparation.kind='outside_document' }
+        elseif ($offscreen) { $report.offline.final_preparation.kind='offscreen' }
+        else { $report.offline.final_preparation.kind='id_mismatch' }
         # A mismatch alone is not replacement evidence. Only permit a complete
         # fresh-tree proof when focus remains in the original visible document.
         if ($belongs -and $inDocument -and -not $offscreen) {
@@ -881,13 +918,18 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
         }
         throw 'Offline button focus changed before UIA Invoke'
     }
+    $report.offline.final_preparation.kind='verified'
     return @{element=$Element;pattern=$pattern}
 }
 function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    $report.offline.final_preparation = $null
+    $report.offline.final_preparation_history = @()
     $diagnosticArgs = @{}
     if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
     if ($VerifySourceStability) {
+        $report.offline.final_preparation = @{route='candidate_window';attempt=0;kind='not_reached';proof='not_eligible'}
+        $report.offline.final_preparation_history = @($report.offline.final_preparation)
         # Candidate stability remains a separate observation window. Never refocus
         # or retry after this window and never borrow its time for replacement.
         $element = Find-FocusedOfflineButton $Name
@@ -903,18 +945,76 @@ function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [Val
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_post_invoke_guard' }
     $null = Assert-Target $true
 }
+function New-OfflineFieldClock { return [Diagnostics.Stopwatch]::StartNew() }
+function Assert-OfflineFieldIdentity($Element, [string]$ExpectedId, $Identities) {
+    $null = Assert-Target $true
+    foreach ($id in $Identities.Keys) {
+        if (-not $ownedIds.Contains([int]$id)) { throw 'Original field process ancestry changed' }
+        Assert-DocumentNodeIdentity ([int]$id) $Identities
+    }
+    $nodePid = $Element.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty, $true)
+    if ($nodePid -isnot [int] -or -not $ownedIds.Contains($nodePid)) { throw 'Original field process is unproven' }
+    Assert-DocumentNodeIdentity $nodePid $Identities
+    $parts = @($Element.GetRuntimeId())
+    if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'Original field identity unavailable' }
+    $id = $parts -join '.'
+    if ($ExpectedId -and $id -cne $ExpectedId) { throw 'Original field identity changed' }
+    $password = $Element.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::IsPasswordProperty, $true)
+    $offscreen = $Element.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::IsOffscreenProperty, $true)
+    $enabled = $Element.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::IsEnabledProperty, $true)
+    if ($password -isnot [bool] -or $password -or $offscreen -isnot [bool] -or $offscreen -or
+        $enabled -isnot [bool] -or -not $enabled) { throw 'Original field is not a known visible non-password input' }
+    return $id
+}
+function Read-OfflineFieldValue($Element, [string]$ExpectedId, $Pattern, $Identities, $Clock, [switch]$Postcondition) {
+    if ($Postcondition -and $Clock.Elapsed.TotalSeconds -ge 3) { throw 'Synthetic text was not observed in the original visible control' }
+    $null = Assert-OfflineFieldIdentity $Element $ExpectedId $Identities
+    # This reviewed focus reader validates PID/lifetime before ancestry and never
+    # reads arbitrary names, values, AutomationId or ClassName.
+    $focus = Read-AccountStabilityFocus $Identities $Clock
+    if ($focus.belongs_to_target -isnot [bool] -or -not $focus.belongs_to_target -or
+        $focus.in_document -isnot [bool] -or -not $focus.in_document -or
+        $focus.offscreen -isnot [bool] -or $focus.offscreen -or
+        $focus.runtime_id -isnot [string] -or $focus.runtime_id -cne $ExpectedId) {
+        throw 'Visible text focus changed before readback'
+    }
+    if ($Postcondition -and $Clock.Elapsed.TotalSeconds -ge 3) { throw 'Synthetic text was not observed in the original visible control' }
+    $value = $Pattern.Current.Value
+    foreach ($id in $Identities.Keys) { Assert-DocumentNodeIdentity ([int]$id) $Identities }
+    if ($Postcondition -and $Clock.Elapsed.TotalSeconds -ge 3) { throw 'Synthetic text was not observed in the original visible control' }
+    if ($value -isnot [string]) { throw 'Original field value is unavailable' }
+    return $value
+}
 function Fill-OfflineField([string]$Name, [string]$Text) {
     $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Name) + '$')
-    if ($element.Current.IsPassword) { throw 'Offline fixture refuses password inputs' }
-    $pattern = $element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-    if ($pattern.Current.Value -ne '') { throw 'Offline synthetic field was not empty' }
-    Focus-OfflineControl $element
-    $null = Assert-Target $true
-    $focus = Read-TargetFocus
-    if ($focus.runtime_id -ne ($element.GetRuntimeId() -join '.') -or -not $focus.in_document -or $focus.offscreen) { throw 'Visible text focus changed before SendInput' }
-    if ([RespireNativeInput]::Text([IntPtr][long]$binding.hwnd, $Text) -ne 2*$Text.Length) { throw 'Offline Unicode SendInput was incomplete' }
-    $null = Assert-Target $true
-    if ($pattern.Current.Value -ne $Text) { throw 'Synthetic text was not observed in the original visible control' }
+    $held = [Collections.Generic.List[object]]::new(); $identities = @{}
+    try {
+        $null = Assert-Target $true
+        foreach ($id in $ownedIds) {
+            $process = Get-Process -Id $id -ErrorAction Stop; $held.Add($process)
+            Assert-DocumentProcessHandle $process
+            $identities[[int]$id] = @{process=$process;birth=$process.StartTime.ToUniversalTime().Ticks;session=$process.SessionId;image=$process.Path}
+        }
+        $originalId = Assert-OfflineFieldIdentity $element '' $identities
+        $pattern = $element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+        $initialValue = $pattern.Current.Value
+        if ($initialValue -isnot [string] -or -not [string]::Equals($initialValue,'',[StringComparison]::Ordinal)) { throw 'Offline synthetic field was not empty' }
+        Focus-OfflineControl $element
+        $clock = New-OfflineFieldClock
+        $beforeInput = Read-OfflineFieldValue $element $originalId $pattern $identities $clock
+        if (-not [string]::Equals($beforeInput,'',[StringComparison]::Ordinal)) { throw 'Offline synthetic field was not empty' }
+        if ([RespireNativeInput]::Text([IntPtr][long]$binding.hwnd, $Text) -ne 2*$Text.Length) { throw 'Offline Unicode SendInput was incomplete' }
+        # New, explicit postcondition budget: at most three seconds after the one
+        # input dispatch. No refocus, replacement lookup, or input replay occurs.
+        $clock.Restart()
+        while ($clock.Elapsed.TotalSeconds -lt 3) {
+            $value = Read-OfflineFieldValue $element $originalId $pattern $identities $clock -Postcondition
+            if ($clock.Elapsed.TotalSeconds -ge 3) { break }
+            if ([string]::Equals($value,$Text,[StringComparison]::Ordinal)) { return }
+            Pause-Probe
+        }
+        throw 'Synthetic text was not observed in the original visible control'
+    } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 
 function Read-OfflineHttp([string]$Path, $Body = $null) {
@@ -1048,6 +1148,7 @@ function Close-OfflineDiaryReader([string]$Title) {
     throw 'Synthetic diary dialog did not close'
 }
 function Wait-OfflineRecoveryDismissed {
+    $report.offline.recovery_dismiss_detail = 'observe_absence'
     $selector = '^' + [regex]::Escape([regex]::Unescape('\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599')) + '$'
     # Only fixed-name existence is inspected. Never read Edit.Value or arbitrary
     # tree text; a disabled recovery field still means the dialog is not dismissed.
@@ -1055,6 +1156,7 @@ function Wait-OfflineRecoveryDismissed {
         $edit = Find-OfflineControl 'ControlType.Edit' $selector 1 -AllowAbsent
         $title = Find-OfflineControl 'ControlType.Text' $selector 1 -AllowAbsent
         if ($null -eq $edit -and $null -eq $title) {
+            $report.offline.recovery_dismiss_detail = 'complete'
             $report.offline.recovery_controls_absent = $true
             return
         }
@@ -1109,7 +1211,7 @@ function Invoke-OfflineGuiAcceptance {
     # Never read arbitrary tree nodes/values, capture a screenshot, copy or archive recovery material.
     $null = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('\u005e\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599\u0024')) 60
     $report.offline.action_stage = 'recovery_dismiss'
-    Send-OfflineKey 27 # Normal Escape closes the recovery display; generated VM keys are disposable.
+    Send-OfflineKey 27 -RecoveryDismiss # Normal Escape closes the recovery display; generated VM keys are disposable.
     Wait-OfflineRecoveryDismissed
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
