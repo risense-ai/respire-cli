@@ -51,6 +51,19 @@ function Element-Info($Element) {
         keyboard_focusable = $current.IsKeyboardFocusable; offscreen = $current.IsOffscreen }
 }
 
+function Get-DocumentUnavailableException([Exception]$Exception) {
+    # Only known method-call wrappers, never arbitrary InnerException chains,
+    # message text, HRESULT guesses, or provider/COM errors.
+    $current = $Exception
+    for ($depth=0; $null -ne $current -and $depth -le 4; $depth++) {
+        if ($current.GetType() -eq [Windows.Automation.ElementNotAvailableException]) { return $current }
+        if ($current.GetType() -ne [Management.Automation.MethodInvocationException] -and
+            $current.GetType() -ne [Reflection.TargetInvocationException]) { return $null }
+        $current = $current.InnerException
+    }
+    return $null
+}
+function New-DocumentReadinessClock { return [Diagnostics.Stopwatch]::StartNew() }
 function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.HashSet[int]]$AdmittedIds = $null, $LiveIdentities = $null) {
     if ($null -eq $AdmittedIds) { $AdmittedIds = $ownedIds }
     $window = Get-OfflineReplacementRoot
@@ -61,9 +74,16 @@ function Read-TargetTree([switch]$ReportUnknownProcess, [Collections.Generic.Has
     while ($queue.Count -gt 0 -and $rows.Count -lt 256 -and $clock.Elapsed.TotalSeconds -lt 5) {
         $next = $queue.Dequeue()
         # Never inspect diagnostic names/values of a node whose process is unproven.
-        # Cache once: null/missing or a PS5-suppressed getter fault is unknown,
-        # never a usable PID. Diagnostics contain only this closed classification.
-        try { $rawPid = $next.element.Current.ProcessId } catch {
+        # Explicit method invocation preserves provider exceptions rather than
+        # relying on PowerShell's property-getter exception handling.
+        try { $rawPid = $next.element.GetCurrentPropertyValue([Windows.Automation.AutomationElement]::ProcessIdProperty, $true) } catch {
+            $unavailable = Get-DocumentUnavailableException $_.Exception
+            if ($null -ne $unavailable -and $ReportUnknownProcess) {
+                $report.document_pid_diagnostic = 'element_unavailable'
+                # Private typed signal; no partial rows or exception details enter
+                # the report. Only Wait-TargetDocument handles this exact type.
+                return $unavailable
+            }
             $report.document_pid_diagnostic = 'unavailable'
             throw
         }
@@ -202,7 +222,8 @@ function Confirm-NewWebViewDescendant([int]$NodePid, [Diagnostics.Stopwatch]$Bud
 }
 
 function Wait-TargetDocument([double]$Seconds = 15) {
-    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $clock = New-DocumentReadinessClock
+    $report.document_discarded_samples = 0
     $attempts = [Collections.Generic.List[object]]::new()
     $refreshed = $false
     $admitted = $null
@@ -231,9 +252,21 @@ function Wait-TargetDocument([double]$Seconds = 15) {
                 Assert-DocumentNodeIdentity $knownPid $identities
             }
         }
+        foreach ($knownPid in $admitted) {
+            if (-not $ownedIds.Contains($knownPid)) { throw 'Document process ancestry changed before sampling' }
+            Assert-DocumentNodeIdentity $knownPid $identities
+        }
         $report.document_readiness_phase = 'read_tree'
         if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
         $tree = Read-TargetTree -ReportUnknownProcess -AdmittedIds $admitted -LiveIdentities $identities
+        if ($null -ne $tree -and $tree.GetType() -eq [Windows.Automation.ElementNotAvailableException]) {
+            $report.document_discarded_samples++
+            if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }
+            $report.document_readiness_phase = 'discard_unavailable_sample'
+            Pause-Probe
+            # Keep held lifetimes, admitted IDs, proof allowance and clock intact.
+            continue
+        }
         if ($tree -is [int]) {
             if ($refreshed) { throw 'UIA node belongs to an unbound process after one verified refresh' }
             if ($clock.Elapsed.TotalSeconds -ge $Seconds) { break }

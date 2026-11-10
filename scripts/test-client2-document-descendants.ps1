@@ -1,9 +1,10 @@
 # Synthetic execution only. No process is spawned, signalled, or added to an allowlist.
 $ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Descendant policy source parse failed' }
-foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-ProvenWebViewChain','Confirm-NewWebViewDescendant','Wait-TargetDocument')) {
+foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-ProvenWebViewChain','Confirm-NewWebViewDescendant','New-DocumentReadinessClock','Wait-TargetDocument')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Descendant policy function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -21,6 +22,9 @@ function Assert-Target {
     $script:ownedIds=[Collections.Generic.HashSet[int]]::new()
     [void]$script:ownedIds.Add(20)
     if ($script:guards -gt 1) { [void]$script:ownedIds.Add(99) }
+    # A verified child remains in the next binding snapshot; sibling 99 still
+    # appears in ownedIds without ever becoming admitted by that proof.
+    if ($script:report.document_descendant_refresh -ceq 'verified_discard_and_rescan') { [void]$script:ownedIds.Add(30) }
     if ($script:mode -eq 'changedroot' -or ($script:mode -eq 'changedbinding' -and $script:guards -gt 1)) { throw 'fixed binding changed' }
 }
 function Get-CimInstance {

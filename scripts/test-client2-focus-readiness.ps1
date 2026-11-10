@@ -281,3 +281,5 @@ Write-Host 'PASS: explicit post-keygen start and single-actor acceptance order'
 & (Join-Path $PSScriptRoot 'test-client2-preinvoke-replacement.ps1')
 
 & (Join-Path $PSScriptRoot 'test-client2-document-pid-diagnostics.ps1')
+
+& (Join-Path $PSScriptRoot 'test-client2-document-sampling.ps1')

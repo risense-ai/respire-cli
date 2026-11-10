@@ -1,9 +1,10 @@
 # Actual tree AST: rejected PID observations never reach node diagnostics or input.
 $ErrorActionPreference='Stop'
+Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Document PID source parse failed' }
-foreach ($name in @('Read-TargetTree','Element-Info')) {
+foreach ($name in @('Get-DocumentUnavailableException','Read-TargetTree','Element-Info')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Document PID function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -57,6 +58,23 @@ foreach ($mode in @('missing','null','wrong_type','throw','zero','negative','pos
         $current | Add-Member ScriptProperty $field $getter
     }
     $script:root=[pscustomobject]@{Current=$current}
+    $method={
+        param($Property,$IgnoreDefault)
+        if ($Property -ne [Windows.Automation.AutomationElement]::ProcessIdProperty -or $IgnoreDefault -ne $true) { throw 'Wrong PID property query' }
+        $counts.pid++
+        switch ($mode) {
+            'missing' { return $null }
+            'null' { return $null }
+            'wrong_type' { return '20' }
+            'throw' { throw 'Synthetic PID method fault' }
+            'zero' { return 0 }
+            'negative' { return -1 }
+            'positive_unbound' { return 99 }
+            'positive_return' { return 99 }
+            'known' { return 20 }
+        }
+    }.GetNewClosure()
+    $root | Add-Member ScriptMethod GetCurrentPropertyValue $method
     $root | Add-Member ScriptMethod GetRuntimeId { return @(1,2) }
     $caught=$null; $result=$null
     try { $result=Read-TargetTree -ReportUnknownProcess:($mode -ne 'positive_unbound') -AdmittedIds $ownedIds -LiveIdentities @{20=@{}} } catch { $caught=$_.Exception.Message }
@@ -65,7 +83,7 @@ foreach ($mode in @('missing','null','wrong_type','throw','zero','negative','pos
         continue
     }
     $expected='unavailable'; if ($mode -eq 'wrong_type') { $expected='invalid_type' }; if ($mode -in @('zero','negative')) { $expected='nonpositive' }; if ($mode -like 'positive_*') { $expected='unbound_positive' }
-    $pidReads=1; if ($mode -eq 'missing') { $pidReads=0 }
+    $pidReads=1
     if ($counts.pid -ne $pidReads -or $counts.metadata -ne 0 -or $identityReads -ne 0 -or $walkerReads -ne 0 -or $inputs -ne 0 -or $report.Count -ne 1 -or $report.document_pid_diagnostic -cne $expected) { throw 'PID rejection read metadata, repeated getter, or escaped closed diagnostics' }
     if ($mode -eq 'positive_return') {
         if ($null -ne $caught -or $result -isnot [int] -or $result -ne 99) { throw 'Private unknown-positive proof protocol changed' }
