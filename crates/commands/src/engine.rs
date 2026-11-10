@@ -4887,7 +4887,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             supersedes,
             see_also,
         } => {
-            let content = crate::engine_resolve_content(content, content_file, true)?
+            let content = engine_resolve_content(content, content_file, true)?
                 .ok_or_else(|| anyhow!("provide the content argument or --content-file <path>"))?;
             let explicit_kind = r#type.is_some();
             let r#type = r#type.unwrap_or_else(|| "context".to_owned());
@@ -7213,7 +7213,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             kind,
             importance,
         } => {
-            let content = crate::engine_resolve_content(content, content_file, false)?;
+            let content = engine_resolve_content(content, content_file, false)?;
             if metadata.patch().is_some()
                 || kind
                     .as_deref()
