@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// Probe only an already-initialized database; never create or migrate a library.
 /// Do not use SQLite immutable mode: a live runtime's committed WAL must be visible.
@@ -16,6 +16,44 @@ pub fn read_memory_revision(path: &Path) -> Result<String> {
     .context("memory revision unavailable: open the library normally to initialize it")?;
     connection.busy_timeout(Duration::from_secs(1))?;
     read_revision(&connection)
+}
+
+/// P0 gate (2026-11-11): the authoritative revision-trigger set. Judged by name
+/// membership only — total-count checks proved unreliable (12/15/17 variants).
+pub const REVISION_TRIGGERS: [&str; 3] = [
+    "memory_revision_insert",
+    "memory_revision_update",
+    "memory_revision_delete",
+];
+
+/// Read-only: which of the three revision triggers are absent? Empty vec = complete.
+pub fn revision_triggers_missing(connection: &Connection) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for name in REVISION_TRIGGERS {
+        let found: Option<i64> = connection
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if found.is_none() {
+            missing.push(name.to_owned());
+        }
+    }
+    Ok(missing)
+}
+
+/// Read-only path probe with the same rules as `read_memory_revision`:
+/// never creates or migrates; the live WAL stays visible.
+pub fn revision_triggers_missing_at(path: &Path) -> Result<Vec<String>> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("trigger self-check unavailable: open the library normally to initialize it")?;
+    connection.busy_timeout(Duration::from_secs(1))?;
+    revision_triggers_missing(&connection)
 }
 
 impl super::LocalStore {
@@ -55,6 +93,20 @@ mod tests {
         let store = LocalStore { connection };
         store.initialize_sync_storage()?;
         Ok(store)
+    }
+
+    #[test]
+    fn revision_trigger_selfcheck_flags_dropped_update_trigger() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        // Complete set: gate reads true with no missing names.
+        assert_eq!(revision_triggers_missing(&connection)?, Vec::<String>::new());
+        connection.execute_batch("DROP TRIGGER memory_revision_update;")?;
+        assert_eq!(
+            revision_triggers_missing(&connection)?,
+            vec!["memory_revision_update".to_owned()]
+        );
+        Ok(())
     }
 
     #[test]

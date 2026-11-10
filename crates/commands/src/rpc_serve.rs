@@ -729,6 +729,20 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     )
     .context("runtime failed to lock the library")?;
     crate::host_hooks::verify_managed_boot()?;
+    // P0 zero-risk gate (task-10): one read-only lookup per runtime startup.
+    {
+        let cache_gate = respire_app::service::retrieval_cache_status();
+        if cache_gate.trigger_ready {
+            respire_logging::info(format_args!(
+                "retrieval cache gate: revision triggers complete"
+            ));
+        } else {
+            respire_logging::error(format_args!(
+                "retrieval cache gate: missing revision triggers {:?} \u{2014} content token will not advance, the cache would never invalidate",
+                cache_gate.missing
+            ));
+        }
+    }
     // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
     // pipe/socket fallback is necessary.
     let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;

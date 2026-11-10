@@ -29,7 +29,7 @@ mod retrieval;
 pub use resident::MemorySourceChanged;
 mod related;
 mod revision;
-pub use revision::read_memory_revision;
+pub use revision::{read_memory_revision, revision_triggers_missing, revision_triggers_missing_at, REVISION_TRIGGERS};
 mod review;
 pub use review::ReviewHistoryRow;
 mod review_snapshot;

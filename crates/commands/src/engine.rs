@@ -6933,6 +6933,11 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 v["sync_scheduler"] = crate::rpc_serve::sync_scheduler_status();
                 v["recall_statistics"] = rpc::recall_stats_status();
                 v["retrieval_index"] = rpc::index_status();
+                let cache_gate = respire_app::service::retrieval_cache_status();
+                v["retrieval_cache"] = serde_json::json!({
+                    "trigger_ready": cache_gate.trigger_ready,
+                    "missing": cache_gate.missing,
+                });
                 v["model_operation"] = crate::model_progress::status()?;
                 v["sync_live"] = serde_json::json!({
                     "phase": if live.phase.is_empty() { "idle" } else { live.phase.as_str() },
