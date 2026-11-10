@@ -144,6 +144,16 @@ class Smoke(support.Smoke):
             raise RuntimeError(reason + args[0])
         return value
 
+    def verify_retained_current_credentials(self, session, fixture):
+        # Only the original, already tracked login alias owns these credentials.
+        alias = session.get("keyring_account")
+        require(session.get("user") == fixture["account"]["user"]
+            and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias)
+            and alias == fixture["alias"], "existing_target_credential_identity_changed")
+        require(self.keys.read("rsrs", "super:" + alias) == fixture["code"]
+            and self.keys.read("rsrs", "pass:" + alias) == fixture["password"],
+            "existing_target_native_credentials_overwritten")
+
     def reserve_alias(self, source):
         alias = "legacy-" + keyring_backend.canonical_identity(source)[:16]
         for slot in ("super:", "pass:"):
@@ -281,8 +291,6 @@ class Smoke(support.Smoke):
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
         self.diagnostic_secrets.add(password)
-        if service == "rsrs" and self.keys.name == "linux-secret-service":
-            self.keys.register_current_target(user)
         account = {"user": user, "token": None, "confirmed": False,
             "pass_hash": None}
         self.accounts.append(account)
@@ -301,6 +309,8 @@ class Smoke(support.Smoke):
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
         self.keys.track_created_login(session, user, code, password)
+        if service == "rsrs" and self.keys.name == "linux-secret-service":
+            self.keys.register_current_target(session, user)
         auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
         account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         self.diagnostic_secrets.add(account["pass_hash"])
@@ -368,7 +378,7 @@ class Smoke(support.Smoke):
             self.report["fixture_operation"] = "retained_current_credentials"
             self.save()
             return {"account": account, "password": password, "code": code, "service": service,
-                "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": None}
+                "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": session["keyring_account"]}
         self.report["fixture_operation"] = "seed_legacy_native_credentials"
         self.save()
         self.keys.put(service, "super:" + user, code)
@@ -543,10 +553,7 @@ class Smoke(support.Smoke):
             if sys.platform == "darwin":
                 self.verify_mac_native_credentials(current_env, current)
             else:
-                user = current["account"]["user"]
-                require(self.keys.read("rsrs", "super:" + user) == current["code"]
-                    and self.keys.read("rsrs", "pass:" + user) == current["password"],
-                    "existing_target_native_credentials_overwritten")
+                self.verify_retained_current_credentials(current_session, current)
             self.read_entry(current_env, current["id"], current["text"])
             self.passed("existing_rsrs_preserved_and_legacy_imported", imported=len(fixtures))
         before = {str(p.relative_to(home)): digest(p) for p in (home / ".rsrs").rglob(".rsrs-migration.json")}
@@ -617,7 +624,9 @@ class Smoke(support.Smoke):
                 remote = self.env("independent-" + user, user)
                 remote["RSRS_SUPER"] = fixture["code"]
                 self.cli(remote, "login", "--interactive", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
-                fixture["account"]["token"] = self.session(remote)["token"]
+                independent = self.session(remote)
+                self.keys.track_created_login(independent, user, fixture["code"], fixture["password"])
+                fixture["account"]["token"] = independent["token"]
                 self.cli(remote, "sync")
                 self.read_entry(remote, fixture["id"], fixture["text"])
                 self.read_entry(remote, new_id, "New-directory migration write")

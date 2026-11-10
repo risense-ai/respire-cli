@@ -1253,8 +1253,11 @@ fn prepare_command_runtime() -> Result<()> {
     if !runtime_policy::client_only() {
         respire_client_host::paths::ensure_default_home()
             .map_err(|error| anyhow!("default profile migration failed: {error:#}"))?;
+        // File logging creates its parent directory even before an event. A
+        // client-only command must leave profiles untouched; its existing
+        // stderr/envelope and default panic diagnostics remain available.
+        install_error_logging();
     }
-    install_error_logging();
     Ok(())
 }
 

@@ -23,6 +23,22 @@ struct Original {
     finished: bool,
     #[serde(default)]
     terminal_receipt: Option<HostMigrationResult>,
+    #[serde(default)]
+    schema_rejection: Option<HostMigrationOperation>,
+}
+
+enum MigrationReply {
+    Receipt(HostMigrationResult),
+    SchemaRejected(HostMigrationOperation),
+}
+
+fn rejection_envelope() -> ResultEnvelope {
+    crate::set_exit_code(1);
+    let mut envelope = ResultEnvelope::new("migrate", Status::Fail,
+        serde_json::json!({"state":"rejected", "code":"migration_schema_rejected", "original_preserved":true}), Vec::new());
+    envelope.errors.push("legacy database uses an incompatible pre-encrypted demo format; export with its original version and import into rsrs; original rows were preserved".into());
+    envelope.actions.push("After correcting the source, use a new account name for a new migration; repeating this account returns the original rejection.".into());
+    envelope
 }
 
 fn canonical_id(value: &str) -> bool {
@@ -105,6 +121,11 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             && operation.key == operation.operation_id && canonical_id(&original.token), "migration recovery binding changed");
         if original.finished {
             anyhow::ensure!(original.sent, "finished migration was never sent");
+            if let Some(rejected) = original.schema_rejection.as_ref() {
+                anyhow::ensure!(original.terminal_receipt.is_none() && *rejected == original.operation,
+                    "terminal migration rejection changed its original operation");
+                return Ok(rejection_envelope());
+            }
             let receipt = original.terminal_receipt.as_ref().context(
                 "migration was already confirmed and maintenance finished, but this older recovery record has no terminal details; Runtime was not drained and no migration was replayed")?;
             validate_terminal_receipt(receipt, &original.operation, HOST_MIGRATION_PROFILE_METHOD)?;
@@ -112,7 +133,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             envelope.details = receipt.details.clone();
             return Ok(envelope);
         }
-        anyhow::ensure!(original.terminal_receipt.is_none(), "unfinished migration contains a terminal receipt");
+        anyhow::ensure!(original.terminal_receipt.is_none() && original.schema_rejection.is_none(), "unfinished migration contains a terminal receipt");
         let maintenance = super::lifecycle::resume_identity_write_maintenance(
             &root, &profile, &original.token, &original.coordinator)?;
         (original, digest, maintenance)
@@ -125,7 +146,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             token: super::lifecycle::current_boot_token().context("migration maintenance token missing")?,
             coordinator: binding["coordinator_id"].as_str().context("migration coordinator missing")?.to_owned(),
             was_serving: owner.is_some(), store_ready: owner.as_ref().is_some_and(|health| health.store_ready),
-            sent: false, finished: false, terminal_receipt: None };
+            sent: false, finished: false, terminal_receipt: None, schema_rejection: None };
         let bytes = serde_json::to_vec(&original)?;
         super::private_write(&path, &bytes, None)?;
         (original, super::hash(&bytes), maintenance)
@@ -165,15 +186,17 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         };
         // A saved sent request always queries. A timeout never admits a replacement operation.
         stage = "exchange";
-        let receipt = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
-        if receipt.outcome == HostMigrationOutcome::Unknown {
-            stage = "encode_unknown";
-            let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown", "request_phase":if method == HOST_MIGRATION_RESULT_METHOD { "result_query" } else { "initial_request" }}), Vec::new());
-            envelope.details = serde_json::to_value(&receipt)?;
-            envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
-                source_id, account, original.operation.operation_id));
-            crate::set_exit_code(2);
-            return Ok(envelope);
+        let reply = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
+        if let MigrationReply::Receipt(receipt) = &reply {
+            if receipt.outcome == HostMigrationOutcome::Unknown {
+                stage = "encode_unknown";
+                let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown", "request_phase":if method == HOST_MIGRATION_RESULT_METHOD { "result_query" } else { "initial_request" }}), Vec::new());
+                envelope.details = serde_json::to_value(&receipt)?;
+                envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
+                    source_id, account, original.operation.operation_id));
+                crate::set_exit_code(2);
+                return Ok(envelope);
+            }
         }
         stage = "selection_after_receipt";
         unchanged()?;
@@ -195,9 +218,18 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         maintenance.finish()?;
         finished = true;
         original.finished = true;
-        let mut envelope = ResultEnvelope::new("migrate", Status::Ok, receipt.details.clone(), Vec::new());
-        envelope.details = receipt.details.clone();
-        original.terminal_receipt = Some(receipt);
+        let envelope = match reply {
+            MigrationReply::Receipt(receipt) => {
+                let mut envelope = ResultEnvelope::new("migrate", Status::Ok, receipt.details.clone(), Vec::new());
+                envelope.details = receipt.details.clone();
+                original.terminal_receipt = Some(receipt);
+                envelope
+            }
+            MigrationReply::SchemaRejected(rejected) => {
+                original.schema_rejection = Some(rejected);
+                rejection_envelope()
+            }
+        };
         stage = "save_terminal";
         super::private_write(&path, &serde_json::to_vec(&original)?, Some(&digest))?;
         Ok(envelope)
@@ -216,7 +248,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
 
 
 fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintenance,
-    original: &HostMigrationOperation, method: &str, failure: &mut &'static str) -> Result<HostMigrationResult> {
+    original: &HostMigrationOperation, method: &str, failure: &mut &'static str) -> Result<MigrationReply> {
     let mut runtime_code = None;
     let envelope = super::control::auth_exchange(takeover, maintenance,
         Instant::now() + Duration::from_secs(185), None, |binding, identity| {
@@ -270,10 +302,17 @@ fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintena
             }
             anyhow::anyhow!("private migration exchange failed; query the original operation")
         })?;
-    serde_json::from_value(envelope.summary).map_err(|_| {
-        *failure = "encoding";
-        anyhow::anyhow!("invalid private migration result")
-    })
+    if envelope.summary.get("schema_version").is_some() {
+        serde_json::from_value(envelope.summary).map(MigrationReply::SchemaRejected).map_err(|_| {
+            *failure = "encoding";
+            anyhow::anyhow!("invalid private migration rejection")
+        })
+    } else {
+        serde_json::from_value(envelope.summary).map(MigrationReply::Receipt).map_err(|_| {
+            *failure = "encoding";
+            anyhow::anyhow!("invalid private migration result")
+        })
+    }
 }
 
 fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest, profile: &Path,
@@ -294,6 +333,16 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         anyhow::ensure!(items.next().is_some_and(|item| item.value == value && if name == "control_ready" {
             matches!(item.status, Status::Ok) } else { matches!(item.status, Status::Skip) }) && items.next().is_none(),
             "migration readiness mismatch");
+    }
+    if response.code.as_deref() == Some("migration_schema_rejected") {
+        anyhow::ensure!(!response.ok && response.exit == 1 && response.error.is_none()
+            && matches!(envelope.status, Status::Fail) && response.data_dir.is_some(),
+            "invalid private migration rejection");
+        let rejected: HostMigrationOperation = serde_json::from_value(envelope.summary.clone())
+            .map_err(|_| anyhow::anyhow!("invalid private migration rejection"))?;
+        anyhow::ensure!(rejected == *original && super::control::identity(profile)? == original.identity,
+            "migration rejection changed its original operation or identity");
+        return Ok(envelope);
     }
     let receipt: HostMigrationResult = serde_json::from_value(envelope.summary.clone())
         .map_err(|_| anyhow::anyhow!("invalid private migration result"))?;

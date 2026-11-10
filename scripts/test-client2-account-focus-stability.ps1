@@ -4,7 +4,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Candidate stability source parse failed' }
-foreach ($name in @('Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
+foreach ($name in @('New-AccountStabilityPidDiagnostic','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Candidate stability function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -39,6 +39,7 @@ function New-StabilityNode([int]$Id,$Type,[string]$Name='') {
     return $node
 }
 function Reset-Stability {
+    $script:candidateProcessSnapshot=@([pscustomobject]@{ProcessId=[uint32]20})
     $script:mode='valid'; $script:guards=0; $script:pauses=0; $script:acquired=0; $script:disposed=0
     $script:invokes=0; $script:focusCalls=0; $script:lookups=0; $script:focusReads=0; $script:nameReads=0
     $script:report=@{offline=@{}}
@@ -192,3 +193,90 @@ foreach ($candidate in @($false,$true)) {
     if (-not $candidate -and ($pauses -ne 0 -or $report.offline.ContainsKey('account_focus_stability'))) { throw 'Official mode unexpectedly observed candidate stability' }
 }
 Write-Host 'PASS: read-only source candidate stability window and unchanged official action counts'
+
+# Read the real traversal over failed synthetic PID observations. No extra node metadata reads.
+foreach ($case in @('null','non_int','nonpositive','positive_not_in_tree','held_not_in_tree')) {
+    Reset-Stability
+    $script:pidReads=0; $script:metadataReads=0
+    $script:rawPid=switch ($case) { 'null' {$null} 'non_int' {'99'} 'nonpositive' {0} default {99} }
+    $button.Current.PSObject.Properties.Remove('ProcessId')
+    $button.Current | Add-Member ScriptProperty ProcessId { $script:pidReads++; return $script:rawPid }
+    foreach ($field in @('Name','ControlType')) {
+        $button.Current.PSObject.Properties.Remove($field)
+        $button.Current | Add-Member ScriptProperty $field { $script:metadataReads++; throw 'synthetic-private-secret' }
+    }
+    $button | Add-Member -Force ScriptMethod GetRuntimeId { $script:metadataReads++; throw 'synthetic-private-secret' }
+    $identities=@{20=@{process=$live;birth=$live.StartTime.ToUniversalTime().Ticks;session=$live.SessionId;image=$live.Path}}
+    if ($case -eq 'held_not_in_tree') { $identities[99]=@{private='synthetic-private-secret'} }
+    $failed=$false
+    try { Read-AccountStabilityButton '^synthetic$' $identities $clock } catch {
+        if ($_.Exception.Message -cne 'Candidate stability process left the bound tree') { throw 'PID diagnostic changed original error' }
+        $failed=$true
+    }
+    $expected=if ($case -eq 'held_not_in_tree') {'positive_not_in_tree'} else {$case}
+    $value=$report.offline.account_stability_pid
+    if (-not $failed -or $value.pid_kind -cne $expected -or $value.held_member -ne ($case -eq 'held_not_in_tree') -or
+        $value.depth -ne 2 -or $value.ancestor_document -cne $true -or $pidReads -ne 1 -or $metadataReads -ne 0 -or $invokes -ne 0) { throw 'PID diagnostic changed traversal or failure boundary' }
+    if (($value | ConvertTo-Json) -match 'synthetic-private-secret|99') { throw 'PID diagnostic leaked input data' }
+}
+foreach ($raw in @('synthetic-private-secret',@{private='synthetic-private-secret'},[long]99,3.5,$true)) {
+    $snapshot=$raw | ConvertTo-Json -Depth 5
+    $value=New-AccountStabilityPidDiagnostic $raw 'true' 33 'false'
+    if ($value.pid_kind -cne 'non_int' -or $value.held_member -cne 'unknown' -or $value.depth -cne 'unknown' -or $value.ancestor_document -cne 'unknown' -or
+        ($value | ConvertTo-Json) -match 'synthetic-private-secret' -or ($raw | ConvertTo-Json -Depth 5) -cne $snapshot) { throw 'PID projection coerced or mutated private input' }
+}
+foreach ($depth in @(-1,33,'2',$true,$null,2.5)) {
+    if ((New-AccountStabilityPidDiagnostic 99 $false $depth $false).depth -cne 'unknown') { throw 'PID projection accepted invalid depth' }
+}
+Write-Host 'PASS: failed PID observations preserve one getter, closed diagnostics and original rejection'
+
+foreach ($present in @($false,$true)) {
+    $snapshot=@([pscustomobject]@{ProcessId=[uint32]20})
+    if ($present) { $snapshot+=([pscustomobject]@{ProcessId=[uint32]99}) }
+    $before=$snapshot | ConvertTo-Json
+    $value=New-AccountStabilityPidDiagnostic 99 $false 2 $true $snapshot
+    if ($value.in_same_snapshot -cne $present -or ($snapshot | ConvertTo-Json) -cne $before) { throw 'Cached snapshot membership changed source or classification' }
+}
+foreach ($bad in @($null,'PRIVATE_SENTINEL',@([pscustomobject]@{ProcessId='PRIVATE_SENTINEL'}))) {
+    if ((New-AccountStabilityPidDiagnostic 99 $false 2 $true $bad).in_same_snapshot -cne 'unknown') { throw 'Unknown snapshot became membership evidence' }
+}
+$poison=[pscustomobject]@{}
+$poison | Add-Member ScriptProperty ProcessId { throw 'PRIVATE_SENTINEL' }
+$value=New-AccountStabilityPidDiagnostic 99 $false 2 $true @($poison)
+if ($value.in_same_snapshot -cne 'unknown' -or ($value | ConvertTo-Json) -match 'PRIVATE_SENTINEL') { throw 'Snapshot property failure leaked or changed rejection' }
+Write-Host 'PASS: existing snapshot membership is closed, read-only and never admission evidence'
+Reset-Stability
+$button.Current.ProcessId='PRIVATE_UNCASTABLE'
+$identities=@{20=@{process=$live;birth=$live.StartTime.ToUniversalTime().Ticks;session=$live.SessionId;image=$live.Path}}
+$failed=$false
+try { Read-AccountStabilityButton '^synthetic$' $identities $clock } catch { $failed=$true }
+if (-not $failed -or $report.offline.ContainsKey('account_stability_pid') -or $invokes -ne 0) { throw 'Original conversion failure moved past diagnostics or invoked' }
+
+# Compare baseline cast/membership rejection with the actual traversal on faulting getters.
+foreach ($case in @('uncastable','throwing_getter')) {
+    Reset-Stability
+    $script:pidReads=0
+    if ($case -eq 'uncastable') { $button.Current.ProcessId='PRIVATE_UNCASTABLE' }
+    else {
+        $button.Current.PSObject.Properties.Remove('ProcessId')
+        $button.Current | Add-Member ScriptProperty ProcessId { $script:pidReads++; throw 'PRIVATE_GETTER' }
+    }
+    $null=Assert-Target $true
+    $baselineType='none'; $baselineMessage=''
+    try {
+        $current=$button.Current; $nodePid=[int]$current.ProcessId
+        if (-not $ownedIds.Contains($nodePid)) { throw 'Candidate stability process left the bound tree' }
+    } catch { $baselineType=$_.Exception.GetType().FullName; $baselineMessage=$_.Exception.Message }
+    $baselineReads=$pidReads; $script:pidReads=0
+    $identities=@{20=@{process=$live;birth=$live.StartTime.ToUniversalTime().Ticks;session=$live.SessionId;image=$live.Path}}
+    $actualType='none'; $actualMessage=''
+    try { Read-AccountStabilityButton '^synthetic$' $identities $clock } catch { $actualType=$_.Exception.GetType().FullName; $actualMessage=$_.Exception.Message }
+    if ($actualType -cne $baselineType -or $actualMessage -cne $baselineMessage -or $pidReads -ne $baselineReads -or $invokes -ne 0) { throw 'Failed getter or conversion behavior differs from original membership gate' }
+    if (($report | ConvertTo-Json -Depth 8) -match 'PRIVATE_UNCASTABLE|PRIVATE_GETTER') { throw 'PID diagnostic exposed getter/conversion text' }
+}
+Reset-Stability
+$button.Current.ProcessId='20'
+$identities=@{20=@{process=$live;birth=$live.StartTime.ToUniversalTime().Ticks;session=$live.SessionId;image=$live.Path}}
+$found=Read-AccountStabilityButton '^synthetic$' $identities $clock
+if ($found.runtime_id -cne '3' -or $report.offline.ContainsKey('account_stability_pid')) { throw 'Diagnostic changed an originally accepted numeric-string PID' }
+Write-Host 'PASS: conversion, getter errors and originally accepted coercion match baseline'
