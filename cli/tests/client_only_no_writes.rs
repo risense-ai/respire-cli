@@ -27,6 +27,22 @@ fn client_only_status_preserves_fresh_and_legacy_homes() -> anyhow::Result<()> {
                 .env("RSRS_NO_AUTOSYNC", "1")
                 .env("RSRS_LANG", "en")
                 .current_dir(fixture.path());
+            // Keep llvm-cov's own output outside the profile fixture. Clearing
+            // LLVM_PROFILE_FILE makes an instrumented child use default.profraw
+            // in its cwd, which is a harness write, not a product profile write.
+            // Preserve the collector's pattern (including %p/%m), rather than
+            // discard coverage or exempt any file from the no-write assertions.
+            if let Some(output) = std::env::var_os("LLVM_PROFILE_FILE") {
+                let output = std::path::PathBuf::from(output);
+                assert!(!output.as_os_str().is_empty());
+                let output = if output.is_absolute() {
+                    output
+                } else {
+                    std::env::current_dir()?.join(output)
+                };
+                assert!(!output.starts_with(fixture.path()));
+                command.env("LLVM_PROFILE_FILE", output);
+            }
             if env_only {
                 command.env("RSRS_CLIENT_ONLY", "1");
             } else {
@@ -37,7 +53,7 @@ fn client_only_status_preserves_fresh_and_legacy_homes() -> anyhow::Result<()> {
             let envelope: serde_json::Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(envelope["status"], "fail");
             // Directory assertions catch empty log/profile creation too, not just files.
-            assert_eq!(fs::read_dir(fixture.path())?.count(), 1);
+            assert_eq!(fs::read_dir(fixture.path())?.count(), 1, "unexpected fixture-root entry");
             assert_eq!(fs::read_dir(&home)?.count(), usize::from(legacy));
             assert!(!home.join(".rsrs").exists());
             if legacy {

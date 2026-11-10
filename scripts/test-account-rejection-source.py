@@ -2,6 +2,7 @@
 """Offline source-order and fail-closed wiring tests; PowerShell execution is separate."""
 from pathlib import Path
 import unittest
+import re
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -35,6 +36,18 @@ def validate(sweep, profile):
         assert 'Test-RuntimeChanged' in next(x for x in sweep.splitlines() if x.startswith(f"Assert-Smoke '{name}'"))
 
 
+def validate_mutation_loop(source):
+    # At script scope, $case and $script:case name the same PowerShell variable.
+    loop_names = set(re.findall(r'foreach\s*\(\$(\w+)\s+in', source, re.I))
+    scoped_assignments = set(re.findall(r'\$script:(\w+)\s*=', source, re.I))
+    assert not ({name.lower() for name in loop_names} & {name.lower() for name in scoped_assignments})
+    assert "$script:caseLabel='space-' + $case" in source
+    assert 'switch ($case)' in source
+    assert "Check-Run ($case -ceq 'same-actor')" in source
+    cases = re.search(r"foreach \(\$case in @\(('same-actor'.*?)\)\)", source).group(1)
+    assert len(re.findall(r"'([^']+)'", cases)) == 21  # Positive control plus 20 negatives.
+
+
 class RejectionSourceTests(unittest.TestCase):
     def setUp(self):
         self.sweep = (ROOT / 'scripts/dev-release-sweep.ps1').read_text()
@@ -51,6 +64,12 @@ class RejectionSourceTests(unittest.TestCase):
     def test_rotation_regression(self):
         with self.assertRaises(AssertionError):
             validate(self.sweep.replace('(Test-RuntimeUnchanged $switchedHealth', '(Test-RuntimeChanged $switchedHealth'), self.profile)
+
+    def test_mutation_loop_label_does_not_overwrite_iterator(self):
+        source = (ROOT / 'scripts/test-account-rejection-contract.ps1').read_text()
+        validate_mutation_loop(source)
+        with self.assertRaises(AssertionError):
+            validate_mutation_loop(source.replace('$script:caseLabel', '$script:case'))
 
     def test_workflow_runs_actual_powershell_contract(self):
         self.assertIn('& ./scripts/test-account-rejection-contract.ps1', (ROOT / '.github/workflows/ci.yml').read_text())

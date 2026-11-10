@@ -33,15 +33,16 @@ function Reset-Fixture {
     $script:invalidAccount = [pscustomobject]@{Ok=$true;Exit=1;Envelope=[pscustomobject]@{errors=@('account profile name allows only letters/digits/-/_')}}
     $script:rejectedStatus = [pscustomobject]@{Ok=$true;Envelope=[pscustomobject]@{summary=[pscustomobject]@{session=[pscustomobject]@{user=$otherUser};unlocked=$true}}}
 }
+# The diagnostic label must not alias the script-scope foreach $case iterator.
 function Check-Run([bool]$Expected) {
     $passed = $true
     try { & $check } catch { $passed = $false }
-    if ($passed -ne $Expected) { throw "Rejection contract mutation failed: $script:case" }
+    if ($passed -ne $Expected) { throw "Rejection contract mutation failed: $script:caseLabel" }
 }
 try {
-    Reset-Fixture; $script:case='same actor'; Check-Run $true
+    Reset-Fixture; $script:caseLabel='same actor'; Check-Run $true
     foreach ($field in @('pid','data_dir','account_id','instance_id','generation','exe','bin','runtime_version','store_ready')) {
-        Reset-Fixture; $script:case=$field
+        Reset-Fixture; $script:caseLabel=$field
         switch ($field) {
             'pid' { $rejectedHealth.pid=102 }
             'generation' { $rejectedHealth.generation=6 }
@@ -51,7 +52,7 @@ try {
         Check-Run $false
     }
     foreach ($case in @('dead','empty-account','empty-instance','zero-generation','before-not-ready','wrong-profile','wrong-user','locked','status-fail','command-fail','wrong-exit','wrong-error','config-write','endpoint-write','session-write','new-profile','traversal-path')) {
-        Reset-Fixture; $script:case=$case
+        Reset-Fixture; $script:caseLabel=$case
         switch ($case) {
             'dead' { $script:alive=$false }
             'empty-account' { $switchedHealth.account_id='';$rejectedHealth.account_id='' }
@@ -80,7 +81,7 @@ try {
     $otherUser = 'sweepspace'; $profile = Join-Path $DirA 'accounts/sweepspace'
     New-Item -ItemType Directory $profile -Force | Out-Null
     foreach ($case in @('same-actor','pid','instance','generation','account','not-ready','dead','wrong-profile','read-fail','wrong-id','wrong-content','config-write','endpoint-write','session-write','created-space','new-profile','wrong-exit','wrong-reason','wrong-type','wrong-error','command-fail')) {
-        Reset-Fixture; $script:case='space-' + $case
+        Reset-Fixture; $script:caseLabel='space-' + $case
         $spaceProfileConfig=$profileConfig; $spaceRejectionSnapshot=$rejectionSnapshot
         $spaceReturnHealth=$switchedHealth; $spaceRejectedHealth=$rejectedHealth
         $missingSpace='missing'; $spaceEntryId='synthetic-id'; $spaceMarker='synthetic-content'
