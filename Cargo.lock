@@ -1763,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "respire_runtime"
-version = "2.0.0-dev.7-local.1"
+version = "2.0.0-dev.7.1"
 dependencies = [
  "anyhow",
  "respire_app",
