@@ -243,8 +243,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain prior uploads plus the isolated historical draft input cache.
-  assert.equal(uploads, 61, 'preserve publication/source evidence, both Client2 results and the historical draft cache');
+  // Retain prior uploads, the historical draft cache and the published online receipt.
+  assert.equal(uploads, 62, 'preserve publication/source evidence, both Client2 results, the historical draft cache and the published online receipt');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
