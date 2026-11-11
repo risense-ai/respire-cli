@@ -60,7 +60,7 @@ concurrency:
   cancel-in-progress: true
 env:
   # Official product provenance is independent of the business-harness checkout.
-  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: a884395b585c3ce44f304f9004ccf72eeb76a99f
+  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: 924ae24e42ac1a8e53b7cba1867af63100a4408e
 jobs:
   platform-build:
     # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.

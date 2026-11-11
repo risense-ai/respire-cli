@@ -306,4 +306,3 @@ pub fn prewarm_once(database: &std::path::Path) -> Option<CacheState> {
         Err(_) => None,
     }
 }
-
