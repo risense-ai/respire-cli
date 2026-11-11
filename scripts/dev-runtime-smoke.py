@@ -667,7 +667,7 @@ class Smoke:
         require(code == 200 and value.get('ok') is False and value.get('code') == 'protocol_version_mismatch', 'rpc_version_not_rejected')
         self.passed('runtime_rpc_version_rejected')
         if self.args.runtime_binary:
-            rejected = self.rpc(['config'], expected=1)
+            rejected = self.rpc(['config'], expected=2)
             require(rejected['details'].get('error_type') == 'host_boundary', 'host_config_not_fenced')
             config = self.direct(['config'])['summary']
         else:

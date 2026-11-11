@@ -286,6 +286,7 @@ class Fixture:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
+        self.a['RSRS_RPC_PORT'] = str(self.port)
         env = self.a.copy()
         if automatic:
             env.pop("RSRS_NO_AUTOSYNC", None)

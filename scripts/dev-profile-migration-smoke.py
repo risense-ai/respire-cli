@@ -279,8 +279,8 @@ class Smoke(support.Smoke):
         result = dict(env)
         result.pop("RSRS_DATA_DIR", None)
         result.pop("RSRS_SUPER", None)
-        if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets':
-            result.pop('RSRS_RUNTIME_BIN', None)
+        # Switching to HOME/.rsrs also changes the managed Runtime owner.
+        result.pop('RSRS_RUNTIME_BIN', None)
         return result
 
     def seed(self, env, path, service, label):
