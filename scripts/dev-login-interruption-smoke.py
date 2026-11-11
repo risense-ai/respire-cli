@@ -711,14 +711,26 @@ def main():
             report["cases"]["different_server_transfer_retry"] = {"passed": True,
                 "source_preserved": True, "different_urk": True, "duplicates_skipped": True}
             report["passed"] = True
+        except BaseException as error:
+            report["operation_failure_code"] = (str(error) if type(error) is RuntimeError
+                and str(error) in FAILURE_CODES else "unclassified_failure")
+            raise
         finally:
             report["failure_stage"] = report["stage"]
             report["stage"] = "owned_child_cleanup"
             if child is not None:
-                stop_owned_control(child)
+                child_running = child.poll() is None
+                members = process_group_members(child.pid)
+                report["cleanup_snapshot"] = {"child_running": child_running,
+                    "members": len(members), "helpers": sum(row["control_helper"] for row in members.values()),
+                    "zombies": sum(row["state"] == "Z" for row in members.values())}
+                if child_running:
+                    stop_owned_control(child)
                 try:
                     stdout, _ = child.communicate(timeout=15)
-                except (OSError, subprocess.TimeoutExpired):
+                except subprocess.TimeoutExpired as error:
+                    stdout = error.output or b""
+                except OSError:
                     stdout = b""
                 report["migration_child"] = {"exit_code": child.returncode,
                     "migration_stage": None, "migration_exchange": None, "register_kind": None}
@@ -746,6 +758,8 @@ def main():
                     if token and token[1] in allowed and (name != "migration_exchange"
                             or report["migration_child"]["migration_stage"] == "exchange"):
                         report["migration_child"][name] = token[1]
+                if not child_running:
+                    stop_owned_control(child)
             # Never unblock a request while a surviving private helper can publish it.
             release.set()
             report["stage"] = "runtime_cleanup"
