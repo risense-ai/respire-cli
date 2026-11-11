@@ -25,7 +25,7 @@ $report = [ordered]@{
     native_window_visible = $false; isolated_webview_bound = $false
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
     target_desktop_screenshot_saved = $false
-    cleanup_exit_confirmed = $false
+    cleanup_exit_confirmed = $false; cleanup_pending_absence = @()
     full_gui_acceptance = 'not-evaluated'; g1_passed = $false; status = 'failed'
 }
 if ($PSCmdlet.ParameterSetName -ceq 'SourceCandidate' -and -not $SourceCandidate) { throw 'Source candidate mode must be explicitly enabled' }
@@ -154,7 +154,14 @@ function Stop-TrackedOwned($Item) {
         # A process can exit between CIM/Get-Process/Stop-Process. Confirm absence twice;
         # never clear an observed birth mismatch, or kill a reused PID.
         if ($identityChanged) { throw }
-        if (-not (Confirm-TrackedAbsent $Item)) { throw }
+        if (-not (Confirm-TrackedAbsent $Item)) {
+            if ($_.FullyQualifiedErrorId -cne 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand') { throw }
+            # Only a vanished Get-Process lookup can defer to the unchanged final
+            # two-sample absence gate; a survivor or reused PID still fails there.
+            $report.cleanup_pending_absence = @($report.cleanup_pending_absence) + @(@{
+                pid=$Item.ProcessId; creation_utc_ticks=$Item.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
+            })
+        }
         return
     }
     if (-not (Confirm-TrackedAbsent $Item)) { throw "Owned process survived cleanup: $($Item.ProcessId)" }
