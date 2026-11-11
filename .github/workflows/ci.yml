@@ -106,39 +106,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Resolve the pinned SDK dependency cache
-        id: sdk-cache-1
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-1-restore
-        if: steps.sdk-cache-1.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-1.outputs.target }}
-          key: ${{ steps.sdk-cache-1.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: steps.sdk-cache-1.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-1.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-1-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        if: ${{ !contains(matrix.target, '-musl') }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="${{ matrix.target }}"
-          node scripts/fetch-core-sdk.mjs "$target"
       - name: Build without local vendor SDKs or accelerator hardware
         if: ${{ !contains(matrix.target, '-musl') }}
-        run: cargo build --workspace --locked --target ${{ matrix.target }} --target-dir target/ci
+        run: cargo build --locked -p respire --bin rsrs --target ${{ matrix.target }} --target-dir target/ci
       - uses: actions/cache/restore@v4
         if: contains(matrix.target, '-musl')
         id: musl-cache
@@ -302,37 +272,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Resolve the pinned SDK dependency cache
-        if: env.CANDIDATE_MODE == 'true'
-        id: sdk-cache-2
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-2-restore
-        if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
-          key: ${{ steps.sdk-cache-2.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        if: env.CANDIDATE_MODE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          node scripts/fetch-core-sdk.mjs "$target"
       - name: Key ordinary Rust dependencies
         id: rust-key
         run: node scripts/rust-ci-cache.mjs key workspace
@@ -343,13 +282,8 @@ jobs:
           key: ${{ steps.rust-key.outputs.key }}
       - name: Restore ordinary Rust dependencies
         run: node scripts/rust-ci-cache.mjs restore workspace
-      - name: Test source-owned workspace packages or explicit candidate native workspace
-        run: |
-          if [ "$CANDIDATE_MODE" = true ]; then
-            cargo test --workspace --exclude respire --locked
-          else
-            cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging
-          fi
+      - name: Test CLI frontend packages
+        run: cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging
       # This offline ownership fixture requires the dependencies cached above.
       - if: env.CANDIDATE_MODE == 'true'
         run: python3 scripts/test-core-payload-lifetime.py
@@ -427,8 +361,33 @@ jobs:
       - name: Prepare private business credential fixture
         if: env.CANDIDATE_MODE == 'true' && matrix.group == 'runtime_smoke'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus gnome-keyring
+          if [ "$(uname -m)" = x86_64 ] &&
+             [ "$(dpkg --print-architecture)" = amd64 ] &&
+             (. /etc/os-release; [ "${VERSION_CODENAME:-}" = noble ]) &&
+             [ -f /etc/apt/apt-mirrors.txt ] &&
+             [ -f /etc/apt/sources.list.d/ubuntu.sources ] &&
+             [ -s /usr/share/keyrings/ubuntu-archive-keyring.gpg ] &&
+             awk '
+               BEGIN { RS = "\n[ \t\r]*\n"; FS = "\n" }
+               {
+                 uri = key = disabled = 0
+                 for (i = 1; i <= NF; i++) {
+                   if ($i ~ /^URIs:[[:space:]]+mirror\+file:\/etc\/apt\/apt-mirrors\.txt[[:space:]]*$/) uri = 1
+                   if ($i ~ /^Signed-By:[[:space:]]+\/usr\/share\/keyrings\/ubuntu-archive-keyring\.gpg[[:space:]]*$/) key = 1
+                   if (tolower($i) ~ /^enabled:[[:space:]]*no[[:space:]]*$/) disabled = 1
+                 }
+                 if (uri && key && !disabled) found = 1
+               }
+               END { exit !found }
+             ' /etc/apt/sources.list.d/ubuntu.sources; then
+            sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/|d' /etc/apt/apt-mirrors.txt
+            apt_mirror=$'https://mirror.us.leaseweb.net/ubuntu/\tpriority:0'
+            if ! grep -Fxq "$apt_mirror" /etc/apt/apt-mirrors.txt; then
+              printf '%s\n' "$apt_mirror" | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+          fi
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Validate candidate evidence inputs
@@ -451,16 +410,7 @@ jobs:
         env:
           REQUESTED_RUNTIME_SHA: ${{ inputs.runtime_examples_sha }}
         run: |
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync} from 'node:fs';
-          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
-          assert.equal(pin.schema_version, 1);
-          assert.equal(pin.repository, 'risense-ai/respire-runtime');
-          const sha = process.env.REQUESTED_RUNTIME_SHA || pin.source_sha;
-          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime SHA containing cli_business_tests; no branch or old release fallback');
-          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
-          NODE
+          node scripts/fetch-runtime-test-bundle.mjs source
       - uses: actions/checkout@v4
         if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
         with:
@@ -475,8 +425,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_TESTS_SHA"
-          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
           for module in support memory_revision diary_identity snapshot_lifecycle account capture_main; do
             test -f ".runtime-examples/crates/commands/examples/cli_business_tests/$module.rs"
@@ -508,37 +458,6 @@ jobs:
           artifact-ids: ${{ inputs.required_candidate_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/required-tests-candidate-input
-      - name: Resolve the pinned SDK dependency cache
-        if: env.CANDIDATE_MODE == 'true'
-        id: sdk-cache-2
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-2-restore
-        if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
-          key: ${{ steps.sdk-cache-2.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        if: env.CANDIDATE_MODE == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          node scripts/fetch-core-sdk.mjs "$target"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -620,23 +539,22 @@ jobs:
           share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
           PY
           printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$RSRS_M3_DIR" >> "$GITHUB_ENV"
-      - name: Build Runtime-owned business assertions without instrumenting Runtime
+      - name: Verify precompiled Runtime business assertions without instrumenting Runtime
         if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-runtime-test-bundle.mjs fetch "$target"
+          node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
+      - name: Run precompiled Runtime snapshot and diary assertions
+        if: env.CANDIDATE_MODE == 'true' && matrix.group == 'core'
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          export RSRS_CORE_SDK_DIR="$PWD/.sdk/$target"
-          cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target "$target" --target-dir target/runtime-cli-tests > "$RUNNER_TEMP/runtime-cli-tests-build.jsonl" || { cat "$RUNNER_TEMP/runtime-cli-tests-build.jsonl"; exit 1; }
-          node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-cli-tests/$target/debug/examples"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync, realpathSync} from 'node:fs';
-          const records = readFileSync(`${process.env.RUNNER_TEMP}/runtime-cli-tests-build.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-          const artifacts = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cli_business_tests' && record.profile?.test && record.executable);
-          assert.equal(artifacts.length, 1, 'Require the actual compiled Runtime example test harness');
-          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${realpathSync(artifacts[0].executable)}\n`);
-          NODE
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
       - name: Run this group's instrumented tests
         id: source-tests
         env:
@@ -896,8 +814,33 @@ jobs:
       - name: Prepare private business credential fixture
         if: matrix.group == 'runtime_smoke'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus gnome-keyring
+          if [ "$(uname -m)" = x86_64 ] &&
+             [ "$(dpkg --print-architecture)" = amd64 ] &&
+             (. /etc/os-release; [ "${VERSION_CODENAME:-}" = noble ]) &&
+             [ -f /etc/apt/apt-mirrors.txt ] &&
+             [ -f /etc/apt/sources.list.d/ubuntu.sources ] &&
+             [ -s /usr/share/keyrings/ubuntu-archive-keyring.gpg ] &&
+             awk '
+               BEGIN { RS = "\n[ \t\r]*\n"; FS = "\n" }
+               {
+                 uri = key = disabled = 0
+                 for (i = 1; i <= NF; i++) {
+                   if ($i ~ /^URIs:[[:space:]]+mirror\+file:\/etc\/apt\/apt-mirrors\.txt[[:space:]]*$/) uri = 1
+                   if ($i ~ /^Signed-By:[[:space:]]+\/usr\/share\/keyrings\/ubuntu-archive-keyring\.gpg[[:space:]]*$/) key = 1
+                   if (tolower($i) ~ /^enabled:[[:space:]]*no[[:space:]]*$/) disabled = 1
+                 }
+                 if (uri && key && !disabled) found = 1
+               }
+               END { exit !found }
+             ' /etc/apt/sources.list.d/ubuntu.sources; then
+            sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/|d' /etc/apt/apt-mirrors.txt
+            apt_mirror=$'https://mirror.us.leaseweb.net/ubuntu/\tpriority:0'
+            if ! grep -Fxq "$apt_mirror" /etc/apt/apt-mirrors.txt; then
+              printf '%s\n' "$apt_mirror" | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+          fi
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Resolve exact Runtime business test source
@@ -905,17 +848,7 @@ jobs:
         env:
           REQUESTED_RUNTIME_SHA: ${{ inputs.runtime_examples_sha }}
         run: |
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync} from 'node:fs';
-          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
-          assert.equal(pin.schema_version, 1);
-          assert.equal(pin.repository, 'risense-ai/respire-runtime');
-          const sha = process.env.REQUESTED_RUNTIME_SHA || pin.source_sha;
-          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime SHA containing cli_business_tests; no branch or old release fallback');
-          assert.equal(sha, pin.source_sha, 'Source integration must use runtime-tests-source.json exactly');
-          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
-          NODE
+          node scripts/fetch-runtime-test-bundle.mjs source
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-runtime
@@ -928,41 +861,12 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_TESTS_SHA"
-          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
           for module in support memory_revision diary_identity snapshot_lifecycle account capture_main; do
             test -f ".runtime-examples/crates/commands/examples/cli_business_tests/$module.rs"
           done
-      - name: Resolve the pinned SDK dependency cache
-        id: sdk-cache-2
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          echo "target=$target" >> "$GITHUB_OUTPUT"
-          echo "key=$(node scripts/sdk-ci-cache.mjs key "$target")" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-cache-2-restore
-        if: steps.sdk-cache-2.outputs.key != ''
-        with:
-          path: .sdk/${{ steps.sdk-cache-2.outputs.target }}
-          key: ${{ steps.sdk-cache-2.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        if: steps.sdk-cache-2.outputs.key != ''
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ steps.sdk-cache-2.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-cache-2-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Prepare pinned binary Core SDK
-        shell: bash
-        run: |
-          set -euo pipefail
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          node scripts/fetch-core-sdk.mjs "$target"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -1067,28 +971,27 @@ jobs:
           share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
           PY
           printf 'RSRS_CORE_TEST_MODEL_DIR=%s\n' "$RSRS_M3_DIR" >> "$GITHUB_ENV"
-      - name: Retain legacy Runtime workspace and SDK ownership assertions in integration
+      - name: Verify precompiled Runtime business assertions without instrumenting Runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          node scripts/fetch-runtime-test-bundle.mjs fetch "$target"
+          node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
+      - name: Run precompiled Runtime snapshot and diary assertions
         if: matrix.group == 'core'
         run: |
           set -euo pipefail
-          cargo test --workspace --exclude respire --exclude respire_spawn --exclude respire_protocol --exclude respire_client_host --exclude respire_commands --locked
-          python3 scripts/test-core-payload-lifetime.py
-      - name: Build Runtime-owned business assertions without instrumenting Runtime
+          unset GH_TOKEN GITHUB_TOKEN
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
+      - name: Retain CLI frontend tests and SDK ownership assertions in integration
+        if: matrix.group == 'core'
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          export RSRS_CORE_SDK_DIR="$PWD/.sdk/$target"
-          cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target "$target" --target-dir target/runtime-cli-tests > "$RUNNER_TEMP/runtime-cli-tests-build.jsonl" || { cat "$RUNNER_TEMP/runtime-cli-tests-build.jsonl"; exit 1; }
-          node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-cli-tests/$target/debug/examples"
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync, realpathSync} from 'node:fs';
-          const records = readFileSync(`${process.env.RUNNER_TEMP}/runtime-cli-tests-build.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-          const artifacts = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cli_business_tests' && record.profile?.test && record.executable);
-          assert.equal(artifacts.length, 1, 'Require the actual compiled Runtime example test harness');
-          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${realpathSync(artifacts[0].executable)}\n`);
-          NODE
+          cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging
+          python3 scripts/test-core-payload-lifetime.py
       - name: Run Runtime business assertions against the source CLI
         id: business
         env:
