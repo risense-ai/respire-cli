@@ -273,6 +273,12 @@ jobs:
           cargo build --locked -p respire --bin rsrs
           target/debug/rsrs --json runtime install
           target/debug/rsrs --json model install-m3
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          from dev_model_fixture import share_cpu_container
+          share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
+          PY
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
