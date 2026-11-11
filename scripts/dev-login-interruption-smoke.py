@@ -363,7 +363,10 @@ def main():
                 command_env["RSRS_SUPER"] = old_super
             result = subprocess.run([str(args.binary), *flags], env=command_env, capture_output=True, timeout=180)
             if (result.returncode == 0) != success:
-                report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed"}
+                command = next((name for name in ("account-rollback", "account-result", "login", "remember",
+                    "migrate", "--runtime-internal", "--version") if name in flags), "other")
+                report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed",
+                                     "command": command}
                 raise RuntimeError("cli_expectation_failed")
             return result
 
@@ -429,8 +432,12 @@ def main():
                     "original_operation_binding_changed")
             rejected_record = records[0]
             logins_before = state["logins"]
-            receipt = json.loads(cli(*account_recovery_flags("account-rollback", rejected_record)).stdout)["summary"]
-            require(receipt["operation_id"] == operation_id and receipt["outcome"] == "rolled_back"
+            rollback = cli(*account_recovery_flags("account-rollback", rejected_record), success=False)
+            rolled_back = json.loads(rollback.stdout)
+            receipt = rolled_back["summary"]
+            require(rollback.returncode == 1 and rolled_back.get("status") == "fail"
+                    and receipt["operation_id"] == operation_id
+                    and receipt["outcome"] == "rolled_back"
                     and state["logins"] == logins_before, "original_rollback_not_confirmed")
             terminal_operation(json.loads(recovery_path.read_bytes()), rejected_record, "rolled_back")
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
@@ -508,8 +515,12 @@ def main():
                 if barrier == "before_publish":
                     # Querying AwaitingVerification would complete it. Explicit rollback
                     # is permitted by the original receipt before any publication starts.
-                    receipt = json.loads(cli(*account_recovery_flags("account-rollback", record)).stdout)["summary"]
-                    require(receipt["operation_id"] == record["operation_id"] and receipt["outcome"] == "rolled_back",
+                    rollback = cli(*account_recovery_flags("account-rollback", record), success=False)
+                    rolled_back = json.loads(rollback.stdout)
+                    receipt = rolled_back["summary"]
+                    require(rollback.returncode == 1 and rolled_back.get("status") == "fail"
+                            and receipt["operation_id"] == record["operation_id"]
+                            and receipt["outcome"] == "rolled_back",
                             "original_rollback_not_confirmed")
                     terminal_operation(json.loads(recovery_path.read_bytes()), record, "rolled_back")
                     require(session.read_bytes() == legacy_bytes and config.read_bytes() == config_bytes,
@@ -519,8 +530,11 @@ def main():
                         require(not list(keys.collection.search_items(password_attributes)), "interrupted_native_password_not_deleted")
                     require((state["logins"], state["posts"], state["password_posts"]) == effect_counts,
                             "rollback_replayed_authentication")
-                    confirmed = json.loads(cli(*account_recovery_flags("account-result", record)).stdout)["summary"]
-                    require(confirmed["outcome"] == "rolled_back", "rollback_receipt_not_retained")
+                    queried = cli(*account_recovery_flags("account-result", record), success=False)
+                    confirmed = json.loads(queried.stdout)
+                    require(queried.returncode == 1 and confirmed.get("status") == "fail"
+                            and confirmed["summary"]["outcome"] == "rolled_back",
+                            "rollback_receipt_not_retained")
                     # A fresh migration is safe only after that original terminal rollback.
                     cli(*migration)
                     require(state["logins"] == effect_counts[0] + 1, "explicit_retry_login_count_changed")
