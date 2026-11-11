@@ -4076,13 +4076,10 @@ pub fn run_local(args: Cli) -> Result<()> {
         Some(Command::Remember { .. }) => "remember",
         Some(Command::Candidates { .. }) => "candidates",
         Some(Command::Bench { .. }) => "bench",
-        Some(Command::Annotate { .. }) => "annotate",
-        Some(Command::Learn { .. }) => "learn",
         Some(Command::TreeDeepen { .. }) => "tree-deepen",
         Some(Command::TreeCure { .. }) => "tree-cure",
         Some(Command::TreeFloat { .. }) => "tree-float",
         Some(Command::Defrag { .. }) => "defrag",
-        Some(Command::Result { .. }) => "result",
         Some(Command::ShareImport { .. }) => "share-import",
         _ => "cli",
     };
@@ -4329,7 +4326,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             return emit_result(envelope);
         }
         Some(Command::Defrag { min, top }) => return run_defrag(*min, *top),
-        Some(Command::Result { id }) => return run_result(&id),
         Some(Command::TreeCure {
             top,
             id,
@@ -4528,29 +4524,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             cmd,
         }) => return run_query_log(*limit, *stats, *json, cmd.as_ref()),
         Some(Command::Bench { cmd }) => return run_bench(cmd),
-        Some(Command::Annotate { query, file, from_query_log, limit, topk, candidate_topk, dry_run, project, backend, ds, api_base, model, export_training, export_format, export_limit, include_failed, request_id, quiet }) => {
-            return crate::annotate::run(crate::annotate::Options {
-                query: query.clone(),
-                file: file.clone(),
-                from_query_log: *from_query_log,
-                limit: *limit,
-                topk: *topk,
-                candidate_topk: *candidate_topk,
-                dry_run: *dry_run,
-                project: project.clone(),
-                api_base: api_base.clone(),
-                model: model.clone(),
-                ds: ds.clone(),
-                backend: backend.clone(),
-                export_training: export_training.clone(),
-                export_format: export_format.clone(),
-                export_limit: *export_limit,
-                include_failed: *include_failed,
-                request_id: request_id.clone(),
-                quiet: *quiet,
-            });
-        }
-        Some(Command::Learn { cmd }) => return run_learn(cmd),
         Some(Command::RunLog { id, status, note }) => {
             return run_run_log(id, status, note);
         }
@@ -4872,7 +4845,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
     match command {
         Command::Remember {
             content,
-            content_file,
             r#type,
             metadata,
             tags,
@@ -4887,8 +4859,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             supersedes,
             see_also,
         } => {
-            let content = engine_resolve_content(content, content_file, true)?
-                .ok_or_else(|| anyhow!("provide the content argument or --content-file <path>"))?;
             let explicit_kind = r#type.is_some();
             let r#type = r#type.unwrap_or_else(|| "context".to_owned());
             let metadata_patch = metadata.patch();
@@ -5496,7 +5466,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             render_min_score,
             no_related,
             intent,
-            lexical,
         } => {
             anyhow::ensure!(
                 render_budget_base64.is_none() || titles || brief,
@@ -5526,15 +5495,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let store = build_local()?;
             let review = respire_app::review::ReviewService::new(&session, &store, &owner)?;
             let source = review.recall_source()?;
-            if lexical || crate::learn::lexical_default() {
-                anyhow::ensure!(
-                    !source.has_metadata() && render_budget.is_none() && !trace && mode.is_none()
-                        && (intent == "fact" || (intent == "auto"
-                            && (r#type.is_some() || !skill::howto_intent(&query)))),
-                    "unsupported_capability: legacy lexical recall cannot preserve the requested Core evidence, rendering, mode or how-to contract; use ordinary recall"
-                );
-                return crate::learn::run_lexical(&store, &source, &owner, &query, limit, project.as_deref(), r#type.as_deref(), titles, no_related);
-            }
             let metadata_aware = brief || source.has_metadata();
             // Dynamic blocks from new records need complete qualified variants.
             // Legacy-only title budgets retain their original WP3a bytes.
@@ -7209,13 +7169,10 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             metadata,
             title,
             content,
-            content_file,
-            drop_legacy_metadata,
             tags,
             kind,
             importance,
         } => {
-            let content = engine_resolve_content(content, content_file, false)?;
             if metadata.patch().is_some()
                 || kind
                     .as_deref()
@@ -7270,14 +7227,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 entry.importance = imp;
             }
             metadata.apply(&mut entry);
-            // Legacy 09-24 entries carry unknown fields (action/cause/effect) the write gate
-            // rejects. Dropping them is explicit-only and the dropped names are echoed back —
-            // never silent data loss.
-            let mut dropped_legacy: Vec<String> = Vec::new();
-            if drop_legacy_metadata && !entry.unknown_fields.is_empty() {
-                dropped_legacy = entry.unknown_fields.keys().cloned().collect();
-                entry.unknown_fields.clear();
-            }
             let metadata_receipt = metadata::prepare(&session, &store, &entry)?;
             let skill_missing = if entry.kind == Kind::Skill && entry.importance == "important" {
                 let missing = skill::missing_sections(&entry.content);
@@ -7322,7 +7271,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 },
                 serde_json::json!({"action":"written", "id": stored.id, "maintenance_hint": hint,
                     "skill_template_missing": skill_missing,
-                    "dropped_legacy_metadata": dropped_legacy,
                     "index_state": if new_stored.local_artifact.is_empty() { "pending" } else { "ready" }}),
                 vec![OutputItem::new(
                     "entry",
@@ -7396,9 +7344,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         | Command::Prompt
         | Command::QueryLog { .. }
         | Command::Bench { .. }
-        | Command::Annotate { .. }
-        | Command::Learn { .. }
-        | Command::Result { .. }
         | Command::RunLog { .. }
         | Command::Classify { .. }
         | Command::Web { .. }
@@ -7408,88 +7353,5 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             "commands that do not need the embedder already returned at the top of main"
         ),
     }
-    Ok(())
-}
-
-
-fn run_learn(cmd: &crate::cli_def::LearnCmd) -> Result<()> {
-    let store = build_local()?;
-    match cmd {
-        crate::cli_def::LearnCmd::Status => crate::learn::status(&store),
-        crate::cli_def::LearnCmd::Train { limit, epochs, from_labels } => {
-            if *from_labels {
-                crate::learn::train_from_labels(&store, *limit, *epochs)
-            } else {
-                crate::learn::train_from_annotations(&store, *limit, *epochs)
-            }
-        }
-        crate::cli_def::LearnCmd::Lexical { off } => {
-            crate::learn::set_lexical(!*off)?;
-            crate::learn::status(&store)
-        }
-        crate::cli_def::LearnCmd::Reset => crate::learn::reset(&store),
-    }
-}
-
-/// Resolve a write body from either the direct value or `--content-file`.
-pub fn engine_resolve_content(
-    primary: Option<String>,
-    file: Option<std::path::PathBuf>,
-    required: bool,
-) -> Result<Option<String>> {
-    let text = match (primary, file) {
-        (Some(_), Some(_)) => anyhow::bail!("--content and --content-file are mutually exclusive"),
-        (Some(text), None) => Some(text),
-        (None, Some(path)) => {
-            anyhow::ensure!(path.is_absolute(), "legacy server --content-file requires an absolute path");
-            let text = std::fs::read_to_string(&path)
-                .map_err(|error| anyhow!("failed to read --content-file {}: {error}", path.display()))?;
-            anyhow::ensure!(!text.trim().is_empty(), "--content-file {} is empty", path.display());
-            Some(text)
-        }
-        (None, None) => None,
-    };
-    if required {
-        anyhow::ensure!(text.is_some(), "provide the content argument or --content-file <path>");
-    }
-    Ok(text)
-}
-
-/// Query the cached outcome of a request by the id printed in request_outcome_unknown.
-/// Read-only: `runtime.result` inspects state, it never replays the original command.
-fn run_result(id: &str) -> Result<()> {
-    let value = crate::net_rpc::rpc_method("runtime.result", vec![id.to_owned()])?;
-    let summary = &value["envelope"]["summary"];
-    let state = summary["state"].as_str().unwrap_or("unknown").to_owned();
-    let response = summary["response"].clone();
-    let retention = summary["retention"].as_str().unwrap_or_default().to_owned();
-    if json_mode() {
-        let mut envelope = ResultEnvelope::new(
-            "result",
-            OutputStatus::Ok,
-            serde_json::json!({"request_id":id,"state":state}),
-            Vec::new(),
-        );
-        envelope.details = if response.is_null() { serde_json::Value::Null } else { response };
-        return emit_result(envelope);
-    }
-    let mut items = vec![
-        OutputItem::new("request_id", OutputStatus::Ok, id.to_owned()),
-        OutputItem::new("state", OutputStatus::Ok, state),
-        OutputItem::new(
-            "response",
-            OutputStatus::Ok,
-            if response.is_null() { "none".to_owned() } else { response.to_string() },
-        ),
-    ];
-    if !retention.is_empty() {
-        items.push(OutputItem::new("retention", OutputStatus::Ok, retention));
-    }
-    emit_result(ResultEnvelope::new(
-        "result",
-        OutputStatus::Ok,
-        serde_json::json!({"request_id":id}),
-        items,
-    ))?;
     Ok(())
 }

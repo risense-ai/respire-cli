@@ -1,11 +1,8 @@
 //! Stage-1 resident lexical index cache (design A, fast path only).
 //!
-//! Why a process-local cache is the right shape: `recall` executes inside the
-//! long-resident runtime. `engine` (and therefore `learn`/`lexical`) is only
-//! compiled under the `server` feature, and the CLI dependency never enables
-//! that feature, so a one-shot CLI process cannot build this index at all —
-//! every recall runs in the serving process, where this cache persists across
-//! requests.
+//! This process-local helper is compiled only under the `server` feature.
+//! The production CLI delegates retrieval to the independent Runtime and Core;
+//! this helper alone does not enable or measure their resident cache.
 //!
 //! Cache key — every one of these participates in `PartialEq`, so a mismatch
 //! rebuilds instead of reusing a stale index:

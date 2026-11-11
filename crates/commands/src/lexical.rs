@@ -1,16 +1,22 @@
-//! Shared lexical (BM25) candidate retrieval for the self-learning path.
+//! Model-free lexical index primitives used by the cache correctness gates.
 //!
-//! This module is deliberately model-free: it indexes the plaintext
-//! `title`/`tags`/`content_head` columns and returns stable candidates. The
-//! annotate command (follow-up) and `learn` both consume it, so the candidate
-//! set used for labels and for training is exactly the same.
+//! The index reads local title, tags and content-head fields. Production
+//! retrieval and cache integration remain in the independent Runtime and Core.
 
 use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
-use respire_app::transport::local::{AnnotationCandidate, LocalStore};
+use respire_app::transport::local::LocalStore;
 use respire_app::MemoryTransport;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LexicalCandidate {
+    pub id: String,
+    pub title: String,
+    pub score: f32,
+    pub snippet: String,
+}
 
 const K1: f32 = 1.2;
 const B: f32 = 0.75;
@@ -220,12 +226,12 @@ impl Bm25Index {
         scored
     }
 
-    pub fn candidates(&self, query: &str, topk: usize) -> Vec<AnnotationCandidate> {
+    pub fn candidates(&self, query: &str, topk: usize) -> Vec<LexicalCandidate> {
         self.search(query, topk)
             .into_iter()
             .map(|(index, score)| {
                 let doc = &self.docs[index];
-                AnnotationCandidate {
+                LexicalCandidate {
                     id: doc.id.clone(),
                     title: if doc.title.trim().is_empty() {
                         doc.head.chars().take(40).collect()

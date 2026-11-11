@@ -84,41 +84,19 @@ to implement the supplied algorithms without requiring the original evaluation
 archive. Lower admission floors may return candidates for questions with no
 answer; titles remain reference material, not evidence that an answer exists.
 
-## Legacy server experiments
-
-The `annotate`, `learn`, and `result` commands, `recall --lexical`, both
-`--content-file` options, and `update --drop-legacy-metadata` are compiled only
-with the explicit `respire_commands/server` feature. They are absent from the
-production CLI parser and help. Production `remember` still requires its
-positional body. The independently published Runtime does not implement these
-experimental command arguments, so building a CLI frontend is not evidence
-that the experiments work through `cli.exec`.
-
-These modules retain the legacy local learning implementation for server
-inspection; they are not the production Core retrieval algorithm. Learning
-uses local annotation/adoption rows and the `learned_reranker` singleton, which
-is never synced. No background annotation process is launched after recall.
-Manual server annotation may send query text and candidate snippets to its
-selected provider. Legacy file inputs and training exports require absolute
-paths so a resident process cannot reinterpret the caller's working directory.
-
-Ordinary recall continues through the active Core model profile. A missing M3
-installation does not select the host learning experiment when another model
-profile is active. Explicit legacy lexical mode rejects evidence, rendering,
-mode, and how-to requests that it cannot preserve instead of silently changing
-the requested behavior. Non-title legacy lexical rows retain the full
-`details[].entry` from the authorized source; compact title rows remain compact.
-
 ## Cache availability
 
-The cache helper defaults to enabled and `RSRS_LEXICAL_CACHE=off` disables it
-for diagnostics. It does not need a new `config --retrieval` flag. Its raw-store
-diagnostic prewarm helper is not connected to production startup and also
-respects the disabled-cache setting.
+This delivery keeps ordinary `remember` and `recall` on their existing Core
+model routes. It adds no retrieval-mode configuration or training commands.
 
-Production cache integration belongs in the independent Runtime, at the
-existing Core retrieval boundary, and must be enabled there by default while
-preserving authorization, evidence, associations, rendering, and model routing.
-This CLI repository's legacy server modules alone provide no measured 2.x
-product speedup. Publish and pin the corresponding Runtime implementation
-before claiming that users receive the cache optimization.
+The CLI repository's lexical cache helper defaults to enabled;
+`RSRS_LEXICAL_CACHE=off` disables that helper for diagnostics. Its raw-store
+prewarm helper is not connected to production startup. The helper and its
+correctness gates retain revision validation, scope isolation, and clear fencing.
+
+Production retrieval uses the independently published Runtime selected by
+`runtime-pin.json`, currently `2.0.0-dev.10`, with Core SDK `2.0.0-dev.4`.
+That Runtime reuses authorized resident snapshots and Core leases by default
+while preserving authorization, evidence, associations, rendering, and model
+routing. The CLI's legacy server helper alone provides no measured product
+speedup; production performance claims require the Runtime and Core evidence.

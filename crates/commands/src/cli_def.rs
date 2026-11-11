@@ -105,101 +105,8 @@ pub enum ModelAction {
     UninstallM3,
 }
 
-#[cfg(feature = "server")]
-#[derive(Subcommand)]
-pub enum LearnCmd {
-    /// Show current weights, update count and annotation count
-    Status,
-    /// Persist BM25-only mode (no BGE); `--off` returns to hybrid BGE
-    Lexical {
-        #[arg(long)]
-        off: bool,
-    },
-    /// Batch-train from stored annotation_log rows
-    Train {
-        #[arg(long, default_value_t = 5000)]
-        limit: usize,
-        #[arg(long, default_value_t = 1)]
-        epochs: usize,
-        /// Train from real query_log adoption labels (BM25 residual) instead of annotations
-        #[arg(long)]
-        from_labels: bool,
-    },
-    /// Clear the learned reranker (next recall falls back to BM25 weights)
-    Reset,
-}
 #[derive(Subcommand)]
 pub enum Command {
-    /// Annotate retrieval: BM25 top-N candidates (no BGE) + LLM judgement, stored as replayable training labels
-    #[cfg(feature = "server")]
-    Annotate {
-        /// One query to annotate
-        #[arg(long)]
-        query: Option<String>,
-        /// JSONL file: one {"query":"..."} object or a plain query per line
-        #[arg(long)]
-        file: Option<String>,
-        /// Mine the most recent distinct queries from query-log (skips already annotated ones)
-        #[arg(long)]
-        from_query_log: bool,
-        /// Max queries taken from --from-query-log
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-        /// Candidate depth sent to the LLM
-        #[arg(long, default_value_t = 10)]
-        topk: usize,
-        /// BM25 pool stored as hard negatives (LLM still sees only --topk)
-        #[arg(long, default_value_t = 50)]
-        candidate_topk: usize,
-        /// Only print BM25 candidates; no LLM call, and the row is stored as dry_run
-        #[arg(long)]
-        dry_run: bool,
-        /// Project value recorded on the label row
-        #[arg(long)]
-        project: Option<String>,
-        /// Chat backend: ds | jev (default: stored selection)
-        #[arg(long)]
-        backend: Option<String>,
-        /// DeepSeek-compatible backend: --ds uses the stored key; --ds <key> stores it
-        #[arg(long, num_args = 0..=1, default_missing_value = "")]
-        ds: Option<String>,
-        /// OpenAI-compatible base URL (default: backend default)
-        #[arg(long)]
-        api_base: Option<String>,
-        /// Model name (default: backend default)
-        #[arg(long, default_value = crate::classify::DEFAULT_MODEL)]
-        model: String,
-        /// Export stored annotations as training JSONL
-        #[arg(long)]
-        export_training: Option<String>,
-        /// Training export shape: listwise | pairwise
-        #[arg(long, default_value = "listwise")]
-        export_format: String,
-        /// Max annotations in the export
-        #[arg(long, default_value_t = 5000)]
-        export_limit: usize,
-        /// Include dry_run/llm_error/parse_error rows in the export (default: ok only)
-        #[arg(long)]
-        include_failed: bool,
-        /// Correlates the label row with the recall that triggered it
-        #[arg(long, hide = true)]
-        request_id: Option<String>,
-        /// Recall-hook mode: no output, failures only land in annotation_log
-        #[arg(long, hide = true)]
-        quiet: bool,
-    },
-    /// Local retrieval learning: inspect, batch-train or reset the BM25 reranker
-    #[cfg(feature = "server")]
-    Learn {
-        #[command(subcommand)]
-        cmd: LearnCmd,
-    },
-    /// Query the outcome of a request whose id was printed by request_outcome_unknown (read-only; never replays the command)
-    #[cfg(feature = "server")]
-    Result {
-        /// request_id from the request_outcome_unknown error
-        id: String,
-    },
     /// Review evidence, due records and explicit approval-backed confirmations.
     Review {
         #[command(flatten)]
@@ -246,16 +153,7 @@ pub enum Command {
     /// medium -> suggest attach (`--parent` as cause); no candidate or --force writes directly.
     /// `--parent` = causal attach; parent/child is cause/effect.
     Remember {
-        #[cfg(not(feature = "server"))]
         content: String,
-        /// Legacy server body; exactly one body source is required.
-        #[cfg(feature = "server")]
-        #[arg(required_unless_present = "content_file", conflicts_with = "content_file")]
-        content: Option<String>,
-        /// Read the body from a file: bypasses shell quoting/escaping and makes the file the source of truth before a write.
-        #[cfg(feature = "server")]
-        #[arg(long)]
-        content_file: Option<std::path::PathBuf>,
         /// Kind; defaults to context for creation and the first source's kind for merge.
         #[arg(long, value_parser = metadata::kind)]
         r#type: Option<String>,
@@ -325,10 +223,6 @@ pub enum Command {
         /// Recall intent: auto (keyword), howto (extra skill pass, keeps one procedure visible), fact (single pass)
         #[arg(long, value_parser = ["auto", "howto", "fact"], default_value = "auto")]
         intent: String,
-        /// BM25 + locally learned reranker; no BGE/model required
-        #[cfg(feature = "server")]
-        #[arg(long)]
-        lexical: bool,
     },
     /// Query log: each recall's candidates + adoption + model self-grade (local DPO/SFT raw material)
     QueryLog {
@@ -816,14 +710,6 @@ pub enum Command {
         title: Option<String>,
         #[arg(long)]
         content: Option<String>,
-        /// Read the new body from a file instead of --content (mutually exclusive; the file is the source of truth).
-        #[cfg(feature = "server")]
-        #[arg(long)]
-        content_file: Option<std::path::PathBuf>,
-        /// Explicitly drop legacy unknown metadata fields (action/cause/effect) that the write gate rejects; their names are echoed back.
-        #[cfg(feature = "server")]
-        #[arg(long)]
-        drop_legacy_metadata: bool,
         #[arg(long)]
         tags: Option<String>,
         #[arg(long, value_parser = metadata::kind)]
