@@ -40,16 +40,7 @@ jobs:
         env:
           RUNTIME_EXAMPLES_SHA: ${{ inputs.runtime_examples_sha }}
         run: |
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync} from 'node:fs';
-          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
-          assert.equal(pin.schema_version, 1);
-          assert.equal(pin.repository, 'risense-ai/respire-runtime');
-          const sha = process.env.RUNTIME_EXAMPLES_SHA || pin.source_sha;
-          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime examples/harness SHA');
-          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
-          NODE
+          node scripts/fetch-runtime-test-bundle.mjs source
       - uses: actions/checkout@v5
         if: inputs.feedback_probe
         with:
@@ -68,8 +59,8 @@ jobs:
           [[ "$CLI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           test "$(git rev-parse HEAD)" = "$CLI_SOURCE_SHA"
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
-          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
           test -f .runtime-examples/crates/commands/examples/feedback_contract_probe.rs
           test -f .runtime-examples/crates/commands/examples/ablation_bench.rs
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
@@ -79,24 +70,6 @@ jobs:
       - name: Require a token-free process environment
         shell: bash
         run: test -z "${CORE_SDK_READ_TOKEN:-}"
-      - uses: actions/cache/restore@v4
-        id: sdk-restore
-        with:
-          path: .sdk/${{ inputs.target }}
-          key: ${{ inputs.cache_key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ inputs.cache_key }}
-          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Reverify pinned SDK without any private download credential
-        shell: bash
-        env:
-          SDK_TARGET: ${{ inputs.target }}
-        run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
       - name: Build native executable with the pinned SDK
         if: ${{ !contains(inputs.target, '-musl') }}
         shell: bash
@@ -105,7 +78,7 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
-          cargo build --workspace --locked --target "$SDK_TARGET" --target-dir target/ci
+          cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/ci
           if [[ "$SDK_TARGET" == x86_64-apple-darwin ]]; then echo 'Intel SDK compile-only; standalone Runtime inference not evaluated.' >> "$GITHUB_STEP_SUMMARY"; fi
       - name: Build static musl executable
         if: contains(inputs.target, '-musl')
@@ -174,7 +147,17 @@ jobs:
           assert.equal(result.status, 0, 'Offline Alpine probe failed');
           NODE
 
-      - name: Native snapshot lifecycle and feedback probe build
+      - name: Fetch reviewed precompiled Runtime tests and feedback examples
+        if: inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SDK_TARGET: ${{ inputs.target }}
+        run: |
+          set -euo pipefail
+          node scripts/fetch-runtime-test-bundle.mjs fetch "$SDK_TARGET"
+          node scripts/fetch-runtime-test-bundle.mjs verify "$SDK_TARGET" --list
+      - name: Native snapshot lifecycle and precompiled feedback tests
         if: ${{ inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin' && !contains(inputs.target, '-musl') }}
         shell: bash
         env:
@@ -185,16 +168,13 @@ jobs:
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
           test -f "$RSRS_RUNTIME_BIN"
-          export RSRS_CORE_SDK_DIR="$(node -p 'require("node:path").resolve(process.argv[1])' ".sdk/$SDK_TARGET")"
           suffix=''; if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
           export RSRS_CLI_BIN="$(node -p 'require("node:path").resolve(process.argv[1])' "target/ci/$SDK_TARGET/debug/rsrs$suffix")"
           export RSRS_CLI_SOURCE_DIR="$(node -p 'process.cwd()')"
           unset GH_TOKEN GITHUB_TOKEN
-          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_app snapshot::tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
-          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_storage transport::local::sync::diary_tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
-          cargo build --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --examples --target "$SDK_TARGET" --target-dir target/runtime-examples
-          node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-examples/$SDK_TARGET/debug/examples"
-          RSRS_CORE_TEST_MODE=1 cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --target "$SDK_TARGET" --target-dir target/runtime-examples -- --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
       - name: Static musl snapshot lifecycle and feedback probe build
         if: ${{ inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin' && contains(inputs.target, '-musl') }}
         shell: bash
@@ -207,15 +187,12 @@ jobs:
           fixture_root="$(dirname "$(dirname "$(dirname "$RSRS_RUNTIME_BIN")")")"
           fixture_binary="/runtime-fixture/runtime/$(basename "$(dirname "$RSRS_RUNTIME_BIN")")/$(basename "$RSRS_RUNTIME_BIN")"
           unset GH_TOKEN GITHUB_TOKEN
-          docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CORE_SDK_DIR="/workspace/.sdk/$SDK_TARGET" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model rust:1.95.0-alpine3.23 sh -ec '
-            . scripts/build-linux-musl-container.sh
+          docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model -e RSRS_RUNTIME_APP_TESTS="/workspace/${RSRS_RUNTIME_APP_TESTS#"$PWD/"}" -e RSRS_RUNTIME_STORAGE_TESTS="/workspace/${RSRS_RUNTIME_STORAGE_TESTS#"$PWD/"}" -e RSRS_RUNTIME_TEST_RUNNER="/workspace/${RSRS_RUNTIME_TEST_RUNNER#"$PWD/"}" rust:1.95.0-alpine3.23 sh -ec '
             echo "Checking minimal-musl ps syntax (diagnostic only):"
             if ps -p $$ -o pid= -o stat=; then echo "ps syntax available"; else echo "ps syntax unavailable; Linux lifecycle requires verified procfs"; fi
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_app snapshot::tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_storage transport::local::sync::diary_tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
-            cargo build --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --examples --target "$TARGET" --target-dir target/runtime-examples
-            node .runtime-examples/scripts/stage-core-runtime.mjs "target/runtime-examples/$TARGET/release/examples"
-            RSRS_CORE_TEST_MODE=1 cargo test --locked --release --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --target "$TARGET" --target-dir target/runtime-examples -- --test-threads=1
+            RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+            RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
+            RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
           '
       - name: Actual model feedback across Core service runtime and both benchmarks
         if: inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin'
@@ -233,7 +210,7 @@ jobs:
           unset GH_TOKEN GITHUB_TOKEN
           export RSRS_CLI_BIN="$(node -p 'require("node:path").resolve(process.argv[1])' "target/ci/$SDK_TARGET/$profile/rsrs$suffix")"
           test -f "$RSRS_CLI_BIN"
-          "target/runtime-examples/$SDK_TARGET/$profile/examples/feedback_contract_probe$suffix"
+          "$RSRS_RUNTIME_FEEDBACK_PROBE"
 
   source-coverage:
     if: inputs.target == 'x86_64-unknown-linux-gnu'
@@ -258,16 +235,7 @@ jobs:
         env:
           RUNTIME_EXAMPLES_SHA: ${{ inputs.runtime_examples_sha }}
         run: |
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {appendFileSync, readFileSync} from 'node:fs';
-          const pin = JSON.parse(readFileSync('runtime-tests-source.json', 'utf8'));
-          assert.equal(pin.schema_version, 1);
-          assert.equal(pin.repository, 'risense-ai/respire-runtime');
-          const sha = process.env.RUNTIME_EXAMPLES_SHA || pin.source_sha;
-          assert.match(sha ?? '', /^[0-9a-f]{40}$/, 'Bind a committed Runtime SHA containing the migrated business tests');
-          appendFileSync(process.env.GITHUB_OUTPUT, `sha=${sha}\n`);
-          NODE
+          node scripts/fetch-runtime-test-bundle.mjs source
       - uses: actions/checkout@v5
         with:
           repository: risense-ai/respire-runtime
@@ -281,8 +249,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
-          cmp sdk/core-sdk.lock.json .runtime-examples/sdk/core-sdk.lock.json
-          cmp sdk/core-sdk.lock.json .runtime-examples/crates/core-sdk/core-sdk.lock.json
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
@@ -291,24 +259,6 @@ jobs:
       - name: Require a token-free coverage environment
         shell: bash
         run: test -z "${CORE_SDK_READ_TOKEN:-}"
-      - uses: actions/cache/restore@v4
-        id: sdk-restore
-        with:
-          path: .sdk/${{ inputs.target }}
-          key: ${{ inputs.cache_key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require the exact SDK cache match
-        shell: bash
-        env:
-          EXPECTED_KEY: ${{ inputs.cache_key }}
-          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
-        run: test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-      - name: Reverify pinned SDK without any private download credential
-        shell: bash
-        env:
-          SDK_TARGET: ${{ inputs.target }}
-        run: node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -343,40 +293,32 @@ jobs:
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\nRSRS_CORE_TEST_MODEL_DIR=${process.env.RSRS_M3_DIR}\n`);
           NODE
-      - name: Build uninstrumented Runtime business harness for source coverage
+      - name: Fetch precompiled Runtime business harness for source coverage
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN
-          export RSRS_CORE_SDK_DIR="$PWD/.sdk/x86_64-unknown-linux-gnu"
-          cargo test --locked --manifest-path .runtime-examples/Cargo.toml -p respire_commands --features respire_app/cpu-owned-ort-experiment --example cli_business_tests --no-run --message-format=json --target-dir target/runtime-cli-tests > "$RUNNER_TEMP/runtime-cli-tests-build.jsonl" || { cat "$RUNNER_TEMP/runtime-cli-tests-build.jsonl"; exit 1; }
-          node .runtime-examples/scripts/stage-core-runtime.mjs target/runtime-cli-tests/debug/examples
-          node --input-type=module <<'NODE'
-          import assert from 'node:assert/strict';
-          import {execFileSync} from 'node:child_process';
-          import {appendFileSync, readFileSync, realpathSync} from 'node:fs';
-          const records = readFileSync(`${process.env.RUNNER_TEMP}/runtime-cli-tests-build.jsonl`, 'utf8').trim().split('\n').map(line => JSON.parse(line));
-          const artifacts = records.filter(record => record.reason === 'compiler-artifact' && record.target?.name === 'cli_business_tests' && record.profile?.test && record.executable);
-          assert.equal(artifacts.length, 1);
-          const runner = realpathSync(artifacts[0].executable);
-          const names = execFileSync(runner, ['--list'], {encoding: 'utf8'}).split('\n').filter(line => line.endsWith(': test'));
-          for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
-            assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count);
-          }
-          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${runner}\n`);
-          NODE
+          node scripts/fetch-runtime-test-bundle.mjs fetch x86_64-unknown-linux-gnu
+          node scripts/fetch-runtime-test-bundle.mjs verify x86_64-unknown-linux-gnu --list
       - name: Complete GNU source tests and existing coverage gate
         env:
           RSRS_CORE_TEST_MODE: '1'
         shell: bash
         run: |
           set -euo pipefail
-          cargo test --workspace --exclude respire --locked
+          cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging
           cargo llvm-cov --locked -p respire --no-report
           (
-            cargo llvm-cov show-env --export-prefix > "$RUNNER_TEMP/cli-coverage.env"
+            CARGO_LLVM_COV_TARGET_DIR="$PWD/target/llvm-cov-target" cargo llvm-cov show-env --sh > "$RUNNER_TEMP/cli-coverage.env"
             source "$RUNNER_TEMP/cli-coverage.env"
-            [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" == *instrument-coverage* ]]
+            # cargo-llvm-cov 0.9 uses a rustc wrapper instead of public RUSTFLAGS.
+            if [[ "${RUSTFLAGS:-}${CARGO_ENCODED_RUSTFLAGS:-}" != *instrument-coverage* ]]; then
+              if [[ "${__CARGO_LLVM_COV_RUSTC_WRAPPER:-}" != 1 || -z "${RUSTC_WRAPPER:-}" || "${__CARGO_LLVM_COV_RUSTC_WRAPPER_RUSTFLAGS:-}" != *instrument-coverage* ]]; then
+                printf '::error::Coverage instrumentation is missing from both direct flags and the active rustc wrapper\n' >&2
+                exit 1
+              fi
+            fi
             [[ "$LLVM_PROFILE_FILE" == "$PWD/target/llvm-cov-target/"* ]]
             export RSRS_CLI_BIN="$PWD/target/llvm-cov-target/debug/rsrs"
             export RSRS_CLI_SOURCE_DIR="$PWD"

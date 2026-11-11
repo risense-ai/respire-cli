@@ -14,8 +14,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   const contracts=section('contract-checks'),source=section('coverage-tests'),workspace=section('workspace-tests'),integration=section('runtime-integration');
   assert(contracts && source);assert.doesNotMatch(contracts,/\n    needs:|id-token:|actions: write|secrets\.|fetch-core-sdk|cargo /);
   assert.match(contracts,/persist-credentials: false/);assert.match(contracts,/contents: read/);
-  assert.match(workspace,/cargo test --workspace --exclude respire --locked/);assert.doesNotMatch(source,/cargo test --workspace --exclude respire/);assert.doesNotMatch(workspace,/llvm-cov|needs:/);assert.match(workspace,/Require the exact SDK cache match/);assert.match(workspace,/RSRS_CORE_TEST_MODE: '1'/);
-  assert(workspace.indexOf('cargo test --workspace --exclude respire --locked')<workspace.indexOf('python3 scripts/test-core-payload-lifetime.py'));assert(workspace.includes('python3 scripts/test-core-payload-lifetime.py'));assert.doesNotMatch(contracts,/test-core-payload-lifetime.py/);assert(workspace.includes('python3 scripts/test-ci-source-profile.py'));
+  assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging/);assert.doesNotMatch(source,/cargo test --workspace --exclude respire/);assert.doesNotMatch(workspace,/llvm-cov|needs:|fetch-core-sdk|path: \.sdk\//);assert.match(workspace,/RSRS_CORE_TEST_MODE: '1'/);
+  assert(workspace.indexOf('cargo test --locked -p respire_spawn')<workspace.indexOf('python3 scripts/test-core-payload-lifetime.py'));assert(workspace.includes('python3 scripts/test-core-payload-lifetime.py'));assert.doesNotMatch(contracts,/test-core-payload-lifetime.py/);assert(workspace.includes('python3 scripts/test-ci-source-profile.py'));
   assert.match(source,/group: \[core, runtime_smoke, runtime_autostart\]/);
   assert.match(source,/fail-fast: false/);assert.match(source,/RSRS_CORE_TEST_MODE: '1'/);
   assert.match(source,/targets.filter\(t => t.kind.includes\('test'\)\)/);
@@ -213,21 +213,12 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands/);
   for(const lane of [workspace,source]){
     assert.match(lane,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
-    assert.match(lane,/name: Prepare pinned binary Core SDK\n        if: env.CANDIDATE_MODE == 'true'/);
-    assert.match(lane,/if: env.CANDIDATE_MODE == 'true' && steps.sdk-cache-2.outputs.key != ''/);
-    for(const block of lane.split(/^      - /m).slice(1).filter(block=>
-      /id: sdk-cache-2|fetch-core-sdk\.mjs|path: \.sdk\//.test(block))){
-      const condition=block.match(/^        if: (.+)$/m)?.[1];
-      assert(condition,'every SDK operation must have its own candidate condition');
-      for(const candidate of ['true','false'])assert.equal(runInNewContext(condition.replaceAll('steps.sdk-cache-2','steps.sdkCache2'),{
-        env:{CANDIDATE_MODE:candidate},steps:{sdkCache2:{outputs:{key:'exact-cache-key'}}},
-      }),candidate==='true');
-    }
+    assert.doesNotMatch(lane,/fetch-core-sdk|path: \.sdk\/|sdk-cache-2/);
   }
   assert.match(source,/name: Coverage \(\$\{\{ matrix.group \}\}\)/);
   for(const name of ['Prepare private business credential fixture','Resolve exact Runtime business test source',
     'Bind Runtime business harness and SDK identity','Verify or install the real business test model using the official installer',
-    'Build Runtime-owned business assertions without instrumenting Runtime']){
+    'Verify precompiled Runtime business assertions without instrumenting Runtime']){
     const block=source.split(`- name: ${name}\n`)[1]?.split('\n      - ')[0];
     assert(block?.includes("if: env.CANDIDATE_MODE == 'true'"),name);
   }
@@ -236,7 +227,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     assert.equal(item.evidence.job_name,'Coverage (core)');assert(source.includes(item.evidence.command_fragment));
   }
   assert.match(integration,/needs: coverage-tests/);
-  assert.match(integration,/assert.equal\(sha, pin.source_sha/);
+  assert.match(integration,/node scripts\/fetch-runtime-test-bundle\.mjs source/);
   assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);
   assert.match(integration,/channel\(pinVersion\), channel\(cliVersion\)/);
   assert.match(integration,/tar --exclude='\*\.profraw' -xzf/);
@@ -246,7 +237,20 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(integration,/runtime_tests_sha: env.RUNTIME_TESTS_SHA/);
   assert.match(integration,/Preserve private business credential diagnostics\n        if: \$\{\{ always\(\)/);
   assert.match(integration,/steps.business.outcome == 'failure'/);
-  assert.match(integration,/cargo test --workspace --exclude respire --exclude respire_spawn --exclude respire_protocol --exclude respire_client_host --exclude respire_commands --locked/);
+  assert.match(integration,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands -p respire_logging/);
+  for(const lane of [workspace,source,integration])assert.doesNotMatch(lane,/--workspace|--manifest-path \.runtime-examples|stage-core-runtime\.mjs|fetch-core-sdk/);
+  for(const lane of [source,integration]){
+    assert.match(lane,/node scripts\/fetch-runtime-test-bundle\.mjs fetch "\$target"/);
+    assert.match(lane,/node scripts\/fetch-runtime-test-bundle\.mjs verify "\$target" --list/);
+    const internal=lane.split('- name: Run precompiled Runtime snapshot and diary assertions\n')[1]?.split('\n      - ')[0];
+    assert(internal,'both core lanes retain precompiled Runtime internal assertions');
+    assert(internal.includes(lane===source ? "if: env.CANDIDATE_MODE == 'true' && matrix.group == 'core'" : "if: matrix.group == 'core'"));
+    assert(internal.includes('set -euo pipefail'));
+    assert(internal.includes('RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1'));
+    assert(internal.includes('RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1'));
+    assert.doesNotMatch(internal,/continue-on-error|\|\| true/);
+    assert(lane.indexOf('- name: Run precompiled Runtime snapshot and diary assertions') > lane.indexOf('node scripts/fetch-runtime-test-bundle.mjs verify'));
+  }
   assert.match(integration,/python3 scripts\/test-core-payload-lifetime.py/);
   const jointBlock=integration.split("      - name: Run Runtime business assertions against the source CLI")[1].split("      - name: Preserve private business credential diagnostics")[0];
   const jointProgram=jointBlock.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]
