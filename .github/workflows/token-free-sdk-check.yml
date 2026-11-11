@@ -360,7 +360,7 @@ jobs:
           assert.equal(artifacts.length, 1);
           const runner = realpathSync(artifacts[0].executable);
           const names = execFileSync(runner, ['--list'], {encoding: 'utf8'}).split('\n').filter(line => line.endsWith(': test'));
-          for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 11, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
+          for (const [module, count] of Object.entries({memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2})) {
             assert.equal(names.filter(name => name.startsWith(`${module}::`)).length, count);
           }
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_TEST_RUNNER=${runner}\n`);
