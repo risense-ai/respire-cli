@@ -8,6 +8,9 @@ $press=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.Function
 $accept=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-OfflineGuiAcceptance'},$true))
 if ($press.Count -ne 1 -or $accept.Count -ne 1) { throw 'Stop diagnostic source functions missing' }
 . ([scriptblock]::Create($press[0].Extent.Text))
+$getInvoke=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Get-OfflineButtonInvoke'},$true))
+if ($getInvoke.Count -ne 1) { throw 'Stop pattern acquisition function missing' }
+. ([scriptblock]::Create($getInvoke[0].Extent.Text))
 $prepare=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Prepare-OfflineButtonInvoke'},$true))
 if ($prepare.Count -ne 1) { throw 'Stop preparation function missing' }
 . ([scriptblock]::Create($prepare[0].Extent.Text))

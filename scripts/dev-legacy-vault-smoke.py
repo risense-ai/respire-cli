@@ -377,8 +377,7 @@ class Smoke:
         result = self.cli(upgraded_env, "migrate", "--vault", "--addr", UPSTREAM, "--user", user,
             prompts=[("  login password: ", password)])
         committed = self.session(upgraded_env)
-        if version == 1:
-            self.keys.track_created_login(committed, user, None, password)
+        self.keys.track_created_login(committed, user, original_super if version != 1 else None, password)
         account["token"] = committed["token"]
         require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
         new_auth_salt = PREFIX + hkdf(user.lower().encode(), None, b"rsrs:auth-salt:v1", 16).hex()

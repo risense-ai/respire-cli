@@ -363,7 +363,10 @@ def main():
                 command_env["RSRS_SUPER"] = old_super
             result = subprocess.run([str(args.binary), *flags], env=command_env, capture_output=True, timeout=180)
             if (result.returncode == 0) != success:
-                report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed"}
+                command = next((name for name in ("account-rollback", "account-result", "login", "remember",
+                    "migrate", "--runtime-internal", "--version") if name in flags), "other")
+                report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed",
+                                     "command": command}
                 raise RuntimeError("cli_expectation_failed")
             return result
 
@@ -410,14 +413,35 @@ def main():
             config.write_text(json.dumps(dict(json.loads(config_bytes), custom="interrupted")))
             recovery_path.write_text(json.dumps(legacy_record))
             recovery_path.chmod(0o600)
-            cli("login", "--interactive", "--addr", addr, "--user", "synthetic",
-                "--pass=synthetic-password", "--super=wrong", success=False)
+            rejected = json.loads(cli("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
+                "--pass=synthetic-password", "--super=wrong", success=False).stdout)
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "legacy_original_profile_not_restored")
-            # The rejected new login may leave a terminal receipt, but no recovery owner.
-            if recovery_path.exists():
-                require(json.loads(recovery_path.read_bytes()).get("active") is None,
-                        "legacy_recovery_not_retired")
+            # The new failed login retains its own operation; resolve that operation
+            # explicitly after proving the original legacy recovery has retired.
+            journal = json.loads(recovery_path.read_bytes())
+            active = journal.get("active") or {}
+            operation_id = rejected.get("details", {}).get("operation_id")
+            require(rejected.get("summary", {}).get("reason") == "account_outcome_unknown"
+                    and any(error.endswith("; login_kind=vault_unlock_rejected") for error in rejected.get("errors", []))
+                    and active.get("operation_id") == operation_id and active.get("alias") != legacy_alias,
+                    "legacy_recovery_not_retired")
+            records = [row for row in journal["operations"] if row["operation_id"] == operation_id]
+            require(len(records) == 1 and records[0]["profile"] == str(root.resolve())
+                    and records[0]["account"]["user"] == "synthetic" and records[0]["account"]["addr"] == addr,
+                    "original_operation_binding_changed")
+            rejected_record = records[0]
+            logins_before = state["logins"]
+            rollback = cli(*account_recovery_flags("account-rollback", rejected_record), success=False)
+            rolled_back = json.loads(rollback.stdout)
+            receipt = rolled_back["summary"]
+            require(rollback.returncode == 1 and rolled_back.get("status") == "fail"
+                    and receipt["operation_id"] == operation_id
+                    and receipt["outcome"] == "rolled_back"
+                    and state["logins"] == logins_before, "original_rollback_not_confirmed")
+            terminal_operation(json.loads(recovery_path.read_bytes()), rejected_record, "rolled_back")
+            require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
+                    "legacy_original_profile_not_restored")
             if keys:
                 for slot in ("super", "pass"):
                     require(not list(keys.collection.search_items(keys.attributes("rsrs", slot + ":" + legacy_alias))),
@@ -491,8 +515,12 @@ def main():
                 if barrier == "before_publish":
                     # Querying AwaitingVerification would complete it. Explicit rollback
                     # is permitted by the original receipt before any publication starts.
-                    receipt = json.loads(cli(*account_recovery_flags("account-rollback", record)).stdout)["summary"]
-                    require(receipt["operation_id"] == record["operation_id"] and receipt["outcome"] == "rolled_back",
+                    rollback = cli(*account_recovery_flags("account-rollback", record), success=False)
+                    rolled_back = json.loads(rollback.stdout)
+                    receipt = rolled_back["summary"]
+                    require(rollback.returncode == 1 and rolled_back.get("status") == "fail"
+                            and receipt["operation_id"] == record["operation_id"]
+                            and receipt["outcome"] == "rolled_back",
                             "original_rollback_not_confirmed")
                     terminal_operation(json.loads(recovery_path.read_bytes()), record, "rolled_back")
                     require(session.read_bytes() == legacy_bytes and config.read_bytes() == config_bytes,
@@ -502,8 +530,11 @@ def main():
                         require(not list(keys.collection.search_items(password_attributes)), "interrupted_native_password_not_deleted")
                     require((state["logins"], state["posts"], state["password_posts"]) == effect_counts,
                             "rollback_replayed_authentication")
-                    confirmed = json.loads(cli(*account_recovery_flags("account-result", record)).stdout)["summary"]
-                    require(confirmed["outcome"] == "rolled_back", "rollback_receipt_not_retained")
+                    queried = cli(*account_recovery_flags("account-result", record), success=False)
+                    confirmed = json.loads(queried.stdout)
+                    require(queried.returncode == 1 and confirmed.get("status") == "fail"
+                            and confirmed["summary"]["outcome"] == "rolled_back",
+                            "rollback_receipt_not_retained")
                     # A fresh migration is safe only after that original terminal rollback.
                     cli(*migration)
                     require(state["logins"] == effect_counts[0] + 1, "explicit_retry_login_count_changed")
@@ -680,14 +711,26 @@ def main():
             report["cases"]["different_server_transfer_retry"] = {"passed": True,
                 "source_preserved": True, "different_urk": True, "duplicates_skipped": True}
             report["passed"] = True
+        except BaseException as error:
+            report["operation_failure_code"] = (str(error) if type(error) is RuntimeError
+                and str(error) in FAILURE_CODES else "unclassified_failure")
+            raise
         finally:
             report["failure_stage"] = report["stage"]
             report["stage"] = "owned_child_cleanup"
             if child is not None:
-                stop_owned_control(child)
+                child_running = child.poll() is None
+                members = process_group_members(child.pid)
+                report["cleanup_snapshot"] = {"child_running": child_running,
+                    "members": len(members), "helpers": sum(row["control_helper"] for row in members.values()),
+                    "zombies": sum(row["state"] == "Z" for row in members.values())}
+                if child_running:
+                    stop_owned_control(child)
                 try:
                     stdout, _ = child.communicate(timeout=15)
-                except (OSError, subprocess.TimeoutExpired):
+                except subprocess.TimeoutExpired as error:
+                    stdout = error.output or b""
+                except OSError:
                     stdout = b""
                 report["migration_child"] = {"exit_code": child.returncode,
                     "migration_stage": None, "migration_exchange": None, "register_kind": None}
@@ -715,6 +758,8 @@ def main():
                     if token and token[1] in allowed and (name != "migration_exchange"
                             or report["migration_child"]["migration_stage"] == "exchange"):
                         report["migration_child"][name] = token[1]
+                if not child_running:
+                    stop_owned_control(child)
             # Never unblock a request while a surviving private helper can publish it.
             release.set()
             report["stage"] = "runtime_cleanup"

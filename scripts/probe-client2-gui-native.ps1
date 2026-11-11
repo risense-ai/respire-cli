@@ -591,11 +591,17 @@ function Focus-OfflineControl($Element, [ref]$MismatchEvidence) {
         $expected = $Element.GetRuntimeId() -join '.'
         $diagnostic.phase = 'set_focus'
         $Element.SetFocus()
+        $focusClock = [Diagnostics.Stopwatch]::StartNew()
         $diagnostic.phase = 'target_after'
         $null = Assert-Target $true
         $diagnostic.phase = 'read_focus'
         $focus = Read-TargetFocus
         $diagnostic.phase = 'match_focus'
+        $diagnostic.after_focus_ms = [Math]::Round($focusClock.Elapsed.TotalMilliseconds)
+        if ($expected -cmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z' -and
+            $focus.runtime_id -is [string] -and $focus.runtime_id -cmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z') {
+            $diagnostic.runtime_ids = @{expected=$expected;actual=$focus.runtime_id}
+        }
         $diagnostic.observed = @{belongs_to_target=[bool]$focus.belongs_to_target
             in_document=[bool]$focus.in_document; expected_id_match=($focus.runtime_id -eq $expected)
             offscreen=[bool]$focus.offscreen}
@@ -767,6 +773,7 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
         $preparingInvoke = $false
         $preparationTimedOut = $false
         if ($PrepareInvoke) {
+            $report.offline.preinvoke_identity = $null
             $report.offline.final_preparation = @{route='bounded_attempt';attempt=($attempt+1);kind='not_reached';proof='not_eligible'}
             $report.offline.final_preparation_history = @($report.offline.final_preparation_history) + @($report.offline.final_preparation)
         }
@@ -805,13 +812,27 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
                 continue
             }
             if ($scrollAttempts -gt 0) { $report.offline.focus_scroll = 'visible' }
+            $invocation = $null
+            if ($PrepareInvoke) {
+                # A stale initial identity uses the existing focus retry path;
+                # pattern acquisition and final preparation remain fail-closed.
+                if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
+                $runtimeParts = @($element.GetRuntimeId())
+                $preparingInvoke = $true
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
+                # Acquire the pattern and its full guard before establishing focus:
+                # overview refreshes replace buttons while these UIA/CIM reads run.
+                $invocation = Get-OfflineButtonInvoke $element @diagnosticArgs -RuntimeParts $runtimeParts
+                if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
+                $preparingInvoke = $false
+            }
             Focus-OfflineControl $element ([ref]$mismatchEvidence)
             if ($PrepareInvoke) {
                 # Continue this same attempt, never start a second retry budget.
                 $preparingInvoke = $true
                 $mismatchEvidence = $null
                 if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
-                $prepared = Prepare-OfflineButtonInvoke $element ([ref]$mismatchEvidence) @diagnosticArgs
+                $prepared = Prepare-OfflineButtonInvoke $element ([ref]$mismatchEvidence) -Invocation $invocation @diagnosticArgs
                 if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
                 return $prepared
             }
@@ -1019,22 +1040,37 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
         $observation.observed_window_ms=($clock.Elapsed.TotalSeconds-$observedStart)*1000
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
-function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
-    $MismatchEvidence.Value = $null
-    if ($null -eq $report.offline.final_preparation) {
-        $report.offline.final_preparation = @{route='bounded_attempt';attempt=0;kind='not_reached';proof='not_eligible'}
-    }
+function Get-OfflineButtonInvoke($Element, [ValidateSet('normal_stop')][string]$DiagnosticStage, $RuntimeParts = $null) {
+    $report.offline.preinvoke_identity = $null
     $report.offline.final_preparation.kind='unknown'
     $report.offline.final_preparation.proof='not_eligible'
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
-    $parts = @($Element.GetRuntimeId())
-    $expected = $parts -join '.'
+    if (-not $PSBoundParameters.ContainsKey('RuntimeParts')) { $RuntimeParts = @($Element.GetRuntimeId()) }
     $pattern = $null
     if (-not $Element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         throw 'Offline button does not support the normal UIA Invoke action'
     }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_focus_guard' }
     $null = Assert-Target $true
+    return @{element=$Element;parts=$RuntimeParts;pattern=$pattern}
+}
+function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [ValidateSet('normal_stop')][string]$DiagnosticStage, $Invocation = $null) {
+    $MismatchEvidence.Value = $null
+    if ($null -eq $report.offline.final_preparation) {
+        $report.offline.final_preparation = @{route='bounded_attempt';attempt=0;kind='not_reached';proof='not_eligible'}
+    }
+    $report.offline.final_preparation.kind='unknown'
+    $report.offline.final_preparation.proof='not_eligible'
+    $preparationClock = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -eq $Invocation) {
+        # Source-candidate stability keeps its already established focus window.
+        $diagnosticArgs = @{}
+        if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
+        $Invocation = Get-OfflineButtonInvoke $Element @diagnosticArgs
+    }
+    $parts = @($Invocation.parts)
+    $expected = $parts -join '.'
+    $pattern = $Invocation.pattern
     $focus = Read-TargetFocus
     # Read each observation exactly once: PS5 may suppress a failing property
     # getter to null. Missing, unknown or malformed observations fail closed.
@@ -1052,6 +1088,9 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
         } else { $report.offline.final_preparation.kind='invalid_requested_id' }
         throw 'Offline button focus changed before UIA Invoke'
     }
+    # These are the already validated observations, not additional provider reads.
+    $report.offline.preinvoke_identity = @{expected=$expected;actual=$focusedId
+        preparation_ms=[Math]::Round($preparationClock.Elapsed.TotalMilliseconds)}
     if (-not $belongs -or -not $inDocument -or $offscreen -or $focusedId -cne $expected) {
         if (-not $belongs) { $report.offline.final_preparation.kind='outside_target' }
         elseif (-not $inDocument) { $report.offline.final_preparation.kind='outside_document' }
@@ -1070,6 +1109,7 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
 function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
     $report.offline.final_preparation = $null
     $report.offline.final_preparation_history = @()
+    $report.offline.preinvoke_identity = $null
     $diagnosticArgs = @{}
     if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }

@@ -1,8 +1,18 @@
 name: Published performance comparison
 on:
   workflow_dispatch:
+    inputs:
+      release_inventory:
+        description: Reviewed JSON for cli/baseline/candidate with version, source_sha, producer_run_id, metadata_sha256 by target, and Runtime sdk_version
+        type: string
+        required: true
+      release_inventory_sha256:
+        description: SHA256 of the exact reviewed release_inventory UTF-8 bytes
+        type: string
+        required: true
 permissions:
   contents: read
+  actions: read
 jobs:
   compare:
     strategy:
@@ -21,6 +31,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -33,6 +45,8 @@ jobs:
       - name: Compare immutable published binaries on the same runner
         env:
           GH_TOKEN: ${{ github.token }}
+          PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
+          PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
           PERF_TARGET: ${{ matrix.target }}
           PERF_ROOT: ${{ runner.temp }}/comparison
           PERF_MODEL: ${{ runner.temp }}/performance-model
