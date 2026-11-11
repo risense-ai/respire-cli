@@ -591,11 +591,17 @@ function Focus-OfflineControl($Element, [ref]$MismatchEvidence) {
         $expected = $Element.GetRuntimeId() -join '.'
         $diagnostic.phase = 'set_focus'
         $Element.SetFocus()
+        $focusClock = [Diagnostics.Stopwatch]::StartNew()
         $diagnostic.phase = 'target_after'
         $null = Assert-Target $true
         $diagnostic.phase = 'read_focus'
         $focus = Read-TargetFocus
         $diagnostic.phase = 'match_focus'
+        $diagnostic.after_focus_ms = [Math]::Round($focusClock.Elapsed.TotalMilliseconds)
+        if ($expected -cmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z' -and
+            $focus.runtime_id -is [string] -and $focus.runtime_id -cmatch '\A-?[0-9]+(?:\.-?[0-9]+)*\z') {
+            $diagnostic.runtime_ids = @{expected=$expected;actual=$focus.runtime_id}
+        }
         $diagnostic.observed = @{belongs_to_target=[bool]$focus.belongs_to_target
             in_document=[bool]$focus.in_document; expected_id_match=($focus.runtime_id -eq $expected)
             offscreen=[bool]$focus.offscreen}
@@ -1026,6 +1032,7 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
     }
     $report.offline.final_preparation.kind='unknown'
     $report.offline.final_preparation.proof='not_eligible'
+    $preparationClock = [Diagnostics.Stopwatch]::StartNew()
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
     $parts = @($Element.GetRuntimeId())
     $expected = $parts -join '.'
@@ -1052,6 +1059,9 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
         } else { $report.offline.final_preparation.kind='invalid_requested_id' }
         throw 'Offline button focus changed before UIA Invoke'
     }
+    # These are the already validated observations, not additional provider reads.
+    $report.offline.preinvoke_identity = @{expected=$expected;actual=$focusedId
+        preparation_ms=[Math]::Round($preparationClock.Elapsed.TotalMilliseconds)}
     if (-not $belongs -or -not $inDocument -or $offscreen -or $focusedId -cne $expected) {
         if (-not $belongs) { $report.offline.final_preparation.kind='outside_target' }
         elseif (-not $inDocument) { $report.offline.final_preparation.kind='outside_document' }
