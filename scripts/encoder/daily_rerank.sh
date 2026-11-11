@@ -26,12 +26,21 @@ flock -n 9 || {
 }
 
 # The experimental legacy CLI must expose `learn`.
-if ! RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >/dev/null 2>&1; then
-  echo "error: learn status failed; RSRS_BIN must select a legacy server experimental CLI" >&2
-  exit 1
-fi
+RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >/dev/null || {
+  status=$?
+  echo "error: learn status failed (status $status); RSRS_BIN must select a legacy server experimental CLI" >&2
+  exit "$status"
+}
 
 echo "$(date '+%Y-%m-%dT%H:%M:%S%z') daily rerank start"
-RSRS_DATA_DIR="$DATA" timeout 300 "$BIN" learn train --from-labels --limit 5000 --epochs 1 --json >> "$DATA/logs/rerank.log" 2>&1 || true
+RSRS_DATA_DIR="$DATA" timeout 300 "$BIN" learn train --from-labels --limit 5000 --epochs 1 --json >> "$DATA/logs/rerank.log" 2>&1 || {
+  status=$?
+  echo "error: learn train failed (status $status); see $DATA/logs/rerank.log" >&2
+  exit "$status"
+}
+RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >> "$DATA/logs/rerank.log" 2>&1 || {
+  status=$?
+  echo "error: learn status failed (status $status); see $DATA/logs/rerank.log" >&2
+  exit "$status"
+}
 echo "$(date '+%Y-%m-%dT%H:%M:%S%z') daily rerank done"
-RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >> "$DATA/logs/rerank.log" 2>&1 || true
