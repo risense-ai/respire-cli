@@ -505,27 +505,54 @@ class Smoke(support.Smoke):
             fixture["destination_account"] = rows[0]["account"]
             fixture["destination"] = root / "accounts" / rows[0]["account"]
         if interrupt:
-            padding = fixtures[0]["source"] / "migration-copy-fixture.bin"
-            with padding.open("wb") as stream:
-                for _ in range(64):
-                    stream.write(bytes(1024 * 1024))
-            process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
-                "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
-                env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            deadline = time.monotonic() + 30
-            stage_seen = False
-            while process.poll() is None and time.monotonic() < deadline:
-                stage = home / ".rsrs-migration-staging"
-                if stage.is_dir() and any((p / "onememory.db").is_file() for p in stage.iterdir()) \
-                    and not fixtures[0]["destination"].exists():
-                    stage_seen = True
-                    process.kill()
-                    break
-                time.sleep(0.002)
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-            require(stage_seen, "interruption_fixture_did_not_reach_real_stage")
+            # Hold the real SQLite snapshot in Copying; a fast file copy can
+            # otherwise reach non-replayable Transforming before the parent dies.
+            source_db = fixtures[0]["source"] / "onememory.db"
+            connection = self.wal_connections[-1]
+            require(Path(connection.execute("PRAGMA database_list").fetchone()[2]).samefile(source_db),
+                    "interruption_fixture_source_mismatch")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            require(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete",
+                    "interruption_fixture_lock_mode_failed")
+            connection.execute("BEGIN EXCLUSIVE")
+            process = None
+            try:
+                process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
+                    "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
+                    env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                deadline = time.monotonic() + 30
+                stage_seen = False
+                while process.poll() is None and time.monotonic() < deadline:
+                    stage = home / ".rsrs-migration-staging"
+                    if stage.is_dir() and any((p / "onememory.db").is_file() for p in stage.iterdir()):
+                        intents = list((home / ".rsrs-migration-intents").glob("*.json"))
+                        require(len(intents) == 1, "interruption_fixture_intent_not_unique")
+                        frames = intents[0].read_text(encoding="utf-8")
+                        require(frames.endswith("\n"), "interruption_fixture_intent_truncated")
+                        intent = json.loads(frames.splitlines()[-1])
+                        require(intent["phase"] == "copying"
+                                and intent["original"]["source_id"] == fixtures[0]["source_id"]
+                                and intent["original"]["account"] == fixtures[0]["destination_account"],
+                                "interruption_fixture_not_copying")
+                        stage_seen = True
+                        break
+                    time.sleep(0.002)
+                require(stage_seen, "interruption_fixture_did_not_reach_real_stage")
+            finally:
+                try:
+                    if process is not None:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait(timeout=10)
+                        # The control helper must release its real library lock
+                        # before the fixture unblocks its source snapshot.
+                        require((root / "lock.db").is_file(), "interruption_fixture_owner_lock_missing")
+                        with sqlite3.connect(root / "lock.db", timeout=20) as owner:
+                            owner.execute("BEGIN EXCLUSIVE")
+                            owner.rollback()
+                finally:
+                    connection.rollback()
+                    connection.execute("PRAGMA journal_mode=WAL")
             require(not fixtures[0]["destination"].exists(), "interruption_fixture_missed_prepublication_window")
         for fixture in fixtures:
             migrated = self.cli(default, "migrate", "--source", fixture["source_id"],

@@ -410,14 +410,31 @@ def main():
             config.write_text(json.dumps(dict(json.loads(config_bytes), custom="interrupted")))
             recovery_path.write_text(json.dumps(legacy_record))
             recovery_path.chmod(0o600)
-            cli("login", "--interactive", "--addr", addr, "--user", "synthetic",
-                "--pass=synthetic-password", "--super=wrong", success=False)
+            rejected = json.loads(cli("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
+                "--pass=synthetic-password", "--super=wrong", success=False).stdout)
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "legacy_original_profile_not_restored")
-            # The rejected new login may leave a terminal receipt, but no recovery owner.
-            if recovery_path.exists():
-                require(json.loads(recovery_path.read_bytes()).get("active") is None,
-                        "legacy_recovery_not_retired")
+            # The new failed login retains its own operation; resolve that operation
+            # explicitly after proving the original legacy recovery has retired.
+            journal = json.loads(recovery_path.read_bytes())
+            active = journal.get("active") or {}
+            operation_id = rejected.get("details", {}).get("operation_id")
+            require(rejected.get("summary", {}).get("reason") == "account_outcome_unknown"
+                    and any(error.endswith("; login_kind=vault_unlock_rejected") for error in rejected.get("errors", []))
+                    and active.get("operation_id") == operation_id and active.get("alias") != legacy_alias,
+                    "legacy_recovery_not_retired")
+            records = [row for row in journal["operations"] if row["operation_id"] == operation_id]
+            require(len(records) == 1 and records[0]["profile"] == str(root.resolve())
+                    and records[0]["account"]["user"] == "synthetic" and records[0]["account"]["addr"] == addr,
+                    "original_operation_binding_changed")
+            rejected_record = records[0]
+            logins_before = state["logins"]
+            receipt = json.loads(cli(*account_recovery_flags("account-rollback", rejected_record)).stdout)["summary"]
+            require(receipt["operation_id"] == operation_id and receipt["outcome"] == "rolled_back"
+                    and state["logins"] == logins_before, "original_rollback_not_confirmed")
+            terminal_operation(json.loads(recovery_path.read_bytes()), rejected_record, "rolled_back")
+            require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
+                    "legacy_original_profile_not_restored")
             if keys:
                 for slot in ("super", "pass"):
                     require(not list(keys.collection.search_items(keys.attributes("rsrs", slot + ":" + legacy_alias))),

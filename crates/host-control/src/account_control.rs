@@ -393,6 +393,12 @@ pub(crate) fn validate_account_response(
             let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
             anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
         }
+        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown"
+            && response.error.as_deref().is_some_and(|error| error.starts_with(
+                "original decryption factors do not unlock this account; the original account was preserved: "))
+        {
+            anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind=vault_unlock_rejected");
+        }
         anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
     let envelope = response

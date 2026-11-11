@@ -1578,7 +1578,12 @@ Assert-Smoke 'super-reset-preserves-memory' ($superReset.Ok -and [bool]$newSuper
 $oldRecoveryDir = Join-Path $Root 'old-recovery'
 Invoke-Om -Name 'old-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $oldRecoveryDir | Out-Null
 $oldRecovery = Invoke-Om -Name 'super-reset-old-code-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $oldRecoveryDir -Secret -HostProfile -AllowStatus @('fail')
-Assert-Smoke 'super-reset-old-code-rejected' ($oldRecovery.Ok -and $oldRecovery.Exit -eq 1 -and ($oldRecovery.Envelope.errors -join ' ') -match 'unwrap|decrypt')
+Assert-Smoke 'super-reset-old-code-rejected' ($oldRecovery.Ok -and $oldRecovery.Exit -eq 1 `
+    -and [string]$oldRecovery.Envelope.summary.reason -ceq 'account_outcome_unknown' `
+    -and ($oldRecovery.Envelope.errors -join ' ').EndsWith('; login_kind=vault_unlock_rejected', [StringComparison]::Ordinal) `
+    -and -not (Test-Path -LiteralPath (Join-Path $oldRecoveryDir 'session.json')) `
+    -and (-not (Test-Path -LiteralPath (Join-Path $oldRecoveryDir 'accounts')) `
+        -or @(Get-ChildItem -LiteralPath (Join-Path $oldRecoveryDir 'accounts') -Filter session.json -Recurse -ErrorAction Stop).Count -eq 0))
 $recoveryDir = Join-Path $Root 'new-recovery'
 Invoke-Om -Name 'new-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $recoveryDir | Out-Null
 $newRecovery = Invoke-Om -Name 'super-reset-new-code-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
