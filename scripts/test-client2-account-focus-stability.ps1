@@ -4,7 +4,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Candidate stability source parse failed' }
-foreach ($name in @('New-AccountStabilityPidDiagnostic','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
+foreach ($name in @('New-AccountStabilityPidDiagnostic','Assert-DocumentProcessHandle','Assert-DocumentNodeIdentity','Read-AccountStabilityButton','Read-AccountStabilityFocus','Assert-AccountFocusStable','Get-OfflineButtonInvoke','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Candidate stability function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))

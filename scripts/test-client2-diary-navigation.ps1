@@ -4,7 +4,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Diary navigation source parse failed' }
-foreach ($name in @('Get-OfflineDiaryNavigationPattern','Find-OfflineControl','Focus-OfflineControl','Test-OfflineFocusRetryable','Find-FocusedOfflineButton','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
+foreach ($name in @('Get-OfflineDiaryNavigationPattern','Find-OfflineControl','Focus-OfflineControl','Test-OfflineFocusRetryable','Find-FocusedOfflineButton','Get-OfflineButtonInvoke','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
     $functions=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($functions.Count -ne 1) { throw 'Diary navigation function missing' }
     . ([scriptblock]::Create($functions[0].Extent.Text))

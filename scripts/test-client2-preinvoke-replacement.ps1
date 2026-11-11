@@ -5,7 +5,7 @@ Add-Type -AssemblyName UIAutomationClient,UIAutomationTypes
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Pre-invoke source parse failed' }
-foreach ($name in @('Find-FocusedOfflineButton','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
+foreach ($name in @('Find-FocusedOfflineButton','Get-OfflineButtonInvoke','Prepare-OfflineButtonInvoke','Press-OfflineButton')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Pre-invoke function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
@@ -67,7 +67,8 @@ foreach ($script:case in @('success','replacement','old_present','ambiguous','un
         'candidate_success' { $v=1; $guardCount=3; $shouldPass=$true }
     }
     $stable=0; if ($case -like 'candidate_*') { $stable=1 }
-    if ($selects -ne $n -or $focuses -ne $n -or $ids -ne $n -or $patterns -ne $n -or $reads -ne $readCount -or $proofs -ne $p -or $invokes -ne $v -or $guards -ne $guardCount -or $stability -ne $stable -or ($null -eq $caught) -ne $shouldPass) { throw ('Pre-invoke operation boundary failed: '+$case) }
+    $focusCount=$n; if ($case -eq 'pattern_missing') { $focusCount=0 }
+    if ($selects -ne $n -or $focuses -ne $focusCount -or $ids -ne $n -or $patterns -ne $n -or $reads -ne $readCount -or $proofs -ne $p -or $invokes -ne $v -or $guards -ne $guardCount -or $stability -ne $stable -or ($null -eq $caught) -ne $shouldPass) { throw ('Pre-invoke operation boundary failed: '+$case) }
     if ($case -in @('old_present','ambiguous','unknown_proof','nonboolean_proof','all_replaced','foreign','outside','hidden','candidate_mismatch') -and $caught -cne 'Offline button focus changed before UIA Invoke') { throw 'Original final mismatch was not preserved' }
     $kind='id_mismatch'; $proof='not_eligible'
     switch ($case) {
