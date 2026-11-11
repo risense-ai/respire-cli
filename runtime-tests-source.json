@@ -7,12 +7,12 @@
     "cpu-owned-ort-experiment"
   ],
   "producer": {
-    "status": "pending",
+    "status": "ready",
     "workflow": ".github/workflows/prebuilt-integration-tests.yml",
-    "workflow_id": null,
-    "workflow_sha": null,
-    "run_id": null,
-    "run_attempt": null
+    "workflow_id": 414927024,
+    "workflow_sha": "d5fe9dddb3d023471fced70761819d731513cf24",
+    "run_id": 43069198416,
+    "run_attempt": 1
   },
   "tests": {
     "business": [
@@ -51,32 +51,32 @@
   },
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13878290806,
+      "sha256": "f2e6a2199d9b68cb0d6a09c217c67d5ab6840174cac6903323c9bcd86520e99e"
     },
     "aarch64-pc-windows-msvc": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13877092639,
+      "sha256": "d727c9874552502f6c75c14ce09064e4a583a39ccd9affda8848bc4e8539b2e5"
     },
     "aarch64-apple-darwin": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13877810957,
+      "sha256": "505d5e726310d0c9ba4c1ce80e22557e168b5cf7baaa055415014bdec8c4bcb9"
     },
     "x86_64-unknown-linux-gnu": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13876813883,
+      "sha256": "7618d4ed4d100689f0c1fad5ff0371c7a546bb2502572f232102c6efcc64d37e"
     },
     "aarch64-unknown-linux-gnu": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13877491971,
+      "sha256": "955a7fd2a36349ed7c187edeb92cfe03f97abce7097046c5f0969052bcfd0875"
     },
     "x86_64-unknown-linux-musl": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13878196579,
+      "sha256": "85ca7dfe60e0699f87b5e314d8a26f4416200d719fa638d4d42abca8673159cc"
     },
     "aarch64-unknown-linux-musl": {
-      "artifact_id": null,
-      "sha256": null
+      "artifact_id": 13877153005,
+      "sha256": "e21bfa2b206d41ec18432b5324a648cdabdac990677d72efdd8fc0b9de025f00"
     }
   }
 }
