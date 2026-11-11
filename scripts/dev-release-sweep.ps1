@@ -182,7 +182,15 @@ function Get-SafeFailureReason($Envelope) {
     # Require a scalar string and emit constants, never stringify/copy private data.
     $reason = $Envelope.summary.reason
     if ($reason -is [string]) {
-        if ($reason -ceq 'account_outcome_unknown') { return 'account_outcome_unknown' }
+        if ($reason -ceq 'account_outcome_unknown') {
+            foreach ($class in @('register_remote_unknown', 'register_native_credentials', 'register_state_conflict',
+                'register_material_invalid', 'register_local_compatibility', 'register_unclassified')) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith("; register_kind=$class", [StringComparison]::Ordinal) }).Count -gt 0) {
+                    return "account_outcome_unknown/$class"
+                }
+            }
+            return 'account_outcome_unknown'
+        }
         if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
     }
     # Report fixed classifications only, never raw authentication responses.

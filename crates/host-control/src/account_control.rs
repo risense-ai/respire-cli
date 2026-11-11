@@ -254,6 +254,57 @@ pub(crate) fn validate_account_receipt(
     Ok(())
 }
 
+/// Reduce a private Runtime rejection to a fixed diagnostic class without copying its content.
+pub fn register_rejection_class(error: &str) -> &'static str {
+    let groups: &[(&str, &[&str])] = &[
+        ("register_remote_unknown", &[
+            "registration outcome unknown; query the original operation, do not resend",
+        ]),
+        ("register_native_credentials", &[
+            "migration keyring destination contains a different credential",
+            "migration keyring destination is ambiguous or invalid; original credentials were preserved",
+            "remove new credential after readback mismatch",
+            "migration keyring readback mismatch",
+            "migration keyring write/readback failed; no snapshot was published",
+            "credential backend is unavailable during recovery",
+            "recovery credential is unavailable",
+            "recovery credential is empty",
+            "offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction",
+        ]),
+        ("register_state_conflict", &[
+            "invalid auth idempotency key", "auth ownership changed", "account and server are required",
+            "auth idempotency conflict",
+            "resolve the interrupted transaction before admitting another account operation",
+            "auth receipt capacity reached", "registration binding mismatch",
+            "unbound source receipt is missing", "registration requires a receipt-backed unbound vault",
+            "recovery code does not match the unbound vault", "account receipt is missing",
+            "account recovery is missing", "source profile changed before account commit",
+            "target profile changed before account commit", "target changed while acquiring ownership",
+            "target session changed during login; original account was preserved",
+            "account admission is missing", "account commit does not own recovery",
+            "interrupted login must be recovered before another commit",
+        ]),
+        ("register_material_invalid", &[
+            "authorization did not return a user", "authorization did not return a token",
+            "vault missing version", "unsupported vault version; original factors were preserved",
+            "vault missing kdf_salt", "vault missing wrapped_urk", "vault missing urk_nonce",
+        ]),
+        ("register_local_compatibility", &[
+            "destination belongs to another account",
+            "legacy session changed or migration would replace its data key",
+            "original credential backend missing; compatibility could not be verified",
+            "local key compatibility could not be verified; original data was preserved",
+        ]),
+    ];
+    for (class, heads) in groups {
+        if heads.iter().any(|head| error == *head
+            || error.strip_prefix(*head).is_some_and(|tail| tail.starts_with(": "))) {
+            return *class;
+        }
+    }
+    "register_unclassified"
+}
+
 pub(crate) fn validate_account_response(
     response: RpcResponse<ResultEnvelope>,
     request: &RpcRequest,
@@ -338,6 +389,10 @@ pub(crate) fn validate_account_response(
             "invalid account control rejection envelope"
         );
         // Never echo the Runtime diagnostic; every rejection retains the original operation.
+        if register && request.method == HOST_AUTH_REGISTER_METHOD && code == "account_outcome_unknown" {
+            let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
+            anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
+        }
         anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
     let envelope = response
