@@ -9,7 +9,7 @@ foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath'
     . ([scriptblock]::Create($nodes[0].Extent.Text))
 }
 $source=$ast.Extent.Text
-foreach ($anchor in @("DefaultParameterSetName=`"Official`"", "release = 'v2.0.0-dev.2'; asset_id = 724679147", "source_sha = 'd798d6fb943a1c7515f5bb427f72c6aee0341ffb'", "expected_exe_sha256 = 'cc889c8b4ded0474ebdcd9c11e8aa91c874f731f7f136e3c3fb84dbcefd92092'", "https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.2/respire-windows-amd64.exe")) {
+foreach ($anchor in @("DefaultParameterSetName=`"Official`"", "release = 'v2.0.0-dev.3'; asset_id = 733947730", "source_sha = 'c5f2687e2e0459063e293250d00c0c1a52d3581f'", "expected_exe_sha256 = '359e7bce9ffc92399a65e0e21caa56fbf28c845ebe19dece779e9aa2275f0f0a'", "https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.3/respire-windows-amd64.exe")) {
     if (-not $source.Contains($anchor)) { throw 'Official fixture default changed' }
 }
 $paramText=$ast.ParamBlock.Extent.Text

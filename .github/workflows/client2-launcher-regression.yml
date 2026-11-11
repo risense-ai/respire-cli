@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-client2
-          ref: d798d6fb943a1c7515f5bb427f72c6aee0341ffb
+          ref: c5f2687e2e0459063e293250d00c0c1a52d3581f
           path: .client2-source
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -111,12 +111,34 @@ jobs:
               assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
           PY
           echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Stage released Client2 Linux x64 headless executable
+        if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0 libx11-6
+          mkdir -p "$RUNNER_TEMP/client2-desktop"
+          gh release download v2.0.0-dev.3 --repo risense-ai/respire-client2 \
+            --pattern respire-linux-amd64.tar.gz --dir "$RUNNER_TEMP/client2-desktop"
+          python3 - <<'PY'
+          import hashlib, os, pathlib
+          archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-desktop/respire-linux-amd64.tar.gz'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == 'c06ab069661e34338b6277ed78472698a3725eeafa5fdcb84d1681c5ee6167e9'
+          PY
+          tar -xzf "$RUNNER_TEMP/client2-desktop/respire-linux-amd64.tar.gz" -C "$RUNNER_TEMP/client2-desktop" respire
       - name: Exercise original Client2 host and all startup orders
         env:
           RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
+          desktop=()
+          if [[ "$RUNNER_OS" == Linux ]]; then
+            desktop=(--desktop-executable "$RUNNER_TEMP/client2-desktop/respire")
+          fi
           python3 scripts/test-client2-launcher-compat.py \
             --ordinary-cli-cold-start \
             --cli target/debug/rsrs${{ matrix.exe }} \
@@ -124,7 +146,7 @@ jobs:
             --runtime-version "$RUNTIME_VERSION" \
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
-            --report "$RUNNER_TEMP/client2-launcher-regression.json"
+            "${desktop[@]}" --report "$RUNNER_TEMP/client2-launcher-regression.json"
       - name: Key the existing pinned public CPU model cache
         if: runner.os == 'Windows'
         id: offline-model-key

@@ -14,9 +14,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
     scope = 'original Client2 Windows GUI connectivity only; not candidate/full GUI acceptance'
-    source_sha = 'd798d6fb943a1c7515f5bb427f72c6aee0341ffb'
-    release = 'v2.0.0-dev.2'; asset_id = 724679147
-    expected_exe_sha256 = 'cc889c8b4ded0474ebdcd9c11e8aa91c874f731f7f136e3c3fb84dbcefd92092'
+    source_sha = 'c5f2687e2e0459063e293250d00c0c1a52d3581f'
+    release = 'v2.0.0-dev.3'; asset_id = 733947730
+    expected_exe_sha256 = '359e7bce9ffc92399a65e0e21caa56fbf28c845ebe19dece779e9aa2275f0f0a'
     environment_ready = $false; official_exe_verified = $false
     native_window_visible = $false; isolated_webview_bound = $false
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
@@ -221,7 +221,7 @@ public static class RespireGuiNative {
         $report.exe_sha256=$manifest.exe_sha256
         $report.unverified_ui_scenarios=@('pending','error','cancel')
     } else {
-        Invoke-WebRequest -Uri 'https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.2/respire-windows-amd64.exe' -OutFile $exe -TimeoutSec 60
+        Invoke-WebRequest -Uri 'https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.3/respire-windows-amd64.exe' -OutFile $exe -TimeoutSec 60
         $report.exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($report.exe_sha256 -ne $report.expected_exe_sha256) { throw 'Official original EXE digest mismatch' }
         $report.official_exe_verified = $true

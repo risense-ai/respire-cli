@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real unchanged Client2 v0.2.56 host calls; account-free temporary installations.
+"""Real unchanged Client2 v2.0.0-dev.3 host calls; account-free temporary installations.
 
 Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
 Client2 source. Optional pinned Magpie source exercises its original legacy RPC.
@@ -21,13 +21,13 @@ import time
 import urllib.error
 import urllib.request
 
-CLIENT2_SHA = 'd798d6fb943a1c7515f5bb427f72c6aee0341ffb'
+CLIENT2_SHA = 'c5f2687e2e0459063e293250d00c0c1a52d3581f'
 MAGPIE_SHA = 'a3ae9b3035d02b181ba7a8ddae251495d092dd63'
 MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
-# Optional historical desktop fixture: workflow run 42458504861, artifact 13609150108.
-DESKTOP_SOURCE_SHA = '57bc070826949994c3f7ce9a64277160704bdfe5'
-DESKTOP_SHA256 = '3cacf426d22974aaa53bb20d13b450fb67b56404366050f796cfd4fbad73933a'
-DESKTOP_ARTIFACT_SHA256 = 'b2aaed0a79a4e9eab9fbe7c78ef14c8fd7664960265f66a4923b281213a617be'
+# Official Linux x64 desktop: Client2 dev.3, produced by run 42951784903.
+DESKTOP_SOURCE_SHA = CLIENT2_SHA
+DESKTOP_SHA256 = 'e3bcd362ebba9c0fc70f4bcce5f966e4faaef55b38551064ca74b622e68bb15d'
+DESKTOP_ARCHIVE_SHA256 = 'c06ab069661e34338b6277ed78472698a3725eeafa5fdcb84d1681c5ee6167e9'
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -77,7 +77,7 @@ def desktop_executable(value):
         raise RuntimeError('Pinned desktop acceptance requires an isolated Linux x64 hosted runner')
     path = value.resolve(strict=True)
     if not path.is_file() or sha256(path) != DESKTOP_SHA256:
-        raise RuntimeError('Require the exact Client2 desktop bytes from run 42458504861')
+        raise RuntimeError('Require the exact released Client2 v2.0.0-dev.3 Linux x64 desktop bytes')
     return path
 
 
@@ -125,7 +125,7 @@ def main():
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
     parser.add_argument('--desktop-executable', type=Path,
-                        help='Candidate CI only: pinned original Linux x64 desktop executable')
+                        help='Hosted CI only: released Client2 v2.0.0-dev.3 Linux x64 desktop executable')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
@@ -140,7 +140,7 @@ def main():
     def git(*argv):
         return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
     if git('rev-parse', 'HEAD') != CLIENT2_SHA or git('status', '--porcelain'):
-        raise RuntimeError('Require unchanged Client2 v0.2.56 source')
+        raise RuntimeError('Require unchanged Client2 v2.0.0-dev.3 source')
     magpie = args.magpie_source.resolve(strict=True) if args.magpie_source else None
     node = None
     if magpie:
@@ -177,8 +177,8 @@ def main():
                          'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
                          'coverage_profile_file': profile},
               'desktop_headless': {'enabled': desktop is not None, 'client2_source': DESKTOP_SOURCE_SHA,
-                                   'run_id': '42458504861', 'artifact_id': '13609150108',
-                                   'artifact_sha256': DESKTOP_ARTIFACT_SHA256,
+                                   'release': 'v2.0.0-dev.3', 'run_id': '42951784903',
+                                   'asset_id': 733947711, 'archive_sha256': DESKTOP_ARCHIVE_SHA256,
                                    'binary_sha256': DESKTOP_SHA256 if desktop else None},
               'legacy_plugin': {'executed': magpie is not None,
                                 'source_sha': MAGPIE_SHA if magpie else None,
@@ -315,7 +315,7 @@ def main():
                 env['RSRS_INSTANCE_ID'] = base.name + '-' + mode
                 version = run([desktop, '--version'], env)
                 if version.returncode or helper_result(version) != {
-                        'version': '0.2.56-dev.164', 'platform': 'linux-amd64'}:
+                        'version': '2.0.0-dev.3', 'platform': 'linux-amd64'}:
                     raise RuntimeError('Pinned original desktop version identity changed')
                 desktop_action('start', env)
                 health = desktop_action('status', env)
