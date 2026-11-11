@@ -2,8 +2,15 @@ name: Published performance comparison
 on:
   workflow_dispatch:
     inputs:
+      comparison_mode:
+        description: Cross-version A/B or candidate-only cold/warm consistency (no baseline)
+        type: choice
+        default: cross-version
+        options:
+          - cross-version
+          - candidate-only
       release_inventory:
-        description: Reviewed JSON for cli/baseline/candidate with version, source_sha, producer_run_id, metadata_sha256 by target, and Runtime sdk_version
+        description: Reviewed JSON for cli/candidate (plus baseline for cross-version) with version, source_sha, producer_run_id, metadata_sha256 by target, and Runtime sdk_version
         type: string
         required: true
       release_inventory_sha256:
@@ -45,6 +52,7 @@ jobs:
       - name: Compare immutable published binaries on the same runner
         env:
           GH_TOKEN: ${{ github.token }}
+          PERF_COMPARISON_MODE: ${{ inputs.comparison_mode }}
           PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
           PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
           PERF_TARGET: ${{ matrix.target }}

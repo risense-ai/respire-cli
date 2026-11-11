@@ -337,10 +337,18 @@ if __name__ == '__main__':
         raw_inventory = os.environ['PERF_RELEASE_INVENTORY']
         assert hashlib.sha256(raw_inventory.encode()).hexdigest() == os.environ['PERF_RELEASE_INVENTORY_SHA256']
         inventory = json.loads(raw_inventory)
-        assert set(inventory) == {'cli', 'baseline', 'candidate'}
+        comparison_mode = os.environ.get('PERF_COMPARISON_MODE', 'cross-version')
+        assert comparison_mode in ('cross-version', 'candidate-only')
+        candidate_only = comparison_mode == 'candidate-only'
+        assert set(inventory) == ({'cli', 'candidate'} if candidate_only else {'cli', 'baseline', 'candidate'})
         candidate = inventory['candidate']['version']
         assert candidate.startswith('2.0.0-dev.') and candidate.removeprefix('2.0.0-dev.').isdecimal()
-        assert int(candidate.removeprefix('2.0.0-dev.')) > 8
+        assert int(candidate.removeprefix('2.0.0-dev.')) >= (10 if candidate_only else 9)
+        if candidate_only:
+            del VERSIONS['baseline']
+            REPORT['order'] = ['candidate'] * 4
+            REPORT['measurement_scope'] = 'single published candidate; cold/warm observations, no cross-version speedup claim'
+        REPORT['comparison_mode'] = comparison_mode
         VERSIONS['candidate'] = candidate
         assert all(inventory[role]['version'] == version for role, version in VERSIONS.items())
         REPORT['release_inventory_sha256'] = os.environ['PERF_RELEASE_INVENTORY_SHA256']
@@ -350,7 +358,7 @@ if __name__ == '__main__':
         REPORT['provenance'] = {role: release[3] for role, release in releases.items()}
         binary = releases['cli'][0]
         prepare_model()
-        env, port = environment(ROOT / 'fixture', binary, releases['baseline'])
+        env, port = environment(ROOT / 'fixture', binary, releases['candidate' if candidate_only else 'baseline'])
         fixture = ROOT / 'entries.json'
         # Fixed old dates avoid wall-clock decay drift; no expiry or asserted verification.
         fixture.write_text(json.dumps([{'title': 'document-%03d' % i, 'content': document,
@@ -383,7 +391,12 @@ if __name__ == '__main__':
                 for index, (left, right) in enumerate(zip(reference, run['requests'], strict=True)):
                     assert normalized(left['response']) == normalized(right['response']), (mode, run['replay'], index, 'complete response changed')
                     assert left['heat_after'] == right['heat_after'], (mode, index, 'heat replay changed')
-            groups = {role: [run for run in runs if run['role'] == role] for role in ('baseline', 'candidate')}
+            if candidate_only:
+                # Normal heat must persist without changing this fixed fixture's full recall response.
+                for run in runs:
+                    for index, measured in enumerate(run['requests'][1:], start=1):
+                        assert normalized(run['requests'][0]['response']) == normalized(measured['response']), (mode, run['replay'], index, 'cold/warm complete response changed')
+            groups = {role: [run for run in runs if run['role'] == role] for role in dict.fromkeys(REPORT['order'])}
             cold = {role: statistics.median(run['cold'] for run in group) for role, group in groups.items()}
             warm = {role: statistics.median(run['warm']['p50_seconds'] for run in group) for role, group in groups.items()}
             p95 = {role: statistics.median(run['warm']['p95_seconds'] for run in group) for role, group in groups.items()}
@@ -391,12 +404,16 @@ if __name__ == '__main__':
                        for role, group in groups.items()}
             REPORT['comparisons'][mode] = {'complete_responses_equal': True,
                 'cold_median_seconds': cold, 'warm_p50_median_seconds': warm,
-                'warm_p95_median_seconds': p95, 'warm_settled_median_seconds': settled,
-                'candidate_over_baseline_warm_p95': p95['candidate'] / p95['baseline'],
-                'candidate_over_baseline_settled': settled['candidate'] / settled['baseline'],
-                'candidate_over_baseline_cold': cold['candidate'] / cold['baseline'],
-                'candidate_over_baseline_warm': warm['candidate'] / warm['baseline'],
-                'warm_observation': 'lower latency observed' if warm['candidate'] < warm['baseline'] else 'no lower latency observed'}
+                'warm_p95_median_seconds': p95, 'warm_settled_median_seconds': settled}
+            if candidate_only:
+                REPORT['comparisons'][mode]['cold_warm_complete_responses_equal'] = True
+            else:
+                REPORT['comparisons'][mode].update({
+                    'candidate_over_baseline_warm_p95': p95['candidate'] / p95['baseline'],
+                    'candidate_over_baseline_settled': settled['candidate'] / settled['baseline'],
+                    'candidate_over_baseline_cold': cold['candidate'] / cold['baseline'],
+                    'candidate_over_baseline_warm': warm['candidate'] / warm['baseline'],
+                    'warm_observation': 'lower latency observed' if warm['candidate'] < warm['baseline'] else 'no lower latency observed'})
             save()
         REPORT['complete'] = True
     finally:
