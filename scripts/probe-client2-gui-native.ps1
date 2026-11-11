@@ -814,11 +814,15 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
             if ($scrollAttempts -gt 0) { $report.offline.focus_scroll = 'visible' }
             $invocation = $null
             if ($PrepareInvoke) {
+                # A stale initial identity uses the existing focus retry path;
+                # pattern acquisition and final preparation remain fail-closed.
+                if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
+                $runtimeParts = @($element.GetRuntimeId())
                 $preparingInvoke = $true
                 if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
                 # Acquire the pattern and its full guard before establishing focus:
                 # overview refreshes replace buttons while these UIA/CIM reads run.
-                $invocation = Get-OfflineButtonInvoke $element @diagnosticArgs
+                $invocation = Get-OfflineButtonInvoke $element @diagnosticArgs -RuntimeParts $runtimeParts
                 if ($attemptClock.Elapsed.TotalSeconds -ge 10) { $preparationTimedOut=$true; throw 'Offline button preparation exceeded its existing attempt budget' }
                 $preparingInvoke = $false
             }
@@ -1036,19 +1040,19 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
         $observation.observed_window_ms=($clock.Elapsed.TotalSeconds-$observedStart)*1000
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
-function Get-OfflineButtonInvoke($Element, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+function Get-OfflineButtonInvoke($Element, [ValidateSet('normal_stop')][string]$DiagnosticStage, $RuntimeParts = $null) {
     $report.offline.preinvoke_identity = $null
     $report.offline.final_preparation.kind='unknown'
     $report.offline.final_preparation.proof='not_eligible'
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
-    $parts = @($Element.GetRuntimeId())
+    if (-not $PSBoundParameters.ContainsKey('RuntimeParts')) { $RuntimeParts = @($Element.GetRuntimeId()) }
     $pattern = $null
     if (-not $Element.TryGetCurrentPattern([Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
         throw 'Offline button does not support the normal UIA Invoke action'
     }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_focus_guard' }
     $null = Assert-Target $true
-    return @{element=$Element;parts=$parts;pattern=$pattern}
+    return @{element=$Element;parts=$RuntimeParts;pattern=$pattern}
 }
 function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [ValidateSet('normal_stop')][string]$DiagnosticStage, $Invocation = $null) {
     $MismatchEvidence.Value = $null
