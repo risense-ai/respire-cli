@@ -242,6 +242,14 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   for(const lane of [source,integration]){
     assert.match(lane,/node scripts\/fetch-runtime-test-bundle\.mjs fetch "\$target"/);
     assert.match(lane,/node scripts\/fetch-runtime-test-bundle\.mjs verify "\$target" --list/);
+    const internal=lane.split('- name: Run precompiled Runtime snapshot and diary assertions\n')[1]?.split('\n      - ')[0];
+    assert(internal,'both core lanes retain precompiled Runtime internal assertions');
+    assert(internal.includes(lane===source ? "if: env.CANDIDATE_MODE == 'true' && matrix.group == 'core'" : "if: matrix.group == 'core'"));
+    assert(internal.includes('set -euo pipefail'));
+    assert(internal.includes('RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1'));
+    assert(internal.includes('RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1'));
+    assert.doesNotMatch(internal,/continue-on-error|\|\| true/);
+    assert(lane.indexOf('- name: Run precompiled Runtime snapshot and diary assertions') > lane.indexOf('node scripts/fetch-runtime-test-bundle.mjs verify'));
   }
   assert.match(integration,/python3 scripts\/test-core-payload-lifetime.py/);
   const jointBlock=integration.split("      - name: Run Runtime business assertions against the source CLI")[1].split("      - name: Preserve private business credential diagnostics")[0];

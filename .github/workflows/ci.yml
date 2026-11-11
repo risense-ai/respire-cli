@@ -548,6 +548,13 @@ jobs:
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-runtime-test-bundle.mjs fetch "$target"
           node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
+      - name: Run precompiled Runtime snapshot and diary assertions
+        if: env.CANDIDATE_MODE == 'true' && matrix.group == 'core'
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
       - name: Run this group's instrumented tests
         id: source-tests
         env:
@@ -972,6 +979,13 @@ jobs:
           target="$(rustc -Vv | sed -n 's/^host: //p')"
           node scripts/fetch-runtime-test-bundle.mjs fetch "$target"
           node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
+      - name: Run precompiled Runtime snapshot and diary assertions
+        if: matrix.group == 'core'
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
+          RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
       - name: Retain CLI frontend tests and SDK ownership assertions in integration
         if: matrix.group == 'core'
         run: |
