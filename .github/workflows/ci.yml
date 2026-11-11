@@ -263,6 +263,23 @@ jobs:
       CARGO_PROFILE_DEV_OPT_LEVEL: '0'
       CARGO_PROFILE_TEST_OPT_LEVEL: '0'
     steps:
+      - name: TEMPORARY - Probe cross-repository Runtime artifact access
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/fixture-access-probe.zip"
+          errors="$RUNNER_TEMP/fixture-access-probe.error"
+          if gh api repos/risense-ai/respire-runtime/actions/artifacts/13856036221/zip > "$archive" 2> "$errors"; then
+            printf 'Runtime artifact access probe succeeded\n'
+            sha256sum "$archive"
+            wc -c < "$archive"
+          else
+            status="$(sed -nE 's/.*HTTP ([0-9]{3}).*/\1/p' "$errors" | head -n 1)"
+            printf '::error::Runtime artifact access probe failed (HTTP %s)\n' "${status:-unknown}" >&2
+            exit 1
+          fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
