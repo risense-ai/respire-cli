@@ -127,21 +127,34 @@ class SecretServiceKeys(_base.TrackedKeys):
         require(reply.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
 
     def cleanup_business_entries(self):
+        diagnostic = self.business_cleanup = {"passed": False, "stage": "owner_check",
+            "observed_entries": None, "validated_entries": 0, "deleted_entries": 0,
+            "remaining_entries": None}
         self.verify_owner()
         # Only this mode runs children against our initially empty private collection.
-        # Match the existing login-interruption cleanup, including auth TOTP checkpoints.
+        # Validate the entire owned set before deleting any entry.
+        diagnostic["stage"] = "enumeration"
         items = list(self.collection.get_all_items())
+        diagnostic["observed_entries"] = len(items)
         for item in items:
+            diagnostic["stage"] = "attribute_read"
             attributes = item.get_attributes()
+            diagnostic["stage"] = "ownership_validation"
             require(attributes.get("service") == "rsrs"
                     and attributes.get("target") == "default"
                     and attributes.get("application") == "rust-keyring"
                     and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}",
                                      attributes.get("username", "")),
                     "unexpected_private_credential")
+            diagnostic["validated_entries"] += 1
+        diagnostic["stage"] = "deletion"
         for item in items:
             item.delete()
-        require(not list(self.collection.get_all_items()), "native_fixture_cleanup_failed")
+            diagnostic["deleted_entries"] += 1
+        diagnostic["stage"] = "readback"
+        diagnostic["remaining_entries"] = len(list(self.collection.get_all_items()))
+        require(diagnostic["remaining_entries"] == 0, "native_fixture_cleanup_failed")
+        diagnostic.update(passed=True, stage="complete")
 
     @staticmethod
     def attributes(service, slot):
@@ -265,12 +278,21 @@ class SecretServiceKeys(_base.TrackedKeys):
             "initial_raw_snapshots_overwritten": False,
             "old_namespaces_and_migrated_aliases": "full_raw_attribute_snapshots",
         }
+        if hasattr(self, "business_cleanup"):
+            report["business_credential_cleanup"] = self.business_cleanup
         if hasattr(self, "collection"):
+            collection = report["collection_cleanup"] = {"passed": False,
+                "stage": "enumeration", "remaining_entries": None}
             try:
-                require(not list(self.collection.get_all_items()), "fixture_collection_not_empty")
+                collection["remaining_entries"] = len(list(self.collection.get_all_items()))
+                collection["stage"] = "empty_check"
+                require(collection["remaining_entries"] == 0, "fixture_collection_not_empty")
+                collection.update(passed=True, stage="complete")
             except Exception:
                 report["passed"] = False
-                report["remaining_entries"].append({"code": "fixture_collection_cleanup_failed"})
+                code = "fixture_collection_not_empty" if collection["remaining_entries"] is not None \
+                    else "fixture_collection_enumeration_failed"
+                report["remaining_entries"].append({"code": code})
         if self.connection is not None:
             try:
                 self.connection.close()
