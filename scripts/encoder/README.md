@@ -1,5 +1,7 @@
 # Encoder flywheel (frozen embeddings + periodic LoRA retrain)
 
+These scripts require the CLI repository's legacy `server` experimental toolchain; they are not part of released 2.x default retrieval, and installing a 2.x dev Runtime does not provide `learn`/`annotate`.
+
 The product embeds with a **frozen** encoder and adapts cheaply in the reranker.
 The encoder itself is retrained only in batches, then the whole dense index is
 rebuilt and atomically swapped.
@@ -51,13 +53,19 @@ embedding profile.
 0 2 * * 0   /path/to/respire-cli/scripts/encoder/weekly_encoder.sh >> $HOME/.rsrs/logs/cron-encoder.log 2>&1
 ```
 
+Both scripts require Bash, `flock`, and `date`; daily also requires `timeout`,
+and weekly requires Python with NumPy, PyTorch, and Transformers installed.
+On macOS, install `flock` and provide GNU coreutils `timeout` on `PATH` before
+scheduling these jobs; missing dependencies fail explicitly.
+
 Daily is cheap (one residual epoch, no model weights). Weekly is CPU-heavy:
 LoRA training plus ~12 minutes of document embedding on this machine.
 
 ## Environment
 
-- `RSRS_BIN` default `~/.rsrs/bin/rsrs`
-- `RSRS_DATA_DIR` default `~/.rsrs`
+- `RSRS_BIN` default `~/.rsrs/bin/rsrs`; set it to the legacy `server` experimental CLI
+- `RSRS_DATA_DIR` default `~/.rsrs`; weekly and Python prefer existing `rsrs.db`,
+  use `onememory.db` only when it is the sole database, and fail if neither exists
 - `RSRS_ENCODER_BASE` default `~/.rsrs/models/granite-97m-r2`
 - `RSRS_ENCODER_STATE` default `~/.rsrs/encoder`
 - `RSRS_ENCODER_INDEX` default `$STATE/index`
@@ -69,7 +77,10 @@ LoRA training plus ~12 minutes of document embedding on this machine.
 
 - `prepare`/`train`/`reembed` open the store read-only; only the side index and
   adapter files are written.
-- Index swap is a symlink rename (`index/current`), old versions are kept (3).
+- Index swap is a symlink rename (`index/current`); retention keeps the newest
+  3 versions plus the current target, excludes symlinks, and only deletes resolved
+  paths within the index directory.
 - If the gate fails, the new version stays for inspection but is not served.
+  Specifying `--min-hit20` also requires a nonempty test split.
 - The daily reranker writes `learned_reranker` in the local store; it is never
   synced and `rsrs learn reset` returns to pure BM25.

@@ -3,27 +3,35 @@
 # Cheap (no model weights, no re-embedding); runs against the user's local store.
 set -uo pipefail
 
-BIN="${RSRS_BIN:-}"
-if [ -z "$BIN" ]; then
-  for candidate in "$HOME/Documents/respire/respire-cli/target/release/rsrs" \
-                   "$HOME/Documents/respire/respire-cli/target/debug/rsrs" \
-                   "$HOME/.rsrs/bin/rsrs"; do
-    [ -x "$candidate" ] && BIN="$candidate" && break
-  done
+BIN="${RSRS_BIN:-$HOME/.rsrs/bin/rsrs}"
+for tool in flock timeout date; do
+  command -v "$tool" >/dev/null 2>&1 || { echo "error: required tool not found: $tool" >&2; exit 1; }
+done
+if [ ! -x "$BIN" ]; then
+  echo "error: executable not found: $BIN (set RSRS_BIN to a legacy server experimental CLI)" >&2
+  exit 1
 fi
 DATA="${RSRS_DATA_DIR:-$HOME/.rsrs}"
 STATE="${RSRS_ENCODER_STATE:-$DATA/encoder}"
 mkdir -p "$DATA/logs" "$STATE"
 exec 9>"$STATE/rerank.lock"
-flock -n 9 || { echo "$(date -Is) skip: another rerank job is running"; exit 0; }
+flock -n 9 || {
+  status=$?
+  if [ "$status" -eq 1 ]; then
+    echo "$(date '+%Y-%m-%dT%H:%M:%S%z') skip: another rerank job is running"
+    exit 0
+  fi
+  echo "error: flock failed with status $status" >&2
+  exit "$status"
+}
 
-# The installed runtime must understand `learn`; otherwise wait for the upgrade.
+# The experimental legacy CLI must expose `learn`.
 if ! RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >/dev/null 2>&1; then
-  echo "$(date -Is) skip: current runtime does not expose learn (upgrade required)"
-  exit 0
+  echo "error: learn status failed; RSRS_BIN must select a legacy server experimental CLI" >&2
+  exit 1
 fi
 
-echo "$(date -Is) daily rerank start"
+echo "$(date '+%Y-%m-%dT%H:%M:%S%z') daily rerank start"
 RSRS_DATA_DIR="$DATA" timeout 300 "$BIN" learn train --from-labels --limit 5000 --epochs 1 --json >> "$DATA/logs/rerank.log" 2>&1 || true
-echo "$(date -Is) daily rerank done"
+echo "$(date '+%Y-%m-%dT%H:%M:%S%z') daily rerank done"
 RSRS_DATA_DIR="$DATA" "$BIN" learn status --json >> "$DATA/logs/rerank.log" 2>&1 || true

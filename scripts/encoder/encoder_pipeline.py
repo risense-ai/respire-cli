@@ -20,7 +20,10 @@ import torch
 from torch import nn
 from transformers import AutoModel, AutoTokenizer
 
-DEFAULT_DB = os.path.expanduser('~/.rsrs/onememory.db')
+DEFAULT_DATA = os.environ.get('RSRS_DATA_DIR') or os.path.expanduser('~/.rsrs')
+DEFAULT_DB = os.path.join(DEFAULT_DATA, 'rsrs.db')
+if not os.path.isfile(DEFAULT_DB) and os.path.isfile(os.path.join(DEFAULT_DATA, 'onememory.db')):
+    DEFAULT_DB = os.path.join(DEFAULT_DATA, 'onememory.db')
 DEFAULT_BASE = os.path.expanduser('~/.rsrs/models/granite-97m-r2')
 DEFAULT_STATE = os.path.expanduser('~/.rsrs/encoder')
 CJK = re.compile(r'[\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF]')
@@ -350,8 +353,12 @@ def cmd_reembed(args):
         except Exception:
             old = None
     gate = True
-    if args.min_hit20 is not None and metrics and metrics['hit20'] < args.min_hit20:
-        gate = False
+    if args.min_hit20 is not None:
+        if not metrics:
+            gate = False
+            print('gate: --min-hit20 requires nonempty test metrics', flush=True)
+        elif metrics['hit20'] < args.min_hit20:
+            gate = False
     if gate and old and metrics and metrics['hit20'] < old['hit20'] - args.tolerance:
         gate = False
         print(f'gate: new {metrics["hit20"]} < current {old["hit20"]} - {args.tolerance}', flush=True)
@@ -364,10 +371,19 @@ def cmd_reembed(args):
         print(f'swapped current -> {version}', flush=True)
     else:
         print('gate: index not swapped; version kept for inspection', flush=True)
-    versions = sorted(d for d in os.listdir(args.index_dir) if os.path.isdir(os.path.join(args.index_dir, d)))
+    index_root = os.path.realpath(args.index_dir)
+    current_target = os.path.realpath(current)
+    versions = sorted(d for d in os.listdir(index_root)
+                      if not os.path.islink(os.path.join(index_root, d))
+                      and os.path.isdir(os.path.join(index_root, d)))
     for v in versions[:-args.keep]:
-        if v != version:
-            shutil.rmtree(os.path.join(args.index_dir, v), ignore_errors=True)
+        path = os.path.join(index_root, v)
+        target = os.path.realpath(path)
+        if v == version or target == current_target or current_target.startswith(target + os.sep):
+            continue
+        if os.path.islink(path) or os.path.commonpath([index_root, target]) != index_root:
+            raise ValueError(f'refusing to remove index version outside {index_root}: {path}')
+        shutil.rmtree(path)
 
 
 def cmd_query(args):
