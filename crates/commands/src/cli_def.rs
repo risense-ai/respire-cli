@@ -105,6 +105,7 @@ pub enum ModelAction {
     UninstallM3,
 }
 
+#[cfg(feature = "server")]
 #[derive(Subcommand)]
 pub enum LearnCmd {
     /// Show current weights, update count and annotation count
@@ -130,6 +131,7 @@ pub enum LearnCmd {
 #[derive(Subcommand)]
 pub enum Command {
     /// Annotate retrieval: BM25 top-N candidates (no BGE) + LLM judgement, stored as replayable training labels
+    #[cfg(feature = "server")]
     Annotate {
         /// One query to annotate
         #[arg(long)]
@@ -187,11 +189,13 @@ pub enum Command {
         quiet: bool,
     },
     /// Local retrieval learning: inspect, batch-train or reset the BM25 reranker
+    #[cfg(feature = "server")]
     Learn {
         #[command(subcommand)]
         cmd: LearnCmd,
     },
     /// Query the outcome of a request whose id was printed by request_outcome_unknown (read-only; never replays the command)
+    #[cfg(feature = "server")]
     Result {
         /// request_id from the request_outcome_unknown error
         id: String,
@@ -242,9 +246,14 @@ pub enum Command {
     /// medium -> suggest attach (`--parent` as cause); no candidate or --force writes directly.
     /// `--parent` = causal attach; parent/child is cause/effect.
     Remember {
-        /// Body text; mutually exclusive with --content-file (one of them is required).
+        #[cfg(not(feature = "server"))]
+        content: String,
+        /// Legacy server body; exactly one body source is required.
+        #[cfg(feature = "server")]
+        #[arg(required_unless_present = "content_file", conflicts_with = "content_file")]
         content: Option<String>,
         /// Read the body from a file: bypasses shell quoting/escaping and makes the file the source of truth before a write.
+        #[cfg(feature = "server")]
         #[arg(long)]
         content_file: Option<std::path::PathBuf>,
         /// Kind; defaults to context for creation and the first source's kind for merge.
@@ -317,6 +326,7 @@ pub enum Command {
         #[arg(long, value_parser = ["auto", "howto", "fact"], default_value = "auto")]
         intent: String,
         /// BM25 + locally learned reranker; no BGE/model required
+        #[cfg(feature = "server")]
         #[arg(long)]
         lexical: bool,
     },
@@ -807,9 +817,11 @@ pub enum Command {
         #[arg(long)]
         content: Option<String>,
         /// Read the new body from a file instead of --content (mutually exclusive; the file is the source of truth).
+        #[cfg(feature = "server")]
         #[arg(long)]
         content_file: Option<std::path::PathBuf>,
         /// Explicitly drop legacy unknown metadata fields (action/cause/effect) that the write gate rejects; their names are echoed back.
+        #[cfg(feature = "server")]
         #[arg(long)]
         drop_legacy_metadata: bool,
         #[arg(long)]

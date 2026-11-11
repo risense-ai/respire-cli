@@ -84,25 +84,41 @@ to implement the supplied algorithms without requiring the original evaluation
 archive. Lower admission floors may return candidates for questions with no
 answer; titles remain reference material, not evidence that an answer exists.
 
-## Lexical learning from real adoption
+## Legacy server experiments
 
-`rsrs learn train --from-labels` rebuilds BM25 top-100 candidates for every
-`query_log` row with `adopted` or `good_ids`, uses those ids as positives, and
-samples up to eight deep negatives (candidate rank >= 20). Negatives are kept
-deep on purpose: an adopted result can sit at rank 40, and treating the lexical
-top-20 as negatives teaches the model to invert BM25.
+The `annotate`, `learn`, and `result` commands, `recall --lexical`, both
+`--content-file` options, and `update --drop-legacy-metadata` are compiled only
+with the explicit `respire_commands/server` feature. They are absent from the
+production CLI parser and help. Production `remember` still requires its
+positional body. The independently published Runtime does not implement these
+experimental command arguments, so building a CLI frontend is not evidence
+that the experiments work through `cli.exec`.
 
-The BM25 log score is the fixed base (`weights[0] = 1`); only the other eight
-features learn, capped at `[-2, 2]`. At recall the residual is normalized per
-query and added with weight 0.5, so learned evidence can promote a deep
-candidate but cannot erase the lexical order on its own. The model lives in the
-local `learned_reranker` singleton and is never synced. `--epochs` replays the
-same labeled rows; `rsrs learn reset` returns to pure BM25.
+These modules retain the legacy local learning implementation for server
+inspection; they are not the production Core retrieval algorithm. Learning
+uses local annotation/adoption rows and the `learned_reranker` singleton, which
+is never synced. No background annotation process is launched after recall.
+Manual server annotation may send query text and candidate snippets to its
+selected provider. Legacy file inputs and training exports require absolute
+paths so a resident process cannot reinterpret the caller's working directory.
+
+Ordinary recall continues through the active Core model profile. A missing M3
+installation does not select the host learning experiment when another model
+profile is active. Explicit legacy lexical mode rejects evidence, rendering,
+mode, and how-to requests that it cannot preserve instead of silently changing
+the requested behavior. Non-title legacy lexical rows retain the full
+`details[].entry` from the authorized source; compact title rows remain compact.
 
 ## Cache availability
 
-The lexical index cache is enabled by default in the serving process; no
-`config --retrieval` option is required. `RSRS_LEXICAL_CACHE=off` disables the
-cache for diagnostics. The CLI frontend does not expose the unimplemented
-retrieval-mode configuration option. Runtime business changes must be shipped
-from the Runtime repository before CLI users receive this optimization.
+The cache helper defaults to enabled and `RSRS_LEXICAL_CACHE=off` disables it
+for diagnostics. It does not need a new `config --retrieval` flag. Its raw-store
+diagnostic prewarm helper is not connected to production startup and also
+respects the disabled-cache setting.
+
+Production cache integration belongs in the independent Runtime, at the
+existing Core retrieval boundary, and must be enabled there by default while
+preserving authorization, evidence, associations, rendering, and model routing.
+This CLI repository's legacy server modules alone provide no measured 2.x
+product speedup. Publish and pin the corresponding Runtime implementation
+before claiming that users receive the cache optimization.

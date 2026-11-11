@@ -328,11 +328,18 @@ pub fn run_lexical(store: &LocalStore, source: &respire_app::review::AuthorizedR
     let details = if titles {
         json!(hits.iter().map(|hit| json!({"id": hit.id, "title": hit.title, "score": hit.score, "superseded_by": associations.superseded.get(&hit.id)})).collect::<Vec<_>>())
     } else {
-        json!(hits.iter().map(|hit| json!({
-            "id": hit.id, "title": hit.title, "score": hit.score, "bm25": hit.bm25,
-            "snippet": hit.snippet, "features": hit.features,
-            "superseded_by": associations.superseded.get(&hit.id),
-        })).collect::<Vec<_>>())
+        let entries: HashMap<_, _> = source.entries().map(|entry| (entry.id.as_str(), entry)).collect();
+        let rows = hits.iter().map(|hit| {
+            let entry = entries.get(hit.id.as_str())
+                .ok_or_else(|| anyhow::anyhow!("lexical hit is missing from the authorized source"))?;
+            Ok(json!({
+                "id": hit.id, "title": hit.title, "score": hit.score, "bm25": hit.bm25,
+                "snippet": hit.snippet, "features": hit.features,
+                "entry": entry, "ancestors": [],
+                "superseded_by": associations.superseded.get(&hit.id),
+            }))
+        }).collect::<Result<Vec<_>>>()?;
+        json!(rows)
     };
     let mut result = ResultEnvelope::new(
         "recall",
@@ -512,26 +519,23 @@ pub fn set_lexical(on: bool) -> Result<()> {
     Ok(())
 }
 
-/// A missing BGE install automatically selects BM25-only. Installing BGE later
-/// switches the same profile back to hybrid without changing any flag.
+/// Inspect the selected model rather than assuming that every profile uses M3.
 pub fn bge_available() -> bool {
-    respire_app::memory::bge::resolve_model_dir()
-        .map(|dir| respire_app::memory::bge::model_files_present(&dir))
-        .unwrap_or(false)
+    match respire_app::core_sdk::profiles::current() {
+        Ok(Some(selection)) => selection.profile.weights.as_ref().is_some_and(|resource| resource.path.is_file())
+            && selection.profile.tokenizer.as_ref().is_some_and(|resource| resource.path.is_file()),
+        Ok(None) => respire_app::memory::bge::resolve_model_dir()
+            .map(|dir| respire_app::memory::bge::model_files_present(&dir))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 pub fn no_embed() -> bool {
-    let explicit = respire_app::service::self_learning_enabled()
+    respire_app::service::self_learning_enabled()
         || lexical_marker().is_file()
         || matches!(respire_app::env::var("RSRS_NO_EMBED"), Ok(value) if value.trim() == "1")
-        || matches!(respire_app::env::var("RSRS_EMBED"), Ok(value) if matches!(value.trim(), "off" | "none" | "0"));
-    // Capture/recall fixtures deliberately point RSRS_M3_DIR at an absent model and
-    // still exercise the normal envelope. Auto-falling back to the lexical path
-    // there would change the summary shape; only an explicit self switch may.
-    if matches!(respire_app::env::var("RSRS_CORE_TEST_MODE"), Ok(value) if value.trim() == "1") {
-        return explicit;
-    }
-    explicit || !bge_available()
+        || matches!(respire_app::env::var("RSRS_EMBED"), Ok(value) if matches!(value.trim(), "off" | "none" | "0"))
 }
 
 pub fn lexical_default() -> bool {
@@ -601,8 +605,29 @@ impl Embedder for LocalEmbedder {
 mod tests {
     use super::*;
     use respire_app::transport::local::NewAnnotation;
-    use crate::capture_tests::with_isolated_session;
     use respire_app::service::{App, CreateReq};
+
+    fn with_isolated_session(action: impl FnOnce(&std::path::Path) -> Result<()>) -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir()?;
+        struct Restore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                for (key, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+        let keys = ["RSRS_DATA_DIR", "RSRS_CORE_TEST_MODE", "RSRS_RETRIEVAL", "RSRS_NO_EMBED", "RSRS_EMBED"];
+        let _restore = Restore(keys.into_iter().map(|key| (key, std::env::var_os(key))).collect());
+        for key in keys { std::env::remove_var(key); }
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        std::env::set_var("RSRS_CORE_TEST_MODE", "1");
+        action(root.path())
+    }
 
     struct NoPrepare;
     impl respire_app::memory::search::Embedder for NoPrepare {
@@ -662,17 +687,18 @@ mod tests {
     }
 
     #[test]
-    fn one_step_increases_update_count_and_keeps_weights_finite() {
+    fn one_step_increases_update_count_and_keeps_weights_finite() -> Result<()> {
         let docs: HashMap<String, RowDoc> = [
             ("pos".to_owned(), doc("pos", "部署脚本位置", "scripts/build-core-sdk.mjs")),
             ("neg".to_owned(), doc("neg", "周报模板", "每周进展与风险")),
         ].into_iter().collect();
         let mut model = LearnedModel::default();
-        let step = train_one_with_docs(&row(), &docs, &mut model).unwrap();
+        let step = train_one_with_docs(&row(), &docs, &mut model)?;
         assert_eq!(step.pairs, 1);
         assert_eq!(model.updates, 1);
         assert!(step.weights.iter().all(|weight| weight.is_finite()));
         assert!(step.bias.is_finite());
+        Ok(())
     }
 
     #[test]
@@ -722,10 +748,13 @@ mod tests {
         })?;
         assert_eq!(store.annotation_training_rows(false, 10)?.len(), 1);
         train_from_annotations(&store, 10, 1)?;
-        let trained = store.load_learned_model()?.expect("model saved");
+        let trained = store.load_learned_model()?.ok_or_else(|| anyhow::anyhow!("trained model was not saved"))?;
         assert!(trained.updates > 0);
         assert!(status(&store).is_ok());
-        assert!(run_lexical(&store, "部署脚本", 3, None, None, true).is_ok());
+        let keys = respire_app::SessionKeys::from_urk([37; 32])?;
+        let review = respire_app::review::ReviewService::new(&keys, &store, "fixture")?;
+        let source = review.recall_source()?;
+        run_lexical(&store, &source, "fixture", "部署脚本", 3, None, None, true, true)?;
         reset(&store)?;
         assert!(store.load_learned_model()?.is_none());
         Ok(())
@@ -742,17 +771,18 @@ mod tests {
     }
 
     #[test]
-    fn snippet_and_early_returns() {
+    fn snippet_and_early_returns() -> Result<()> {
         assert_eq!(snippet("", "标题"), "标题");
         assert!(snippet(&"很长".repeat(80), "t").ends_with('…'));
         let docs: HashMap<String, RowDoc> = HashMap::new();
         let mut model = LearnedModel::default();
         let mut no_positive = row();
         no_positive.selected.clear();
-        assert_eq!(train_one_with_docs(&no_positive, &docs, &mut model).unwrap().pairs, 0);
+        assert_eq!(train_one_with_docs(&no_positive, &docs, &mut model)?.pairs, 0);
         let mut no_negative = row();
         no_negative.selected = vec!["pos".into(), "neg".into()];
-        assert_eq!(train_one_with_docs(&no_negative, &docs, &mut model).unwrap().pairs, 0);
+        assert_eq!(train_one_with_docs(&no_negative, &docs, &mut model)?.pairs, 0);
+        Ok(())
     }
 
     #[test]
@@ -769,18 +799,20 @@ mod tests {
     fn label_training_learns_from_real_adoption() -> Result<()> {
         with_isolated_session(|_| {
             let app = App {
-                keys: crate::engine::build_session()?,
+                keys: respire_app::SessionKeys::from_urk([41; 32])?,
                 store: crate::engine::build_local()?,
                 embedder: Box::new(NoPrepare),
             };
             let _defer = respire_app::core_sdk::defer_indexing();
             let mut ids = Vec::new();
+            let mut owner = String::new();
             for i in 0..25 {
                 let entry = app.create(&CreateReq {
                     title: format!("部署脚本位置 {i}"),
                     content: "scripts/build-core-sdk.mjs 构建入口".into(),
                     ..Default::default()
                 })?;
+                owner = entry.user.clone();
                 ids.push(entry.id);
             }
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -788,9 +820,11 @@ mod tests {
             app.store.log_query_request(&request_id, "部署脚本", "demo", "", &ids, &scores)?;
             app.store.mark_query_feedback(&request_id, &[ids[0].clone()], true, "human")?;
             train_from_labels(&app.store, 10, 1)?;
-            let model = app.store.load_learned_model()?.expect("label training saved a model");
+            let model = app.store.load_learned_model()?.ok_or_else(|| anyhow::anyhow!("trained model was not saved"))?;
             assert!(model.updates > 0);
-            assert!(run_lexical(&app.store, "部署脚本", 5, None, None, false).is_ok());
+            let review = respire_app::review::ReviewService::new(&app.keys, &app.store, &owner)?;
+            let source = review.recall_source()?;
+            run_lexical(&app.store, &source, &owner, "部署脚本", 5, None, None, false, false)?;
             assert!(status(&app.store).is_ok());
             Ok(())
         })

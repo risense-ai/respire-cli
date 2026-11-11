@@ -5526,15 +5526,13 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let store = build_local()?;
             let review = respire_app::review::ReviewService::new(&session, &store, &owner)?;
             let source = review.recall_source()?;
-            // Metadata/evidence and render options retain the existing authoritative path.
-            if (lexical || crate::learn::lexical_default())
-                && !source.has_metadata()
-                && render_budget.is_none()
-                && !trace
-                && mode.is_none()
-                && (intent == "fact"
-                    || (intent == "auto" && (r#type.is_some() || !skill::howto_intent(&query))))
-            {
+            if lexical || crate::learn::lexical_default() {
+                anyhow::ensure!(
+                    !source.has_metadata() && render_budget.is_none() && !trace && mode.is_none()
+                        && (intent == "fact" || (intent == "auto"
+                            && (r#type.is_some() || !skill::howto_intent(&query)))),
+                    "unsupported_capability: legacy lexical recall cannot preserve the requested Core evidence, rendering, mode or how-to contract; use ordinary recall"
+                );
                 return crate::learn::run_lexical(&store, &source, &owner, &query, limit, project.as_deref(), r#type.as_deref(), titles, no_related);
             }
             let metadata_aware = brief || source.has_metadata();
@@ -5766,9 +5764,6 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                 } else if let Err(error) = stats.persist(&store) {
                     eprintln!("recall statistics writeback failed: {error:#}");
                 }
-                // Opt-in (RSRS_ANNOTATE=1): label this recall's query with BM25 + LLM in a
-                // detached process. The reply path never waits for the model call.
-                crate::annotate::spawn_after_recall(&query, project.as_deref().unwrap_or(""), query_log_id.as_deref());
                 // Hit-heat writeback: top hits recall_count+1 - source of the heat-axis hit_score (used to be read-only, always 0; this round fills it)
                 // Plugin hook post-recall: query and hit summary (post-training / external telemetry)
                 {
@@ -7446,6 +7441,7 @@ pub fn engine_resolve_content(
         (Some(_), Some(_)) => anyhow::bail!("--content and --content-file are mutually exclusive"),
         (Some(text), None) => Some(text),
         (None, Some(path)) => {
+            anyhow::ensure!(path.is_absolute(), "legacy server --content-file requires an absolute path");
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| anyhow!("failed to read --content-file {}: {error}", path.display()))?;
             anyhow::ensure!(!text.trim().is_empty(), "--content-file {} is empty", path.display());

@@ -287,7 +287,7 @@ pub fn prewarm_disabled() -> bool {
 /// disabled, the P0 trigger gate rejects the library, or the library cannot be
 /// opened. This raw-store diagnostic helper is not connected to runtime startup.
 pub fn prewarm_once(database: &std::path::Path) -> Option<CacheState> {
-    if prewarm_disabled() {
+    if prewarm_disabled() || disabled_by_env() {
         return None;
     }
     let store = match LocalStore::open_read_only(database) {

@@ -620,6 +620,10 @@ fn build_backend(options: &Options) -> Result<crate::classify::Backend> {
 
 /// Run the annotate command (CLI entry).
 pub fn run(options: Options) -> Result<()> {
+    for path in [options.file.as_deref(), options.export_training.as_deref()].into_iter().flatten() {
+        anyhow::ensure!(std::path::Path::new(path).is_absolute(),
+            "legacy server annotation paths must be absolute; caller-relative paths are not supported");
+    }
     let store = crate::engine::build_local()?;
 
     if let Some(path) = options.export_training.as_deref() {
@@ -855,63 +859,6 @@ pub fn run(options: Options) -> Result<()> {
     crate::output_emit::emit_result(result)
 }
 
-/// Recall hook: after a real recall, annotate in a **detached** process so the
-/// reply path never waits for (or pays for) an LLM call. Off unless
-/// `RSRS_ANNOTATE=1`. Failures land in annotation_log, never in the reply.
-pub fn spawn_after_recall(query: &str, project: &str, request_id: Option<&str>) {
-    if !matches!(respire_app::env::var("RSRS_ANNOTATE"), Ok(value) if value.trim() == "1") {
-        return;
-    }
-    if query.trim().is_empty() {
-        return;
-    }
-    let exe = match std::env::current_exe() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("annotate hook skipped: current executable unknown ({error})");
-            return;
-        }
-    };
-    let topk = respire_app::env::var("RSRS_ANNOTATE_TOPK")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(10);
-    let mut command = std::process::Command::new(exe);
-    command
-        .arg("annotate")
-        .arg("--query")
-        .arg(query)
-        .arg("--topk")
-        .arg(topk.to_string())
-        .arg("--candidate-topk")
-        .arg(respire_app::env::var("RSRS_ANNOTATE_CANDIDATES").ok().and_then(|value| value.trim().parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(50).to_string())
-        .arg("--quiet")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if !project.trim().is_empty() {
-        command.arg("--project").arg(project);
-    }
-    if let Some(request_id) = request_id {
-        command.arg("--request-id").arg(request_id);
-    }
-    // The hook runs without flags, so provider/model routing must come from the
-    // runtime environment (the same environment the daemon was started with).
-    if let Ok(base) = respire_app::env::var("RSRS_ANNOTATE_API_BASE") {
-        if !base.trim().is_empty() {
-            command.arg("--api-base").arg(base.trim());
-        }
-    }
-    if let Ok(model) = respire_app::env::var("RSRS_ANNOTATE_MODEL") {
-        if !model.trim().is_empty() {
-            command.arg("--model").arg(model.trim());
-        }
-    }
-    if let Err(error) = command.spawn() {
-        eprintln!("annotate hook spawn failed: {error}");
-    }
-}
 
 /// Export helper reused by tests: build the listwise sample for one row.
 pub fn listwise_sample(row: &AnnotationRow) -> Value {
@@ -1030,37 +977,36 @@ mod tests {
     }
 
     #[test]
-    fn verdict_parsing_accepts_fences_and_rejects_garbage() {
-        let ok = parse_verdict("```json\n{\"selected\":[\"a\"],\"confidence\":0.7,\"reason\":\"r\"}\n```")
-            .expect("fenced JSON must parse");
+    fn verdict_parsing_accepts_fences_and_rejects_garbage() -> Result<()> {
+        let ok = parse_verdict("```json\n{\"selected\":[\"a\"],\"confidence\":0.7,\"reason\":\"r\"}\n```")?;
         assert_eq!(ok.selected, vec!["a".to_owned()]);
         assert!((ok.confidence - 0.7).abs() < 1e-9);
 
-        let empty = parse_verdict("{\"selected\":[],\"confidence\":0.2,\"reason\":\"none\"}")
-            .expect("empty selection is valid");
+        let empty = parse_verdict("{\"selected\":[],\"confidence\":0.2,\"reason\":\"none\"}")?;
         assert!(empty.selected.is_empty());
 
-        let error = parse_verdict("I think entry a is best").unwrap_err().to_string();
+        let error = parse_verdict("I think entry a is best").err().ok_or_else(|| anyhow::anyhow!("invalid verdict was accepted"))?.to_string();
         assert!(error.contains("raw:"), "error must keep a raw summary: {error}");
         assert!(error.contains("I think entry a is best"));
 
         let error = parse_verdict("{\"selected\":[\"a\"],\"confidence\":1.7,\"reason\":\"r\"}")
-            .unwrap_err()
+            .err().ok_or_else(|| anyhow::anyhow!("invalid verdict was accepted"))?
             .to_string();
         assert!(error.contains("outside 0..1"));
+        Ok(())
     }
 
     #[test]
-    fn selected_ids_resolve_to_real_candidates() {
+    fn selected_ids_resolve_to_real_candidates() -> Result<()> {
         let candidates = vec![
             candidate("aaaaaaaa-1111", "t1", 3.0),
             candidate("bbbbbbbb-2222", "t2", 2.0),
         ];
-        let resolved = resolve_selected(&["aaaaaaaa".into(), "aaaaaaaa-1111".into()], &candidates)
-            .expect("prefix and full id resolve");
+        let resolved = resolve_selected(&["aaaaaaaa".into(), "aaaaaaaa-1111".into()], &candidates)?;
         assert_eq!(resolved, vec!["aaaaaaaa-1111".to_owned()]);
         assert!(resolve_selected(&["cccccccc".into()], &candidates).is_err());
         assert!(resolve_selected(&["aa".into()], &candidates).is_err());
+        Ok(())
     }
 
     #[test]
@@ -1094,15 +1040,16 @@ mod tests {
     }
 
     #[test]
-    fn request_body_sends_only_candidate_metadata() {
+    fn request_body_sends_only_candidate_metadata() -> Result<()> {
         let body = request_body("m", "q", &[candidate("a", "title", 2.5)]);
-        let content = body["messages"][1]["content"].as_str().expect("user message is text");
-        let payload: Value = serde_json::from_str(content).expect("payload is JSON");
+        let content = body["messages"][1]["content"].as_str().ok_or_else(|| anyhow::anyhow!("user message is not text"))?;
+        let payload: Value = serde_json::from_str(content)?;
         assert_eq!(payload["query"], "q");
         assert_eq!(payload["candidates"][0]["id"], "a");
         assert!(payload["candidates"][0]["snippet"].is_string());
         assert!(!content.contains("api_key"));
         assert!(!content.contains("ciphertext"));
         assert_eq!(body["temperature"], 0);
+        Ok(())
     }
 }
