@@ -135,9 +135,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          desktop=()
+          set --
           if [[ "$RUNNER_OS" == Linux ]]; then
-            desktop=(--desktop-executable "$RUNNER_TEMP/client2-desktop/respire")
+            set -- --desktop-executable "$RUNNER_TEMP/client2-desktop/respire"
           fi
           python3 scripts/test-client2-launcher-compat.py \
             --ordinary-cli-cold-start \
@@ -146,7 +146,7 @@ jobs:
             --runtime-version "$RUNTIME_VERSION" \
             --client2-source .client2-source --go "$(python3 -c 'import shutil; print(shutil.which("go"))')" \
             --magpie-source .magpie-source --node "$(python3 -c 'import shutil; print(shutil.which("node"))')" \
-            "${desktop[@]}" --report "$RUNNER_TEMP/client2-launcher-regression.json"
+            "$@" --report "$RUNNER_TEMP/client2-launcher-regression.json"
       - name: Key the existing pinned public CPU model cache
         if: runner.os == 'Windows'
         id: offline-model-key
