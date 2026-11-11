@@ -185,8 +185,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dbus-x11 gnome-keyring
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3 psutil==7.1.0
       - name: Install PowerShell
         if: ${{ !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Windows' }}
@@ -200,8 +200,8 @@ jobs:
             . /etc/os-release
             curl -fsSL "https://packages.microsoft.com/config/ubuntu/${VERSION_ID}/packages-microsoft-prod.deb" -o /tmp/packages-microsoft-prod.deb
             sudo dpkg -i /tmp/packages-microsoft-prod.deb
-            sudo apt-get update
-            sudo apt-get install -y powershell
+            bash scripts/ci-apt-get.sh update
+            bash scripts/ci-apt-get.sh install -y powershell
           else
             brew install powershell
           fi
@@ -259,8 +259,8 @@ jobs:
           RSRS_DEV_SERVER_SHA: ${{ vars.RESPIRE_DEV_SERVER_SHA }}
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y dbus gnome-keyring
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           binary="$(realpath validated-cli/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
