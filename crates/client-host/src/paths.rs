@@ -136,6 +136,10 @@ fn canonical_profile_path(path: &Path) -> Option<PathBuf> {
                 return Some(resolved);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(current) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    _ => return None,
+                }
                 let name = current.file_name()?;
                 #[cfg(windows)]
                 {
