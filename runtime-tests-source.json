@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
   "repository": "risense-ai/respire-runtime",
-  "source_sha": "924ae24e42ac1a8e53b7cba1867af63100a4408e",
-  "sdk_lock_sha256": "0798601993ac41bf276b11184f76915c754c67cd079fac553184428fd9ca1d57",
+  "source_sha": "a884395b585c3ce44f304f9004ccf72eeb76a99f",
+  "sdk_lock_sha256": "db273b3c628ed5f71e2d42f6404193dce74d9a38217bdedfba2174cb08760364",
   "features": [
     "cpu-owned-ort-experiment"
   ],
@@ -59,10 +59,6 @@
       "sha256": null
     },
     "aarch64-apple-darwin": {
-      "artifact_id": null,
-      "sha256": null
-    },
-    "x86_64-apple-darwin": {
       "artifact_id": null,
       "sha256": null
     },
