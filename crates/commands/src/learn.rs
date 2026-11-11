@@ -220,13 +220,11 @@ fn snippet(head: &str, title: &str) -> String {
 }
 
 pub fn run_lexical(store: &LocalStore, query: &str, limit: usize, project: Option<&str>, kind: Option<&str>, titles: bool) -> Result<()> {
-    let docs: Vec<RowDoc> = docs_from_store(store)?
-        .into_iter()
-        .filter(|doc| project.is_none_or(|p| p.is_empty() || doc.project == p))
-        .filter(|doc| kind.is_none_or(|k| k.is_empty() || doc.kind.eq_ignore_ascii_case(k)))
-        .collect();
-    let indexed = docs.len();
-    let index = Bm25Index::build(docs);
+    // The index is a pure function of (filtered rows, tokenizer, layout) and the
+    // content token names that snapshot, so a hit reuses it verbatim; the scope
+    // is part of the key because df/avg_len are statistics of the filtered set.
+    let (index, _cache_state) = crate::lexical_cache::load(store, project, kind)?;
+    let indexed = index.len();
     let model = load_model(store)?;
     let query_tokens = tokens(query);
     let mut rows: Vec<(usize, f32, Vec<f32>)> = index

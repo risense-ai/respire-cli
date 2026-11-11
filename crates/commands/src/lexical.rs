@@ -155,6 +155,17 @@ impl Bm25Index {
         self.docs.len()
     }
 
+    /// Rough resident size, for cache diagnostics only (not a precise allocator
+    /// figure): document text plus one entry per indexed token.
+    pub fn approx_bytes(&self) -> usize {
+        let docs: usize = self.docs.iter().map(|doc| 96 + doc.title.len() + doc.tags.len() + doc.head.len() + doc.project.len() + doc.kind.len() + doc.created_at.len()).sum();
+        let fields: usize = self.fields.iter().flatten()
+            .map(|vector| vector.tf.iter().map(|(token, _)| 48 + token.len()).sum::<usize>())
+            .sum();
+        let df: usize = self.df.keys().map(|token| 48 + token.len()).sum();
+        docs + fields + df + std::mem::size_of::<Self>()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.docs.is_empty()
     }

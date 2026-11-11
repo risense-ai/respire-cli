@@ -41,6 +41,8 @@ pub mod annotate;
 pub mod learn;
 #[cfg(feature = "server")]
 pub mod lexical;
+#[cfg(feature = "server")]
+pub mod lexical_cache;
 pub mod gates;
 pub mod hooks;
 pub mod host_hooks;

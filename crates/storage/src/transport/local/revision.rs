@@ -61,6 +61,12 @@ impl super::LocalStore {
     pub fn memory_revision(&self) -> Result<String> {
         read_revision(&self.connection)
     }
+
+    /// P0 gate for cached indexes: which revision triggers are absent?
+    /// Empty vec = the content token is trustworthy. Read-only.
+    pub fn revision_triggers_missing(&self) -> Result<Vec<String>> {
+        revision_triggers_missing(&self.connection)
+    }
 }
 
 fn read_revision(connection: &Connection) -> Result<String> {
