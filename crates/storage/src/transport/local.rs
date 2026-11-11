@@ -1383,6 +1383,10 @@ fn migrate_schema(connection: &Connection) -> Result<()> {
         );",
     )?;
     connection.execute_batch(include_str!("local/revision_schema.sql"))?;
+    // The batch above cannot upgrade a library that already carries an older
+    // `memory_revision_update`, and a definition naming absent columns would
+    // break a fresh library, so the shape is picked from the actual columns.
+    revision::refresh_update_trigger(connection)?;
     witness::install(connection)?;
     Ok(())
 }
@@ -2129,6 +2133,123 @@ mod tests {
         assert!(!store.revoke_grant(&grant.id)?);
         Ok(())
     }
+
+    fn revision_token(connection: &rusqlite::Connection) -> anyhow::Result<String> {
+        Ok(connection.query_row(
+            "SELECT value FROM meta WHERE key='memory_revision_v1'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?)
+    }
+
+    fn update_trigger_sql(connection: &rusqlite::Connection) -> anyhow::Result<String> {
+        Ok(connection.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
+            [],
+            |row| row.get::<_, String>(0),
+        )?)
+    }
+
+    /// Guard for every library the current schema creates: the base trigger must
+    /// not mention columns that do not exist here, or `CREATE TRIGGER` fails and
+    /// the library cannot be opened at all.
+    #[test]
+    fn fresh_library_keeps_the_base_update_trigger() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = LocalStore::open(&dir.path().join("memory.db"))?;
+        store.put(&sample("fresh-1"))?;
+        let sql = update_trigger_sql(&store.connection)?;
+        for column in revision::LEGACY_CONTENT_COLUMNS {
+            assert!(
+                !sql.contains(column),
+                "a fresh library has no {column}; the trigger must not name it"
+            );
+        }
+        let missing: Vec<String> = store
+            .connection
+            .prepare("SELECT name FROM pragma_table_info('memories') WHERE name IN ('when_to_use','superseded_by')")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        assert!(missing.is_empty(), "the current schema really does not create them");
+        assert!(store.revision_triggers_missing()?.is_empty(), "P0 self-check must stay green");
+        let before = revision_token(&store.connection)?;
+        store
+            .connection
+            .execute("UPDATE memories SET title='renamed' WHERE id='fresh-1'", [])?;
+        assert_ne!(before, revision_token(&store.connection)?, "title must still advance");
+        // Reopening an up-to-date library must not rewrite the trigger.
+        drop(store);
+        let store = LocalStore::open(&dir.path().join("memory.db"))?;
+        assert_eq!(sql, update_trigger_sql(&store.connection)?, "reopen must be a no-op");
+        Ok(())
+    }
+
+    /// A library upgraded from a release that carried the legacy content columns
+    /// must get the extended trigger, so writes to those columns advance the
+    /// token; the replacement happens on open and only for that one trigger.
+    #[test]
+    fn legacy_content_columns_extend_the_update_trigger() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("memory.db");
+        {
+            let store = LocalStore::open(&path)?;
+            store.put(&sample("legacy-1"))?;
+            store.connection.execute_batch(
+                "ALTER TABLE memories ADD COLUMN when_to_use TEXT;
+                 ALTER TABLE memories ADD COLUMN superseded_by TEXT;",
+            )?;
+            let before = revision_token(&store.connection)?;
+            store.connection.execute(
+                "UPDATE memories SET when_to_use='gap' WHERE id='legacy-1'",
+                [],
+            )?;
+            assert_eq!(
+                before,
+                revision_token(&store.connection)?,
+                "the base trigger is expected to miss when_to_use before the upgrade"
+            );
+        }
+        let store = LocalStore::open(&path)?;
+        let sql = update_trigger_sql(&store.connection)?;
+        for column in revision::LEGACY_CONTENT_COLUMNS {
+            assert!(sql.contains(column), "upgraded trigger must mention {column}");
+        }
+        let before = revision_token(&store.connection)?;
+        store
+            .connection
+            .execute("UPDATE memories SET when_to_use='tracked' WHERE id='legacy-1'", [])?;
+        let after_when = revision_token(&store.connection)?;
+        assert_ne!(before, after_when, "when_to_use must advance the token");
+        store.connection.execute(
+            "UPDATE memories SET superseded_by='successor-1' WHERE id='legacy-1'",
+            [],
+        )?;
+        assert_ne!(
+            after_when,
+            revision_token(&store.connection)?,
+            "superseded_by must advance the token"
+        );
+        // Untouched columns and the P0 self-check stay intact.
+        let before_title = revision_token(&store.connection)?;
+        store
+            .connection
+            .execute("UPDATE memories SET title='renamed' WHERE id='legacy-1'", [])?;
+        assert_ne!(before_title, revision_token(&store.connection)?);
+        assert!(store.revision_triggers_missing()?.is_empty());
+        let names: Vec<String> = store
+            .connection
+            .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND (name LIKE 'memory_revision%' OR name='memory_metadata_revision_update') ORDER BY name")?
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for kept in ["memory_revision_insert", "memory_revision_delete", "memory_metadata_revision_update"] {
+            assert!(names.contains(&kept.to_owned()), "{kept} must be untouched");
+        }
+        drop(store);
+        let store = LocalStore::open(&path)?;
+        assert_eq!(sql, update_trigger_sql(&store.connection)?, "reopen must be a no-op");
+        Ok(())
+    }
+
 }
 
 #[cfg(test)]

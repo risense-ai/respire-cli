@@ -44,6 +44,73 @@ pub fn revision_triggers_missing(connection: &Connection) -> Result<Vec<String>>
     Ok(missing)
 }
 
+/// Legacy content columns that some upgraded libraries still carry. The current
+/// schema never creates them, so the trigger definition has to follow whatever
+/// the library actually has.
+pub const LEGACY_CONTENT_COLUMNS: [&str; 2] = ["when_to_use", "superseded_by"];
+
+/// True when every legacy column exists on `memories`.
+fn has_legacy_content_columns(connection: &Connection) -> Result<bool> {
+    let found: i64 = connection.query_row(
+        "SELECT count(*) FROM pragma_table_info('memories') WHERE name IN ('when_to_use','superseded_by')",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(found as usize == LEGACY_CONTENT_COLUMNS.len())
+}
+
+/// The `memory_revision_update` definition this library should have.
+fn expected_update_sql(extended: bool) -> &'static str {
+    if extended {
+        include_str!("revision_update_extended.sql")
+    } else {
+        include_str!("revision_schema.sql")
+    }
+}
+
+/// Idempotent trigger refresh, run inside the migration transaction on every open.
+///
+/// `CREATE TRIGGER IF NOT EXISTS` never rewrites an existing trigger, so editing
+/// a definition alone leaves upgraded libraries on the old WHEN list. The shape
+/// is chosen by column presence, never by guessing:
+///
+/// * library has `when_to_use` and `superseded_by` (upgraded from an older
+///   release) → the extended definition, so content in those columns advances
+///   the token;
+/// * library does not have them (every library the current schema creates) → the
+///   base definition, unchanged from today. Naming a missing column would make
+///   `CREATE TRIGGER` fail and break the library on first open, so the base
+///   shape must stay the default.
+///
+/// Only `memory_revision_update` is ever replaced; the insert/delete triggers,
+/// the metadata trigger and the sync-head triggers are untouched. Safe to run
+/// any number of times: once the stored definition matches, this is a no-op.
+pub fn refresh_update_trigger(connection: &Connection) -> Result<bool> {
+    let extended = has_legacy_content_columns(connection)?;
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let matches = match stored.as_deref() {
+        None => false,
+        Some(sql) => {
+            LEGACY_CONTENT_COLUMNS
+                .iter()
+                .all(|column| sql.contains(column))
+                == extended
+        }
+    };
+    if matches {
+        return Ok(false);
+    }
+    connection.execute_batch("DROP TRIGGER IF EXISTS memory_revision_update;")?;
+    connection.execute_batch(expected_update_sql(extended))?;
+    Ok(true)
+}
+
 /// Read-only path probe with the same rules as `read_memory_revision`:
 /// never creates or migrates; the live WAL stays visible.
 pub fn revision_triggers_missing_at(path: &Path) -> Result<Vec<String>> {
