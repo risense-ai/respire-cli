@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-client2
-          ref: c5f2687e2e0459063e293250d00c0c1a52d3581f
+          ref: 62eebaf43333978afd5b6b7a6fc7a45665189c6c
           path: .client2-source
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -121,12 +121,12 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y libgtk-3-0 libwebkit2gtk-4.1-0 libx11-6
           mkdir -p "$RUNNER_TEMP/client2-desktop"
-          gh release download v2.0.0-dev.3 --repo risense-ai/respire-client2 \
+          gh release download v2.0.0-dev.4 --repo risense-ai/respire-client2 \
             --pattern respire-linux-amd64.tar.gz --dir "$RUNNER_TEMP/client2-desktop"
           python3 - <<'PY'
           import hashlib, os, pathlib
           archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-desktop/respire-linux-amd64.tar.gz'
-          assert hashlib.sha256(archive.read_bytes()).hexdigest() == 'c06ab069661e34338b6277ed78472698a3725eeafa5fdcb84d1681c5ee6167e9'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '3c80ece3400669f28c54862b8b6b3cf3846268ab257246a05eb38c45029a2d91'
           PY
           tar -xzf "$RUNNER_TEMP/client2-desktop/respire-linux-amd64.tar.gz" -C "$RUNNER_TEMP/client2-desktop" respire
       - name: Exercise original Client2 host and all startup orders
