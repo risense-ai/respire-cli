@@ -83,7 +83,7 @@ import hashlib, json, os, re, shutil, stat, sys, tempfile, zipfile
 archive, destination, mode = sys.argv[1:]
 manifest_name = 'manifest.json'
 def safe(name):
-    assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_./-]+', name), 'Unsafe bundle path'
+    assert isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_./+-]+', name), 'Unsafe bundle path'
     parts = name.split('/')
     assert all(part not in ('', '.', '..') and not part.endswith(('.', ' ')) for part in parts), 'Unsafe bundle component'
     assert all(not re.fullmatch(r'(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\..*)?', part) for part in parts), 'Reserved bundle path'
