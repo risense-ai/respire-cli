@@ -1713,6 +1713,14 @@ pub fn dispatch_loop(
                     *slot = snapshot_id;
                 }
                 STORE_READY.store(true, Ordering::Release);
+                // Design C: warm the hot scope in the background so the first
+                // recall after a start, or after a write, does not pay the whole
+                // build. Best-effort only; a failure here never affects RPC.
+                if let Ok(database) =
+                    respire_app::service::database_path(&respire_app::service::data_dir())
+                {
+                    crate::lexical_cache::spawn_prewarm(database);
+                }
                 store
             }
             Err(error) => {

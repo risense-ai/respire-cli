@@ -164,3 +164,47 @@ fn bypass_switch_never_populates_the_cache() -> Result<()> {
     assert_eq!(hits(&bypass_index, "部署脚本"), hits(&cold, "部署脚本"));
     Ok(())
 }
+
+/// Design C (task-28): the startup prewarm must leave a resident index behind,
+/// so the first recall of a fresh process is a hit instead of a build.
+#[test]
+fn prewarm_leaves_a_resident_index_for_the_first_recall() -> Result<()> {
+    let _guard = lock();
+    let (dir, store) = seeded("")?;
+    lexical_cache::clear();
+    let builds_before = lexical_cache::builds();
+    let warmed = lexical_cache::prewarm_once(&dir.path().join("memory.db"));
+    assert_eq!(
+        warmed,
+        Some(CacheState::Miss),
+        "prewarm must build and store the unscoped index"
+    );
+    assert_eq!(lexical_cache::builds(), builds_before + 1);
+    assert!(lexical_cache::cached_key().is_some(), "prewarm must populate the cache");
+    // 预热之后，首个召回直接命中，不再重建。
+    let builds_after_warm = lexical_cache::builds();
+    let (index, state) = lexical_cache::load(&store, None, None)?;
+    assert_eq!(state, CacheState::Hit);
+    assert_eq!(lexical_cache::builds(), builds_after_warm, "hit must not rebuild");
+    assert!(!hits(&index, "部署脚本").is_empty());
+    Ok(())
+}
+
+/// `RSRS_LEXICAL_PREWARM=off` must disable prewarm entirely: no build, no cache.
+#[test]
+fn prewarm_switch_off_does_nothing() -> Result<()> {
+    let _guard = lock();
+    let (dir, store) = seeded("")?;
+    lexical_cache::clear();
+    let builds_before = lexical_cache::builds();
+    std::env::set_var(lexical_cache::PREWARM_ENV, "off");
+    let warmed = lexical_cache::prewarm_once(&dir.path().join("memory.db"));
+    std::env::remove_var(lexical_cache::PREWARM_ENV);
+    assert_eq!(warmed, None, "prewarm must be a no-op when switched off");
+    assert_eq!(lexical_cache::builds(), builds_before, "off must not build");
+    assert!(lexical_cache::cached_key().is_none(), "off must not populate the cache");
+    // 关掉预热不影响正常召回（仍走懒建）。
+    let (_, state) = lexical_cache::load(&store, None, None)?;
+    assert_eq!(state, CacheState::Miss);
+    Ok(())
+}

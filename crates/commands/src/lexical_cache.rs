@@ -236,3 +236,102 @@ pub fn cached_key() -> Option<String> {
         .and_then(|guard| guard.as_ref().map(|entry| entry.key.render()))
 }
 
+// ---------------------------------------------------------------------------
+// Prewarm (design C): build the hot scope in the background so the first recall
+// after a start, or after a write, does not pay the whole build.
+//
+// This never changes what a request sees: the build still runs outside the cache
+// lock and the key is still the content token, so a stale prewarm can only be
+// discarded, never served.
+// ---------------------------------------------------------------------------
+
+/// Environment switch for both prewarm phases; `off` (or `0`) disables them.
+pub const PREWARM_ENV: &str = "RSRS_LEXICAL_PREWARM";
+
+/// How often the background thread re-reads the content token.
+pub const PREWARM_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// True when the operator turned prewarm off.
+pub fn prewarm_disabled() -> bool {
+    std::env::var(PREWARM_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("off") || value == "0"
+    })
+}
+
+/// Build the unscoped index once if — and only if — it is not already resident.
+///
+/// Returns the cache state the build ended in, or `None` when prewarm is
+/// disabled, the P0 trigger gate rejects the library, or the library cannot be
+/// opened. Never panics; a failure is logged and the next tick retries.
+pub fn prewarm_once(database: &std::path::Path) -> Option<CacheState> {
+    if prewarm_disabled() {
+        return None;
+    }
+    let store = match LocalStore::open_read_only(database) {
+        Ok(store) => store,
+        Err(_) => return None,
+    };
+    // Gate first: a library whose revision triggers are absent cannot vouch for
+    // the token, so prewarming it would burn a build without ever caching it.
+    match store.revision_triggers_missing() {
+        Ok(missing) if !missing.is_empty() => return None,
+        Ok(_) => {}
+        Err(_) => return None,
+    }
+    match load(&store, None, None) {
+        Ok((_, state)) => Some(state),
+        Err(_) => None,
+    }
+}
+
+/// Start the background prewarm thread: one build at startup, then one build per
+/// observed content-token change.
+///
+/// The thread owns no borrow of the request store; it reopens the library
+/// read-only per build, which keeps every RPC path untouched. A panic inside the
+/// loop is caught so it can never reach the RPC main flow.
+pub fn spawn_prewarm(database: std::path::PathBuf) {
+    if prewarm_disabled() {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("respire-lexical-prewarm".into())
+        .stack_size(4 * 1024 * 1024)
+        .spawn(move || {
+            let first = std::panic::catch_unwind(|| prewarm_once(&database));
+            let mut last = if matches!(first, Ok(Some(_))) {
+                read_token(&database)
+            } else {
+                None
+            };
+            loop {
+                std::thread::sleep(PREWARM_PERIOD);
+                let Ok(observed) = std::panic::catch_unwind(|| read_token(&database)) else {
+                    continue;
+                };
+                match observed {
+                    Some(token) if Some(&token) != last.as_ref() => {
+                        let warmed = std::panic::catch_unwind(|| prewarm_once(&database));
+                        if matches!(warmed, Ok(Some(_))) {
+                            last = Some(token);
+                        }
+                    }
+                    Some(token) => last = Some(token),
+                    None => {}
+                }
+            }
+        });
+    if spawned.is_err() {
+        eprintln!("warning: lexical prewarm thread could not start");
+    }
+}
+
+/// Read-only content token probe; `None` when the library is unreadable.
+fn read_token(database: &std::path::Path) -> Option<String> {
+    match respire_app::transport::local::read_memory_revision(database) {
+        Ok(token) => Some(token),
+        Err(_) => None,
+    }
+}
+
