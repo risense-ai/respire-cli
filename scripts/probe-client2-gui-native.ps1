@@ -1036,6 +1036,7 @@ function Assert-AccountFocusStable($Element, [string]$Name) {
     } finally { foreach ($process in $held) { $process.Dispose() } }
 }
 function Get-OfflineButtonInvoke($Element, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
+    $report.offline.preinvoke_identity = $null
     $report.offline.final_preparation.kind='unknown'
     $report.offline.final_preparation.proof='not_eligible'
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_pattern' }
@@ -1103,6 +1104,7 @@ function Prepare-OfflineButtonInvoke($Element, [ref]$MismatchEvidence, [Validate
 function Press-OfflineButton([string]$Name, [switch]$VerifySourceStability, [ValidateSet('normal_stop')][string]$DiagnosticStage) {
     $report.offline.final_preparation = $null
     $report.offline.final_preparation_history = @()
+    $report.offline.preinvoke_identity = $null
     $diagnosticArgs = @{}
     if ($DiagnosticStage) { $diagnosticArgs.DiagnosticStage = $DiagnosticStage }
     if ($DiagnosticStage) { $report.offline.action_stage = 'normal_stop_select' }
