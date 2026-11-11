@@ -1,7 +1,7 @@
 # Linux builds
 
-CLI-side builds link a validated binary Core SDK. They do not compile Core
-or ONNX Runtime sources.
+The CLI frontend builds without a Core SDK, native model libraries or a Runtime
+binary. Business commands connect to a separately installed Runtime.
 
 | Item | Contract |
 | --- | --- |
@@ -10,21 +10,18 @@ or ONNX Runtime sources.
 | Linux ARM64, glibc | `aarch64-unknown-linux-gnu`, native `ubuntu-24.04-arm` |
 | Linux ARM64, static musl | `aarch64-unknown-linux-musl`, native `ubuntu-24.04-arm` |
 | musl container | `rust:1.95.0-alpine3.23`, same CPU architecture |
-| SDK | Pinned binary SDK for the exact target |
-| Output | `target/ci/<target>/release/rsrs` and staged notices |
+| SDK | Not needed for the CLI frontend |
+| Output | `target/ci/<target>/release/rsrs` |
 | musl verification | No ELF `INTERP`/`NEEDED`; version checks on Ubuntu and Alpine |
 
-On a glibc Linux host, prepare the SDK and compile the native GNU target:
+On a glibc Linux host, use the pinned Rust toolchain to build the native GNU target:
 
 ```sh
 target="$(uname -m)-unknown-linux-gnu"
-node scripts/fetch-core-sdk.mjs "$target"
-export RSRS_CORE_SDK_DIR="$PWD/.sdk/$target"
 cargo build --release --locked -p respire --bin rsrs --target "$target" --target-dir target/ci
-node scripts/stage-core-runtime.mjs "target/ci/$target/release"
 ```
 
-The GNU build requires compatible glibc and the staged shared libraries. Choose
+The GNU frontend requires compatible glibc. Choose
 musl for a static libc build; neither architecture can be substituted for the other.
 The npm launcher keeps musl as its default. Set `RSRS_LIBC=glibc` to select a GNU
 platform package; see [npm platform selection](../npm/README.md).
@@ -35,8 +32,8 @@ For musl, use the existing Alpine container build:
 bash scripts/build-linux-musl.sh "$(uname -m)-unknown-linux-musl"
 ```
 
-The container fetches the SDK, compiles CLI/application crates and stages runtime/third-party
-notices. Configure the SDK URL first. Caches stay in `target/musl-cache/<target>`.
+The container compiles the CLI frontend without downloading a Core SDK or staging
+model runtime libraries. Caches stay in `target/musl-cache/<target>`.
 Static libc does not establish support for every kernel, CPU or sandbox. Host
 permissions still govern Linux keyring access.
 
@@ -45,7 +42,12 @@ runner. No QEMU or cross build substitutes for model/runtime acceptance. GNU
 artifacts require an AArch64 ELF with its interpreter and resolved dynamic
 runtime dependencies. Musl artifacts require no ELF interpreter or shared
 library imports and also run in native ARM Alpine.
-The Alpine inference probe uses the already prepared model files, a separate
+Runtime builds and explicit joint-workspace validation still require the pinned
+Core SDK for the exact target and its native libraries. SDK download credentials
+belong only to those workflows, not the frontend build above. Install the verified
+Runtime separately with `rsrs runtime install` before running business commands.
+
+The separate Alpine inference probe uses the already prepared model files, a separate
 owned profile and no container network or forwarded credentials. It executes
 actual CPU model inference as well as the native executable startup check.
 

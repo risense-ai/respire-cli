@@ -1,27 +1,24 @@
 # Respire CLI
 
-Local-first memory for AI tools, with encrypted storage, synchronization, a terminal interface and an HTTP/MCP runtime. Loopback access needs no token; non-loopback access requires authentication. The command is `rsrs`.
+Command-line and terminal interfaces for Respire memory. The `rsrs` executable manages a separately installed Runtime and sends business requests over loopback RPC. The CLI does not embed Runtime, Core or model weights. Runtime owns encrypted storage, synchronization and inference; non-loopback Runtime binding is refused.
 
 ```mermaid
 flowchart LR
-  Tools[CLI / TUI / MCP] --> App[Application]
-  App --> Store[Encrypted SQLite store]
-  App --> SDK[Core SDK]
+  Tools[CLI / TUI] -->|Loopback RPC| Runtime[Independent Runtime]
+  Runtime --> Store[Encrypted SQLite store]
+  Runtime --> SDK[Core SDK]
   Store <-->|Ciphertext| Server[Sync server]
 ```
 
 ## Build
 
-Use the pinned Rust toolchain and a Core SDK matching your target and `sdk/core-sdk.lock.json`.
+Use the pinned Rust toolchain. Building the CLI frontend needs no Core SDK or Runtime binary.
 
 ```sh
-export RSRS_CORE_SDK_DIR=/path/to/sdk
-node scripts/fetch-core-sdk.mjs <rust-target>
 cargo build --locked --release -p respire --bins
-node scripts/stage-core-runtime.mjs target/release
 ```
 
-On PowerShell, set `$env:RSRS_CORE_SDK_DIR`. Include the staged runtime libraries and notices with the executable. See [SDK setup](crates/core-sdk/README.md) and [Linux builds](docs/linux-build.md).
+Install the independently published Runtime with `rsrs runtime install` before business use. `runtime-pin.json` specifies the accepted Runtime versions; the installer verifies archive and binary hashes against downloaded release metadata. Native libraries and models remain outside the CLI package. SDK inputs are needed only for Runtime or explicit joint-workspace validation. See [Runtime](docs/runtime.md) and [Linux builds](docs/linux-build.md).
 
 ## Usage
 

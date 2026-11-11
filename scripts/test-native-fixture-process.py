@@ -230,7 +230,9 @@ finally:
 """, encoding='utf-8')
 fixture_env = {key: value for key, value in os.environ.items()
                if key.upper() in ('PATH', 'SYSTEMROOT', 'WINDIR', 'TEMP', 'TMP')}
-host = subprocess.Popen([sys.executable, str(host_source), str(ready_path),
+# Windows venv python.exe is a redirector; use the real interpreter so the
+# synthetic host owns exactly one worker, as the production Runtime does.
+host = subprocess.Popen([sys._base_executable, str(host_source), str(ready_path),
                          '--runtime-internal'], stdin=subprocess.PIPE,
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         env=fixture_env)

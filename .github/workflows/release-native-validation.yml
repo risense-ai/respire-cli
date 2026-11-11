@@ -434,6 +434,11 @@ jobs:
       - name: Verify GNU login interruption recovery with this release binary
         if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
         shell: bash
+        env:
+          NATIVE_RUNTIME_BIN: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_RUNTIME_BIN || steps.pinned-runtime.outputs.path }}
+          NATIVE_RUNTIME_SHA256: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_SHA256 || steps.pinned-runtime.outputs.sha256 }}
+          NATIVE_RUNTIME_VERSION: ${{ inputs.artifact_source == 'published-assets' && env.RSRS_PUBLISHED_RUNTIME_VERSION || steps.pinned-runtime.outputs.version }}
+          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
         run: |
           set -euo pipefail
           python3 -m venv "$RUNNER_TEMP/login-regression-python"
