@@ -773,6 +773,7 @@ function Find-FocusedOfflineButton([string]$Name, [switch]$PrepareInvoke, [Valid
         $preparingInvoke = $false
         $preparationTimedOut = $false
         if ($PrepareInvoke) {
+            $report.offline.preinvoke_identity = $null
             $report.offline.final_preparation = @{route='bounded_attempt';attempt=($attempt+1);kind='not_reached';proof='not_eligible'}
             $report.offline.final_preparation_history = @($report.offline.final_preparation_history) + @($report.offline.final_preparation)
         }
