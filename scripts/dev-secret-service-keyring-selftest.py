@@ -106,11 +106,16 @@ def self_test():
         items.append(item)
     keys.cleanup_business_entries()
     assert not items
+    assert keys.business_cleanup == {"passed": True, "stage": "complete",
+        "observed_entries": 3, "validated_entries": 3, "deleted_entries": 3, "remaining_entries": 0}
     items.append(SimpleNamespace(get_attributes=lambda: {"service": "unknown"}))
     try:
         keys.cleanup_business_entries()
     except RuntimeError:
         assert len(items) == 1
+        assert keys.business_cleanup == {"passed": False, "stage": "ownership_validation",
+            "observed_entries": 1, "validated_entries": 0, "deleted_entries": 0, "remaining_entries": None}
+        assert "unknown" not in json.dumps(keys.business_cleanup)
     else:
         raise AssertionError("unknown credential accepted")
 

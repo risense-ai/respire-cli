@@ -189,6 +189,19 @@ function Get-SafeFailureReason($Envelope) {
                     return "account_outcome_unknown/$class"
                 }
             }
+            # Fixed classes only; preserve the original unknown outcome and never replay it.
+            foreach ($entry in @(
+                @('host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
+                @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'account_helper_frame_invalid'),
+                @('account control response identity mismatch', 'account_rpc_identity_mismatch'),
+                @('account response launch profile mismatch|account receipt operation or profile mismatch', 'account_profile_binding_mismatch'),
+                @('account helper readiness was not confirmed', 'account_response_readiness_invalid'),
+                @('account target Runtime is unavailable|target Runtime does not match the selected account, image or managed owner|target Runtime or account identity changed during verification|account target launch does not belong to this maintenance controller', 'account_target_verification_failed')
+            )) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_ -match $entry[0] }).Count -gt 0) {
+                    return "account_outcome_unknown/$($entry[1])"
+                }
+            }
             return 'account_outcome_unknown'
         }
         if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
@@ -1609,6 +1622,20 @@ $mismatchedId = [string]$mismatched.Envelope.summary.id
 Assert-Smoke 'reset-vault-mismatched-fixture-written' ($resetKeys.Ok -and [bool]$resetKeys.Envelope.summary.super -and $mismatched.Ok -and [bool]$mismatchedId)
 $resetProfile = [string](Invoke-Om -Name 'reset-vault-selected-profile' -ArgList @('--json', 'config') -DataDir $resetDir).Envelope.summary.data_dir
 $resetSession = Join-Path $resetProfile 'session.json'
+# Preserve the live binding until its owned process has acknowledged stop and exited.
+$resetRuntime = Get-OwnedRuntimeHealth $resetDir
+if ([IO.Path]::GetFullPath([string]$resetRuntime.data_dir) -ne [IO.Path]::GetFullPath($resetProfile)) {
+    throw 'Reset fixture Runtime does not own the selected profile.'
+}
+$resetProcess = Get-Process -Id ([int]$resetRuntime.pid) -ErrorAction Stop
+try {
+    $null = $resetProcess.Handle
+    $resetStopped = Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
+        -DataDir $resetDir -Raw -ExpectExit @(0) -NoReadyRetry
+    if ($resetStopped.Ok -ne $true -or $resetStopped.Exit -ne 0 -or -not $resetProcess.WaitForExit(10000)) {
+        throw 'Reset fixture owned Runtime stop and exit were not confirmed.'
+    }
+} finally { $resetProcess.Dispose() }
 # keygen clears identity; bind this fixture to the same remote identity to exercise the overwrite guard.
 $resetIdentity = Get-Content -LiteralPath $resetSession -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
 $resetIdentity['user'] = $user
@@ -1619,8 +1646,12 @@ $previousResetSuper = $env:RSRS_SUPER
 try {
     # Keep the disposable local key usable without storing its Super password in the session.
     $env:RSRS_SUPER = [string]$resetKeys.Envelope.summary.super
-    $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile -AllowStatus @('fail')
-    Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 -and ($resetGuard.Envelope.errors -join ' ') -match 'different key material|destination belongs to another account')
+    $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--direct', '--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -AllowStatus @('fail')
+    Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 `
+        -and [string]$resetGuard.Envelope.command -ceq 'login' -and [string]$resetGuard.Envelope.status -ceq 'fail' `
+        -and [string]$resetGuard.Envelope.summary.reason -ceq 'account_outcome_unknown' `
+        -and @($resetGuard.Envelope.errors).Count -eq 1 `
+        -and @($resetGuard.Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith('; login_kind=account_material_rejected', [StringComparison]::Ordinal) }).Count -eq 1)
     Assert-Smoke 'login-key-mismatch-original-session-preserved' ((Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash -ceq $beforeResetSession)
     $resetRead = Invoke-Om -Name 'login-key-mismatch-original-readback' -ArgList @('--json', 'show', $mismatchedId) -DataDir $resetDir
     Assert-Smoke 'login-key-mismatch-original-data-readable' ($resetRead.Ok -and [string]$resetRead.Envelope.details.entry.content -ceq "reset-local-old-key-$stamp")

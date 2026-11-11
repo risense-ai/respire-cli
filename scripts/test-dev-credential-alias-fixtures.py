@@ -313,7 +313,9 @@ class SnapshotTests(unittest.TestCase):
         report = self.keys.cleanup()
         self.assertFalse(report['passed'])
         self.assertEqual(self.keys.collection.items, [foreign])
-        self.assertIn({'code': 'fixture_collection_cleanup_failed'}, report['remaining_entries'])
+        self.assertIn({'code': 'fixture_collection_not_empty'}, report['remaining_entries'])
+        self.assertEqual(report['collection_cleanup'],
+                         {'passed': False, 'stage': 'empty_check', 'remaining_entries': 1})
         for forbidden in (PASSWORD, SUPER, USER, ALIAS, OTHER, 'foreign'):
             self.assertNotIn(forbidden, json.dumps(report))
 
