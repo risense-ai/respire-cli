@@ -262,6 +262,42 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare private business credential fixture for coverage
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$(uname -m)" = x86_64 ] &&
+             [ "$(dpkg --print-architecture)" = amd64 ] &&
+             (. /etc/os-release; [ "${VERSION_CODENAME:-}" = noble ]) &&
+             [ -f /etc/apt/apt-mirrors.txt ] &&
+             [ -f /etc/apt/sources.list.d/ubuntu.sources ] &&
+             [ -s /usr/share/keyrings/ubuntu-archive-keyring.gpg ] &&
+             awk '
+               BEGIN { RS = "\n[ \t\r]*\n"; FS = "\n" }
+               {
+                 uri = key = disabled = 0
+                 for (i = 1; i <= NF; i++) {
+                   if ($i ~ /^URIs:[[:space:]]+mirror\+file:\/etc\/apt\/apt-mirrors\.txt[[:space:]]*$/) uri = 1
+                   if ($i ~ /^Signed-By:[[:space:]]+\/usr\/share\/keyrings\/ubuntu-archive-keyring\.gpg[[:space:]]*$/) key = 1
+                   if (tolower($i) ~ /^enabled:[[:space:]]*no[[:space:]]*$/) disabled = 1
+                 }
+                 if (uri && key && !disabled) found = 1
+               }
+               END { exit !found }
+             ' /etc/apt/sources.list.d/ubuntu.sources; then
+            sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/|d' /etc/apt/apt-mirrors.txt
+            apt_mirror=$'https://mirror.us.leaseweb.net/ubuntu/\tpriority:0'
+            if ! grep -Fxq "$apt_mirror" /etc/apt/apt-mirrors.txt; then
+              printf '%s\n' "$apt_mirror" | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
+            fi
+          fi
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y dbus gnome-keyring
+          python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
+          python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Prepare official Runtime and real model for migrated coverage tests
         shell: bash
         env:
@@ -273,6 +309,12 @@ jobs:
           cargo build --locked -p respire --bin rsrs
           target/debug/rsrs --json runtime install
           target/debug/rsrs --json model install-m3
+          python - <<'PY'
+          import os, sys
+          sys.path.insert(0, 'scripts')
+          from dev_model_fixture import share_cpu_container
+          share_cpu_container(os.environ['RUNNER_TEMP'], os.environ, os.environ['RSRS_M3_DIR'])
+          PY
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
@@ -326,7 +368,13 @@ jobs:
             test -x "$RSRS_CLI_BIN"
             original_cli="$(sha256sum "$RSRS_CLI_BIN")"
             unset GH_TOKEN GITHUB_TOKEN
-            "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
+            env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SESSION_BUS_PID \
+              -u DBUS_STARTER_ADDRESS -u DBUS_STARTER_BUS_TYPE \
+              -u GNOME_KEYRING_CONTROL -u GNOME_KEYRING_PID -u SSH_AUTH_SOCK \
+              dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private \
+              python -B scripts/dev-secret-service-keyring-selftest.py \
+              --root "$RUNNER_TEMP/trusted-coverage-secret-service" -- \
+              "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
             test "$(sha256sum "$RSRS_CLI_BIN")" = "$original_cli"
           )
           node scripts/check-cli-coverage.mjs '(main\.rs|(^|/)cli/src/frontend\.rs$|web\.rs|rpc\.rs|runtime_(policy|error|http|fetch)\.rs|autostart/(supervise|manager)\.rs|login\.rs|extract_tui\.rs|inject_tui\.rs|shell\.rs|/shell/|/core/|model_(install|progress)\.rs|space\.rs|update_check\.rs|classify(_config)?\.rs|recall_select\.rs)'
