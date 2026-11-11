@@ -182,7 +182,7 @@ def request(binary, env, args, direct=False):
             envelope = {}
         ok = completed.returncode == 0 and envelope.get('status') in ('ok', 'warn')
         return {'seconds': time.perf_counter() - start, 'ok': ok, 'exit': completed.returncode,
-                'status': envelope.get('status'), 'error_codes': [e.get('code') for e in envelope.get('errors', [])],
+                'status': envelope.get('status'), 'error_count': len(envelope.get('errors', [])),
                 'items': len(envelope.get('items', []))}, envelope
     except subprocess.TimeoutExpired:
         return {'seconds': time.perf_counter() - start, 'ok': False, 'timeout': True}, {}
@@ -302,8 +302,8 @@ def benchmark(binary, release, mode, number, env, port, snapshot):
             started = time.perf_counter()
             metric, envelope = request(binary, env, command)
             result['requests'].append({'phase': 'cold' if index == 0 else 'warm',
-                                       **metric, 'response': envelope})
-            assert metric['ok'] and envelope['items'], 'recall failed or returned no fixture source'
+                                       **metric, 'response': envelope if metric['ok'] and not metric['error_count'] else None})
+            assert metric['ok'] and not metric['error_count'] and envelope['items'], 'recall failed or returned no fixture source'
             assert envelope['summary']['metadata_aware'] is True
             assert envelope['summary']['recall_mode'] == mode
             normalized(envelope)
