@@ -18,7 +18,7 @@ Use the pinned Rust toolchain. Building the CLI frontend needs no Core SDK or Ru
 cargo build --locked --release -p respire --bins
 ```
 
-Install the independently published Runtime with `rsrs runtime install` before business use. The installer verifies the selected release metadata and hashes against `runtime-pin.json`; native libraries and models remain outside the CLI package. SDK inputs are needed only for Runtime or explicit joint-workspace validation. See [Runtime](docs/runtime.md) and [Linux builds](docs/linux-build.md).
+Install the independently published Runtime with `rsrs runtime install` before business use. `runtime-pin.json` specifies the accepted Runtime versions; the installer verifies archive and binary hashes against downloaded release metadata. Native libraries and models remain outside the CLI package. SDK inputs are needed only for Runtime or explicit joint-workspace validation. See [Runtime](docs/runtime.md) and [Linux builds](docs/linux-build.md).
 
 ## Usage
 
