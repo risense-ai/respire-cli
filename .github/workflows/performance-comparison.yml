@@ -3,14 +3,13 @@ on:
   workflow_dispatch:
     inputs:
       comparison_mode:
-        description: Cross-version A/B or candidate-only cold/warm consistency (no baseline)
+        description: Candidate-only cold/warm consistency with normal heat updates
         type: choice
-        default: cross-version
+        default: candidate-only
         options:
-          - cross-version
           - candidate-only
       release_inventory:
-        description: Reviewed JSON for cli/candidate (plus baseline for cross-version) with version, source_sha, producer_run_id, metadata_sha256 by target, and Runtime sdk_version
+        description: Official published-assets schema 2 JSON (schema/cli/runtime), all seven targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
         type: string
         required: true
       release_inventory_sha256:
@@ -40,6 +39,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -64,5 +66,7 @@ jobs:
         with:
           retention-days: 1
           name: performance-${{ matrix.target }}
-          path: ${{ runner.temp }}/comparison/report.json
+          path: |
+            ${{ runner.temp }}/comparison/report.json
+            ${{ runner.temp }}/comparison/published-assets-receipt.json
           if-no-files-found: error
