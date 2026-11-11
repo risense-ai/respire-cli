@@ -183,6 +183,7 @@ pub fn sync_scheduler_status() -> Value {
 }
 
 pub fn context_changed() {
+    crate::lexical_cache::clear();
     if let Err(error) = respire_app::resident::clear() {
         eprintln!("resident catalog reset failed: {error:#}");
     }
@@ -1713,14 +1714,7 @@ pub fn dispatch_loop(
                     *slot = snapshot_id;
                 }
                 STORE_READY.store(true, Ordering::Release);
-                // Design C: warm the hot scope in the background so the first
-                // recall after a start, or after a write, does not pay the whole
-                // build. Best-effort only; a failure here never affects RPC.
-                if let Ok(database) =
-                    respire_app::service::database_path(&respire_app::service::data_dir())
-                {
-                    crate::lexical_cache::spawn_prewarm(database);
-                }
+                // Prewarm must use an authorized snapshot, not a raw database path.
                 store
             }
             Err(error) => {

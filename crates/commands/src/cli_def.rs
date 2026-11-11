@@ -711,9 +711,6 @@ pub enum Command {
         /// Max concurrent ordinary runtime jobs. 0 follows available CPU parallelism; explicit values cannot exceed it. Applies after runtime restart.
         #[arg(long)]
         rpc_parallelism: Option<u32>,
-        /// Retrieval path: auto (BGE if installed, else local), bge (hybrid), self (BM25 + learned reranker)
-        #[arg(long, value_name = "auto|bge|self")]
-        retrieval: Option<String>,
     },
     /// Judge-then-store candidate bill (read-only): high similarity suggests merge, medium suggests attach, similar candidates suggest merging them
     Candidates { content: String },

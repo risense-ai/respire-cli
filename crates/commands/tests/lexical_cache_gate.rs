@@ -6,6 +6,8 @@
 //! `--lib` tests do not compile. The gates themselves only need the public
 //! cache API plus a real `LocalStore`.
 
+#![cfg(feature = "server")]
+
 use anyhow::Result;
 use respire_app::memory::StoredMemory;
 use respire_app::transport::local::LocalStore;
@@ -21,16 +23,8 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 fn memory(id: &str, title: &str, head: &str, project: &str) -> StoredMemory {
-    let mut memory: StoredMemory = serde_json::from_value(serde_json::json!({
-        "id": id,
-        "user": "account",
-        "ciphertext": "",
-        "nonce": "",
-        "embedding_enc": "",
-        "updated_at": "2026-01-01T00:00:00Z",
-        "deleted": false,
-    }))
-    .expect("memory fixture");
+    let mut memory = StoredMemory::new_pending(id.to_owned(), "account".to_owned());
+    memory.updated_at = "2026-01-01T00:00:00Z".to_owned();
     memory.local_title = title.to_owned();
     memory.local_content_head = head.to_owned();
     memory.local_project = project.to_owned();

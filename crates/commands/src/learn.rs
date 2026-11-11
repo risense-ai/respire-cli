@@ -219,11 +219,35 @@ fn snippet(head: &str, title: &str) -> String {
     out
 }
 
-pub fn run_lexical(store: &LocalStore, query: &str, limit: usize, project: Option<&str>, kind: Option<&str>, titles: bool) -> Result<()> {
-    // The index is a pure function of (filtered rows, tokenizer, layout) and the
-    // content token names that snapshot, so a hit reuses it verbatim; the scope
-    // is part of the key because df/avg_len are statistics of the filtered set.
-    let (index, _cache_state) = crate::lexical_cache::load(store, project, kind)?;
+pub fn run_lexical(store: &LocalStore, source: &respire_app::review::AuthorizedRecallSource, owner: &str, query: &str, limit: usize, project: Option<&str>, kind: Option<&str>, titles: bool, no_related: bool) -> Result<()> {
+    let mut request = respire_app::MemoryQuery::new(query).limit(limit);
+    if let Some(kind) = kind {
+        request = request.of_kind(respire_app::memory::model::Kind::try_from_str(&kind.trim().to_ascii_lowercase())
+            .ok_or_else(|| anyhow::anyhow!("unsupported_metadata: unknown memory kind"))?);
+    }
+    if let Some(project) = project {
+        request = request.of_project(project);
+    }
+    let kind = request.kind.as_ref().map(|kind| kind.as_str());
+    let (index, _cache_state) = crate::lexical_cache::index_for(
+        store, project, kind, owner, Some(source.memory_revision()), || {
+            let mut docs: Vec<RowDoc> = source.entries()
+                .map(|entry| RowDoc {
+                    id: entry.id.clone(),
+                    title: entry.title.clone(),
+                    tags: entry.tags.join(","),
+                    head: entry.content.chars().take(500).collect(),
+                    project: entry.project.clone(),
+                    created_at: entry.created_at.clone(),
+                    kind: entry.kind.as_str().to_owned(),
+                })
+                .filter(|doc| project.is_none_or(|p| p.is_empty() || doc.project == p))
+                .filter(|doc| kind.is_none_or(|k| k.is_empty() || doc.kind.eq_ignore_ascii_case(k)))
+                .collect();
+            docs.sort_by(|left, right| left.id.cmp(&right.id));
+            Ok(Bm25Index::build(docs))
+        },
+    )?;
     let indexed = index.len();
     let model = load_model(store)?;
     let query_tokens = tokens(query);
@@ -275,6 +299,15 @@ pub fn run_lexical(store: &LocalStore, query: &str, limit: usize, project: Optio
         .collect();
     hits.sort_by(|left, right| right.score.total_cmp(&left.score).then_with(|| left.id.cmp(&right.id)));
     hits.truncate(limit.max(1));
+    let hit_ids: Vec<String> = hits.iter().map(|hit| hit.id.clone()).collect();
+    let associations: respire_app::memory::model::RelatedResult = if no_related {
+        Default::default()
+    } else {
+        respire_app::core_sdk::execute("related_business", json!({
+            "model": "none", "snapshots": source.snapshots(), "query": request,
+            "ids": hit_ids, "pairs": store.recall_pairs(&hit_ids)?,
+        }))?
+    };
     let count = hits.len();
     // A lexical recall is a real retrieval request: record it in query_log so
     // `query-log mark` + `learn train --from-labels` can learn from no-model use.
@@ -289,14 +322,16 @@ pub fn run_lexical(store: &LocalStore, query: &str, limit: usize, project: Optio
         None
     };
     let items: Vec<OutputItem> = hits.iter().map(|hit| {
-        OutputItem::new(respire_app::service::short_id(&hit.id), OutputStatus::Ok, format!("{:.3} {}", hit.score, hit.title))
+        let superseded = if associations.superseded.contains_key(&hit.id) { " [superseded]" } else { "" };
+        OutputItem::new(respire_app::service::short_id(&hit.id), OutputStatus::Ok, format!("{:.3} {}{superseded}", hit.score, hit.title))
     }).collect();
     let details = if titles {
-        json!(hits.iter().map(|hit| json!({"id": hit.id, "title": hit.title, "score": hit.score})).collect::<Vec<_>>())
+        json!(hits.iter().map(|hit| json!({"id": hit.id, "title": hit.title, "score": hit.score, "superseded_by": associations.superseded.get(&hit.id)})).collect::<Vec<_>>())
     } else {
         json!(hits.iter().map(|hit| json!({
             "id": hit.id, "title": hit.title, "score": hit.score, "bm25": hit.bm25,
             "snippet": hit.snippet, "features": hit.features,
+            "superseded_by": associations.superseded.get(&hit.id),
         })).collect::<Vec<_>>())
     };
     let mut result = ResultEnvelope::new(
@@ -306,11 +341,13 @@ pub fn run_lexical(store: &LocalStore, query: &str, limit: usize, project: Optio
             "query": query, "count": count, "limit": limit, "mode": "lexical",
             "embedding_model": null, "indexed_entries": indexed,
             "learned_updates": model.updates, "project": project,
+            "related": associations.related.len(),
             "query_log_id": query_log_id,
         }),
         items,
     );
     result.details = details;
+    result.related = associations.related;
     crate::output_emit::emit_result(result)
 }
 

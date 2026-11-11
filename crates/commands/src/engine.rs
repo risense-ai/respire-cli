@@ -5524,12 +5524,19 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
             let (session, owner) = build_session_with_owner()?;
             let owner = owner.unwrap_or_else(|| "local".to_owned());
             let store = build_local()?;
-            // New-user / no-BGE path: BM25 candidates re-ranked by the local learner.
-            if lexical || crate::learn::lexical_default() {
-                return crate::learn::run_lexical(&store, &query, limit, project.as_deref(), r#type.as_deref(), titles);
-            }
             let review = respire_app::review::ReviewService::new(&session, &store, &owner)?;
             let source = review.recall_source()?;
+            // Metadata/evidence and render options retain the existing authoritative path.
+            if (lexical || crate::learn::lexical_default())
+                && !source.has_metadata()
+                && render_budget.is_none()
+                && !trace
+                && mode.is_none()
+                && (intent == "fact"
+                    || (intent == "auto" && (r#type.is_some() || !skill::howto_intent(&query))))
+            {
+                return crate::learn::run_lexical(&store, &source, &owner, &query, limit, project.as_deref(), r#type.as_deref(), titles, no_related);
+            }
             let metadata_aware = brief || source.has_metadata();
             // Dynamic blocks from new records need complete qualified variants.
             // Legacy-only title budgets retain their original WP3a bytes.

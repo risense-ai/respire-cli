@@ -564,7 +564,6 @@ mod tests {
                     autosync: None,
                     cure_auto: None,
                     rpc_parallelism: None,
-            retrieval: None,
                 },
             })
         };

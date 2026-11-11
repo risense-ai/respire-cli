@@ -18,30 +18,63 @@ pub fn read_memory_revision(path: &Path) -> Result<String> {
     read_revision(&connection)
 }
 
-/// P0 gate (2026-11-11): the authoritative revision-trigger set. Judged by name
-/// membership only — total-count checks proved unreliable (12/15/17 variants).
-pub const REVISION_TRIGGERS: [&str; 3] = [
+/// Required invalidation triggers, including encrypted metadata changes.
+pub const REVISION_TRIGGERS: [&str; 4] = [
     "memory_revision_insert",
     "memory_revision_update",
     "memory_revision_delete",
+    "memory_metadata_revision_update",
 ];
 
-/// Read-only: which of the three revision triggers are absent? Empty vec = complete.
+/// Missing or outdated invalidation triggers disable cache reuse.
 pub fn revision_triggers_missing(connection: &Connection) -> Result<Vec<String>> {
     let mut missing = Vec::new();
     for name in REVISION_TRIGGERS {
-        let found: Option<i64> = connection
+        let stored: Option<String> = connection
             .query_row(
-                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1",
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name='memories'",
                 [name],
                 |row| row.get(0),
             )
             .optional()?;
-        if found.is_none() {
+        let valid = if name == "memory_metadata_revision_update" {
+            let expected = "CREATE TRIGGER memory_metadata_revision_update AFTER UPDATE ON memories
+                WHEN OLD.memory_contract IS NOT NEW.memory_contract OR OLD.summary IS NOT NEW.summary
+                  OR OLD.source_refs IS NOT NEW.source_refs OR OLD.valid_until IS NOT NEW.valid_until
+                  OR OLD.review_at IS NOT NEW.review_at OR OLD.artifact IS NOT NEW.artifact
+                  OR OLD.verification IS NOT NEW.verification
+                BEGIN UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'; END";
+            stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(expected))
+        } else {
+            let expected = if name == "memory_revision_update" {
+                expected_update_sql(connection)?
+            } else {
+                trigger_sql(include_str!("revision_schema.sql"), name)?
+            };
+            stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(&expected))
+        };
+        if !valid {
             missing.push(name.to_owned());
         }
     }
     Ok(missing)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.lines()
+        .map(|line| line.split("--").next().unwrap_or_default())
+        .collect::<String>()
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != ';')
+        .collect::<String>()
+        .replace("IFNOTEXISTS", "")
+}
+
+fn trigger_sql(schema: &str, name: &str) -> Result<String> {
+    let start = format!("CREATE TRIGGER IF NOT EXISTS {name} ");
+    let (_, tail) = schema.split_once(&start).context("missing revision trigger definition")?;
+    let (body, _) = tail.split_once("END;").context("incomplete revision trigger definition")?;
+    Ok(format!("{start}{body}END;"))
 }
 
 /// Legacy content columns that some upgraded libraries still carry. The current
@@ -49,44 +82,27 @@ pub fn revision_triggers_missing(connection: &Connection) -> Result<Vec<String>>
 /// the library actually has.
 pub const LEGACY_CONTENT_COLUMNS: [&str; 2] = ["when_to_use", "superseded_by"];
 
-/// True when every legacy column exists on `memories`.
-fn has_legacy_content_columns(connection: &Connection) -> Result<bool> {
-    let found: i64 = connection.query_row(
-        "SELECT count(*) FROM pragma_table_info('memories') WHERE name IN ('when_to_use','superseded_by')",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(found as usize == LEGACY_CONTENT_COLUMNS.len())
-}
-
-/// The `memory_revision_update` definition this library should have.
-fn expected_update_sql(extended: bool) -> &'static str {
-    if extended {
-        include_str!("revision_update_extended.sql")
-    } else {
-        include_str!("revision_schema.sql")
+/// Include each legacy column independently; partially upgraded libraries exist.
+fn expected_update_sql(connection: &Connection) -> Result<String> {
+    let mut sql = trigger_sql(include_str!("revision_schema.sql"), "memory_revision_update")?;
+    for column in LEGACY_CONTENT_COLUMNS {
+        let found: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if found {
+            sql = sql.replace("\nBEGIN", &format!("\n  OR OLD.{column} IS NOT NEW.{column}\nBEGIN"));
+        }
     }
+    Ok(sql)
 }
 
-/// Idempotent trigger refresh, run inside the migration transaction on every open.
-///
-/// `CREATE TRIGGER IF NOT EXISTS` never rewrites an existing trigger, so editing
-/// a definition alone leaves upgraded libraries on the old WHEN list. The shape
-/// is chosen by column presence, never by guessing:
-///
-/// * library has `when_to_use` and `superseded_by` (upgraded from an older
-///   release) → the extended definition, so content in those columns advances
-///   the token;
-/// * library does not have them (every library the current schema creates) → the
-///   base definition, unchanged from today. Naming a missing column would make
-///   `CREATE TRIGGER` fail and break the library on first open, so the base
-///   shape must stay the default.
-///
-/// Only `memory_revision_update` is ever replaced; the insert/delete triggers,
-/// the metadata trigger and the sync-head triggers are untouched. Safe to run
-/// any number of times: once the stored definition matches, this is a no-op.
+/// Repair the update trigger inside the migration transaction, then invalidate
+/// old tokens. Compare the complete definition and track each legacy column
+/// independently; a name or a matching comment does not prove invalidation works.
 pub fn refresh_update_trigger(connection: &Connection) -> Result<bool> {
-    let extended = has_legacy_content_columns(connection)?;
+    let expected = expected_update_sql(connection)?;
     let stored: Option<String> = connection
         .query_row(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
@@ -94,20 +110,16 @@ pub fn refresh_update_trigger(connection: &Connection) -> Result<bool> {
             |row| row.get(0),
         )
         .optional()?;
-    let matches = match stored.as_deref() {
-        None => false,
-        Some(sql) => {
-            LEGACY_CONTENT_COLUMNS
-                .iter()
-                .all(|column| sql.contains(column))
-                == extended
-        }
-    };
-    if matches {
+    if stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(&expected)) {
         return Ok(false);
     }
     connection.execute_batch("DROP TRIGGER IF EXISTS memory_revision_update;")?;
-    connection.execute_batch(expected_update_sql(extended))?;
+    connection.execute_batch(&expected)?;
+    // A repaired trigger cannot vouch for the previously issued content token.
+    connection.execute(
+        "UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'",
+        [],
+    )?;
     Ok(true)
 }
 

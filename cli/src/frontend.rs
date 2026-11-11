@@ -156,14 +156,12 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
             autosync,
             cure_auto,
             rpc_parallelism,
-            retrieval,
         }) => Some(run_config(
             data_dir.as_deref(),
             addr.as_deref(),
             *autosync,
             *cure_auto,
             *rpc_parallelism,
-            retrieval.as_deref(),
         )),
 
         Some(Command::Secret { reveal }) => Some(run_secret(*reveal)),
@@ -827,9 +825,7 @@ fn run_config(
     autosync: Option<bool>,
     cure_auto: Option<bool>,
     rpc_parallelism: Option<u32>,
-    retrieval: Option<&str>,
 ) -> Result<()> {
-    let _ = retrieval; // TODO(gap): set_retrieval wiring pending service-path confirmation
     emit_result(autostart::run_config_control(
         data_dir,
         addr,
@@ -1785,7 +1781,6 @@ fn run(args: Cli) -> Result<()> {
             autosync,
             cure_auto,
             rpc_parallelism,
-            retrieval,
         }) => {
             data_dir.is_some()
                 || addr.is_some()

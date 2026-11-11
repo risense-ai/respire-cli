@@ -18,10 +18,8 @@
 //! * scope — `(project, kind)`. `df`/`avg_len` are statistics of the *filtered*
 //!   document set, so an index built for one scope must never answer another.
 //!
-//! `library_identity` is deliberately not a separate key item: a replaced or
-//! copied library carries a fresh random 32-hex `memory_revision_v1`, so the
-//! token already forces a mismatch, while a rewritten-but-equal library stays
-//! safe to reuse.
+//! Library path and authenticated owner also participate in the key. A copied
+//! library can retain the original content token; tokens are not library identity.
 //!
 //! Failure policy (design §3 兜底): a failed token probe or a missing P0
 //! revision trigger never fails the recall and never reuses a stale index —
@@ -55,6 +53,8 @@ pub const CACHE_MARKER: &str = "lexical-cache.off";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheKey {
     pub token: String,
+    pub library: String,
+    pub owner: String,
     pub format: u32,
     pub tokenizer: &'static str,
     pub scope: String,
@@ -64,6 +64,8 @@ impl CacheKey {
     pub fn new(token: String, project: Option<&str>, kind: Option<&str>) -> Self {
         Self {
             token,
+            library: String::new(),
+            owner: String::new(),
             format: INDEX_FORMAT_VERSION,
             tokenizer: TOKENIZER_ID,
             scope: scope_key(project, kind),
@@ -80,7 +82,9 @@ impl CacheKey {
 }
 
 pub fn scope_key(project: Option<&str>, kind: Option<&str>) -> String {
-    format!("project={};kind={}", project.unwrap_or(""), kind.unwrap_or(""))
+    let project = project.unwrap_or("");
+    let kind = kind.unwrap_or("");
+    format!("project={}:{};kind={}:{}", project.len(), project, kind.len(), kind)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +105,7 @@ struct Entry {
 
 static CACHE: OnceLock<Mutex<Option<Entry>>> = OnceLock::new();
 static BUILDS: AtomicUsize = AtomicUsize::new(0);
+static EPOCH: AtomicUsize = AtomicUsize::new(0);
 static GATE_WARNED: AtomicBool = AtomicBool::new(false);
 
 fn cache() -> &'static Mutex<Option<Entry>> {
@@ -118,7 +123,7 @@ pub fn disabled_by_env() -> bool {
 }
 
 /// Key for this request, or `None` when the cache must be bypassed.
-fn key_for(store: &LocalStore, project: Option<&str>, kind: Option<&str>, bypass: bool) -> Option<CacheKey> {
+fn key_for(store: &LocalStore, project: Option<&str>, kind: Option<&str>, owner: &str, revision: Option<&str>, bypass: bool) -> Option<CacheKey> {
     if bypass {
         return None;
     }
@@ -137,7 +142,13 @@ fn key_for(store: &LocalStore, project: Option<&str>, kind: Option<&str>, bypass
         Err(_) => return None,
     }
     match store.memory_revision() {
-        Ok(token) => Some(CacheKey::new(token, project, kind)),
+        Ok(token) if revision.is_none_or(|expected| expected == token) => {
+            let mut key = CacheKey::new(token, project, kind);
+            key.library = store.library_identity().ok()?.to_owned();
+            key.owner = owner.to_owned();
+            Some(key)
+        }
+        Ok(_) => None,
         Err(_) => None,
     }
 }
@@ -147,12 +158,14 @@ pub fn index_for<F>(
     store: &LocalStore,
     project: Option<&str>,
     kind: Option<&str>,
+    owner: &str,
+    revision: Option<&str>,
     build: F,
 ) -> Result<(Arc<Bm25Index>, CacheState)>
 where
     F: FnOnce() -> Result<Bm25Index>,
 {
-    index_for_with(store, project, kind, disabled_by_env(), build)
+    index_for_with(store, project, kind, owner, revision, disabled_by_env(), build)
 }
 
 /// Same decision with the environment switch passed explicitly, so tests can
@@ -161,13 +174,19 @@ pub(crate) fn index_for_with<F>(
     store: &LocalStore,
     project: Option<&str>,
     kind: Option<&str>,
+    owner: &str,
+    revision: Option<&str>,
     bypass: bool,
     build: F,
 ) -> Result<(Arc<Bm25Index>, CacheState)>
 where
     F: FnOnce() -> Result<Bm25Index>,
 {
-    let key = key_for(store, project, kind, bypass);
+    let epoch = EPOCH.load(Ordering::Acquire);
+    let key = key_for(store, project, kind, owner, revision, bypass);
+    if key.is_none() {
+        clear();
+    }
     if let Some(key) = key.as_ref() {
         if let Ok(guard) = cache().lock() {
             if let Some(entry) = guard.as_ref() {
@@ -179,25 +198,30 @@ where
     }
     let index = Arc::new(build()?);
     BUILDS.fetch_add(1, Ordering::Relaxed);
-    let state = if key.is_some() { CacheState::Miss } else { CacheState::Bypass };
     if let Some(key) = key {
-        if let Ok(mut guard) = cache().lock() {
-            *guard = Some(Entry { key, index: index.clone(), bytes: index.approx_bytes() });
+        // Publish only the snapshot we built; clear() also fences in-flight builds.
+        if key_for(store, project, kind, owner, revision, bypass).as_ref() == Some(&key) {
+            if let Ok(mut guard) = cache().lock() {
+                if EPOCH.load(Ordering::Acquire) == epoch {
+                    *guard = Some(Entry { key, index: index.clone(), bytes: index.approx_bytes() });
+                    return Ok((index, CacheState::Miss));
+                }
+            }
         }
     }
-    Ok((index, state))
+    Ok((index, CacheState::Bypass))
 }
 
 /// Load (or reuse) the index for one `(project, kind)` scope.
 ///
-/// This is the whole fast path: on a hit the store is never scanned for rows,
-/// and no token is re-tokenized.
+/// Raw-store diagnostic helper. Runtime recall must use `index_for` with an
+/// authenticated owner, the authorized snapshot revision and authorized rows.
 pub fn load(
     store: &LocalStore,
     project: Option<&str>,
     kind: Option<&str>,
 ) -> Result<(Arc<Bm25Index>, CacheState)> {
-    index_for(store, project, kind, || {
+    index_for(store, project, kind, "", None, || {
         let docs: Vec<crate::lexical::RowDoc> = crate::lexical::docs_from_store(store)?
             .into_iter()
             .filter(|doc| project.is_none_or(|p| p.is_empty() || doc.project == p))
@@ -210,6 +234,7 @@ pub fn load(
 /// Drop the cached index (tests and diagnostics).
 pub fn clear() {
     if let Ok(mut guard) = cache().lock() {
+        EPOCH.fetch_add(1, Ordering::AcqRel);
         *guard = None;
     }
 }
@@ -248,9 +273,6 @@ pub fn cached_key() -> Option<String> {
 /// Environment switch for both prewarm phases; `off` (or `0`) disables them.
 pub const PREWARM_ENV: &str = "RSRS_LEXICAL_PREWARM";
 
-/// How often the background thread re-reads the content token.
-pub const PREWARM_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
-
 /// True when the operator turned prewarm off.
 pub fn prewarm_disabled() -> bool {
     std::env::var(PREWARM_ENV).is_ok_and(|value| {
@@ -263,7 +285,7 @@ pub fn prewarm_disabled() -> bool {
 ///
 /// Returns the cache state the build ended in, or `None` when prewarm is
 /// disabled, the P0 trigger gate rejects the library, or the library cannot be
-/// opened. Never panics; a failure is logged and the next tick retries.
+/// opened. This raw-store diagnostic helper is not connected to runtime startup.
 pub fn prewarm_once(database: &std::path::Path) -> Option<CacheState> {
     if prewarm_disabled() {
         return None;
@@ -281,56 +303,6 @@ pub fn prewarm_once(database: &std::path::Path) -> Option<CacheState> {
     }
     match load(&store, None, None) {
         Ok((_, state)) => Some(state),
-        Err(_) => None,
-    }
-}
-
-/// Start the background prewarm thread: one build at startup, then one build per
-/// observed content-token change.
-///
-/// The thread owns no borrow of the request store; it reopens the library
-/// read-only per build, which keeps every RPC path untouched. A panic inside the
-/// loop is caught so it can never reach the RPC main flow.
-pub fn spawn_prewarm(database: std::path::PathBuf) {
-    if prewarm_disabled() {
-        return;
-    }
-    let spawned = std::thread::Builder::new()
-        .name("respire-lexical-prewarm".into())
-        .stack_size(4 * 1024 * 1024)
-        .spawn(move || {
-            let first = std::panic::catch_unwind(|| prewarm_once(&database));
-            let mut last = if matches!(first, Ok(Some(_))) {
-                read_token(&database)
-            } else {
-                None
-            };
-            loop {
-                std::thread::sleep(PREWARM_PERIOD);
-                let Ok(observed) = std::panic::catch_unwind(|| read_token(&database)) else {
-                    continue;
-                };
-                match observed {
-                    Some(token) if Some(&token) != last.as_ref() => {
-                        let warmed = std::panic::catch_unwind(|| prewarm_once(&database));
-                        if matches!(warmed, Ok(Some(_))) {
-                            last = Some(token);
-                        }
-                    }
-                    Some(token) => last = Some(token),
-                    None => {}
-                }
-            }
-        });
-    if spawned.is_err() {
-        eprintln!("warning: lexical prewarm thread could not start");
-    }
-}
-
-/// Read-only content token probe; `None` when the library is unreadable.
-fn read_token(database: &std::path::Path) -> Option<String> {
-    match respire_app::transport::local::read_memory_revision(database) {
-        Ok(token) => Some(token),
         Err(_) => None,
     }
 }

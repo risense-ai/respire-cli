@@ -32,7 +32,6 @@ pub fn is_context_query(args: &[String]) -> bool {
             autosync: None,
             cure_auto: None,
             rpc_parallelism: None,
-            retrieval: None,
         })
         | Some(Command::AgentConfig { set: None })
         | Some(Command::Session {
