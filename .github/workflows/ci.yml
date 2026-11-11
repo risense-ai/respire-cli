@@ -700,7 +700,7 @@ jobs:
         if: matrix.group == 'core'
         with:
           repository: risense-ai/respire-client2
-          ref: 62eebaf43333978afd5b6b7a6fc7a45665189c6c
+          ref: be682108c555a3e5a788ad74217e088bcb25170b
           path: .client2-source
           persist-credentials: false
       - uses: actions/setup-go@v5
