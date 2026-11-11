@@ -26,6 +26,48 @@ if [ "$(uname -m)" = x86_64 ] &&
   if ! grep -Fxq "$apt_mirror" /etc/apt/apt-mirrors.txt; then
     printf '%s\n' "$apt_mirror" | sudo tee -a /etc/apt/apt-mirrors.txt >/dev/null
   fi
+elif [ "$(uname -m)" = aarch64 ] &&
+     [ "$(dpkg --print-architecture)" = arm64 ] &&
+     (. /etc/os-release; [ "${VERSION_CODENAME:-}" = noble ]) &&
+     [ -f /etc/apt/sources.list.d/ubuntu.sources ] &&
+     [ -s /usr/share/keyrings/ubuntu-archive-keyring.gpg ]; then
+  # ARM64 uses direct ports sources, not the amd64 mirror list.
+  ports_updates=$(awk '
+    function finish() {
+      if (uri && key && !disabled && !unsupported && uris == 1 && keys == 1 && suites == 1)
+        print uri "s|http://ports[.]ubuntu[.]com/ubuntu-ports/*|https://mirror.us.leaseweb.net/ubuntu-ports/|"
+      uri = key = disabled = unsupported = uris = keys = suites = 0
+      field = ""
+    }
+    /^[[:space:]]*$/ { finish(); next }
+    /^[^#[:space:]][^:]*:/ {
+      field = tolower(substr($0, 1, index($0, ":") - 1))
+      if (field == "uris") uris++
+      if (field == "signed-by") keys++
+      if (field == "suites") suites++
+    }
+    /^[[:space:]]/ {
+      if (field == "uris" || field == "signed-by" || field == "enabled" || field == "suites") unsupported = 1
+    }
+    /^URIs:/ {
+      if ($0 ~ /^URIs:[[:space:]]+http:\/\/ports\.ubuntu\.com\/ubuntu-ports\/?[[:space:]]*$/) uri = NR
+    }
+    /^Signed-By:/ {
+      if ($0 ~ /^Signed-By:[[:space:]]+\/usr\/share\/keyrings\/ubuntu-archive-keyring\.gpg[[:space:]]*$/) key = 1
+    }
+    /^Suites:/ {
+      if ($0 !~ /^Suites:[[:space:]]+noble(-updates|-backports|-security)?([[:space:]]+noble(-updates|-backports|-security)?)*[[:space:]]*$/) unsupported = 1
+    }
+    tolower($0) ~ /^enabled:/ {
+      if (tolower($0) !~ /^enabled:[[:space:]]+yes[[:space:]]*$/) disabled = 1
+    }
+    END { finish() }
+  ' /etc/apt/sources.list.d/ubuntu.sources)
+  if [ -n "$ports_updates" ]; then
+    printf '%s\n' "$ports_updates" | sudo sed -i -f - /etc/apt/sources.list.d/ubuntu.sources
+  else
+    printf '%s\n' 'ARM64 ports fallback skipped: no matching active Ubuntu source stanza' >&2
+  fi
 fi
 
 sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 "$@"
