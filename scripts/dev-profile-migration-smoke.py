@@ -486,6 +486,8 @@ class Smoke(support.Smoke):
             current = self.seed(env, home / ".rsrs", "rsrs", name + "-existing-rsrs")
             # A current profile must keep its existing credentials and URL untouched.
             current_env = dict(env, RSRS_DATA_DIR=str(current["source"]))
+            # This retained profile owns its own installed Runtime, not the seed environment's override.
+            current_env.pop("RSRS_RUNTIME_BIN", None)
             current_session = self.session(current_env)
         default = self.default_env(env)
         support.install_published_runtime(self.args.binary, default)
@@ -731,9 +733,12 @@ class Smoke(support.Smoke):
         listed = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate"],
             env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
         listing = json.loads(listed.stdout)
+        link_errors = ("symbolic link", "discovery path contains a symlink",
+                       "discovery path contains a reparse point")
         if listed.returncode != 0:
-            require(listing.get("status") == "fail" and any("symbolic link" in error
-                for error in listing.get("errors", [])), "symlink_listing_failed_for_unrelated_reason")
+            require(listing.get("status") == "fail" and any(term in error
+                for error in listing.get("errors", []) for term in link_errors),
+                "symlink_listing_failed_for_unrelated_reason")
         else:
             require(listing.get("status") == "ok", "symlink_listing_status_invalid")
             for row in listing["details"]["profiles"]:
@@ -742,9 +747,13 @@ class Smoke(support.Smoke):
                     env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
                 rejection = json.loads(result.stdout)
                 require(result.returncode != 0 and rejection.get("status") == "fail"
-                    and any("symbolic link" in error for error in rejection.get("errors", [])),
+                    and any(term in error for error in rejection.get("errors", []) for term in link_errors),
                     "symlink_root_migration_not_rejected")
-        require(not (link_home / ".rsrs").exists(), "symlink_root_migration_created_destination")
+        # A host rejection may write its fixed error log, but no library or Runtime state.
+        destination = link_home / ".rsrs"
+        require(not destination.exists() or all(not path.is_symlink()
+                and str(path.relative_to(destination)).replace("\\", "/") in ("logs", "logs/cli.log")
+                for path in destination.rglob("*")), "symlink_root_migration_created_destination")
         require(digest(fixture["source"] / "onememory.db") == source_database
             and digest(fixture["source"] / "session.json") == source_session,
             "rejected_symlink_source_changed")
