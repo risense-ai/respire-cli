@@ -132,7 +132,7 @@ jobs:
           bash scripts/verify-linux-arm64-elf.sh "$SDK_TARGET" "$exe"
           "$exe" --json runtime install
           "$exe" --direct model install-m3 --json
-          "$exe" --direct model probe --json
+          "$exe" --direct model probe --model m3 --json
           CLI_FIXTURE_BINARY="$exe" node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
