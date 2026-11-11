@@ -140,7 +140,7 @@ jobs:
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
           import {appendFileSync, readFileSync, realpathSync, statSync} from 'node:fs';
-          import {join} from 'node:path';
+          import {dirname, join} from 'node:path';
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
@@ -158,6 +158,14 @@ jobs:
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
+          const coreBytes = readFileSync(join(dirname(runtime), 'core-runtime.json'));
+          assert.equal(createHash('sha256').update(coreBytes).digest('hex'),
+            metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
+          const core = JSON.parse(coreBytes);
+          const sdk = JSON.parse(readFileSync('sdk/core-sdk.lock.json', 'utf8')).targets[process.env.SDK_TARGET];
+          assert.ok(sdk, 'The native target must have a pinned SDK identity');
+          assert.equal(core.target, process.env.SDK_TARGET);
+          assert.equal(core.sdk_version, sdk.sdk_version);
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           const result = spawnSync('bash', ['scripts/probe-native-arm64-alpine.sh', process.env.RSRS_RUNTIME_TRIPLE,
             process.env.CLI_FIXTURE_BINARY, process.env.RSRS_M3_DIR, join(process.env.RUNNER_TEMP, 'arm-alpine-probe'),
