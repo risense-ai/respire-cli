@@ -427,8 +427,11 @@ jobs:
       - name: Prepare private business credential fixture
         if: env.CANDIDATE_MODE == 'true' && matrix.group == 'runtime_smoke'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus gnome-keyring
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/|d' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Validate candidate evidence inputs
@@ -896,8 +899,11 @@ jobs:
       - name: Prepare private business credential fixture
         if: matrix.group == 'runtime_smoke'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y dbus gnome-keyring
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i '\|^[[:space:]]*https\?://azure\.archive\.ubuntu\.com/|d' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y dbus gnome-keyring
           python -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0 cryptography==46.0.3
           python -B scripts/dev-secret-service-keyring-selftest.py --self-test
       - name: Resolve exact Runtime business test source
