@@ -1172,15 +1172,46 @@ function Read-OfflineFieldValue($Element, [string]$ExpectedId, $Pattern, $Identi
     return $value
 }
 function Fill-OfflineField([string]$Name, [string]$Text) {
-    $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Name) + '$')
     $held = [Collections.Generic.List[object]]::new(); $identities = @{}
+    $acquisitionClock = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $null = Assert-Target $true
-        foreach ($id in $ownedIds) {
-            $process = Get-Process -Id $id -ErrorAction Stop; $held.Add($process)
-            Assert-DocumentProcessHandle $process
-            $identities[[int]$id] = @{process=$process;birth=$process.StartTime.ToUniversalTime().Ticks;session=$process.SessionId;image=$process.Path}
+        for ($attempt=0; $attempt -lt 2; $attempt++) {
+            $remaining = 10 - $acquisitionClock.Elapsed.TotalSeconds
+            if ($remaining -le 0) { throw 'Original field identity acquisition exceeded its selector budget' }
+            $element = Find-OfflineControl 'ControlType.Edit' ('^' + [regex]::Escape($Name) + '$') $remaining
+            $null = Assert-Target $true
+            $exitedCandidate = $false
+            foreach ($id in $ownedIds) {
+                try { $process = Get-Process -Id $id -ErrorAction Stop } catch {
+                    # A vanished snapshot candidate permits one fresh selector before input.
+                    # Identity/permission failures and the bound actors never permit resampling.
+                    if ($_.FullyQualifiedErrorId -cne 'NoProcessFoundForGivenId,Microsoft.PowerShell.Commands.GetProcessCommand' -or
+                        $_.TargetObject -isnot [int] -or $_.TargetObject -ne $id -or
+                        $id -eq $binding.desktop_pid -or $id -eq $binding.browser_pid -or
+                        $attempt -ne 0 -or $acquisitionClock.Elapsed.TotalSeconds -ge 10) { throw }
+                    $browser = @($candidateProcessSnapshot | Where-Object { $_.ProcessId -eq $binding.browser_pid })
+                    if ($browser.Count -ne 1) { throw }
+                    $cursor = [int]$id
+                    for ($depth=0; $depth -lt 32 -and $cursor -ne $binding.browser_pid; $depth++) {
+                        $candidate = @($candidateProcessSnapshot | Where-Object { $_.ProcessId -eq $cursor })
+                        if ($candidate.Count -ne 1 -or $candidate[0].SessionId -ne $binding.session_id -or
+                            -not [string]::Equals($candidate[0].ExecutablePath,$browser[0].ExecutablePath,[StringComparison]::OrdinalIgnoreCase)) { throw }
+                        $cursor = [int]$candidate[0].ParentProcessId
+                    }
+                    if ($cursor -ne $binding.browser_pid -or
+                        @(Get-CimInstance Win32_Process -Filter "ProcessId=$id").Count -ne 0) { throw }
+                    $exitedCandidate = $true
+                    break
+                }
+                $held.Add($process)
+                Assert-DocumentProcessHandle $process
+                $identities[[int]$id] = @{process=$process;birth=$process.StartTime.ToUniversalTime().Ticks;session=$process.SessionId;image=$process.Path}
+            }
+            if (-not $exitedCandidate) { break }
+            foreach ($process in $held) { $process.Dispose() }
+            $held.Clear(); $identities.Clear()
         }
+        if ($acquisitionClock.Elapsed.TotalSeconds -ge 10) { throw 'Original field identity acquisition exceeded its selector budget' }
         $originalId = Assert-OfflineFieldIdentity $element '' $identities
         $pattern = $element.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
         $initialValue = $pattern.Current.Value
@@ -1269,9 +1300,10 @@ function Read-OfflineRpc([string[]]$Arguments) {
     Assert-OfflineRuntime
     return $reply.envelope
 }
-function Wait-OfflinePreferences([string]$Field, $Expected) {
+function Wait-OfflinePreferences([string]$Field, $Expected, $Observation = $null) {
     for ($attempt=0; $attempt -lt 50; $attempt++) {
         $preferences = Get-Content -Raw -LiteralPath $binding.preferences_path | ConvertFrom-Json
+        if ($null -ne $Observation) { $Observation.actual_pref = $preferences.$Field }
         if ($preferences.$Field -eq $Expected) { return }
         Pause-Probe
     }
@@ -1281,6 +1313,29 @@ function Wait-OfflinePreferences([string]$Field, $Expected) {
         sync_choice=$(if ($preferences.onboardingSyncChoice -in @('offline','cloud','')) { $preferences.onboardingSyncChoice } else { 'other' })
     }
     throw "Original preferences did not persist the visible action: $Field"
+}
+function Set-OfflineAutoRuntime([bool]$Enabled) {
+    $phase = if ($Enabled) { 'enable' } else { 'disable' }
+    $report.offline.action_stage = 'settings_' + $phase
+    $preference = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
+    $parts = @($preference.GetRuntimeId())
+    if ($parts.Count -eq 0 -or @($parts | Where-Object { $_ -isnot [int] }).Count -gt 0) { throw 'AutoRuntime checkbox identity unavailable' }
+    $expectedId = $parts -join '.'
+    $toggle = $preference.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+    $before = $toggle.Current.ToggleState
+    if ($before -isnot [Windows.Automation.ToggleState] -or $before -eq [Windows.Automation.ToggleState]::Indeterminate) { throw 'AutoRuntime checkbox state unknown' }
+    if ($Enabled -and $before -ne [Windows.Automation.ToggleState]::Off) { throw 'AutoRuntime was not initially disabled' }
+    $observation = @{before=$before.ToString(); after='not_observed'; expected_pref=$Enabled; actual_pref=$null}
+    $report.offline.settings_inputs[$phase] = $observation
+    Focus-OfflineControl $preference
+    Send-OfflineKey 32 -ExpectedRuntimeId $expectedId
+    $null = Assert-Target $true
+    if (($preference.GetRuntimeId() -join '.') -cne $expectedId) { throw 'AutoRuntime checkbox identity changed after Space' }
+    $after = $toggle.Current.ToggleState
+    if ($after -isnot [Windows.Automation.ToggleState] -or $after -eq [Windows.Automation.ToggleState]::Indeterminate) { throw 'AutoRuntime checkbox state unknown after Space' }
+    $observation.after = $after.ToString()
+    $report.offline.action_stage = 'settings_' + $phase + '_persist'
+    Wait-OfflinePreferences 'autoRuntime' $Enabled $observation
 }
 function Create-OfflineMemory([string]$Title, [string]$Content, [bool]$Diary) {
     $report.offline.action_stage = $(if ($Diary) { 'diary_editor_open' } else { 'important_editor_open' })
@@ -1446,19 +1501,9 @@ function Invoke-OfflineGuiAcceptance {
     Close-OfflineDiaryReader $days[0].title
     $report.offline.action_stage = 'settings_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bbe\u7f6e\u0024'))
-    $report.offline.action_stage = 'settings_locate'
-    $preference = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
-    $report.offline.action_stage = 'settings_initial_state'
-    $toggle = $preference.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
-    if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) { throw 'AutoRuntime was not initially disabled' }
-    $report.offline.action_stage = 'settings_enable'
-    Focus-OfflineControl $preference; Send-OfflineKey 32
-    $report.offline.action_stage = 'settings_enable_persist'
-    Wait-OfflinePreferences 'autoRuntime' $true
-    $report.offline.action_stage = 'settings_disable'
-    Focus-OfflineControl (Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('\u005e\u81ea\u52a8\u8fde\u63a5\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))); Send-OfflineKey 32
-    $report.offline.action_stage = 'settings_disable_persist'
-    Wait-OfflinePreferences 'autoRuntime' $false
+    $report.offline.settings_inputs = @{}
+    Set-OfflineAutoRuntime $true
+    Set-OfflineAutoRuntime $false
     $report.offline.settings_persisted = $true
     $report.offline.action_stage = 'runtime_pre_stop_check'
     Assert-OfflineRuntime
