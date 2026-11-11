@@ -537,6 +537,10 @@ fn rpc_timeout(method: &str, args: &[String], test_timeout: Option<Duration>) ->
         .is_some_and(|c| matches!(*c, "reembed" | "sync" | "import"))
     {
         Duration::from_secs(30 * 60)
+    } else if command.first().is_some_and(|c| *c == "defrag") {
+        // Core's single-call budget is 365s; wait exactly that long before
+        // outcome-unknown reconciliation instead of the generic 120s HTTP cap.
+        Duration::from_secs(365)
     } else {
         HTTP_TIMEOUT
     }

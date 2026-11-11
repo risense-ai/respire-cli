@@ -2,8 +2,14 @@ name: Published performance comparison
 on:
   workflow_dispatch:
     inputs:
+      comparison_mode:
+        description: Candidate-only cold/warm consistency with normal heat updates
+        type: choice
+        default: candidate-only
+        options:
+          - candidate-only
       release_inventory:
-        description: Reviewed JSON for cli/baseline/candidate with version, source_sha, producer_run_id, metadata_sha256 by target, and Runtime sdk_version
+        description: Official published-assets schema 2 JSON (schema/cli/runtime), all seven targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
         type: string
         required: true
       release_inventory_sha256:
@@ -33,6 +39,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
@@ -45,6 +54,7 @@ jobs:
       - name: Compare immutable published binaries on the same runner
         env:
           GH_TOKEN: ${{ github.token }}
+          PERF_COMPARISON_MODE: ${{ inputs.comparison_mode }}
           PERF_RELEASE_INVENTORY: ${{ inputs.release_inventory }}
           PERF_RELEASE_INVENTORY_SHA256: ${{ inputs.release_inventory_sha256 }}
           PERF_TARGET: ${{ matrix.target }}
@@ -56,5 +66,7 @@ jobs:
         with:
           retention-days: 1
           name: performance-${{ matrix.target }}
-          path: ${{ runner.temp }}/comparison/report.json
+          path: |
+            ${{ runner.temp }}/comparison/report.json
+            ${{ runner.temp }}/comparison/published-assets-receipt.json
           if-no-files-found: error

@@ -243,8 +243,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain prior uploads plus the isolated historical draft input cache.
-  assert.equal(uploads, 61, 'preserve publication/source evidence, both Client2 results and the historical draft cache');
+  // Retain prior uploads, the historical draft cache and the published online receipt.
+  assert.equal(uploads, 61, 'preserve current publication/source evidence, both Client2 results, the historical draft cache and the published online receipt');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
@@ -260,12 +260,10 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert(compatibility.replace(/\r\n/g, '\n').includes(launcherRaw),
     'original Client2 raw and exact GUI evidence paths must belong to the same named one-day upload');
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
-  const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
-  const candidateLines = candidate.split(/\r?\n/);
-  assert(candidateLines.includes(`      CANDIDATE_CASE_NAME: ${candidateCase}`));
-  assert(candidateLines.includes(`          name: ${candidateCase}-\${{ github.run_id }}-\${{ github.run_attempt }}`));
-  assert(candidateLines.includes('            --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \\'));
-  assert(candidateLines.includes('          path: ${{ runner.temp }}/${{ env.CANDIDATE_CASE_NAME }}/result.json'));
+  assert.doesNotMatch(candidate, /runtime_candidate_sha:|source-account-regression:|\.account-runtime/);
+  assert.match(candidate, /release_run_id:/);
+  assert.match(candidate, /targeted-native-migration\/migration-platform-gate\.json/);
+  assert.match(candidate, /native-migration-keyring\/keyring-selftest\.json/);
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);

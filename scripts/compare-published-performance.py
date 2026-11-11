@@ -1,5 +1,4 @@
 """Matched published-binary CPU benchmark. CI-owned synthetic vaults only."""
-import base64
 import copy
 import hashlib
 import hmac
@@ -15,7 +14,6 @@ import sqlite3
 import statistics
 from types import SimpleNamespace
 import subprocess
-import tarfile
 import time
 import urllib.request
 
@@ -26,7 +24,7 @@ from native_fixture_process import verify_runtime_health
 ROOT = pathlib.Path(os.environ['PERF_ROOT']).resolve()
 MODEL = pathlib.Path(os.environ['PERF_MODEL']).resolve()
 TARGET = os.environ['PERF_TARGET']
-VERSIONS = {'cli': '2.0.0-dev.3', 'baseline': '2.0.0-dev.8'}
+VERSIONS = {'cli': '2.0.0-dev.3'}
 DOCUMENTS = ['Performance fixture document %03d. ' % i +
              ('Background indexing and foreground memory retrieval. ' * 24) +
              ' Unique topic number %03d.' % i for i in range(64)]
@@ -38,7 +36,7 @@ REPORT = {'versions': VERSIONS, 'target': TARGET, 'engine': 'cpu',
           'settled_scope': 'request plus normal heat persistence, including read-only polling overhead',
           'hardware': {'platform': platform.platform(), 'cpu': platform.processor(),
                        'logical_cpus': psutil.cpu_count(), 'memory_bytes': psutil.virtual_memory().total},
-          'order': ['baseline', 'candidate', 'candidate', 'baseline'],
+          'order': ['candidate'] * 4,
           'cold_scope': 'first recall after model probe; fresh Runtime and lexical cache',
           'response_comparison': 'exact complete envelope except summary.query_log_id; raw retained',
           'results': [], 'complete': False}
@@ -53,75 +51,73 @@ def digest(path):
         return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
-def api(path):
-    return json.loads(subprocess.check_output(['gh', 'api', path], timeout=60))
-
-
-def published(role, inventory):
-    version = VERSIONS[role]
-    expected = inventory[role]
-    repo = 'risense-ai/respire-' + ('cli' if role == 'cli' else 'runtime')
-    source = expected['source_sha']
-    assert len(source) == 40 and all(c in '0123456789abcdef' for c in source)
-    producer = api(f'repos/{repo}/actions/runs/{int(expected["producer_run_id"])}')
-    assert (producer['head_sha'] == source and producer['conclusion'] == 'success'
-            and producer['path'] == '.github/workflows/release.yml'
-            and producer['event'] in ('workflow_dispatch', 'push'))
-    release = api(f'repos/{repo}/releases/tags/v{version}')
-    assert not release['draft'] and release['tag_name'] == 'v' + version
-    assert api(f'repos/{repo}/commits/v{version}')['sha'] == source
-    assets = {asset['name']: asset for asset in release['assets']}
-    folder = ROOT / ('assets-' + role)
-    folder.mkdir()
-    metadata_name = ('cli' if role == 'cli' else 'runtime') + '-build-' + TARGET + '.json'
-    subprocess.run(['gh', 'release', 'download', 'v' + version, '--repo', repo,
-                    '--pattern', metadata_name, '--dir', str(folder)], check=True, timeout=180)
-    metadata_hash = digest(folder / metadata_name)
-    assert metadata_hash == expected['metadata_sha256'][TARGET]
-    assert assets[metadata_name]['digest'] == 'sha256:' + metadata_hash
-    meta = json.loads((folder / metadata_name).read_text(encoding='utf-8'))
-    if role == 'cli':
-        assert meta['version'] == version and meta['target'] == TARGET and meta['git_sha'] == source
-        names = [(meta['binary_file'], meta['binary_sha256']),
-                 (meta['runtime_file'], meta['runtime_sha256'])]
-    else:
-        assert (meta['schema_version'] == 2 and meta['runtime_version'] == version
-                and meta['target_triple'] == TARGET and meta['source_commit'] == source)
-        names = [(meta['archive_file'], meta['archive_sha256'])]
-        lock = api(f'repos/{repo}/contents/sdk/core-sdk.lock.json?ref={source}')
-        lock_bytes = base64.b64decode(lock['content'])
-        crate_lock = api(f'repos/{repo}/contents/crates/core-sdk/core-sdk.lock.json?ref={source}')
-        assert json.loads(lock_bytes) == json.loads(base64.b64decode(crate_lock['content']))
-        sdk = json.loads(lock_bytes)['targets'][TARGET]
-        assert sdk['sdk_version'] == expected['sdk_version']
-        if role == 'baseline':
-            assert sdk['sdk_version'] == '2.0.0-dev.1'
-    for name, expected_hash in names:
-        assert pathlib.PurePosixPath(name).name == name and '\\' not in name
-        subprocess.run(['gh', 'release', 'download', 'v' + version, '--repo', repo,
-                        '--pattern', name, '--dir', str(folder)], check=True, timeout=300)
-        assert digest(folder / name) == expected_hash
-        assert assets[name]['digest'] == 'sha256:' + expected_hash
-    destination = folder / 'unpacked'
-    if role == 'cli':
-        with tarfile.open(folder / meta['runtime_file']) as archive:
-            archive.extractall(destination, filter='data')
-        binary = destination / ('rsrs.exe' if os.name == 'nt' else 'rsrs')
-        binary.write_bytes((folder / meta['binary_file']).read_bytes())
-    else:
-        with tarfile.open(folder / meta['archive_file']) as archive:
-            archive.extractall(destination, filter='data')
-        for item in meta['files']:
-            path = destination / item['path']
-            assert path.resolve().is_relative_to(destination.resolve()) and not path.is_symlink()
-            assert path.stat().st_size == item['size'] and digest(path) == item['sha256']
-        binary = destination / meta['binary_file']
-        assert digest(binary) == meta['binary_sha256']
-    binary.chmod(0o755)
-    proof = {'version': version, 'source_sha': source, 'producer_run_id': producer['id'],
-             'release_id': release['id'], 'metadata_sha256': metadata_hash,
-             'assets': {name: {'id': assets[name]['id'], 'sha256': sha} for name, sha in names}}
-    return binary, meta, folder, proof
+def published(inventory):
+    # Reuse the release consumer's schema, metadata, download and bounded extraction contracts.
+    subprocess.run(['node', '--input-type=module', '-e', r'''
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {mkdirSync, readFileSync, writeFileSync} from 'node:fs';
+import {join, resolve} from 'node:path';
+import {parsePublishedAssets, publishedAssetNames, inspectPublishedRelease,
+  downloadPublishedAsset, validatePublishedMetadata, inspectRuntimeProducer,
+  consumePublishedTarget} from './npm/scripts/extract-artifact.mjs';
+const env = process.env, root = resolve(env.PERF_ROOT), target = env.PERF_TARGET;
+const manifest = JSON.parse(readFileSync('npm/artifact-manifest.json'));
+const spec = parsePublishedAssets(env.PERF_RELEASE_INVENTORY, env.PERF_RELEASE_INVENTORY_SHA256,
+  manifest.targets.map(row => row.triple));
+assert.equal(spec.cli.version, '2.0.0-dev.3');
+assert.match(spec.runtime.version, /^2\.0\.0-dev\.\d+$/);
+assert(Number(spec.runtime.version.split('.').at(-1)) >= 10);
+assert(manifest.targets.some(row => row.triple === target));
+const api = path => JSON.parse(execFileSync('gh', ['api', '--hostname', 'github.com', 'repos/' + path],
+  {encoding:'utf8', timeout:60000, maxBuffer:2 ** 21, windowsHide:true}));
+const destination = join(root, 'published-assets');
+mkdirSync(destination);
+const receipt = {schema:2, manifest_sha256:env.PERF_RELEASE_INVENTORY_SHA256,
+  target, releases:{}, assets:[], complete:false};
+try {
+  for (const kind of ['cli', 'runtime']) {
+    const part = spec[kind];
+    receipt.releases[kind] = {repository:part.repository, version:part.version,
+      ...await inspectPublishedRelease(part, {token:env.GH_TOKEN}),
+      producer_workflow:'.github/workflows/release.yml'};
+    const directory = join(destination, kind); mkdirSync(directory);
+    for (const name of publishedAssetNames(kind, target)) {
+      const asset = part.assets.find(row => row.name === name);
+      await downloadPublishedAsset(part, asset, directory, {token:env.GH_TOKEN});
+      receipt.assets.push({repository:part.repository, ...asset});
+    }
+  }
+  const metadata = kind => JSON.parse(readFileSync(join(destination, kind, kind + '-build-' + target + '.json')));
+  validatePublishedMetadata(spec, target, metadata('cli'), metadata('runtime'));
+  receipt.runtime_producer = await inspectRuntimeProducer(spec.runtime, target, {token:env.GH_TOKEN});
+  const lock = path => JSON.parse(Buffer.from(api(spec.runtime.repository + '/contents/' + path
+    + '?ref=' + spec.runtime.source_sha).content, 'base64'));
+  assert.deepEqual(lock('sdk/core-sdk.lock.json'), lock('crates/core-sdk/core-sdk.lock.json'));
+  const consumed = await consumePublishedTarget(spec, target, destination, join(root, 'verified'),
+    env.PERF_RELEASE_INVENTORY_SHA256, {token:env.GH_TOKEN});
+  receipt.payload_identity = consumed.identity;
+  receipt.complete = true;
+} finally {
+  writeFileSync(join(root, 'published-assets-receipt.json'), JSON.stringify(receipt, null, 2) + '\n');
+}
+'''], check=True, timeout=900)
+    receipt = json.loads((ROOT / 'published-assets-receipt.json').read_text(encoding='utf-8'))
+    assert receipt['complete'] and receipt['manifest_sha256'] == os.environ['PERF_RELEASE_INVENTORY_SHA256']
+    REPORT['published_assets'] = receipt
+    releases = {}
+    for role, kind in (('cli', 'cli'), ('candidate', 'runtime')):
+        part = inventory[kind]
+        folder = ROOT / 'published-assets' / kind
+        meta = json.loads((folder / (kind + '-build-' + TARGET + '.json')).read_text(encoding='utf-8'))
+        binary = (ROOT / 'verified' / ('rsrs.exe' if os.name == 'nt' else 'rsrs') if role == 'cli'
+                  else ROOT / 'verified' / 'runtime' / meta['binary_file'])
+        proof = {**receipt['releases'][kind], 'role': role,
+                 'metadata_sha256': digest(folder / (kind + '-build-' + TARGET + '.json')),
+                 'assets': {asset['name']: {'id': asset['id'], 'sha256': asset['sha256']}
+                            for asset in receipt['assets'] if asset['repository'] == part['repository']}}
+        releases[role] = binary, meta, folder, proof
+    return releases
 
 
 def install_runtime(binary, env, release):
@@ -337,20 +333,24 @@ if __name__ == '__main__':
         raw_inventory = os.environ['PERF_RELEASE_INVENTORY']
         assert hashlib.sha256(raw_inventory.encode()).hexdigest() == os.environ['PERF_RELEASE_INVENTORY_SHA256']
         inventory = json.loads(raw_inventory)
-        assert set(inventory) == {'cli', 'baseline', 'candidate'}
-        candidate = inventory['candidate']['version']
+        comparison_mode = os.environ.get('PERF_COMPARISON_MODE', 'candidate-only')
+        assert comparison_mode == 'candidate-only', 'this release gate permits candidate-only'
+        assert inventory['schema'] == 2 and set(inventory) == {'schema', 'cli', 'runtime'}
+        assert inventory['cli']['version'] == VERSIONS['cli']
+        candidate = inventory['runtime']['version']
         assert candidate.startswith('2.0.0-dev.') and candidate.removeprefix('2.0.0-dev.').isdecimal()
-        assert int(candidate.removeprefix('2.0.0-dev.')) > 8
+        assert int(candidate.removeprefix('2.0.0-dev.')) >= 10
+        REPORT['measurement_scope'] = 'single published candidate; cold/warm observations, no cross-version speedup claim'
+        REPORT['cold_warm_consistency'] = 'same initial snapshot and matching phase/query-sequence position across candidate replays'
+        REPORT['response_comparison'] = 'exact complete envelope at matching query-sequence positions across fresh snapshot replays except summary.query_log_id; raw retained'
+        REPORT['comparison_mode'] = comparison_mode
         VERSIONS['candidate'] = candidate
-        assert all(inventory[role]['version'] == version for role, version in VERSIONS.items())
         REPORT['release_inventory_sha256'] = os.environ['PERF_RELEASE_INVENTORY_SHA256']
-        releases = {role: published(role, inventory) for role in VERSIONS}
-        for role, release in releases.items():
-            release[3]['role'] = role
+        releases = published(inventory)
         REPORT['provenance'] = {role: release[3] for role, release in releases.items()}
         binary = releases['cli'][0]
         prepare_model()
-        env, port = environment(ROOT / 'fixture', binary, releases['baseline'])
+        env, port = environment(ROOT / 'fixture', binary, releases['candidate'])
         fixture = ROOT / 'entries.json'
         # Fixed old dates avoid wall-clock decay drift; no expiry or asserted verification.
         fixture.write_text(json.dumps([{'title': 'document-%03d' % i, 'content': document,
@@ -383,7 +383,7 @@ if __name__ == '__main__':
                 for index, (left, right) in enumerate(zip(reference, run['requests'], strict=True)):
                     assert normalized(left['response']) == normalized(right['response']), (mode, run['replay'], index, 'complete response changed')
                     assert left['heat_after'] == right['heat_after'], (mode, index, 'heat replay changed')
-            groups = {role: [run for run in runs if run['role'] == role] for role in ('baseline', 'candidate')}
+            groups = {role: [run for run in runs if run['role'] == role] for role in dict.fromkeys(REPORT['order'])}
             cold = {role: statistics.median(run['cold'] for run in group) for role, group in groups.items()}
             warm = {role: statistics.median(run['warm']['p50_seconds'] for run in group) for role, group in groups.items()}
             p95 = {role: statistics.median(run['warm']['p95_seconds'] for run in group) for role, group in groups.items()}
@@ -391,12 +391,7 @@ if __name__ == '__main__':
                        for role, group in groups.items()}
             REPORT['comparisons'][mode] = {'complete_responses_equal': True,
                 'cold_median_seconds': cold, 'warm_p50_median_seconds': warm,
-                'warm_p95_median_seconds': p95, 'warm_settled_median_seconds': settled,
-                'candidate_over_baseline_warm_p95': p95['candidate'] / p95['baseline'],
-                'candidate_over_baseline_settled': settled['candidate'] / settled['baseline'],
-                'candidate_over_baseline_cold': cold['candidate'] / cold['baseline'],
-                'candidate_over_baseline_warm': warm['candidate'] / warm['baseline'],
-                'warm_observation': 'lower latency observed' if warm['candidate'] < warm['baseline'] else 'no lower latency observed'}
+                'warm_p95_median_seconds': p95, 'warm_settled_median_seconds': settled}
             save()
         REPORT['complete'] = True
     finally:

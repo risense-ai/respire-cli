@@ -1606,6 +1606,37 @@ pub fn memory_revision() -> Result<MemoryRevision> {
     })
 }
 
+/// P0 zero-risk gate (task-10): facts for the future retrieval cache — do the
+/// three revision triggers exist? Neither enables a cache nor adds a switch/env
+/// var. The status field must always carry a value: a failed read-only probe is
+/// treated as "not ready" with all three names (unverified == missing).
+#[derive(Debug, Serialize)]
+pub struct RetrievalCacheStatus {
+    pub trigger_ready: bool,
+    pub missing: Vec<String>,
+}
+
+pub fn retrieval_cache_status() -> RetrievalCacheStatus {
+    let unverified = || RetrievalCacheStatus {
+        trigger_ready: false,
+        missing: crate::transport::local::REVISION_TRIGGERS
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
+    };
+    let path = match database_path(&data_dir()) {
+        Ok(path) => path,
+        Err(_) => return unverified(),
+    };
+    match crate::transport::local::revision_triggers_missing_at(&path) {
+        Ok(missing) => RetrievalCacheStatus {
+            trigger_ready: missing.is_empty(),
+            missing,
+        },
+        Err(_) => unverified(),
+    }
+}
+
 pub fn server_addr() -> String {
     read_client_config()
         .and_then(|d| {

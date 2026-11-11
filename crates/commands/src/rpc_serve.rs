@@ -17,9 +17,12 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use std::fs::File;
+use std::io::Read;
+use sha2::{Digest, Sha256};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use respire_protocol::{RuntimeCompat, RuntimeIdentity};
+use respire_protocol::{RuntimeCompat, RuntimeIdentity, RuntimeRequestScope};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -180,6 +183,7 @@ pub fn sync_scheduler_status() -> Value {
 }
 
 pub fn context_changed() {
+    crate::lexical_cache::clear();
     if let Err(error) = respire_app::resident::clear() {
         eprintln!("resident catalog reset failed: {error:#}");
     }
@@ -574,6 +578,13 @@ pub struct RuntimeFlags {
 pub struct RpcRequest {
     pub v: u32,
     pub id: String,
+    // ported from risense-ai/respire-runtime 1f40b16 (v2.0.0-dev.7)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RuntimeRequestScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub method: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -587,6 +598,13 @@ pub struct RpcRequest {
 pub struct RpcResponse {
     pub v: u32,
     pub id: String,
+    // ported from risense-ai/respire-runtime 1f40b16 (v2.0.0-dev.7)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<RuntimeRequestScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     pub ok: bool,
     pub exit: i32,
     #[serde(default)]
@@ -729,6 +747,20 @@ pub fn serve(flags: RuntimeFlags) -> Result<()> {
     )
     .context("runtime failed to lock the library")?;
     crate::host_hooks::verify_managed_boot()?;
+    // P0 zero-risk gate (task-10): one read-only lookup per runtime startup.
+    {
+        let cache_gate = respire_app::service::retrieval_cache_status();
+        if cache_gate.trigger_ready {
+            respire_logging::info(format_args!(
+                "retrieval cache gate: revision triggers complete"
+            ));
+        } else {
+            respire_logging::error(format_args!(
+                "retrieval cache gate: missing revision triggers {:?} \u{2014} content token will not advance, the cache would never invalidate",
+                cache_gate.missing
+            ));
+        }
+    }
     // Probe and bind only the existing loopback HTTP/TCP transport; no legacy
     // pipe/socket fallback is necessary.
     let bound = crate::runtime_http::bind_runtime(flags.port, &flags.host)?;
@@ -1016,6 +1048,9 @@ pub fn dispatch(request: RpcRequest, tx: &Sender<Job>) -> RpcResponse {
             Ok(captured) => RpcResponse {
                 v: PROTOCOL_V,
                 id: request.id.clone(),
+operation_id: request.operation_id.clone(),
+scope: request.scope.clone(),
+idempotency_key: request.idempotency_key.clone(),
                 ok: captured.exit == 0,
                 exit: captured.exit,
                 bin: bin_version().to_owned(),
@@ -1045,6 +1080,9 @@ fn command_response(request: &RpcRequest, result: CommandResult) -> RpcResponse 
         Ok(captured) => RpcResponse {
             v: PROTOCOL_V,
             id: request.id.clone(),
+operation_id: request.operation_id.clone(),
+scope: request.scope.clone(),
+idempotency_key: request.idempotency_key.clone(),
             ok: captured.exit == 0,
             exit: captured.exit,
             bin: bin_version().to_owned(),
@@ -1112,6 +1150,9 @@ pub fn status_response(request: &RpcRequest) -> RpcResponse {
     RpcResponse {
         v: PROTOCOL_V,
         id: request.id.clone(),
+operation_id: request.operation_id.clone(),
+scope: request.scope.clone(),
+idempotency_key: request.idempotency_key.clone(),
         ok: true,
         exit: 0,
         bin: bin_version().to_owned(),
@@ -1128,6 +1169,9 @@ pub fn error_response(request: &RpcRequest, code: &str, error: &str) -> RpcRespo
     RpcResponse {
         v: PROTOCOL_V,
         id: request.id.clone(),
+operation_id: request.operation_id.clone(),
+scope: request.scope.clone(),
+idempotency_key: request.idempotency_key.clone(),
         ok: false,
         exit: 1,
         bin: bin_version().to_owned(),
@@ -1316,11 +1360,109 @@ fn inference_health_status() -> Value {
     }
 }
 
+// ported from risense-ai/respire-runtime 1f40b16 (v2.0.0-dev.7)
+#[derive(Clone)]
+struct ProcessIdentity {
+    installation_id: String,
+    instance_id: String,
+    process_start_id: String,
+    image_path: String,
+    image_sha256: String,
+}
+
+static PROCESS_IDENTITY: OnceLock<ProcessIdentity> = OnceLock::new();
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn sha256_file(path: &std::path::Path) -> Option<String> {
+    let mut file = File::open(path).ok()?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Some(format!("{:x}", digest.finalize()))
+}
+
+fn os_process_start_identity() -> Option<String> {
+    let pid = std::process::id();
+    #[cfg(windows)]
+    {
+        return respire_spawn::process_birth(pid)
+            .ok()
+            .flatten()
+            .map(|birth| format!("windows-filetime-{birth}"));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let raw = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields = raw.rsplit_once(')')?.1;
+        let state = fields.split_whitespace().next()?;
+        if state == "Z" {
+            return None;
+        }
+        let birth = fields.split_whitespace().nth(19)?;
+        return Some(format!("linux-starttime-{birth}"));
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        let output = std::process::Command::new("ps")
+            .arg("-p")
+            .arg(pid.to_string())
+            .arg("-o")
+            .arg("lstart=")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let birth = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        return (!birth.is_empty()).then(|| format!("darwin-lstart-{birth}"));
+    }
+}
+
+fn process_identity() -> ProcessIdentity {
+    PROCESS_IDENTITY
+        .get_or_init(|| {
+            let exe = std::env::current_exe().unwrap_or_default();
+            let installation = respire_app::service::main_data_dir();
+            ProcessIdentity {
+                installation_id: sha256_hex(installation.display().to_string().as_bytes()),
+                instance_id: uuid::Uuid::new_v4().to_string(),
+                process_start_id: os_process_start_identity().unwrap_or_default(),
+                image_path: exe.display().to_string(),
+                image_sha256: sha256_file(&exe).unwrap_or_default(),
+            }
+        })
+        .clone()
+}
+
+fn account_identity() -> String {
+    let data_dir = respire_app::service::data_dir();
+    let account = respire_app::service::session_user_of_dir(&data_dir);
+    let source = if account.is_empty() {
+        match data_dir.canonicalize() {
+            Ok(profile) => profile.display().to_string(),
+            Err(_) => return String::new(),
+        }
+    } else {
+        account
+    };
+    sha256_hex(source.as_bytes())
+}
+
 pub fn health_body() -> Value {
     let inference = inference_health_status();
     let (queue_cancelled, timings) = crate::admission::timings();
     let (queued, executing) = crate::admission::occupancy();
     let identity = runtime_identity();
+    let process = process_identity();
     let exe = std::env::current_exe()
         .ok()
         .map(|p| p.display().to_string())
@@ -1335,6 +1477,9 @@ pub fn health_body() -> Value {
         "data_dir": respire_app::service::data_dir().display().to_string(),
         "store_ready": STORE_READY.load(Ordering::Acquire),
         "installation_root": respire_app::service::main_data_dir().display().to_string(),
+        "account_id": account_identity(),
+        "instance_id": process.instance_id,
+        "generation": crate::rpc_worker::wire_generation(),
         "managed_id": crate::host_hooks::managed_id(),
         "credential_state": crate::host_hooks::credential_state(),
         "snapshot_restore_id": SNAPSHOT_BOOT_ID.lock().ok().and_then(|slot|slot.clone()),
@@ -1569,6 +1714,7 @@ pub fn dispatch_loop(
                     *slot = snapshot_id;
                 }
                 STORE_READY.store(true, Ordering::Release);
+                // Prewarm must use an authorized snapshot, not a raw database path.
                 store
             }
             Err(error) => {

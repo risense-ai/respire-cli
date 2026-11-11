@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 /// Probe only an already-initialized database; never create or migrate a library.
 /// Do not use SQLite immutable mode: a live runtime's committed WAL must be visible.
@@ -18,10 +18,133 @@ pub fn read_memory_revision(path: &Path) -> Result<String> {
     read_revision(&connection)
 }
 
+/// Required invalidation triggers, including encrypted metadata changes.
+pub const REVISION_TRIGGERS: [&str; 4] = [
+    "memory_revision_insert",
+    "memory_revision_update",
+    "memory_revision_delete",
+    "memory_metadata_revision_update",
+];
+
+/// Missing or outdated invalidation triggers disable cache reuse.
+pub fn revision_triggers_missing(connection: &Connection) -> Result<Vec<String>> {
+    let mut missing = Vec::new();
+    for name in REVISION_TRIGGERS {
+        let stored: Option<String> = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name='memories'",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let valid = if name == "memory_metadata_revision_update" {
+            let expected = "CREATE TRIGGER memory_metadata_revision_update AFTER UPDATE ON memories
+                WHEN OLD.memory_contract IS NOT NEW.memory_contract OR OLD.summary IS NOT NEW.summary
+                  OR OLD.source_refs IS NOT NEW.source_refs OR OLD.valid_until IS NOT NEW.valid_until
+                  OR OLD.review_at IS NOT NEW.review_at OR OLD.artifact IS NOT NEW.artifact
+                  OR OLD.verification IS NOT NEW.verification
+                BEGIN UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'; END";
+            stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(expected))
+        } else {
+            let expected = if name == "memory_revision_update" {
+                expected_update_sql(connection)?
+            } else {
+                trigger_sql(include_str!("revision_schema.sql"), name)?
+            };
+            stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(&expected))
+        };
+        if !valid {
+            missing.push(name.to_owned());
+        }
+    }
+    Ok(missing)
+}
+
+fn normalize_sql(sql: &str) -> String {
+    sql.lines()
+        .map(|line| line.split("--").next().unwrap_or_default())
+        .collect::<String>()
+        .chars()
+        .filter(|character| !character.is_whitespace() && *character != ';')
+        .collect::<String>()
+        .replace("IFNOTEXISTS", "")
+}
+
+fn trigger_sql(schema: &str, name: &str) -> Result<String> {
+    let start = format!("CREATE TRIGGER IF NOT EXISTS {name} ");
+    let (_, tail) = schema.split_once(&start).context("missing revision trigger definition")?;
+    let (body, _) = tail.split_once("END;").context("incomplete revision trigger definition")?;
+    Ok(format!("{start}{body}END;"))
+}
+
+/// Legacy content columns that some upgraded libraries still carry. The current
+/// schema never creates them, so the trigger definition has to follow whatever
+/// the library actually has.
+pub const LEGACY_CONTENT_COLUMNS: [&str; 2] = ["when_to_use", "superseded_by"];
+
+/// Include each legacy column independently; partially upgraded libraries exist.
+fn expected_update_sql(connection: &Connection) -> Result<String> {
+    let mut sql = trigger_sql(include_str!("revision_schema.sql"), "memory_revision_update")?;
+    for column in LEGACY_CONTENT_COLUMNS {
+        let found: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name=?1)",
+            [column],
+            |row| row.get(0),
+        )?;
+        if found {
+            sql = sql.replace("\nBEGIN", &format!("\n  OR OLD.{column} IS NOT NEW.{column}\nBEGIN"));
+        }
+    }
+    Ok(sql)
+}
+
+/// Repair the update trigger inside the migration transaction, then invalidate
+/// old tokens. Compare the complete definition and track each legacy column
+/// independently; a name or a matching comment does not prove invalidation works.
+pub fn refresh_update_trigger(connection: &Connection) -> Result<bool> {
+    let expected = expected_update_sql(connection)?;
+    let stored: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='memory_revision_update'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if stored.as_deref().is_some_and(|sql| normalize_sql(sql) == normalize_sql(&expected)) {
+        return Ok(false);
+    }
+    connection.execute_batch("DROP TRIGGER IF EXISTS memory_revision_update;")?;
+    connection.execute_batch(&expected)?;
+    // A repaired trigger cannot vouch for the previously issued content token.
+    connection.execute(
+        "UPDATE meta SET value=lower(hex(randomblob(16))) WHERE key='memory_revision_v1'",
+        [],
+    )?;
+    Ok(true)
+}
+
+/// Read-only path probe with the same rules as `read_memory_revision`:
+/// never creates or migrates; the live WAL stays visible.
+pub fn revision_triggers_missing_at(path: &Path) -> Result<Vec<String>> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .context("trigger self-check unavailable: open the library normally to initialize it")?;
+    connection.busy_timeout(Duration::from_secs(1))?;
+    revision_triggers_missing(&connection)
+}
+
 impl super::LocalStore {
     /// Read the CAS token on this connection, including the active transaction.
     pub fn memory_revision(&self) -> Result<String> {
         read_revision(&self.connection)
+    }
+
+    /// P0 gate for cached indexes: which revision triggers are absent?
+    /// Empty vec = the content token is trustworthy. Read-only.
+    pub fn revision_triggers_missing(&self) -> Result<Vec<String>> {
+        revision_triggers_missing(&self.connection)
     }
 }
 
@@ -55,6 +178,20 @@ mod tests {
         let store = LocalStore { connection };
         store.initialize_sync_storage()?;
         Ok(store)
+    }
+
+    #[test]
+    fn revision_trigger_selfcheck_flags_dropped_update_trigger() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        migrate(&connection)?;
+        // Complete set: gate reads true with no missing names.
+        assert_eq!(revision_triggers_missing(&connection)?, Vec::<String>::new());
+        connection.execute_batch("DROP TRIGGER memory_revision_update;")?;
+        assert_eq!(
+            revision_triggers_missing(&connection)?,
+            vec!["memory_revision_update".to_owned()]
+        );
+        Ok(())
     }
 
     #[test]
