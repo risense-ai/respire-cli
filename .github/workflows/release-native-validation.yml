@@ -302,6 +302,33 @@ jobs:
           "$exe" --direct model probe --json
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
+      - name: Verify released Client2 online CLI installation and the existing GUI subset
+        if: inputs.artifact_source == 'published-assets' && matrix.target == 'x86_64-pc-windows-msvc'
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          EXPECTED_MODEL_KEY: ${{ steps.model-key.outputs.key }}
+          MATCHED_MODEL_KEY: ${{ steps.model-cache.outputs.cache-matched-key }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:MATCHED_MODEL_KEY -or $env:MATCHED_MODEL_KEY -cne $env:EXPECTED_MODEL_KEY) { throw 'Exact public model cache required for the existing offline GUI subset' }
+          ./scripts/probe-client2-gui.ps1 `
+            -Cli "$PWD/target/ci/x86_64-pc-windows-msvc/release/rsrs.exe" `
+            -RuntimeArchive $env:RSRS_PUBLISHED_RUNTIME_ARCHIVE `
+            -RuntimeVersion $env:RSRS_PUBLISHED_RUNTIME_VERSION `
+            -OutputDirectory "$env:RUNNER_TEMP/published-client2-gui" `
+            -OfflineAcceptance -OfflineModelDirectory "$env:RUNNER_TEMP/release-probe/models/bge-m3"
+      - uses: actions/upload-artifact@v4
+        if: always() && inputs.artifact_source == 'published-assets' && matrix.target == 'x86_64-pc-windows-msvc'
+        with:
+          retention-days: 1
+          name: client2-published-online-${{ matrix.target }}
+          path: |
+            ${{ runner.temp }}/published-client2-gui/report.json
+            ${{ runner.temp }}/published-client2-gui/native-gui.json
+            ${{ runner.temp }}/published-client2-gui/workspace.png
+            ${{ runner.temp }}/published-client2-gui/online-*
+          if-no-files-found: error
       - name: Prepare isolated upgrade Python and the fixed Windows wheel key
         id: wheel-key
         shell: bash
