@@ -345,6 +345,7 @@ jobs:
             ${{ runner.temp }}/dev-supplements/runtime-coverage.json
             ${{ runner.temp }}/dev-supplements/legacy-vault/legacy-vault-coverage.json
             ${{ runner.temp }}/dev-supplements/profile-migration/migration-coverage.json
+            ${{ runner.temp }}/dev-supplements/login-interruption/interruption-coverage.json
             ${{ runner.temp }}/dev-supplements/migration-platform-gate.json
             ${{ runner.temp }}/secret-service-profile-migration/migration-coverage.json
             ${{ runner.temp }}/secret-service-profile-migration/migration-platform-gate.json

@@ -1742,16 +1742,40 @@ $resetIdentity['user'] = $user
 $resetIdentity['addr'] = $Server
 [IO.File]::WriteAllText($resetSession, ($resetIdentity | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
 $beforeResetSession = (Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash
+$resetJournalPath = Join-Path $resetDir '.login-recovery.json'
+$beforeResetOperations = @((Get-Content -LiteralPath $resetJournalPath -Raw -Encoding utf8 | ConvertFrom-Json).operations |
+    ForEach-Object { $_.operation_id })
 $previousResetSuper = $env:RSRS_SUPER
 try {
     # Keep the disposable local key usable without storing its Super password in the session.
     $env:RSRS_SUPER = [string]$resetKeys.Envelope.summary.super
     $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--direct', '--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -AllowStatus @('fail')
+    $resetJournal = Get-Content -LiteralPath $resetJournalPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $resetOperations = @($resetJournal.operations | Where-Object { $_.operation_id -cnotin $beforeResetOperations })
+    $resetRejection = if ($resetOperations.Count -eq 1) { $resetOperations[0] } else { $null }
+    $resetComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $resetRolledBack = $resetJournal.schema_version -is [long] -and $resetJournal.schema_version -eq 2 -and $null -eq $resetJournal.active `
+        -and $resetOperations.Count -eq 1 -and $resetRejection.operation_id -is [string] `
+        -and $resetRejection.operation_id -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' `
+        -and $resetRejection.idempotency_key -is [string] -and $resetRejection.idempotency_key -ceq $resetRejection.operation_id `
+        -and $resetRejection.phase -is [string] -and $resetRejection.phase -ceq 'rolled_back' `
+        -and $resetRejection.account.register -is [bool] -and $resetRejection.account.register -ceq $false `
+        -and $resetRejection.account.user -is [string] -and $resetRejection.account.user -ceq $user `
+        -and $resetRejection.account.addr -is [string] -and $resetRejection.account.addr -ceq $Server `
+        -and $resetRejection.original_sha256 -is [string] -and $resetRejection.original_sha256 -ceq $beforeResetSession.ToLowerInvariant() `
+        -and $resetRejection.root -is [string] -and $resetRejection.profile -is [string] `
+        -and $null -eq $resetRejection.candidate -and $null -eq $resetRejection.backend -and $null -eq $resetRejection.account.target `
+        -and ([IO.Path]::GetFullPath(([string]$resetRejection.root -replace '^\\\\\?\\', ''))).Equals([IO.Path]::GetFullPath($resetDir), $resetComparison) `
+        -and ([IO.Path]::GetFullPath(([string]$resetRejection.profile -replace '^\\\\\?\\', ''))).Equals([IO.Path]::GetFullPath(($resetProfile -replace '^\\\\\?\\', '')), $resetComparison)
+    $resetExpectedError = if ($resetRolledBack) {
+        "account operation rolled back; operation_id=$($resetRejection.operation_id) source_profile=$($resetRejection.profile); original account was preserved"
+    } else { '' }
     Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 `
         -and [string]$resetGuard.Envelope.command -ceq 'cli' -and [string]$resetGuard.Envelope.status -ceq 'fail' `
-        -and [string]$resetGuard.Envelope.summary.reason -ceq 'account_outcome_unknown' `
+        -and [string]$resetGuard.Envelope.summary.reason -ceq 'runtime_error' `
+        -and [string]$resetGuard.Envelope.details.error_type -ceq 'runtime' -and $resetRolledBack `
         -and @($resetGuard.Envelope.errors).Count -eq 1 `
-        -and @($resetGuard.Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith('; login_kind=account_material_rejected', [StringComparison]::Ordinal) }).Count -eq 1)
+        -and $resetGuard.Envelope.errors[0] -is [string] -and $resetGuard.Envelope.errors[0] -ceq $resetExpectedError)
     Assert-Smoke 'login-key-mismatch-original-session-preserved' ((Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash -ceq $beforeResetSession)
     $resetRead = Invoke-Om -Name 'login-key-mismatch-original-readback' -ArgList @('--json', 'show', $mismatchedId) -DataDir $resetDir
     Assert-Smoke 'login-key-mismatch-original-data-readable' ($resetRead.Ok -and [string]$resetRead.Envelope.details.entry.content -ceq "reset-local-old-key-$stamp")
