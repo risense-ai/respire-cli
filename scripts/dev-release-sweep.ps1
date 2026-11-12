@@ -1685,7 +1685,7 @@ try {
     $env:RSRS_SUPER = [string]$resetKeys.Envelope.summary.super
     $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--direct', '--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -AllowStatus @('fail')
     Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 `
-        -and [string]$resetGuard.Envelope.command -ceq 'login' -and [string]$resetGuard.Envelope.status -ceq 'fail' `
+        -and [string]$resetGuard.Envelope.command -ceq 'cli' -and [string]$resetGuard.Envelope.status -ceq 'fail' `
         -and [string]$resetGuard.Envelope.summary.reason -ceq 'account_outcome_unknown' `
         -and @($resetGuard.Envelope.errors).Count -eq 1 `
         -and @($resetGuard.Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith('; login_kind=account_material_rejected', [StringComparison]::Ordinal) }).Count -eq 1)
