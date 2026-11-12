@@ -38,10 +38,12 @@ def main():
     def run_suite(command):
         name, script, flags = command
         argv = [sys.executable, str(scripts / script), *flags]
-        if (sys.platform.startswith("linux") and name in ("legacy_vault", "profile_migration")
+        if (sys.platform.startswith("linux") and name in ("legacy_vault", "profile_migration", "login_interruption")
                 and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
                 and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:")):
             # Each native manager must own its own initially empty private service.
+            if name == "login_interruption":
+                argv.append("--native-credentials")
             argv = ["dbus-run-session", "--", *argv]
         timeout = 1500
         if sys.platform.startswith("linux") and name == "runtime":

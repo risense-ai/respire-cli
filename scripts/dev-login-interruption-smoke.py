@@ -31,7 +31,7 @@ require = legacy.require
 
 # Only fixed fixture assertions may become diagnostic strings. Never serialize
 # arbitrary exception text, subprocess output, paths or account material.
-FAILURE_CODES = frozenset(['cli_expectation_failed', 'API_config_changed', 'DEV4_recovery_failed', 'SIGINT_fixture_requires_linux_pidfd', 'binary_hash_mismatch', 'binary_version_mismatch', 'ciphertext_fixture_missing', 'cleanup_control_helper_still_running', 'cleanup_process_identity_changed', 'cleanup_process_lifetime_unproven', 'cleanup_untracked_group_member', 'commit_barrier_not_reached', 'credential_journal_outside_fixture', 'credential_not_bound_to_fixture_transaction', 'data_key_changed', 'durable_recovery_missing', 'explicit_retry_login_count_changed', 'fresh_fixture_required', 'fresh_login_replaced_maintenance_owner', 'fresh_login_replaced_original_operation', 'fresh_login_replayed_authentication', 'full_library_namespace_not_migrated', 'inconsistent_factors_modified_state', 'inconsistent_profile_overwritten', 'interrupted_control_helper_still_running', 'interrupted_group_still_running', 'interrupted_native_credential_not_deleted', 'interrupted_native_password_not_deleted', 'interrupted_operation_advanced', 'interrupted_phase_not_proven', 'interruption_already_completed', 'interruption_child_not_owned', 'interruption_control_helper_not_bound', 'interruption_group_changed', 'interruption_group_has_unbound_member', 'interruption_session_not_owned', 'invalid_publication_barrier', 'invalid_recovery_action', 'legacy_credential_collision', 'legacy_fixture_requires_clean_journal', 'legacy_interrupted_credential_not_deleted', 'legacy_original_ciphertexts_changed', 'legacy_original_profile_not_restored', 'legacy_recovery_not_retired', 'migrated_fixture_witness_invalid', 'migration_effects_not_exactly_once', 'native_alias_missing', 'native_backend_not_used', 'native_credential_not_written', 'native_fixture_cleanup_failed', 'operation_journal_schema_missing', 'operation_recovery_not_retired', 'original_account_identity_changed', 'original_candidate_changed_during_completion', 'original_ciphertexts_changed', 'original_factors_not_recovered', 'original_login_password_changed', 'original_operation_binding_changed', 'original_operation_invalid', 'original_operation_missing', 'original_operation_not_committed', 'original_operation_not_unique', 'original_password_not_written', 'original_plaintext_not_recovered', 'original_profile_not_discovered', 'original_profile_not_migrated', 'original_profile_not_restored', 'original_recovery_image_changed', 'original_result_not_repeatable', 'original_rollback_not_confirmed', 'original_source_changed', 'original_terminal_receipt_missing', 'original_vault_factors_changed', 'owned_child_not_interrupted', 'owned_runtime_cleanup_failed', 'password_update_not_authorized', 'publication_checkpoint_not_proven', 'publication_window_not_proven', 'repeated_result_changed_material', 'result_replayed_authentication', 'rollback_receipt_not_retained', 'rollback_replayed_authentication', 'server_transfer_changed_source', 'server_transfer_copy_missing', 'server_transfer_count_failed', 'server_transfer_not_reencrypted', 'server_transfer_remote_duplicated', 'server_transfer_retry_duplicated', 'server_transfer_reused_source', 'server_transfer_sync_warning_missing', 'transfer_push_not_authorized', 'unexpected_private_credential', 'unknown_result_changed_material', 'unknown_result_released_maintenance', 'unknown_result_replayed_effect', 'unknown_rollback_changed_material', 'unknown_rollback_deleted_credentials', 'unowned_fixture_alias', 'unowned_fixture_operation_alias', 'wrong_recovery_modified_state'])
+FAILURE_CODES = frozenset(['cli_expectation_failed', 'API_config_changed', 'DEV4_recovery_failed', 'SIGINT_fixture_requires_linux_pidfd', 'binary_hash_mismatch', 'binary_version_mismatch', 'ciphertext_fixture_missing', 'cleanup_control_helper_still_running', 'cleanup_process_identity_changed', 'cleanup_process_lifetime_unproven', 'cleanup_untracked_group_member', 'commit_barrier_not_reached', 'credential_journal_outside_fixture', 'credential_not_bound_to_fixture_transaction', 'data_key_changed', 'durable_recovery_missing', 'explicit_retry_login_count_changed', 'fresh_fixture_required', 'fresh_login_replaced_maintenance_owner', 'fresh_login_replaced_original_operation', 'fresh_login_replayed_authentication', 'full_library_namespace_not_migrated', 'inconsistent_factors_modified_state', 'inconsistent_profile_overwritten', 'interrupted_control_helper_still_running', 'interrupted_group_still_running', 'interrupted_native_credential_not_deleted', 'interrupted_native_password_not_deleted', 'interrupted_operation_advanced', 'interrupted_phase_not_proven', 'interruption_already_completed', 'interruption_child_not_owned', 'interruption_control_helper_not_bound', 'interruption_group_changed', 'interruption_group_has_unbound_member', 'interruption_session_not_owned', 'invalid_publication_barrier', 'invalid_recovery_action', 'legacy_credential_collision', 'legacy_fixture_requires_clean_journal', 'legacy_interrupted_credential_not_deleted', 'legacy_original_ciphertexts_changed', 'legacy_original_profile_not_restored', 'legacy_recovery_not_retired', 'migrated_fixture_witness_invalid', 'migration_effects_not_exactly_once', 'native_alias_missing', 'native_backend_not_used', 'native_credential_not_written', 'native_fixture_cleanup_failed', 'operation_journal_schema_missing', 'operation_recovery_not_retired', 'original_account_identity_changed', 'original_candidate_changed_during_completion', 'original_ciphertexts_changed', 'original_factors_not_recovered', 'original_login_password_changed', 'original_operation_binding_changed', 'original_operation_invalid', 'original_operation_missing', 'original_operation_not_committed', 'original_operation_not_unique', 'original_password_not_written', 'original_plaintext_not_recovered', 'original_profile_not_discovered', 'original_profile_not_migrated', 'original_profile_not_restored', 'original_profile_selection_failed', 'original_recovery_image_changed', 'original_result_not_repeatable', 'original_rollback_not_confirmed', 'original_source_changed', 'original_terminal_receipt_missing', 'original_vault_factors_changed', 'owned_child_not_interrupted', 'owned_runtime_cleanup_failed', 'password_update_not_authorized', 'publication_checkpoint_not_proven', 'publication_window_not_proven', 'repeated_result_changed_material', 'result_replayed_authentication', 'rollback_receipt_not_retained', 'rollback_replayed_authentication', 'server_transfer_changed_source', 'server_transfer_copy_missing', 'server_transfer_count_failed', 'server_transfer_not_reencrypted', 'server_transfer_remote_duplicated', 'server_transfer_retry_duplicated', 'server_transfer_reused_source', 'server_transfer_sync_warning_missing', 'transfer_push_not_authorized', 'unexpected_private_credential', 'unknown_result_changed_material', 'unknown_result_released_maintenance', 'unknown_result_replayed_effect', 'unknown_rollback_changed_material', 'unknown_rollback_deleted_credentials', 'unowned_fixture_alias', 'unowned_fixture_operation_alias', 'wrong_recovery_modified_state'])
 
 
 @contextmanager
@@ -50,6 +50,60 @@ def fixture_report(args, report):
     finally:
         # Outermost write also runs when setup or an owned cleanup check raises.
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
+
+
+def safe_cli_diagnostic(stdout, stderr):
+    """Keep fixed classifications only; subprocess output can contain account material."""
+    try:
+        value = json.loads(stdout)
+    except (ValueError, UnicodeError, RecursionError):
+        value = None
+    summary = value.get("summary") if isinstance(value, dict) else None
+    reason = summary.get("reason") if isinstance(summary, dict) else None
+    reasons = ("account_outcome_unknown", "control_outcome_unknown", "auth_outcome_unknown",
+               "request_outcome_unknown", "runtime_error", "invalid_input",
+               "account_handoff_pending", "identity_write_recovery_required")
+    errors = value.get("errors") if isinstance(value, dict) else None
+    text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
+    text += "\n" + stderr.decode("utf-8", errors="replace")
+    categories = (
+        ("runtime_account_rejected", "Runtime rejected account control (account_outcome_unknown)"),
+        ("control_spawn", "cannot start owned host control Runtime"),
+        ("control_response_wait", "host control response deadline or channel failure"),
+        ("control_deadline", "host control deadline exceeded"),
+        ("control_response_deadline", "host control response deadline exceeded"),
+        ("control_exit_deadline", "host control exit deadline exceeded"),
+        ("control_exit_mismatch", "host control Runtime exit does not match its response"),
+        ("control_response_identity", "account control response identity mismatch"),
+        ("control_profile_identity", "account response launch profile mismatch"),
+        ("control_parent_or_deadline", "account deadline or parent authorization ended"),
+        ("control_authorization", "account launch or parent authorization failed"),
+        ("control_binding", "account control binding changed or does not match"),
+        ("control_ownership", "account library ownership is unavailable"),
+        ("auth_recovery_pending", "authentication recovery requires the original operation"),
+        ("host_maintenance_pending", "runtime maintenance is incomplete; use the host runtime restart or the indicated snapshot/login recovery before accessing the library"),
+        ("discovery_symlink", "discovery path contains a symlink: "),
+        ("discovery_reparse", "discovery path contains a reparse point: "),
+        ("discovery_parent_traversal", "discovery path contains parent traversal"),
+        ("discovery_ancestor", "discovery ancestor is not a directory"),
+        ("discovery_profile_root", "profile root is not a directory"),
+        ("migration_control_unknown", "migration_outcome_unknown operation_id="),
+        ("login_vault_unlock", "login_kind=vault_unlock_rejected"),
+        ("login_account_material", "login_kind=account_material_rejected"),
+        ("owned_cleanup", "cleanup_failed owned_pid="),
+    )
+    diagnostic = {"reason": reason if reason in reasons else None,
+            "category": next((name for name, marker in categories if marker in text), "unclassified"),
+            "stdout_json": isinstance(value, dict), "stderr_present": bool(stderr)}
+    # The host migration error deliberately hides its underlying error chain.
+    # Preserve only its existing fixed stage, never adjacent operation parameters.
+    stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+        "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+        "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+        "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+    stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", text)
+    diagnostic["migration_stage"] = stage[1] if stage and stage[1] in stages else None
+    return diagnostic
 
 
 def process_group_members(group):
@@ -366,7 +420,8 @@ def main():
                 command = next((name for name in ("account-rollback", "account-result", "login", "remember",
                     "migrate", "--runtime-internal", "--version") if name in flags), "other")
                 report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed",
-                                     "command": command}
+                                     "command": command,
+                                     "diagnostic": safe_cli_diagnostic(result.stdout, result.stderr)}
                 raise RuntimeError("cli_expectation_failed")
             return result
 
@@ -439,7 +494,9 @@ def main():
                     and receipt["operation_id"] == operation_id
                     and receipt["outcome"] == "rolled_back"
                     and state["logins"] == logins_before, "original_rollback_not_confirmed")
-            terminal_operation(json.loads(recovery_path.read_bytes()), rejected_record, "rolled_back")
+            journal = json.loads(recovery_path.read_bytes())
+            require(len(journal["operations"]) == 1, "original_operation_not_unique")
+            terminal_operation(journal, rejected_record, "rolled_back")
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "legacy_original_profile_not_restored")
             if keys:
@@ -596,9 +653,48 @@ def main():
             before = session.read_bytes()
             wrong = list(migration)
             wrong[-1] = "A3-000000-000000-000000-000000-000000-000000"
-            cli(*wrong, success=False)
+            def reject_legacy_migration(flags):
+                previous_ids = {row["operation_id"] for row in json.loads(recovery_path.read_bytes())["operations"]}
+                rejected = json.loads(cli(*flags, success=False).stdout)
+                operation_id = rejected.get("details", {}).get("operation_id")
+                require(isinstance(operation_id, str) and str(uuid.UUID(operation_id)) == operation_id
+                        and uuid.UUID(operation_id).version == 4 and operation_id not in previous_ids
+                        and rejected.get("summary", {}).get("reason") == "account_outcome_unknown"
+                        and rejected["details"].get("source_profile") == str(root.resolve()),
+                        "original_operation_binding_changed")
+                journal = json.loads(recovery_path.read_bytes())
+                rows = [row for row in journal["operations"] if row["operation_id"] == operation_id]
+                require(journal.get("schema_version") == 2 and len(rows) == 1,
+                        "original_operation_not_unique")
+                record = rows[0]
+                active = journal.get("active") or {}
+                account = record.get("account") or {}
+                login = account.get("login") or {}
+                require(record["idempotency_key"] == operation_id and record["root"] == str(root.resolve())
+                        and record["profile"] == str(root.resolve()) and active.get("operation_id") == operation_id
+                        and active.get("alias") == record["alias"]
+                        and re.fullmatch(r"login-[a-f0-9]{32}", record["alias"]) is not None
+                        and account.get("register") is False and account.get("user") == "synthetic"
+                        and account.get("addr") == addr and login.get("migrate_vault") is True
+                        and all(login.get(key) is False for key in
+                            ("publication_pending", "publication_done", "vault_done", "password_done")),
+                        "original_operation_binding_changed")
+                native_aliases.add(record["alias"])
+                effects = state["logins"], state["posts"], state["password_posts"]
+                # Each negative case retains its own operation; retire it through the public rollback API.
+                rolled_back = json.loads(cli(*account_recovery_flags("account-rollback", record), success=False).stdout)
+                require(rolled_back.get("status") == "fail" and rolled_back["summary"]["operation_id"] == operation_id
+                        and rolled_back["summary"]["outcome"] == "rolled_back",
+                        "original_rollback_not_confirmed")
+                terminal_operation(json.loads(recovery_path.read_bytes()), record, "rolled_back")
+                require((state["logins"], state["posts"], state["password_posts"]) == effects,
+                        "rollback_replayed_authentication")
+
+            report["stage"] = "legacy_recovery_reject_wrong_super"
+            reject_legacy_migration(wrong)
             require(session.read_bytes() == before and state["posts"] == 0, "wrong_recovery_modified_state")
-            cli(*migration, success=False)
+            report["stage"] = "legacy_recovery_reject_inconsistent_material"
+            reject_legacy_migration(migration)
             require(session.read_bytes() == before and state["posts"] == 0, "inconsistent_factors_modified_state")
             if keys is None:
                 key_spec = importlib.util.spec_from_file_location("migration_keys", Path(__file__).with_name("dev-migration-keyring.py"))
@@ -638,9 +734,11 @@ def main():
             native_aliases.add(alias)
             for slot in ("super", "pass"):
                 migration_keys.reserve("rsrs", slot + ":" + alias)
+            report["stage"] = "legacy_recovery_discover_profiles"
             discovered = json.loads(cli("--json", "migrate").stdout)["details"]["profiles"]
             candidates = [row for row in discovered if Path(row["source"]).resolve() == source.resolve()]
             require(len(candidates) == 1, "original_profile_not_discovered")
+            report["stage"] = "legacy_recovery_import_profile"
             result = json.loads(cli("--json", "migrate", "--source", candidates[0]["source_id"], "--account", "recovered-original").stdout)["summary"]
             require(result["state"] == "migrated", "original_profile_not_migrated")
             restored_root = Path(result["dir"])
@@ -653,10 +751,20 @@ def main():
             require(len(restored_rows) == len(original_rows) and all(ciphertext.startswith(legacy.PREFIX) for _, ciphertext, _ in restored_rows), "full_library_namespace_not_migrated")
             require([legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in restored_rows]
                     == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
-            env["RSRS_DATA_DIR"] = str(restored_root)
+            report["stage"] = "legacy_recovery_select_profile"
+            selected = json.loads(cli("--json", "account", "use", "recovered-original").stdout)["summary"]
+            require(Path(selected["dir"]).resolve() == restored_root.resolve(), "original_profile_selection_failed")
+            profiles = json.loads(cli("--json", "account", "list").stdout)["details"]["accounts"]
+            selected_profiles = [row for row in profiles if row["current"]]
+            require(len(selected_profiles) == 1 and selected_profiles[0]["name"] == "recovered-original"
+                    and Path(selected_profiles[0]["dir"]).resolve() == restored_root.resolve(),
+                    "original_profile_selection_failed")
+            report["stage"] = "legacy_recovery_migrate_vault"
             cli(*migration)
+            report["stage"] = "legacy_recovery_stop_runtime"
             cli("--runtime-internal", "--stop")
             if fixture_witness is not None:
+                report["stage"] = "legacy_recovery_verify_witness"
                 chain = json.loads(cli("--direct", "--json", "witness", "--verify").stdout)
                 require(chain["status"] == "ok" and chain["summary"]["intact"] is True
                         and chain["summary"]["count"] > fixture_witness["count"], "migrated_fixture_witness_invalid")
@@ -668,9 +776,11 @@ def main():
                 "full_library_reencrypted": True, "original_source_preserved": True,
                 "original_factors_preserved": True, "requires_original_source": True}
             # Transfer to a different server identity and URK without plaintext exports.
+            report["stage"] = "server_transfer_list_accounts"
             source_profile = json.loads(cli("--json", "account", "list").stdout)["details"]["accounts"]
-            source_name = next(row["name"] for row in source_profile if row["current"])
-            source_path = Path(env["RSRS_DATA_DIR"])
+            source_account = next(row for row in source_profile if row["current"])
+            source_name = source_account["name"]
+            source_path = Path(source_account["dir"])
             source_session = source_path / "session.json"
             source_value = json.loads(source_session.read_bytes())
             source_value["addr"] = "https://previous.invalid"
@@ -685,6 +795,7 @@ def main():
             state.update(sync_blobs={}, sync_pulls=0)
             transfer = ("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
                         "--pass=synthetic-password", "--super", code, "--migrate-local")
+            report["stage"] = "server_transfer_initial_login"
             first_result = cli(*transfer, success=False)
             require(first_result.returncode == 2, "server_transfer_sync_warning_missing")
             first = json.loads(first_result.stdout)["summary"]
@@ -699,7 +810,9 @@ def main():
             original_payload = json.loads(legacy.decrypt_content(urk, original_rows[0][1], original_rows[0][2]))
             require(all(copied_payload[field] == original_payload[field] for field in ("content", "title")),
                     "server_transfer_not_reencrypted")
+            report["stage"] = "server_transfer_select_source"
             cli("--json", "account", "use", source_name)
+            report["stage"] = "server_transfer_retry_login"
             retry_result = cli(*transfer)
             retry = json.loads(retry_result.stdout)["summary"]
             require(retry["import"]["imported"] == 0 and retry["import"]["duplicates"] == 1,
@@ -727,17 +840,50 @@ def main():
                 if child_running:
                     stop_owned_control(child)
                 try:
-                    stdout, _ = child.communicate(timeout=15)
+                    stdout, stderr = child.communicate(timeout=15)
                 except subprocess.TimeoutExpired as error:
                     stdout = error.output or b""
+                    stderr = error.stderr or b""
                 except OSError:
                     stdout = b""
+                    stderr = b""
                 report["migration_child"] = {"exit_code": child.returncode,
-                    "migration_stage": None, "migration_exchange": None, "register_kind": None}
+                    "migration_stage": None, "migration_exchange": None, "register_kind": None,
+                    "diagnostic": safe_cli_diagnostic(stdout, stderr), "operation_phase": None}
+                report["fixture_requests"] = {name: state.get(name, 0)
+                    for name in ("gets", "posts", "logins", "password_posts")}
                 try:
                     value = json.loads(stdout)
                 except (ValueError, UnicodeError, RecursionError):
                     value = None
+                # Observe only this response's owned journal; never recover or replay it.
+                try:
+                    details = value.get("details") if isinstance(value, dict) else None
+                    operation_id = details.get("operation_id") if isinstance(details, dict) else None
+                    source = details.get("source_profile") if isinstance(details, dict) else None
+                    if (isinstance(operation_id, str) and str(uuid.UUID(operation_id)) == operation_id
+                            and uuid.UUID(operation_id).version == 4 and isinstance(source, str)
+                            and Path(source).resolve() == root.resolve()
+                            and not recovery_path.is_symlink()
+                            and recovery_path.resolve(strict=True) == root.resolve() / ".login-recovery.json"):
+                        journal = json.loads(recovery_path.read_bytes())
+                        records = [row for row in journal.get("operations", [])
+                            if isinstance(row, dict) and row.get("operation_id") == operation_id]
+                        if (journal.get("schema_version") == 2 and len(records) == 1
+                                and (journal.get("active") or {}).get("operation_id") == operation_id):
+                            record = records[0]
+                            phase = record.get("phase")
+                            if (record.get("idempotency_key") == operation_id
+                                    and (journal.get("active") or {}).get("alias") == record.get("alias")
+                                    and re.fullmatch(r"login-[a-f0-9]{32}", record.get("alias", "")) is not None
+                                    and record.get("root") == str(root.resolve())
+                                    and record.get("profile") == str(root.resolve())
+                                    and phase in ("admitted", "login_input", "remote_pending", "remote_unknown",
+                                        "authorized", "prepared", "awaiting_verification", "rolling_back",
+                                        "committed", "rolled_back")):
+                                report["migration_child"]["operation_phase"] = phase
+                except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+                    pass  # Diagnostic absence cannot replace the original fixture failure.
                 errors = value.get("errors") if isinstance(value, dict) else None
                 text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
                 migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
@@ -802,6 +948,7 @@ def main():
             report["stage"] = "server_cleanup"
             server.shutdown()
             server.server_close()
+            report["server_cleanup"] = {"passed": True, "scope": "loopback_fixture"}
         require(report["runtime_cleanup"]["passed"], "owned_runtime_cleanup_failed")
         if migration_keys or keys:
             require(report["native_cleanup"]["passed"], "native_fixture_cleanup_failed")
