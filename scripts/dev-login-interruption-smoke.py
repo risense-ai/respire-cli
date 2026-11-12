@@ -81,13 +81,29 @@ def safe_cli_diagnostic(stdout, stderr):
         ("control_binding", "account control binding changed or does not match"),
         ("control_ownership", "account library ownership is unavailable"),
         ("auth_recovery_pending", "authentication recovery requires the original operation"),
+        ("host_maintenance_pending", "runtime maintenance is incomplete; use the host runtime restart or the indicated snapshot/login recovery before accessing the library"),
+        ("discovery_symlink", "discovery path contains a symlink: "),
+        ("discovery_reparse", "discovery path contains a reparse point: "),
+        ("discovery_parent_traversal", "discovery path contains parent traversal"),
+        ("discovery_ancestor", "discovery ancestor is not a directory"),
+        ("discovery_profile_root", "profile root is not a directory"),
+        ("migration_control_unknown", "migration_outcome_unknown operation_id="),
         ("login_vault_unlock", "login_kind=vault_unlock_rejected"),
         ("login_account_material", "login_kind=account_material_rejected"),
         ("owned_cleanup", "cleanup_failed owned_pid="),
     )
-    return {"reason": reason if reason in reasons else None,
+    diagnostic = {"reason": reason if reason in reasons else None,
             "category": next((name for name, marker in categories if marker in text), "unclassified"),
             "stdout_json": isinstance(value, dict), "stderr_present": bool(stderr)}
+    # The host migration error deliberately hides its underlying error chain.
+    # Preserve only its existing fixed stage, never adjacent operation parameters.
+    stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+        "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+        "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+        "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+    stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", text)
+    diagnostic["migration_stage"] = stage[1] if stage and stage[1] in stages else None
+    return diagnostic
 
 
 def process_group_members(group):
@@ -672,8 +688,10 @@ def main():
                 require((state["logins"], state["posts"], state["password_posts"]) == effects,
                         "rollback_replayed_authentication")
 
+            report["stage"] = "legacy_recovery_reject_wrong_super"
             reject_legacy_migration(wrong)
             require(session.read_bytes() == before and state["posts"] == 0, "wrong_recovery_modified_state")
+            report["stage"] = "legacy_recovery_reject_inconsistent_material"
             reject_legacy_migration(migration)
             require(session.read_bytes() == before and state["posts"] == 0, "inconsistent_factors_modified_state")
             if keys is None:
@@ -714,9 +732,11 @@ def main():
             native_aliases.add(alias)
             for slot in ("super", "pass"):
                 migration_keys.reserve("rsrs", slot + ":" + alias)
+            report["stage"] = "legacy_recovery_discover_profiles"
             discovered = json.loads(cli("--json", "migrate").stdout)["details"]["profiles"]
             candidates = [row for row in discovered if Path(row["source"]).resolve() == source.resolve()]
             require(len(candidates) == 1, "original_profile_not_discovered")
+            report["stage"] = "legacy_recovery_import_profile"
             result = json.loads(cli("--json", "migrate", "--source", candidates[0]["source_id"], "--account", "recovered-original").stdout)["summary"]
             require(result["state"] == "migrated", "original_profile_not_migrated")
             restored_root = Path(result["dir"])
@@ -730,9 +750,12 @@ def main():
             require([legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in restored_rows]
                     == [legacy.decrypt_content(urk, ciphertext, nonce) for _, ciphertext, nonce in original_rows], "original_plaintext_not_recovered")
             env["RSRS_DATA_DIR"] = str(restored_root)
+            report["stage"] = "legacy_recovery_migrate_vault"
             cli(*migration)
+            report["stage"] = "legacy_recovery_stop_runtime"
             cli("--runtime-internal", "--stop")
             if fixture_witness is not None:
+                report["stage"] = "legacy_recovery_verify_witness"
                 chain = json.loads(cli("--direct", "--json", "witness", "--verify").stdout)
                 require(chain["status"] == "ok" and chain["summary"]["intact"] is True
                         and chain["summary"]["count"] > fixture_witness["count"], "migrated_fixture_witness_invalid")
@@ -744,6 +767,7 @@ def main():
                 "full_library_reencrypted": True, "original_source_preserved": True,
                 "original_factors_preserved": True, "requires_original_source": True}
             # Transfer to a different server identity and URK without plaintext exports.
+            report["stage"] = "server_transfer_list_accounts"
             source_profile = json.loads(cli("--json", "account", "list").stdout)["details"]["accounts"]
             source_name = next(row["name"] for row in source_profile if row["current"])
             source_path = Path(env["RSRS_DATA_DIR"])
@@ -761,6 +785,7 @@ def main():
             state.update(sync_blobs={}, sync_pulls=0)
             transfer = ("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
                         "--pass=synthetic-password", "--super", code, "--migrate-local")
+            report["stage"] = "server_transfer_initial_login"
             first_result = cli(*transfer, success=False)
             require(first_result.returncode == 2, "server_transfer_sync_warning_missing")
             first = json.loads(first_result.stdout)["summary"]
@@ -775,7 +800,9 @@ def main():
             original_payload = json.loads(legacy.decrypt_content(urk, original_rows[0][1], original_rows[0][2]))
             require(all(copied_payload[field] == original_payload[field] for field in ("content", "title")),
                     "server_transfer_not_reencrypted")
+            report["stage"] = "server_transfer_select_source"
             cli("--json", "account", "use", source_name)
+            report["stage"] = "server_transfer_retry_login"
             retry_result = cli(*transfer)
             retry = json.loads(retry_result.stdout)["summary"]
             require(retry["import"]["imported"] == 0 and retry["import"]["duplicates"] == 1,
