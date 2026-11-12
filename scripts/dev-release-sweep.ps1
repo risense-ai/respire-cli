@@ -196,6 +196,24 @@ function Get-SafeFailureReason($Envelope) {
                     return "account_outcome_unknown/$class"
                 }
             }
+            # Match only fixed source markers within the original account error chain.
+            foreach ($entry in @(
+                @('owned account Runtime exited before readiness', 'account_candidate_exited_before_ready'),
+                @('owned account Runtime did not become ready; query the original operation', 'account_candidate_readiness_timeout'),
+                @('Runtime owner changed during account startup', 'account_candidate_owner_mismatch'),
+                @('Runtime process changed during account startup verification', 'account_candidate_process_changed'),
+                @('account target launch does not belong to this maintenance controller', 'account_candidate_launch_binding_mismatch'),
+                @('starting Runtime exited', 'account_candidate_exited_during_verification'),
+                @('selected Runtime port differs from host transport', 'account_candidate_port_mismatch'),
+                @('failed to stop owned unready Runtime', 'account_candidate_stop_failed'),
+                @('failed to reap owned unready Runtime', 'account_candidate_reap_failed')
+            )) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and
+                    ($_ -ceq $entry[0] -or $_.EndsWith(": $($entry[0])", [StringComparison]::Ordinal) -or
+                        $_.Contains(": $($entry[0]): ", [StringComparison]::Ordinal)) }).Count -gt 0) {
+                    return "account_outcome_unknown/$($entry[1])"
+                }
+            }
             # Fixed classes only; preserve the original unknown outcome and never replay it.
             foreach ($entry in @(
                 @('Runtime rejected account control \(control_outcome_unknown\)|control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked'),
@@ -438,7 +456,9 @@ function Get-Leak([string]$Text, [bool]$Secret) {
 }
 
 # Only the endpoint and token beneath the current disposable device are used.
-function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Arguments = @(), [int]$TimeoutSec = 5) {
+function Invoke-OwnedRuntimeRpc {
+    param([string]$DataDir, [string]$Method, [string[]]$Arguments = @(), [int]$TimeoutSec = 5,
+        [string]$RequestId = '', [hashtable]$Headers = @{}, [int]$ExpectedExit = 0, [switch]$FullResponse)
     $endpoint = Get-Content -LiteralPath (Join-Path $DataDir 'runtime/endpoint.json') -Raw | ConvertFrom-Json
     $uri = [Uri][string]$endpoint.url
     if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
@@ -452,16 +472,19 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
         }
         $health = Get-OwnedRuntimeHealth $DataDir -TimeoutSec $TimeoutSec
         $scope = @{ account_id = $health.account_id; instance_id = $health.instance_id; generation = $health.generation }
-        $requestId = [Guid]::NewGuid().ToString('N')
-        $body = @{ v = 1; id = $requestId; scope = $scope; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
+        if (-not $RequestId) { $RequestId = [Guid]::NewGuid().ToString('N') }
+        $body = @{ v = 1; id = $RequestId; scope = $scope; method = $Method; args = $Arguments } | ConvertTo-Json -Compress -Depth 8
         $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
-            -Body $body -TimeoutSec 5
-        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne [string]$health.bin `
+            -Body $body -Headers $Headers -TimeoutSec $TimeoutSec
+        if ($response.ok -isnot [bool] -or $response.ok -ne ($ExpectedExit -eq 0) -or $response.exit -cne $ExpectedExit `
+            -or $response.v -ne 1 -or $response.pid -cne $health.pid -or $null -eq $response.envelope `
+            -or [string]$response.id -cne $RequestId -or [string]$response.bin -cne [string]$health.bin `
             -or [string]$response.scope.account_id -cne [string]$scope.account_id `
             -or [string]$response.scope.instance_id -cne [string]$scope.instance_id `
             -or $response.scope.generation -cne $scope.generation) {
             throw 'Owned runtime RPC response identity failed.'
         }
+        if ($FullResponse) { return $response }
         return $response.envelope.summary
     } catch { throw 'Owned runtime request failed.' }
 }
@@ -1841,31 +1864,47 @@ function Invoke-LocalSmoke {
     Assert-Smoke $Name ([int]$response.StatusCode -eq $ExpectedStatus)
     if ($ExpectedStatus -eq 200) { return ($response.Content | ConvertFrom-Json) }
 }
-$health = Invoke-LocalSmoke -Name 'runtime-http-health' -Path '/api/health' -Method GET
-Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -eq $ExpectVersion)
-$wrongToken = Invoke-LocalSmoke -Name 'runtime-http-loopback-ignores-token' -Path '/api/rpc' -Payload @{ v = 1; id = 'wrong-token'; method = 'runtime.status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' }
-if ($wrongToken.ok -ne $true -or [string]$wrongToken.id -cne 'wrong-token' -or [string]$wrongToken.bin -cne $ExpectVersion) { throw 'Loopback RPC response identity failed.' }
+# The endpoint is the separate Runtime, whose installation has its own version and digest.
+$health = Get-OwnedRuntimeHealth $DirA -TimeoutSec 90
+Assert-Smoke 'runtime-http-health' ($null -ne $health -and $health.store_ready -eq $true)
+Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -ceq [string]$health.runtime_version)
+$wrongToken = Invoke-OwnedRuntimeRpc $DirA 'runtime.status' -RequestId 'wrong-token' `
+    -Headers @{ Authorization = 'Bearer invalid-smoke-token' } -TimeoutSec 90 -FullResponse
+Assert-Smoke 'runtime-http-loopback-ignores-token' ($wrongToken.ok -eq $true -and [string]$wrongToken.id -ceq 'wrong-token')
 Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/rpc' -Payload @{ v = 1; id = 'foreign-origin'; method = 'runtime.status' } -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-malformed-json' -Path '/api/rpc' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-missing-command' -Path '/api/rpc' -Payload @{} -ExpectedStatus 400 | Out-Null
 foreach ($removed in @(@('/', 'GET'), @('/index.html', 'GET'), @('/favicon.ico', 'GET'), @('/api/invoke', 'POST'), @('/api/task/start', 'POST'))) {
     Invoke-LocalSmoke -Name "runtime-removed-ui-$($removed[0] -replace '[^a-zA-Z0-9]', '-')" -Path $removed[0] -Method $removed[1] -Payload @{} -ExpectedStatus 404 | Out-Null
 }
-function Invoke-RuntimeCli([string]$Name, [string[]]$Arguments) {
-    $response = Invoke-LocalSmoke -Name $Name -Path '/api/rpc' -Payload @{ v = 1; id = $Name; method = 'cli.exec'; args = @('--json') + $Arguments }
-    Assert-Smoke "$Name-response" ($response.ok -eq $true -and [string]$response.id -ceq $Name -and [string]$response.bin -ceq $ExpectVersion -and $null -ne $response.envelope)
+function Invoke-RuntimeCli([string]$Name, [string[]]$Arguments, [int]$ExpectedExit = 0) {
+    $response = Invoke-OwnedRuntimeRpc $DirA 'cli.exec' (@('--json') + $Arguments) `
+        -RequestId $Name -ExpectedExit $ExpectedExit -TimeoutSec 90 -FullResponse
+    Assert-Smoke $Name ($response.exit -eq $ExpectedExit)
+    Assert-Smoke "$Name-response" ($response.ok -eq ($ExpectedExit -eq 0) -and [string]$response.id -ceq $Name `
+        -and $null -ne $response.envelope -and ($ExpectedExit -eq 0 -or [string]$response.envelope.status -ceq 'fail'))
     return $response.envelope
 }
 $runtimeStatus = Invoke-RuntimeCli 'runtime-cli-status' @('status')
 Assert-Smoke 'runtime-cli-status-approved-server' ([string]$runtimeStatus.summary.server_addr -ceq $Server -and $runtimeStatus.summary.unlocked -eq $true)
 Assert-Smoke 'runtime-cli-workspace-mode-normal' ([string]$runtimeStatus.summary.workspace -ceq 'normal')
-$runtimeConfig = Invoke-RuntimeCli 'runtime-cli-config' @('config')
+foreach ($hostOnly in @(@('config'), @('agent-config'), @('inject', '--targets'))) {
+    $deniedName = "runtime-cli-$($hostOnly[0])-host-boundary"
+    $denied = Invoke-RuntimeCli $deniedName $hostOnly -ExpectedExit 2
+    Assert-Smoke "$deniedName-fenced" ([string]$denied.details.error_type -ceq 'host_boundary')
+}
+$hostConfig = Invoke-Om -Name 'runtime-cli-config' -ArgList @('--json', 'config') -DataDir $DirA -TimeoutSec 90
+$runtimeConfig = $hostConfig.Envelope
+Assert-Smoke 'runtime-cli-config-response' ($hostConfig.Ok -and $hostConfig.Exit -eq 0 -and [string]$runtimeConfig.command -ceq 'config')
 Assert-Smoke 'runtime-cli-config-approved-server' ([string]$runtimeConfig.summary.addr -ceq $Server -and $runtimeConfig.summary.autosync -eq $false)
-$runtimeAgent = Invoke-RuntimeCli 'runtime-cli-agent-config' @('agent-config')
+$hostAgent = Invoke-Om -Name 'runtime-cli-agent-config' -ArgList @('--json', 'agent-config') -DataDir $DirA -TimeoutSec 90
+$runtimeAgent = $hostAgent.Envelope
+Assert-Smoke 'runtime-cli-agent-config-response' ($hostAgent.Ok -and $hostAgent.Exit -eq 0 -and [string]$runtimeAgent.command -ceq 'agent-config')
 Assert-Smoke 'runtime-cli-diary-mode-contract' ([string]$runtimeAgent.summary.diary_mode -in @('concise', 'verbose'))
 Invoke-RuntimeCli 'runtime-cli-list' @('list', '--limit', '5') | Out-Null
 Invoke-RuntimeCli 'runtime-cli-tree' @('tree', '--depth', '3') | Out-Null
-Invoke-RuntimeCli 'runtime-cli-inject-targets' @('inject', '--targets') | Out-Null
+$hostTargets = Invoke-Om -Name 'runtime-cli-inject-targets' -ArgList @('--json', 'inject', '--targets') -DataDir $DirA -TimeoutSec 90
+Assert-Smoke 'runtime-cli-inject-targets-response' ($hostTargets.Ok -and $hostTargets.Exit -eq 0 -and [string]$hostTargets.Envelope.command -ceq 'inject')
 Assert-Smoke 'runtime-cli-retired-rerank-rejected' ($retiredInstall.Ok -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base')))
 $runtimeCreated = Invoke-RuntimeCli 'runtime-cli-create' @('remember', "runtime-rpc-$stamp", '--title', "runtime-$stamp", '--importance', 'important', '--force', '--parent', $id)
 $runtimeId = [string]$runtimeCreated.summary.id
