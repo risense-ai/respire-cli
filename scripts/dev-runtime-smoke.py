@@ -867,8 +867,22 @@ class Smoke:
         require(self.child is None, 'doctor_fixture_requires_stopped_runtime')
         model = Path(self.env['RSRS_M3_DIR'])
         cache = self.root / 'doctor-model-cache'
+        self.start()
+        candidates = self.rpc(['recall', 'Runtime fixture persisted memory.', '--titles'])['details']
+        candidate_ids = [row['id'] for row in candidates]
+        require(bool(candidate_ids), 'doctor_baseline_candidates_missing')
+        self.stop()
         model.rename(cache)
         database = self.library / 'rsrs.db'
+
+        def asset_digests(directory):
+            values = {}
+            for name in ('tokenizer.json', 'onnx/model_quantized.onnx'):
+                with (directory / name).open('rb') as stream:
+                    values[name] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            return values
+
+        expected_assets = asset_digests(cache)
 
         def snapshot():
             with sqlite3.connect(database) as db:
@@ -881,7 +895,9 @@ class Smoke:
             db.execute('DELETE FROM core_artifacts')
             db.commit()
         allowed, started, release = threading.Event(), threading.Event(), threading.Event()
-        requests = []
+        requests, rejected_requests = [], []
+        repair = None
+        repair_deadline = None
         prefix = '/Xenova/bge-m3/resolve/4de13258303883538bd53b696b452bf8099f0858/'
 
         class ModelSource(BaseHTTPRequestHandler):
@@ -889,13 +905,14 @@ class Smoke:
                 pass
 
             def do_GET(self):
-                if not allowed.is_set():
-                    self.send_response(503)
-                    self.end_headers()
-                    return
                 name = self.path.removeprefix(prefix)
                 if not self.path.startswith(prefix) or name not in ('tokenizer.json', 'onnx/model_quantized.onnx'):
                     self.send_response(404)
+                    self.end_headers()
+                    return
+                if not allowed.is_set():
+                    rejected_requests.append(name)
+                    self.send_response(503)
                     self.end_headers()
                     return
                 requests.append((name, self.headers.get('Range')))
@@ -962,43 +979,127 @@ class Smoke:
                         else:
                             self.rpc(command)
                 index = self.rpc(['status'])['summary']['retrieval_index']
+                states = ('idle', 'scheduled', 'running', 'waiting_model', 'ready', 'missing', 'failed', 'paused', 'stopped')
+                self.report['doctor_last_index'] = {
+                    'expected': want, 'state': index.get('state') if index.get('state') in states else 'unknown',
+                    **{key: index.get(key) if type(index.get(key)) is bool else None
+                       for key in ('scheduled', 'running', 'worker_active')},
+                }
                 if index.get('state') == want:
                     return index
                 time.sleep(.2)
             raise Failure('doctor_index_' + want + '_timeout')
 
+        def host_result(result):
+            require(result.returncode in (0, 1, 2), 'host_doctor_repair_failed')
+            try:
+                envelope = json.loads(result.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                raise Failure('host_doctor_repair_envelope_invalid') from None
+            require(isinstance(envelope, dict), 'host_doctor_repair_envelope_invalid')
+            return envelope
+
         try:
             self.start()
-            wait_index('failed')
-            failed = doctor()
-            require(all(row['status'] == 'fail' for row in failed.values())
-                    and '503' in str(failed['model index'].get('value')), 'doctor_download_error_hidden')
-            self.passed('doctor_model_failed_download_visible', http_status=503)
-            allowed.set()
-            scheduled = doctor(True)
-            require(all(row['status'] == 'warn' for row in scheduled.values()), 'doctor_retry_not_scheduled')
-            require(started.wait(45), 'doctor_retry_did_not_download')
-            self.passed('doctor_model_failed_download_retry')
-            busy = doctor(True)
-            # This source ignores Range: one support probe precedes one full
-            # transfer. Block only the transfer, and reject additional requests.
+            if self.args.runtime_binary:
+                # Runtime verifies assets; the host owns downloads and Paused recovery.
+                wait_index('missing')
+                missing = doctor()
+                require(missing['embedder']['status'] == 'fail'
+                        and missing['model index']['status'] == 'warn'
+                        and not rejected_requests and not requests, 'doctor_missing_assets_not_visible')
+                command = [str(self.args.binary), '--json', 'doctor', '--fix']
+                failed = subprocess.run(command, env=self.env, cwd=self.root, capture_output=True, timeout=90)
+                failure = host_result(failed)
+                marker = self.root / 'runtime/autostart/maintenance.json'
+                require(failed.returncode != 0 and failure.get('status') == 'fail'
+                        and '503' in json.dumps(failure) and bool(rejected_requests)
+                        and not requests and all(not (model / name).exists() for name in expected_assets),
+                        'doctor_download_error_hidden')
+                require(marker.is_file() and not marker.is_symlink()
+                        and json.loads(marker.read_bytes()).get('phase') == 'Paused', 'doctor_failure_not_paused')
+                self.stop()
+                require(snapshot() == before and (self.library / 'session.json').read_bytes() == session,
+                        'doctor_failed_repair_changed_source_or_session')
+                self.passed('doctor_model_failed_download_visible', http_status=503, maintenance='Paused')
+                # Recover the failed transaction explicitly before starting another write.
+                rejected_count = len(rejected_requests)
+                self.direct(['runtime', 'restart'])
+                require(not marker.exists() and len(rejected_requests) == rejected_count
+                        and not requests, 'doctor_paused_recovery_failed')
+                self.start()
+                wait_index('missing')
+                allowed.set()
+                repair_deadline = time.monotonic() + 90
+                repair = subprocess.Popen(command, env=self.env, cwd=self.root,
+                                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                require(started.wait(45) and repair.poll() is None, 'doctor_retry_did_not_download')
+                self.passed('doctor_model_failed_download_retry', synchronous=True, paused_recovered=True)
+                paused = marker.read_bytes()
+                require(json.loads(paused).get('phase') == 'Paused', 'doctor_active_repair_not_paused')
+                busy = subprocess.run(command, env=self.env, cwd=self.root, capture_output=True,
+                                      timeout=max(.1, repair_deadline - time.monotonic()))
+                busy_result = host_result(busy)
+                require(busy.returncode != 0 and busy_result.get('status') == 'fail'
+                        and any(word in json.dumps(busy_result).lower() for word in ('maintenance', 'paused'))
+                        and marker.read_bytes() == paused and repair.poll() is None,
+                        'doctor_competing_repair_not_fenced')
+            else:
+                wait_index('failed')
+                failed = doctor()
+                require(all(row['status'] == 'fail' for row in failed.values())
+                        and '503' in str(failed['model index'].get('value')), 'doctor_download_error_hidden')
+                self.passed('doctor_model_failed_download_visible', http_status=503)
+                allowed.set()
+                scheduled = doctor(True)
+                require(all(row['status'] == 'warn' for row in scheduled.values()), 'doctor_retry_not_scheduled')
+                require(started.wait(45), 'doctor_retry_did_not_download')
+                self.passed('doctor_model_failed_download_retry')
+                busy = doctor(True)
+                require(all(row['status'] == 'warn' for row in busy.values()), 'doctor_competing_installer_started')
+            # One ignored Range probe and one blocked transfer, with no competing installer.
             model_requests = [range_header for name, range_header in requests
                               if name == 'onnx/model_quantized.onnx']
-            require(all(row['status'] == 'warn' for row in busy.values())
-                    and model_requests == ['bytes=0-0', None], 'doctor_competing_installer_started')
-            self.passed('doctor_model_active_download_no_duplicate', model_downloads=1, range_probes=1)
+            require(model_requests == ['bytes=0-0', None], 'doctor_competing_installer_started')
             release.set()
+            if repair is not None:
+                stdout, _ = repair.communicate(timeout=max(.1, repair_deadline - time.monotonic()))
+                repaired = host_result(subprocess.CompletedProcess(command, repair.returncode, stdout))
+                require(repair.returncode in (0, 2) and repaired.get('command') == 'doctor'
+                        and repaired.get('status') != 'fail' and not marker.exists(), 'host_doctor_repair_not_completed')
+                # Host maintenance replaces the owner; resume the fixture's verified child.
+                self.stop()
+                self.start()
             wait_index('ready', 240)
             ready = doctor()
             require(all(row['status'] == 'ok' for row in ready.values()), 'doctor_ready_model_not_pass')
-            self.passed('doctor_model_repair_ready')
+            require([header for name, header in requests if name == 'onnx/model_quantized.onnx']
+                    == model_requests, 'doctor_competing_installer_started')
+            self.passed('doctor_model_active_download_no_duplicate', model_downloads=1, range_probes=1)
+            require(asset_digests(model) == expected_assets, 'doctor_repaired_asset_digest_mismatch')
+            self.passed('doctor_model_repair_ready', asset_digests=expected_assets)
             require(snapshot() == before and (self.library / 'session.json').read_bytes() == session,
                     'doctor_repair_changed_source_or_session')
-            self.passed('doctor_model_repair_preserves_source')
+            recovered = self.rpc(['recall', 'Runtime fixture persisted memory.', '--titles'])['details']
+            require([row['id'] for row in recovered] == candidate_ids, 'doctor_repair_changed_candidates')
+            self.passed('doctor_model_repair_preserves_source', candidates_unchanged=True)
         finally:
             release.set()
+            self.report['doctor_repair_cleanup'] = {'passed': False}
             try:
-                self.stop()
+                try:
+                    if repair is not None and repair.poll() is None:
+                        try:
+                            repair.communicate(timeout=max(.1, repair_deadline - time.monotonic()))
+                        except subprocess.TimeoutExpired:
+                            repair.kill()
+                            repair.communicate(timeout=5)
+                            raise Failure('doctor_owned_repair_cleanup_timeout') from None
+                finally:
+                    self.stop()
+                    if self.args.runtime_binary:
+                        self.direct(['--runtime-internal', '--stop'])
+                self.report['doctor_repair_cleanup']['passed'] = True
             finally:
                 server.shutdown()
                 server.server_close()

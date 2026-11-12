@@ -146,7 +146,9 @@ function Write-SweepReport([switch]$Force) {
     [IO.File]::WriteAllText($ReportPath, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
     # Deliberately omit command output, arguments, notes, and credential material.
     $observed = @($Rows | ForEach-Object {
-        @{ case = $_.Name; command = $_.Command; step = $_.Step; exit = $_.Exit; status = $_.Status; result = $(if (-not $_.Ok) { 'failed' } elseif ($_.Status -eq 'skip') { 'skipped' } elseif ($_.Status -eq 'fail') { 'expected_error_contract' } else { 'passed' }) }
+        @{ case = $_.Name; command = $_.Command; step = $_.Step; exit = $_.Exit; status = $_.Status; result = $(if (-not $_.Ok) { 'failed' } elseif ($_.Status -eq 'skip') { 'skipped' } elseif ($_.Status -eq 'fail') { 'expected_error_contract' } else { 'passed' })
+            account_register_vault_pending = $_.account_register_vault_pending
+            account_register_vault_published = $_.account_register_vault_published }
     })
     $coverage = @{
         schema_version = 1; server = $Server; source_sha = $env:CLI_SHA; workflow_sha = $env:GITHUB_SHA
@@ -281,7 +283,9 @@ function Get-SafeFailureReason($Envelope) {
     return 'unclassified'
 }
 
-function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot) {
+function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot, [hashtable]$RegisterState = @{}) {
+    $RegisterState.account_register_vault_pending = $null
+    $RegisterState.account_register_vault_published = $null
     if ($Envelope.summary.reason -isnot [string] -or $Envelope.summary.reason -cne 'account_outcome_unknown') { return '' }
     $unavailable = 'account_phase=phase_unavailable'
     try {
@@ -334,7 +338,16 @@ function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot)
             if ($record.account.login -isnot [pscustomobject] -or $record.account.login.publication_pending -isnot [bool]) { return $unavailable }
             $pending = if ($record.account.login.publication_pending) { ' pubpending=true' } else { ' pubpending=false' }
         }
-        return "account_phase=$phase$pending"
+        $registerDiagnostic = ''
+        if ($record.account.register -is [bool] -and $record.account.register) {
+            foreach ($field in @(@('vault_pending', 'account_register_vault_pending'), @('published_vault', 'account_register_vault_published'))) {
+                $value = $record.account.($field[0])
+                if ($value -is [bool]) { $RegisterState[$field[1]] = $value }
+                $fixed = if ($value -is [bool]) { $value.ToString().ToLowerInvariant() } else { 'null' }
+                $registerDiagnostic += " $($field[1])=$fixed"
+            }
+        }
+        return "account_phase=$phase$pending$registerDiagnostic"
     } catch { return $unavailable }
 }
 
@@ -826,14 +839,17 @@ function Invoke-Om {
             break
         }
     }
+    $registerState = @{ account_register_vault_pending = $null; account_register_vault_published = $null }
     if (-not $ok) {
-        $failureDiagnostic = ("failure_reason=$(Get-SafeFailureReason $envlp) $(Get-SafeAccountPhase $envlp $DataDir $resolvedRoot)").Trim()
+        $failureDiagnostic = ("failure_reason=$(Get-SafeFailureReason $envlp) $(Get-SafeAccountPhase $envlp $DataDir $resolvedRoot $registerState)").Trim()
         $Note = ("$failureDiagnostic $Note").Trim()
     }
     $row = [pscustomobject]@{
         Step   = $script:Step
         Name   = $Name
         Command = $commandPath
+        account_register_vault_pending = $registerState.account_register_vault_pending
+        account_register_vault_published = $registerState.account_register_vault_published
         Exit   = $exit
         Status = $status
         Ok     = $ok

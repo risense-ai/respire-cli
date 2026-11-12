@@ -272,6 +272,10 @@ class Fixture:
         stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
             env=self.b, capture_output=True, timeout=60)
         require(stopped.returncode == 0, 'independent_login_runtime_stop_failed')
+        # Drain A before changing the session bound to its resident Runtime.
+        stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+            env=self.a, capture_output=True, timeout=90)
+        require(stopped.returncode == 0, 'registered_runtime_stop_failed')
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address

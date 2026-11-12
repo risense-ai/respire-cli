@@ -635,9 +635,46 @@ def main():
             before = session.read_bytes()
             wrong = list(migration)
             wrong[-1] = "A3-000000-000000-000000-000000-000000-000000"
-            cli(*wrong, success=False)
+            def reject_legacy_migration(flags):
+                previous_ids = {row["operation_id"] for row in json.loads(recovery_path.read_bytes())["operations"]}
+                rejected = json.loads(cli(*flags, success=False).stdout)
+                operation_id = rejected.get("details", {}).get("operation_id")
+                require(isinstance(operation_id, str) and str(uuid.UUID(operation_id)) == operation_id
+                        and uuid.UUID(operation_id).version == 4 and operation_id not in previous_ids
+                        and rejected.get("summary", {}).get("reason") == "account_outcome_unknown"
+                        and rejected["details"].get("source_profile") == str(root.resolve()),
+                        "original_operation_binding_changed")
+                journal = json.loads(recovery_path.read_bytes())
+                rows = [row for row in journal["operations"] if row["operation_id"] == operation_id]
+                require(journal.get("schema_version") == 2 and len(rows) == 1,
+                        "original_operation_not_unique")
+                record = rows[0]
+                active = journal.get("active") or {}
+                account = record.get("account") or {}
+                login = account.get("login") or {}
+                require(record["idempotency_key"] == operation_id and record["root"] == str(root.resolve())
+                        and record["profile"] == str(root.resolve()) and active.get("operation_id") == operation_id
+                        and active.get("alias") == record["alias"]
+                        and re.fullmatch(r"login-[a-f0-9]{32}", record["alias"]) is not None
+                        and account.get("register") is False and account.get("user") == "synthetic"
+                        and account.get("addr") == addr and login.get("migrate_vault") is True
+                        and all(login.get(key) is False for key in
+                            ("publication_pending", "publication_done", "vault_done", "password_done")),
+                        "original_operation_binding_changed")
+                native_aliases.add(record["alias"])
+                effects = state["logins"], state["posts"], state["password_posts"]
+                # Each negative case retains its own operation; retire it through the public rollback API.
+                rolled_back = json.loads(cli(*account_recovery_flags("account-rollback", record), success=False).stdout)
+                require(rolled_back.get("status") == "fail" and rolled_back["summary"]["operation_id"] == operation_id
+                        and rolled_back["summary"]["outcome"] == "rolled_back",
+                        "original_rollback_not_confirmed")
+                terminal_operation(json.loads(recovery_path.read_bytes()), record, "rolled_back")
+                require((state["logins"], state["posts"], state["password_posts"]) == effects,
+                        "rollback_replayed_authentication")
+
+            reject_legacy_migration(wrong)
             require(session.read_bytes() == before and state["posts"] == 0, "wrong_recovery_modified_state")
-            cli(*migration, success=False)
+            reject_legacy_migration(migration)
             require(session.read_bytes() == before and state["posts"] == 0, "inconsistent_factors_modified_state")
             if keys is None:
                 key_spec = importlib.util.spec_from_file_location("migration_keys", Path(__file__).with_name("dev-migration-keyring.py"))
