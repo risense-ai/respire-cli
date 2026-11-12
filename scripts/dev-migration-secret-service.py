@@ -136,16 +136,35 @@ class SecretServiceKeys(_base.TrackedKeys):
         diagnostic["stage"] = "enumeration"
         items = list(self.collection.get_all_items())
         diagnostic["observed_entries"] = len(items)
+        prefixes = ("super:", "pass:", "totp:", "classify:ds-model@", "classify:ds@", "classify:")
+        classification = self.business_classification = {
+            "classified_entries": 0,
+            "attribute_matches": {key: {"matched": 0, "mismatched": 0}
+                                  for key in ("service", "target", "application")},
+            "known_prefix_counts": {key: 0 for key in (*prefixes, "other")}}
+        ownership = []
+        # Classify every item with fixed counters; never publish attributes or aliases.
+        # Keep validated_entries as the accepted prefix before the first rejection.
         for item in items:
             diagnostic["stage"] = "attribute_read"
             attributes = item.get_attributes()
-            diagnostic["stage"] = "ownership_validation"
-            require(attributes.get("service") == "rsrs"
+            for key, expected in (("service", "rsrs"), ("target", "default"),
+                                  ("application", "rust-keyring")):
+                match = "matched" if attributes.get(key) == expected else "mismatched"
+                classification["attribute_matches"][key][match] += 1
+            username = attributes.get("username", "")
+            prefix = next((key for key in prefixes
+                           if isinstance(username, str) and username.startswith(key)), "other")
+            classification["known_prefix_counts"][prefix] += 1
+            classification["classified_entries"] += 1
+            ownership.append(bool(attributes.get("service") == "rsrs"
                     and attributes.get("target") == "default"
                     and attributes.get("application") == "rust-keyring"
-                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}",
-                                     attributes.get("username", "")),
-                    "unexpected_private_credential")
+                    and isinstance(username, str)
+                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}", username)))
+        diagnostic["stage"] = "ownership_validation"
+        for owned in ownership:
+            require(owned, "unexpected_private_credential")
             diagnostic["validated_entries"] += 1
         diagnostic["stage"] = "deletion"
         for item in items:
@@ -280,6 +299,8 @@ class SecretServiceKeys(_base.TrackedKeys):
         }
         if hasattr(self, "business_cleanup"):
             report["business_credential_cleanup"] = self.business_cleanup
+        if hasattr(self, "business_classification"):
+            report["business_credential_classification"] = self.business_classification
         if hasattr(self, "collection"):
             collection = report["collection_cleanup"] = {"passed": False,
                 "stage": "enumeration", "remaining_entries": None}

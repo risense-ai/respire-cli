@@ -453,6 +453,8 @@ jobs:
           path: |
             ${{ runner.temp }}/published-upgrades/published-upgrades.json
             ${{ runner.temp }}/published-upgrades/**/results/real-account-return-verification.json
+            ${{ runner.temp }}/published-upgrades/**/results/**/boundary-inspector/inspector.log
+            ${{ runner.temp }}/published-upgrades/**/results/**/boundary-inspector/inspection-failure.json
           if-no-files-found: error
       - name: Verify GNU login interruption recovery with this release binary
         if: inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
