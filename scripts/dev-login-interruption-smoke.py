@@ -494,7 +494,9 @@ def main():
                     and receipt["operation_id"] == operation_id
                     and receipt["outcome"] == "rolled_back"
                     and state["logins"] == logins_before, "original_rollback_not_confirmed")
-            terminal_operation(json.loads(recovery_path.read_bytes()), rejected_record, "rolled_back")
+            journal = json.loads(recovery_path.read_bytes())
+            require(len(journal["operations"]) == 1, "original_operation_not_unique")
+            terminal_operation(journal, rejected_record, "rolled_back")
             require(session.read_bytes() == initial_session and config.read_bytes() == config_bytes,
                     "legacy_original_profile_not_restored")
             if keys:
