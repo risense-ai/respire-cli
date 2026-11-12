@@ -46,12 +46,13 @@ def main():
                 argv.append("--native-credentials")
             argv = ["dbus-run-session", "--", *argv]
         timeout = 1500
-        if sys.platform.startswith("linux") and name == "runtime":
+        if sys.platform.startswith("linux") and name in ("runtime", "ai_inject"):
             # Provider settings include fixed slots; the shared supplements bus
             # cannot safely own them while another suite is running.
+            credentials = "runtime-credentials" if name == "runtime" else "ai-credentials"
             argv = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                     sys.executable, str(scripts / "dev-secret-service-keyring-selftest.py"),
-                    "--root", str(root / "runtime-credentials"), "--timeout", "1500", "--", *argv]
+                    "--root", str(root / credentials), "--timeout", "1500", "--", *argv]
             # Keep the business deadline. Allow bounded wrapper startup/teardown
             # time (daemon startup 10s; terminate/kill waits 5s each; native RPCs).
             # A wedged backend can still exceed this watchdog: report failure.
