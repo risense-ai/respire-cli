@@ -761,8 +761,6 @@ def main():
                     "original_profile_selection_failed")
             report["stage"] = "legacy_recovery_migrate_vault"
             cli(*migration)
-            report["stage"] = "legacy_recovery_stop_runtime"
-            cli("--runtime-internal", "--stop")
             if fixture_witness is not None:
                 report["stage"] = "legacy_recovery_verify_witness"
                 chain = json.loads(cli("--direct", "--json", "witness", "--verify").stdout)
@@ -782,6 +780,8 @@ def main():
             source_name = source_account["name"]
             source_path = Path(source_account["dir"])
             source_session = source_path / "session.json"
+            report["stage"] = "legacy_recovery_stop_runtime"
+            cli("--runtime-internal", "--stop")
             source_value = json.loads(source_session.read_bytes())
             source_value["addr"] = "https://previous.invalid"
             source_value["super"] = old_super  # Synthetic source factor differs from the target env key.
@@ -793,7 +793,9 @@ def main():
             state["vault"] = {"version": 4, "kdf_salt": cloud_salt, "urk_nonce": cloud_nonce.hex(),
                 "wrapped_urk": legacy.PREFIX + AESGCM(legacy.v4_kek(code, cloud_salt, legacy.PREFIX)).encrypt(cloud_nonce, cloud_urk, None).hex()}
             state.update(sync_blobs={}, sync_pulls=0)
-            transfer = ("--json", "login", "--interactive", "--addr", addr, "--user", "synthetic",
+            # Keep the fresh cloud vault separate from main's existing remote identity.
+            transfer_addr = f"http://localhost:{server.server_port}"
+            transfer = ("--json", "login", "--interactive", "--addr", transfer_addr, "--user", "synthetic",
                         "--pass=synthetic-password", "--super", code, "--migrate-local")
             report["stage"] = "server_transfer_initial_login"
             first_result = cli(*transfer, success=False)
