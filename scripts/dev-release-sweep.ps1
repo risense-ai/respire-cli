@@ -216,6 +216,9 @@ function Get-SafeFailureReason($Envelope) {
                     return "account_outcome_unknown/$($entry[1])"
                 }
             }
+            if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith('Runtime rejected account control (account_outcome_unknown): account outcome is unknown; query the original operation without replaying', [StringComparison]::Ordinal) }).Count -gt 0) {
+                return 'account_outcome_unknown/account_runtime_rejected'
+            }
             return 'account_outcome_unknown'
         }
         if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
@@ -276,6 +279,57 @@ function Get-SafeFailureReason($Envelope) {
         if ($message -match $entry[0]) { return $entry[1] }
     }
     return 'unclassified'
+}
+
+function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot) {
+    if ($Envelope.summary.reason -isnot [string] -or $Envelope.summary.reason -cne 'account_outcome_unknown') { return '' }
+    $unavailable = 'account_phase=phase_unavailable'
+    try {
+        $operation = $Envelope.details.operation_id
+        $source = $Envelope.details.source_profile
+        if ($operation -isnot [string] -or $operation -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or $source -isnot [string]) { return $unavailable }
+        $normalize = {
+            param([string]$Value)
+            if (-not [IO.Path]::IsPathFullyQualified($Value)) { throw 'invalid_fixture_path' }
+            if ($IsWindows) { $Value = $Value -replace '^\\\\\?\\', '' }
+            return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Value))
+        }
+        $fixturePath = & $normalize $FixtureRoot
+        $devicePath = & $normalize $DataDir
+        $sourcePath = & $normalize $source
+        $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        if ((-not $devicePath.Equals($fixturePath, $comparison) -and -not $devicePath.StartsWith($fixturePath + [IO.Path]::DirectorySeparatorChar, $comparison)) -or
+            (-not $sourcePath.Equals($devicePath, $comparison) -and -not $sourcePath.StartsWith($devicePath + [IO.Path]::DirectorySeparatorChar, $comparison))) { return $unavailable }
+        $journalPath = Join-Path $devicePath '.login-recovery.json'
+        foreach ($path in @($sourcePath, $journalPath)) {
+            for ($ancestor = $path; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
+                if (([IO.File]::GetAttributes($ancestor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $unavailable }
+            }
+        }
+        if (([IO.File]::GetAttributes($sourcePath) -band [IO.FileAttributes]::Directory) -eq 0) { return $unavailable }
+        $journal = [IO.File]::ReadAllText($journalPath) | ConvertFrom-Json -ErrorAction Stop
+        if ($journal -isnot [pscustomobject] -or $journal.schema_version -isnot [long] -or $journal.schema_version -ne 2 -or $journal.operations -isnot [array] -or $journal.active -isnot [pscustomobject] -or
+            $journal.active.operation_id -isnot [string] -or $journal.active.operation_id -cne $operation) { return $unavailable }
+        $records = @($journal.operations | Where-Object { $_.operation_id -is [string] -and $_.operation_id -eq $operation })
+        if ($records.Count -ne 1) { return $unavailable }
+        $record = $records[0]
+        if ($record -isnot [pscustomobject] -or $record.operation_id -cne $operation -or $record.idempotency_key -isnot [string] -or $record.idempotency_key -cne $operation -or
+            $record.root -isnot [string] -or $record.profile -isnot [string] -or $journal.active.directory -isnot [string] -or
+            $record.alias -isnot [string] -or -not $record.alias -or $journal.active.alias -isnot [string] -or $journal.active.alias -cne $record.alias -or
+            $record.account -isnot [pscustomobject]) { return $unavailable }
+        if (-not (& $normalize $record.root).Equals($devicePath, $comparison) -or
+            -not (& $normalize $record.profile).Equals($sourcePath, $comparison) -or
+            -not (& $normalize $journal.active.directory).Equals($sourcePath, $comparison)) { return $unavailable }
+        $phase = $record.phase
+        if ($phase -isnot [string] -or $phase -cnotin @('admitted', 'login_input', 'remote_pending', 'remote_unknown', 'authorized',
+            'prepared', 'awaiting_verification', 'rolling_back', 'committed', 'rolled_back')) { return $unavailable }
+        $pending = ''
+        if ($null -ne $record.account.login) {
+            if ($record.account.login -isnot [pscustomobject] -or $record.account.login.publication_pending -isnot [bool]) { return $unavailable }
+            $pending = if ($record.account.login.publication_pending) { ' pubpending=true' } else { ' pubpending=false' }
+        }
+        return "account_phase=$phase$pending"
+    } catch { return $unavailable }
 }
 
 function Assert-DevEnvelope($Envelope, [string]$Where) {
@@ -766,7 +820,10 @@ function Invoke-Om {
             break
         }
     }
-    if (-not $ok) { $Note = ("failure_reason=$(Get-SafeFailureReason $envlp) $Note").Trim() }
+    if (-not $ok) {
+        $failureDiagnostic = ("failure_reason=$(Get-SafeFailureReason $envlp) $(Get-SafeAccountPhase $envlp $DataDir $resolvedRoot)").Trim()
+        $Note = ("$failureDiagnostic $Note").Trim()
+    }
     $row = [pscustomobject]@{
         Step   = $script:Step
         Name   = $Name
@@ -782,7 +839,7 @@ function Invoke-Om {
     $flag = if (-not $ok) { 'FAIL' } elseif ($status -eq 'fail') { 'EXPECTED_ERROR' } elseif ($status -eq 'skip') { 'SKIP' } else { 'PASS' }
     Write-Host "$flag $Name exit=$exit status=$status leak=$($row.Leak)"
     if (-not $ok) {
-        $detail = if ($Secret) { "failure_reason=$(Get-SafeFailureReason $envlp)" } else { $stderr + ' ' + $stdout }
+        $detail = if ($Secret -or ($envlp.summary.reason -is [string] -and $envlp.summary.reason -ceq 'account_outcome_unknown')) { $failureDiagnostic } else { $stderr + ' ' + $stdout }
         $detail = [regex]::Replace($detail, '(?i)(super|secret|token|password|nonce|wrapped_urk|kdf_salt)[^,\s"]{0,120}', '${1}=[redacted]')
         $detail = ($detail -replace '\s+', ' ').Trim()
         if ($detail.Length -gt 240) { $detail = $detail.Substring($detail.Length - 240) }
