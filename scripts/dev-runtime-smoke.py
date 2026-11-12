@@ -1172,9 +1172,16 @@ class Smoke:
             return actual['pid']
         try:
             cli(['space', 'list'])
+            cli(['runtime', 'start'])
             old_pid = health(library)
             cli(['space', 'create', 'probe'])
             probe = library / 'accounts/probe'
+            require(Path(json.loads(config.read_text(encoding='utf-8'))['data_dir']).resolve() == probe.resolve(),
+                    'space_create_did_not_select_profile')
+            with socket.socket() as listener:
+                listener.settimeout(2)
+                require(listener.connect_ex(('127.0.0.1', port)) != 0, 'space_create_did_not_stop_runtime')
+            cli(['runtime', 'start'])
             require(probe.joinpath('space_owner.json').is_file() and health(probe) != old_pid,
                     'space_create_did_not_take_over_runtime')
             before = config.read_bytes()
@@ -1198,9 +1205,9 @@ class Smoke:
                     'space_host_command_lost_configuration')
         finally:
             cli(['--runtime-internal', '--stop'])
-        with socket.socket() as listener:
-            listener.settimeout(2)
-            require(listener.connect_ex(('127.0.0.1', port)) != 0, 'space_fixture_runtime_not_closed')
+            with socket.socket() as listener:
+                listener.settimeout(2)
+                require(listener.connect_ex(('127.0.0.1', port)) != 0, 'space_fixture_runtime_not_closed')
         self.passed('host_space_lifecycle', runtime_cleanup=True, configuration_preserved=True)
 
     def update_check_comparisons(self):

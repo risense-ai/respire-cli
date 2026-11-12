@@ -221,7 +221,7 @@ class Fixture:
             runtime_inputs(self.args, [self.args.binary])
         return env
 
-    def direct(self, env, command, allow_pending=False, timeout=150):
+    def direct(self, env, command, allow_pending=False, timeout=150, expected_profile=None):
         try:
             result = subprocess.run([str(self.args.binary), "--direct", "--json", *command],
                                     env=env, capture_output=True, timeout=timeout)
@@ -247,8 +247,8 @@ class Fixture:
             with urllib.request.urlopen(urllib.request.Request(
                     'http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
-            profile = Path(env['RSRS_DATA_DIR'])
-            verify_runtime_health(self.args, health, profile, profile)
+            root = Path(env['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, root, expected_profile if expected_profile is not None else root)
         return data
 
     def prepare(self):
@@ -268,7 +268,14 @@ class Fixture:
         super_key = registration.get("summary", {}).get("super")
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
-        self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        login = self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        summary = login.get("summary", {})
+        require(summary.get("ok") is True and summary.get("user") == self.user
+                and summary.get("addr") == UPSTREAM, "independent_login_identity_mismatch")
+        require(isinstance(summary.get("dir"), str) and bool(summary["dir"]), "independent_login_profile_missing")
+        self.b_profile = Path(summary["dir"]).resolve(strict=True)
+        require(self.b_profile.is_relative_to(Path(self.b["RSRS_DATA_DIR"]).resolve(strict=True)),
+                "independent_login_profile_escape")
         stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
             env=self.b, capture_output=True, timeout=60)
         require(stopped.returncode == 0, 'independent_login_runtime_stop_failed')
@@ -405,9 +412,9 @@ class Fixture:
                 real_acknowledged = set(memories).issubset(self.gate.acknowledged)
             return self.pending() == 0 and real_acknowledged
         wait_for(acknowledged, 150, "real_ack_timeout")
-        self.direct(self.b, ["sync"], allow_pending=True)
+        self.direct(self.b, ["sync"], allow_pending=True, expected_profile=self.b_profile)
         for memory_id, content in memories.items():
-            shown = self.direct(self.b, ["show", memory_id])
+            shown = self.direct(self.b, ["show", memory_id], expected_profile=self.b_profile)
             require(any(node.get("id") == memory_id and node.get("content") == content for node in objects(shown)), "independent_pull_decrypt_mismatch")
 
     def close(self):
