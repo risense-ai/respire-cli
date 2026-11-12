@@ -3,6 +3,7 @@
 from native_fixture_process import install_published_runtime
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -16,6 +17,13 @@ import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+_runtime_spec = importlib.util.spec_from_file_location(
+    "ai_runtime_credentials", Path(__file__).with_name("dev-runtime-smoke.py"))
+_runtime = importlib.util.module_from_spec(_runtime_spec)
+_runtime_spec.loader.exec_module(_runtime)
+RuntimeProviderKeys = _runtime.RuntimeProviderKeys
+
 
 REQUIRED = (
     "model_cpu_real", "inject_preview_install_remove",
@@ -249,7 +257,8 @@ class Provider:
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
-        self.url = f"http://127.0.0.1:{self.server.server_port}/v1"
+        self.port = self.server.server_port
+        self.url = f"http://127.0.0.1:{self.port}/v1"
 
     def close(self):
         self.server.shutdown()
@@ -294,6 +303,7 @@ class Smoke:
             "provider_scope": "Deterministic local CLI/provider protocol only; no external LLM quality claim.",
             "cloud_cleanup": {"passed": False, "remaining_users": []}}
         self.provider = None
+        self.provider_keys = None
         self.registration_attempted = False
         self.created_user = None
         self.account_token = None
@@ -474,6 +484,7 @@ class Smoke:
             shapes=3, legacy_removed=True, user_content_preserved=True)
 
     def run(self):
+        self.provider_keys = RuntimeProviderKeys(self.env)
         raw = subprocess.run([str(self.args.binary), "--version"], env=self.env,
             capture_output=True, timeout=20)
         require(raw.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", raw.stdout.decode()), "binary_version_mismatch")
@@ -521,6 +532,7 @@ class Smoke:
                 for number in range(8):
                     self.remember(f"{root_name} group {group} item {number}", body, roots[root_name])
         self.provider = Provider()
+        self.provider_keys.reserve(f"classify:ds-model@127.0.0.1:{self.provider.port}")
         flags = ["--backend", "ds", "--api-base", self.provider.url, "--root", roots["CI causal root"], "--all"]
         save = self.root / "standard.json"
         self.cli("classify", *flags, "--save", str(save))
@@ -605,6 +617,15 @@ def main():
             except Exception as error:
                 smoke.report["provider_shutdown_failure"] = type(error).__name__
                 smoke.report["status"] = "failed"
+        provider_clean = False
+        if smoke.provider_keys is not None:
+            try:
+                provider_clean = smoke.provider_keys.cleanup()
+            except Exception:
+                provider_clean = False
+        smoke.report["provider_credential_cleanup"] = {"passed": provider_clean}
+        if not provider_clean:
+            smoke.report["status"] = "failed"
         smoke.cleanup_account()
         if not smoke.report["cloud_cleanup"]["passed"]:
             smoke.report["status"] = "failed"

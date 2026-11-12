@@ -1601,9 +1601,16 @@ if (-not (Test-Path $sessionPath)) {
     $sessionPath = Get-ChildItem -Path $DirA -Filter session.json -Recurse | Select-Object -First 1 -ExpandProperty FullName
 }
 if ($sessionPath -and (Test-Path $sessionPath)) {
-    Invoke-Om -Name 'config-addr-d' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirD | Out-Null
+    $fivekeysConfig = Invoke-Om -Name 'config-addr-d' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirD
     $sess = Get-Content $sessionPath -Raw -Encoding utf8 | ConvertFrom-Json
-    Invoke-Om -Name 'fivekeys-d' -ArgList @(
+    $fivekeysSelected = $fivekeysConfig.Envelope.summary.data_dir
+    $fivekeysNote = 'user_present={0} pass_present={1} secret_present={2} kdf_salt_present={3} wrapped_urk_present={4} urk_nonce_present={5} super_present={6} selected_profile_observed={7} selected_profile_matches={8}' -f `
+        (-not [string]::IsNullOrEmpty($user)), (-not [string]::IsNullOrEmpty($pass)), (-not [string]::IsNullOrEmpty([string]$sess.secret_key)), `
+        (-not [string]::IsNullOrEmpty([string]$sess.kdf_salt)), (-not [string]::IsNullOrEmpty([string]$sess.wrapped_urk)), `
+        (-not [string]::IsNullOrEmpty([string]$sess.urk_nonce)), (-not [string]::IsNullOrEmpty($super)), `
+        ($fivekeysSelected -is [string] -and -not [string]::IsNullOrEmpty($fivekeysSelected)), `
+        ($fivekeysSelected -is [string] -and $fivekeysSelected -eq [IO.Path]::GetFullPath($DirD))
+    $fivekeysResult = Invoke-Om -Name 'fivekeys-d' -ArgList @(
         '--json', 'fivekeys',
         '--addr', $Server,
         '--user', $user,
@@ -1613,7 +1620,15 @@ if ($sessionPath -and (Test-Path $sessionPath)) {
         '--wrapped-urk', ([string]$sess.wrapped_urk),
         '--urk-nonce', ([string]$sess.urk_nonce),
         '--super', $super
-    ) -DataDir $DirD -Secret -TimeoutSec 180 | Out-Null
+    ) -DataDir $DirD -Secret -TimeoutSec 180 -Note $fivekeysNote
+    if (-not $fivekeysResult.Ok) {
+        $fivekeysReason = 'unclassified'
+        foreach ($class in @('key_outcome_unknown', 'auth_outcome_unknown', 'identity_write_recovery_required', 'invalid_input', 'runtime_error')) {
+            if ($fivekeysResult.Envelope.summary.reason -is [string] -and $fivekeysResult.Envelope.summary.reason -ceq $class) { $fivekeysReason = $class; break }
+        }
+        $fivekeysResult.Row.Note += " fivekeys_reason=$fivekeysReason"
+        Write-SweepReport -Force
+    }
 }
 
 Invoke-Om -Name 'config-autosync-off-a' -ArgList @('--json', 'config', '--autosync', 'false') -DataDir $DirA | Out-Null

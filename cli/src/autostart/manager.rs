@@ -29,7 +29,13 @@ pub(crate) fn process_birth(pid: u32) -> Result<Option<String>> {
     {
         let raw = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(raw) => raw,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            // ESRCH (3) means this procfs task exited between open and read.
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(3) =>
+            {
+                return Ok(None);
+            }
             Err(error) => return Err(error.into()),
         };
         let fields = raw.rsplit_once(')').context("invalid process identity")?.1;

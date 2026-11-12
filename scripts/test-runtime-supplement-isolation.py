@@ -22,6 +22,7 @@ class RunnerTests(unittest.TestCase):
             def __init__(self, argv, **kwargs):
                 self.argv, self.calls, self.pid = argv, [], 987654321
                 self.is_runtime = any(value.endswith('/dev-runtime-smoke.py') for value in argv)
+                self.is_ai = any(value.endswith('/dev-ai-inject-smoke.py') for value in argv)
                 self.returncode = runtime_exit if self.is_runtime else 0
                 commands.append(self)
             def communicate(self, timeout):
@@ -49,10 +50,11 @@ class RunnerTests(unittest.TestCase):
         result, processes, outcomes, kills = self.run_fixture()
         self.assertEqual(result, 0)
         for process in processes:
-            if process.is_runtime:
+            if process.is_runtime or process.is_ai:
                 self.assertEqual(process.argv[:5], ['dbus-run-session', '--', 'env', 'RSRS_SS_FIXTURE_BUS=private', sys.executable])
                 self.assertTrue(process.argv[5].endswith('/dev-secret-service-keyring-selftest.py'))
-                self.assertTrue(process.argv[7].endswith('/runtime-credentials'))
+                self.assertTrue(process.argv[7].endswith(
+                    '/runtime-credentials' if process.is_runtime else '/ai-credentials'))
                 self.assertEqual(process.argv[8:11], ['--timeout', '1500', '--'])
                 self.assertEqual(process.calls, [1800])
             else:

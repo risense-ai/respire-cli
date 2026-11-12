@@ -404,11 +404,18 @@ class Smoke:
                 # The supervisor has already killed/reaped its exact descendants;
                 # check filesystem/listener effects even after launch/timeout errors.
                 self.nonloopback_no_effects()
-            # Only fixed identifiers and integer exits may leave this process.
+            # Only fixed classifications, booleans and lengths may leave this process.
             self.report['failure_diagnostic'] = {
                 'case_id': case_id, 'probe_id': probe_id, 'expected_exit': 2,
                 'actual_exit': result.returncode if type(result.returncode) is int else None,
             }
+            expected_stdout = f'runtime=starting host={host} port={self.port}\n' if probe_id == 'runtime_host_rejection' else ''
+            expected_stderr = 'rsrs-runtime: ' + cases[host][1] + '\n' if probe_id == 'runtime_host_rejection' else ''
+            stdout_match, stderr_match = result.stdout == expected_stdout, result.stderr == expected_stderr
+            self.report['failure_diagnostic'].update(
+                stdout_expected_match=stdout_match, stderr_expected_match=stderr_match,
+                stdout_utf8_bytes=len(result.stdout.encode('utf-8')), stderr_utf8_bytes=len(result.stderr.encode('utf-8')),
+                output_classification='expected_output' if stdout_match and stderr_match else 'output_mismatch')
             require(type(result.returncode) is int and result.returncode == 2,
                     'nonloopback_exit_mismatch')
             if probe_id == 'runtime_host_rejection':

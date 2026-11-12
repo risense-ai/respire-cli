@@ -72,6 +72,8 @@ def verify_migration(args, result):
             and not migration.get("keyring_cleanup", {}).get("remaining_entries"), "migration_keyring_cleanup_failed")
     native_backends = {"linux": "linux-keyutils", "darwin": "macos-keychain-synthetic-acl",
                        "win32": "windows-credential-manager"}
+    if sys.platform == "linux" and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private":
+        native_backends["linux"] = "linux-secret-service"
     require(migration.get("platform") == sys.platform
             and migration.get("keyring_backend") == native_backends.get(sys.platform),
             "migration_native_platform_mismatch")
@@ -148,7 +150,7 @@ def verify(args, result):
     identity(interruption, args)
     require(interruption.get("passed") is True and interruption.get("runtime_cleanup", {}).get("passed") is True,
             "login_interruption_incomplete")
-    cases(interruption, {"before_publish_SIGINT_retry", "after_publish_SIGINT_retry", "pre_journal_DEV4_recovery"},
+    cases(interruption, {"before_publish_interrupted", "after_publish_interrupted", "pre_journal_DEV4_recovery"},
           "login_interruption_cases_missing")
     recovered = interruption["cases"]["pre_journal_DEV4_recovery"]
     require(all(recovered.get(field) is True for field in ("public_original_profile_migration",
