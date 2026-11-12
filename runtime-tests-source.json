@@ -40,43 +40,43 @@
       "snapshot_lifecycle::staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable"
     ]
   },
-  "source_sha": "2797706fa217952ff282f6a688ee30cdc9973ab2",
+  "source_sha": "aa733bcac113296054e47e3686d68094f2dcd95b",
   "producer": {
     "status": "ready",
     "workflow": ".github/workflows/prebuilt-integration-tests.yml",
     "workflow_id": 414927024,
-    "workflow_sha": "2797706fa217952ff282f6a688ee30cdc9973ab2",
-    "run_id": 43166580654,
+    "workflow_sha": "aa733bcac113296054e47e3686d68094f2dcd95b",
+    "run_id": 43193353931,
     "run_attempt": 1
   },
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "artifact_id": 13920137906,
-      "sha256": "3924e64522c1e4c8e39242472b4395d1ba22ef5c7964a088dd72a26782ab3d06"
+      "artifact_id": 13931259010,
+      "sha256": "1067b43c4def4eb6bded592a14d227c9f2f65e5618a08da5f5f8ad7ca315baea"
     },
     "aarch64-pc-windows-msvc": {
-      "artifact_id": 13920816133,
-      "sha256": "dd4a810da229126658cebd053d52e61989fcbc85887ecc664ccd220b63917d3f"
+      "artifact_id": 13932296164,
+      "sha256": "719c6e2539977893744e6d5d43702fe6f4c8838034d51bfcbe8de47056c5170b"
     },
     "aarch64-apple-darwin": {
-      "artifact_id": 13920187900,
-      "sha256": "18c59cd1944e256f16555abbced1c9ffe0fc8c44d3e95667f3323b6477c56500"
+      "artifact_id": 13932595065,
+      "sha256": "3e6b6a66a76181484d5e946e45f403615ba188f3e10199d3164fb77e7a4fb556"
     },
     "x86_64-unknown-linux-gnu": {
-      "artifact_id": 13920741023,
-      "sha256": "314a63fb07c0919a27c1ffee139442e0e4d34cb9c179b248c8b2d12ad485ce95"
+      "artifact_id": 13932011858,
+      "sha256": "f320b1f0690e7d35a73376f35f9550cec32c61b69c69b92c1904ef0f176d51fb"
     },
     "aarch64-unknown-linux-gnu": {
-      "artifact_id": 13919893793,
-      "sha256": "b5ffab520ff6eee02f25a2da2db47f8e63c0aaffa1107b8e7383036a0e8805ec"
+      "artifact_id": 13931991952,
+      "sha256": "5c839b71bab633ba5291a387fc684bf80c94a227e0e66ca63e7a990152f9dea5"
     },
     "x86_64-unknown-linux-musl": {
-      "artifact_id": 13920567916,
-      "sha256": "05ac1d84452e8c4e968776be48d60100b6486a7be9790aaac8bef97ecfe8884d"
+      "artifact_id": 13931993390,
+      "sha256": "a5a460d690b261866518709c25438b3bafb2e2bde8a2129d3e91ade0ba815486"
     },
     "aarch64-unknown-linux-musl": {
-      "artifact_id": 13920044032,
-      "sha256": "6277deb0da32d09f75dd8eb03e01e7b6d38072f38c0bd5366ba5b04025f1b314"
+      "artifact_id": 13932815695,
+      "sha256": "3f5b23b2ef94e008f5ee7ac2ceaf8ca5040de8bda213797ff2ee2349d84f9b9b"
     }
   }
 }

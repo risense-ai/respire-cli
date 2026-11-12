@@ -31,7 +31,7 @@ if sys.platform.startswith('linux'):
 # Asynchronous stack dumps can race live frames (CPython #116008); fixture calls retain hard deadlines.
 BASE=pathlib.Path(args.output_dir).resolve()
 BASE.mkdir(parents=True,exist_ok=True)
-import cryptography, importlib.metadata, psutil
+import cryptography, importlib.metadata, importlib.util, psutil
 (BASE/'fixture-dependencies.json').write_text(json.dumps({
     'python':sys.version,'cryptography':cryptography.__version__,'psutil':psutil.__version__,
     'psutil_source':json.loads(importlib.metadata.distribution('psutil').read_text('direct_url.json') or 'null'),
@@ -140,6 +140,7 @@ for binary in BINARIES:
         (main/'client.json').write_text(json.dumps({**public_config,'data_dir':str(profile)}),encoding='utf-8')
     worker_identities=[]
     inspector=None
+    stop_failure=None
     def checked_worker(health):
         global inspector
         if args.runtime_binary: observe_runtime(health)
@@ -292,6 +293,31 @@ for binary in BINARIES:
             # candidate Runtime can initialize the selected profile's schema.
             run('--direct','model','engine','cpu')
             stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            if stopped.returncode:
+                stop_failure={'phase':'direct_engine_preparation','returncode':stopped.returncode,
+                    'timing':dict(stopped.fixture_timing),
+                    'runtime_identity_receipt_index':len(args.runtime_identity_receipts)-1,
+                    'stdout':'redaction_unavailable','stderr':'redaction_unavailable'}
+                try:
+                    # Reuse the existing bounded credential redactor; never attach raw output or fixture files.
+                    support_spec=importlib.util.spec_from_file_location('stop_diagnostic_support',
+                        pathlib.Path(__file__).with_name('dev-legacy-vault-smoke.py'))
+                    support=importlib.util.module_from_spec(support_spec)
+                    support_spec.loader.exec_module(support)
+                    redactor=object.__new__(support.Smoke)
+                    redactor.diagnostic_secrets={code,entropy.hex()}
+                    for profile in (main,alternate):
+                        redactor.diagnostic_secrets.update(value for value in
+                            json.loads((profile/'session.json').read_bytes()).values()
+                            if isinstance(value,str) and value)
+                    for stream in ('stdout','stderr'):
+                        body=getattr(stopped,stream)
+                        output=subprocess.CompletedProcess(stopped.args,stopped.returncode,
+                            body if stream=='stdout' else b'',body)
+                        stop_failure[stream]=redactor.redacted_cli_error(env,output)
+                except Exception:
+                    # Redaction failure must neither publish raw bytes nor hide the original stop failure.
+                    pass
             assert stopped.returncode==0,'direct engine preparation runtime stop failed'
             global_engine=(main/'inference.json').read_bytes()
         statuses=[]
@@ -676,7 +702,8 @@ for binary in BINARIES:
             **runtime_report(args,True)})
         print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
     except Exception as error:
-        reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000]})
+        reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000],
+            **({'runtime_stop_failure':stop_failure} if stop_failure is not None else {})})
         (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
         raise
     finally:
