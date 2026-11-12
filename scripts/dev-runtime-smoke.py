@@ -411,15 +411,20 @@ class Smoke:
             }
             expected_stdout = f'runtime=starting host={host} port={self.port}\n' if probe_id == 'runtime_host_rejection' else ''
             expected_stderr = 'rsrs-runtime: ' + cases[host][1] + '\n' if probe_id == 'runtime_host_rejection' else ''
-            stdout_match, stderr_match = result.stdout == expected_stdout, result.stderr == expected_stderr
+            known_cpuid_warning = 'onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n'
+            known_cpuid_warning_match = (probe_id == 'runtime_host_rejection'
+                                         and result.stderr == known_cpuid_warning + expected_stderr)
+            stdout_match = result.stdout == expected_stdout
+            stderr_match = result.stderr == expected_stderr or known_cpuid_warning_match
             self.report['failure_diagnostic'].update(
+                known_cpuid_warning_match=known_cpuid_warning_match,
                 stdout_expected_match=stdout_match, stderr_expected_match=stderr_match,
                 stdout_utf8_bytes=len(result.stdout.encode('utf-8')), stderr_utf8_bytes=len(result.stderr.encode('utf-8')),
                 output_classification='expected_output' if stdout_match and stderr_match else 'output_mismatch')
             require(type(result.returncode) is int and result.returncode == 2,
                     'nonloopback_exit_mismatch')
             if probe_id == 'runtime_host_rejection':
-                require(result.stderr == 'rsrs-runtime: ' + cases[host][1] + '\n'
+                require(stderr_match
                         and result.stdout == f'runtime=starting host={host} port={self.port}\n',
                         'nonloopback_rejection_reason_mismatch')
             else:
