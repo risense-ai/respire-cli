@@ -248,13 +248,6 @@ jobs:
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           python3 scripts/test-login-interruption-contract.py
           python3 scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/om-sweep/models/bge-m3"
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() && matrix.target == 'x86_64-unknown-linux-gnu' && !inputs.local_api_only && !inputs.auth_salt_only }}
-        with:
-          retention-days: 1
-          name: diagnostic-gnu-login-interruption
-          path: ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
-          if-no-files-found: error
       - name: Verify all supplementary CLI contracts
         if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
@@ -344,6 +337,7 @@ jobs:
             ${{ runner.temp }}/base-sweep-credentials/business-keyring-selftest.json
             ${{ runner.temp }}/supplement-credentials/business-keyring-selftest.json
             ${{ runner.temp }}/standalone-diagnostic-identity.json
+            ${{ runner.temp }}/gnu-login-interruption/interruption-coverage.json
             ${{ runner.temp }}/dev-supplements/suite-results.json
             ${{ runner.temp }}/dev-supplements/combined-coverage.json
             ${{ runner.temp }}/dev-supplements/outbox/outbox-coverage.json
