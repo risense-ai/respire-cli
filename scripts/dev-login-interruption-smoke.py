@@ -67,6 +67,7 @@ def safe_cli_diagnostic(stdout, stderr):
     text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
     text += "\n" + stderr.decode("utf-8", errors="replace")
     categories = (
+        ("runtime_account_rejected", "Runtime rejected account control (account_outcome_unknown)"),
         ("control_spawn", "cannot start owned host control Runtime"),
         ("control_response_wait", "host control response deadline or channel failure"),
         ("control_deadline", "host control deadline exceeded"),
@@ -774,13 +775,41 @@ def main():
                     stderr = b""
                 report["migration_child"] = {"exit_code": child.returncode,
                     "migration_stage": None, "migration_exchange": None, "register_kind": None,
-                    "diagnostic": safe_cli_diagnostic(stdout, stderr)}
+                    "diagnostic": safe_cli_diagnostic(stdout, stderr), "operation_phase": None}
                 report["fixture_requests"] = {name: state.get(name, 0)
                     for name in ("gets", "posts", "logins", "password_posts")}
                 try:
                     value = json.loads(stdout)
                 except (ValueError, UnicodeError, RecursionError):
                     value = None
+                # Observe only this response's owned journal; never recover or replay it.
+                try:
+                    details = value.get("details") if isinstance(value, dict) else None
+                    operation_id = details.get("operation_id") if isinstance(details, dict) else None
+                    source = details.get("source_profile") if isinstance(details, dict) else None
+                    if (isinstance(operation_id, str) and str(uuid.UUID(operation_id)) == operation_id
+                            and uuid.UUID(operation_id).version == 4 and isinstance(source, str)
+                            and Path(source).resolve() == root.resolve()
+                            and not recovery_path.is_symlink()
+                            and recovery_path.resolve(strict=True) == root.resolve() / ".login-recovery.json"):
+                        journal = json.loads(recovery_path.read_bytes())
+                        records = [row for row in journal.get("operations", [])
+                            if isinstance(row, dict) and row.get("operation_id") == operation_id]
+                        if (journal.get("schema_version") == 2 and len(records) == 1
+                                and (journal.get("active") or {}).get("operation_id") == operation_id):
+                            record = records[0]
+                            phase = record.get("phase")
+                            if (record.get("idempotency_key") == operation_id
+                                    and (journal.get("active") or {}).get("alias") == record.get("alias")
+                                    and re.fullmatch(r"login-[a-f0-9]{32}", record.get("alias", "")) is not None
+                                    and record.get("root") == str(root.resolve())
+                                    and record.get("profile") == str(root.resolve())
+                                    and phase in ("admitted", "login_input", "remote_pending", "remote_unknown",
+                                        "authorized", "prepared", "awaiting_verification", "rolling_back",
+                                        "committed", "rolled_back")):
+                                report["migration_child"]["operation_phase"] = phase
+                except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+                    pass  # Diagnostic absence cannot replace the original fixture failure.
                 errors = value.get("errors") if isinstance(value, dict) else None
                 text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
                 migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",

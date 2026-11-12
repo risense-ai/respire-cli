@@ -464,11 +464,13 @@ jobs:
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          bash scripts/ci-apt-get.sh update
+          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
           python3 -m venv "$RUNNER_TEMP/login-regression-python"
-          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3
+          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3 SecretStorage==3.3.3 jeepney==0.9.0
           binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
       - uses: actions/upload-artifact@v4
         if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
         with:
