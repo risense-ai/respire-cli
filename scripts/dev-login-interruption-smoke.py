@@ -52,6 +52,43 @@ def fixture_report(args, report):
         (args.root / "interruption-coverage.json").write_text(json.dumps(report, indent=2) + "\n")
 
 
+def safe_cli_diagnostic(stdout, stderr):
+    """Keep fixed classifications only; subprocess output can contain account material."""
+    try:
+        value = json.loads(stdout)
+    except (ValueError, UnicodeError, RecursionError):
+        value = None
+    summary = value.get("summary") if isinstance(value, dict) else None
+    reason = summary.get("reason") if isinstance(summary, dict) else None
+    reasons = ("account_outcome_unknown", "control_outcome_unknown", "auth_outcome_unknown",
+               "request_outcome_unknown", "runtime_error", "invalid_input",
+               "account_handoff_pending", "identity_write_recovery_required")
+    errors = value.get("errors") if isinstance(value, dict) else None
+    text = "\n".join(error for error in errors if isinstance(error, str)) if isinstance(errors, list) else ""
+    text += "\n" + stderr.decode("utf-8", errors="replace")
+    categories = (
+        ("control_spawn", "cannot start owned host control Runtime"),
+        ("control_response_wait", "host control response deadline or channel failure"),
+        ("control_deadline", "host control deadline exceeded"),
+        ("control_response_deadline", "host control response deadline exceeded"),
+        ("control_exit_deadline", "host control exit deadline exceeded"),
+        ("control_exit_mismatch", "host control Runtime exit does not match its response"),
+        ("control_response_identity", "account control response identity mismatch"),
+        ("control_profile_identity", "account response launch profile mismatch"),
+        ("control_parent_or_deadline", "account deadline or parent authorization ended"),
+        ("control_authorization", "account launch or parent authorization failed"),
+        ("control_binding", "account control binding changed or does not match"),
+        ("control_ownership", "account library ownership is unavailable"),
+        ("auth_recovery_pending", "authentication recovery requires the original operation"),
+        ("login_vault_unlock", "login_kind=vault_unlock_rejected"),
+        ("login_account_material", "login_kind=account_material_rejected"),
+        ("owned_cleanup", "cleanup_failed owned_pid="),
+    )
+    return {"reason": reason if reason in reasons else None,
+            "category": next((name for name, marker in categories if marker in text), "unclassified"),
+            "stdout_json": isinstance(value, dict), "stderr_present": bool(stderr)}
+
+
 def process_group_members(group):
     members = {}
     for entry in Path("/proc").iterdir():
@@ -366,7 +403,8 @@ def main():
                 command = next((name for name in ("account-rollback", "account-result", "login", "remember",
                     "migrate", "--runtime-internal", "--version") if name in flags), "other")
                 report["failure"] = {"exit_code": result.returncode, "code": "cli_expectation_failed",
-                                     "command": command}
+                                     "command": command,
+                                     "diagnostic": safe_cli_diagnostic(result.stdout, result.stderr)}
                 raise RuntimeError("cli_expectation_failed")
             return result
 
@@ -727,13 +765,18 @@ def main():
                 if child_running:
                     stop_owned_control(child)
                 try:
-                    stdout, _ = child.communicate(timeout=15)
+                    stdout, stderr = child.communicate(timeout=15)
                 except subprocess.TimeoutExpired as error:
                     stdout = error.output or b""
+                    stderr = error.stderr or b""
                 except OSError:
                     stdout = b""
+                    stderr = b""
                 report["migration_child"] = {"exit_code": child.returncode,
-                    "migration_stage": None, "migration_exchange": None, "register_kind": None}
+                    "migration_stage": None, "migration_exchange": None, "register_kind": None,
+                    "diagnostic": safe_cli_diagnostic(stdout, stderr)}
+                report["fixture_requests"] = {name: state.get(name, 0)
+                    for name in ("gets", "posts", "logins", "password_posts")}
                 try:
                     value = json.loads(stdout)
                 except (ValueError, UnicodeError, RecursionError):
@@ -802,6 +845,7 @@ def main():
             report["stage"] = "server_cleanup"
             server.shutdown()
             server.server_close()
+            report["server_cleanup"] = {"passed": True, "scope": "loopback_fixture"}
         require(report["runtime_cleanup"]["passed"], "owned_runtime_cleanup_failed")
         if migration_keys or keys:
             require(report["native_cleanup"]["passed"], "native_fixture_cleanup_failed")
