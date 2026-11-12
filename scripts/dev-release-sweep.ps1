@@ -189,12 +189,26 @@ function Get-SafeFailureReason($Envelope) {
                     return "account_outcome_unknown/$class"
                 }
             }
+            foreach ($class in @('vault_unlock_rejected', 'account_material_rejected')) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith("; login_kind=$class", [StringComparison]::Ordinal) }).Count -gt 0) {
+                    return "account_outcome_unknown/$class"
+                }
+            }
             # Fixed classes only; preserve the original unknown outcome and never replay it.
             foreach ($entry in @(
-                @('host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
+                @('Runtime rejected account control \(control_outcome_unknown\)|control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked'),
+                @('Runtime rejected account control \(unauthorized\)', 'account_launch_or_parent_authorization_failed'),
+                @('Runtime rejected account control \(scope_mismatch\)', 'account_control_binding_mismatch'),
+                @('Runtime rejected account control \(auth_ownership_unavailable\)', 'account_library_ownership_unavailable'),
+                @('Runtime rejected account control \(control_unavailable\)', 'account_controller_unavailable'),
+                @('cannot start owned host control Runtime', 'account_helper_start_failed'),
+                @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'account_helper_channel_failed'),
+                @('host control Runtime exit does not match its response', 'account_helper_exit_mismatch'),
+                @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
                 @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'account_helper_frame_invalid'),
                 @('account control response identity mismatch', 'account_rpc_identity_mismatch'),
                 @('account response launch profile mismatch|account receipt operation or profile mismatch', 'account_profile_binding_mismatch'),
+                @('account control rejection envelope missing|invalid account control rejection code|invalid account control rejection envelope|account control result is missing|invalid account control envelope|invalid account receipt shape|account control outcome/status mismatch', 'account_response_invalid'),
                 @('account helper readiness was not confirmed', 'account_response_readiness_invalid'),
                 @('account target Runtime is unavailable|target Runtime does not match the selected account, image or managed owner|target Runtime or account identity changed during verification|account target launch does not belong to this maintenance controller', 'account_target_verification_failed')
             )) {
@@ -207,7 +221,29 @@ function Get-SafeFailureReason($Envelope) {
         if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
     }
     # Report fixed classifications only, never raw authentication responses.
-    $message = @($Envelope.errors) -join ' '
+    $message = @($Envelope.errors | Where-Object { $_ -is [string] }) -join ' '
+    if ($Envelope.command -is [string] -and $Envelope.command -ceq 'space' -and $Envelope.summary.outcome -is [string]) {
+        switch -CaseSensitive ($Envelope.summary.outcome) {
+            'unknown' { return 'space_outcome_unknown' }
+            'pending' { return 'space_pending' }
+            'rejected' { return 'space_rejected' }
+        }
+    }
+    foreach ($code in @('unauthorized', 'scope_mismatch', 'auth_ownership_unavailable', 'control_unavailable', 'space_outcome_unknown', 'control_outcome_unknown')) {
+        if ($message -cmatch "Runtime rejected space control \($code\);") { return "space_runtime_$code" }
+    }
+    foreach ($entry in @(
+        @('space response binding mismatch|space response profile mismatch|space receipt differs from its original identity or intent', 'space_response_binding_mismatch'),
+        @('space control rejection envelope missing|invalid space control rejection code|invalid space control rejection envelope|space receipt missing|invalid space envelope|invalid space receipt|invalid space write receipt|invalid committed space outcome|invalid pending space outcome|invalid unknown space outcome|invalid rejected space outcome', 'space_response_invalid'),
+        @('space readiness mismatch', 'space_response_readiness_invalid'),
+        @('join target receipt mismatch|join account receipt mismatch|join session digest mismatch|join readonly_team gate mismatch|join unexpectedly changed the agent gate|pending join claims completion', 'space_join_receipt_invalid'),
+        @('cannot start owned host control Runtime', 'auth_helper_start_failed'),
+        @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'auth_helper_channel_failed'),
+        @('host control Runtime exit does not match its response', 'auth_helper_exit_mismatch'),
+        @('control deadline or parent revocation; query the same operation ID before retrying', 'auth_runtime_deadline_or_parent_revoked')
+    )) {
+        if ($message -match $entry[0]) { return $entry[1] }
+    }
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
     foreach ($entry in @(
         @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
@@ -218,7 +254,7 @@ function Get-SafeFailureReason($Envelope) {
         @('auth_diagnostic=auth_credential_write_readback_failed\b', 'auth_credential_write_readback_failed'),
         @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
         @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'auth_helper_frame_invalid'),
-        @('auth control response identity mismatch', 'auth_response_identity_mismatch'),
+        @('auth control response identity mismatch|host control response identity mismatch', 'auth_response_identity_mismatch'),
         @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
         @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
         @('invalid auth control result shape|auth control result is missing|unexpected auth control command|auth control result owner mismatch|committed auth result is missing the recovery code', 'auth_result_invalid'),
@@ -234,6 +270,7 @@ function Get-SafeFailureReason($Envelope) {
         @('DNS|resolve', 'dns'),
         @('connect|timeout|transport', 'transport'),
         @('runtime.*token|runtime.*auth', 'runtime_auth'),
+        @('space_recovery_required operation_id=', 'space_recovery_required'),
         @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown')
     )) {
         if ($message -match $entry[0]) { return $entry[1] }
