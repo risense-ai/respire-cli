@@ -760,6 +760,7 @@ class Smoke:
         installed = agent_file.read_text(encoding='utf-8')
         require(installed != original and original.strip() in installed,
                 'owned_agent_injection_not_applied')
+        self.direct(['inject', '--id', 'generic'])
         # Keep doctor strict: a fresh supported agent must be actually injected.
         result = subprocess.run([str(self.args.binary), '--direct', '--json', 'doctor'], env=self.env,
                                 cwd=self.root, capture_output=True, text=True, timeout=180)
