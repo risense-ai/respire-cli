@@ -1,19 +1,10 @@
 {
   "schema_version": 1,
   "repository": "risense-ai/respire-runtime",
-  "source_sha": "31630e6e016c5a8c29aee98392b67f687bf4b867",
   "sdk_lock_sha256": "0798601993ac41bf276b11184f76915c754c67cd079fac553184428fd9ca1d57",
   "features": [
     "cpu-owned-ort-experiment"
   ],
-  "producer": {
-    "status": "ready",
-    "workflow": ".github/workflows/prebuilt-integration-tests.yml",
-    "workflow_id": 414927024,
-    "workflow_sha": "31630e6e016c5a8c29aee98392b67f687bf4b867",
-    "run_id": 43146363565,
-    "run_attempt": 1
-  },
   "tests": {
     "business": [
       "account::authorization_preserves_and_commits_profiles",
@@ -49,34 +40,43 @@
       "snapshot_lifecycle::staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable"
     ]
   },
+  "source_sha": "2797706fa217952ff282f6a688ee30cdc9973ab2",
+  "producer": {
+    "status": "ready",
+    "workflow": ".github/workflows/prebuilt-integration-tests.yml",
+    "workflow_id": 414927024,
+    "workflow_sha": "2797706fa217952ff282f6a688ee30cdc9973ab2",
+    "run_id": 43166580654,
+    "run_attempt": 1
+  },
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "artifact_id": 13911354847,
-      "sha256": "7fb28e22d6fe5c35ea7ab8d5c9c06877d82848a18f2149d0a4d6d41ce9161a8b"
+      "artifact_id": 13920137906,
+      "sha256": "3924e64522c1e4c8e39242472b4395d1ba22ef5c7964a088dd72a26782ab3d06"
     },
     "aarch64-pc-windows-msvc": {
-      "artifact_id": 13912810323,
-      "sha256": "3391531add232584e1ed48eee6045401c9fcf0185dc399ea8592975a8bcfb116"
+      "artifact_id": 13920816133,
+      "sha256": "dd4a810da229126658cebd053d52e61989fcbc85887ecc664ccd220b63917d3f"
     },
     "aarch64-apple-darwin": {
-      "artifact_id": 13912700408,
-      "sha256": "211a0065e40ad7f773107139c736321d634c9e0a0af5bfd1aa9786bf7641cc5a"
+      "artifact_id": 13920187900,
+      "sha256": "18c59cd1944e256f16555abbced1c9ffe0fc8c44d3e95667f3323b6477c56500"
     },
     "x86_64-unknown-linux-gnu": {
-      "artifact_id": 13911766904,
-      "sha256": "289485efe56c4e7d1c0cb10968d76a6514490baa71b13ebfcac3ddaa938137f2"
+      "artifact_id": 13920741023,
+      "sha256": "314a63fb07c0919a27c1ffee139442e0e4d34cb9c179b248c8b2d12ad485ce95"
     },
     "aarch64-unknown-linux-gnu": {
-      "artifact_id": 13911537378,
-      "sha256": "cec7217e94d84927c7cd0f8973710a5d4ee998c7e973f1fbb337c526f82796ef"
+      "artifact_id": 13919893793,
+      "sha256": "b5ffab520ff6eee02f25a2da2db47f8e63c0aaffa1107b8e7383036a0e8805ec"
     },
     "x86_64-unknown-linux-musl": {
-      "artifact_id": 13911938511,
-      "sha256": "fc92ba74df75fae90be302fa7434cfd94e900cbb4290ab1bb70993efe3220cfd"
+      "artifact_id": 13920567916,
+      "sha256": "05ac1d84452e8c4e968776be48d60100b6486a7be9790aaac8bef97ecfe8884d"
     },
     "aarch64-unknown-linux-musl": {
-      "artifact_id": 13912127499,
-      "sha256": "a6c8083da6769e82410faa100d32b5f06df3fc2b944555d6aa359484ed541df8"
+      "artifact_id": 13920044032,
+      "sha256": "6277deb0da32d09f75dd8eb03e01e7b6d38072f38c0bd5366ba5b04025f1b314"
     }
   }
 }
