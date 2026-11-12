@@ -317,9 +317,15 @@ function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot)
             $record.root -isnot [string] -or $record.profile -isnot [string] -or $journal.active.directory -isnot [string] -or
             $record.alias -isnot [string] -or -not $record.alias -or $journal.active.alias -isnot [string] -or $journal.active.alias -cne $record.alias -or
             $record.account -isnot [pscustomobject]) { return $unavailable }
+        $activePath = $sourcePath
+        if ($record.account.target -is [string] -and $record.account.target.Length -gt 0) {
+            $activePath = & $normalize $record.account.target
+            if (-not $activePath.Equals($devicePath, $comparison) -and
+                -not $activePath.StartsWith($devicePath + [IO.Path]::DirectorySeparatorChar, $comparison)) { return $unavailable }
+        }
         if (-not (& $normalize $record.root).Equals($devicePath, $comparison) -or
             -not (& $normalize $record.profile).Equals($sourcePath, $comparison) -or
-            -not (& $normalize $journal.active.directory).Equals($sourcePath, $comparison)) { return $unavailable }
+            -not (& $normalize $journal.active.directory).Equals($activePath, $comparison)) { return $unavailable }
         $phase = $record.phase
         if ($phase -isnot [string] -or $phase -cnotin @('admitted', 'login_input', 'remote_pending', 'remote_unknown', 'authorized',
             'prepared', 'awaiting_verification', 'rolling_back', 'committed', 'rolled_back')) { return $unavailable }
