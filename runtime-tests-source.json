@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "repository": "risense-ai/respire-runtime",
-  "source_sha": "924ae24e42ac1a8e53b7cba1867af63100a4408e",
+  "source_sha": "31630e6e016c5a8c29aee98392b67f687bf4b867",
   "sdk_lock_sha256": "0798601993ac41bf276b11184f76915c754c67cd079fac553184428fd9ca1d57",
   "features": [
     "cpu-owned-ort-experiment"
@@ -10,8 +10,8 @@
     "status": "ready",
     "workflow": ".github/workflows/prebuilt-integration-tests.yml",
     "workflow_id": 414927024,
-    "workflow_sha": "d5fe9dddb3d023471fced70761819d731513cf24",
-    "run_id": 43069204230,
+    "workflow_sha": "31630e6e016c5a8c29aee98392b67f687bf4b867",
+    "run_id": 43146363565,
     "run_attempt": 1
   },
   "tests": {
@@ -51,32 +51,32 @@
   },
   "targets": {
     "x86_64-pc-windows-msvc": {
-      "artifact_id": 13876942928,
-      "sha256": "b303d7fd682a86a1e88f818f68b2d6e73356e6d22ba41b3c7dbec6cb1e09d4a9"
+      "artifact_id": 13911354847,
+      "sha256": "7fb28e22d6fe5c35ea7ab8d5c9c06877d82848a18f2149d0a4d6d41ce9161a8b"
     },
     "aarch64-pc-windows-msvc": {
-      "artifact_id": 13876679726,
-      "sha256": "d5b61b10e8626e7c4fcf1474432f484d9eb801294fa185b2c0d8ac2e6ca08fd5"
+      "artifact_id": 13912810323,
+      "sha256": "3391531add232584e1ed48eee6045401c9fcf0185dc399ea8592975a8bcfb116"
     },
     "aarch64-apple-darwin": {
-      "artifact_id": 13876674161,
-      "sha256": "4610d80a5811719f56a4cb6bd28b1826138982ae6383800c0bb160065cc150b6"
+      "artifact_id": 13912700408,
+      "sha256": "211a0065e40ad7f773107139c736321d634c9e0a0af5bfd1aa9786bf7641cc5a"
     },
     "x86_64-unknown-linux-gnu": {
-      "artifact_id": 13876459818,
-      "sha256": "bdcbae8f32c282c81a098d789f5babee49c4c633a32bc8df7b0f39a7ed287f02"
+      "artifact_id": 13911766904,
+      "sha256": "289485efe56c4e7d1c0cb10968d76a6514490baa71b13ebfcac3ddaa938137f2"
     },
     "aarch64-unknown-linux-gnu": {
-      "artifact_id": 13878035540,
-      "sha256": "a382eb55f5116041017c5e997edaa443c07874de810d8dc0efe407542bffad24"
+      "artifact_id": 13911537378,
+      "sha256": "cec7217e94d84927c7cd0f8973710a5d4ee998c7e973f1fbb337c526f82796ef"
     },
     "x86_64-unknown-linux-musl": {
-      "artifact_id": 13878430912,
-      "sha256": "1451d31377965e2f6fb6eaaa12926ef468b8a517e865ad2da6ed36342fc4c918"
+      "artifact_id": 13911938511,
+      "sha256": "fc92ba74df75fae90be302fa7434cfd94e900cbb4290ab1bb70993efe3220cfd"
     },
     "aarch64-unknown-linux-musl": {
-      "artifact_id": 13878661063,
-      "sha256": "cb46818d946eb2a09cc8147c359e524a57630cf7b966c4162cc50ff8f5285fd0"
+      "artifact_id": 13912127499,
+      "sha256": "a6c8083da6769e82410faa100d32b5f06df3fc2b944555d6aa359484ed541df8"
     }
   }
 }
