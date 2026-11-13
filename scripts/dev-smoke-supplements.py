@@ -73,10 +73,12 @@ def main():
         print(json.dumps(outcome), flush=True)
         return outcome
 
-    # Each suite owns its profiles and ports. Only login interruption shares outbox's prepared model.
+    # Login interruption needs outbox's model, not completion of every independent suite.
     with ThreadPoolExecutor(max_workers=2) as pool:
-        outcomes = list(pool.map(run_suite, commands[:-1]))
-    outcomes.append(run_suite(commands[-1]))
+        futures = [pool.submit(run_suite, command) for command in commands[:-1]]
+        futures[0].result()
+        futures.append(pool.submit(run_suite, commands[-1]))
+        outcomes = [future.result() for future in futures]
     (root / "suite-results.json").write_text(json.dumps(outcomes, indent=2) + "\n", encoding="utf-8")
     gate = [sys.executable, str(scripts / "dev-smoke-gate.py"), "--cli-report", str(args.cli_report),
             "--outbox", str(root / "outbox/outbox-coverage.json"), "--ai-inject", str(root / "ai-inject/ai-inject-coverage.json"),
