@@ -45,7 +45,7 @@ const releases = run('gh', ['api', `repos/${repository}/releases?per_page=100`, 
   .trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 const previous = releases.filter(release => !release.draft).map(release => ({release, version: parse(release.tag_name)}))
   .filter(item => item.version && compare(item.version, version) < 0
-    && !item.release.prerelease && item.version[3] === null)
+    && (channel === 'dev' || (!item.release.prerelease && item.version[3] === null)))
   .sort((left, right) => compare(right.version, left.version))[0];
 let baseline;
 if (previous) {
