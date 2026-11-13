@@ -162,13 +162,13 @@ test('both Linux ARM targets require native runners, every source feedback phase
       s=>s.selected.release=null,s=>s.selected.release.metadata_sha256='b'.repeat(64),s=>s.sameImage=true,s=>s.hosted='false',
       s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])await assert.rejects(()=>simulate(change));
   }
-  for(const name of ['Require every upgrade selected by the native validation profile','Verify resident foreground and background inference under concurrent CLI load']) {
+  for(const name of ['Verify the latest formal release upgrades automatically','Verify resident foreground and background inference under concurrent CLI load']) {
     const consumer=step(name);
     for(const [key,output,published] of [['BIN','path','RSRS_RUNTIME_BIN'],['SHA256','sha256','RSRS_PUBLISHED_RUNTIME_SHA256'],['VERSION','version','RSRS_PUBLISHED_RUNTIME_VERSION']])assert(consumer.includes(`NATIVE_RUNTIME_${key}: \u0024{{ inputs.artifact_source == 'published-assets' && env.${published} || steps.pinned-runtime.outputs.${output} }}`));
     assert.match(consumer,/test -n "\$NATIVE_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
     assert.match(consumer,/--runtime-binary "\$NATIVE_RUNTIME_BIN" --runtime-sha256 "\$NATIVE_RUNTIME_SHA256" --runtime-version "\$NATIVE_RUNTIME_VERSION"/);
   }
-  assert.match(step('Require every upgrade selected by the native validation profile'),/GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(step('Verify the latest formal release upgrades automatically'),/GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.doesNotMatch(native,/RSRS_ARTIFACT_SOURCE: published-assets|RSRS_PUBLISHED_ASSETS_SHA256:|RSRS_PUBLISHED_BUNDLE_SHA256:/);
   const account=readFileSync(new URL('../../scripts/test-real-m3-account-switch.py',import.meta.url),'utf8');
   assert.match(account,/if key not in \('GH_TOKEN', 'GITHUB_TOKEN'\)/);
