@@ -24,7 +24,8 @@ from native_fixture_process import verify_runtime_health
 ROOT = pathlib.Path(os.environ['PERF_ROOT']).resolve()
 MODEL = pathlib.Path(os.environ['PERF_MODEL']).resolve()
 TARGET = os.environ['PERF_TARGET']
-VERSIONS = {'cli': '2.0.0-dev.3'}
+VERSIONS = {'cli': json.loads((pathlib.Path(__file__).resolve().parents[1]
+                              / 'npm/artifact-manifest.json').read_text(encoding='utf-8'))['cliVersion']}
 DOCUMENTS = ['Performance fixture document %03d. ' % i +
              ('Background indexing and foreground memory retrieval. ' * 24) +
              ' Unique topic number %03d.' % i for i in range(64)]
@@ -65,7 +66,7 @@ const env = process.env, root = resolve(env.PERF_ROOT), target = env.PERF_TARGET
 const manifest = JSON.parse(readFileSync('npm/artifact-manifest.json'));
 const spec = parsePublishedAssets(env.PERF_RELEASE_INVENTORY, env.PERF_RELEASE_INVENTORY_SHA256,
   manifest.targets.map(row => row.triple));
-assert.equal(spec.cli.version, '2.0.0-dev.3');
+assert.equal(spec.cli.version, manifest.cliVersion);
 assert.match(spec.runtime.version, /^2\.0\.0-dev\.\d+$/);
 assert(Number(spec.runtime.version.split('.').at(-1)) >= 10);
 assert(manifest.targets.some(row => row.triple === target));

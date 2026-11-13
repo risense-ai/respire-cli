@@ -305,6 +305,80 @@ pub fn register_rejection_class(error: &str) -> &'static str {
     "register_unclassified"
 }
 
+fn authorization_request_class(error: &str, salt: bool) -> Option<&'static str> {
+    // ureq 2.x Display puts the URL before the first ": "; never search a private suffix.
+    let (has_url, detail) = if error.starts_with("https://") || error.starts_with("http://") {
+        let (url, detail) = error.split_once(": ")?;
+        if url.chars().any(char::is_whitespace) { return None; }
+        (true, detail)
+    } else {
+        (false, error)
+    };
+    let category = if let Some(code) = detail.strip_prefix("status code ") {
+        if !has_url || code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        match code {
+            "401" => 0, "403" => 1, "429" => 2,
+            _ if code.starts_with('5') => 3,
+            _ if matches!(code.as_bytes()[0], b'4'..=b'9') => 4,
+            _ => return None,
+        }
+    } else {
+        let kinds = ["Bad URL", "Unknown Scheme", "Dns Failed",
+            "Insecure request attempted with https_only set", "Connection Failed",
+            "Too Many Redirects", "Bad Status", "Bad Header", "Network Error",
+            "Malformed proxy", "Proxy failed to connect", "Provided proxy credentials are incorrect"];
+        if !kinds.iter().any(|kind| detail == *kind
+            || detail.strip_prefix(*kind).is_some_and(|tail| tail.starts_with(": "))) {
+            return None;
+        }
+        5
+    };
+    Some(if salt {
+        ["auth_salt_http_unauthorized", "auth_salt_http_forbidden", "auth_salt_http_rate_limited",
+            "auth_salt_http_server_error", "auth_salt_http_other", "auth_salt_transport"][category]
+    } else {
+        ["auth_login_http_unauthorized", "auth_login_http_forbidden", "auth_login_http_rate_limited",
+            "auth_login_http_server_error", "auth_login_http_other", "auth_login_transport"][category]
+    })
+}
+
+impl crate::AccountCoordinator {
+    /// Classify a validated private login rejection; unknown text retains the generic response.
+    pub fn login_rejection_class(error: &str) -> Option<&'static str> {
+        if error.starts_with("original decryption factors do not unlock this account; the original account was preserved: ") {
+            return Some("vault_unlock_rejected");
+        }
+        for head in ["local library uses different key material; original data was preserved",
+            "destination belongs to another account"] {
+            if error == head || error.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return Some("account_material_rejected");
+            }
+        }
+        let cause = error.strip_prefix("authorization outcome unknown; query the original operation, do not resend: ")?;
+        if let Some(detail) = cause.strip_prefix("authentication salt request failed: ") {
+            return authorization_request_class(detail, true);
+        }
+        if let Some(detail) = cause.strip_prefix("login request failed: ") {
+            return authorization_request_class(detail, false);
+        }
+        for (head, class) in [
+            ("server did not return an authentication salt", "auth_salt_missing"),
+            ("salt hex decode failed", "auth_salt_invalid_hex"),
+            ("failed to parse response", "auth_login_reply_parse_failed"),
+            ("TOTP challenge did not return a ticket", "auth_totp_ticket_missing"),
+            ("invalid TOTP challenge ticket", "auth_totp_ticket_invalid"),
+            ("login failed", "auth_login_token_missing"),
+        ] {
+            if cause == head || cause.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return Some(class);
+            }
+        }
+        None
+    }
+}
+
 pub(crate) fn validate_account_response(
     response: RpcResponse<ResultEnvelope>,
     request: &RpcRequest,
@@ -393,22 +467,10 @@ pub(crate) fn validate_account_response(
             let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
             anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
         }
-        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown"
-            && response.error.as_deref().is_some_and(|error| error.starts_with(
-                "original decryption factors do not unlock this account; the original account was preserved: "))
-        {
-            anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind=vault_unlock_rejected");
-        }
-        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown"
-            && response.error.as_deref().is_some_and(|error| {
-                ["local library uses different key material; original data was preserved",
-                    "destination belongs to another account"].iter().any(|head| {
-                    error == *head || error.strip_prefix(*head)
-                        .is_some_and(|tail| tail.starts_with(": "))
-                })
-            })
-        {
-            anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind=account_material_rejected");
+        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown" {
+            if let Some(class) = response.error.as_deref().and_then(crate::AccountCoordinator::login_rejection_class) {
+                anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind={class}");
+            }
         }
         anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
