@@ -44,16 +44,6 @@
       ]
     },
     {
-      "triple": "aarch64-unknown-linux-musl",
-      "pkg": "@rsrsai/linux-arm64",
-      "os": [
-        "linux"
-      ],
-      "cpu": [
-        "arm64"
-      ]
-    },
-    {
       "triple": "aarch64-apple-darwin",
       "pkg": "@rsrsai/macos-arm64",
       "os": [

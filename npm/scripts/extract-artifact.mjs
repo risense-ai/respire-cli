@@ -30,14 +30,17 @@ export function parsePublishedAssets(text, expectedHash, targets) {
     && sha256(text) === expectedHash, 'Published asset manifest hash/size mismatch');
   const spec = JSON.parse(text);
   requireValue(ownKeys(spec, ['schema', 'cli', 'runtime']) && spec.schema === 2, 'Published asset manifest schema differs');
-  requireValue(Array.isArray(targets) && targets.length === 7 && new Set(targets).size === 7, 'Seven unique targets required');
+  const cliTargets = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8')).targets.map(t => t.triple);
+  const runtimeTargets = Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json', import.meta.url), 'utf8')).targets);
+  requireValue(Array.isArray(targets) && targets.length > 0 && targets.length === cliTargets.length
+    && new Set(targets).size === targets.length && targets.every(target => cliTargets.includes(target)), 'Exact CLI manifest targets required');
   for (const kind of ['cli', 'runtime']) {
     const part = spec[kind];
     requireValue(ownKeys(part, ['repository', 'release_id', 'version', 'source_sha', 'producer', 'assets'])
       && part.repository === `risense-ai/respire-${kind}` && positiveID(part.release_id)
       && versionPattern.test(part.version || '') && sourcePattern.test(part.source_sha || '')
       && ownKeys(part.producer, ['run_id','run_attempt']) && positiveID(part.producer.run_id) && positiveID(part.producer.run_attempt), `Invalid published ${kind} identity`);
-    const names = targets.flatMap(target => publishedAssetNames(kind, target));
+    const names = (kind === 'cli' ? targets : runtimeTargets).flatMap(target => publishedAssetNames(kind, target));
     requireValue(Array.isArray(part.assets) && part.assets.length === names.length, `Incomplete published ${kind} assets`);
     const ids = new Set(), found = new Set();
     for (const asset of part.assets) {

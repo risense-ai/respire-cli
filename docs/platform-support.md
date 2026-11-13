@@ -14,9 +14,12 @@ compiler target alone does not establish product support.
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
 | Linux ARM64 GNU | `aarch64-unknown-linux-gnu` | Existing; native `ubuntu-24.04-arm` | Pinned CPU SDK |
-| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Existing; native Ubuntu and Alpine | Pinned static CPU SDK |
+| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Deferred for CLI 2.x DEV; [issue #272](https://github.com/risense-ai/respire-cli/issues/272) | Existing SDK pin retained |
 
-The current CLI release manifest contains seven targets. Historical Intel launcher
+The current CLI release manifest contains six targets. Linux ARM64 musl is
+excluded from CLI assets and npm dependencies until its startup and cleanup
+failure is resolved. Existing Core SDK and Runtime releases are unchanged.
+Historical Intel launcher
 selection remains supported, but no Intel dev.5 optional dependency or release
 asset is generated. Both SDK locks still pin the same eight SDKs, including
 manifest and archive SHA-256. CPU inference is linked into Core; an empty list

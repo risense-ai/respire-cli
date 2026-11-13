@@ -4,7 +4,8 @@
 const { spawnSync } = require('child_process');
 const path = require('path');
 const { existsSync, readFileSync } = require('fs');
-const version = require('../package.json').version;
+const manifest = require('../package.json');
+const version = manifest.version;
 
 const PKGS = {
   'linux-x64': '@rsrsai/linux-x64',
@@ -18,7 +19,13 @@ const PKGS = {
 const key = `${process.platform}-${process.arch}`;
 let pkg = PKGS[key];
 if (process.platform === 'linux') {
-  const libc = process.env.RSRS_LIBC ?? process.env.ONEMEMORY_LIBC ?? process.env.RESPIRE_LIBC ?? 'musl';
+  const configuredLibc = process.env.RSRS_LIBC ?? process.env.ONEMEMORY_LIBC ?? process.env.RESPIRE_LIBC;
+  let libc = configuredLibc ?? 'musl';
+  if (configuredLibc === undefined && pkg === '@rsrsai/linux-arm64'
+      && manifest.optionalDependencies && !Object.prototype.hasOwnProperty.call(manifest.optionalDependencies, pkg)
+      && process.report?.getReport?.()?.header?.glibcVersionRuntime) {
+    libc = 'glibc';
+  }
   if (libc !== 'musl' && libc !== 'glibc') {
     console.error('rsrs: RSRS_LIBC must be musl or glibc.');
     process.exit(1);
@@ -27,6 +34,11 @@ if (process.platform === 'linux') {
 }
 if (!pkg) {
   console.error(`rsrs: unsupported platform ${key} (supported: ${Object.keys(PKGS).join(' ')})`);
+  process.exit(1);
+}
+if (pkg === '@rsrsai/linux-arm64' && manifest.optionalDependencies
+    && !Object.prototype.hasOwnProperty.call(manifest.optionalDependencies, pkg)) {
+  console.error(`rsrs: platform package ${pkg} is not published for ${version}. Linux ARM64 musl is deferred for CLI 2.x DEV: https://github.com/risense-ai/respire-cli/issues/272`);
   process.exit(1);
 }
 

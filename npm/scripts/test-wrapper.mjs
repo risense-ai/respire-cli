@@ -7,12 +7,14 @@ import vm from 'node:vm';
 
 const source = readFileSync(new URL('../bin/cli.js', import.meta.url), 'utf8');
 const version = '1.0.11-dev.5';
+const manifest = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url)));
+const optionalDependencies = Object.fromEntries(manifest.targets.map(t => [t.pkg, version]));
 const targets = [
   ['linux', 'x64', 'musl', 'linux-x64'],
   ['linux', 'x64', 'glibc', 'linux-x64-gnu'],
   ['linux', 'arm64', 'musl', 'linux-arm64'],
   ['linux', 'arm64', 'glibc', 'linux-arm64-gnu'],
-  ['linux', 'arm64', '', 'linux-arm64'],
+  ['linux', 'arm64', '', 'linux-arm64-gnu'],
   ['darwin', 'x64', '', 'macos-x64'],
   ['darwin', 'arm64', '', 'macos-arm64'], ['win32', 'x64', '', 'win-x64'],
   ['win32', 'arm64', '', 'win-arm64'],
@@ -37,7 +39,7 @@ for (const [platform, arch, libc, name] of targets) {
         let spawned = false, exit, stderr = '';
         const quit = {};
         const require = (name) => {
-          if (name === '../package.json') return { version };
+          if (name === '../package.json') return { version, optionalDependencies };
           if (name === 'fs') return fs;
           if (name === 'path') return path;
           if (name === 'child_process') return { spawnSync: () => { spawned = true; return { status: 0 }; } };
@@ -50,12 +52,16 @@ for (const [platform, arch, libc, name] of targets) {
         try {
           vm.runInNewContext(source, { require, __dirname: directory,
             console: { error: (message) => { stderr += message; } },
-            process: { platform, arch, env: libc ? { RSRS_LIBC: libc } : {}, argv: ['node', 'cli', '--version'],
+            process: { platform, arch, env: libc ? { RSRS_LIBC: libc } : {},
+              report: { getReport: () => ({header: resolution === 'module' ? {glibcVersionRuntime:'2.39'} : {}}) }, argv: ['node', 'cli', '--version'],
               exit: (code) => { exit = code; throw quit; } } });
         } catch (error) { if (error !== quit) throw error; }
-        assert.equal(spawned, installed === version);
-        assert.equal(exit, installed === version ? 0 : 1);
-        if (installed !== version) assert.ok(stderr.includes(`${pkg}@${version}`), stderr);
+        const deferred = platform === 'linux' && arch === 'arm64'
+          && (libc === 'musl' || (!libc && resolution === 'global-sibling'));
+        assert.equal(spawned, !deferred && installed === version);
+        assert.equal(exit, !deferred && installed === version ? 0 : 1);
+        if (deferred) assert.ok(stderr.includes('not published') && stderr.includes('/issues/272'), stderr);
+        else if (installed !== version) assert.ok(stderr.includes(`${pkg}@${version}`), stderr);
         cases++;
       } finally { rmSync(root, { recursive: true, force: true }); }
     }

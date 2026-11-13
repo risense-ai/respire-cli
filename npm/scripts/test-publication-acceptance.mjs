@@ -92,12 +92,17 @@ test('accepted ACKs cannot replace public digest and isolated installation proof
   }
 });
 
-test('ARM64 installation proof requires both native libc routes, exact versions and binary hashes',()=>{
-  const f=fixture(),receipt={...copy(f.verified),kind:'publication-arm64-verified',installs:['linux-arm64-gnu','linux-arm64'].map(platform=>({platform,version,binary_sha256:hash}))};
+test('ARM64 installation proof requires every published native libc route, exact versions and binary hashes',()=>{
+  const f=fixture(),receipt={...copy(f.verified),kind:'publication-arm64-verified',installs:m.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')).map(t=>({platform:t.pkg.slice('@rsrsai/'.length),version,binary_sha256:hash}))};
   delete receipt.install;validateArmVerified(receipt,f.scoped,f.alias);
   for(const mutate of [r=>r.installs.pop(),r=>r.installs[0].platform='linux-x64-gnu',r=>r.installs[0].binary_sha256='f'.repeat(64),r=>r.installs[0].version='0.0.0',r=>r.source.sha='f'.repeat(40),r=>r.alias_publisher.run_attempt=2]){
     const bad=copy(receipt);mutate(bad);assert.throws(()=>validateArmVerified(bad,f.scoped,f.alias));
   }
+  const historical=copy(f.scoped),both=copy(receipt);
+  historical.binaries.push({package:'@rsrsai/linux-arm64',target:'aarch64-unknown-linux-musl',sha256:hash});
+  both.installs.push({platform:'linux-arm64',version,binary_sha256:hash});
+  validateArmVerified(both,historical,f.alias);
+  assert.throws(()=>validateArmVerified(receipt,historical,f.alias));
 });
 
 test('GNU installation proof alone cannot authorize cleanup of a six-platform release',async()=>{
@@ -120,7 +125,7 @@ function cleanupFixture(){
   const a=(id,name,run)=>({id,name,expired:false,digest:'sha256:'+hash,size_in_bytes:100,created_at:'2026-10-27T00:10:00Z',workflow_run:{id:run.id,head_sha:run.head_sha}});
   f.verifiers=[verifier];f.consumers=[f.child];f.deleted=[];
   f.scoped.validation_inventory=regressionContract(m);
-  f.armVerified={...copy(f.verified),kind:'publication-arm64-verified',installs:['linux-arm64-gnu','linux-arm64'].map(platform=>({platform,version,binary_sha256:hash}))};delete f.armVerified.install;
+  f.armVerified={...copy(f.verified),kind:'publication-arm64-verified',installs:m.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')).map(t=>({platform:t.pkg.slice('@rsrsai/'.length),version,binary_sha256:hash}))};delete f.armVerified.install;
   f.artifacts=new Map([[10,a(10,'cli-release-'+m.targets[0].triple,f.run)],[11,a(11,'scoped-accepted-100-1',f.run)],[12,a(12,'alias-accepted-100-1-200-1',f.child)],[13,a(13,'publication-verified-100-1-400-1',verifier)]]);
   f.artifacts.set(16,a(16,'publication-arm64-verified-100-1-400-1',verifier));
   const job=name=>({name,status:'completed',conclusion:'success',completed_at:f.run.updated_at});

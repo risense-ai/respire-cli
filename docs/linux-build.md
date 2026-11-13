@@ -8,7 +8,7 @@ binary. Business commands connect to a separately installed Runtime.
 | Linux x64, glibc | `x86_64-unknown-linux-gnu` |
 | Linux x64, static musl | `x86_64-unknown-linux-musl` |
 | Linux ARM64, glibc | `aarch64-unknown-linux-gnu`, native `ubuntu-24.04-arm` |
-| Linux ARM64, static musl | `aarch64-unknown-linux-musl`, native `ubuntu-24.04-arm` |
+| Linux ARM64, static musl | Deferred from CLI 2.x DEV; [issue #272](https://github.com/risense-ai/respire-cli/issues/272) |
 | musl container | `rust:1.95.0-alpine3.23`, same CPU architecture |
 | SDK | Not needed for the CLI frontend |
 | Output | `target/ci/<target>/release/rsrs` |
