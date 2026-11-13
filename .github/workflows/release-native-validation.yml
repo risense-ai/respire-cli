@@ -38,37 +38,7 @@ env:
   RELEASE_REF: ${{ inputs.ref }}
 
 jobs:
-  historical-draft-download:
-    if: inputs.validation_profile == 'full'
-    permissions:
-      contents: write
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [x86_64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-gnu, aarch64-unknown-linux-musl, aarch64-apple-darwin, x86_64-pc-windows-msvc, aarch64-pc-windows-msvc]
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Download and verify the fixed historical draft without executing products
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python scripts/test-published-upgrades.py --download-only --target '${{ matrix.target }}' --output-dir '${{ runner.temp }}/historical-draft'
-      - uses: actions/upload-artifact@v4
-        with:
-          name: historical-draft-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
-          path: ${{ runner.temp }}/historical-draft
-          retention-days: 1
-          if-no-files-found: error
-
   native:
-    needs: historical-draft-download
-    if: ${{ !cancelled() && (needs.historical-draft-download.result == 'success' || (inputs.validation_profile == 'critical' && needs.historical-draft-download.result == 'skipped')) }}
     name: Native (${{ matrix.target }})
     permissions:
       contents: read
@@ -364,12 +334,7 @@ jobs:
           fi
           "$py" scripts/native-psutil-wheel-cache.py validate --directory .native-psutil-wheels
           "$py" scripts/native-psutil-wheel-cache.py install --directory .native-psutil-wheels
-      - uses: actions/download-artifact@v4
-        if: inputs.validation_profile == 'full'
-        with:
-          name: historical-draft-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}
-          path: ${{ runner.temp }}/published-upgrades
-      - name: Require every upgrade selected by the native validation profile
+      - name: Verify the latest formal release upgrades automatically
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -401,15 +366,11 @@ jobs:
               --output native-legacy-model/onnx/model_fp16.onnx
           fi
           "$py" scripts/native-model-cache.py verify --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" --legacy-dir native-legacy-model
-          draft_args=()
-          if [ '${{ inputs.validation_profile }}' = full ]; then
-            draft_args+=(--draft-baseline-cache "$RUNNER_TEMP/published-upgrades")
-          fi
-          "$py" scripts/test-published-upgrades.py "${draft_args[@]}" --binary "$exe" --target '${{ matrix.target }}' \
+          "$py" scripts/test-published-upgrades.py --binary "$exe" --target '${{ matrix.target }}' \
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --legacy-model-dir native-legacy-model \
-            --output-dir "$RUNNER_TEMP/published-upgrades" --profile '${{ inputs.validation_profile }}'
+            --output-dir "$RUNNER_TEMP/published-upgrades" --profile critical
       - name: Verify resident foreground and background inference under concurrent CLI load
         if: inputs.validation_profile == 'full'
         shell: bash

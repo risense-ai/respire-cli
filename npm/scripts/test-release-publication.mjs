@@ -243,8 +243,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain prior uploads, the historical draft cache and the published online receipt.
-  assert.equal(uploads, 61, 'preserve current publication/source evidence, both Client2 results, the historical draft cache and the published online receipt');
+  // The latest-release upgrade no longer uploads a historical draft cache.
+  assert.equal(uploads, 60, 'preserve current publication/source evidence, both Client2 results and the published online receipt');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
@@ -737,7 +737,7 @@ function publishedFullFixture(root) {
     put('resident-concurrency-'+target,'resident-stress-metrics.json',{passed:true});
     put('resident-concurrency-'+target,'fixture-dependencies.json',{synthetic:true});
     put('resident-concurrency-'+target,'fixture-process-verification.json',[{passed:true}]);
-    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'full',full_coverage:true,all_published_sources_covered:true,target,candidate_sha256:identity.binary_sha256,selected_sources:['v1.0.20'],sources:[{version:'1.0.20',passed:true}]});
+    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'critical',full_coverage:false,all_published_sources_covered:false,target,candidate_sha256:identity.binary_sha256,published_formal_sources:['v1.0.19','v1.0.20'],selected_sources:['v1.0.20'],sources:[{version:'1.0.20',formal:true,passed:true}]});
     put('published-upgrades-'+target,'v1.0.20/results/real-account-return-verification.json',[runtime]);
     if(target==='x86_64-unknown-linux-gnu')continue;
     job(`cloud-sweep (runner, ${target})`);

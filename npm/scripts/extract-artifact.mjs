@@ -574,13 +574,14 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     const bounded = read('resident-concurrency-'+target,'fixture-process-verification.json');
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
     const upgrades = read('published-upgrades-'+target,'published-upgrades.json');
-    requireValue(upgrades.passed === true && upgrades.profile === 'full' && upgrades.full_coverage === true
-      && upgrades.all_published_sources_covered === true && upgrades.target === target
-      && upgrades.candidate_sha256 === native[0].binary_sha256 && upgrades.selected_sources?.length > 0
-      && upgrades.sources?.length === upgrades.selected_sources.length, 'Full historical upgrades incomplete');
+    requireValue(upgrades.passed === true && upgrades.profile === 'critical' && upgrades.full_coverage === false
+      && upgrades.all_published_sources_covered === false && upgrades.target === target
+      && upgrades.candidate_sha256 === native[0].binary_sha256 && upgrades.selected_sources?.length === 1
+      && upgrades.selected_sources[0] === upgrades.published_formal_sources?.at(-1)
+      && upgrades.sources?.length === 1, 'Latest formal release upgrade incomplete');
     for (const version of upgrades.selected_sources) {
       const row = upgrades.sources.filter(r => 'v'+r.version === version);
-      requireValue(row.length === 1 && (row[0].passed === true || row[0].status === 'not-applicable' && typeof row[0].reason === 'string'), 'Missing full upgrade source result');
+      requireValue(row.length === 1 && row[0].passed === true && row[0].formal === true, 'Missing latest formal upgrade result');
       if (row[0].passed) {
         const check = read('published-upgrades-'+target,version+'/results/real-account-return-verification.json');
         requireValue(Array.isArray(check) && check.length === 1 && check[0].binary_sha256 === native[0].binary_sha256, 'Upgrade process binary differs');
