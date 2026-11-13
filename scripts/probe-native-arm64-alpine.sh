@@ -62,15 +62,15 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     esac
     umask 077
     chmod 700 /profile
-    test ! -e /profile/runtime.json
-    mkdir -p "/profile/runtime/$NATIVE_RUNTIME_VERSION" /profile/bin
+    test ! -e /profile/bin/runtime.json
+    mkdir -p "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION" /profile/bin
     cp /rsrs /profile/bin/rsrs
     cmp /rsrs /profile/bin/rsrs
-    cp -R /runtime/. "/profile/runtime/$NATIVE_RUNTIME_VERSION/"
-    cmp /runtime/rsrs-runtime "/profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime"
-    echo "$NATIVE_RUNTIME_SHA256  /profile/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime" | sha256sum -c >/dev/null
-    cp /runtime-selection.json /profile/runtime.json
-    cmp /runtime-selection.json /profile/runtime.json
+    cp -R /runtime/. "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION/"
+    cmp /runtime/rsrs-runtime "/profile/bin/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime"
+    echo "$NATIVE_RUNTIME_SHA256  /profile/bin/runtime/$NATIVE_RUNTIME_VERSION/rsrs-runtime" | sha256sum -c >/dev/null
+    cp /runtime-selection.json /profile/bin/runtime.json
+    cmp /runtime-selection.json /profile/bin/runtime.json
     trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
     /rsrs --json runtime start
     /rsrs --direct model probe --json

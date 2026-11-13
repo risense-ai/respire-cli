@@ -128,12 +128,12 @@ def install_runtime(binary, env, release):
     assert completed.returncode == 0, 'official offline Runtime install failed'
     profile = pathlib.Path(env['RSRS_DATA_DIR'])
     assert profile.resolve().is_relative_to(ROOT) and not profile.is_symlink()
-    receipt = json.loads((profile / 'runtime.json').read_text(encoding='utf-8'))
+    receipt = json.loads((profile / 'bin/runtime.json').read_text(encoding='utf-8'))
     metadata = folder / ('runtime-build-' + TARGET + '.json')
     assert receipt['version'] == meta['runtime_version'] and receipt['sha256'] == meta['binary_sha256']
     assert receipt['release']['metadata_sha256'] == digest(metadata)
     assert receipt['release']['metadata_json'].encode() == metadata.read_bytes()
-    installed = profile / 'runtime' / meta['runtime_version'] / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    installed = profile / 'bin/runtime' / meta['runtime_version'] / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
     assert digest(installed) == meta['binary_sha256']
     env['RSRS_RUNTIME_BIN'] = str(installed)
     return installed

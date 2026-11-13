@@ -117,7 +117,7 @@ jobs:
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.match(selected.sha256, /^[0-9a-f]{64}$/);
           assert.ok(selected.release, 'Official Runtime release proof is required');
@@ -127,7 +127,7 @@ jobs:
           assert.equal(metadata.triple ?? metadata.target_triple, process.env.RSRS_RUNTIME_TRIPLE);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
-          const runtime = realpathSync(join(root, 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
+          const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
@@ -322,14 +322,14 @@ jobs:
           import {join} from 'node:path';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.ok(selected.release);
           assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
           const metadata = JSON.parse(selected.release.metadata_json);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
-          const runtime = realpathSync(join(root, 'runtime', selected.version, 'rsrs-runtime'));
+          const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, 'rsrs-runtime'));
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync('target/debug/rsrs'));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);

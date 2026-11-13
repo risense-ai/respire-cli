@@ -42,7 +42,7 @@ impl Fixture {
         for directory in ["home", "run", "config", "share", "state", "cache"] {
             std::fs::create_dir(base.join(directory))?;
         }
-        let selection = std::fs::read(root.join("runtime.json"))?;
+        let selection = std::fs::read(root.join("bin/runtime.json"))?;
         let model = root.join("models/bge-m3");
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?
@@ -161,7 +161,7 @@ impl Fixture {
 
     fn assert_profile_untouched(&self) -> Result<()> {
         assert_eq!(
-            std::fs::read(self.root.join("runtime.json"))?,
+            std::fs::read(self.root.join("bin/runtime.json"))?,
             self.selection
         );
         assert_eq!(std::fs::read(self.root.join("client.json"))?, self.client);
@@ -373,7 +373,7 @@ impl OwnedRuntime {
         let binary = self
             .fixture
             .root
-            .join("runtime")
+            .join("bin/runtime")
             .join(version)
             .join(if cfg!(windows) {
                 "rsrs-runtime.exe"
@@ -541,7 +541,7 @@ fn anonymous_owner_cpu_reset_drains_and_restores_verified_runtime() -> Result<()
         bytes
     );
     assert_eq!(
-        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        std::fs::read(runtime.fixture.root.join("bin/runtime.json"))?,
         runtime.fixture.selection
     );
     assert_eq!(
@@ -632,7 +632,7 @@ impl OwnedRuntime {
 
     fn assert_anonymous_selection_unchanged(&self) -> Result<()> {
         assert_eq!(
-            std::fs::read(self.fixture.root.join("runtime.json"))?,
+            std::fs::read(self.fixture.root.join("bin/runtime.json"))?,
             self.fixture.selection
         );
         assert_eq!(
@@ -845,7 +845,7 @@ fn anonymous_owner_host_config_reports_workers_without_restarting_the_owner() ->
         expected
     );
     assert_eq!(
-        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        std::fs::read(runtime.fixture.root.join("bin/runtime.json"))?,
         runtime.fixture.selection
     );
     assert!(!runtime.fixture.profile.join("session.json").exists());
@@ -915,7 +915,7 @@ fn anonymous_owner_profile_switch_validates_and_serves_the_selected_target() -> 
     assert!(!target.join("session.json").exists());
     assert!(!runtime.fixture.marker().exists());
     assert_eq!(
-        std::fs::read(runtime.fixture.root.join("runtime.json"))?,
+        std::fs::read(runtime.fixture.root.join("bin/runtime.json"))?,
         runtime.fixture.selection
     );
     assert!(!runtime

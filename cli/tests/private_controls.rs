@@ -32,7 +32,7 @@ impl Fixture {
         for directory in ["home", "run", "config", "share", "state", "cache"] {
             std::fs::create_dir(base.join(directory))?;
         }
-        let selection = std::fs::read(root.join("runtime.json"))?;
+        let selection = std::fs::read(root.join("bin/runtime.json"))?;
         let port = std::net::TcpListener::bind(("127.0.0.1", 0))?
             .local_addr()?
             .port();
@@ -108,7 +108,7 @@ impl Fixture {
 
     fn assert_unchanged(&self) -> Result<()> {
         assert_eq!(
-            std::fs::read(self.root.join("runtime.json"))?,
+            std::fs::read(self.root.join("bin/runtime.json"))?,
             self.selection
         );
         assert_eq!(std::fs::read(self.root.join("client.json"))?, self.client);

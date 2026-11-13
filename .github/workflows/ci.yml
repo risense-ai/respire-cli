@@ -141,7 +141,7 @@ jobs:
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.match(selected.sha256, /^[0-9a-f]{64}$/);
           assert.ok(selected.release, 'Official Runtime release proof is required');
@@ -152,7 +152,7 @@ jobs:
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA);
           assert.equal(metadata.binary_sha256, selected.sha256);
-          const runtime = realpathSync(join(root, 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
+          const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
@@ -503,9 +503,9 @@ jobs:
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
+          const runtime = join(root, 'bin', 'runtime', pin.required, 'rsrs-runtime');
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.ok(selected.release?.metadata_json, 'Official Runtime receipt is required');
           assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);
@@ -644,7 +644,7 @@ jobs:
           import hashlib, json, os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-coverage-runtime'
           release = json.loads((root / 'release.json').read_text())
-          receipt = json.loads((pathlib.Path(os.environ['OFFICIAL_RUNTIME_ROOT']) / 'runtime.json').read_text())
+          receipt = json.loads((pathlib.Path(os.environ['OFFICIAL_RUNTIME_ROOT']) / 'bin/runtime.json').read_text())
           assert not release['draft'] and release['tag_name'] == 'v' + receipt['version']
           for name in ['rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz', 'runtime-build-x86_64-unknown-linux-gnu.json']:
               asset, = [a for a in release['assets'] if a['name'] == name]
@@ -930,9 +930,9 @@ jobs:
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime');
+          const runtime = join(root, 'bin', 'runtime', pin.required, 'rsrs-runtime');
           const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.ok(selected.release?.metadata_json, 'Official Runtime receipt is required');
           assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);

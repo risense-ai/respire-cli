@@ -1268,7 +1268,7 @@ mod tests {
                 && source_root.join("runtime").join(&version) == version_dir,
                 "fixture must be the official pinned managed installation");
             let root = tempfile::tempdir()?;
-            let mut pending = vec![(version_dir.to_path_buf(), root.path().join("runtime").join(&version))];
+            let mut pending = vec![(version_dir.to_path_buf(), root.path().join("bin/runtime").join(&version))];
             while let Some((source, target)) = pending.pop() {
                 let metadata = std::fs::symlink_metadata(&source)?;
                 anyhow::ensure!(!metadata.file_type().is_symlink(), "fixture contains a link");
@@ -1289,7 +1289,7 @@ mod tests {
                     std::fs::copy(source, target)?;
                 }
             }
-            std::fs::write(root.path().join("runtime.json"), receipt)?;
+            std::fs::write(root.path().join("bin/runtime.json"), receipt)?;
             std::fs::write(root.path().join("client.json"), b"{\"service_mode\":\"normal\"}")?;
             let keys = ["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE",
                 "RSRS_NO_AUTOSYNC", "RSRS_RUNTIME_BIN", "ONEMEMORY_RUNTIME_BIN", "RESPIRE_RUNTIME_BIN",

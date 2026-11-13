@@ -2645,7 +2645,7 @@ mod tests {
         manager::install(&mut config)?;
         save(&mut config)?;
         let version = crate::runtime_fetch::pinned()?.required.clone();
-        let installed = root.join("runtime").join(&version);
+        let installed = root.join("bin/runtime").join(&version);
         fs::create_dir_all(&installed)?;
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version

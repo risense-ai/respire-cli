@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import tarfile
 import time
 import urllib.error
 import urllib.request
@@ -301,12 +302,17 @@ def main():
         try:
             installed = run([cli, '--json', 'runtime', 'install', '--file', archive, '--version', args.runtime_version], env)
             if installed.returncode: raise RuntimeError('Official Runtime installation failed: '+installed.stderr)
-            selection = json.loads((root/'runtime.json').read_text())
+            selection = json.loads((root/'bin/runtime.json').read_text())
             (root/'bin').mkdir(exist_ok=True)
             shutil.copy2(cli, root/'bin'/('rsrs.exe' if os.name=='nt' else 'rsrs'))
             if mode in ['client2-owned', 'desktop-owned']:
                 destination = root/'client2/runtime'/args.runtime_version
-                shutil.copytree(root/'runtime'/args.runtime_version, destination)
+                shutil.copytree(root/'bin/runtime'/args.runtime_version, destination)
+                # The unchanged legacy Client2 requires notices from the CLI-verified archive.
+                with tarfile.open(archive, 'r:gz') as packaged:
+                    notices = [entry for entry in packaged.getmembers()
+                               if entry.name == 'core-notices' or entry.name.startswith('core-notices/')]
+                    packaged.extractall(destination, members=notices, filter='data')
                 (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
             if mode == 'reuse-cli-started':
                 started = run([cli, '--json', 'runtime', 'start'], env)

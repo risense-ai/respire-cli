@@ -337,8 +337,8 @@ def main():
                     assert kernel.WaitForSingleObject(handle,0)==258, "fixture process already exited"
                     return handle,(values[0].dwHighDateTime<<32)|values[0].dwLowDateTime
                 try:
-                    selection=json.loads((expected_root/"runtime.json").read_text())
-                    runtime_image=expected_root/"runtime"/selection["version"]/runtime_name
+                    selection=json.loads((expected_root/"bin/runtime.json").read_text())
+                    runtime_image=expected_root/"bin/runtime"/selection["version"]/runtime_name
                     child,child_birth=checked_process(current["pid"], runtime_image)
                     class ProcessEntry(ctypes.Structure):
                         _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),

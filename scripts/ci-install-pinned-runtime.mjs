@@ -82,7 +82,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (result.error) throw result.error;
   assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
   const pin = JSON.parse(readFileSync(new URL('../runtime-pin.json', import.meta.url), 'utf8'));
-  const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+  const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
   assert.equal(selected.version, pin.required);
   assert.match(selected.sha256, /^[0-9a-f]{64}$/);
   assert.ok(selected.release, 'Official Runtime release proof is required');
@@ -90,7 +90,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const metadata = JSON.parse(selected.release.metadata_json);
   assert.equal(metadata.triple ?? metadata.target_triple, target);
   assert.equal(metadata.runtime_version, pin.required);
-  const runtime = realpathSync(join(root, 'runtime', pin.required, 'rsrs-runtime' + (process.platform === 'win32' ? '.exe' : '')));
+  const runtime = realpathSync(join(root, 'bin', 'runtime', pin.required, 'rsrs-runtime' + (process.platform === 'win32' ? '.exe' : '')));
   assert.ok(statSync(runtime).isFile());
   assert.notEqual(runtime, cli, 'CLI cannot substitute for standalone Runtime');
   assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);

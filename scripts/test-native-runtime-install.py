@@ -71,6 +71,7 @@ class FixtureInstallationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary) / 'fixture'
             root.mkdir()
+            (root / 'bin').mkdir()
             version, triple = '1.0.21-dev.17', 'synthetic-target'
             image = b'synthetic Runtime; never executed'
             digest = hashlib.sha256(image).hexdigest()
@@ -79,7 +80,7 @@ class FixtureInstallationTests(unittest.TestCase):
                    'GITHUB_TOKEN': 'not-real', 'RSRS_CORE_TEST_MODE': '1'}
             metadata = {'schema_version': 2, 'runtime_version': version,
                         'target_triple': triple, 'binary_sha256': digest}
-            installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+            installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
 
             def installer(command, **kwargs):
                 self.assertEqual(command, ['fixture-cli', '--json', 'runtime', 'install'])
@@ -100,11 +101,11 @@ class FixtureInstallationTests(unittest.TestCase):
                 receipt = {'version': version, 'sha256': digest, 'release': proof}
                 if fault == 'version':
                     receipt['version'] = '1.0.21-dev.16'
-                (root / 'runtime.json').write_text(json.dumps(receipt))
+                (root / 'bin/runtime.json').write_text(json.dumps(receipt))
                 return types.SimpleNamespace(returncode=0)
 
             if fault == 'existing':
-                (root / 'runtime.json').write_text('{}')
+                (root / 'bin/runtime.json').write_text('{}')
             hosted = {'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
                       'RUNNER_TEMP': temporary}
             if fault == 'host':
