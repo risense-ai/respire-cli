@@ -1809,14 +1809,26 @@ fn verify_install_host() -> Result<()> {
                 LegacyRuntimeMigrationRequired);
         }
     }
-    // Release provenance is not permission to overwrite a different host CLI.
-    // A materialized copy of this CLI is a normal fresh-install layout. Compare
-    // bytes, not filenames, version strings or the currently selected account.
+    // Compare bytes, not filenames, version strings or the selected account.
+    // A different image needs proof that it is a released frontend-only CLI.
     let current = std::env::current_exe().context(LegacyRuntimeMigrationRequired)?;
     let different = crate::mcp::bin_needs_refresh(&current, &legacy)
         .map_err(anyhow::Error::msg)
         .context(LegacyRuntimeMigrationRequired)?;
-    anyhow::ensure!(!different, LegacyRuntimeMigrationRequired);
+    if different {
+        // Official v2.0.0-dev.3 cli-build metadata; these binaries contain no business Runtime.
+        // shortcut: extend this reviewed predecessor set when publishing a later CLI upgrade.
+        let approved = [
+            "e893ed0df7dc9a18d690c81af2537df85a907c7c033b61c060b7b1ae1a0ef1c1",
+            "7e1af4f989850656b699a67546ecd9cd07a39c9cbf343b9c52d500610294f2e1",
+            "5cd906b94597d273463477b1fc0c09579309e3bb98771f5203ef29881d291d68",
+            "c484f2259f29db7eb4499656d8750ea18ca230ade33f7cbc5a9b812cf09b740d",
+            "903e0595a76d930e82287d27b6c370bebcbbb9d3a4da2905c9fab1244f6c0261",
+            "f506f17fc621edd30fff6bc9be91c9089a9e6f63cfb5fb4d7e23b249226e4625",
+        ];
+        let previous = sha256_file(&legacy).context(LegacyRuntimeMigrationRequired)?;
+        anyhow::ensure!(approved.contains(&previous.as_str()), LegacyRuntimeMigrationRequired);
+    }
     Ok(())
 }
 

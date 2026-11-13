@@ -763,6 +763,12 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     anyhow::ensure!(verified_migrated_image(&image.to_string_lossy())? == Some(image.clone()));
     fs::write(legacy.join("lib/provider.bin"), b"tampered")?;
     anyhow::ensure!(verified_migrated_image(&image.to_string_lossy()).is_err());
+    if let Some(previous) = std::env::var_os("RSRS_TEST_PREVIOUS_FRONTEND_BIN") {
+        fs::copy(previous, crate::mcp::stable_bin_path())?;
+        verify_install_host()?;
+        fs::write(crate::mcp::stable_bin_path(), b"unapproved frontend")?;
+        anyhow::ensure!(verify_install_host().is_err());
+    }
     Ok(())
 }
 
