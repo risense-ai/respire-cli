@@ -205,15 +205,17 @@ fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (Some(a), Some(b)) => {
-            // Numeric identifiers compare numerically; None ranks below any
-            // number (the semver numeric-below-alphanumeric rule); two
-            // alphanumeric identifiers compare lexically via Option<u64>.
-            let rank = |id: &str| id.parse::<u64>().ok();
-            let left = a.split('.').map(rank).collect::<Vec<_>>();
-            let right = b.split('.').map(rank).collect::<Vec<_>>();
+            let left = a.split('.').collect::<Vec<_>>();
+            let right = b.split('.').collect::<Vec<_>>();
             for (x, y) in left.iter().zip(right.iter()) {
-                if x != y {
-                    return x.cmp(y);
+                let ordering = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
                 }
             }
             left.len().cmp(&right.len())
@@ -523,6 +525,34 @@ fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
         verify_stage(&directory, RUNTIME_BINARY, &triple, &manifest.sha256)
     })()
     .context(ManagedRuntimeRepairRequired)
+}
+
+/// A migrated owner may still be draining from its authenticated legacy image.
+pub(crate) fn verified_migrated_image(image: &str) -> Result<Option<PathBuf>> {
+    let Some(version) = Path::new(image).parent().and_then(Path::file_name).and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if !valid_version(version) {
+        return Ok(None);
+    }
+    let directory = installation_root().join("runtime").join(version);
+    if !crate::mcp::exe_matches_dest(image, &directory.join(RUNTIME_BINARY)) {
+        return Ok(None);
+    }
+    let receipt = runtime_dir().join(".receipts").join(format!("{version}.json"));
+    let info = match fs::symlink_metadata(&receipt) {
+        Ok(info) => info,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(info.is_file() && !info.file_type().is_symlink()
+        && info.len() <= MAX_MANAGED_MANIFEST_BYTES, "invalid migrated Runtime receipt");
+    let manifest: ManagedManifest = serde_json::from_slice(&fs::read(receipt)?)?;
+    anyhow::ensure!(manifest.version == version, "migrated Runtime receipt version mismatch");
+    let triple = release_triple()?;
+    let metadata = manifest.bound_metadata(&triple)?;
+    metadata.verify_files(&directory)?;
+    Ok(Some(verify_stage(&directory, RUNTIME_BINARY, &triple, &manifest.sha256)?))
 }
 
 /// The managed binary the running CLI should currently use, if any. Used by
@@ -1755,6 +1785,11 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         }
         None
     };
+    verify_install_host()?;
+    Ok(selected)
+}
+
+fn verify_install_host() -> Result<()> {
     let legacy = crate::mcp::stable_bin_path();
     // Windows can report NotFound for `file/rsrs.exe`, unlike Unix ENOTDIR.
     // Missing leaf bytes are not evidence that the installation path is usable.
@@ -1767,7 +1802,7 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         }
     }
     match fs::symlink_metadata(&legacy) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(selected),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
         Ok(metadata) => {
             anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
@@ -1782,7 +1817,7 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         .map_err(anyhow::Error::msg)
         .context(LegacyRuntimeMigrationRequired)?;
     anyhow::ensure!(!different, LegacyRuntimeMigrationRequired);
-    Ok(selected)
+    Ok(())
 }
 
 /// Materialization and managed replacement must use the same read-only boundary
@@ -1793,6 +1828,7 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
         // or materialize a CLI; installation entry points reject embedding.
         return selected.verify().map(|_| ());
     }
+    verify_install_host()?;
     shared::migrate_legacy()?;
     automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
@@ -1809,6 +1845,7 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
+    verify_install_host()?;
     shared::migrate_legacy()?;
     let required = match pin {
         Some(explicit) => {
@@ -1821,7 +1858,9 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         None => pinned()?.required.clone(),
     };
     if let Some(binary) = automatic_install_preflight(&required)? {
-        return Ok(binary);
+        if pin.is_none() || binary == managed_binary_path(&required) {
+            return Ok(binary);
+        }
     }
     let triple = release_triple()?;
     // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
@@ -1831,7 +1870,9 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
     );
     let lock = install_lock()?;
     if let Some(binary) = automatic_install_preflight(&required)? {
-        return Ok(binary);
+        if pin.is_none() || binary == managed_binary_path(&required) {
+            return Ok(binary);
+        }
     }
     let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");

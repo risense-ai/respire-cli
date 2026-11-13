@@ -1036,7 +1036,10 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
 
 pub(super) fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
     let root = config.installation.canonicalize()?;
-    let runtime = registered_runtime_image(config)?;
+    let runtime = match crate::runtime_fetch::verified_migrated_image(&health.image_path)? {
+        Some(legacy) => legacy,
+        None => registered_runtime_image(config)?,
+    };
     anyhow::ensure!(
         runtime != config.executable.canonicalize()?
             && runtime != std::env::current_exe()?.canonicalize()?

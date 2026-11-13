@@ -525,6 +525,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         assert endpoint.read_bytes()==endpoint_before
                         assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](previous)
                         assert not (upgrade_root/"runtime.json").exists()
+                        assert not (upgrade_root/"bin/runtime.json").exists()
                         assert not (upgrade_root/"runtime/autostart/registration.json").exists()
                         assert not (upgrade_root/"runtime/autostart/maintenance.json").exists()
                         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:

@@ -232,6 +232,8 @@ fn accept_ranges_reject_malformed_bounds() -> Result<()> {
     anyhow::ensure!(AcceptRange::parse("<2.0.0")?.contains("1.9.9"));
     anyhow::ensure!(!AcceptRange::parse("<2.0.0")?.contains("2.0.0"));
     anyhow::ensure!(AcceptRange::parse(">=1.0.21-dev.1")?.contains("1.0.21-dev.2"));
+    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-beta.99"));
+    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-99"));
     Ok(())
 }
 
@@ -676,6 +678,8 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     let library = dir.path().join("rsrs.db");
     fs::write(&session, b"legacy session bytes")?;
     fs::write(&library, b"legacy data bytes")?;
+    let legacy_receipt = dir.path().join("runtime.json");
+    fs::write(&legacy_receipt, b"legacy receipt bytes")?;
     let error = download_and_install(None, None)
         .err()
         .context("legacy owner triggered automatic installation")?;
@@ -692,6 +696,7 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     anyhow::ensure!(fs::read(&legacy)? == legacy_bytes);
     anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
     anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
+    anyhow::ensure!(fs::read(&legacy_receipt)? == b"legacy receipt bytes");
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     Ok(())
 }
@@ -747,6 +752,17 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>());
     anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    let binary = install_lifecycle_fixture()?;
+    let directory = binary.parent().context("fixture directory missing")?;
+    let legacy = dir.path().join("runtime").join(required);
+    fs::create_dir_all(legacy.join("lib"))?;
+    for name in [RUNTIME_BINARY, CORE_MANIFEST_FILE, "lib/provider.bin"] {
+        fs::copy(directory.join(name), legacy.join(name))?;
+    }
+    let image = legacy.join(RUNTIME_BINARY);
+    anyhow::ensure!(verified_migrated_image(&image.to_string_lossy())? == Some(image.clone()));
+    fs::write(legacy.join("lib/provider.bin"), b"tampered")?;
+    anyhow::ensure!(verified_migrated_image(&image.to_string_lossy()).is_err());
     Ok(())
 }
 
