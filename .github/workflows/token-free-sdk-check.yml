@@ -117,7 +117,7 @@ jobs:
           import {spawnSync} from 'node:child_process';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.match(selected.sha256, /^[0-9a-f]{64}$/);
           assert.ok(selected.release, 'Official Runtime release proof is required');
@@ -127,7 +127,7 @@ jobs:
           assert.equal(metadata.triple ?? metadata.target_triple, process.env.RSRS_RUNTIME_TRIPLE);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
-          const runtime = realpathSync(join(root, 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
+          const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, process.platform === 'win32' ? 'rsrs-runtime.exe' : 'rsrs-runtime'));
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync(process.env.CLI_FIXTURE_BINARY));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);
@@ -184,8 +184,8 @@ jobs:
         run: |
           set -euo pipefail
           test -f "$RSRS_RUNTIME_BIN"
-          fixture_root="$(dirname "$(dirname "$(dirname "$RSRS_RUNTIME_BIN")")")"
-          fixture_binary="/runtime-fixture/runtime/$(basename "$(dirname "$RSRS_RUNTIME_BIN")")/$(basename "$RSRS_RUNTIME_BIN")"
+          fixture_root="$(dirname "$(dirname "$(dirname "$(dirname "$RSRS_RUNTIME_BIN")")")")"
+          fixture_binary="/runtime-fixture/bin/runtime/$(basename "$(dirname "$RSRS_RUNTIME_BIN")")/$(basename "$RSRS_RUNTIME_BIN")"
           unset GH_TOKEN GITHUB_TOKEN
           docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model -e RSRS_RUNTIME_APP_TESTS="/workspace/${RSRS_RUNTIME_APP_TESTS#"$PWD/"}" -e RSRS_RUNTIME_STORAGE_TESTS="/workspace/${RSRS_RUNTIME_STORAGE_TESTS#"$PWD/"}" -e RSRS_RUNTIME_TEST_RUNNER="/workspace/${RSRS_RUNTIME_TEST_RUNNER#"$PWD/"}" rust:1.95.0-alpine3.23 sh -ec '
             echo "Checking minimal-musl ps syntax (diagnostic only):"
@@ -322,14 +322,14 @@ jobs:
           import {join} from 'node:path';
           const root = realpathSync(process.env.RSRS_DATA_DIR);
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const selected = JSON.parse(readFileSync(join(root, 'runtime.json'), 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
           assert.equal(selected.version, pin.required);
           assert.ok(selected.release);
           assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
           const metadata = JSON.parse(selected.release.metadata_json);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
-          const runtime = realpathSync(join(root, 'runtime', selected.version, 'rsrs-runtime'));
+          const runtime = realpathSync(join(root, 'bin', 'runtime', selected.version, 'rsrs-runtime'));
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(runtime, realpathSync('target/debug/rsrs'));
           assert.equal(createHash('sha256').update(readFileSync(runtime)).digest('hex'), selected.sha256);

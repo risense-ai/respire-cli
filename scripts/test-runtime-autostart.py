@@ -208,7 +208,7 @@ def main():
         shutil.copy2(binary, base / "off-bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
         off_env["RSRS_RUNTIME_BIN"] = str(base / "off-bin" / runtime_name)
         if needs_managed:
-            off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture, off_root))
+            off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", off_root))
         try:
             for argv in [("runtime","start"),("runtime","stop")]*3+[("runtime","restart")]:
                 result = subprocess.run([binary,"--json",*argv],env=off_env,capture_output=True,text=True,timeout=45)
@@ -337,8 +337,8 @@ def main():
                     assert kernel.WaitForSingleObject(handle,0)==258, "fixture process already exited"
                     return handle,(values[0].dwHighDateTime<<32)|values[0].dwLowDateTime
                 try:
-                    selection=json.loads((expected_root/"runtime.json").read_text())
-                    runtime_image=expected_root/"runtime"/selection["version"]/runtime_name
+                    selection=json.loads((expected_root/"bin/runtime.json").read_text())
+                    runtime_image=expected_root/"bin/runtime"/selection["version"]/runtime_name
                     child,child_birth=checked_process(current["pid"], runtime_image)
                     class ProcessEntry(ctypes.Structure):
                         _fields_=[("dwSize",wintypes.DWORD),("cntUsage",wintypes.DWORD),
@@ -525,6 +525,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         assert endpoint.read_bytes()==endpoint_before
                         assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](previous)
                         assert not (upgrade_root/"runtime.json").exists()
+                        assert not (upgrade_root/"bin/runtime.json").exists()
                         assert not (upgrade_root/"runtime/autostart/registration.json").exists()
                         assert not (upgrade_root/"runtime/autostart/maintenance.json").exists()
                         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health",timeout=5) as response:
@@ -534,7 +535,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                         require_upgrade("runtime","autostart","remove","--stop")
                         # Explicit test-harness transition AFTER the verified
                         # legacy stop. This is not automatic migration acceptance.
-                        upgrade_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture, upgrade_root))
+                        upgrade_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", upgrade_root))
                         shutil.copy2(binary,stable)
                         assert bundle_helpers["digest"](stable)==bundle_helpers["digest"](Path(binary))
                         upgraded=require_upgrade("runtime","autostart","enable","--now")
@@ -613,9 +614,8 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 # port, while a different verified installation tries to enable.
                 # Neither a synthetic receipt nor a forged health response is used.
                 failure_root=base/"failed-installation"
-                failure_runtime=copy_managed_installation(managed_fixture,failure_root)
+                failure_runtime=copy_managed_installation(managed_fixture / "bin",failure_root)
                 failure_bin=failure_root/"bin"
-                failure_bin.mkdir()
                 shutil.copy2(binary,failure_bin/("rsrs.exe" if os.name=="nt" else "rsrs"))
                 failure_env=dict(env,RSRS_DATA_DIR=str(failure_root),RSRS_BIN_DIR=str(failure_bin),RSRS_RUNTIME_BIN=str(failure_runtime))
                 owner_attempted=False
@@ -690,7 +690,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                             raise
                         print(f"identity fixture cleanup also failed: {cleanup_error}",file=sys.stderr)
                 print("PASS: verified cross-installation owner refused without replacement; persisted fence cleared only by explicit recovery after owner drain")
-                managed_runtime_binary = copy_managed_installation(managed_fixture, root)
+                managed_runtime_binary = copy_managed_installation(managed_fixture / "bin", root)
                 env["RSRS_RUNTIME_BIN"] = str(managed_runtime_binary)
                 enabled = run("runtime", "autostart", "enable")
                 assert enabled["enabled"] is True and enabled["registered"] is True, enabled

@@ -55,14 +55,14 @@ test('Linux base and supplements use separate unlocked private credential wrappe
   assert.match(workflow,/standalone-diagnostic-identity.json/);
 });
 function simulate(change=()=>{}){
-  const state={pin:{required:'2.0.0-dev.6',accept:'>=2.0.0-dev.6,<3.0.0'},metadata:{git_sha:'c'.repeat(40),version:'1.2.3-dev.4',producer:{run_id:42,run_attempt:2},target:'x86_64-unknown-linux-musl',binary_sha256:hash('CLI')},inventory:{command:'runtime.list',status:'ok',summary:{required:'2.0.0-dev.6',accept:'>=2.0.0-dev.6,<3.0.0'}},version:{command:'version',status:'ok',summary:{version:'1.2.3-dev.4'}},display:'rsrs 1.2.3-dev.4',cli:'CLI',runtime:'RUNTIME',runtimePath:'/temp/proof/runtime/2.0.0-dev.6/rsrs-runtime'};
+  const state={pin:{required:'2.0.0-dev.6',accept:'>=2.0.0-dev.6,<3.0.0'},metadata:{git_sha:'c'.repeat(40),version:'1.2.3-dev.4',producer:{run_id:42,run_attempt:2},target:'x86_64-unknown-linux-musl',binary_sha256:hash('CLI')},inventory:{command:'runtime.list',status:'ok',summary:{required:'2.0.0-dev.6',accept:'>=2.0.0-dev.6,<3.0.0'}},version:{command:'version',status:'ok',summary:{version:'1.2.3-dev.4'}},display:'rsrs 1.2.3-dev.4',cli:'CLI',runtime:'RUNTIME',runtimePath:'/temp/proof/bin/runtime/2.0.0-dev.6/rsrs-runtime'};
   state.runtimeMetadata={schema_version:2,runtime_version:state.pin.required,target_triple:state.metadata.target,binary_sha256:hash(state.runtime),source_commit:'d'.repeat(40)};
   state.receipt={version:state.pin.required,sha256:hash(state.runtime),release:{metadata_json:JSON.stringify(state.runtimeMetadata)}};
   state.receipt.release.metadata_sha256=hash(state.receipt.release.metadata_json);
   change(state);
   const env={RSRS_DATA_DIR:'/temp/proof',RUNNER_TEMP:'/temp',RSRS_RUNTIME_TRIPLE:state.metadata.target,CLI_SHA:'c'.repeat(40),CLI_RUN_ID:'42',GITHUB_SHA:'a'.repeat(40),GITHUB_RUN_ID:'43',GITHUB_RUN_ATTEMPT:'1',GH_TOKEN:'synthetic-secret',SERVICE_API_KEY:'synthetic-secret',RSRS_RUNTIME_BIN:'untrusted'};
   let report;
-  const fs={realpathSync:p=>p==='cli'?'/cli':state.runtimePath,readFileSync:p=>p==='runtime-pin.json'?JSON.stringify(state.pin):p.startsWith('validated-cli/')?JSON.stringify(state.metadata):p==='/temp/proof/runtime.json'?JSON.stringify(state.receipt):p==='/cli'?state.cli:state.runtime,writeFileSync:(p,text)=>{assert.equal(p,'/temp/standalone-diagnostic-identity.json');report=JSON.parse(text);}};
+  const fs={realpathSync:p=>p==='cli'?'/cli':state.runtimePath,readFileSync:p=>p==='runtime-pin.json'?JSON.stringify(state.pin):p.startsWith('validated-cli/')?JSON.stringify(state.metadata):p==='/temp/proof/bin/runtime.json'?JSON.stringify(state.receipt):p==='/cli'?state.cli:state.runtime,writeFileSync:(p,text)=>{assert.equal(p,'/temp/standalone-diagnostic-identity.json');report=JSON.parse(text);}};
   const cp={execFileSync:(binary,args,options)=>{assert.equal(binary,'/cli');assert.equal(options.timeout,30000);for(const key of ['GH_TOKEN','SERVICE_API_KEY','RSRS_RUNTIME_BIN'])assert.equal(options.env[key],undefined);assert.equal(options.env.HOME,'/temp/proof/home');return args.includes('list')?JSON.stringify(state.inventory):args.includes('v')?JSON.stringify(state.version):state.display;}};
   runInNewContext(script,{require:name=>({fs,path,child_process:cp,'assert/strict':assert,crypto:{createHash}})[name],process:{argv:['node','-','cli'],env,platform:'linux'}});
   return report;

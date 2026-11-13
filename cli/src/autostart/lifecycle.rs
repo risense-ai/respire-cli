@@ -444,7 +444,7 @@ impl Maintenance {
         let (binary, _) = super::supervise::installed_auth_runtime()?;
         if let Some(config) = self.config.as_ref() {
             owned(config)?;
-            anyhow::ensure!(registered_runtime_image(config)? == binary
+            anyhow::ensure!(registered_runtime_image(config, None)? == binary
                 && !config.environment.contains_key("GH_TOKEN")
                 && !config.environment.contains_key("GITHUB_TOKEN"),
                 "account startup requires the installed managed Runtime and nonsecret registration environment");
@@ -1001,7 +1001,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
     Ok(Some(executable))
 }
 
-pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf> {
+pub(super) fn registered_runtime_image(config: &Registration, migrated_image: Option<&str>) -> Result<PathBuf> {
     let root = config.installation.canonicalize()?;
     let registered_root = PathBuf::from(
         config
@@ -1014,6 +1014,11 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
             && respire_client_host::paths::main_data_dir().canonicalize()? == root,
         "registered runtime root belongs to another installation"
     );
+    if let Some(image) = migrated_image {
+        if let Some(runtime) = crate::runtime_fetch::verified_migrated_image(image)? {
+            return Ok(runtime);
+        }
+    }
     // The registered supervisor clears runtime overrides before selecting its child.
     let accepted = crate::runtime_fetch::read_manifest()?
         .is_some_and(|manifest| crate::runtime_fetch::version_in_accept(&manifest.version));
@@ -1036,7 +1041,7 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
 
 pub(super) fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
     let root = config.installation.canonicalize()?;
-    let runtime = registered_runtime_image(config)?;
+    let runtime = registered_runtime_image(config, Some(&health.image_path))?;
     anyhow::ensure!(
         runtime != config.executable.canonicalize()?
             && runtime != std::env::current_exe()?.canonicalize()?
@@ -1223,9 +1228,6 @@ fn start_explicit_locked() -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
-        #[cfg(feature = "client2-host-prototype")]
-        return crate::client2_host::start_locked();
-        #[cfg(not(feature = "client2-host-prototype"))]
         return crate::rpc::ensure_daemon_locked();
     };
     owned(&config)?;
@@ -1641,9 +1643,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         }
         RuntimeCommand::Update => {
             let binary = crate::runtime_fetch::download_and_install(None, None)?;
+            let version = crate::runtime_fetch::read_manifest()?.context("Runtime selection missing after update")?.version;
             emit(
                 "runtime.update",
-                json!({"version": crate::runtime_fetch::pinned()?.required.clone(), "binary": binary}),
+                json!({"version": version, "binary": binary}),
             )
         }
         RuntimeCommand::Supervise { data_dir } => {
@@ -2644,7 +2647,7 @@ mod tests {
         manager::install(&mut config)?;
         save(&mut config)?;
         let version = crate::runtime_fetch::pinned()?.required.clone();
-        let installed = root.join("runtime").join(&version);
+        let installed = root.join("bin/runtime").join(&version);
         fs::create_dir_all(&installed)?;
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version

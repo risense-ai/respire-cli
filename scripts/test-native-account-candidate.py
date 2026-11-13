@@ -142,12 +142,12 @@ class CandidateFixtureTests(unittest.TestCase):
     def install_synthetic_receipt(self):
         archive, metadata_path = self.package()
         metadata = json.loads(metadata_path.read_text())
-        installed = self.root / "installation/runtime/1.0.21-dev.16"
+        installed = self.root / "installation/bin/runtime/1.0.21-dev.16"
         installed.mkdir(parents=True)
         with tarfile.open(archive) as stream:
             stream.extractall(installed, filter="data")
         (installed / metadata["binary_file"]).rename(installed / "rsrs-runtime")
-        candidate.write_json(self.root / "installation/runtime.json", {
+        candidate.write_json(self.root / "installation/bin/runtime.json", {
             "version": "1.0.21-dev.16", "sha256": candidate.digest(self.runtime),
             "release": {"metadata_json": metadata_path.read_text(),
                         "metadata_sha256": candidate.digest(metadata_path)}})
@@ -211,7 +211,7 @@ class CandidateFixtureTests(unittest.TestCase):
 
     def test_receipt_metadata_cannot_be_rewritten(self):
         metadata_path, _ = self.install_synthetic_receipt()
-        receipt_path = self.root / "installation/runtime.json"
+        receipt_path = self.root / "installation/bin/runtime.json"
         original = json.loads(receipt_path.read_text())
         for change in ("version", "sha256", "metadata_json", "metadata_sha256"):
             changed = copy.deepcopy(original)

@@ -257,7 +257,7 @@ impl StaleOwner {
                 !manager::inspect(config)?.running,
                 "registered supervisor still reports running"
             );
-            let image = lifecycle::registered_runtime_image(config)?;
+            let image = lifecycle::registered_runtime_image(config, None)?;
             anyhow::ensure!(
                 Path::new(text(&grant, "image_path")?).canonicalize()? == image,
                 "selected registered Runtime changed"

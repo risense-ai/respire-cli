@@ -147,7 +147,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
       await runInNewContext(`(async()=>{${script}\n})()`,{assert,createHash,join:p.join,resolve:(...parts)=>p.resolve(...parts),process:{platform,env},
         mkdirSync:()=>{},statSync:()=>({isFile:()=>true}),
         realpathSync:file=>state.sameImage?'same-image':file,
-        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'runtime.json')?JSON.stringify(selected):image,
+        readFileSync:file=>file==='runtime-pin.json'?JSON.stringify({required:version}):file===p.join(root,'bin','runtime.json')?JSON.stringify(selected):image,
         appendFileSync:(_file,line)=>output.push(line),
         installPinnedRuntime:async(cli,options,target)=>{assert.equal(target,'synthetic-target');
           calls.push({cli,env:options.env});return {status:state.status}}});
@@ -155,7 +155,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
       for(const token of ['GH_TOKEN','GITHUB_TOKEN']){assert.equal(calls[0].env[token],undefined);assert.equal(env[token],tokenSentinel);}
       assert.equal(calls[0].env.RSRS_DATA_DIR,root);assert.equal(calls[0].env.HOME,p.join(root,'home'));
       assert.equal(calls[0].env.RSRS_RUNTIME_TRIPLE,'synthetic-target');
-      assert.deepEqual(output,[`path=${p.join(root,'runtime',version,'rsrs-runtime'+(platform==='win32'?'.exe':''))}\n`,`sha256=${digest}\n`,`version=${version}\n`]);
+      assert.deepEqual(output,[`path=${p.join(root,'bin','runtime',version,'rsrs-runtime'+(platform==='win32'?'.exe':''))}\n`,`sha256=${digest}\n`,`version=${version}\n`]);
     };
     await simulate();
     for(const change of [s=>s.status=1,s=>s.selected.version='1.0.21-dev.4',s=>s.selected.sha256='a'.repeat(64),

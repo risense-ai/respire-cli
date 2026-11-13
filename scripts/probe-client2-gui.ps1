@@ -377,11 +377,14 @@ public static class RespireGuiNative {
         $install = Child-Start $cliPath @('--json','runtime','install','--file',$archivePath,'--version',$RuntimeVersion)
         if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
         if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
-        $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'runtime.json') | ConvertFrom-Json
+        $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
         if (-not (Test-Path -LiteralPath (Split-Path $managed))) {
             New-Item -ItemType Directory -Path (Split-Path $managed) | Out-Null
         }
-        Copy-Item -LiteralPath (Join-Path $taskProfile "runtime/$RuntimeVersion") -Destination $managed -Recurse
+        Copy-Item -LiteralPath (Join-Path $taskProfile "bin/runtime/$RuntimeVersion") -Destination $managed -Recurse
+        # The unchanged legacy Client2 requires notices from the CLI-verified archive.
+        & tar -xzf $archivePath -C $managed ./core-notices
+        if ($LASTEXITCODE -ne 0) { throw 'Unable to restore the legacy Client2 notice fixture' }
         @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
     }
