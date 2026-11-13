@@ -102,11 +102,11 @@ test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',
     }
   }finally{rmSync(root,{recursive:true,force:true})}
 });
-test('both Linux ARM targets require native runners, every source feedback phase and background install proof',async()=>{
+test('supported Linux ARM targets require native runners, every source feedback phase and background install proof',async()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
   for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
     const workflow=text(file).replace(/\r\n/g,'\n');
-    for(const triple of ['aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl'])assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
+    for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
     assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
   }
   const source=text('token-free-sdk-check.yml');assert.match(source,/if: \$\{\{ !contains\(inputs.target, '-musl'\) \}\}/);
@@ -269,7 +269,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
 });
 
 test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
-  assert.equal(manifest.targets.length,7,'dev.5 releases seven platforms; SDK/G1 inventories remain separate');
+  assert.equal(new Set(manifest.targets.map(t=>t.triple)).size,manifest.targets.length);
+  assert(!manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-musl'),'ARM64 musl CLI is deferred; Runtime/SDK inventories remain separate');
   assert(!manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'||t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));
@@ -383,7 +384,7 @@ test('the actual critical target waiter binds unique successful producer, source
 function publishedFixture() {
   const part = kind => ({repository: `risense-ai/respire-${kind}`, release_id: kind === 'cli' ? 41 : 42,
     version: '1.0.21-dev.5', source_sha: (kind === 'cli' ? 'a' : 'b').repeat(40), producer:{run_id:91,run_attempt:2},
-    assets: manifest.targets.flatMap((t, index) => publishedAssetNames(kind, t.triple).map((name, n) =>
+    assets: (kind === 'cli' ? manifest.targets.map(t=>t.triple) : Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json',import.meta.url))).targets)).flatMap((target, index) => publishedAssetNames(kind, target).map((name, n) =>
       ({id: index * 3 + n + 1, name, size: 12, sha256: 'c'.repeat(64)})))});
   const spec = {schema: 2, cli: part('cli'), runtime: part('runtime')};
   const text = JSON.stringify(spec), hash = createHash('sha256').update(text).digest('hex');

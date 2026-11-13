@@ -1,4 +1,4 @@
-import {writeFileSync} from 'node:fs';
+import {readFileSync, writeFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 
 const [output] = process.argv.slice(2);
@@ -70,6 +70,10 @@ for (const entry of commits) {
 }
 const lines = [`# Respire CLI ${tag.slice(1)}`, '', channel === 'dev'
   ? 'Development release for testing. The npm `latest` channel remains on the stable version.' : 'Stable release.', ''];
+const manifest = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8'));
+if (channel === 'dev' && version[0] === 2 && !manifest.targets.some(t => t.triple === 'aarch64-unknown-linux-musl')) {
+  lines.push('Linux ARM64 musl CLI is temporarily unavailable in this 2.x DEV release; its CLI assets and npm package are not published. Track [#272](https://github.com/risense-ai/respire-cli/issues/272). The standalone Runtime retains its existing seven-platform, 21-asset inventory.', '');
+}
 if (previous) lines.push(`Changes since [${previous.release.tag_name}](https://github.com/${repository}/releases/tag/${previous.release.tag_name}).`, '');
 else lines.push(channel === 'latest' ? 'First stable release: cumulative changes with no previous published stable baseline.'
   : 'Initial release: cumulative changes with no previous published release baseline.', '');
