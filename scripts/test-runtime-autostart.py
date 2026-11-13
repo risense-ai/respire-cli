@@ -615,7 +615,6 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 failure_root=base/"failed-installation"
                 failure_runtime=copy_managed_installation(managed_fixture / "bin",failure_root)
                 failure_bin=failure_root/"bin"
-                failure_bin.mkdir()
                 shutil.copy2(binary,failure_bin/("rsrs.exe" if os.name=="nt" else "rsrs"))
                 failure_env=dict(env,RSRS_DATA_DIR=str(failure_root),RSRS_BIN_DIR=str(failure_bin),RSRS_RUNTIME_BIN=str(failure_runtime))
                 owner_attempted=False
