@@ -444,7 +444,7 @@ impl Maintenance {
         let (binary, _) = super::supervise::installed_auth_runtime()?;
         if let Some(config) = self.config.as_ref() {
             owned(config)?;
-            anyhow::ensure!(registered_runtime_image(config)? == binary
+            anyhow::ensure!(registered_runtime_image(config, None)? == binary
                 && !config.environment.contains_key("GH_TOKEN")
                 && !config.environment.contains_key("GITHUB_TOKEN"),
                 "account startup requires the installed managed Runtime and nonsecret registration environment");
@@ -1001,7 +1001,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
     Ok(Some(executable))
 }
 
-pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf> {
+pub(super) fn registered_runtime_image(config: &Registration, migrated_image: Option<&str>) -> Result<PathBuf> {
     let root = config.installation.canonicalize()?;
     let registered_root = PathBuf::from(
         config
@@ -1014,6 +1014,11 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
             && respire_client_host::paths::main_data_dir().canonicalize()? == root,
         "registered runtime root belongs to another installation"
     );
+    if let Some(image) = migrated_image {
+        if let Some(runtime) = crate::runtime_fetch::verified_migrated_image(image)? {
+            return Ok(runtime);
+        }
+    }
     // The registered supervisor clears runtime overrides before selecting its child.
     let accepted = crate::runtime_fetch::read_manifest()?
         .is_some_and(|manifest| crate::runtime_fetch::version_in_accept(&manifest.version));
@@ -1036,10 +1041,7 @@ pub(super) fn registered_runtime_image(config: &Registration) -> Result<PathBuf>
 
 pub(super) fn verify_owned_runtime(config: &Registration, health: &crate::net_rpc::Health) -> Result<String> {
     let root = config.installation.canonicalize()?;
-    let runtime = match crate::runtime_fetch::verified_migrated_image(&health.image_path)? {
-        Some(legacy) => legacy,
-        None => registered_runtime_image(config)?,
-    };
+    let runtime = registered_runtime_image(config, Some(&health.image_path))?;
     anyhow::ensure!(
         runtime != config.executable.canonicalize()?
             && runtime != std::env::current_exe()?.canonicalize()?
