@@ -326,7 +326,7 @@ test('workflow defaults critical, retains mandatory profile gates and dispatches
   assert.doesNotMatch(part('api-smoke'),/validation_profile == 'full'/);
   assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
   assert.doesNotMatch(part('publication-ready'),/channel == 'latest' \|\| github.event_name/);
-  assert.match(native,/default: full/);assert(native.includes("--profile '${{ inputs.validation_profile }}'"));
+  assert.match(native,/default: full/);assert(native.includes('--profile critical'));
   assert(native.indexOf('Target producer concluded')<native.indexOf('const artifacts=inventory.artifacts.filter'));
   assert.match(native,/artifacts.length>1/);assert.match(native,/current.run_attempt!==attempt/);assert.match(native,/job.conclusion==='success'/);
   assert.match(native,/if: inputs.validation_profile == 'full'[\s\S]*?resident-stress/);
@@ -540,24 +540,12 @@ test('published consumers declare every condition dependency and cannot execute 
   assert.doesNotMatch(nativeDefault,/GH_TOKEN:|GITHUB_TOKEN:|contents: write/);
   assert.match(nativeDefault,/permissions:\n  contents: read/);
   const nativeJobs=Object.fromEntries([...native.split('\njobs:\n')[1].matchAll(/^  ([a-z][a-z0-9-]+):\n([\s\S]*?)(?=^  [a-z][a-z0-9-]+:|$(?![\s\S]))/gm)].map(m=>[m[1],m[2]]));
-  assert.deepEqual(Object.keys(nativeJobs).filter(name=>/contents: write/.test(nativeJobs[name])),['historical-draft-download']);
+  assert.deepEqual(Object.keys(nativeJobs).filter(name=>/contents: write/.test(nativeJobs[name])),[]);
   assert.match(nativeJobs.native,/permissions:\n      contents: read\n      actions: read/);
   assert.doesNotMatch(nativeJobs.native,/contents: write|actions: write|id-token:/);
-  const draft=nativeJobs['historical-draft-download'];
-  assert.match(draft,/if: inputs.validation_profile == 'full'/);
-  assert.match(draft,/permissions:\n      contents: write/);
-  assert.doesNotMatch(draft,/actions: write|id-token:/);
-  assert.match(draft,/ref: \$\{\{ github.sha \}\}/);assert.match(draft,/persist-credentials: false/);
-  assert.deepEqual([...draft.matchAll(/^      - uses: (.+)$/gm)].map(m=>m[1]),['actions/checkout@v5','actions/setup-python@v5','actions/upload-artifact@v4']);
-  assert.deepEqual([...draft.matchAll(/^        run: (.+)$/gm)].map(m=>m[1]),["python scripts/test-published-upgrades.py --download-only --target '${{ matrix.target }}' --output-dir '${{ runner.temp }}/historical-draft'"]);
-  const draftName='name: historical-draft-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.target }}';
-  assert(draft.includes(draftName));assert(nativeJobs.native.includes(draftName));
-  assert.match(nativeJobs.native,/needs: historical-draft-download/);
-  const nativeCondition=nativeJobs.native.match(/^    if: \$\{\{ (.+) \}\}$/m)[1];
-  for(const artifact_source of ['build','published-assets'])for(const validation_profile of ['critical','full'])for(const result of ['success','skipped','failure','cancelled']){
-    const context={cancelled:()=>false,inputs:{artifact_source,validation_profile},needs:{'historical-draft-download':{result}}};
-    assert.equal(Boolean(runInNewContext(js(nativeCondition),context)),result==='success'||validation_profile==='critical'&&result==='skipped');
-  }
+  assert.doesNotMatch(native,/historical-draft-download|draft-baseline-cache/);
+  assert.doesNotMatch(nativeJobs.native,/^    needs:/m);
+  assert(nativeJobs.native.includes('--profile critical'));
   const upgrade=readFileSync(new URL('../../scripts/test-published-upgrades.py',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(upgrade,/if args.download_only:\n        assert tag=='v1\.0\.10' and release\['draft'\][\s\S]*?\n        return\n    with tarfile\.open/);
   assert.match(upgrade,/if args.download_only:\n    assert args.profile=='full' and not args.draft_baseline_cache[\s\S]*?\n    sys.exit\(0\)\n\ntry:/);
