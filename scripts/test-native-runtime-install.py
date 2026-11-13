@@ -132,7 +132,7 @@ class FixtureInstallationTests(unittest.TestCase):
         self.assertLess(startup.index('Copy-Item -LiteralPath $nativeExecutable -Destination $stableCli'),
                         startup.index('Start-ScheduledTask -TaskName $taskName'))
         self.assertIn('Get-FileHash -LiteralPath $stableCli -Algorithm SHA256', startup)
-        self.assertIn("('runtime/' + $managedReceipt.version + '/rsrs-runtime.exe')", startup)
+        self.assertIn("('bin/runtime/' + $managedReceipt.version + '/rsrs-runtime.exe')", startup)
         self.assertEqual(startup.count("-Headers @{'X-Respire-Health' = 'runtime-v1'}"), 3)
         self.assertIn('task_result_parsed = ($null -ne $taskEnvelope); task_error_code = $taskErrorCode;', startup)
         bundle = ast.parse(Path(__file__).with_name('runtime-acceptance-bundle.py').read_text(encoding='utf-8'))
