@@ -1452,7 +1452,7 @@ function Invoke-OfflineGuiAcceptance {
     # Never read arbitrary tree nodes/values, capture a screenshot, copy or archive recovery material.
     $null = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('\u005e\u8bf7\u4fdd\u5b58\u672c\u673a\u6062\u590d\u6750\u6599\u0024')) 60
     $report.offline.action_stage = 'recovery_dismiss'
-    Send-OfflineKey 27 -RecoveryDismiss # Normal Escape closes the recovery display; generated VM keys are disposable.
+    Press-OfflineButton ([regex]::Unescape('\u005e\u5173\u95ed\u0024')) # Focus the recovery dialog's fixed close button before native input.
     Wait-OfflineRecoveryDismissed
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
