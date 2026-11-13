@@ -383,7 +383,7 @@ public static class RespireGuiNative {
         }
         Copy-Item -LiteralPath (Join-Path $taskProfile "bin/runtime/$RuntimeVersion") -Destination $managed -Recurse
         # The unchanged legacy Client2 requires notices from the CLI-verified archive.
-        & tar -xzf $archivePath -C $managed core-notices
+        & tar -xzf $archivePath -C $managed ./core-notices
         if ($LASTEXITCODE -ne 0) { throw 'Unable to restore the legacy Client2 notice fixture' }
         @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')

@@ -311,7 +311,8 @@ def main():
                 # The unchanged legacy Client2 requires notices from the CLI-verified archive.
                 with tarfile.open(archive, 'r:gz') as packaged:
                     notices = [entry for entry in packaged.getmembers()
-                               if entry.name == 'core-notices' or entry.name.startswith('core-notices/')]
+                               if entry.name.removeprefix('./') == 'core-notices'
+                               or entry.name.removeprefix('./').startswith('core-notices/')]
                     packaged.extractall(destination, members=notices, filter='data')
                 (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
             if mode == 'reuse-cli-started':
