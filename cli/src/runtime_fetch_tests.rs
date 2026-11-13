@@ -407,12 +407,16 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     let resource_hash = sha256_hex(resource_bytes);
     let core = serde_json::json!({
         "schema_version": 1, "target": triple,
-        "files": [{"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash}],
+        "files": [
+            {"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash},
+            {"path": "core-notices/NOTICES.txt", "sha256": sha256_hex(b"notices")},
+        ],
     }).to_string();
     let archive = gz(&tar_bytes(&[
         (&binary_name, b'0', 0o700, binary_bytes),
         (CORE_MANIFEST_FILE, b'0', 0o600, core.as_bytes()),
         ("lib/provider.bin", b'0', 0o600, resource_bytes),
+        ("core-notices/NOTICES.txt", b'0', 0o600, b"notices"),
     ]))?;
     let archive_path = dir.path().join("runtime.tar.gz");
     let metadata_path = dir.path().join(format!("runtime-build-{triple}.json"));
@@ -427,6 +431,7 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
             {"path": binary_name, "size": binary_bytes.len(), "sha256": hash},
             {"path": CORE_MANIFEST_FILE, "size": core.len(), "sha256": sha256_hex(core.as_bytes())},
             {"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash},
+            {"path": "core-notices/NOTICES.txt", "size": 7, "sha256": sha256_hex(b"notices")},
         ],
     });
     fs::write(&archive_path, &archive)?;
@@ -438,6 +443,8 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     fs::write(&metadata_path, metadata.to_string())?;
     let binary = install_from_file(&archive_path, "1.0.21-dev.1")?;
     anyhow::ensure!(binary.is_file());
+    anyhow::ensure!(!version_dir("1.0.21-dev.1").join("core-notices").exists());
+    anyhow::ensure!(version_dir("1.0.21-dev.1").join(CORE_MANIFEST_FILE).is_file());
     let manifest = read_manifest()?.context("manifest missing after install")?;
     anyhow::ensure!(manifest.version == "1.0.21-dev.1" && manifest.sha256 == hash);
     let proof = manifest.release.as_ref().context("release proof missing")?;
@@ -446,7 +453,7 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     anyhow::ensure!(managed_runtime_path()?.context("managed path missing")? == binary);
     anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
     // A trusted Runtime archive is not old-host migration authorization.
-    fs::create_dir(dir.path().join("bin"))?;
+    fs::create_dir_all(dir.path().join("bin"))?;
     let legacy = crate::mcp::stable_bin_path();
     fs::write(&legacy, b"old combined CLI")?;
     let before = fs::read(manifest_path())?;
@@ -616,6 +623,18 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
             .current
     );
     anyhow::ensure!(clean_old()?.is_empty());
+    // Both hosts migrate the same receipt and inventory, preserving old files.
+    let client2 = dir.path().join("client2");
+    fs::create_dir_all(&client2)?;
+    fs::rename(runtime_dir(), client2.join("runtime"))?;
+    fs::rename(manifest_path(), client2.join(MANIFEST_FILE))?;
+    shared::migrate_legacy()?;
+    anyhow::ensure!(managed_runtime_path()?.as_ref() == Some(&binary));
+    anyhow::ensure!(client2.join("runtime").join("1.0.21-dev.1").join(RUNTIME_BINARY).is_file());
+    shared::migrate_legacy()?;
+    let lock = install_lock()?;
+    anyhow::ensure!(respire_spawn::FileLock::acquire(&runtime_dir().join(".install.lock"), Duration::ZERO).is_err());
+    drop(lock);
     Ok(())
 }
 
@@ -625,6 +644,7 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     // An explicit selection still precedes managed discovery; no executable is run.
+    fs::create_dir_all(manifest_path().parent().context("manifest parent missing")?)?;
     fs::write(manifest_path(), b"invalid managed selection")?;
     let explicit = dir.path().join(RUNTIME_BINARY);
     fs::write(&explicit, b"synthetic explicit runtime")?;

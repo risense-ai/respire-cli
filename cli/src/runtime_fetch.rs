@@ -18,8 +18,8 @@
 //!   with the full triple (`rsrs-runtime-<triple>(.exe)`); install placement
 //!   renames it to the bare [`RUNTIME_BINARY`] without touching its bytes.
 //! * Concurrent first launches (CLI and client2) serialize on the
-//!   `<installation_root>/runtime/.install.lock` file lock and the switch into
-//!   `<installation_root>/runtime/<version>/` is atomic; the previous version
+//!   `<installation_root>/bin/runtime/.install.lock` native file lock and the switch into
+//!   `<installation_root>/bin/runtime/<version>/` is atomic; the previous version
 //!   directory is kept as a rollback point.
 //!
 //! `runtime-pin.json` (repository root, embedded at build time) selects the
@@ -64,7 +64,7 @@ pub const RUNTIME_BINARY: &str = if cfg!(windows) {
 };
 /// Binary name of the legacy combined CLI+runtime layout.
 pub const LEGACY_COMBINED_BINARY: &str = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
-/// CLI managed-install manifest, next to `<installation_root>/runtime/`.
+/// Shared managed-install manifest, next to `<installation_root>/bin/runtime/`.
 pub const MANIFEST_FILE: &str = "runtime.json";
 /// Per-release integrity manifest shipped inside the archive.
 pub const CORE_MANIFEST_FILE: &str = "core-runtime.json";
@@ -331,12 +331,12 @@ pub fn installation_root() -> PathBuf {
     respire_client_host::paths::main_data_dir()
 }
 
-/// Managed runtime directory: `<installation_root>/runtime/`.
+/// Managed runtime directory: `<installation_root>/bin/runtime/`.
 pub fn runtime_dir() -> PathBuf {
     if let Some(selected) = crate::embedding::selection() {
         return selected.runtime_dir.clone();
     }
-    installation_root().join("runtime")
+    installation_root().join("bin").join("runtime")
 }
 
 /// Shared manifest read and written by both the CLI and client2.
@@ -344,10 +344,10 @@ pub fn manifest_path() -> PathBuf {
     if let Some(selected) = crate::embedding::selection() {
         return selected.manifest_path.clone();
     }
-    installation_root().join(MANIFEST_FILE)
+    installation_root().join("bin").join(MANIFEST_FILE)
 }
 
-/// Installed version directory: `<installation_root>/runtime/<version>/`.
+/// Installed version directory: `<installation_root>/bin/runtime/<version>/`.
 pub fn version_dir(version: &str) -> PathBuf {
     runtime_dir().join(version)
 }
@@ -357,7 +357,7 @@ pub fn managed_binary_path(version: &str) -> PathBuf {
     version_dir(version).join(RUNTIME_BINARY)
 }
 
-/// CLI version selection in `<installation_root>/runtime.json`. Existing
+/// CLI version selection in `<installation_root>/bin/runtime.json`. Existing
 /// version/hash fields remain readable; reuse also requires the release proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ManagedManifest {
@@ -587,6 +587,7 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
         return Ok(ResolvedRuntime::Ready(explicit));
     }
+    shared::migrate_legacy()?;
     if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
         let binary = validate_installed(&manifest)?;
         if version_in_accept(&manifest.version) {
@@ -905,6 +906,9 @@ impl BuildMetadata {
             } else {
                 file.path.as_str()
             };
+            if file.path.starts_with("core-notices/") && !stage.join(name).try_exists()? {
+                continue;
+            }
             expected.insert(stage.join(name));
             let path = regular_install_file(stage, name)?;
             let metadata = fs::symlink_metadata(&path)
@@ -1592,6 +1596,9 @@ fn verify_stage(
             valid_sha256(&file.sha256),
             "invalid runtime manifest checksum"
         );
+        if file.path.starts_with("core-notices/") && !stage.join(&file.path).try_exists()? {
+            continue;
+        }
         let target = regular_install_file(stage, &file.path)?;
         anyhow::ensure!(
             target.is_file(),
@@ -1635,15 +1642,17 @@ fn place_managed_binary(stage: &Path, binary_file: &str) -> Result<()> {
 // Install transactions
 // ---------------------------------------------------------------------------
 
-fn install_lock() -> Result<respire_client_host::lock::LibraryLock> {
-    respire_client_host::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
+fn install_lock() -> Result<respire_spawn::FileLock> {
+    create_private_dir(&runtime_dir())?;
+    respire_spawn::FileLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
         .context("another process is installing the runtime")
 }
 
 fn publish_manifest(manifest: &ManagedManifest) -> Result<()> {
+    shared::save_receipt(manifest)?;
     let path = manifest_path();
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    let temporary = installation_root().join(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
+    let temporary = path.with_file_name(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         {
             let mut options = fs::OpenOptions::new();
@@ -1673,11 +1682,13 @@ fn adopt_or_verify_version_dir(stage: &Path, manifest: &ManagedManifest) -> Resu
     if dest.is_dir() {
         // An explicit install may repair a legacy selection only after verifying
         // the existing bytes against the newly supplied trusted release proof.
-        return validate_installed(manifest)
-            .context("a different build already occupies this runtime version");
+        shared::compact_version(manifest)
+            .context("a different build already occupies this runtime version")?;
+        return validate_installed(manifest);
     }
     // Renaming stays inside <runtime/>, so it is atomic on every platform.
     fs::rename(stage, &dest).with_context(|| format!("failed to publish {}", dest.display()))?;
+    shared::compact_version(manifest)?;
     respire_spawn::durable::sync_directory(&runtime_dir()).ok();
     Ok(dest.join(RUNTIME_BINARY))
 }
@@ -1718,7 +1729,9 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
                 error
             }
         })?;
-        (manifest.version == required).then_some(binary)
+        (manifest.version == required
+            || (semver_cmp(&manifest.version, required) == std::cmp::Ordering::Greater
+                && version_in_accept(&manifest.version))).then_some(binary)
     } else {
         // Resolve configured paths read-only. This never imports records or
         // turns the selected profile into request identity or migration authority.
@@ -1781,6 +1794,7 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
         // or materialize a CLI; installation entry points reject embedding.
         return selected.verify().map(|_| ());
     }
+    shared::migrate_legacy()?;
     automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
 
@@ -1796,6 +1810,7 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
+    shared::migrate_legacy()?;
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -2035,6 +2050,7 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
 pub fn clean_old() -> Result<Vec<String>> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
+    let _lock = install_lock()?;
     let keep = list_installed()?
         .iter()
         .find(|entry| entry.current)
@@ -2080,6 +2096,9 @@ fn remove_version_dir(version: &str) -> Result<()> {
 #[cfg(test)]
 #[path = "runtime_fetch_tests.rs"]
 pub(crate) mod runtime_fetch_tests;
+
+#[path = "runtime_shared.rs"]
+pub(crate) mod shared;
 
 #[cfg(test)]
 mod revision4_install_validation {

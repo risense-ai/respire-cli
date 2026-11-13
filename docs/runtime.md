@@ -1,5 +1,20 @@
 # Host runtime and sandbox clients
 
+CLI and Client2 independently install and manage the same Runtime layout:
+`~/.rsrs/bin/rsrs[.exe]`, `~/.rsrs/bin/runtime/<version>/rsrs-runtime[.exe]`,
+and `~/.rsrs/bin/runtime.json`. Client2 does not invoke the CLI to install Runtime.
+Managed versions retain the executable, required libraries and the authenticated
+`core-runtime.json`; installers omit `core-notices` and remove it from existing
+shared installations. Missing notices do not bypass executable or library checks.
+Both installers use `bin/runtime/.install.lock` (a one-byte Windows file lock
+or Unix flock), the same complete schema-2 release proof, and atomic version
+selection. `bin/runtime/.receipts/<version>.json` retains verified rollback receipts.
+On the first host start, old root-level or Client2-managed installations are
+verified against published metadata and copied into this layout. Original files
+remain available for recovery; account data and Runtime state under `~/.rsrs/runtime/`
+are not relocated. Existing running owners are drained through normal lifecycle
+operations before a replacement starts.
+
 Embedding profiles use `model.catalog`, `model.configure`, `model.switch`,
 `model.resume` and `model.progress` on the existing runtime RPC transport.
 See [embedding profiles](model-profiles.md) for CLI/JSON and failure semantics.

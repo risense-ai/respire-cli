@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 
 mod confinement;
 pub mod durable;
+mod file_lock;
+pub use file_lock::FileLock;
 pub use confinement::is_restricted;
 mod control;
 pub use control::spawn_control_helper;

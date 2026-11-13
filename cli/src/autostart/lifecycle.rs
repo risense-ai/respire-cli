@@ -1641,9 +1641,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         }
         RuntimeCommand::Update => {
             let binary = crate::runtime_fetch::download_and_install(None, None)?;
+            let version = crate::runtime_fetch::read_manifest()?.context("Runtime selection missing after update")?.version;
             emit(
                 "runtime.update",
-                json!({"version": crate::runtime_fetch::pinned()?.required.clone(), "binary": binary}),
+                json!({"version": version, "binary": binary}),
             )
         }
         RuntimeCommand::Supervise { data_dir } => {
