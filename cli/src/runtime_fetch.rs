@@ -1682,9 +1682,8 @@ fn adopt_or_verify_version_dir(stage: &Path, manifest: &ManagedManifest) -> Resu
     if dest.is_dir() {
         // An explicit install may repair a legacy selection only after verifying
         // the existing bytes against the newly supplied trusted release proof.
-        shared::compact_version(manifest)
-            .context("a different build already occupies this runtime version")?;
-        return validate_installed(manifest);
+        return validate_installed(manifest)
+            .context("a different build already occupies this runtime version");
     }
     // Renaming stays inside <runtime/>, so it is atomic on every platform.
     fs::rename(stage, &dest).with_context(|| format!("failed to publish {}", dest.display()))?;

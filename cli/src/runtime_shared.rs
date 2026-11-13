@@ -104,19 +104,7 @@ fn publish_directory(source: &Path, manifest: &ManagedManifest, activate: bool) 
 /// Migrate installation bytes only. Account data, endpoints and running owners
 /// stay untouched; old trees remain available until a verified normal restart.
 pub(crate) fn migrate_legacy() -> Result<()> {
-    if crate::embedding::selection().is_some() {
-        return Ok(());
-    }
-    if manifest_path().exists() {
-        if let Some(manifest) = read_manifest()? {
-            if version_dir(&manifest.version)
-                .join("core-notices")
-                .try_exists()?
-            {
-                let _lock = install_lock()?;
-                compact_version(&manifest)?;
-            }
-        }
+    if crate::embedding::selection().is_some() || manifest_path().exists() {
         return Ok(());
     }
     let root = installation_root();

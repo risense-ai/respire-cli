@@ -445,6 +445,12 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     anyhow::ensure!(binary.is_file());
     anyhow::ensure!(!version_dir("1.0.21-dev.1").join("core-notices").exists());
     anyhow::ensure!(version_dir("1.0.21-dev.1").join(CORE_MANIFEST_FILE).is_file());
+    // Reusing an older installation leaves its authenticated notices untouched.
+    let notices = version_dir("1.0.21-dev.1").join("core-notices/NOTICES.txt");
+    fs::create_dir_all(notices.parent().context("notice parent missing")?)?;
+    fs::write(&notices, b"notices")?;
+    anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1")? == binary);
+    anyhow::ensure!(notices.is_file());
     let manifest = read_manifest()?.context("manifest missing after install")?;
     anyhow::ensure!(manifest.version == "1.0.21-dev.1" && manifest.sha256 == hash);
     let proof = manifest.release.as_ref().context("release proof missing")?;

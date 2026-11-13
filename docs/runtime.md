@@ -4,8 +4,8 @@ CLI and Client2 independently install and manage the same Runtime layout:
 `~/.rsrs/bin/rsrs[.exe]`, `~/.rsrs/bin/runtime/<version>/rsrs-runtime[.exe]`,
 and `~/.rsrs/bin/runtime.json`. Client2 does not invoke the CLI to install Runtime.
 Managed versions retain the executable, required libraries and the authenticated
-`core-runtime.json`; installers omit `core-notices` and remove it from existing
-shared installations. Missing notices do not bypass executable or library checks.
+`core-runtime.json`; new installations omit `core-notices`. Existing installations
+are not cleaned. Missing notices do not bypass executable or library checks.
 Both installers use `bin/runtime/.install.lock` (a one-byte Windows file lock
 or Unix flock), the same complete schema-2 release proof, and atomic version
 selection. `bin/runtime/.receipts/<version>.json` retains verified rollback receipts.
