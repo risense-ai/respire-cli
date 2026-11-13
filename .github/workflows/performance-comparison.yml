@@ -9,7 +9,7 @@ on:
         options:
           - candidate-only
       release_inventory:
-        description: Official published-assets schema 2 JSON (schema/cli/runtime), six CLI and seven Runtime targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
+        description: Official published-assets schema 2 JSON (schema/cli/runtime), seven CLI and seven Runtime targets with exact release IDs, sources, metadata producers and asset IDs/sizes/SHA256
         type: string
         required: true
       release_inventory_sha256:
