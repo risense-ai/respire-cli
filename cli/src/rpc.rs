@@ -1169,6 +1169,7 @@ mod runtime_resolution_tests {
         anyhow::ensure!(resolve_runtime_executable().is_err());
         anyhow::ensure!(!directory.path().join("bin").exists());
         std::env::remove_var("RSRS_RUNTIME_BIN");
+        std::fs::create_dir_all(directory.path().join("bin"))?;
         std::fs::write(
             crate::runtime_fetch::manifest_path(),
             serde_json::to_vec(&json!({
