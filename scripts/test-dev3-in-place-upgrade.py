@@ -141,6 +141,8 @@ def main():
             ['set-keychain-settings', '-t', '3600', '-u', authorized_keychain],
             ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
              '-w', secret, authorized_keychain],
+            ['set-generic-password-partition-list', '-s', 'rsrs', '-a', 'super:' + alias,
+             '-S', 'apple-tool:,apple:,unsigned:', '-k', keychain_password, authorized_keychain],
             ['list-keychains', '-d', 'user', '-s', authorized_keychain, keychain],
             ['default-keychain', '-d', 'user', '-s', authorized_keychain],
         ]:
@@ -204,8 +206,30 @@ def main():
             report['probe_elapsed_seconds'] = elapsed
             report['probe_runtime_sha256'] = digest(probe)
             preauthorize_keychain(retained['session.json'])
-            authorized = subprocess.run([str(probe), '--keychain-authorize-internal'],
-                                        env=env, capture_output=True, timeout=10)
+            authorized = subprocess.Popen([str(probe), '--keychain-authorize-internal'],
+                                          env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            started = time.monotonic()
+            try:
+                authorized.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                sample_path = root / 'foreground-sample.txt'
+                try:
+                    subprocess.run(['/usr/bin/sample', str(authorized.pid), '3', '-file', str(sample_path)],
+                                   capture_output=True, timeout=15)
+                except (OSError, subprocess.SubprocessError) as error:
+                    report['foreground_sample_error'] = type(error).__name__
+                if sample_path.is_file():
+                    sample = sample_path.read_text(encoding='utf-8', errors='replace')
+                    report['foreground_wait_frames'] = [frame for frame in (
+                        'SecKeychainFindGenericPassword', 'SecItemCopyMatching', 'CCKeyDerivationPBKDF',
+                        'pbkdf2', 'argon2', 'verify_candidate', 'unlock_v4') if frame in sample]
+                try:
+                    authorized.communicate(timeout=100)
+                except subprocess.TimeoutExpired:
+                    authorized.kill()
+                    authorized.communicate()
+                    raise RuntimeError('preauthorized foreground verification timed out; inspect the safe frame report') from None
+            report['foreground_verification_seconds'] = time.monotonic() - started
             if authorized.returncode:
                 raise AssertionError('preauthorized foreground credential verification failed')
             for name, original in retained.items():
