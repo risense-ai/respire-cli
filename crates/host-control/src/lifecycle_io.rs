@@ -27,6 +27,30 @@ pub fn probe_runtime() -> Result<Option<Health>> {
     }
 }
 
+/// Deliver keys only to the verified local profile owner. Never start a process here.
+pub fn unlock_if_needed(health: &Health) -> Result<bool> {
+    if health.store_ready { return Ok(true); }
+    if health.credential_state != "required" || respire_client_host::settings::off_mode()? {
+        return Ok(false);
+    }
+    let (installation, profile) = respire_client_host::config::control_roots()?;
+    anyhow::ensure!(Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
+        && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?
+        && health.v == crate::PROTOCOL_V && !health.instance_id.is_empty() && health.generation > 0,
+        "unlock Runtime does not own the selected profile");
+    let process = net_rpc::runtime_process_identity(health.pid)?;
+    let executable = Path::new(&health.image_path).canonicalize()?;
+    anyhow::ensure!(Path::new(&process.executable).canonicalize()? == executable
+        && start_matches(&process.started_at, &health.process_start_id),
+        "unlock Runtime process identity changed");
+    use sha2::{Digest, Sha256};
+    anyhow::ensure!(format!("{:x}", Sha256::digest(std::fs::read(executable)?)) == health.image_sha256,
+        "unlock Runtime image changed");
+    respire_client_host::host_credentials::unlock_runtime(
+        &health.url, &installation, &profile, &health.instance_id, health.generation,
+    )
+}
+
 fn endpoint_pid() -> Result<Option<u32>> {
     let path = respire_client_host::config::normalize_control_path(&endpoint_path())?;
     let bytes = match std::fs::read(&path) {
@@ -110,9 +134,6 @@ pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -
             let Some(health) = probe_runtime()? else {
                 continue;
             };
-            if !health.store_ready {
-                continue;
-            }
             let birth =
                 crate::launch::process_birth(child.id())?.context("starting Runtime exited")?;
             let process = net_rpc::runtime_process_identity(child.id())?;
@@ -138,6 +159,7 @@ pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -
                 "Runtime process changed during account startup verification"
             );
             image.revalidate()?;
+            anyhow::ensure!(unlock_if_needed(&health)?, "host credentials are required to unlock the account Runtime");
             return Ok(());
         }
         anyhow::bail!("owned account Runtime did not become ready; query the original operation")

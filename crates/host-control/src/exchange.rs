@@ -53,12 +53,16 @@ pub(crate) fn exchange_control(
                 .spawn(move || {
                     let response = (|| -> Result<RpcResponse<ResultEnvelope>> {
                         let written = input.write_all(&frames).and_then(|()| input.flush());
-                        // Return the writer before blocking on stdout so the owner can revoke it.
+                        written.context("host control request write failed")?;
+                        let response = respire_client_host::host_credentials::read_control_response(
+                            &mut input, &mut output,
+                        )?;
                         input_sender.send(input).map_err(|_| {
                             anyhow::anyhow!("host control input owner was released")
                         })?;
-                        written.context("host control request write failed")?;
-                        read_response(&mut output)
+                        let mut extra = [0u8; 1];
+                        anyhow::ensure!(output.read(&mut extra)? == 0, "extra host control response bytes");
+                        Ok(response)
                     })();
                     let _ = sender.send(response);
                 })?,

@@ -106,6 +106,7 @@ pub(crate) fn supervise() -> Result<()> {
         host_image_sha256: hex::encode(Sha256::digest(std::fs::read(&executable)?)),
         last_health: Mutex::new(health) };
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+    respire_host_control::lifecycle_io::unlock_if_needed(&backend.health)?;
     // A disconnected launcher must not orphan a running host by making its
     // observer exit. Keep ownership and reap normally even if readiness is lost.
     let readiness = publish_ready(&ready);

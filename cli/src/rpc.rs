@@ -741,6 +741,7 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     // begins when startup, replacement or recovery is actually required.
     if let Some(health) = probe_runtime()? {
         if runtime_acceptable(&health)? {
+            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
             return Ok(());
         }
     }
@@ -791,6 +792,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     let current = probe_runtime()?;
     if let Some(health) = &current {
         if runtime_acceptable(health)? {
+            respire_host_control::lifecycle_io::unlock_if_needed(health)?;
             return Ok(());
         }
     }
@@ -919,10 +921,6 @@ fn wait_daemon_ready(
         }
         if let Some(health) = probe_runtime()? {
             last_store_ready = Some(health.store_ready);
-            // Off mode deliberately leaves the store closed; owner checks still apply.
-            if !health.store_ready && !off_mode {
-                continue;
-            }
             let birth = crate::autostart::process_birth(child.id())?
                 .context("starting runtime process exited")?;
             let birth_prefix = if cfg!(windows) {
@@ -948,6 +946,7 @@ fn wait_daemon_ready(
                     ),
                 "runtime owner changed during startup"
             );
+            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
             return Ok(());
         }
     }

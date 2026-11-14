@@ -5,6 +5,7 @@
 pub mod classification;
 pub mod config;
 pub mod credential;
+pub mod host_credentials;
 pub mod env;
 pub mod identity;
 pub mod input_error;

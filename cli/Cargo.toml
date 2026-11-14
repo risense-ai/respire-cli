@@ -1,6 +1,6 @@
 [package]
 name = "respire"
-version = "1.0.21-dev.5"
+version = "1.0.22-dev.1"
 edition = "2021"
 rust-version = "1.88"
 description = "respire CLI — encrypted cross-device AI memory"
@@ -21,7 +21,7 @@ path = "src/main.rs"
 respire_host_control = { path = "../crates/host-control" }
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
 respire_commands = { path = "../crates/commands" }
-respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.7" }
+respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.8" }
 respire_spawn = { path = "../spawn" }
 anyhow = "1.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

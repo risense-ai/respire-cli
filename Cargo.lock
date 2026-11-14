@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "respire"
-version = "1.0.21-dev.5"
+version = "1.0.22-dev.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1654,10 +1654,15 @@ dependencies = [
  "hex",
  "keyring",
  "rand",
+ "respire_protocol",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
+ "ureq",
+ "url",
+ "uuid",
  "whoami",
 ]
 
@@ -1745,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.7"
+version = "2.0.0-dev.8"
 dependencies = [
  "anyhow",
  "serde",

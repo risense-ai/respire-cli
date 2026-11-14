@@ -954,6 +954,10 @@ pub(super) fn wait_ready(config: &Registration) -> Result<()> {
                 crate::runtime_fetch::version_in_accept(&health.runtime_version),
                 "managed runtime version mismatch"
             );
+            if health.credential_state == "required" {
+                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                return Ok(());
+            }
             if health.store_ready || respire_client_host::settings::off_mode()? {
                 return Ok(());
             }
@@ -1055,6 +1059,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         if crate::rpc::runtime_acceptable(&health)?
             && health.managed_id.as_deref() == Some(config.id.as_str())
         {
+            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
             return Ok(true);
         }
     }
@@ -1091,6 +1096,7 @@ fn start_explicit_locked() -> Result<()> {
             if health.managed_id.as_deref() == Some(config.id.as_str())
                 && crate::rpc::runtime_acceptable(&health)?
             {
+                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
                 reset_attempts(&config)?;
                 return Ok(());
             }
@@ -1463,6 +1469,12 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             let _ownership = crate::runtime_policy::takeover_lock()?;
             start_explicit_locked()?;
             emit("runtime.start", status()?)
+        }
+        RuntimeCommand::Unlock => {
+            let health = crate::net_rpc::health()?;
+            let unlocked = respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+            emit("runtime.unlock", json!({"store_ready":unlocked,
+                "credential_state":if unlocked {"available"} else {"required"}}))
         }
         RuntimeCommand::Autostart {
             command: AutostartCommand::Enable { now },

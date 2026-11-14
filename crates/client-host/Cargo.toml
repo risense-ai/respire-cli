@@ -11,6 +11,11 @@ publish = false
 locks = ["dep:rusqlite"]
 
 [dependencies]
+respire_protocol = { path = "../protocol" }
+uuid = { version = "1.0", features = ["v4"] }
+sha2 = "0.10"
+ureq = { version = "2.12", features = ["json"] }
+url = "2.5"
 anyhow = "1.0"
 dirs = "6.0"
 hex = "0.4"

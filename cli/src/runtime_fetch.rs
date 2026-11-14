@@ -331,7 +331,12 @@ pub fn installation_root() -> PathBuf {
     respire_client_host::paths::main_data_dir()
 }
 
-/// Managed runtime directory: `<installation_root>/runtime/`.
+/// Client2 chooses the shared bin layout; release proofs are verified normally.
+pub(crate) fn client2_managed() -> bool {
+    respire_client_host::env::var("RSRS_CLIENT2_HOST").is_ok_and(|value| value == "1")
+}
+
+/// Managed runtime directory, selected by the owning host.
 pub fn runtime_dir() -> PathBuf {
     if let Some(selected) = crate::embedding::selection() {
         return selected.runtime_dir.clone();
