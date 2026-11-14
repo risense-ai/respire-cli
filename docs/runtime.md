@@ -19,7 +19,7 @@ For an in-place upgrade from a released 2.x frontend-only CLI, update the CLI
 through its original installation channel, then run `rsrs runtime install` on
 the host. Confirm `rsrs --version` reports the upgraded CLI first. If the old
 stable entry shadows the global package, invoke the new package explicitly;
-for the pnpm dev channel, use `pnpm dlx rsrs@dev runtime install`.
+for the pnpm dev channel, use `pnpm dlx rsrs-cli@dev runtime install`.
 This installs a verified compatible Runtime, drains an existing owner
 when the Runtime or stable CLI needs replacement, atomically refreshes
 `~/.rsrs/bin/rsrs`, and restarts an owner that was running. An already compatible

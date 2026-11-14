@@ -173,11 +173,47 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
-        # Headless CI cannot answer Keychain prompts; grant access only in this synthetic keychain.
-        subprocess.run(['/usr/bin/security', 'set-generic-password-partition-list',
-                        '-s', 'rsrs', '-S', 'apple-tool:,apple:,unsigned:', '-k', '', keychain],
-                       env=env, check=True, capture_output=True, timeout=15)
-        report['checks'].append('synthetic native Keychain access approved for the new Runtime')
+        # Match Always Allow only in the empty synthetic keychain, without reading or replacing secrets.
+        approver = root / 'approve-synthetic-keychain'
+        approval_source = r'''
+#include <Security/Security.h>
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+extern OSStatus SecKeychainItemSetAccessWithPassword(SecKeychainItemRef, SecAccessRef,
+                                                    UInt32, const void *);
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    SecKeychainRef keychain = NULL;
+    SecKeychainSearchRef search = NULL;
+    SecAccessRef access = NULL;
+    OSStatus status = SecKeychainOpen(argv[1], &keychain);
+    if (!status) status = SecAccessCreate(CFSTR("issue-285 synthetic credentials"), NULL, &access);
+    if (!status) status = SecKeychainSearchCreateFromAttributes(keychain, kSecGenericPasswordItemClass,
+                                                               NULL, &search);
+    if (status) { fprintf(stderr, "fixture ACL setup: %d\n", (int)status); return 1; }
+    unsigned count = 0;
+    SecKeychainItemRef item = NULL;
+    while ((status = SecKeychainSearchCopyNext(search, &item)) == errSecSuccess) {
+        status = SecKeychainItemSetAccessWithPassword(item, access, 0, "");
+        CFRelease(item);
+        if (status) break;
+        count++;
+    }
+    CFRelease(search);
+    CFRelease(access);
+    CFRelease(keychain);
+    if (status != errSecItemNotFound || count == 0) {
+        fprintf(stderr, "fixture ACL approval: %d, count: %u\n", (int)status, count);
+        return 1;
+    }
+    return 0;
+}
+'''
+        subprocess.run(['/usr/bin/clang', '-x', 'c', '-', '-framework', 'Security',
+                        '-framework', 'CoreFoundation', '-o', str(approver)],
+                       input=approval_source.encode(), env=env, check=True, capture_output=True, timeout=60)
+        subprocess.run([str(approver), keychain], env=env, check=True, capture_output=True, timeout=15)
+        report['checks'].append('synthetic native Keychain application access approved for the new Runtime')
         installed = run(candidate, 'runtime', 'install')['summary']
         if installed.get('restarted') is not True or digest(stable) != digest(candidate):
             raise AssertionError('upgrade did not refresh the CLI and restart the old owner')
