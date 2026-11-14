@@ -208,7 +208,11 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
             let restored = crate::rpc::probe_runtime()?.context("identity owner did not resume")?;
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest,
                 Some(&account(&receipt.identity, &profile)))?;
-            anyhow::ensure!(!original.store_ready || restored.store_ready, "identity owner store readiness was not restored");
+            if matches!(original.operation, HostIdentityWriteOperation::Logout { full: true }) {
+                anyhow::ensure!(!restored.store_ready, "full logout reopened the store without a session");
+            } else {
+                anyhow::ensure!(!original.store_ready || restored.store_ready, "identity owner store readiness was not restored");
+            }
         }
         unchanged(&original, &receipt.identity, &binary, &manifest)?;
         maintenance.finish()?;
