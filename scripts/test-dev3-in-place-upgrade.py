@@ -128,6 +128,31 @@ def main():
         with opener.open(request, timeout=5) as response:
             return json.load(response)
 
+    def preauthorize_keychain(original_session):
+        # Retain the original Keychain and clone only this fixture's freshly issued secret.
+        secret = generated.get('summary', {}).get('super_password')
+        alias = json.loads(original_session).get('keyring_account')
+        if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
+            raise AssertionError('official keygen did not return the synthetic credential and alias')
+        authorized_keychain = str(keychains / 'authorized-upgrade.keychain-db')
+        for operation in [
+            ['create-keychain', '-p', keychain_password, authorized_keychain],
+            ['unlock-keychain', '-p', keychain_password, authorized_keychain],
+            ['set-keychain-settings', '-t', '3600', '-u', authorized_keychain],
+            ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
+             '-w', secret, authorized_keychain],
+            ['list-keychains', '-d', 'user', '-s', authorized_keychain, keychain],
+            ['default-keychain', '-d', 'user', '-s', authorized_keychain],
+        ]:
+            try:
+                approval = subprocess.run(['/usr/bin/security', *operation], env=env,
+                                          capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError('synthetic Keychain preparation timed out') from None
+            if approval.returncode:
+                raise RuntimeError('synthetic Keychain preparation failed: ' + operation[0])
+        return authorized_keychain
+
     try:
         # Security.framework and the security tool must use the same disposable runner account HOME.
         keychains = root / 'Library' / 'Keychains'
@@ -178,6 +203,16 @@ def main():
             report['checks'].append('unauthorized Runtime exited with a Keychain diagnostic and retained recovery state')
             report['probe_elapsed_seconds'] = elapsed
             report['probe_runtime_sha256'] = digest(probe)
+            preauthorize_keychain(retained['session.json'])
+            authorized = subprocess.run([str(probe), '--keychain-authorize-internal'],
+                                        env=env, capture_output=True, timeout=10)
+            if authorized.returncode:
+                raise AssertionError('preauthorized foreground credential verification failed')
+            for name, original in retained.items():
+                if (data / name).read_bytes() != original:
+                    raise AssertionError('foreground authorization changed recovery state')
+            report['checks'].append('preauthorized foreground verification succeeds without changing recovery state')
+            report['interactive_prompt_tested'] = False
             run(old, 'runtime', 'stop')
             report['passed'] = True
             return
@@ -204,30 +239,8 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
-        # Keep the original keychain. A second synthetic keychain models prior authorization.
-        # Reuse only the secret that this fixture's official dev.3 keygen just returned.
-        secret = generated.get('summary', {}).get('super_password')
-        alias = json.loads(original_session).get('keyring_account')
-        if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
-            raise AssertionError('official keygen did not return the synthetic credential and alias')
-        authorized_keychain = str(keychains / 'authorized-upgrade.keychain-db')
-        for operation in [
-            ['create-keychain', '-p', keychain_password, authorized_keychain],
-            ['unlock-keychain', '-p', keychain_password, authorized_keychain],
-            ['set-keychain-settings', '-t', '3600', '-u', authorized_keychain],
-            ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
-             '-w', secret, authorized_keychain],
-            ['list-keychains', '-d', 'user', '-s', authorized_keychain, keychain],
-            ['default-keychain', '-d', 'user', '-s', authorized_keychain],
-        ]:
-            try:
-                approval = subprocess.run(['/usr/bin/security', *operation], env=env,
-                                          capture_output=True, timeout=15)
-            except subprocess.TimeoutExpired:
-                raise RuntimeError('synthetic Keychain preparation timed out') from None
-            if approval.returncode:
-                raise RuntimeError('synthetic Keychain preparation failed: ' + operation[0])
-        del secret, generated
+        authorized_keychain = preauthorize_keychain(original_session)
+        del generated
         if run(old, 'show', memory_id)['details']['entry']['content'] != original_memory['content']:
             raise AssertionError('original credential did not retain access to the original memory')
         report['checks'].append('same synthetic credential works in a preauthorized native Keychain; original Keychain retained')
