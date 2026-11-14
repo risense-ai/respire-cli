@@ -499,6 +499,7 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
     $clock = [Diagnostics.Stopwatch]::StartNew()
     if ($ObserveStartStopSelector) {
         # Historical selector observations only, never an acceptance condition.
+        $report.offline.runtime_binding_stage = 'stop_control'
         $report.offline.runtime_start_stop_selector = @{state='unobservable';complete_samples=0}
     }
     do {
@@ -1261,9 +1262,13 @@ function Read-OfflineHttp([string]$Path, $Body = $null) {
     } finally { $response.Dispose() }
 }
 function Bind-OfflineRuntime {
+    $report.offline.runtime_binding_stage = 'health'
     $health = Read-OfflineHttp '/api/health'
+    $report.offline.runtime_binding_stage = 'process'
     $process = Get-Process -Id $health.pid -ErrorAction Stop
+    $report.offline.runtime_binding_stage = 'cim'
     $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($health.pid)"
+    $report.offline.runtime_binding_stage = 'identity'
     if ($health.server -ne 'respire' -or $health.v -ne 1 -or
         -not [string]::Equals($health.exe,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
@@ -1276,6 +1281,7 @@ function Bind-OfflineRuntime {
     # Store process identity only, never the session/keygen payload.
     $report.offline.runtime_process = $record | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,SessionId,@{Name="creation_utc_ticks";Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)}}
     $report.offline.runtime_bound = $true
+    $report.offline.runtime_binding_stage = 'bound'
     # Persist only the guarded actor record before credential verification or business action.
     # The parent can still clean this detached actor if this helper reaches its watchdog.
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'),
@@ -1458,6 +1464,7 @@ function Invoke-OfflineGuiAcceptance {
     Wait-OfflineRecoveryDismissed
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
+    $report.offline.runtime_binding_stage = 'start_control'
     $report.offline.action_stage = 'runtime_start'
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60 -ObserveStartStopSelector
