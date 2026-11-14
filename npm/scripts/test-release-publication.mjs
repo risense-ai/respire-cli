@@ -244,7 +244,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
     }
   }
   // The latest-release upgrade no longer uploads a historical draft cache.
-  assert.equal(uploads, 60, 'preserve current publication/source evidence, both Client2 results and the published online receipt');
+  assert.equal(uploads, 61, 'preserve current publication/source evidence, Intel import, both Client2 results and the published online receipt');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
@@ -720,7 +720,7 @@ test('published compatibility checks exact product pin and numeric DEV minCLI wi
 
 function publishedFullFixture(root) {
   const targets=m.targets.map(t=>t.triple), manifestHash='d'.repeat(64), context={sha:'e'.repeat(40),run_id:901,run_attempt:2};
-  const runtimeTargets=Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json',import.meta.url))).targets);
+  const runtimeTargets=targets;
   let id=1;
   const spec={schema:2,...Object.fromEntries(['cli','runtime'].map(kind=>[kind,{repository:`risense-ai/respire-${kind}`,version:kind==='cli'?'1.0.21-dev.5':'1.0.21-dev.4',source_sha:(kind==='cli'?'a':'b').repeat(40),release_id:kind==='cli'?21:22,producer:{run_id:91,run_attempt:2},assets:(kind==='cli'?targets:runtimeTargets).flatMap(target=>publishedAssetNames(kind,target).map(name=>({id:id++,name,size:64,sha256:(kind==='cli'?'a':'b').repeat(64)})))}]))};
   const jobs=[];

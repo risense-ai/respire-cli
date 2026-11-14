@@ -15,7 +15,7 @@ permissions:
 jobs:
   native-source:
     cache-mode: read
-    name: ${{ inputs.target == 'x86_64-apple-darwin' && 'Intel SDK compile only (Runtime inference not evaluated)' || 'Native SDK source validation' }}
+    name: Native SDK source validation
     runs-on: ${{ inputs.runner_os }}
     timeout-minutes: 90
     env:
@@ -79,14 +79,11 @@ jobs:
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
           cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/ci
-          if [[ "$SDK_TARGET" == x86_64-apple-darwin ]]; then echo 'Intel SDK compile-only; standalone Runtime inference not evaluated.' >> "$GITHUB_STEP_SUMMARY"; fi
       - name: Build static musl executable
         if: contains(inputs.target, '-musl')
         shell: bash
         run: bash scripts/build-linux-musl.sh ${{ inputs.target }}
       - name: Actual CPU model installation and native inference
-        # Intel is absent from the current CLI/Runtime release triples; retain SDK audit and compilation only.
-        if: inputs.target != 'x86_64-apple-darwin'
         shell: bash
         env:
           SDK_TARGET: ${{ inputs.target }}

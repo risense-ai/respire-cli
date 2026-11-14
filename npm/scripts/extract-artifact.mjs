@@ -31,7 +31,7 @@ export function parsePublishedAssets(text, expectedHash, targets) {
   const spec = JSON.parse(text);
   requireValue(ownKeys(spec, ['schema', 'cli', 'runtime']) && spec.schema === 2, 'Published asset manifest schema differs');
   const cliTargets = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8')).targets.map(t => t.triple);
-  const runtimeTargets = Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json', import.meta.url), 'utf8')).targets);
+  const runtimeTargets = cliTargets;
   requireValue(Array.isArray(targets) && targets.length > 0 && targets.length === cliTargets.length
     && new Set(targets).size === targets.length && targets.every(target => cliTargets.includes(target)), 'Exact CLI manifest targets required');
   for (const kind of ['cli', 'runtime']) {
@@ -648,7 +648,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   return {schema:1,kind:'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
     reports,actual_processes:processes,full_passed:true,g1Passed:false,
-    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Seven current dev platforms only; Intel macOS, Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
+    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms only; Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
 }
 async function completePublished(spec,targets,directory) {
   const context = {sha:process.env.GITHUB_SHA,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT)};

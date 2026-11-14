@@ -130,6 +130,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -471,6 +473,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -697,6 +701,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -822,6 +828,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -1036,6 +1044,15 @@ jobs:
             imported-assets/rsrs-x86_64-unknown-linux-musl
             imported-assets/rsrs-x86_64-unknown-linux-musl-runtime.tar.gz
             imported-assets/cli-build-x86_64-unknown-linux-musl.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          retention-days: 1
+          name: cli-release-x86_64-apple-darwin
+          path: |
+            imported-assets/rsrs-x86_64-apple-darwin
+            imported-assets/rsrs-x86_64-apple-darwin-runtime.tar.gz
+            imported-assets/cli-build-x86_64-apple-darwin.json
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:

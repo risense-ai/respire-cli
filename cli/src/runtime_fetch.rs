@@ -86,14 +86,13 @@ pub fn release_binary_name(triple: &str) -> String {
 ///
 /// Note: client2 maps darwin-amd64 releases to the obfuscated asset triple
 /// `x86_64-apple-darwin` (a legacy name scramble kept for asset-name
-/// compatibility with older clients). That triple is deliberately not part of
-/// this list constant; the host selection lives in [`release_triple`], which
-/// returns it for `x86_64` Apple platforms so both managers consume the same
-/// asset name.
+/// compatibility with older clients). Host selection and explicit overrides
+/// use that same asset name for `x86_64` Apple platforms.
 pub const TRIPLES: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
     "aarch64-apple-darwin",
+    DARWIN_AMD64_RELEASE_TRIPLE,
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
