@@ -42,6 +42,9 @@ compatibility guarantee; trial inference must succeed. No node-placement or
 performance guarantee is implied. The commands are
 `rsrs model install --model VARIANT --for-engine cpu|gpu|npu` for prefetch and
 `rsrs model load cpu|gpu|npu --model VARIANT` for validated loading.
+`rsrs model install-granite` installs quantized granite-311m by default;
+`--model 97m` installs non-quantized granite-97m. Files land in separate
+profile directories and are not activated.
 `rsrs model engine cpu|gpu|npu --model VARIANT` remains a settings-only CLI command;
 TUI engine changes use the validated load path.
 
