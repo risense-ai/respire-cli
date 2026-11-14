@@ -185,6 +185,12 @@ def main():
         run(old, 'runtime', 'install')
         run(old, 'status')
         generated = run(old, 'keygen')
+        # Select the fixture credential store before starting the baseline owner;
+        # changing Keychain defaults under a live Security.framework client is not an upgrade.
+        run(old, 'runtime', 'stop')
+        authorized_keychain = preauthorize_keychain((data / 'session.json').read_bytes())
+        report['interactive_prompt_tested'] = False
+        report['preauthorized_before_baseline_start'] = True
         run(old, 'runtime', 'start')
         run(old, 'model', 'install')
         content = 'Issue 285 retained offline memory'
@@ -209,7 +215,6 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
-        authorized_keychain = preauthorize_keychain(original_session)
         del generated
         if run(old, 'show', memory_id)['details']['entry']['content'] != original_memory['content']:
             raise AssertionError('original credential did not retain access to the original memory')
