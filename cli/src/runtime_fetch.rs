@@ -6,8 +6,8 @@
 //!
 //! * Discovery order (see [`resolve_runtime_bin`]): explicit `RSRS_RUNTIME_BIN`
 //!   override, the managed directory (verified against `runtime.json`), the
-//!   portable layout next to the CLI binary, the legacy combined-binary stable
-//!   location, and finally an automatic pinned download.
+//!   legacy combined-binary stable location, and finally an automatic pinned
+//!   download. Portable images require the explicit override.
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
 //!   `RSRS_MIRROR` override). Archives are sha256-verified against the released
@@ -602,8 +602,8 @@ pub enum ResolvedRuntime {
 ///
 /// Order: `RSRS_RUNTIME_BIN` (explicit override, no integrity check), the
 /// managed directory (version within the accept range plus binary sha256
-/// verified), the portable layout next to this CLI binary, the legacy combined
-/// stable location, and finally [`download_and_install`].
+/// verified), the legacy combined stable location, and finally
+/// [`download_and_install`]. Portable images require the explicit override.
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
     if let Some(selected) = crate::embedding::selection() {
         return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
@@ -622,14 +622,6 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         let binary = validate_installed(&manifest)?;
         if version_in_accept(&manifest.version) {
             return Ok(ResolvedRuntime::Ready(binary));
-        }
-    }
-    if let Ok(self_exe) = std::env::current_exe() {
-        if let Some(portable) = self_exe.parent() {
-            let candidate = portable.join(RUNTIME_BINARY);
-            if candidate.is_file() {
-                return Ok(ResolvedRuntime::Ready(candidate));
-            }
         }
     }
     let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
