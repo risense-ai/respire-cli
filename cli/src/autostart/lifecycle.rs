@@ -1601,6 +1601,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             installation_root.as_deref(),
             *supervised_child,
         ),
+        RuntimeCommand::AuthorizeKeychain => {
+            authorize_keychain()?;
+            emit("runtime.authorize-keychain", json!({"authorized": true}))
+        }
         RuntimeCommand::Stop => {
             let stopped = crate::rpc::probe_runtime()?;
             crate::rpc::stop_if_running()?;
@@ -1690,6 +1694,13 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
         .transpose()?.is_some_and(|acceptable| !acceptable);
     let mut restarted = false;
     if refresh_cli || restart_runtime {
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                authorize_keychain().context("Runtime installed; existing owner and data retained because Keychain authorization failed")?;
+            }
+        }
         let mut maintenance = begin_maintenance_locked()?;
         if let Some(health) = previous.as_ref() {
             maintenance.drain_runtime(health)?;
@@ -1706,6 +1717,36 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
         .context("Runtime selection missing after installation")?.version;
     emit("runtime.install", json!({"source":source,"version":selected_version,
         "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
+}
+
+fn authorize_keychain() -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    bail!("Keychain authorization is only available on macOS");
+    #[cfg(target_os = "macos")]
+    {
+        let binary = crate::runtime_fetch::managed_runtime_path()?
+            .context("install the compatible Runtime before authorizing Keychain access")?;
+        let mut child = std::process::Command::new(binary)
+            .arg("--keychain-authorize-internal")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn().context("could not launch Runtime Keychain authorization")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                anyhow::ensure!(status.success(),
+                    "Runtime Keychain authorization failed; unlock the login Keychain and authorize the installed Runtime, then retry; retain recovery state");
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().context("could not stop the expired Keychain authorization")?;
+                child.wait().context("could not reap Keychain authorization")?;
+                bail!("Runtime Keychain authorization timed out; retain recovery state and retry rsrs runtime authorize-keychain in a terminal");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
 }
 
 fn runtime_inventory() -> Result<Value> {

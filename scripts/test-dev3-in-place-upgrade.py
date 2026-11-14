@@ -29,6 +29,8 @@ def main():
     parser.add_argument('--candidate', type=Path, required=True)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--m3-dir', type=Path)
+    parser.add_argument('--probe-runtime', type=Path,
+                        help='only verify a candidate Runtime fails promptly on an unauthorized native credential')
     args = parser.parse_args()
     if (platform.system(), platform.machine()) != ('Darwin', 'arm64'):
         raise RuntimeError('requires native macOS arm64; do not substitute another platform')
@@ -152,6 +154,33 @@ def main():
         run(old, 'status')
         run(old, 'keygen')
         run(old, 'runtime', 'start')
+        if args.probe_runtime:
+            probe = args.probe_runtime.resolve(strict=True)
+            retained = {name: (data / name).read_bytes()
+                        for name in ('session.json', '.login-recovery.json')}
+            with socket.socket() as reservation:
+                reservation.bind(('127.0.0.1', 0))
+                probe_port = reservation.getsockname()[1]
+            probe_env = dict(env, RSRS_RPC_PORT=str(probe_port))
+            started = time.monotonic()
+            result = subprocess.run(
+                [str(probe), '--runtime-internal', '--runtime-background-internal',
+                 '--port', str(probe_port)], env=probe_env, capture_output=True, timeout=10)
+            elapsed = time.monotonic() - started
+            frame = json.loads(result.stdout)
+            if result.returncode == 0 or frame.get('startup_complete') is not False:
+                raise AssertionError('unauthorized Runtime did not report a startup failure')
+            if 'Keychain' not in frame.get('error', ''):
+                raise AssertionError('startup failure did not identify the Keychain authorization requirement')
+            for name, original in retained.items():
+                if (data / name).read_bytes() != original:
+                    raise AssertionError('failed startup changed original recovery state')
+            report['checks'].append('unauthorized Runtime exited with a Keychain diagnostic and retained recovery state')
+            report['probe_elapsed_seconds'] = elapsed
+            report['probe_runtime_sha256'] = digest(probe)
+            run(old, 'runtime', 'stop')
+            report['passed'] = True
+            return
         run(old, 'model', 'install')
         content = 'Issue 285 retained offline memory'
         stored = run(old, 'remember', content, '--title', 'issue-285-before-upgrade',
