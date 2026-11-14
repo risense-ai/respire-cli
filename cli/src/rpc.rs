@@ -946,8 +946,10 @@ fn wait_daemon_ready(
                     ),
                 "runtime owner changed during startup"
             );
-            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
-            return Ok(());
+            if health.store_ready || off_mode || health.credential_state == "required" {
+                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                return Ok(());
+            }
         }
     }
     bail!("host runtime did not become ready (off_mode={off_mode}, last_store_ready={last_store_ready:?})")
