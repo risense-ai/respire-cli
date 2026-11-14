@@ -73,7 +73,37 @@ def main():
             report['failure'] = {'exit': result.returncode,
                                  'elapsed_seconds': time.monotonic() - started,
                                  'errors': failure.get('errors', []) if failure.get('status') == 'fail' else []}
-            print(json.dumps(report['failure']))
+            print(json.dumps(report['failure']), flush=True)
+            if arguments[:2] in (('runtime', 'install'), ('runtime', 'start')):
+                report['startup_samples'] = []
+                processes = subprocess.check_output(
+                    ['/bin/ps', '-axo', 'pid=,command='], text=True, timeout=10)
+                for process in processes.splitlines():
+                    fields = process.strip().split(None, 1)
+                    if len(fields) != 2:
+                        continue
+                    pid, command = fields
+                    executable, internal, _ = command.partition(' --runtime-internal')
+                    image = Path(executable)
+                    if not internal or image.name != 'rsrs-runtime' or not image.is_relative_to(data):
+                        continue
+                    sample_path = root / ('runtime-sample-' + pid + '.txt')
+                    try:
+                        subprocess.run(['/usr/bin/sample', pid, '3', '-file', str(sample_path)],
+                                       capture_output=True, check=True, timeout=15)
+                        sample = sample_path.read_text(encoding='utf-8', errors='replace')
+                        graph = sample.partition('Call graph:')[2].partition('Total number in stack')[0]
+                        report['startup_samples'].append({
+                            'pid': int(pid), 'stack': graph[:60000].replace(str(root), '<fixture>')})
+                    except (OSError, subprocess.SubprocessError) as error:
+                        report['startup_samples'].append({'pid': int(pid), 'error': type(error).__name__})
+                try:
+                    status = subprocess.run([str(candidate), '--json', 'status'], env=env,
+                                            capture_output=True, timeout=20)
+                    value = json.loads(status.stdout)
+                    report['post_failure_status'] = {'exit': status.returncode, 'errors': value.get('errors', [])}
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    report['post_failure_status'] = {'error': type(error).__name__}
             raise RuntimeError('command failed: ' + ' '.join(arguments[:2])
                                + '; inspect the retained fixture logs')
         value = json.loads(result.stdout)

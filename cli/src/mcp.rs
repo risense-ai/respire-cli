@@ -226,7 +226,14 @@ fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
     // Publish complete bytes atomically; truncating a live Unix image can fail or corrupt it.
     let temporary = parent.join(format!(".rsrs-{}", uuid::Uuid::new_v4()));
     let result = (|| -> anyhow::Result<()> {
-        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o700);
+        }
+        let mut output = options.open(&temporary)?;
         std::io::copy(&mut std::fs::File::open(src)?, &mut output)?;
         #[cfg(unix)]
         {

@@ -27,6 +27,12 @@ are retained. A restart failure is an error, not a successful upgrade; retain th
 recovery records and inspect the reported failure before retrying startup.
 Older combined-binary installations still require their explicit migration path.
 
+On macOS, review any Keychain prompt for the verified new Runtime path.
+“Allow Once” grants one access; recovery checks and startup can request access
+again. If startup is uncertain, inspect the reported child and pending prompts
+before retrying. Do not delete recovery records or regenerate keys to clear a
+Keychain prompt.
+
 The native macOS arm64 regression is `scripts/test-dev3-in-place-upgrade.py`.
 It uses the official CLI dev.3 to create a Runtime dev.14 home with a committed
 native keygen receipt, writes a memory, and upgrades the running original home.
