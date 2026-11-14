@@ -244,7 +244,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
     }
   }
   // The latest-release upgrade no longer uploads a historical draft cache.
-  assert.equal(uploads, 61, 'preserve current publication/source evidence, Intel import, both Client2 results and the published online receipt');
+  assert.equal(uploads, 62, 'preserve publication/source evidence, Intel import, Client2 results, published online receipt and dev.3 upgrade report');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [

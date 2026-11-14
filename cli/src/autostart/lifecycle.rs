@@ -1601,6 +1601,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             installation_root.as_deref(),
             *supervised_child,
         ),
+        RuntimeCommand::AuthorizeKeychain => {
+            authorize_keychain()?;
+            emit("runtime.authorize-keychain", json!({"authorized": true}))
+        }
         RuntimeCommand::Stop => {
             let stopped = crate::rpc::probe_runtime()?;
             crate::rpc::stop_if_running()?;
@@ -1635,20 +1639,13 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             file,
             version,
             mirror,
-        } => install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref()),
+        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref()),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
             emit("runtime.clean", json!({"removed": removed}))
         }
-        RuntimeCommand::Update => {
-            let binary = crate::runtime_fetch::download_and_install(None, None)?;
-            let version = crate::runtime_fetch::read_manifest()?.context("Runtime selection missing after update")?.version;
-            emit(
-                "runtime.update",
-                json!({"version": version, "binary": binary}),
-            )
-        }
+        RuntimeCommand::Update => install_runtime("runtime.update", None, None, None),
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
@@ -1665,15 +1662,11 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
 
 /// `runtime install`: pinned download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
-fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
-    match (file, version) {
+fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+    let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
-            let binary = crate::runtime_fetch::install_from_file(archive, explicit_version)?;
-            emit(
-                "runtime.install",
-                json!({"source":"file","version":explicit_version,"binary":binary}),
-            )
+            (crate::runtime_fetch::install_from_file(archive, explicit_version)?, "file")
         }
         (Some(_), None) => bail!("--file requires --version"),
         (None, Some(_)) => bail!("--version is only accepted together with --file"),
@@ -1681,11 +1674,72 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            let binary = crate::runtime_fetch::download_and_install(None, mirror)?;
-            emit(
-                "runtime.install",
-                json!({"source":"download","version":crate::runtime_fetch::pinned()?.required.clone(),"binary":binary}),
-            )
+            (crate::runtime_fetch::download_and_install(None, mirror)?, "download")
+        }
+    };
+    // Keep the old release files; only a verified drain authorizes replacing the CLI entry.
+    let _ownership = crate::runtime_policy::takeover_lock()?;
+    let previous = crate::rpc::probe_runtime()?;
+    let cli_binary = crate::mcp::stable_bin_path();
+    let refresh_cli = crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &cli_binary)
+        .map_err(anyhow::Error::msg)?;
+    let restart_runtime = previous.as_ref().map(crate::rpc::runtime_acceptable)
+        .transpose()?.is_some_and(|acceptable| !acceptable);
+    let mut restarted = false;
+    if refresh_cli || restart_runtime {
+        #[cfg(target_os = "macos")]
+        {
+            use std::io::IsTerminal;
+            if std::io::stdin().is_terminal() {
+                authorize_keychain().context("Runtime installed; existing owner and data retained because Keychain authorization failed")?;
+            }
+        }
+        let mut maintenance = begin_maintenance_locked()?;
+        if let Some(health) = previous.as_ref() {
+            maintenance.drain_runtime(health)?;
+        }
+        crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+        maintenance.finish()?;
+        if previous.is_some() {
+            start_explicit_locked().context(
+                "Runtime and CLI installed; restart failed; old data and recovery records were retained; inspect the startup error before running rsrs runtime start")?;
+            restarted = true;
+        }
+    }
+    let selected_version = crate::runtime_fetch::read_manifest()?
+        .context("Runtime selection missing after installation")?.version;
+    emit(command, json!({"source":source,"version":selected_version,
+        "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
+}
+
+fn authorize_keychain() -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    bail!("Keychain authorization is only available on macOS");
+    #[cfg(target_os = "macos")]
+    {
+        let binary = crate::runtime_fetch::managed_runtime_path()?
+            .context("install the compatible Runtime before authorizing Keychain access")?;
+        eprintln!("macOS Keychain: review {} and choose Always Allow for later background access.", binary.display());
+        let mut child = std::process::Command::new(binary)
+            .arg("--keychain-authorize-internal")
+            .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::inherit())
+            .spawn().context("could not launch Runtime Keychain authorization")?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(120);
+        loop {
+            if let Some(status) = child.try_wait()? {
+                anyhow::ensure!(status.success(),
+                    "Runtime Keychain authorization failed; unlock the login Keychain and authorize the installed Runtime, then retry; retain recovery state");
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                child.kill().context("could not stop the expired Keychain authorization")?;
+                child.wait().context("could not reap Keychain authorization")?;
+                bail!("Runtime Keychain authorization timed out; retain recovery state and retry rsrs runtime authorize-keychain in a terminal");
+            }
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 }
@@ -2652,9 +2706,9 @@ mod tests {
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
-        anyhow::ensure!(install_runtime(Some(&runtime), None, None).is_err());
-        anyhow::ensure!(install_runtime(None, Some(&version), None).is_err());
-        anyhow::ensure!(install_runtime(Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", None, Some(&version), None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
 
         // Recovery must revalidate the registered owner again at the cleanup boundary.
         {

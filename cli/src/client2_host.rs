@@ -45,7 +45,8 @@ fn read_ready(reader: impl Read) -> Result<Value> {
     anyhow::ensure!(bytes.len() <= READY_LIMIT as usize && bytes.last() == Some(&b'\n'),
         "incomplete Runtime readiness frame");
     let ready: Value = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(ready["startup_complete"] == true, "Runtime startup is incomplete");
+    anyhow::ensure!(ready["startup_complete"] == true, "Runtime startup failed: {}",
+        ready["error"].as_str().unwrap_or("startup did not complete"));
     Ok(ready)
 }
 
@@ -57,6 +58,7 @@ fn receive_ready(child: &mut std::process::Child) -> Result<Value> {
     std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
     receiver.recv_timeout(Duration::from_secs(40))
         .with_context(|| format!("startup is uncertain for child {pid}; inspect before retry"))?
+        .with_context(|| format!("compatibility host child {pid} did not publish readiness; retain the original home and inspect this child before retry"))
 }
 
 fn publish_ready(ready: &Value) -> Result<()> {
@@ -92,7 +94,13 @@ pub(crate) fn supervise() -> Result<()> {
     let mut command = Command::new(&executable);
     command.arg("--client2-host-internal").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
-    let mut ready = receive_ready(&mut child)?;
+    let mut ready = match receive_ready(&mut child) {
+        Ok(ready) => ready,
+        Err(error) => {
+            publish_ready(&json!({"startup_complete":false, "error":format!("{error:#}")}))?;
+            return Err(error);
+        }
+    };
     anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
     ready["guardian_pid"] = json!(std::process::id());
     guarded_host_pid(&ready, std::process::id(), &executable,
@@ -357,8 +365,20 @@ pub(crate) fn serve() -> Result<()> {
     let reader = child.stdout.take().context("Runtime readiness pipe is missing")?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
-    let ready = receiver.recv_timeout(Duration::from_secs(30))
-        .with_context(|| format!("Runtime readiness is uncertain for child {pid}; inspect before retry"))??;
+    let readiness = receiver.recv_timeout(Duration::from_secs(30))
+        .with_context(|| format!("Runtime readiness timed out for owned child {pid}"))
+        .and_then(|ready| ready);
+    let ready = match readiness {
+        Ok(ready) => ready,
+        Err(error) => {
+            if child.try_wait()?.is_none() {
+                child.kill().context("could not stop unready Runtime child")?;
+            }
+            child.wait().context("could not reap unready Runtime child")?;
+            publish_ready(&json!({"startup_complete":false, "error":format!("{error:#}")}))?;
+            return Err(error).context("Runtime startup failed; original data and recovery records retained");
+        }
+    };
     let health: crate::net_rpc::Health = serde_json::from_value(ready)?;
     let (installation, profile) = respire_client_host::config::control_roots()?;
     anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
@@ -646,6 +666,10 @@ mod tests {
         let ready = json!({"startup_complete":true, "pid":123, "guardian_pid":456,
             "exe":executable, "installation_root":root, "bin":crate::VERSION, "port":15169});
         assert_eq!(guarded_host_pid(&ready, 456, &executable, &root, 15169)?, 123);
+        let denied = b"{\"startup_complete\":false,\"error\":\"Keychain authorization required\"}\n";
+        let error = read_ready(&denied[..]).err().context("negative readiness was accepted")?;
+        assert!(error.to_string().contains("Keychain authorization required"));
+        assert!(read_ready(&b"{\"startup_complete\":false}\n"[..]).is_err());
         for (key, value) in [("pid", json!(0)), ("pid", json!(456)),
             ("pid", json!(u64::MAX)), ("guardian_pid", json!(789)),
             ("startup_complete", json!(false)), ("bin", json!("foreign")),

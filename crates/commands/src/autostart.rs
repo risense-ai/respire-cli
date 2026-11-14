@@ -20,6 +20,8 @@ pub enum RuntimeCommand {
     },
     /// Start the host through its configured lifecycle owner.
     Start,
+    /// Authorize the installed Runtime's macOS Keychain access without changing data.
+    AuthorizeKeychain,
     /// Stop the owned host without automatic resurrection.
     Stop,
     /// Drain and restart the owned host through its configured lifecycle owner.

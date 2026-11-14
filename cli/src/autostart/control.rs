@@ -236,9 +236,12 @@ fn validate_login_recovery_response(
     anyhow::ensure!(response.v == request.v && response.id == request.id
         && response.bin == "rsrs-runtime" && response.pid == Some(pid)
         && response.operation_id.is_none() && response.idempotency_key.is_none()
-        && response.scope.is_none() && response.web_url.is_none() && response.data_dir.is_none()
-        && response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none(),
-        "login recovery failed or its completion is unknown; retain recovery state");
+        && response.scope.is_none() && response.web_url.is_none() && response.data_dir.is_none(),
+        "login recovery response identity mismatch; retain recovery state");
+    anyhow::ensure!(response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none(),
+        "login recovery failed or its completion is unknown ({}): {}; retain recovery state",
+        response.code.as_deref().unwrap_or("unknown"),
+        response.error.as_deref().unwrap_or("Runtime returned no diagnostic"));
     let envelope = response.envelope.context("login recovery result is missing")?;
     anyhow::ensure!(envelope.command == "login-recovery" && matches!(envelope.status, Status::Ok)
         && envelope.errors.is_empty() && envelope.actions.is_empty() && envelope.related.is_empty()
@@ -264,7 +267,7 @@ fn validate_login_recovery_response(
 
 pub(crate) fn installed_auth_runtime() -> Result<(std::path::PathBuf, String)> {
     let binary = crate::runtime_fetch::managed_runtime_path()?
-        .context("auth control requires an installed managed Runtime")?.canonicalize()?;
+        .context("auth control requires a compatible managed Runtime; run rsrs runtime install on the host, then retry; retain the existing data and recovery journal")?.canonicalize()?;
     let manifest = crate::runtime_fetch::read_manifest()?
         .context("auth control Runtime manifest is missing")?;
     anyhow::ensure!(crate::runtime_fetch::version_in_accept(&manifest.version)
@@ -549,6 +552,35 @@ pub(super) fn validate_auth_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_recovery_failure_preserves_the_bound_runtime_diagnostic() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let profile = directory.path();
+        let request = login_recovery_request(ControlBinding {
+            installation_root: profile.into(), profile: profile.into(),
+            launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None,
+        }, HostAuthIdentity::Absent, false)?;
+        let response: RpcResponse<ResultEnvelope> = serde_json::from_value(serde_json::json!({
+            "v":request.v,"id":request.id,"bin":"rsrs-runtime","pid":42,
+            "ok":false,"exit":2,"code":"unauthorized",
+            "error":"login recovery status authorization failed"
+        }))?;
+        let error = match validate_login_recovery_response(response.clone(), &request, profile, 42) {
+            Err(error) => error.to_string(),
+            Ok(_) => anyhow::bail!("failed recovery was accepted"),
+        };
+        assert!(error.contains("unauthorized") && error.contains("authorization failed")
+            && error.contains("retain recovery state"));
+        let mut foreign = response;
+        foreign.pid = Some(43);
+        let error = match validate_login_recovery_response(foreign, &request, profile, 42) {
+            Err(error) => error.to_string(),
+            Ok(_) => anyhow::bail!("foreign recovery response was accepted"),
+        };
+        assert!(error.contains("identity mismatch") && !error.contains("authorization failed"));
+        Ok(())
+    }
 
     #[test]
     fn account_process_start_requires_exact_native_birth() -> Result<()> {

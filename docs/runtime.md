@@ -15,6 +15,51 @@ remain available for recovery; account data and Runtime state under `~/.rsrs/run
 are not relocated. Existing running owners are drained through normal lifecycle
 operations before a replacement starts.
 
+For an in-place upgrade from a released 2.x frontend-only CLI, update the CLI
+through its original installation channel, then run `rsrs runtime install` on
+the host. Confirm `rsrs --version` reports the upgraded CLI first. If the old
+stable entry shadows the global package, invoke the new package explicitly;
+for the pnpm dev channel, use `pnpm dlx rsrs-cli@dev runtime install`.
+This installs a verified compatible Runtime, drains an existing owner
+when the Runtime or stable CLI needs replacement, atomically refreshes
+`~/.rsrs/bin/rsrs`, and restarts an owner that was running. An already compatible
+installation is reused without a restart. A stopped installation stays stopped;
+use `rsrs runtime start` when ready. This command does not register a service.
+Original release directories, account data, sessions and login recovery records
+are retained. A restart failure is an error, not a successful upgrade; retain the
+recovery records and inspect the reported failure before retrying startup.
+Older combined-binary installations still require their explicit migration path.
+
+On macOS, review any Keychain prompt for the verified new Runtime path.
+“Allow Once” grants one access; recovery checks and startup can request access
+again. “Always Allow” permits later reads by that app. Background serving and
+control processes fail when access requires interaction. In a terminal, run
+`rsrs runtime authorize-keychain`, review the installed Runtime path and grant
+persistent access, then retry the failed command. The authorization command
+stops after two minutes if no decision is made. Interactive installation asks
+for authorization before stopping the old owner. This reads the existing
+credential; it does not reset keys or remove recovery records. A denied or locked
+Keychain remains an error, and startup reports its cause instead of waiting for
+a background prompt. Never delete recovery records or regenerate keys to clear
+an authorization failure.
+
+The native macOS arm64 regression is `scripts/test-dev3-in-place-upgrade.py`.
+It uses the official CLI dev.3 to create a Runtime dev.14 home with a committed
+native keygen receipt, writes a memory, and upgrades the running original home.
+It checks the stable CLI, retained session/journal/old release, existing memory,
+new writes, recall and repeated installation. It requires an empty fixture
+directory and a disposable GitHub Actions runner, because it changes that
+account's native Keychain defaults. Headless CI retains the original Keychain
+and reuses the exact secret returned by that fixture's dev.3 keygen in a second,
+preauthorized synthetic Keychain. It verifies that the old memory remains readable
+before upgrading. This models existing authorization; it does not test changing
+the original item's ACL or interactive prompt approval. The `--probe-runtime`
+mode separately checks unauthorized startup with the original restricted
+Keychain and unchanged recovery files. Never run it under a user's regular
+account or publish the complete fixture. The matching workflow retains only a report
+without credential material. Passing this fixture does not establish that an
+unavailable user-specific failing home has been repaired.
+
 Embedding profiles use `model.catalog`, `model.configure`, `model.switch`,
 `model.resume` and `model.progress` on the existing runtime RPC transport.
 See [embedding profiles](model-profiles.md) for CLI/JSON and failure semantics.
