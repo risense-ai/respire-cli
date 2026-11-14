@@ -31,7 +31,7 @@ export function parsePublishedAssets(text, expectedHash, targets) {
   const spec = JSON.parse(text);
   requireValue(ownKeys(spec, ['schema', 'cli', 'runtime']) && spec.schema === 2, 'Published asset manifest schema differs');
   const cliTargets = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8')).targets.map(t => t.triple);
-  const runtimeTargets = Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json', import.meta.url), 'utf8')).targets);
+  const runtimeTargets = cliTargets;
   requireValue(Array.isArray(targets) && targets.length > 0 && targets.length === cliTargets.length
     && new Set(targets).size === targets.length && targets.every(target => cliTargets.includes(target)), 'Exact CLI manifest targets required');
   for (const kind of ['cli', 'runtime']) {
