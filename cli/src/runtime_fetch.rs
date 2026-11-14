@@ -6,8 +6,8 @@
 //!
 //! * Discovery order (see [`resolve_runtime_bin`]): explicit `RSRS_RUNTIME_BIN`
 //!   override, the managed directory (verified against `runtime.json`), the
-//!   portable layout next to the CLI binary, the legacy combined-binary stable
-//!   location, and finally an automatic pinned download.
+//!   legacy combined-binary stable location, and finally an automatic pinned
+//!   download. Portable images require the explicit override.
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
 //!   `RSRS_MIRROR` override). Archives are sha256-verified against the released
@@ -602,8 +602,8 @@ pub enum ResolvedRuntime {
 ///
 /// Order: `RSRS_RUNTIME_BIN` (explicit override, no integrity check), the
 /// managed directory (version within the accept range plus binary sha256
-/// verified), the portable layout next to this CLI binary, the legacy combined
-/// stable location, and finally [`download_and_install`].
+/// verified), the legacy combined stable location, and finally
+/// [`download_and_install`]. Portable images require the explicit override.
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
     if let Some(selected) = crate::embedding::selection() {
         return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
@@ -622,14 +622,6 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         let binary = validate_installed(&manifest)?;
         if version_in_accept(&manifest.version) {
             return Ok(ResolvedRuntime::Ready(binary));
-        }
-    }
-    if let Ok(self_exe) = std::env::current_exe() {
-        if let Some(portable) = self_exe.parent() {
-            let candidate = portable.join(RUNTIME_BINARY);
-            if candidate.is_file() {
-                return Ok(ResolvedRuntime::Ready(candidate));
-            }
         }
     }
     let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
@@ -1816,7 +1808,7 @@ fn verify_install_host() -> Result<()> {
         .map_err(anyhow::Error::msg)
         .context(LegacyRuntimeMigrationRequired)?;
     if different {
-        // Official v2.0.0-dev.3 cli-build metadata; these binaries contain no business Runtime.
+        // Official dev.3 and dev.6 cli-build metadata; these binaries contain no business Runtime.
         // shortcut: extend this reviewed predecessor set when publishing a later CLI upgrade.
         let approved = [
             "e893ed0df7dc9a18d690c81af2537df85a907c7c033b61c060b7b1ae1a0ef1c1",
@@ -1825,6 +1817,12 @@ fn verify_install_host() -> Result<()> {
             "c484f2259f29db7eb4499656d8750ea18ca230ade33f7cbc5a9b812cf09b740d",
             "903e0595a76d930e82287d27b6c370bebcbbb9d3a4da2905c9fab1244f6c0261",
             "f506f17fc621edd30fff6bc9be91c9089a9e6f63cfb5fb4d7e23b249226e4625",
+            "67549aa46996988aa91a529e9a42514ce2439a6c86c402dbbb644869b530d710",
+            "789ce0a3b5b127ea0bb6aa17f158f8ded3dc0b3c4f1fac91b2011ccd2650bc93",
+            "74bd5a041e81b3963db4eb7a6a45d0fbf41137b5077df3e6115da9226e9de291",
+            "92f3fdc52031ca7050305c82be0f311a5927a98796a9661159725ac143c203bd",
+            "5a597fd2344846b521b82921fe6e1832bd73d8108c164dafb0c5113042c67a42",
+            "5cba9ee34c744f646386d36cf38de5d4959b2ec03edba06f5fc88fdff597b660",
         ];
         let previous = sha256_file(&legacy).context(LegacyRuntimeMigrationRequired)?;
         anyhow::ensure!(approved.contains(&previous.as_str()), LegacyRuntimeMigrationRequired);
