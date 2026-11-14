@@ -186,7 +186,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(alpine,/case "\$\(\/runtime\/rsrs-runtime --version\)"/);
 });
 test('new full gate requires every native, cloud, migration fixture, join and API success',()=>{
-  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,manifest.targets.length);assert.equal(contract.cloud.length,manifest.targets.length-1);assert.equal(contract.migration.length,3);assert.equal(contract.migration_gate.length,3);
+  validateRegressionContract(contract,manifest);assert.equal(contract.native.length,manifest.targets.length);assert.equal(contract.cloud.length,manifest.targets.length-1);assert.equal(contract.migration.length,4);assert.equal(contract.migration_gate.length,4);
   assert.equal(regressionStatus(inventory(),contract),'success');requireRegressions(inventory(),contract.native,contract);
   for(let index=0;index<inventory().length-1;index++){
     for(const conclusion of ['failure','cancelled','skipped',null]){
@@ -270,9 +270,9 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
 
 test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
   assert.equal(new Set(manifest.targets.map(t=>t.triple)).size,manifest.targets.length);
-  assert.equal(manifest.targets.length,7,'dev.4 requires seven CLI targets; Runtime/SDK inventories remain separate');
+  assert.equal(manifest.targets.length,8,'Intel restoration requires eight CLI targets; Runtime/SDK inventories remain separate');
   assert(manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-musl'&&t.pkg==='@rsrsai/linux-arm64'));
-  assert(!manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'||t.pkg==='@rsrsai/macos-x64'));
+  assert(manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'&&t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));
   assert.equal(critical.native.length,manifest.targets.length);assert.equal(critical.cloud.length,0);assert.equal(critical.migration.length,0);assert.equal(critical.migration_gate.length,0);assert.equal(critical.api,true);

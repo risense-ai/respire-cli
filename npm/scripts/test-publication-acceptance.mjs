@@ -105,7 +105,7 @@ test('ARM64 installation proof requires every published native libc route, exact
   assert.throws(()=>validateArmVerified(gnuOnly,f.scoped,f.alias));
 });
 
-test('GNU installation proof alone cannot authorize cleanup of a seven-platform release',async()=>{
+test('GNU installation proof alone cannot authorize cleanup of an eight-platform release',async()=>{
   const f=cleanupFixture(),at=Date.parse('2026-10-27T02:00:00Z');f.artifacts.delete(16);
   assert.equal((await planCleanup(f.io,100,m,at)).skip,'no-native-arm64-public-install-proof');assert.deepEqual(f.deleted,[]);
 });
@@ -129,7 +129,7 @@ function cleanupFixture(){
   f.artifacts=new Map([[10,a(10,'cli-release-'+m.targets[0].triple,f.run)],[11,a(11,'scoped-accepted-100-1',f.run)],[12,a(12,'alias-accepted-100-1-200-1',f.child)],[13,a(13,'publication-verified-100-1-400-1',verifier)]]);
   f.artifacts.set(16,a(16,'publication-arm64-verified-100-1-400-1',verifier));
   const job=name=>({name,status:'completed',conclusion:'success',completed_at:f.run.updated_at});
-  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),...m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin').flatMap(t=>[job(`Native migration (${t.triple})`),job(`Migration gate (${t.triple})`)]),job('api-smoke'),job('publish')];
+  f.parentJobs=[...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (${t.triple})`)),...m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin').flatMap(t=>[job(`Native migration (${t.triple})`),job(`Migration gate (${t.triple})`)]),job('api-smoke'),job('publish')];
   f.io={repository:source.repository,run:async()=>copy(f.run),artifacts:async id=>copy([...f.artifacts.values()].filter(a=>a.workflow_run.id===id)),
     receipt:async a=>copy(a.id===11?f.scoped:a.id===12?f.alias:a.id===16?f.armVerified:f.verified),jobs:async id=>copy(id===100?f.parentJobs:id===200?f.jobs:[job('verify-publication'),job('verify-publication-arm64')]),
     release:async()=>({id:300,draft:false,published_at:f.run.updated_at,tag_name:'v'+version,target_commitish:sha,prerelease:true,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))}),tag:async()=>({type:'commit',sha}),
@@ -142,7 +142,7 @@ function preparedCleanupFixture(){
   const original={repository:source.repository,workflow:source.workflow,run_id:'50',run_attempt:1,sha,version};
   const manifest={...m,cliVersion:version},identity={hashes:{'Cargo.lock':hash},sdk:[]};
   const job=name=>({name,status:'completed',conclusion:'success',started_at:previous('20'),completed_at:previous('30')});
-  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin');
+  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin');
   const originalJobs=[...m.targets.map(t=>job(`validate / Release (${t.triple})`)),job('validate / npm-dry-run'),
     ...m.targets.map(t=>job(`native-regression / Native (${t.triple})`)),...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>job(`cloud-sweep (runner, ${t.triple})`)),
     ...migration.map(t=>job(`Native migration (${t.triple})`)),...migration.map(t=>job(`Migration gate (${t.triple})`)),job('api-smoke')];
@@ -267,7 +267,7 @@ test('real coordinator processes finish acceptance while child workflow runs, an
   const f=fixture();f.run.status='in_progress';f.run.conclusion=null;f.child.status='in_progress';f.child.conclusion=null;
   const release={id:300,draft:true,prerelease:true,tag_name:'v'+version,target_commitish:sha,assets:f.scoped.assets.map(a=>({...a,state:'uploaded',digest:'sha256:'+a.sha256}))};
   const successful=name=>({name,status:'completed',conclusion:'success',completed_at:'2026-10-27T00:04:00Z'});
-  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin');
+  const migration=m.targets.filter(t=>t.triple.includes('windows')||t.triple==='aarch64-apple-darwin'||t.triple==='x86_64-apple-darwin');
   f.full_jobs=[...m.targets.map(t=>successful(`native-regression / Native (${t.triple})`)),
     ...m.targets.filter(t=>t.triple!=='x86_64-unknown-linux-gnu').map(t=>successful(`cloud-sweep (runner, ${t.triple})`)),
     ...migration.map(t=>successful(`Native migration (${t.triple})`)),...migration.map(t=>successful(`Migration gate (${t.triple})`)),successful('api-smoke')];
