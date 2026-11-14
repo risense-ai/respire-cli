@@ -734,9 +734,14 @@ mod tests {
 
     #[test]
     fn legacy_rpc_identity_is_supplied_and_projected_by_the_host() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir()?;
+        let previous = std::env::var_os("RSRS_DATA_DIR");
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        let result = (|| -> Result<()> {
         let health: crate::net_rpc::Health = serde_json::from_value(json!({
             "server":"respire","bin":"fixture","v":1,"pid":42,"account_id":"account",
-            "instance_id":"instance","generation":7
+            "instance_id":"instance","generation":7,"installation_root":root.path()
         }))?;
         let raw = serde_json::to_vec(&json!({"v":1,"id":"original","method":"cli.exec","args":["--json","status"]}))?;
         let (bound, original) = prepare_legacy_rpc(&raw, &health)?;
@@ -744,7 +749,7 @@ mod tests {
         assert_eq!(bound.scope, Some(crate::net_rpc::request_scope(&health)?));
         assert_eq!(bound.operation_id.as_deref(), Some("original"));
         let original = original.context("missing legacy projection")?;
-        let response = json!({"v":1,"id":"original","ok":true,"exit":0,
+        let response = json!({"v":1,"id":"original","ok":true,"exit":0,"bin":"fixture",
             "scope":bound.scope,"operation_id":"original","idempotency_key":"original"});
         let projected: Value = serde_json::from_slice(&project_legacy_rpc(&serde_json::to_vec(&response)?, &original, &health)?)?;
         for field in ["scope","operation_id","idempotency_key"] { assert!(projected.get(field).is_none()); }
@@ -753,6 +758,12 @@ mod tests {
         let mut mixed = original; mixed.operation_id = Some("foreign".into());
         assert!(prepare_legacy_rpc(&serde_json::to_vec(&mixed)?, &health).is_err());
         Ok(())
+        })();
+        match previous {
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
+        }
+        result
     }
 
     #[test]
