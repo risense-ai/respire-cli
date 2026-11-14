@@ -32,6 +32,8 @@ def main():
     args = parser.parse_args()
     if (platform.system(), platform.machine()) != ('Darwin', 'arm64'):
         raise RuntimeError('requires native macOS arm64; do not substitute another platform')
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        raise RuntimeError('requires a disposable GitHub Actions runner; native Keychain defaults are changed')
     old = args.old_cli.resolve(strict=True)
     candidate = args.candidate.resolve(strict=True)
     metadata = json.loads(args.old_metadata.read_text(encoding='utf-8'))
@@ -51,7 +53,7 @@ def main():
     env = {key: value for key, value in os.environ.items()
            if not key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_', 'XDG_'))
            and key not in ('GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN')}
-    env.update(HOME=str(root), RSRS_DATA_DIR=str(data), RSRS_BIN_DIR=str(stable.parent),
+    env.update(RSRS_DATA_DIR=str(data), RSRS_BIN_DIR=str(stable.parent),
                RSRS_RPC_PORT=str(port), RSRS_ENGINE='cpu', RSRS_LOG='info')
     if args.m3_dir:
         env['RSRS_M3_DIR'] = str(args.m3_dir.resolve(strict=True))
@@ -125,8 +127,7 @@ def main():
             return json.load(response)
 
     try:
-        # Match the existing release sweep: native credentials in this disposable HOME.
-        (root / 'Library' / 'Preferences').mkdir(parents=True)
+        # Security.framework and the security tool must use the same disposable runner account HOME.
         keychains = root / 'Library' / 'Keychains'
         keychains.mkdir(parents=True)
         keychain = str(keychains / 'upgrade.keychain-db')
@@ -229,7 +230,8 @@ int main(int argc, char **argv) {
         subprocess.run(['/usr/bin/clang', '-x', 'c', '-', '-framework', 'Security',
                         '-framework', 'CoreFoundation', '-o', str(approver)],
                        input=approval_source.encode(), env=env, check=True, capture_output=True, timeout=60)
-        subprocess.run([str(approver), keychain], env=env, check=True, capture_output=True, timeout=15)
+        subprocess.run([str(approver), keychain], env=env, check=True,
+                       stdout=subprocess.DEVNULL, timeout=15)
         report['checks'].append('synthetic native Keychain application access approved for the new Runtime')
         installed = run(candidate, 'runtime', 'install')['summary']
         if installed.get('restarted') is not True or digest(stable) != digest(candidate):

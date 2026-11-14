@@ -41,9 +41,10 @@ It uses the official CLI dev.3 to create a Runtime dev.14 home with a committed
 native keygen receipt, writes a memory, and upgrades the running original home.
 It checks the stable CLI, retained session/journal/old release, existing memory,
 new writes, recall and repeated installation. It requires an empty fixture
-directory and native Keychain access. Headless CI explicitly authorizes the new
-Runtime in its disposable synthetic Keychain; this does not test interactive
-prompt approval. Never point it at a user's existing home or publish the complete fixture. The matching workflow retains only a report
+directory and a disposable GitHub Actions runner, because it changes that
+account's native Keychain defaults. Headless CI explicitly authorizes the new
+Runtime in its synthetic Keychain; this does not test interactive prompt
+approval. Never run it under a user's regular account or publish the complete fixture. The matching workflow retains only a report
 without credential material. Passing this fixture does not establish that an
 unavailable user-specific failing home has been repaired.
 
