@@ -264,7 +264,7 @@ fn validate_login_recovery_response(
 
 pub(crate) fn installed_auth_runtime() -> Result<(std::path::PathBuf, String)> {
     let binary = crate::runtime_fetch::managed_runtime_path()?
-        .context("auth control requires an installed managed Runtime")?.canonicalize()?;
+        .context("auth control requires an installed managed Runtime; run `rsrs runtime install` to migrate the installation and refresh the stable CLI, then retry")?.canonicalize()?;
     let manifest = crate::runtime_fetch::read_manifest()?
         .context("auth control Runtime manifest is missing")?;
     anyhow::ensure!(crate::runtime_fetch::version_in_accept(&manifest.version)
