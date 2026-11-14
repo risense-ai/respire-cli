@@ -330,7 +330,7 @@ public static class RespireGuiNative {
         foreach ($arg in $argv) { [void]$start.ArgumentList.Add($arg) }
         return [Diagnostics.Process]::Start($start)
     }
-    $managed = Join-Path $taskProfile "client2/runtime/$RuntimeVersion"
+    $managed = if ($SourceCandidate) { Join-Path $taskProfile "bin/runtime/$RuntimeVersion" } else { Join-Path $taskProfile "client2/runtime/$RuntimeVersion" }
     if ($publishedOnline) {
         $installedCli = Join-Path $taskProfile 'bin/rsrs.exe'
         $report.online_install.cli_absent_before = -not (Test-Path -LiteralPath $installedCli)
@@ -378,14 +378,16 @@ public static class RespireGuiNative {
         if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
         if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
-        if (-not (Test-Path -LiteralPath (Split-Path $managed))) {
-            New-Item -ItemType Directory -Path (Split-Path $managed) | Out-Null
+        if (-not $SourceCandidate) {
+            if (-not (Test-Path -LiteralPath (Split-Path $managed))) {
+                New-Item -ItemType Directory -Path (Split-Path $managed) | Out-Null
+            }
+            Copy-Item -LiteralPath (Join-Path $taskProfile "bin/runtime/$RuntimeVersion") -Destination $managed -Recurse
+            # The unchanged legacy Client2 requires notices from the CLI-verified archive.
+            & tar -xzf $archivePath -C $managed ./core-notices
+            if ($LASTEXITCODE -ne 0) { throw 'Unable to restore the legacy Client2 notice fixture' }
+            @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
         }
-        Copy-Item -LiteralPath (Join-Path $taskProfile "bin/runtime/$RuntimeVersion") -Destination $managed -Recurse
-        # The unchanged legacy Client2 requires notices from the CLI-verified archive.
-        & tar -xzf $archivePath -C $managed ./core-notices
-        if ($LASTEXITCODE -ne 0) { throw 'Unable to restore the legacy Client2 notice fixture' }
-        @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
     }
     Write-Output 'GUI probe: Runtime installed'

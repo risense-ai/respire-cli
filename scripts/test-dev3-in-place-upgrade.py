@@ -80,6 +80,7 @@ def main():
             except (ValueError, UnicodeError):
                 failure = {}
             report['failure'] = {'exit': result.returncode,
+                                 'cli_role': 'official_dev3_baseline' if binary == old else 'candidate',
                                  'elapsed_seconds': time.monotonic() - started,
                                  'errors': failure.get('errors', []) if failure.get('status') == 'fail' else []}
             print(json.dumps(report['failure']), flush=True)
@@ -98,9 +99,9 @@ def main():
                     if len(fields) != 2:
                         continue
                     pid, command = fields
-                    executable, internal, _ = command.partition(' --runtime-internal')
+                    executable, _, _ = command.partition(' --')
                     image = Path(executable)
-                    if not internal or image.name != 'rsrs-runtime' or not image.is_relative_to(data):
+                    if image.name != 'rsrs-runtime' or not image.is_relative_to(data):
                         continue
                     sample_path = root / ('runtime-sample-' + pid + '.txt')
                     try:
@@ -113,7 +114,7 @@ def main():
                     except (OSError, subprocess.SubprocessError) as error:
                         report['startup_samples'].append({'pid': int(pid), 'error': type(error).__name__})
                 try:
-                    status = subprocess.run([str(candidate), '--json', 'status'], env=env,
+                    status = subprocess.run([str(binary), '--json', 'status'], env=env,
                                             capture_output=True, timeout=20)
                     value = json.loads(status.stdout)
                     report['post_failure_status'] = {'exit': status.returncode, 'errors': value.get('errors', [])}
