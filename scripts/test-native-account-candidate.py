@@ -132,6 +132,17 @@ class CandidateFixtureTests(unittest.TestCase):
         ignored = candidate.safe_failure_diagnostics(captured([event]), [])
         self.assertEqual(ignored["owned_stop_checkpoints"], [])
 
+    def test_account_error_sources_do_not_echo_private_output(self):
+        message = b"target Runtime does not match the selected account, image or managed owner"
+        captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
+                    + message + b" private-canary\n")
+        result = candidate.safe_failure_diagnostics(captured, [candidate.CASE])
+        locations = result["host_error_sources"][candidate.CASE]
+        self.assertTrue(any(item["file"] == "crates/host-control/src/maintenance.rs" for item in locations))
+        self.assertTrue(all(set(item) == {"file", "line"} and item["line"] > 0 for item in locations))
+        self.assertNotIn("private-canary", json.dumps(result))
+        self.assertEqual(candidate.safe_failure_diagnostics(captured, [])["host_error_sources"], {})
+
     def save_core(self):
         candidate.write_json(self.staged / "core-runtime.json", self.core)
 

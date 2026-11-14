@@ -517,8 +517,30 @@ def safe_failure_diagnostics(captured, failed_cases):
             owned_checkpoints.append(event)
         except (ValueError, TypeError):
             owned_invalid = True
+    # Report only checked-out source locations matching static error text, never captured text.
+    host_error_sources = {}
+    if CASE in failed_cases:
+        source_root = Path(__file__).resolve().parents[1]
+        block = b"\n".join(blocks.get(CASE, []))
+        matches = []
+        for directory in ("cli/src", "crates/host-control/src"):
+            for path in sorted((source_root / directory).rglob("*.rs")):
+                if path.is_symlink():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                for literal in re.finditer(r'"(?:[^"\\]|\\.)*"', text):
+                    try:
+                        message = json.loads(literal.group()).split("{", 1)[0].rstrip()
+                    except ValueError:
+                        continue
+                    if len(message) >= 32 and message.encode() in block:
+                        location = {"file": path.relative_to(source_root).as_posix(),
+                                    "line": text.count("\n", 0, literal.start()) + 1}
+                        matches.append((len(message), location))
+        matches.sort(key=lambda match: -match[0])
+        host_error_sources[CASE] = [location for _, location in matches[:8]]
     return {"authorization_events": events, "authorization_event_invalid": invalid,
-            "failure_codes": codes, "failure_locations": locations,
+            "failure_codes": codes, "failure_locations": locations, "host_error_sources": host_error_sources,
             "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,
             "response_events": response_events, "response_event_invalid": response_invalid,
             "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid,
