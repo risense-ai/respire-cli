@@ -160,14 +160,14 @@ jobs:
           const version=JSON.parse(invoke(['--json','v'])),display=invoke(['--version']);
           assert.equal(version.command,'version');assert.equal(version.status,'ok');
           assert.equal(version.summary.version,metadata.version);assert.equal(display,`rsrs ${metadata.version}`);
-          const receipt=JSON.parse(fs.readFileSync(path.join(root,'runtime.json'),'utf8'));
+          const receipt=JSON.parse(fs.readFileSync(path.join(root, 'bin', 'runtime.json'),'utf8'));
           const runtimeMetadata=JSON.parse(receipt.release.metadata_json);
           assert.equal(receipt.version,pin.required);
           assert.equal(hash(receipt.release.metadata_json),receipt.release.metadata_sha256);
           assert.equal(runtimeMetadata.binary_sha256,receipt.sha256);
           assert.equal(runtimeMetadata.runtime_version,pin.required);
           assert.equal(runtimeMetadata.target_triple??runtimeMetadata.triple,process.env.RSRS_RUNTIME_TRIPLE);
-          const runtime=fs.realpathSync(path.join(root,'runtime',pin.required,'rsrs-runtime'+(process.platform==='win32'?'.exe':'')));
+          const runtime=fs.realpathSync(path.join(root, 'bin', 'runtime',pin.required,'rsrs-runtime'+(process.platform==='win32'?'.exe':'')));
           assert.notEqual(runtime,binary);assert.equal(hash(fs.readFileSync(runtime)),receipt.sha256);
           assert.match(process.env.GITHUB_SHA,/^[a-f0-9]{40}$/);
           const evidence={schema:1,kind:'standalone-cli-diagnostic',diagnostic_only:true,publication_reusable:false,

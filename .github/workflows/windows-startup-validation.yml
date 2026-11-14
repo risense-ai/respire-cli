@@ -93,7 +93,7 @@ jobs:
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
-          const runtime = join(root, 'runtime', pin.required, 'rsrs-runtime.exe');
+          const runtime = join(root, 'bin', 'runtime', pin.required, 'rsrs-runtime.exe');
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);

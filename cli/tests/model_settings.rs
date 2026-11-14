@@ -198,7 +198,7 @@ impl RuntimeCleanup<'_> {
         let pin: Value = serde_json::from_str(include_str!("../../runtime-pin.json"))?;
         let version = pin["required"].as_str().context("Runtime pin missing")?;
         let binary = root
-            .join("runtime")
+            .join("bin/runtime")
             .join(version)
             .join(if cfg!(windows) {
                 "rsrs-runtime.exe"

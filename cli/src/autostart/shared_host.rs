@@ -208,7 +208,7 @@ impl HostLifecycle for CliHost {
             .filter(|config| config.enabled && !config.manually_stopped)
         {
             anyhow::ensure!(
-                lifecycle::registered_runtime_image(&config)? == binary,
+                lifecycle::registered_runtime_image(&config, None)? == binary,
                 "account startup requires the registered installed Runtime"
             );
         } else if let Some(raw) = respire_client_host::env::var_os("RSRS_RUNTIME_BIN") {

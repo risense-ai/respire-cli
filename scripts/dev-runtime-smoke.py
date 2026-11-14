@@ -573,7 +573,7 @@ class Smoke:
         if installed is not None:
             self.args.runtime_binary = installed
             if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
-                receipt = json.loads((Path(self.env['RSRS_DATA_DIR']) / 'runtime.json').read_text(encoding='utf-8'))
+                receipt = json.loads((Path(self.env['RSRS_DATA_DIR']) / 'bin/runtime.json').read_text(encoding='utf-8'))
                 self.args.runtime_version, self.args.runtime_sha256 = receipt['version'], receipt['sha256']
                 runtime_inputs(self.args, [self.args.binary])
         value = self.direct(['-v'])

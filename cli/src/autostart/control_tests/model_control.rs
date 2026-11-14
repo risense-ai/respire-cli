@@ -68,7 +68,8 @@ fn model_preparation_preserves_damaged_installations_before_maintenance() -> Res
     let dir = tempfile::tempdir()?;
     let root = dir.path().canonicalize()?;
     let _restore = isolate(&root);
-    let manifest = root.join("runtime.json");
+    std::fs::create_dir_all(root.join("bin"))?;
+    let manifest = root.join("bin/runtime.json");
     let unproved = serde_json::to_vec(&json!({
         "version": "1.0.21-dev.17", "sha256": "a".repeat(64)
     }))?;

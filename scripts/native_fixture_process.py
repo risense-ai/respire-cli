@@ -106,7 +106,7 @@ def install_official_runtime(binary, env, version, binary_hash):
         raise ValueError('official installation must remain inside the owned runner workspace')
     source_full = (os.environ.get('ARTIFACT_SOURCE') == 'build'
                    and os.environ.get('VALIDATION_PROFILE') == 'full')
-    if (root / 'runtime.json').exists():
+    if (root / 'bin/runtime.json').exists():
         if not source_full:
             raise ValueError('source-build fixture must start without a Runtime receipt')
     else:
@@ -117,11 +117,11 @@ def install_official_runtime(binary, env, version, binary_hash):
                                 env=install_env, capture_output=True, timeout=180)
         if result.returncode:
             raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
-    receipt = json.loads((root / 'runtime.json').read_text(encoding='utf-8'))
+    receipt = json.loads((root / 'bin/runtime.json').read_text(encoding='utf-8'))
     proof = receipt.get('release') or {}
     metadata_bytes = proof.get('metadata_json', '').encode('utf-8')
     metadata = json.loads(metadata_bytes)
-    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
     if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
             or proof.get('metadata_sha256') != hashlib.sha256(metadata_bytes).hexdigest()
             or metadata.get('schema_version') != 2 or metadata.get('runtime_version') != version
@@ -161,14 +161,14 @@ def install_published_runtime(binary, env):
         if (version != json.loads((repository / 'runtime-pin.json').read_text(encoding='utf-8'))['required']
                 or len(binary_hash) != 64 or any(c not in '0123456789abcdef' for c in binary_hash)):
             raise ValueError('source fixture differs from the independently pinned Runtime identity')
-        if not (root / 'runtime.json').exists():
+        if not (root / 'bin/runtime.json').exists():
             source = pathlib.Path(os.environ['NATIVE_RUNTIME_BIN']).resolve(strict=True)
             if source.parent.name != version or source.parent.parent.name != 'runtime':
                 raise ValueError('official managed Runtime source required')
             source_root = source.parent.parent.parent
-            if source_root == root or not (source_root / 'runtime.json').is_file():
+            if source_root.name != 'bin' or source_root.parent == root or not (source_root / 'runtime.json').is_file():
                 raise ValueError('independent official Runtime source receipt required')
-            source_env = dict(env, RSRS_DATA_DIR=str(source_root))
+            source_env = dict(env, RSRS_DATA_DIR=str(source_root.parent))
             verified = install_official_runtime(binary, source_env, version, binary_hash)
             if not source.samefile(verified):
                 raise ValueError('official Runtime source differs from the selected image')
@@ -229,7 +229,7 @@ def install_published_runtime(binary, env):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == 'posix':
         root.chmod(0o700)
-    receipt_path = root / 'runtime.json'
+    receipt_path = root / 'bin/runtime.json'
     if not receipt_path.exists():
         install_env = {key: value for key, value in env.items()
                        if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
@@ -242,7 +242,7 @@ def install_published_runtime(binary, env):
             raise RuntimeError('selected published Runtime offline install failed: exit ' + str(result.returncode))
     receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
     proof = receipt.get('release', {})
-    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
     if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
             or proof.get('metadata_sha256') != metadata_hash
             or proof.get('metadata_json', '').encode('utf-8') != metadata_bytes
@@ -333,7 +333,7 @@ def _verify_runtime_health(args, health, root, profile, pid=None):
     session_path = profile / 'session.json'
     session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
     installation_id, account_id = runtime_scope_ids(root, profile, session)
-    selected_image = ((root / 'runtime' / args.runtime_version /
+    selected_image = ((root / 'bin/runtime' / args.runtime_version /
                        ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
                       if (os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets'
                           or (os.environ.get('ARTIFACT_SOURCE') == 'build'
