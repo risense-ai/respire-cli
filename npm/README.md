@@ -100,7 +100,7 @@ Windows ARM64 is a DEV-first release candidate and requires a version that
 actually includes its complete package. Stable 1.0.15 and 1.0.16 omit it.
 See the [support matrix](../docs/platform-support.md) for validation status and blockers.
 
-`artifact-manifest.json` defines the seven CLI targets for 2.0.0-dev.4.
+`artifact-manifest.json` defines the seven CLI targets for 2.0.0-dev.7.
 Publication requires 14 CLI assets and eight npm packages: `rsrs-cli` plus
 seven platform packages, including `@rsrsai/linux-arm64`. ARM64 musl remains
 a candidate until its native release and installation gates pass.
@@ -110,7 +110,7 @@ CLI targets without that platform package. That release remains unchanged.
 The standalone Runtime retains its seven-platform, 21-asset inventory.
 Intel macOS is also deferred; historical Intel packages use `@rsrsai/macos-x64`
 and require macOS 13.4 or later.
-Linux x64 and ARM64 use musl as the launcher default in dev.4.
+Linux x64 and ARM64 use musl as the launcher default in dev.7.
 The historical dev.3 launcher selects GNU on ARM64 only when Node reports a
 glibc host, and refuses ARM64 musl or unrecognized hosts.
 On a glibc distribution, select GNU explicitly; the same choice applies to

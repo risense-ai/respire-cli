@@ -14,9 +14,9 @@ compiler target alone does not establish product support.
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
 | Linux ARM64 GNU | `aarch64-unknown-linux-gnu` | Existing; native `ubuntu-24.04-arm` | Pinned CPU SDK |
-| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Restored candidate for CLI 2.0.0-dev.4; native `ubuntu-24.04-arm` and Alpine | Pinned static CPU SDK |
+| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Restored candidate for CLI 2.0.0-dev.7; native `ubuntu-24.04-arm` and Alpine | Pinned static CPU SDK |
 
-The dev.4 CLI manifest contains seven targets: 14 frontend release assets and
+The dev.7 CLI manifest contains seven targets: 14 frontend release assets and
 eight npm packages (the launcher plus seven platform packages). CLI 2.0.0-dev.3
 deferred Linux ARM64 musl under [issue #272](https://github.com/risense-ai/respire-cli/issues/272);
 its historical six-target release remains unchanged. The restored target is a
