@@ -61,6 +61,7 @@ try {
         $nativeHealth.exe=$image; $report=@{offline=@{}}
         Bind-OfflineRuntime
         if ($report.offline.runtime_binding_stage -cne 'bound' -or $offlineRuntime.pid -ne 42) { throw 'Matching Runtime image did not bind' }
+        if ($report.offline.runtime_binding_checks.Count -ne 8 -or @($report.offline.runtime_binding_checks.Values | Where-Object { $_ -isnot [bool] -or -not $_ }).Count) { throw 'Successful binding diagnostic was not eight true booleans' }
     }
     foreach ($case in @('foreign_image','empty_image','foreign_process','foreign_session','foreign_data','wrong_digest')) {
         $nativeHealth.exe=$binding.runtime_exe; $nativeHealth.data_dir=$binding.data_directory
@@ -76,6 +77,9 @@ try {
         $report=@{offline=@{}}; $rejected=$false
         try { Bind-OfflineRuntime } catch { $rejected=$_.Exception.Message -ceq 'Offline Runtime health/process/profile/hash binding failed' }
         if (-not $rejected) { throw "Native binding did not reject synthetic case: $case" }
+        $failedField=@{foreign_image='health_image';empty_image='health_image';foreign_process='process_image';foreign_session='session';foreign_data='data_directory';wrong_digest='image_digest'}[$case]
+        $identity=$report.offline.runtime_binding_checks
+        if ($identity[$failedField] -isnot [bool] -or $identity[$failedField] -or @($identity.Values | Where-Object { $_ -isnot [bool] }).Count -or @($identity.Values | Where-Object { -not $_ }).Count -ne 1) { throw 'Binding diagnostics changed the rejection or exported a nonboolean' }
     }
 } finally {
     Remove-Item -LiteralPath (Join-Path $OutputDirectory 'native-gui.json') -ErrorAction SilentlyContinue
