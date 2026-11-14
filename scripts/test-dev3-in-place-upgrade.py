@@ -68,11 +68,50 @@ def main():
               'candidate_runtime_version': args.candidate_runtime_version}
     report_path = root / 'upgrade-report.json'
 
+    def sample_owned_runtime():
+        samples = []
+        processes = subprocess.check_output(
+            ['/bin/ps', '-axo', 'pid=,command='], text=True, timeout=10)
+        for process in processes.splitlines():
+            fields = process.strip().split(None, 1)
+            if len(fields) != 2:
+                continue
+            pid, command = fields
+            executable, _, _ = command.partition(' --')
+            image = Path(executable)
+            if image.name not in ('rsrs-runtime', 'rsrs-runtime-aarch64-apple-darwin') or not image.is_relative_to(data):
+                continue
+            sample_path = root / ('runtime-sample-' + pid + '.txt')
+            try:
+                subprocess.run(['/usr/bin/sample', pid, '3', '-file', str(sample_path)],
+                               capture_output=True, check=True, timeout=15)
+                sample = sample_path.read_text(encoding='utf-8', errors='replace')
+                graph = sample.partition('Call graph:')[2].partition('Total number in stack')[0]
+                samples.append({'pid': int(pid), 'stack': graph[:60000].replace(str(root), '<fixture>')})
+            except (OSError, subprocess.SubprocessError) as error:
+                samples.append({'pid': int(pid), 'error': type(error).__name__})
+        return samples
+
     def run(binary, *arguments):
         report['stage'] = ' '.join(arguments[:2])
         started = time.monotonic()
-        result = subprocess.run([str(binary), '--json', *arguments], env=env,
-                                capture_output=True, timeout=600)
+        command = [str(binary), '--json', *arguments]
+        if binary == old and arguments[:2] == ('runtime', 'start'):
+            # The old CLI kills its control child at its own deadline; sample it before that.
+            with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    report['startup_samples'] = sample_owned_runtime()
+                    try:
+                        stdout, stderr = process.communicate(timeout=592)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                        raise
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        else:
+            result = subprocess.run(command, env=env, capture_output=True, timeout=600)
         # Keygen stdout can include a recovery kit: never put raw output in reports.
         if result.returncode:
             try:
@@ -91,28 +130,8 @@ def main():
                     'legacy_release': old_release.is_dir(),
                 }
             if arguments[:2] in (('runtime', 'install'), ('runtime', 'start')):
-                report['startup_samples'] = []
-                processes = subprocess.check_output(
-                    ['/bin/ps', '-axo', 'pid=,command='], text=True, timeout=10)
-                for process in processes.splitlines():
-                    fields = process.strip().split(None, 1)
-                    if len(fields) != 2:
-                        continue
-                    pid, command = fields
-                    executable, _, _ = command.partition(' --')
-                    image = Path(executable)
-                    if image.name != 'rsrs-runtime' or not image.is_relative_to(data):
-                        continue
-                    sample_path = root / ('runtime-sample-' + pid + '.txt')
-                    try:
-                        subprocess.run(['/usr/bin/sample', pid, '3', '-file', str(sample_path)],
-                                       capture_output=True, check=True, timeout=15)
-                        sample = sample_path.read_text(encoding='utf-8', errors='replace')
-                        graph = sample.partition('Call graph:')[2].partition('Total number in stack')[0]
-                        report['startup_samples'].append({
-                            'pid': int(pid), 'stack': graph[:60000].replace(str(root), '<fixture>')})
-                    except (OSError, subprocess.SubprocessError) as error:
-                        report['startup_samples'].append({'pid': int(pid), 'error': type(error).__name__})
+                if 'startup_samples' not in report:
+                    report['startup_samples'] = sample_owned_runtime()
                 try:
                     status = subprocess.run([str(binary), '--json', 'status'], env=env,
                                             capture_output=True, timeout=20)
