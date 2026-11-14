@@ -136,7 +136,8 @@ pub fn install_granite(model: &str, mirror: Option<&str>) -> Result<InstallGrani
     let _operation = crate::model_progress::Operation::begin_download()?;
     let pin = pin_for(model)?;
     let dest = granite_model_dir(&granite_models_root()?, &pin);
-    let origins = granite_origins(mirror)?;
+    let mirror_env = respire_client_host::settings::mirror_from_env()?;
+    let origins = granite_origins(mirror.or(mirror_env.as_deref()))?;
     let mut skipped = true;
     for file in [pin.weights, pin.tokenizer] {
         let staged = stage_file(&pin, file, &dest, &origins)?;
@@ -218,10 +219,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pin_lookup_rejects_unknown_models() {
-        assert_eq!(pin_for("311m").expect("311m pin").profile, "granite-311m-r2");
-        assert_eq!(pin_for("97m").expect("97m pin").profile, "granite-97m-r2");
+    fn pin_lookup_rejects_unknown_models() -> Result<()> {
+        assert_eq!(pin_for("311m")?.profile, "granite-311m-r2");
+        assert_eq!(pin_for("97m")?.profile, "granite-97m-r2");
         assert!(pin_for("bge-m3").is_err());
+        Ok(())
     }
 
     #[test]
