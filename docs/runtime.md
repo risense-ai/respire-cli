@@ -15,6 +15,14 @@ remain available for recovery; account data and Runtime state under `~/.rsrs/run
 are not relocated. Existing running owners are drained through normal lifecycle
 operations before a replacement starts.
 
+`rsrs runtime install` and `rsrs runtime update` also refresh the stable CLI
+from the invoking executable. When replacement is needed, the host first drains
+the existing owner, publishes verified CLI bytes atomically, and restarts an owner
+that was running. A failed restart retains account data and recovery records;
+inspect the reported startup error before retrying `rsrs runtime start`.
+System credentials remain the CLI or Client2 host's responsibility. Installing
+Runtime does not authorize Runtime to read the system keychain.
+
 Embedding profiles use `model.catalog`, `model.configure`, `model.switch`,
 `model.resume` and `model.progress` on the existing runtime RPC transport.
 See [embedding profiles](model-profiles.md) for CLI/JSON and failure semantics.
