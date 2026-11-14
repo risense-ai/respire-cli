@@ -9,22 +9,20 @@ compiler target alone does not establish product support.
 | --- | --- | --- | --- |
 | Windows x64 | `x86_64-pc-windows-msvc` | Existing; `windows-latest` | Pinned SDK and DirectML |
 | Windows ARM64 | `aarch64-pc-windows-msvc` | Added; native `windows-11-arm`, DEV first | Pinned SDK and ARM64 DirectML |
-| macOS Intel | `x86_64-apple-darwin` | Deferred for CLI 1.0.21-dev.5; historical macOS 13.4+ packages remain available | ORT API 20; bundled ORT 1.20.1 |
+| macOS Intel | `x86_64-apple-darwin` | Restored candidate; native `macos-15-intel`, macOS 13.4+; official Runtime 2.0.0-dev.17 pinned | ORT API 20; bundled ORT 1.20.1 |
 | macOS ARM64 | `aarch64-apple-darwin` | Existing; native `macos-latest` | Pinned CPU SDK |
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
 | Linux ARM64 GNU | `aarch64-unknown-linux-gnu` | Existing; native `ubuntu-24.04-arm` | Pinned CPU SDK |
 | Linux ARM64 musl | `aarch64-unknown-linux-musl` | Restored candidate for CLI 2.0.0-dev.7; native `ubuntu-24.04-arm` and Alpine | Pinned static CPU SDK |
 
-The dev.7 CLI manifest contains seven targets: 14 frontend release assets and
-eight npm packages (the launcher plus seven platform packages). CLI 2.0.0-dev.3
+The next DEV manifest configures eight targets: 16 frontend release assets and
+nine npm packages (the launcher plus eight platform packages). CLI 2.0.0-dev.3
 deferred Linux ARM64 musl under [issue #272](https://github.com/risense-ai/respire-cli/issues/272);
-its historical six-target release remains unchanged. The restored target is a
-candidate until its native startup, inference and owned-cleanup gates pass.
-Existing Core SDK and Runtime releases are unchanged.
-Historical Intel launcher
-selection remains supported, but no Intel dev.5 optional dependency or release
-asset is generated. Both SDK locks still pin the same eight SDKs, including
+its historical six-target release remains unchanged. Intel remains a candidate
+until its native startup,
+inference and owned-cleanup gates pass. Historical Intel releases stay unchanged.
+Both SDK locks still pin the same eight SDKs, including
 manifest and archive SHA-256. CPU inference is linked into Core; an empty list
 of shared runtime files on Unix does not mean inference is missing. Windows
 ships the matching DirectML DLL. Redistribution notices remain mandatory.
@@ -73,8 +71,10 @@ and [LoongArch requirements](https://doc.rust-lang.org/rustc/platform-support/lo
 Every released CLI target must provide `cli-build-<target>.json` and
 `rsrs-<target>[.exe]`. Frontend schema 2 metadata binds the version, source
 commit, target, executable filename and SHA-256. The CLI does not bundle a
-Runtime archive. The separately released Runtime retains its seven targets
-and 21 assets, including its own archives, libraries and notices.
+Runtime archive. Runtime 2.0.0-dev.16 retains its immutable seven targets and
+21 assets. Official Runtime 2.0.0-dev.17 supplies eight targets and 24 assets,
+including Intel archives, libraries and notices; CLI CI consumes those assets
+without compiling Runtime.
 The build checks version and headers before staging; package verification
 checks source/target identity, headers and executable hashes.
 

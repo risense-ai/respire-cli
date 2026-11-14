@@ -60,10 +60,10 @@ concurrency:
   cancel-in-progress: true
 env:
   # Official product provenance is independent of the business-harness checkout.
-  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: 959beb99d7d0ad065b28d9830a4a09ace8b40b72
+  EXPECTED_RUNTIME_PRODUCT_SOURCE_SHA: e2590eb034be26243f12f8a68b303727343f796a
 jobs:
   platform-build:
-    # Release builds the seven current targets; Intel macOS is deferred. Keep the separate compile matrix manual.
+    # Keep the separate compile matrix manual; Runtime inference consumes official releases only.
     if: ${{ github.event_name == 'workflow_dispatch' && !inputs.source_checks_only && !inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only }}
     name: Native joint compile (${{ matrix.target }})
     strategy:
@@ -78,6 +78,8 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
           - os: macos-latest
             target: aarch64-apple-darwin
           - os: windows-latest
@@ -118,8 +120,8 @@ jobs:
       - name: Build static Linux binary and verify libc independence
         if: contains(matrix.target, '-musl')
         run: bash scripts/build-linux-musl.sh "${{ matrix.target }}"
-      - name: Verify musl CPU inference
-        if: contains(matrix.target, '-musl')
+      - name: Verify musl and Intel CPU inference
+        if: contains(matrix.target, '-musl') || matrix.target == 'x86_64-apple-darwin'
         env:
           RSRS_ENGINE: cpu
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
@@ -128,10 +130,15 @@ jobs:
         run: |
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
-          exe=target/ci/${{ matrix.target }}/release/rsrs
+          profile=release
+          if [[ "${{ matrix.target }}" == x86_64-apple-darwin ]]; then profile=debug; fi
+          exe=target/ci/${{ matrix.target }}/$profile/rsrs
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
           "$exe" --json runtime install
           "$exe" --direct model install-m3 --json
+          mkdir -p "$RSRS_DATA_DIR/bin"
+          cp "$exe" "$RSRS_DATA_DIR/bin/rsrs"
+          cmp "$exe" "$RSRS_DATA_DIR/bin/rsrs"
           "$exe" --direct model probe --json
           CLI_FIXTURE_BINARY="$exe" node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
