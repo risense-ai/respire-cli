@@ -132,6 +132,14 @@ class CandidateFixtureTests(unittest.TestCase):
         ignored = candidate.safe_failure_diagnostics(captured([event]), [])
         self.assertEqual(ignored["owned_stop_checkpoints"], [])
 
+    def test_login_receipt_failure_reports_only_fixed_code(self):
+        captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
+            b"Error: login session does not match its committed credential receipt\n"
+            b"private-credential-must-not-be-exported\n")
+        result = candidate.safe_failure_diagnostics(captured, [candidate.CASE])
+        self.assertEqual(result["failure_codes"][candidate.CASE], ["account_login_receipt_mismatch"])
+        self.assertNotIn("private-credential-must-not-be-exported", json.dumps(result))
+
     def test_account_error_sources_do_not_echo_private_output(self):
         message = b"target Runtime does not match the selected account, image or managed owner"
         captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
