@@ -1749,6 +1749,7 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
     let birth = manager::process_birth(pid)?;
     let mut drain: Option<std::thread::JoinHandle<Result<()>>> = None;
     let mut drain_requested = false;
+    let mut credentials_checked = false;
     let result = (|| -> Result<()> {
         loop {
             if let Some(status) = child.try_wait().context("cannot reap foreground Runtime")? {
@@ -1757,6 +1758,16 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
                 }
                 crate::set_exit_code(status.code().unwrap_or(1));
                 return Ok(());
+            }
+            if !credentials_checked && !stopped.load(Ordering::Acquire) {
+                if let Ok(Some(health)) = crate::rpc::probe_runtime() {
+                    if health.pid == pid && health.instance_id == instance_id {
+                        credentials_checked = true;
+                        if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
+                            eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                        }
+                    }
+                }
             }
             if drain.as_ref().is_some_and(|drain| drain.is_finished()) {
                 if let Some(drain) = drain.take() {
