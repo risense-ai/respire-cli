@@ -139,6 +139,15 @@ class CandidateFixtureTests(unittest.TestCase):
         result = candidate.safe_failure_diagnostics(captured, [candidate.CASE])
         self.assertEqual(result["failure_codes"][candidate.CASE], ["account_login_receipt_mismatch"])
         self.assertNotIn("private-credential-must-not-be-exported", json.dumps(result))
+        outside = (b"Error: trailing characters at line 2 column 1 private-value\n"
+            b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
+            b"account-checkpoint oauth_completed\naccount-checkpoint private-value\n")
+        result = candidate.safe_failure_diagnostics(outside, [candidate.CASE])
+        self.assertEqual(result["failure_codes"][candidate.CASE], ["account_json_trailing_data"])
+        self.assertEqual(result["account_checkpoints"], ["oauth_completed"])
+        self.assertNotIn("private-value", json.dumps(result))
+        unrelated = candidate.safe_failure_diagnostics(outside, [candidate.CASE, "other::case"])
+        self.assertNotIn("account_json_trailing_data", unrelated["failure_codes"][candidate.CASE])
 
     def test_account_error_sources_do_not_echo_private_output(self):
         message = b"target Runtime does not match the selected account, image or managed owner"

@@ -257,6 +257,9 @@ def safe_failure_diagnostics(captured, failed_cases):
         b"login session does not match its committed credential receipt": "account_login_receipt_mismatch",
         b"could not stop the isolated OAuth runtime": "account_login_stop_failed",
         b"cloud fixture row missing": "account_cloud_fixture_missing",
+        b"trailing characters at line": "account_json_trailing_data",
+        b"EOF while parsing": "account_json_incomplete",
+        b"expected value at line": "account_json_invalid_value",
         b"owned space command": "account_owned_space_command_failed",
         b"join never fetched": "account_join_request_not_observed",
         b"join did not authenticate its ordered GET": "account_join_authorization_mismatch",
@@ -454,9 +457,19 @@ def safe_failure_diagnostics(captured, failed_cases):
                 response_events.append(clean)
             except (ValueError, TypeError):
                 response_invalid = True
+    account_stages = {"oauth_completed", "receipt_verified", "oauth_runtime_stopped",
+                      "cloud_memory_seeded", "cloud_store_opened", "cloud_fixture_staged"}
+    account_checkpoints = [line[len(b"account-checkpoint "):].decode("ascii")
+        for line in blocks.get(CASE, []) if line.startswith(b"account-checkpoint ")
+        and line[len(b"account-checkpoint "):] in {stage.encode() for stage in account_stages}][:32]
     codes, locations = {}, {}
     for case in failed_cases:
-        block = b"\n".join(blocks.get(case, []))
+        lines = list(blocks.get(case, []))
+        # libtest prints returned Result errors outside the captured stdout block.
+        if failed_cases == [CASE] and case == CASE:
+            lines.extend(line for line in captured.splitlines()
+                         if line.startswith(b"Error: ") and len(line) <= 65536)
+        block = b"\n".join(lines)
         codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block))
         # HTTP details can contain URLs and response data. Retain only a fixed
         # status when the same line identifies this failed stop exchange.
@@ -548,6 +561,7 @@ def safe_failure_diagnostics(captured, failed_cases):
         host_error_sources[CASE] = [location for _, location in matches[:8]]
     return {"authorization_events": events, "authorization_event_invalid": invalid,
             "failure_codes": codes, "failure_locations": locations, "host_error_sources": host_error_sources,
+            "account_checkpoints": account_checkpoints,
             "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,
             "response_events": response_events, "response_event_invalid": response_invalid,
             "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid,
