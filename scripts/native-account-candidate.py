@@ -226,6 +226,19 @@ def safe_failure_diagnostics(captured, failed_cases):
             invalid = True
 
     known = {
+        b'completed account selection changed before supervisor handoff': 'account_handoff_selection_changed',
+        b'compatibility handoff cannot inherit maintenance authorization': 'account_handoff_inherited_maintenance',
+        b'compatibility handoff requires an unregistered host and completed durable maintenance': 'account_handoff_maintenance_incomplete',
+        b'Client2 requires the same verified CLI bytes at the stable bin path': 'account_handoff_stable_cli_mismatch',
+        b'compatibility startup cannot inherit account maintenance': 'account_handoff_start_inherited_maintenance',
+        b'compatibility host exited before readiness': 'account_handoff_host_exited',
+        b'compatibility startup is uncertain for child': 'account_handoff_start_unknown',
+        b'compatibility listener is not the launched child': 'account_handoff_listener_pid_mismatch',
+        b'compatibility host identity does not match this installation': 'account_handoff_host_identity_mismatch',
+        b'compatibility host backend binding changed': 'account_handoff_backend_binding_changed',
+        b'compatibility Runtime failed independent committed-owner handoff verification': 'account_handoff_runtime_verification_failed',
+        b'account rollback did not restore the original source identity': 'account_rollback_source_identity_changed',
+        b'rollback serving state differs from the actually drained owner': 'account_rollback_serving_state_changed',
         b'registered lifecycle command failed with exit code': 'owned_registered_lifecycle_failed',
         b'registered service could not unlock its actual persistent credential': 'owned_registered_unlock_failed',
         b'original Go Manager.Start failed': 'owned_client2_start_failed',

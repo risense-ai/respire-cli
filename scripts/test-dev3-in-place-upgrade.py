@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -160,6 +161,20 @@ def main():
         if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
             raise AssertionError('official keygen did not return the synthetic credential and alias')
         authorized_keychain = str(keychains / 'authorized-upgrade.keychain-db')
+        # Ad-hoc signed Rust binaries have a cdhash partition, not the unsigned partition.
+        partitions = ['apple-tool:', 'apple:']
+        for image in [old, stable, candidate, data / 'runtime' / '2.0.0-dev.14' / 'rsrs-runtime']:
+            signature = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(image)],
+                                       capture_output=True, text=True, timeout=15)
+            if signature.returncode:
+                raise RuntimeError('synthetic Keychain consumer has no readable code signature')
+            hashes = [match.group(1).lower() for line in signature.stderr.splitlines()
+                      if (match := re.fullmatch(r'CDHash=([a-fA-F0-9]{40})', line.strip()))]
+            if len(hashes) != 1:
+                raise RuntimeError('synthetic Keychain consumer has no unambiguous code hash')
+            partition = 'cdhash:' + hashes[0]
+            if partition not in partitions:
+                partitions.append(partition)
         for operation in [
             ['create-keychain', '-p', keychain_password, authorized_keychain],
             ['unlock-keychain', '-p', keychain_password, authorized_keychain],
@@ -167,7 +182,7 @@ def main():
             ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
              '-w', secret, authorized_keychain],
             ['set-generic-password-partition-list', '-s', 'rsrs', '-a', 'super:' + alias,
-             '-S', 'apple-tool:,apple:,unsigned:', '-k', keychain_password, authorized_keychain],
+             '-S', ','.join(partitions), '-k', keychain_password, authorized_keychain],
             ['list-keychains', '-d', 'user', '-s', authorized_keychain],
             ['default-keychain', '-d', 'user', '-s', authorized_keychain],
         ]:
