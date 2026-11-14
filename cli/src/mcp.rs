@@ -217,22 +217,37 @@ pub fn materialize_bin() -> Result<PathBuf, String> {
 
 // The CLI is standalone; Runtime and its native libraries use their own verified installer.
 fn install_binary(src: &Path, dest: &Path) -> Result<(), String> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
-    }
+    let parent = dest.parent().ok_or("CLI destination has no parent")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|err| format!("cannot create {}: {err}", parent.display()))?;
     if !bin_needs_refresh(src, dest)? {
         return Ok(());
     }
-    std::fs::copy(src, dest)
-        .map_err(|err| format!("cannot copy {} -> {}: {err}", src.display(), dest.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
-            .map_err(|err| format!("cannot set execute bit on {}: {err}", dest.display()))?;
+    // Publish complete bytes atomically; truncating a live Unix image can fail or corrupt it.
+    let temporary = parent.join(format!(".rsrs-{}", uuid::Uuid::new_v4()));
+    let result = (|| -> anyhow::Result<()> {
+        let mut output = std::fs::OpenOptions::new().write(true).create_new(true).open(&temporary)?;
+        std::io::copy(&mut std::fs::File::open(src)?, &mut output)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            output.set_permissions(std::fs::Permissions::from_mode(0o755))?;
+        }
+        output.sync_all()?;
+        drop(output);
+        anyhow::ensure!(!bin_needs_refresh(src, &temporary).map_err(anyhow::Error::msg)?,
+            "staged CLI bytes differ from the invoking executable");
+        if dest.try_exists()? {
+            respire_spawn::durable::replace_file(&temporary, dest)?;
+        } else {
+            respire_spawn::durable::publish_new_file(&temporary, dest)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
     }
-    Ok(())
+    result.map_err(|error| format!("cannot install CLI at {}: {error:#}", dest.display()))
 }
 
 pub fn exe_matches_dest(exe: &str, dest: &Path) -> bool {
@@ -1757,6 +1772,18 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             assert_eq!(after.ino(), before.ino());
         }
+        #[cfg(unix)]
+        let mut original = std::fs::File::open(&executable)?;
+        std::fs::write(&source, b"upgraded standalone CLI")?;
+        install_binary(&source, &executable).map_err(anyhow::Error::msg)?;
+        assert_eq!(std::fs::read(&executable)?, b"upgraded standalone CLI");
+        #[cfg(unix)]
+        {
+            let mut retained = Vec::new();
+            std::io::Read::read_to_end(&mut original, &mut retained)?;
+            assert_eq!(retained, b"synthetic standalone CLI payload");
+        }
+        assert_eq!(std::fs::read_dir(&destination_dir)?.count(), 1);
         Ok(())
     }
 

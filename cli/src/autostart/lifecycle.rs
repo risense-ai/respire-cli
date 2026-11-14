@@ -1666,14 +1666,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
 /// `runtime install`: pinned download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
 fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
-    match (file, version) {
+    let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
-            let binary = crate::runtime_fetch::install_from_file(archive, explicit_version)?;
-            emit(
-                "runtime.install",
-                json!({"source":"file","version":explicit_version,"binary":binary}),
-            )
+            (crate::runtime_fetch::install_from_file(archive, explicit_version)?, "file")
         }
         (Some(_), None) => bail!("--file requires --version"),
         (None, Some(_)) => bail!("--version is only accepted together with --file"),
@@ -1681,13 +1677,35 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            let binary = crate::runtime_fetch::download_and_install(None, mirror)?;
-            emit(
-                "runtime.install",
-                json!({"source":"download","version":crate::runtime_fetch::pinned()?.required.clone(),"binary":binary}),
-            )
+            (crate::runtime_fetch::download_and_install(None, mirror)?, "download")
+        }
+    };
+    // Keep the old release files; only a verified drain authorizes replacing the CLI entry.
+    let _ownership = crate::runtime_policy::takeover_lock()?;
+    let previous = crate::rpc::probe_runtime()?;
+    let cli_binary = crate::mcp::stable_bin_path();
+    let refresh_cli = crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &cli_binary)
+        .map_err(anyhow::Error::msg)?;
+    let restart_runtime = previous.as_ref().map(crate::rpc::runtime_acceptable)
+        .transpose()?.is_some_and(|acceptable| !acceptable);
+    let mut restarted = false;
+    if refresh_cli || restart_runtime {
+        let mut maintenance = begin_maintenance_locked()?;
+        if let Some(health) = previous.as_ref() {
+            maintenance.drain_runtime(health)?;
+        }
+        crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+        maintenance.finish()?;
+        if previous.is_some() {
+            start_explicit_locked().context(
+                "Runtime and CLI installed; restart failed; old data and recovery records were retained; inspect the startup error before running rsrs runtime start")?;
+            restarted = true;
         }
     }
+    let selected_version = crate::runtime_fetch::read_manifest()?
+        .context("Runtime selection missing after installation")?.version;
+    emit("runtime.install", json!({"source":source,"version":selected_version,
+        "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
 }
 
 fn runtime_inventory() -> Result<Value> {

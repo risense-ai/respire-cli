@@ -1,0 +1,58 @@
+name: dev.3 in-place upgrade
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cli/src/autostart/**'
+      - 'cli/src/mcp.rs'
+      - 'cli/src/client2_host.rs'
+      - 'cli/src/runtime_fetch.rs'
+      - 'cli/src/runtime_shared.rs'
+      - 'scripts/test-dev3-in-place-upgrade.py'
+      - '.github/workflows/dev3-in-place-upgrade.yml'
+permissions:
+  contents: read
+jobs:
+  macos-upgrade:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Require native macOS arm64
+        run: test "$(uname -s)/$(uname -m)" = Darwin/arm64
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check CLI replacement and recovery response boundaries
+        run: >-
+          cargo test --locked -p respire --lib --
+          binary_installation_keeps_a_current_executable_without_sdk_libraries
+          login_recovery_failure_preserves_the_bound_runtime_diagnostic
+          guardian_readiness_is_bound_to_the_owned_launch --test-threads=1
+      - name: Build the standalone candidate CLI
+        run: cargo build --locked -p respire --bin rsrs
+      - name: Download the official dev.3 CLI and its metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v2.0.0-dev.3 --repo risense-ai/respire-cli \
+            --pattern rsrs-aarch64-apple-darwin \
+            --pattern cli-build-aarch64-apple-darwin.json --dir "$RUNNER_TEMP/dev3"
+          chmod +x "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin"
+      - name: Upgrade a running dev.3/dev.14 home without replacing its data
+        run: |
+          python scripts/test-dev3-in-place-upgrade.py \
+            --old-cli "$RUNNER_TEMP/dev3/rsrs-aarch64-apple-darwin" \
+            --old-metadata "$RUNNER_TEMP/dev3/cli-build-aarch64-apple-darwin.json" \
+            --candidate target/debug/rsrs --root "$RUNNER_TEMP/issue-285"
+      - name: Retain the credential-free acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: issue-285-macos-arm64
+          path: ${{ runner.temp }}/issue-285/upgrade-report.json
+          if-no-files-found: warn

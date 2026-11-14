@@ -57,6 +57,7 @@ fn receive_ready(child: &mut std::process::Child) -> Result<Value> {
     std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
     receiver.recv_timeout(Duration::from_secs(40))
         .with_context(|| format!("startup is uncertain for child {pid}; inspect before retry"))?
+        .with_context(|| format!("compatibility host child {pid} did not publish readiness; retain the original home and inspect this child before retry"))
 }
 
 fn publish_ready(ready: &Value) -> Result<()> {
@@ -358,7 +359,8 @@ pub(crate) fn serve() -> Result<()> {
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
     let ready = receiver.recv_timeout(Duration::from_secs(30))
-        .with_context(|| format!("Runtime readiness is uncertain for child {pid}; inspect before retry"))??;
+        .with_context(|| format!("Runtime readiness is uncertain for child {pid}; inspect before retry"))?
+        .with_context(|| format!("Runtime child {pid} did not publish readiness; retain the original home and inspect this child before retry"))?;
     let health: crate::net_rpc::Health = serde_json::from_value(ready)?;
     let (installation, profile) = respire_client_host::config::control_roots()?;
     anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
