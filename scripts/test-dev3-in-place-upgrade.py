@@ -152,7 +152,7 @@ def main():
             raise ValueError('expected CLI 2.0.0-dev.3')
         run(old, 'runtime', 'install')
         run(old, 'status')
-        run(old, 'keygen')
+        generated = run(old, 'keygen')
         run(old, 'runtime', 'start')
         if args.probe_runtime:
             probe = args.probe_runtime.resolve(strict=True)
@@ -204,70 +204,34 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
-        # Like security -A, permit apps only in this synthetic keychain; never read or replace secrets.
-        approver = root / 'approve-synthetic-keychain'
-        approval_source = r'''
-#include <Security/Security.h>
-#include <CoreFoundation/CoreFoundation.h>
-#include <stdio.h>
-#include <string.h>
-extern OSStatus SecKeychainItemSetAccessWithPassword(SecKeychainItemRef, SecAccessRef,
-                                                    UInt32, const void *);
-int main(int argc, char **argv) {
-    if (argc != 2) return 2;
-    char password[128];
-    if (!fgets(password, sizeof(password), stdin)) return 2;
-    size_t password_length = strcspn(password, "\n");
-    if (!password_length || password_length >= sizeof(password) - 1) return 2;
-    SecKeychainRef keychain = NULL;
-    SecKeychainSearchRef search = NULL;
-    SecAccessRef access = NULL;
-    OSStatus status = SecKeychainOpen(argv[1], &keychain);
-    if (!status) status = SecAccessCreate(CFSTR("issue-285 synthetic credentials"), NULL, &access);
-    CFArrayRef decrypt = NULL;
-    if (!status) status = SecAccessCopySelectedACLList(access, CSSM_ACL_AUTHORIZATION_DECRYPT, &decrypt);
-    if (!status && CFArrayGetCount(decrypt) == 0) status = errSecParam;
-    for (CFIndex i = 0; !status && i < CFArrayGetCount(decrypt); i++) {
-        SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(decrypt, i);
-        CFArrayRef apps = NULL;
-        CFStringRef description = NULL;
-        CSSM_ACL_KEYCHAIN_PROMPT_SELECTOR prompt;
-        status = SecACLCopySimpleContents(acl, &apps, &description, &prompt);
-        if (!status) {
-            prompt.flags &= ~CSSM_ACL_KEYCHAIN_PROMPT_REQUIRE_PASSPHRASE;
-            status = SecACLSetSimpleContents(acl, NULL, description, &prompt);
-        }
-        if (apps) CFRelease(apps);
-        if (description) CFRelease(description);
-    }
-    if (decrypt) CFRelease(decrypt);
-    if (!status) status = SecKeychainSearchCreateFromAttributes(keychain, kSecGenericPasswordItemClass,
-                                                               NULL, &search);
-    if (status) { fprintf(stderr, "fixture ACL setup: %d\n", (int)status); return 1; }
-    unsigned count = 0;
-    SecKeychainItemRef item = NULL;
-    while ((status = SecKeychainSearchCopyNext(search, &item)) == errSecSuccess) {
-        status = SecKeychainItemSetAccessWithPassword(item, access, (UInt32)password_length, password);
-        CFRelease(item);
-        if (status) break;
-        count++;
-    }
-    CFRelease(search);
-    CFRelease(access);
-    CFRelease(keychain);
-    if (status != errSecItemNotFound || count == 0) {
-        fprintf(stderr, "fixture ACL approval: %d, count: %u\n", (int)status, count);
-        return 1;
-    }
-    return 0;
-}
-'''
-        subprocess.run(['/usr/bin/clang', '-x', 'c', '-', '-framework', 'Security',
-                        '-framework', 'CoreFoundation', '-o', str(approver)],
-                       input=approval_source.encode(), env=env, check=True, capture_output=True, timeout=60)
-        subprocess.run([str(approver), keychain], input=(keychain_password + '\n').encode(),
-                       env=env, check=True, stdout=subprocess.DEVNULL, timeout=15)
-        report['checks'].append('synthetic native Keychain application access approved for the new Runtime')
+        # Keep the original keychain. A second synthetic keychain models prior authorization.
+        # Reuse only the secret that this fixture's official dev.3 keygen just returned.
+        secret = generated.get('summary', {}).get('super_password')
+        alias = json.loads(original_session).get('keyring_account')
+        if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
+            raise AssertionError('official keygen did not return the synthetic credential and alias')
+        authorized_keychain = str(keychains / 'authorized-upgrade.keychain-db')
+        for operation in [
+            ['create-keychain', '-p', keychain_password, authorized_keychain],
+            ['unlock-keychain', '-p', keychain_password, authorized_keychain],
+            ['set-keychain-settings', '-t', '3600', '-u', authorized_keychain],
+            ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
+             '-w', secret, authorized_keychain],
+            ['list-keychains', '-d', 'user', '-s', authorized_keychain, keychain],
+            ['default-keychain', '-d', 'user', '-s', authorized_keychain],
+        ]:
+            try:
+                approval = subprocess.run(['/usr/bin/security', *operation], env=env,
+                                          capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError('synthetic Keychain preparation timed out') from None
+            if approval.returncode:
+                raise RuntimeError('synthetic Keychain preparation failed: ' + operation[0])
+        del secret, generated
+        if run(old, 'show', memory_id)['details']['entry']['content'] != original_memory['content']:
+            raise AssertionError('original credential did not retain access to the original memory')
+        report['checks'].append('same synthetic credential works in a preauthorized native Keychain; original Keychain retained')
+        report['interactive_prompt_tested'] = False
         installed = run(candidate, 'runtime', 'install')['summary']
         if installed.get('restarted') is not True or digest(stable) != digest(candidate):
             raise AssertionError('upgrade did not refresh the CLI and restart the old owner')
@@ -276,10 +240,30 @@ int main(int argc, char **argv) {
         if session.read_bytes() != original_session:
             raise AssertionError('upgrade changed the original offline session')
         upgraded_health = health()
-        if upgraded_health.get('runtime_version') == '2.0.0-dev.14':
-            raise AssertionError('old Runtime still serves after upgrade')
+        expected_runtime = json.loads((Path(__file__).resolve().parents[1] / 'runtime-pin.json').read_text(encoding='utf-8'))['required']
+        if upgraded_health.get('runtime_version') != expected_runtime:
+            raise AssertionError('upgraded owner does not match the candidate CLI Runtime pin')
+        report['runtime_version'] = upgraded_health['runtime_version']
         report['checks'].append('in-place restart with original session, journal and old release retained')
         run(candidate, 'status')
+        run(candidate, 'runtime', 'authorize-keychain')
+        subprocess.run(['/usr/bin/security', 'lock-keychain', authorized_keychain],
+                       env=env, capture_output=True, check=True, timeout=15)
+        try:
+            started = time.monotonic()
+            denied = subprocess.run([str(candidate), '--json', 'status'], env=env,
+                                    capture_output=True, timeout=10)
+            failure = json.loads(denied.stdout)
+            if denied.returncode == 0 or 'Keychain' not in ' '.join(failure.get('errors', [])):
+                raise AssertionError('locked Keychain did not produce an actionable failure')
+            if journal_path.read_bytes() != journal_bytes or session.read_bytes() != original_session:
+                raise AssertionError('locked Keychain failure changed recovery state')
+            report['locked_keychain_failure_seconds'] = time.monotonic() - started
+        finally:
+            subprocess.run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password,
+                            authorized_keychain], env=env, capture_output=True, check=True, timeout=15)
+        run(candidate, 'status')
+        report['checks'].append('foreground authorization succeeds; locked Keychain fails promptly and unlock restores access')
         restored = run(candidate, 'show', memory_id)['details']['entry']
         if (restored['id'], restored['content']) != (original_memory['id'], original_memory['content']):
             raise AssertionError('pre-upgrade memory changed')

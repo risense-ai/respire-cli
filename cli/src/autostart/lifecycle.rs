@@ -1639,20 +1639,13 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             file,
             version,
             mirror,
-        } => install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref()),
+        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref()),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
             emit("runtime.clean", json!({"removed": removed}))
         }
-        RuntimeCommand::Update => {
-            let binary = crate::runtime_fetch::download_and_install(None, None)?;
-            let version = crate::runtime_fetch::read_manifest()?.context("Runtime selection missing after update")?.version;
-            emit(
-                "runtime.update",
-                json!({"version": version, "binary": binary}),
-            )
-        }
+        RuntimeCommand::Update => install_runtime("runtime.update", None, None, None),
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
@@ -1669,7 +1662,7 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
 
 /// `runtime install`: pinned download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
-fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
     let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
@@ -1715,7 +1708,7 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
     }
     let selected_version = crate::runtime_fetch::read_manifest()?
         .context("Runtime selection missing after installation")?.version;
-    emit("runtime.install", json!({"source":source,"version":selected_version,
+    emit(command, json!({"source":source,"version":selected_version,
         "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
 }
 
@@ -1726,8 +1719,10 @@ fn authorize_keychain() -> Result<()> {
     {
         let binary = crate::runtime_fetch::managed_runtime_path()?
             .context("install the compatible Runtime before authorizing Keychain access")?;
+        eprintln!("macOS Keychain: review {} and choose Always Allow for later background access.", binary.display());
         let mut child = std::process::Command::new(binary)
             .arg("--keychain-authorize-internal")
+            .env_remove("RSRS_RUNTIME_BOOT_TOKEN")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::inherit())

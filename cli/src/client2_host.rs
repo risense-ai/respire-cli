@@ -666,6 +666,10 @@ mod tests {
         let ready = json!({"startup_complete":true, "pid":123, "guardian_pid":456,
             "exe":executable, "installation_root":root, "bin":crate::VERSION, "port":15169});
         assert_eq!(guarded_host_pid(&ready, 456, &executable, &root, 15169)?, 123);
+        let denied = b"{\"startup_complete\":false,\"error\":\"Keychain authorization required\"}\n";
+        let error = read_ready(&denied[..]).err().context("negative readiness was accepted")?;
+        assert!(error.to_string().contains("Keychain authorization required"));
+        assert!(read_ready(&b"{\"startup_complete\":false}\n"[..]).is_err());
         for (key, value) in [("pid", json!(0)), ("pid", json!(456)),
             ("pid", json!(u64::MAX)), ("guardian_pid", json!(789)),
             ("startup_complete", json!(false)), ("bin", json!("foreign")),

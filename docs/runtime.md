@@ -32,9 +32,16 @@ Older combined-binary installations still require their explicit migration path.
 
 On macOS, review any Keychain prompt for the verified new Runtime path.
 “Allow Once” grants one access; recovery checks and startup can request access
-again. “Always Allow” permits later reads by that app. If startup is uncertain,
-inspect the reported child and pending prompts before retrying. Do not delete
-recovery records or regenerate keys to clear a Keychain prompt.
+again. “Always Allow” permits later reads by that app. Background serving and
+control processes fail when access requires interaction. In a terminal, run
+`rsrs runtime authorize-keychain`, review the installed Runtime path and grant
+persistent access, then retry the failed command. The authorization command
+stops after two minutes if no decision is made. Interactive installation asks
+for authorization before stopping the old owner. This reads the existing
+credential; it does not reset keys or remove recovery records. A denied or locked
+Keychain remains an error, and startup reports its cause instead of waiting for
+a background prompt. Never delete recovery records or regenerate keys to clear
+an authorization failure.
 
 The native macOS arm64 regression is `scripts/test-dev3-in-place-upgrade.py`.
 It uses the official CLI dev.3 to create a Runtime dev.14 home with a committed
@@ -42,9 +49,14 @@ native keygen receipt, writes a memory, and upgrades the running original home.
 It checks the stable CLI, retained session/journal/old release, existing memory,
 new writes, recall and repeated installation. It requires an empty fixture
 directory and a disposable GitHub Actions runner, because it changes that
-account's native Keychain defaults. Headless CI explicitly authorizes the new
-Runtime in its synthetic Keychain; this does not test interactive prompt
-approval. Never run it under a user's regular account or publish the complete fixture. The matching workflow retains only a report
+account's native Keychain defaults. Headless CI retains the original Keychain
+and reuses the exact secret returned by that fixture's dev.3 keygen in a second,
+preauthorized synthetic Keychain. It verifies that the old memory remains readable
+before upgrading. This models existing authorization; it does not test changing
+the original item's ACL or interactive prompt approval. The `--probe-runtime`
+mode separately checks unauthorized startup with the original restricted
+Keychain and unchanged recovery files. Never run it under a user's regular
+account or publish the complete fixture. The matching workflow retains only a report
 without credential material. Passing this fixture does not establish that an
 unavailable user-specific failing home has been repaired.
 
