@@ -1808,7 +1808,7 @@ fn verify_install_host() -> Result<()> {
         .map_err(anyhow::Error::msg)
         .context(LegacyRuntimeMigrationRequired)?;
     if different {
-        // Official dev.3 and dev.6 cli-build metadata; these binaries contain no business Runtime.
+        // Official dev.3/dev.6 metadata and sealed dev.7 artifacts; these are frontend-only binaries.
         // shortcut: extend this reviewed predecessor set when publishing a later CLI upgrade.
         let approved = [
             "e893ed0df7dc9a18d690c81af2537df85a907c7c033b61c060b7b1ae1a0ef1c1",
@@ -1823,6 +1823,13 @@ fn verify_install_host() -> Result<()> {
             "92f3fdc52031ca7050305c82be0f311a5927a98796a9661159725ac143c203bd",
             "5a597fd2344846b521b82921fe6e1832bd73d8108c164dafb0c5113042c67a42",
             "5cba9ee34c744f646386d36cf38de5d4959b2ec03edba06f5fc88fdff597b660",
+            "64d306ea40a5fd49152444b0f81514eb195ef7c9e1d59527058b8545ac241983",
+            "25db4d0583b8d160776052f32a7321ae21cfd10ee227810d5916ec0d15edcf47",
+            "4b6a701479bf3e1186834154791795e4931cfb4bd2d5021315321c85590bcfb6",
+            "9ef1071d5b24966b760e497010d60c426f2bf40495b82775a157728ba69180da",
+            "9e77894484ffd40725036e3fc9c51ad5db22b9c05817c8b83af183ee39c478bf",
+            "78e228184f6adad1b6d2958ca0e997505d1195287e8ba62356280bd080c2122b",
+            "cb54a10918123b91296a7b40424668205572c1ceb3e03c4c4ab7a1947305d6d0",
         ];
         let previous = sha256_file(&legacy).context(LegacyRuntimeMigrationRequired)?;
         anyhow::ensure!(approved.contains(&previous.as_str()), LegacyRuntimeMigrationRequired);
