@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn legacy_rpc_identity_is_supplied_and_projected_by_the_host() -> Result<()> {
         let health: crate::net_rpc::Health = serde_json::from_value(json!({
-            "server":"respire","v":1,"pid":42,"account_id":"account",
+            "server":"respire","bin":"fixture","v":1,"pid":42,"account_id":"account",
             "instance_id":"instance","generation":7
         }))?;
         let raw = serde_json::to_vec(&json!({"v":1,"id":"original","method":"cli.exec","args":["--json","status"]}))?;
