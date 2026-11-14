@@ -89,6 +89,24 @@ def main():
             return json.load(response)
 
     try:
+        # Match the existing release sweep: native credentials in this disposable HOME.
+        (root / 'Library' / 'Preferences').mkdir(parents=True)
+        keychains = root / 'Library' / 'Keychains'
+        keychains.mkdir(parents=True)
+        keychain = str(keychains / 'upgrade.keychain-db')
+        for operation in [
+            ['create-keychain', '-p', '', keychain],
+            ['list-keychains', '-d', 'user', '-s', keychain],
+            ['default-keychain', '-d', 'user', '-s', keychain],
+            ['unlock-keychain', '-p', '', keychain],
+            ['set-keychain-settings', '-t', '3600', '-u', keychain],
+        ]:
+            subprocess.run(['/usr/bin/security', *operation], env=env, check=True,
+                           capture_output=True, timeout=15)
+        selected = subprocess.check_output(
+            ['/usr/bin/security', 'default-keychain', '-d', 'user'], env=env, timeout=15)
+        if selected.decode().strip().strip('"') != keychain:
+            raise AssertionError('isolated native Keychain selection changed')
         version = subprocess.check_output([str(old), '--version'], env=env, timeout=15)
         if version.strip() != b'rsrs 2.0.0-dev.3':
             raise ValueError('expected CLI 2.0.0-dev.3')
