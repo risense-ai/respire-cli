@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "artifactLayout": "cli-frontend-v2",
-  "cliVersion": "2.0.0-dev.7",
+  "cliVersion": "2.0.0-dev.8",
   "binaryName": "rsrs",
   "commandAliases": [],
   "npmScope": "rsrs-cli",
