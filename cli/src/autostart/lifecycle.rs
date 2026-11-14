@@ -2706,9 +2706,9 @@ mod tests {
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
-        anyhow::ensure!(install_runtime(Some(&runtime), None, None).is_err());
-        anyhow::ensure!(install_runtime(None, Some(&version), None).is_err());
-        anyhow::ensure!(install_runtime(Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", None, Some(&version), None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
 
         // Recovery must revalidate the registered owner again at the cleanup boundary.
         {
