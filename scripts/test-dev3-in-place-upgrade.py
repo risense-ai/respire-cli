@@ -131,11 +131,12 @@ def main():
         keychains = root / 'Library' / 'Keychains'
         keychains.mkdir(parents=True)
         keychain = str(keychains / 'upgrade.keychain-db')
+        keychain_password = 'issue-285-synthetic-only'
         for operation in [
-            ['create-keychain', '-p', '', keychain],
+            ['create-keychain', '-p', keychain_password, keychain],
             ['list-keychains', '-d', 'user', '-s', keychain],
             ['default-keychain', '-d', 'user', '-s', keychain],
-            ['unlock-keychain', '-p', '', keychain],
+            ['unlock-keychain', '-p', keychain_password, keychain],
             ['set-keychain-settings', '-t', '3600', '-u', keychain],
         ]:
             subprocess.run(['/usr/bin/security', *operation], env=env, check=True,
@@ -180,10 +181,15 @@ def main():
 #include <Security/Security.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <stdio.h>
+#include <string.h>
 extern OSStatus SecKeychainItemSetAccessWithPassword(SecKeychainItemRef, SecAccessRef,
                                                     UInt32, const void *);
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
+    char password[128];
+    if (!fgets(password, sizeof(password), stdin)) return 2;
+    size_t password_length = strcspn(password, "\n");
+    if (!password_length || password_length >= sizeof(password) - 1) return 2;
     SecKeychainRef keychain = NULL;
     SecKeychainSearchRef search = NULL;
     SecAccessRef access = NULL;
@@ -212,7 +218,7 @@ int main(int argc, char **argv) {
     unsigned count = 0;
     SecKeychainItemRef item = NULL;
     while ((status = SecKeychainSearchCopyNext(search, &item)) == errSecSuccess) {
-        status = SecKeychainItemSetAccessWithPassword(item, access, 0, "");
+        status = SecKeychainItemSetAccessWithPassword(item, access, (UInt32)password_length, password);
         CFRelease(item);
         if (status) break;
         count++;
@@ -230,8 +236,8 @@ int main(int argc, char **argv) {
         subprocess.run(['/usr/bin/clang', '-x', 'c', '-', '-framework', 'Security',
                         '-framework', 'CoreFoundation', '-o', str(approver)],
                        input=approval_source.encode(), env=env, check=True, capture_output=True, timeout=60)
-        subprocess.run([str(approver), keychain], env=env, check=True,
-                       stdout=subprocess.DEVNULL, timeout=15)
+        subprocess.run([str(approver), keychain], input=(keychain_password + '\n').encode(),
+                       env=env, check=True, stdout=subprocess.DEVNULL, timeout=15)
         report['checks'].append('synthetic native Keychain application access approved for the new Runtime')
         installed = run(candidate, 'runtime', 'install')['summary']
         if installed.get('restarted') is not True or digest(stable) != digest(candidate):
