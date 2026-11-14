@@ -1238,6 +1238,8 @@ function Read-OfflineHttp([string]$Path, $Body = $null) {
     if ($Path -notin @('/api/health','/api/rpc')) { throw 'Offline oracle permits only fixed local health/RPC paths' }
     $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:' + $binding.rpc_port + $Path)
     $request.Proxy = $null; $request.Timeout = 10000; $request.ReadWriteTimeout = 10000
+    # Match Client2's health request: verify the Runtime actor behind the CLI compatibility host.
+    if ($Path -eq '/api/health') { $request.Headers['X-Respire-Health'] = 'runtime-v1' }
     if ($null -ne $Body) {
         $request.Method = 'POST'; $request.ContentType = 'application/json'
         $bytes = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Compress -Depth 6))
