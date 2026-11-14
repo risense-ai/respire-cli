@@ -185,7 +185,7 @@ test('same-run scoped tarball reuse is explicit current-main only; historical, p
   for(const owner of [repository,'fork/repo']) for(const event of ['workflow_dispatch','push']) for(const ref of ['refs/heads/main','refs/heads/feature'])
     for(const exact of [true,false]) for(const prepared of ['', '100']) for(const repair12 of [false,true])
     for(const repair14 of [false,true]) for(const reuse of [false,true]) {
-      const github={repository:owner,event_name:event,ref,sha:'a'.repeat(40)},needs={plan:{outputs:{sha:(exact?'a':'b').repeat(40)}}};
+      const github={repository:owner,event_name:event,ref,sha:'a'.repeat(40),run_attempt:'1'},needs={plan:{outputs:{sha:(exact?'a':'b').repeat(40)}}};
       const inputs={prepared_run:prepared,repair_dev12:repair12,repair_dev14:repair14,reuse_dev12_validation:reuse};
       assert.equal(selected(github,needs,inputs),owner===repository&&event==='workflow_dispatch'&&ref==='refs/heads/main'&&exact&&!prepared&&!repair12&&!repair14&&!reuse);
     }
