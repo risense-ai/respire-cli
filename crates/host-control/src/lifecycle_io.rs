@@ -159,7 +159,12 @@ pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -
                 "Runtime process changed during account startup verification"
             );
             image.revalidate()?;
-            anyhow::ensure!(unlock_if_needed(&health)?, "host credentials are required to unlock the account Runtime");
+            if !health.store_ready {
+                if health.credential_state != "required" {
+                    continue;
+                }
+                anyhow::ensure!(unlock_if_needed(&health)?, "host credentials are required to unlock the account Runtime");
+            }
             return Ok(());
         }
         anyhow::bail!("owned account Runtime did not become ready; query the original operation")

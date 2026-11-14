@@ -825,6 +825,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     }
     #[cfg(feature = "client2-host-prototype")]
     if current.is_none()
+        && !respire::env::var("RSRS_CLIENT2_HOST").is_ok_and(|value| value == "1")
         && crate::autostart::lifecycle_boot_token().is_none()
         && !respire_client_host::paths::main_data_dir()
             .join("runtime/autostart/registration.json")
