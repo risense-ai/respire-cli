@@ -157,8 +157,8 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         crate::autostart::restart_stage("restart_start");
         ensure_daemon_locked()?;
     }
-    crate::net_rpc::health()?;
-    if !respire_client_host::settings::off_mode()? {
+    let health = crate::net_rpc::health()?;
+    if !respire_client_host::settings::off_mode()? && health.credential_state != "required" {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
     }
     maintenance.finish()?;
