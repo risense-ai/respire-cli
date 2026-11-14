@@ -1232,7 +1232,7 @@ jobs:
       REPAIR_VERSION: ${{ inputs.repair_dev14 && '1.0.11-dev.14' || '1.0.11-dev.12' }}
       REPAIR_SHA: ${{ inputs.repair_dev14 && 'fd0e5463f8c59f304ff17d622efb1f6221f9b04c' || 'd8314480e10a27767544f781083e35c8e85657f0' }}
       REPAIR_RUN: ${{ inputs.repair_dev14 && '37728949557' || '37716872717' }}
-      REUSE_VALIDATED_PACKS: ${{ github.repository == 'risense-ai/respire-cli' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.reuse_dev12_validation) }}
+      REUSE_VALIDATED_PACKS: ${{ github.run_attempt == '1' && github.repository == 'risense-ai/respire-cli' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.reuse_dev12_validation) }}
     permissions:
       contents: write
       actions: write
