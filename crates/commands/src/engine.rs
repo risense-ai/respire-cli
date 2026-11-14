@@ -4627,6 +4627,22 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
                     ))?;
                     Ok(())
                 }
+                ModelAction::InstallGranite { model, mirror } => {
+                    let mirror_env = crate::model_install::mirror_from_env();
+                    let resolved = mirror.as_deref().or(mirror_env.as_deref());
+                    let report = crate::model_granite::install_granite(model, resolved)?;
+                    emit_result(ResultEnvelope::new(
+                        "model install-granite",
+                        OutputStatus::Ok,
+                        serde_json::json!({"dir":report.dir,"profile":report.profile,"model":report.model,"skipped":report.skipped,"activated":false}),
+                        vec![OutputItem::new(
+                            "model",
+                            OutputStatus::Ok,
+                            "Granite profile ready; it is not activated until you run rsrs model switch",
+                        ),
+                    ))?;
+                    Ok(())
+                }
                 ModelAction::Activate { model } => {
                     use crate::model_progress;
                     let _operation = model_progress::Operation::try_begin_background_index()?

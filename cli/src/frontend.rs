@@ -1760,6 +1760,35 @@ fn run(args: Cli) -> Result<()> {
         result.details = serde_json::to_value(&assets)?;
         return emit_result(result);
     }
+    if let Some(Command::Model {
+        action: ModelAction::InstallGranite { model, mirror },
+    }) = args.command.as_ref()
+    {
+        set_json_mode(
+            args.json
+                || respire_client_host::env::var("RSRS_JSON")
+                    .is_ok_and(|value| value == "1" || value == "true"),
+        );
+        let _task = respire_commands::model_progress::TaskScope::new(args.model_task_id.clone());
+        let report = respire_commands::model_granite::install_granite(model, mirror.as_deref())?;
+        let result = ResultEnvelope::new(
+            "model install-granite",
+            OutputStatus::Ok,
+            serde_json::json!({
+                "dir": report.dir,
+                "profile": report.profile,
+                "model": model,
+                "skipped": report.skipped,
+                "activated": false,
+            }),
+            vec![OutputItem::new(
+                "model",
+                OutputStatus::Ok,
+                "Granite profile ready; it is not activated until you run rsrs model switch",
+            )],
+        );
+        return emit_result(result);
+    }
     // Business RPC retains Runtime's post-ownership snapshot gate and bootstrap.
     // Only local host writes need this offline check before they change files.
     let host_snapshot_write = match args.command.as_ref() {

@@ -65,6 +65,15 @@ pub enum ModelAction {
         #[arg(long, value_parser = ["npu", "gpu", "cpu"])]
         for_engine: Option<String>,
     },
+    /// Download or verify a pinned Granite embedding profile without activating it.
+    #[command(name = "install-granite")]
+    InstallGranite {
+        /// 311m (quantized, default) or 97m (non-quantized).
+        #[arg(long, value_parser = ["311m", "97m"], default_value = "311m")]
+        model: String,
+        #[arg(long)]
+        mirror: Option<String>,
+    },
     /// Build a resumable index generation and activate it after complete validation.
     Activate {
         #[arg(value_parser = ["m3"])]
