@@ -509,7 +509,7 @@ async function packPublished(spec, targets, source, manifestHash) {
     const core = name === manifest.npmScope || frontendLayout(manifest) ? null : JSON.parse(readFileSync(join(directory,'bin/core-runtime.json')));
     const packed = packPackage(resolve(directory),resolve('npm/release-packages'));
     validatePublishedPackage(pkg,manifest,name,core,new Set(packed.files.map(f => f.path)));
-    verifyPackFile(packed.tarballPath,packed,resolve(directory));
+    verifyPackFile(packed.tarballPath,{...packed,sha256:sha256(readFileSync(packed.tarballPath))},resolve(directory));
     if (name !== manifest.npmScope) {
       const target = manifest.targets.find(t => t.pkg === name).triple;
       const expected = spec.cli.assets.find(a => a.name === publishedAssetNames('cli',target)[1]);
