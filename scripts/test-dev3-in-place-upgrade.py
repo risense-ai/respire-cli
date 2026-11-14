@@ -297,7 +297,8 @@ def main():
         restored = run(candidate, 'show', memory_id)['details']['entry']
         if (restored['id'], restored['content']) != (original_memory['id'], original_memory['content']):
             raise AssertionError('pre-upgrade memory changed')
-        written = run(candidate, 'remember', 'Issue 285 post-upgrade write', '--force')['summary']['id']
+        written = run(candidate, 'remember', 'Issue 285 post-upgrade write',
+                      '--importance', 'important', '--force')['summary']['id']
         after_write = run(candidate, 'show', written)['details']['entry']
         if after_write['id'] != written or after_write['content'] != 'Issue 285 post-upgrade write':
             raise AssertionError('post-upgrade write did not read back unchanged')
