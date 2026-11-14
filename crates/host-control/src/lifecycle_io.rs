@@ -115,8 +115,8 @@ fn start_matches(birth: &str, observed: &str) -> bool {
     !birth.is_empty() && observed.strip_prefix(prefix) == Some(birth)
 }
 
-/// A successful return proves this owned child's identity and ready store. The
-/// maintenance owner separately verifies the account receipt before completion.
+/// A successful return proves this owned child's identity. The maintenance owner
+/// requires an open store for committed targets, but can restore an originally locked owner.
 pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -> Result<()> {
     anyhow::ensure!(
         image.port() == net_rpc::rpc_port(),
@@ -163,7 +163,7 @@ pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -
                 if health.credential_state != "required" {
                     continue;
                 }
-                anyhow::ensure!(unlock_if_needed(&health)?, "host credentials are required to unlock the account Runtime");
+                unlock_if_needed(&health)?;
             }
             return Ok(());
         }
