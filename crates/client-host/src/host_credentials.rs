@@ -144,8 +144,10 @@ pub fn unlock_runtime(
     };
     let session: serde_json::Value = serde_json::from_slice(&bytes)?;
     let (super_password, login_password) = read_session_credentials(&session)?;
-    if session["vault_version"].as_u64().unwrap_or(1) >= 2 && super_password.is_none()
-        && session["secret_key"].as_str().is_none() && session["super"].as_str().is_none()
+    let version = session["vault_version"].as_u64().unwrap_or(1);
+    if (version < 2 && login_password.is_none())
+        || (version >= 2 && super_password.is_none()
+            && session["secret_key"].as_str().is_none() && session["super"].as_str().is_none())
     {
         return Ok(false);
     }
