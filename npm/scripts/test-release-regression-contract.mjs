@@ -385,7 +385,7 @@ test('the actual critical target waiter binds unique successful producer, source
 function publishedFixture() {
   const part = kind => ({repository: `risense-ai/respire-${kind}`, release_id: kind === 'cli' ? 41 : 42,
     version: '1.0.21-dev.5', source_sha: (kind === 'cli' ? 'a' : 'b').repeat(40), producer:{run_id:91,run_attempt:2},
-    assets: (kind === 'cli' ? manifest.targets.map(t=>t.triple) : Object.keys(JSON.parse(readFileSync(new URL('../../runtime-tests-source.json',import.meta.url))).targets)).flatMap((target, index) => publishedAssetNames(kind, target).map((name, n) =>
+    assets: manifest.targets.map(t=>t.triple).flatMap((target, index) => publishedAssetNames(kind, target).map((name, n) =>
       ({id: index * 3 + n + 1, name, size: 12, sha256: 'c'.repeat(64)})))});
   const spec = {schema: 2, cli: part('cli'), runtime: part('runtime')};
   const text = JSON.stringify(spec), hash = createHash('sha256').update(text).digest('hex');
