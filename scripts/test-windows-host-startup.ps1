@@ -141,8 +141,8 @@ try {
     Copy-Item -LiteralPath $nativeExecutable -Destination $stableCli
     if ((Get-FileHash -LiteralPath $stableCli -Algorithm SHA256).Hash -cne
         (Get-FileHash -LiteralPath $nativeExecutable -Algorithm SHA256).Hash) { throw 'Stable fixture CLI bytes differ' }
-    $managedReceipt = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'runtime.json') | ConvertFrom-Json
-    $fixtureRuntime = (Get-Item -LiteralPath (Join-Path $profileRoot ('runtime/' + $managedReceipt.version + '/rsrs-runtime.exe'))).FullName
+    $managedReceipt = Get-Content -Raw -LiteralPath (Join-Path $profileRoot 'bin/runtime.json') | ConvertFrom-Json
+    $fixtureRuntime = (Get-Item -LiteralPath (Join-Path $profileRoot ('bin/runtime/' + $managedReceipt.version + '/rsrs-runtime.exe'))).FullName
     [IO.File]::WriteAllText((Join-Path $profileRoot 'client.json'),
         (@{data_dir = $selectedProfile; service_mode = 'off'} | ConvertTo-Json -Compress), $utf8)
     $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
@@ -221,7 +221,7 @@ try {
                 task_state = [string](FindFixtureTask).State; last_task_result = [long]$taskInfo.LastTaskResult;
                 task_result_parsed = ($null -ne $taskEnvelope); task_error_code = $taskErrorCode;
                 stable_cli_exists = (Test-Path -LiteralPath $stableCli -PathType Leaf);
-                managed_receipt_exists = (Test-Path -LiteralPath (Join-Path $profileRoot 'runtime.json') -PathType Leaf)} | ConvertTo-Json -Compress)
+                managed_receipt_exists = (Test-Path -LiteralPath (Join-Path $profileRoot 'bin/runtime.json') -PathType Leaf)} | ConvertTo-Json -Compress)
         } catch { Write-Warning 'Startup task diagnostics unavailable; original timeout retained' }
         throw 'Scheduled host startup did not become ready'
     }

@@ -6,8 +6,8 @@
 //!
 //! * Discovery order (see [`resolve_runtime_bin`]): explicit `RSRS_RUNTIME_BIN`
 //!   override, the managed directory (verified against `runtime.json`), the
-//!   portable layout next to the CLI binary, the legacy combined-binary stable
-//!   location, and finally an automatic pinned download.
+//!   legacy combined-binary stable location, and finally an automatic pinned
+//!   download. Portable images require the explicit override.
 //! * Downloads come from the official release assets with a gh-proxy mirror
 //!   fallback (same rule as client2 `mirrorURL` and the model installer's
 //!   `RSRS_MIRROR` override). Archives are sha256-verified against the released
@@ -18,8 +18,8 @@
 //!   with the full triple (`rsrs-runtime-<triple>(.exe)`); install placement
 //!   renames it to the bare [`RUNTIME_BINARY`] without touching its bytes.
 //! * Concurrent first launches (CLI and client2) serialize on the
-//!   `<installation_root>/runtime/.install.lock` file lock and the switch into
-//!   `<installation_root>/runtime/<version>/` is atomic; the previous version
+//!   `<installation_root>/bin/runtime/.install.lock` native file lock and the switch into
+//!   `<installation_root>/bin/runtime/<version>/` is atomic; the previous version
 //!   directory is kept as a rollback point.
 //!
 //! `runtime-pin.json` (repository root, embedded at build time) selects the
@@ -64,7 +64,7 @@ pub const RUNTIME_BINARY: &str = if cfg!(windows) {
 };
 /// Binary name of the legacy combined CLI+runtime layout.
 pub const LEGACY_COMBINED_BINARY: &str = if cfg!(windows) { "rsrs.exe" } else { "rsrs" };
-/// CLI managed-install manifest, next to `<installation_root>/runtime/`.
+/// Shared managed-install manifest, next to `<installation_root>/bin/runtime/`.
 pub const MANIFEST_FILE: &str = "runtime.json";
 /// Per-release integrity manifest shipped inside the archive.
 pub const CORE_MANIFEST_FILE: &str = "core-runtime.json";
@@ -86,14 +86,13 @@ pub fn release_binary_name(triple: &str) -> String {
 ///
 /// Note: client2 maps darwin-amd64 releases to the obfuscated asset triple
 /// `x86_64-apple-darwin` (a legacy name scramble kept for asset-name
-/// compatibility with older clients). That triple is deliberately not part of
-/// this list constant; the host selection lives in [`release_triple`], which
-/// returns it for `x86_64` Apple platforms so both managers consume the same
-/// asset name.
+/// compatibility with older clients). Host selection and explicit overrides
+/// use that same asset name for `x86_64` Apple platforms.
 pub const TRIPLES: &[&str] = &[
     "x86_64-pc-windows-msvc",
     "aarch64-pc-windows-msvc",
     "aarch64-apple-darwin",
+    DARWIN_AMD64_RELEASE_TRIPLE,
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
     "x86_64-unknown-linux-musl",
@@ -205,15 +204,17 @@ fn semver_cmp(ours: &str, theirs: &str) -> std::cmp::Ordering {
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (Some(a), Some(b)) => {
-            // Numeric identifiers compare numerically; None ranks below any
-            // number (the semver numeric-below-alphanumeric rule); two
-            // alphanumeric identifiers compare lexically via Option<u64>.
-            let rank = |id: &str| id.parse::<u64>().ok();
-            let left = a.split('.').map(rank).collect::<Vec<_>>();
-            let right = b.split('.').map(rank).collect::<Vec<_>>();
+            let left = a.split('.').collect::<Vec<_>>();
+            let right = b.split('.').collect::<Vec<_>>();
             for (x, y) in left.iter().zip(right.iter()) {
-                if x != y {
-                    return x.cmp(y);
+                let ordering = match (x.parse::<u64>(), y.parse::<u64>()) {
+                    (Ok(x), Ok(y)) => x.cmp(&y),
+                    (Ok(_), Err(_)) => std::cmp::Ordering::Less,
+                    (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
+                    (Err(_), Err(_)) => x.cmp(y),
+                };
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
                 }
             }
             left.len().cmp(&right.len())
@@ -331,17 +332,12 @@ pub fn installation_root() -> PathBuf {
     respire_client_host::paths::main_data_dir()
 }
 
-/// Client2 chooses the shared bin layout; release proofs are verified normally.
-pub(crate) fn client2_managed() -> bool {
-    respire_client_host::env::var("RSRS_CLIENT2_HOST").is_ok_and(|value| value == "1")
-}
-
-/// Managed runtime directory, selected by the owning host.
+/// Managed runtime directory: `<installation_root>/bin/runtime/`.
 pub fn runtime_dir() -> PathBuf {
     if let Some(selected) = crate::embedding::selection() {
         return selected.runtime_dir.clone();
     }
-    installation_root().join("runtime")
+    installation_root().join("bin").join("runtime")
 }
 
 /// Shared manifest read and written by both the CLI and client2.
@@ -349,10 +345,10 @@ pub fn manifest_path() -> PathBuf {
     if let Some(selected) = crate::embedding::selection() {
         return selected.manifest_path.clone();
     }
-    installation_root().join(MANIFEST_FILE)
+    installation_root().join("bin").join(MANIFEST_FILE)
 }
 
-/// Installed version directory: `<installation_root>/runtime/<version>/`.
+/// Installed version directory: `<installation_root>/bin/runtime/<version>/`.
 pub fn version_dir(version: &str) -> PathBuf {
     runtime_dir().join(version)
 }
@@ -362,7 +358,7 @@ pub fn managed_binary_path(version: &str) -> PathBuf {
     version_dir(version).join(RUNTIME_BINARY)
 }
 
-/// CLI version selection in `<installation_root>/runtime.json`. Existing
+/// CLI version selection in `<installation_root>/bin/runtime.json`. Existing
 /// version/hash fields remain readable; reuse also requires the release proof.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ManagedManifest {
@@ -530,6 +526,34 @@ fn validate_installed(manifest: &ManagedManifest) -> Result<PathBuf> {
     .context(ManagedRuntimeRepairRequired)
 }
 
+/// A migrated owner may still be draining from its authenticated legacy image.
+pub(crate) fn verified_migrated_image(image: &str) -> Result<Option<PathBuf>> {
+    let Some(version) = Path::new(image).parent().and_then(Path::file_name).and_then(|name| name.to_str()) else {
+        return Ok(None);
+    };
+    if !valid_version(version) {
+        return Ok(None);
+    }
+    let directory = installation_root().join("runtime").join(version);
+    if !crate::mcp::exe_matches_dest(image, &directory.join(RUNTIME_BINARY)) {
+        return Ok(None);
+    }
+    let receipt = runtime_dir().join(".receipts").join(format!("{version}.json"));
+    let info = match fs::symlink_metadata(&receipt) {
+        Ok(info) => info,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(info.is_file() && !info.file_type().is_symlink()
+        && info.len() <= MAX_MANAGED_MANIFEST_BYTES, "invalid migrated Runtime receipt");
+    let manifest: ManagedManifest = serde_json::from_slice(&fs::read(receipt)?)?;
+    anyhow::ensure!(manifest.version == version, "migrated Runtime receipt version mismatch");
+    let triple = release_triple()?;
+    let metadata = manifest.bound_metadata(&triple)?;
+    metadata.verify_files(&directory)?;
+    Ok(Some(verify_stage(&directory, RUNTIME_BINARY, &triple, &manifest.sha256)?))
+}
+
 /// The managed binary the running CLI should currently use, if any. Used by
 /// lifecycle checks to compare a live runtime's reported executable path.
 pub fn managed_runtime_path() -> Result<Option<PathBuf>> {
@@ -537,6 +561,24 @@ pub fn managed_runtime_path() -> Result<Option<PathBuf>> {
         Some(manifest) => Ok(Some(validate_installed(&manifest)?)),
         None => Ok(None),
     }
+}
+
+/// Read-only, release-proof-bound capability check before offline keygen admission.
+/// Embeddings without authenticated capability metadata deliberately fail closed.
+pub(crate) fn require_offline_keygen_handoff() -> Result<(PathBuf, String)> {
+    let manifest = read_manifest()?.context("offline_keygen_handoff_unsupported: installed Runtime required")?;
+    let binary = validate_installed(&manifest)?.canonicalize()?;
+    let metadata = manifest.bound_metadata(&release_triple()?)
+        .context("offline_keygen_handoff_unsupported: authenticated capability metadata required")?;
+    require_handoff_capability(&metadata.capabilities)?;
+    anyhow::ensure!(version_in_accept(&manifest.version), "offline_keygen_handoff_unsupported: Runtime incompatible");
+    Ok((binary, manifest.sha256))
+}
+
+fn require_handoff_capability(capabilities: &BTreeMap<String, String>) -> Result<()> {
+    anyhow::ensure!(capabilities.get("offline_keygen_handoff").map(String::as_str) == Some("1"),
+        "offline_keygen_handoff_unsupported: upgrade Runtime before generating local keys");
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -559,8 +601,8 @@ pub enum ResolvedRuntime {
 ///
 /// Order: `RSRS_RUNTIME_BIN` (explicit override, no integrity check), the
 /// managed directory (version within the accept range plus binary sha256
-/// verified), the portable layout next to this CLI binary, the legacy combined
-/// stable location, and finally [`download_and_install`].
+/// verified), the legacy combined stable location, and finally
+/// [`download_and_install`]. Portable images require the explicit override.
 pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
     if let Some(selected) = crate::embedding::selection() {
         return Ok(ResolvedRuntime::Ready(selected.verify()?.path().to_path_buf()));
@@ -574,18 +616,11 @@ pub fn resolve_runtime_bin() -> Result<ResolvedRuntime> {
         anyhow::ensure!(explicit.is_file(), "RSRS_RUNTIME_BIN does not name a file");
         return Ok(ResolvedRuntime::Ready(explicit));
     }
+    shared::migrate_legacy()?;
     if let Some(manifest) = read_manifest().context(ManagedRuntimeRepairRequired)? {
         let binary = validate_installed(&manifest)?;
         if version_in_accept(&manifest.version) {
             return Ok(ResolvedRuntime::Ready(binary));
-        }
-    }
-    if let Ok(self_exe) = std::env::current_exe() {
-        if let Some(portable) = self_exe.parent() {
-            let candidate = portable.join(RUNTIME_BINARY);
-            if candidate.is_file() {
-                return Ok(ResolvedRuntime::Ready(candidate));
-            }
         }
     }
     let legacy = respire_client_host::paths::bin_dir().join(LEGACY_COMBINED_BINARY);
@@ -892,6 +927,9 @@ impl BuildMetadata {
             } else {
                 file.path.as_str()
             };
+            if file.path.starts_with("core-notices/") && !stage.join(name).try_exists()? {
+                continue;
+            }
             expected.insert(stage.join(name));
             let path = regular_install_file(stage, name)?;
             let metadata = fs::symlink_metadata(&path)
@@ -1037,13 +1075,124 @@ fn download_agent(timeouts: DownloadTimeouts) -> ureq::Agent {
         .build()
 }
 
+#[derive(Deserialize)]
+struct PublicRelease {
+    tag_name: String,
+    draft: bool,
+    assets: Vec<PublicAsset>,
+}
+
+#[derive(Deserialize)]
+struct PublicAsset {
+    id: u64,
+    name: String,
+    size: u64,
+    state: String,
+    digest: String,
+}
+
+fn official_asset_identity(url: &str) -> Option<(&str, &str)> {
+    let path =
+        url.strip_prefix("https://github.com/risense-ai/respire-runtime/releases/download/v")?;
+    let (version, name) = path.split_once('/')?;
+    (valid_version(version) && safe_metadata_path(name) && !name.contains(['/', '?', '#', '%']))
+        .then_some((version, name))
+}
+
+fn public_asset(
+    release: PublicRelease,
+    version: &str,
+    name: &str,
+    limit: u64,
+) -> Result<PublicAsset> {
+    anyhow::ensure!(
+        !release.draft && release.tag_name == format!("v{version}"),
+        "invalid official Runtime release identity"
+    );
+    let mut matches = release
+        .assets
+        .into_iter()
+        .filter(|asset| asset.name == name);
+    let asset = matches
+        .next()
+        .context("official Runtime asset is missing")?;
+    anyhow::ensure!(
+        matches.next().is_none()
+            && asset.id > 0
+            && asset.size > 0
+            && asset.size <= limit
+            && asset.state == "uploaded"
+            && asset
+                .digest
+                .strip_prefix("sha256:")
+                .is_some_and(valid_sha256),
+        "invalid or ambiguous official Runtime asset identity"
+    );
+    Ok(asset)
+}
+
+// Only the official browser route's explicit transient HTTP failures use the
+// public API for the same asset. TLS, transport and mirror failures stay errors.
+fn release_response(
+    url: &str,
+    limit: u64,
+    timeout: Option<Duration>,
+) -> Result<(ureq::Response, Option<PublicAsset>)> {
+    let request = download_agent(DownloadTimeouts::default())
+        .get(url)
+        .set("Accept-Encoding", "identity");
+    let request = match timeout {
+        Some(timeout) => request.timeout(timeout),
+        None => request,
+    };
+    match request.call() {
+        Ok(response) => Ok((response, None)),
+        Err(error) => {
+            if !matches!(&error, ureq::Error::Status(429 | 502 | 503 | 504, _)) {
+                return Err(error.into());
+            }
+            let Some((version, name)) = official_asset_identity(url) else {
+                return Err(error.into());
+            };
+            let api = format!("https://api.github.com/repos/{RUNTIME_REPO}/releases");
+            let response = download_agent(DownloadTimeouts::default())
+                .get(&format!("{api}/tags/v{version}"))
+                .set("Accept", "application/vnd.github+json")
+                .set("User-Agent", "respire-cli")
+                .timeout(Duration::from_secs(30))
+                .call()?;
+            let mut bytes = Vec::new();
+            response
+                .into_reader()
+                .take((MAX_METADATA_BYTES + 1) as u64)
+                .read_to_end(&mut bytes)?;
+            anyhow::ensure!(
+                bytes.len() <= MAX_METADATA_BYTES,
+                "official Runtime release metadata too large"
+            );
+            let asset = public_asset(serde_json::from_slice(&bytes)?, version, name, limit)?;
+            let request = download_agent(DownloadTimeouts::default())
+                .get(&format!("{api}/assets/{}", asset.id))
+                .set("Accept", "application/octet-stream")
+                .set("Accept-Encoding", "identity")
+                .set("User-Agent", "respire-cli");
+            let request = match timeout {
+                Some(timeout) => request.timeout(timeout),
+                None => request,
+            };
+            Ok((request.call()?, Some(asset)))
+        }
+    }
+}
+
 /// Fetch a small release metadata document, bounded like client2 `fetchJSON`.
 fn fetch_metadata(url: &str) -> Result<Vec<u8>> {
-    let response = download_agent(DownloadTimeouts::default())
-        .get(url)
-        .timeout(Duration::from_secs(30))
-        .call()
-        .with_context(|| format!("release metadata request failed ({url})"))?;
+    let (response, asset) = release_response(
+        url,
+        MAX_METADATA_BYTES as u64,
+        Some(Duration::from_secs(30)),
+    )
+    .with_context(|| format!("release metadata request failed ({url})"))?;
     let mut reader = response.into_reader().take((MAX_METADATA_BYTES + 1) as u64);
     let mut bytes = Vec::new();
     reader
@@ -1053,6 +1202,14 @@ fn fetch_metadata(url: &str) -> Result<Vec<u8>> {
         bytes.len() <= MAX_METADATA_BYTES,
         "release metadata too large"
     );
+    if let Some(asset) = asset {
+        anyhow::ensure!(
+            bytes.len() as u64 == asset.size
+                && format!("sha256:{:x}", Sha256::digest(&bytes))
+                    .eq_ignore_ascii_case(&asset.digest),
+            "official Runtime metadata asset checksum mismatch"
+        );
+    }
     Ok(bytes)
 }
 
@@ -1066,10 +1223,7 @@ fn download_archive(url: &str, dest: &Path) -> Result<String> {
     }
     let item = dest.file_name().unwrap_or_default().to_string_lossy();
     model_progress::update("connect", &item, 0, None)?;
-    let response = download_agent(DownloadTimeouts::default())
-        .get(url)
-        .set("Accept-Encoding", "identity")
-        .call()
+    let (response, asset) = release_response(url, MAX_ARCHIVE_BYTES, None)
         .with_context(|| format!("download failed ({url})"))?;
     model_progress::check()?;
     let mut reader = response.into_reader();
@@ -1111,7 +1265,14 @@ fn download_archive(url: &str, dest: &Path) -> Result<String> {
         .with_context(|| format!("failed to flush {}", dest.display()))?;
     drop(file);
     model_progress::update("verify", &item, written, Some(written))?;
-    Ok(hex::encode(hasher.finalize()))
+    let actual = hex::encode(hasher.finalize());
+    if let Some(asset) = asset {
+        anyhow::ensure!(
+            written == asset.size && format!("sha256:{actual}").eq_ignore_ascii_case(&asset.digest),
+            "official Runtime archive asset checksum mismatch"
+        );
+    }
+    Ok(actual)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1456,6 +1617,9 @@ fn verify_stage(
             valid_sha256(&file.sha256),
             "invalid runtime manifest checksum"
         );
+        if file.path.starts_with("core-notices/") && !stage.join(&file.path).try_exists()? {
+            continue;
+        }
         let target = regular_install_file(stage, &file.path)?;
         anyhow::ensure!(
             target.is_file(),
@@ -1499,15 +1663,17 @@ fn place_managed_binary(stage: &Path, binary_file: &str) -> Result<()> {
 // Install transactions
 // ---------------------------------------------------------------------------
 
-fn install_lock() -> Result<respire_client_host::lock::LibraryLock> {
-    respire_client_host::lock::LibraryLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
+fn install_lock() -> Result<respire_spawn::FileLock> {
+    create_private_dir(&runtime_dir())?;
+    respire_spawn::FileLock::acquire(&runtime_dir().join(".install.lock"), INSTALL_LOCK_WAIT)
         .context("another process is installing the runtime")
 }
 
 fn publish_manifest(manifest: &ManagedManifest) -> Result<()> {
+    shared::save_receipt(manifest)?;
     let path = manifest_path();
     let bytes = serde_json::to_vec_pretty(manifest)?;
-    let temporary = installation_root().join(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
+    let temporary = path.with_file_name(format!(".runtime-manifest-{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         {
             let mut options = fs::OpenOptions::new();
@@ -1542,6 +1708,7 @@ fn adopt_or_verify_version_dir(stage: &Path, manifest: &ManagedManifest) -> Resu
     }
     // Renaming stays inside <runtime/>, so it is atomic on every platform.
     fs::rename(stage, &dest).with_context(|| format!("failed to publish {}", dest.display()))?;
+    shared::compact_version(manifest)?;
     respire_spawn::durable::sync_directory(&runtime_dir()).ok();
     Ok(dest.join(RUNTIME_BINARY))
 }
@@ -1582,7 +1749,9 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
                 error
             }
         })?;
-        (manifest.version == required).then_some(binary)
+        (manifest.version == required
+            || (semver_cmp(&manifest.version, required) == std::cmp::Ordering::Greater
+                && version_in_accept(&manifest.version))).then_some(binary)
     } else {
         // Resolve configured paths read-only. This never imports records or
         // turns the selected profile into request identity or migration authority.
@@ -1607,6 +1776,11 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         }
         None
     };
+    verify_install_host()?;
+    Ok(selected)
+}
+
+fn verify_install_host() -> Result<()> {
     let legacy = crate::mcp::stable_bin_path();
     // Windows can report NotFound for `file/rsrs.exe`, unlike Unix ENOTDIR.
     // Missing leaf bytes are not evidence that the installation path is usable.
@@ -1619,22 +1793,47 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
         }
     }
     match fs::symlink_metadata(&legacy) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(selected),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error).context(LegacyRuntimeMigrationRequired),
         Ok(metadata) => {
             anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink(),
                 LegacyRuntimeMigrationRequired);
         }
     }
-    // Release provenance is not permission to overwrite a different host CLI.
-    // A materialized copy of this CLI is a normal fresh-install layout. Compare
-    // bytes, not filenames, version strings or the currently selected account.
+    // Compare bytes, not filenames, version strings or the selected account.
+    // A different image needs proof that it is a released frontend-only CLI.
     let current = std::env::current_exe().context(LegacyRuntimeMigrationRequired)?;
     let different = crate::mcp::bin_needs_refresh(&current, &legacy)
         .map_err(anyhow::Error::msg)
         .context(LegacyRuntimeMigrationRequired)?;
-    anyhow::ensure!(!different, LegacyRuntimeMigrationRequired);
-    Ok(selected)
+    if different {
+        // Official dev.3/dev.6 metadata and sealed dev.7 artifacts; these are frontend-only binaries.
+        // shortcut: extend this reviewed predecessor set when publishing a later CLI upgrade.
+        let approved = [
+            "e893ed0df7dc9a18d690c81af2537df85a907c7c033b61c060b7b1ae1a0ef1c1",
+            "7e1af4f989850656b699a67546ecd9cd07a39c9cbf343b9c52d500610294f2e1",
+            "5cd906b94597d273463477b1fc0c09579309e3bb98771f5203ef29881d291d68",
+            "c484f2259f29db7eb4499656d8750ea18ca230ade33f7cbc5a9b812cf09b740d",
+            "903e0595a76d930e82287d27b6c370bebcbbb9d3a4da2905c9fab1244f6c0261",
+            "f506f17fc621edd30fff6bc9be91c9089a9e6f63cfb5fb4d7e23b249226e4625",
+            "67549aa46996988aa91a529e9a42514ce2439a6c86c402dbbb644869b530d710",
+            "789ce0a3b5b127ea0bb6aa17f158f8ded3dc0b3c4f1fac91b2011ccd2650bc93",
+            "74bd5a041e81b3963db4eb7a6a45d0fbf41137b5077df3e6115da9226e9de291",
+            "92f3fdc52031ca7050305c82be0f311a5927a98796a9661159725ac143c203bd",
+            "5a597fd2344846b521b82921fe6e1832bd73d8108c164dafb0c5113042c67a42",
+            "5cba9ee34c744f646386d36cf38de5d4959b2ec03edba06f5fc88fdff597b660",
+            "64d306ea40a5fd49152444b0f81514eb195ef7c9e1d59527058b8545ac241983",
+            "25db4d0583b8d160776052f32a7321ae21cfd10ee227810d5916ec0d15edcf47",
+            "4b6a701479bf3e1186834154791795e4931cfb4bd2d5021315321c85590bcfb6",
+            "9ef1071d5b24966b760e497010d60c426f2bf40495b82775a157728ba69180da",
+            "9e77894484ffd40725036e3fc9c51ad5db22b9c05817c8b83af183ee39c478bf",
+            "78e228184f6adad1b6d2958ca0e997505d1195287e8ba62356280bd080c2122b",
+            "cb54a10918123b91296a7b40424668205572c1ceb3e03c4c4ab7a1947305d6d0",
+        ];
+        let previous = sha256_file(&legacy).context(LegacyRuntimeMigrationRequired)?;
+        anyhow::ensure!(approved.contains(&previous.as_str()), LegacyRuntimeMigrationRequired);
+    }
+    Ok(())
 }
 
 /// Materialization and managed replacement must use the same read-only boundary
@@ -1645,6 +1844,8 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
         // or materialize a CLI; installation entry points reject embedding.
         return selected.verify().map(|_| ());
     }
+    verify_install_host()?;
+    shared::migrate_legacy()?;
     automatic_install_preflight(&pinned()?.required).map(|_| ())
 }
 
@@ -1660,6 +1861,8 @@ pub(crate) fn require_automatic_migration_safe() -> Result<()> {
 pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<PathBuf> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot download or replace it");
+    verify_install_host()?;
+    shared::migrate_legacy()?;
     let required = match pin {
         Some(explicit) => {
             anyhow::ensure!(
@@ -1671,7 +1874,9 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
         None => pinned()?.required.clone(),
     };
     if let Some(binary) = automatic_install_preflight(&required)? {
-        return Ok(binary);
+        if pin.is_none() || binary == managed_binary_path(&required) {
+            return Ok(binary);
+        }
     }
     let triple = release_triple()?;
     // Hermetic tests fail explicitly instead of downloading or synthesizing a shim.
@@ -1681,7 +1886,9 @@ pub fn download_and_install(pin: Option<&str>, mirror: Option<&str>) -> Result<P
     );
     let lock = install_lock()?;
     if let Some(binary) = automatic_install_preflight(&required)? {
-        return Ok(binary);
+        if pin.is_none() || binary == managed_binary_path(&required) {
+            return Ok(binary);
+        }
     }
     let _operation = model_progress::Operation::begin_download()?;
     let metadata_name = format!("runtime-build-{triple}.json");
@@ -1899,6 +2106,7 @@ pub fn list_installed() -> Result<Vec<InstalledRuntime>> {
 pub fn clean_old() -> Result<Vec<String>> {
     anyhow::ensure!(crate::embedding::selection().is_none(),
         "Runtime installation is owned by Client2; the embedded frontend cannot replace or remove it");
+    let _lock = install_lock()?;
     let keep = list_installed()?
         .iter()
         .find(|entry| entry.current)
@@ -1945,6 +2153,9 @@ fn remove_version_dir(version: &str) -> Result<()> {
 #[path = "runtime_fetch_tests.rs"]
 pub(crate) mod runtime_fetch_tests;
 
+#[path = "runtime_shared.rs"]
+pub(crate) mod shared;
+
 #[cfg(test)]
 mod revision4_install_validation {
     use super::*;
@@ -1983,7 +2194,7 @@ mod revision4_install_validation {
     }
 
     #[test]
-    fn paths_and_mirrors_fail_closed() {
+    fn paths_and_mirrors_fail_closed() -> Result<()> {
         for name in [
             "../escape",
             "a/../b",
@@ -2001,5 +2212,63 @@ mod revision4_install_validation {
         }
         assert!(safe_metadata_path("core-notices/models/LICENSE.txt"));
         assert!(download_origins(Some("https://unapproved.invalid")).is_err());
+        let version = "2.0.0-dev.4";
+        let name = "runtime-build-x86_64-unknown-linux-gnu.json";
+        let official = release_asset(RELEASE_BASE, &format!("v{version}/{name}"));
+        assert_eq!(official_asset_identity(&official), Some((version, name)));
+        for url in [
+            format!("{MIRROR_PREFIX}/{official}"),
+            format!("{official}?redirect=1"),
+            official.replace("github.com/", "github.com.evil.invalid/"),
+            official.replace(name, "../escape"),
+        ] {
+            assert!(official_asset_identity(&url).is_none());
+        }
+        let asset = serde_json::json!({"id":1,"name":name,"size":32,"state":"uploaded", "digest":format!("sha256:{}", "a".repeat(64))});
+        let release = serde_json::json!({"tag_name":format!("v{version}"),"draft":false,"assets":[asset.clone()]});
+        assert_eq!(
+            public_asset(serde_json::from_value(release.clone())?, version, name, 32)?.id,
+            1
+        );
+        let mut invalid = Vec::new();
+        for (field, value) in [
+            ("tag_name", serde_json::json!("v2.0.0-dev.3")),
+            ("draft", serde_json::json!(true)),
+            ("assets", serde_json::json!([])),
+            ("assets", serde_json::json!([asset.clone(), asset.clone()])),
+        ] {
+            let mut changed = release.clone();
+            changed[field] = value;
+            invalid.push(changed);
+        }
+        for (field, value) in [
+            ("id", serde_json::json!(0)),
+            ("name", serde_json::json!("wrong.json")),
+            ("size", serde_json::json!(0)),
+            ("size", serde_json::json!(33)),
+            ("state", serde_json::json!("new")),
+            ("digest", serde_json::json!("sha256:invalid")),
+        ] {
+            let mut changed = release.clone();
+            changed["assets"][0][field] = value;
+            invalid.push(changed);
+        }
+        for changed in invalid {
+            assert!(public_asset(serde_json::from_value(changed)?, version, name, 32).is_err());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod offline_keygen_capability_tests {
+    use super::*;
+    #[test]
+    fn capability_requires_exact_version_not_truthiness() {
+        assert!(require_handoff_capability(&BTreeMap::new()).is_err());
+        for value in ["", "true", "0", "2", "01", "1 "] {
+            assert!(require_handoff_capability(&BTreeMap::from([("offline_keygen_handoff".into(),value.into())])).is_err());
+        }
+        assert!(require_handoff_capability(&BTreeMap::from([("offline_keygen_handoff".into(),"1".into())])).is_ok());
     }
 }

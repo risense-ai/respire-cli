@@ -224,13 +224,13 @@ fn runtime_serves_status_and_stops() -> Result<(), Box<dyn std::error::Error>> {
         .as_str()
         .ok_or("Runtime executable missing")?;
     let selection: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.path().join("runtime.json"))?)?;
+        serde_json::from_slice(&std::fs::read(dir.path().join("bin/runtime.json"))?)?;
     let selected_version = selection["version"]
         .as_str()
         .ok_or("Runtime selection missing")?;
     let installed = dir
         .path()
-        .join("runtime")
+        .join("bin/runtime")
         .join(selected_version)
         .join(if cfg!(windows) {
             "rsrs-runtime.exe"
@@ -366,7 +366,7 @@ fn unbound_explicit_runtime_restart_preserves_the_existing_owner(
     fixture.remember_owner(&before)?;
     let endpoint_path = fixture.path().join("runtime/endpoint.json");
     let endpoint = std::fs::read(&endpoint_path)?;
-    assert!(!fixture.path().join("runtime.json").exists());
+    assert!(!fixture.path().join("bin/runtime.json").exists());
 
     let rejected = fixture.run(&["--json", "restart", "--timeout", "2"])?;
     assert!(
@@ -397,7 +397,7 @@ fn unbound_explicit_runtime_restart_preserves_the_existing_owner(
     }
     assert_eq!(std::fs::read(endpoint_path)?, endpoint);
     assert_eq!(std::fs::read(data_path)?, data);
-    assert!(!fixture.path().join("runtime.json").exists());
+    assert!(!fixture.path().join("bin/runtime.json").exists());
     assert!(!fixture
         .path()
         .join("runtime/autostart/registration.json")

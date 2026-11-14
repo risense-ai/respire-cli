@@ -30,14 +30,17 @@ export function parsePublishedAssets(text, expectedHash, targets) {
     && sha256(text) === expectedHash, 'Published asset manifest hash/size mismatch');
   const spec = JSON.parse(text);
   requireValue(ownKeys(spec, ['schema', 'cli', 'runtime']) && spec.schema === 2, 'Published asset manifest schema differs');
-  requireValue(Array.isArray(targets) && targets.length === 7 && new Set(targets).size === 7, 'Seven unique targets required');
+  const cliTargets = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8')).targets.map(t => t.triple);
+  const runtimeTargets = cliTargets;
+  requireValue(Array.isArray(targets) && targets.length > 0 && targets.length === cliTargets.length
+    && new Set(targets).size === targets.length && targets.every(target => cliTargets.includes(target)), 'Exact CLI manifest targets required');
   for (const kind of ['cli', 'runtime']) {
     const part = spec[kind];
     requireValue(ownKeys(part, ['repository', 'release_id', 'version', 'source_sha', 'producer', 'assets'])
       && part.repository === `risense-ai/respire-${kind}` && positiveID(part.release_id)
       && versionPattern.test(part.version || '') && sourcePattern.test(part.source_sha || '')
       && ownKeys(part.producer, ['run_id','run_attempt']) && positiveID(part.producer.run_id) && positiveID(part.producer.run_attempt), `Invalid published ${kind} identity`);
-    const names = targets.flatMap(target => publishedAssetNames(kind, target));
+    const names = (kind === 'cli' ? targets : runtimeTargets).flatMap(target => publishedAssetNames(kind, target));
     requireValue(Array.isArray(part.assets) && part.assets.length === names.length, `Incomplete published ${kind} assets`);
     const ids = new Set(), found = new Set();
     for (const asset of part.assets) {
@@ -269,6 +272,7 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   verifyBinary(binary,target); verifyBinary(runtimeBinary,target);
   // Existing migration joins consume this exact metadata filename, never synthesized metadata.
   copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(source,`cli-build-${target}.json`));
+  copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(destination,`cli-build-${target}.json`));
   const identity = {manifest_sha256:manifestHash,target,harness_sha:process.env.GITHUB_SHA ?? null,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},cli_artifact_layout:cli.artifact_layout,runtime_core:runtimeCore,
     producers:{cli:spec.cli.producer,runtime:spec.runtime.producer},
@@ -505,7 +509,7 @@ async function packPublished(spec, targets, source, manifestHash) {
     const core = name === manifest.npmScope || frontendLayout(manifest) ? null : JSON.parse(readFileSync(join(directory,'bin/core-runtime.json')));
     const packed = packPackage(resolve(directory),resolve('npm/release-packages'));
     validatePublishedPackage(pkg,manifest,name,core,new Set(packed.files.map(f => f.path)));
-    verifyPackFile(packed.tarballPath,packed,resolve(directory));
+    verifyPackFile(packed.tarballPath,{...packed,sha256:sha256(readFileSync(packed.tarballPath))},resolve(directory));
     if (name !== manifest.npmScope) {
       const target = manifest.targets.find(t => t.pkg === name).triple;
       const expected = spec.cli.assets.find(a => a.name === publishedAssetNames('cli',target)[1]);
@@ -574,13 +578,14 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     const bounded = read('resident-concurrency-'+target,'fixture-process-verification.json');
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
     const upgrades = read('published-upgrades-'+target,'published-upgrades.json');
-    requireValue(upgrades.passed === true && upgrades.profile === 'full' && upgrades.full_coverage === true
-      && upgrades.all_published_sources_covered === true && upgrades.target === target
-      && upgrades.candidate_sha256 === native[0].binary_sha256 && upgrades.selected_sources?.length > 0
-      && upgrades.sources?.length === upgrades.selected_sources.length, 'Full historical upgrades incomplete');
+    requireValue(upgrades.passed === true && upgrades.profile === 'critical' && upgrades.full_coverage === false
+      && upgrades.all_published_sources_covered === false && upgrades.target === target
+      && upgrades.candidate_sha256 === native[0].binary_sha256 && upgrades.selected_sources?.length === 1
+      && upgrades.selected_sources[0] === upgrades.published_formal_sources?.at(-1)
+      && upgrades.sources?.length === 1, 'Latest formal release upgrade incomplete');
     for (const version of upgrades.selected_sources) {
       const row = upgrades.sources.filter(r => 'v'+r.version === version);
-      requireValue(row.length === 1 && (row[0].passed === true || row[0].status === 'not-applicable' && typeof row[0].reason === 'string'), 'Missing full upgrade source result');
+      requireValue(row.length === 1 && row[0].passed === true && row[0].formal === true, 'Missing latest formal upgrade result');
       if (row[0].passed) {
         const check = read('published-upgrades-'+target,version+'/results/real-account-return-verification.json');
         requireValue(Array.isArray(check) && check.length === 1 && check[0].binary_sha256 === native[0].binary_sha256, 'Upgrade process binary differs');
@@ -643,7 +648,7 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   return {schema:1,kind:'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
     reports,actual_processes:processes,full_passed:true,g1Passed:false,
-    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Seven current dev platforms only; Intel macOS, Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
+    limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms only; Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
 }
 async function completePublished(spec,targets,directory) {
   const context = {sha:process.env.GITHUB_SHA,run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT)};

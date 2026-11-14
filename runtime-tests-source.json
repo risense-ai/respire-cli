@@ -1,5 +1,82 @@
 {
   "schema_version": 1,
   "repository": "risense-ai/respire-runtime",
-  "source_sha": "75dc3e73a9fafab90b3d80865978a826a1bdc44b"
+  "sdk_lock_sha256": "0798601993ac41bf276b11184f76915c754c67cd079fac553184428fd9ca1d57",
+  "features": [
+    "cpu-owned-ort-experiment"
+  ],
+  "tests": {
+    "business": [
+      "account::authorization_preserves_and_commits_profiles",
+      "account::space_create_list_use_remove",
+      "account::spaces_coordinate_with_the_owned_runtime",
+      "capture_main::memory_revision_without_runtime_fails_without_local_business_fallback",
+      "capture_main::residual_host_and_parser_errors_remain_user_errors",
+      "diary_identity::canonical_identity_merges_legacy_tracks_without_touching_other_users_or_days",
+      "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once",
+      "diary_identity::deleted_stable_track_uses_legacy_fallback_and_deleted_history_is_not_resurrected",
+      "diary_identity::environment_key_fallback_does_not_adopt_unlocked_profile_alias",
+      "diary_identity::explicit_titles_preserve_entries_and_leave_the_daily_track_unchanged",
+      "diary_identity::important_remember_pending_candidates_preserve_ciphertext_and_outbox",
+      "diary_identity::missing_entry_and_usage_failures_have_machine_diagnostics",
+      "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay",
+      "diary_identity::old_owner_normalized_diary_keeps_its_author_after_public_title_edit",
+      "diary_identity::public_title_edit_and_blank_title_still_append_without_changing_metadata",
+      "diary_identity::remember_public_payload_covers_created_appended_and_merged",
+      "diary_identity::unrelated_canonical_author_fails_without_writes_or_private_output",
+      "memory_revision::memory_revision_direct_is_model_free_and_follows_resolved_profile",
+      "memory_revision::memory_revision_direct_respects_client_only_policy",
+      "memory_revision::memory_revision_does_not_initialize_or_autostart",
+      "memory_revision::memory_revision_does_not_recover_interrupted_login",
+      "memory_revision::memory_revision_legacy_database_and_ambiguous_names",
+      "memory_revision::memory_revision_preserves_legacy_environment_alias",
+      "snapshot_lifecycle::concurrent_host_recover_cannot_interleave_with_restore_commit",
+      "snapshot_lifecycle::healthy_snapshot_rescue_preserves_unparseable_current_witness",
+      "snapshot_lifecycle::public_empty_recall_returns_its_query_log_identity",
+      "snapshot_lifecycle::public_feedback_attribution_uses_exact_request_and_refuses_readonly_writes",
+      "snapshot_lifecycle::public_snapshot_restore_reopens_runtime_and_keeps_sync_quarantined",
+      "snapshot_lifecycle::public_witness_verifies_restored_chain_and_reports_tamper_without_writes",
+      "snapshot_lifecycle::queued_direct_resume_rechecks_maintenance_after_library_ownership_wait",
+      "snapshot_lifecycle::staged_store_open_failure_cannot_pass_boot_readiness_and_is_recoverable"
+    ]
+  },
+  "source_sha": "a50a92c1a1a00c3f81ab292e090b4896080ea6b1",
+  "producer": {
+    "status": "ready",
+    "workflow": ".github/workflows/prebuilt-integration-tests.yml",
+    "workflow_id": 414927024,
+    "workflow_sha": "a50a92c1a1a00c3f81ab292e090b4896080ea6b1",
+    "run_id": 43470549696,
+    "run_attempt": 2
+  },
+  "targets": {
+    "x86_64-pc-windows-msvc": {
+      "artifact_id": 14061069186,
+      "sha256": "31f4c9ecfcc9b8ce01bc88a2fa2c74070fb3261ad22cbc384ffdbc3996a95026"
+    },
+    "aarch64-pc-windows-msvc": {
+      "artifact_id": 14062585737,
+      "sha256": "fca716b5b004c7da978bc3eb9356375b08661fb69fbe25bf3696c2d62e6deb9c"
+    },
+    "aarch64-apple-darwin": {
+      "artifact_id": 14061719581,
+      "sha256": "f7c7c9c7f8595066e09250f0965994828290a1c355110cca69104340e85809ab"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "artifact_id": 14062013157,
+      "sha256": "f557f0fb719d336a4af233de9172175c81152f8f759389d3511314935c56da2b"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "artifact_id": 14060674219,
+      "sha256": "be4eebaf264d073accb2762ce2b6544063e7a11672d6344ccaa2ee384f7ce3b4"
+    },
+    "x86_64-unknown-linux-musl": {
+      "artifact_id": 14063545653,
+      "sha256": "f8604b36886d277c058bbf621b6b9f6e166e7968e9b082064f19b49662ab1829"
+    },
+    "aarch64-unknown-linux-musl": {
+      "artifact_id": 14062134147,
+      "sha256": "faec593ef5c99e86928f8fb54f9eff8371dd82a04d9371077da3b03c4c6fcf21"
+    }
+  }
 }

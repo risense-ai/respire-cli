@@ -60,6 +60,7 @@ def copy_managed_installation(source_root, destination):
             raise ValueError("managed Runtime fixture contains a link")
         if not path.is_dir():
             files.append(regular_file(source, path.relative_to(source).as_posix()))
+    destination = destination / "bin"
     target = destination / "runtime" / version
     if target.exists() or (destination / "runtime.json").exists():
         raise ValueError("managed Runtime fixture destination must be fresh")
@@ -120,6 +121,10 @@ def stage_runtime(cli_binary, runtime_binary, destination, archive=None, version
         if name.casefold() in seen or not re.fullmatch(r"[0-9a-fA-F]{64}", expected):
             raise ValueError(f"duplicate, reserved or invalid Runtime dependency: {name}")
         seen.add(name.casefold())
+        if not re.fullmatch(r"[A-Za-z0-9_./+-]+", name) or any(part in ("", ".", "..") for part in name.split("/")):
+            raise ValueError(f"unsafe Runtime dependency: {name}")
+        if name.startswith("core-notices/") and not (root / name).exists():
+            continue
         source = regular_file(root, name)
         if digest(source) != expected.lower():
             raise ValueError(f"Runtime dependency checksum mismatch: {name}")

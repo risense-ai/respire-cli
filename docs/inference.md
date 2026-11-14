@@ -161,9 +161,11 @@ heartbeats stop for ten seconds, or a complete Core call exceeds 365 seconds,
 the supervisor fails pending calls without replay and terminates the owned child.
 It must confirm exit before starting a replacement; later requests reload their
 authorized resident view and model. If termination cannot be confirmed,
-replacement is prohibited and host recovery is required. `rsrs restart --timeout
-10` requests graceful host shutdown and terminates its verified process when the
-deadline expires. See [worker recovery](retrieval.md) for the boundaries of
+replacement is prohibited. A later new Core request retries the bounded cleanup
+using the retained child handle; only confirmed exit permits a replacement.
+This never replays the failed request. If cleanup still fails, host recovery is
+required. `rsrs restart --timeout 10` requests graceful host shutdown and terminates
+its verified process when the deadline expires. See [worker recovery](retrieval.md) for the boundaries of
 in-flight host callbacks and committed writes.
 
 Native errors retain their underlying cause and do not switch engines or

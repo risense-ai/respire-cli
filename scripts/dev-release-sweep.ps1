@@ -146,7 +146,9 @@ function Write-SweepReport([switch]$Force) {
     [IO.File]::WriteAllText($ReportPath, ($lines -join "`n") + "`n", [Text.UTF8Encoding]::new($false))
     # Deliberately omit command output, arguments, notes, and credential material.
     $observed = @($Rows | ForEach-Object {
-        @{ case = $_.Name; command = $_.Command; step = $_.Step; exit = $_.Exit; status = $_.Status; result = $(if (-not $_.Ok) { 'failed' } elseif ($_.Status -eq 'skip') { 'skipped' } elseif ($_.Status -eq 'fail') { 'expected_error_contract' } else { 'passed' }) }
+        @{ case = $_.Name; command = $_.Command; step = $_.Step; exit = $_.Exit; status = $_.Status; result = $(if (-not $_.Ok) { 'failed' } elseif ($_.Status -eq 'skip') { 'skipped' } elseif ($_.Status -eq 'fail') { 'expected_error_contract' } else { 'passed' })
+            account_register_vault_pending = $_.account_register_vault_pending
+            account_register_vault_published = $_.account_register_vault_published }
     })
     $coverage = @{
         schema_version = 1; server = $Server; source_sha = $env:CLI_SHA; workflow_sha = $env:GITHUB_SHA
@@ -178,10 +180,111 @@ function Get-SafeReportNote([string]$Text) {
 }
 
 function Get-SafeFailureReason($Envelope) {
+    # These structured account outcomes survive shared-host error wrapping.
+    # Require a scalar string and emit constants, never stringify/copy private data.
+    $reason = $Envelope.summary.reason
+    if ($reason -is [string]) {
+        if ($reason -ceq 'account_outcome_unknown') {
+            foreach ($class in @('register_remote_unknown', 'register_native_credentials', 'register_state_conflict',
+                'register_material_invalid', 'register_local_compatibility', 'register_unclassified')) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith("; register_kind=$class", [StringComparison]::Ordinal) }).Count -gt 0) {
+                    return "account_outcome_unknown/$class"
+                }
+            }
+            foreach ($class in @('vault_unlock_rejected', 'account_material_rejected',
+                'auth_salt_http_unauthorized', 'auth_salt_http_forbidden', 'auth_salt_http_rate_limited', 'auth_salt_http_server_error', 'auth_salt_http_other', 'auth_salt_transport',
+                'auth_login_http_unauthorized', 'auth_login_http_forbidden', 'auth_login_http_rate_limited', 'auth_login_http_server_error', 'auth_login_http_other', 'auth_login_transport',
+                'auth_salt_missing', 'auth_salt_invalid_hex', 'auth_login_reply_parse_failed',
+                'auth_totp_ticket_missing', 'auth_totp_ticket_invalid', 'auth_login_token_missing')) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith("; login_kind=$class", [StringComparison]::Ordinal) }).Count -gt 0) {
+                    return "account_outcome_unknown/$class"
+                }
+            }
+            # Match only fixed source markers within the original account error chain.
+            foreach ($entry in @(
+                @('owned account Runtime exited before readiness', 'account_candidate_exited_before_ready'),
+                @('owned account Runtime did not become ready; query the original operation', 'account_candidate_readiness_timeout'),
+                @('Runtime owner changed during account startup', 'account_candidate_owner_mismatch'),
+                @('Runtime process changed during account startup verification', 'account_candidate_process_changed'),
+                @('account target launch does not belong to this maintenance controller', 'account_candidate_launch_binding_mismatch'),
+                @('starting Runtime exited', 'account_candidate_exited_during_verification'),
+                @('selected Runtime port differs from host transport', 'account_candidate_port_mismatch'),
+                @('failed to stop owned unready Runtime', 'account_candidate_stop_failed'),
+                @('failed to reap owned unready Runtime', 'account_candidate_reap_failed')
+            )) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and
+                    ($_ -ceq $entry[0] -or $_.EndsWith(": $($entry[0])", [StringComparison]::Ordinal) -or
+                        $_.Contains(": $($entry[0]): ", [StringComparison]::Ordinal)) }).Count -gt 0) {
+                    return "account_outcome_unknown/$($entry[1])"
+                }
+            }
+            # Fixed classes only; preserve the original unknown outcome and never replay it.
+            foreach ($entry in @(
+                @('Runtime rejected account control \(control_outcome_unknown\)|control deadline or parent revocation; query the same operation ID before retrying', 'account_runtime_deadline_or_parent_revoked'),
+                @('Runtime rejected account control \(unauthorized\)', 'account_launch_or_parent_authorization_failed'),
+                @('Runtime rejected account control \(scope_mismatch\)', 'account_control_binding_mismatch'),
+                @('Runtime rejected account control \(auth_ownership_unavailable\)', 'account_library_ownership_unavailable'),
+                @('Runtime rejected account control \(control_unavailable\)', 'account_controller_unavailable'),
+                @('cannot start owned host control Runtime', 'account_helper_start_failed'),
+                @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'account_helper_channel_failed'),
+                @('host control Runtime exit does not match its response', 'account_helper_exit_mismatch'),
+                @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'account_helper_deadline_or_channel'),
+                @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'account_helper_frame_invalid'),
+                @('account control response identity mismatch', 'account_rpc_identity_mismatch'),
+                @('account response launch profile mismatch|account receipt operation or profile mismatch', 'account_profile_binding_mismatch'),
+                @('account control rejection envelope missing|invalid account control rejection code|invalid account control rejection envelope|account control result is missing|invalid account control envelope|invalid account receipt shape|account control outcome/status mismatch', 'account_response_invalid'),
+                @('account helper readiness was not confirmed', 'account_response_readiness_invalid'),
+                @('account target Runtime is unavailable|target Runtime does not match the selected account, image or managed owner|target Runtime or account identity changed during verification|account target launch does not belong to this maintenance controller', 'account_target_verification_failed')
+            )) {
+                if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_ -match $entry[0] }).Count -gt 0) {
+                    return "account_outcome_unknown/$($entry[1])"
+                }
+            }
+            if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith('Runtime rejected account control (account_outcome_unknown): account outcome is unknown; query the original operation without replaying', [StringComparison]::Ordinal) }).Count -gt 0) {
+                return 'account_outcome_unknown/account_runtime_rejected'
+            }
+            return 'account_outcome_unknown'
+        }
+        if ($reason -ceq 'account_handoff_pending') { return 'account_handoff_pending' }
+    }
     # Report fixed classifications only, never raw authentication responses.
-    $message = @($Envelope.errors) -join ' '
+    $message = @($Envelope.errors | Where-Object { $_ -is [string] }) -join ' '
+    if ($Envelope.command -is [string] -and $Envelope.command -ceq 'space' -and $Envelope.summary.outcome -is [string]) {
+        switch -CaseSensitive ($Envelope.summary.outcome) {
+            'unknown' { return 'space_outcome_unknown' }
+            'pending' { return 'space_pending' }
+            'rejected' { return 'space_rejected' }
+        }
+    }
+    foreach ($code in @('unauthorized', 'scope_mismatch', 'auth_ownership_unavailable', 'control_unavailable', 'space_outcome_unknown', 'control_outcome_unknown')) {
+        if ($message -cmatch "Runtime rejected space control \($code\);") { return "space_runtime_$code" }
+    }
+    foreach ($entry in @(
+        @('space response binding mismatch|space response profile mismatch|space receipt differs from its original identity or intent', 'space_response_binding_mismatch'),
+        @('space control rejection envelope missing|invalid space control rejection code|invalid space control rejection envelope|space receipt missing|invalid space envelope|invalid space receipt|invalid space write receipt|invalid committed space outcome|invalid pending space outcome|invalid unknown space outcome|invalid rejected space outcome', 'space_response_invalid'),
+        @('space readiness mismatch', 'space_response_readiness_invalid'),
+        @('join target receipt mismatch|join account receipt mismatch|join session digest mismatch|join readonly_team gate mismatch|join unexpectedly changed the agent gate|pending join claims completion', 'space_join_receipt_invalid'),
+        @('cannot start owned host control Runtime', 'auth_helper_start_failed'),
+        @('missing host control input pipe|missing host control output pipe|host control input owner was released|host control request write failed', 'auth_helper_channel_failed'),
+        @('host control Runtime exit does not match its response', 'auth_helper_exit_mismatch'),
+        @('control deadline or parent revocation; query the same operation ID before retrying', 'auth_runtime_deadline_or_parent_revoked')
+    )) {
+        if ($message -match $entry[0]) { return $entry[1] }
+    }
     if ($message -match '\b([45]\d\d)\b') { return "http_$($Matches[1])" }
     foreach ($entry in @(
+        @('auth control requires an installed managed Runtime', 'auth_runtime_missing'),
+        @('auth control Runtime version or image does not match the managed manifest', 'auth_runtime_image_mismatch'),
+        @('auth_diagnostic=auth_runtime_deadline_or_parent_revoked\b', 'auth_runtime_deadline_or_parent_revoked'),
+        @('auth_diagnostic=auth_credential_backend_unavailable\b', 'auth_credential_backend_unavailable'),
+        @('auth_diagnostic=auth_credential_backend_not_persistent\b', 'auth_credential_backend_not_persistent'),
+        @('auth_diagnostic=auth_credential_write_readback_failed\b', 'auth_credential_write_readback_failed'),
+        @('host control deadline exceeded|host control response deadline or channel failure|host control response deadline exceeded|host control exit deadline exceeded', 'auth_helper_deadline_or_channel'),
+        @('missing host control response frame|incomplete host control response frame|invalid host control response frame size|invalid host control response JSON|extra host control response bytes', 'auth_helper_frame_invalid'),
+        @('auth control response identity mismatch|host control response identity mismatch', 'auth_response_identity_mismatch'),
+        @('auth control response profile mismatch', 'auth_response_profile_mismatch'),
+        @('auth control readiness was not confirmed', 'auth_response_readiness_invalid'),
+        @('invalid auth control result shape|auth control result is missing|unexpected auth control command|auth control result owner mismatch|committed auth result is missing the recovery code', 'auth_result_invalid'),
         @('already registered', 'account_exists'),
         @('runtime owns its boot profile', 'profile_change_requires_host'),
         @('read.only', 'readonly_local_guard'),
@@ -193,11 +296,81 @@ function Get-SafeFailureReason($Envelope) {
         @('TLS|certificate', 'tls'),
         @('DNS|resolve', 'dns'),
         @('connect|timeout|transport', 'transport'),
-        @('runtime.*token|runtime.*auth', 'runtime_auth')
+        @('runtime.*token|runtime.*auth', 'runtime_auth'),
+        @('space_recovery_required operation_id=', 'space_recovery_required'),
+        @('auth_outcome_unknown operation_id=|auth control completion is unknown; query the original operation', 'auth_outcome_unknown')
     )) {
         if ($message -match $entry[0]) { return $entry[1] }
     }
     return 'unclassified'
+}
+
+function Get-SafeAccountPhase($Envelope, [string]$DataDir, [string]$FixtureRoot, [hashtable]$RegisterState = @{}) {
+    $RegisterState.account_register_vault_pending = $null
+    $RegisterState.account_register_vault_published = $null
+    if ($Envelope.summary.reason -isnot [string] -or $Envelope.summary.reason -cne 'account_outcome_unknown') { return '' }
+    $unavailable = 'account_phase=phase_unavailable'
+    try {
+        $operation = $Envelope.details.operation_id
+        $source = $Envelope.details.source_profile
+        if ($operation -isnot [string] -or $operation -cnotmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' -or $source -isnot [string]) { return $unavailable }
+        $normalize = {
+            param([string]$Value)
+            if (-not [IO.Path]::IsPathFullyQualified($Value)) { throw 'invalid_fixture_path' }
+            if ($IsWindows) { $Value = $Value -replace '^\\\\\?\\', '' }
+            return [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Value))
+        }
+        $fixturePath = & $normalize $FixtureRoot
+        $devicePath = & $normalize $DataDir
+        $sourcePath = & $normalize $source
+        $comparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+        if ((-not $devicePath.Equals($fixturePath, $comparison) -and -not $devicePath.StartsWith($fixturePath + [IO.Path]::DirectorySeparatorChar, $comparison)) -or
+            (-not $sourcePath.Equals($devicePath, $comparison) -and -not $sourcePath.StartsWith($devicePath + [IO.Path]::DirectorySeparatorChar, $comparison))) { return $unavailable }
+        $journalPath = Join-Path $devicePath '.login-recovery.json'
+        foreach ($path in @($sourcePath, $journalPath)) {
+            for ($ancestor = $path; $ancestor; $ancestor = [IO.Path]::GetDirectoryName($ancestor)) {
+                if (([IO.File]::GetAttributes($ancestor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { return $unavailable }
+            }
+        }
+        if (([IO.File]::GetAttributes($sourcePath) -band [IO.FileAttributes]::Directory) -eq 0) { return $unavailable }
+        $journal = [IO.File]::ReadAllText($journalPath) | ConvertFrom-Json -ErrorAction Stop
+        if ($journal -isnot [pscustomobject] -or $journal.schema_version -isnot [long] -or $journal.schema_version -ne 2 -or $journal.operations -isnot [array] -or $journal.active -isnot [pscustomobject] -or
+            $journal.active.operation_id -isnot [string] -or $journal.active.operation_id -cne $operation) { return $unavailable }
+        $records = @($journal.operations | Where-Object { $_.operation_id -is [string] -and $_.operation_id -eq $operation })
+        if ($records.Count -ne 1) { return $unavailable }
+        $record = $records[0]
+        if ($record -isnot [pscustomobject] -or $record.operation_id -cne $operation -or $record.idempotency_key -isnot [string] -or $record.idempotency_key -cne $operation -or
+            $record.root -isnot [string] -or $record.profile -isnot [string] -or $journal.active.directory -isnot [string] -or
+            $record.alias -isnot [string] -or -not $record.alias -or $journal.active.alias -isnot [string] -or $journal.active.alias -cne $record.alias -or
+            $record.account -isnot [pscustomobject]) { return $unavailable }
+        $activePath = $sourcePath
+        if ($record.account.target -is [string] -and $record.account.target.Length -gt 0) {
+            $activePath = & $normalize $record.account.target
+            if (-not $activePath.Equals($devicePath, $comparison) -and
+                -not $activePath.StartsWith($devicePath + [IO.Path]::DirectorySeparatorChar, $comparison)) { return $unavailable }
+        }
+        if (-not (& $normalize $record.root).Equals($devicePath, $comparison) -or
+            -not (& $normalize $record.profile).Equals($sourcePath, $comparison) -or
+            -not (& $normalize $journal.active.directory).Equals($activePath, $comparison)) { return $unavailable }
+        $phase = $record.phase
+        if ($phase -isnot [string] -or $phase -cnotin @('admitted', 'login_input', 'remote_pending', 'remote_unknown', 'authorized',
+            'prepared', 'awaiting_verification', 'rolling_back', 'committed', 'rolled_back')) { return $unavailable }
+        $pending = ''
+        if ($null -ne $record.account.login) {
+            if ($record.account.login -isnot [pscustomobject] -or $record.account.login.publication_pending -isnot [bool]) { return $unavailable }
+            $pending = if ($record.account.login.publication_pending) { ' pubpending=true' } else { ' pubpending=false' }
+        }
+        $registerDiagnostic = ''
+        if ($record.account.register -is [bool] -and $record.account.register) {
+            foreach ($field in @(@('vault_pending', 'account_register_vault_pending'), @('published_vault', 'account_register_vault_published'))) {
+                $value = $record.account.($field[0])
+                if ($value -is [bool]) { $RegisterState[$field[1]] = $value }
+                $fixed = if ($value -is [bool]) { $value.ToString().ToLowerInvariant() } else { 'null' }
+                $registerDiagnostic += " $($field[1])=$fixed"
+            }
+        }
+        return "account_phase=$phase$pending$registerDiagnostic"
+    } catch { return $unavailable }
 }
 
 function Assert-DevEnvelope($Envelope, [string]$Where) {
@@ -287,7 +460,9 @@ function Get-Leak([string]$Text, [bool]$Secret) {
 }
 
 # Only the endpoint and token beneath the current disposable device are used.
-function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Arguments = @(), [int]$TimeoutSec = 5) {
+function Invoke-OwnedRuntimeRpc {
+    param([string]$DataDir, [string]$Method, [string[]]$Arguments = @(), [int]$TimeoutSec = 5,
+        [string]$RequestId = '', [hashtable]$Headers = @{}, [int]$ExpectedExit = 0, [switch]$FullResponse)
     $endpoint = Get-Content -LiteralPath (Join-Path $DataDir 'runtime/endpoint.json') -Raw | ConvertFrom-Json
     $uri = [Uri][string]$endpoint.url
     if ($uri.Scheme -ne 'http' -or $uri.Host -notin @('127.0.0.1', 'localhost', '::1')) {
@@ -299,13 +474,21 @@ function Invoke-OwnedRuntimeRpc([string]$DataDir, [string]$Method, [string[]]$Ar
         if ($Method -eq 'health') {
             return Invoke-RestMethod -Uri "$origin/api/health" -TimeoutSec $TimeoutSec
         }
-        $requestId = [Guid]::NewGuid().ToString('N')
-        $body = @{ v = 1; id = $requestId; method = $Method; args = $Arguments } | ConvertTo-Json -Compress
+        $health = Get-OwnedRuntimeHealth $DataDir -TimeoutSec $TimeoutSec
+        $scope = @{ account_id = $health.account_id; instance_id = $health.instance_id; generation = $health.generation }
+        if (-not $RequestId) { $RequestId = [Guid]::NewGuid().ToString('N') }
+        $body = @{ v = 1; id = $RequestId; scope = $scope; method = $Method; args = $Arguments } | ConvertTo-Json -Compress -Depth 8
         $response = Invoke-RestMethod -Uri "$origin/api/rpc" -Method Post -ContentType 'application/json' `
-            -Body $body -TimeoutSec 5
-        if ($response.ok -ne $true -or [string]$response.id -cne $requestId -or [string]$response.bin -cne $ExpectVersion) {
+            -Body $body -Headers $Headers -TimeoutSec $TimeoutSec
+        if ($response.ok -isnot [bool] -or $response.ok -ne ($ExpectedExit -eq 0) -or $response.exit -cne $ExpectedExit `
+            -or $response.v -ne 1 -or $response.pid -cne $health.pid -or $null -eq $response.envelope `
+            -or [string]$response.id -cne $RequestId -or [string]$response.bin -cne [string]$health.bin `
+            -or [string]$response.scope.account_id -cne [string]$scope.account_id `
+            -or [string]$response.scope.instance_id -cne [string]$scope.instance_id `
+            -or $response.scope.generation -cne $scope.generation) {
             throw 'Owned runtime RPC response identity failed.'
         }
+        if ($FullResponse) { return $response }
         return $response.envelope.summary
     } catch { throw 'Owned runtime request failed.' }
 }
@@ -315,11 +498,29 @@ function Get-OwnedRuntimeHealth([string]$DataDir, [int]$TimeoutSec = 5) {
     $profile = [IO.Path]::GetFullPath([string]$health.data_dir)
     $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
     $nativeName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
+    $runtimeVersion = $ExpectVersion
+    $runtimeHash = $script:BinarySha256
     $ownedExecutable = [IO.Path]::GetFullPath((Join-Path $DataDir "bin/$nativeName"))
-    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $ExpectVersion -or [int]$health.pid -le 0 `
+    if ($script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+        $ownedExecutable = [IO.Path]::GetFullPath($script:PublishedRuntimePaths[$DataDir])
+        $runtimeVersion = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_VERSION } else { $env:NATIVE_RUNTIME_VERSION }
+        $runtimeHash = if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') { $env:RSRS_PUBLISHED_RUNTIME_SHA256 } else { $env:NATIVE_RUNTIME_SHA256 }
+        if ([string]$health.runtime_version -cne $runtimeVersion) { throw 'Owned runtime version differs from the selected installation.' }
+    }
+    $reportedExecutable = [IO.Path]::GetFullPath([string]$health.exe)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+        $ownedExecutable = $ownedExecutable -replace '^\\\\\?\\', ''
+        $reportedExecutable = $reportedExecutable -replace '^\\\\\?\\', ''
+    }
+    if ([int]$health.v -ne 1 -or [string]$health.bin -cne $runtimeVersion -or [int]$health.pid -le 0 `
         -or ($profile -ne $device -and -not $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar)) `
-        -or [IO.Path]::GetFullPath([string]$health.exe) -ne $ownedExecutable `
-        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $script:BinarySha256) {
+        -or $reportedExecutable -ne $ownedExecutable `
+        -or (Get-FileHash -LiteralPath $ownedExecutable -Algorithm SHA256).Hash.ToLowerInvariant() -cne $runtimeHash `
+        -or [string]::IsNullOrWhiteSpace([string]$health.account_id) `
+        -or [string]::IsNullOrWhiteSpace([string]$health.instance_id) `
+        -or ($health.generation -isnot [long] -and $health.generation -isnot [int]) -or $health.generation -le 0) {
         throw 'Owned runtime health identity failed.'
     }
     return $health
@@ -333,6 +534,31 @@ function Test-RuntimeChanged($Before, $After, [string]$Profile) {
     return [int]$Before.pid -ne [int]$After.pid `
         -and -not (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue) `
         -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile)
+}
+
+function Test-RuntimeUnchanged($Before, $After, [string]$Profile) {
+    # Invalid names fail before the coordinator: accepting a replacement actor hides a regression.
+    return [int]$Before.pid -gt 0 -and [int]$Before.pid -eq [int]$After.pid `
+        -and $null -ne (Get-Process -Id ([int]$Before.pid) -ErrorAction SilentlyContinue) `
+        -and [string]$Before.data_dir -ceq [string]$After.data_dir `
+        -and [IO.Path]::GetFullPath([string]$After.data_dir) -eq [IO.Path]::GetFullPath($Profile) `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.account_id) `
+        -and [string]$Before.account_id -ceq [string]$After.account_id `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Before.instance_id) `
+        -and [string]$Before.instance_id -ceq [string]$After.instance_id `
+        -and $Before.generation -gt 0 -and $Before.generation -ceq $After.generation `
+        -and [string]$Before.exe -ceq [string]$After.exe `
+        -and [string]$Before.bin -ceq [string]$After.bin `
+        -and [string]$Before.runtime_version -ceq [string]$After.runtime_version `
+        -and $Before.store_ready -eq $true -and $After.store_ready -eq $true
+}
+
+function Get-AccountRejectionSnapshot([string]$Device, [string]$Profile) {
+    # Snapshot only stable control/session state; the serving actor may update its own DB/WAL.
+    $paths = @((Join-Path $Device 'client.json'), (Join-Path $Device 'runtime/endpoint.json'), (Join-Path $Profile 'session.json'))
+    $files = @($paths | ForEach-Object { [Convert]::ToBase64String([IO.File]::ReadAllBytes($_)) })
+    $profiles = @(Get-ChildItem -LiteralPath (Join-Path $Device 'accounts') -Force | Sort-Object Name | ForEach-Object { $_.Name })
+    return ([ordered]@{ files = $files; profiles = $profiles; invalid_exists = (Test-Path -LiteralPath (Join-Path $Device 'invalid')) } | ConvertTo-Json -Depth 5 -Compress)
 }
 
 function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
@@ -353,6 +579,38 @@ function Wait-OwnedModelIdle([string]$DataDir, [int]$TimeoutSec) {
     throw 'Owned model/index work did not finish within the bounded installation deadline.'
 }
 
+# Host keygen commits keys but deliberately leaves its original operation Paused.
+# Only a positively completed keygen may request the normal explicit Start once.
+function Complete-SmokeKeygen([string]$Name, $Keygen, [string]$DataDir) {
+    Assert-Smoke "$Name-committed" ($Keygen.Ok -eq $true -and $Keygen.Exit -eq 0 `
+        -and [string]$Keygen.Envelope.command -ceq 'keygen' `
+        -and [string]$Keygen.Envelope.status -ceq 'ok' `
+        -and [bool]$Keygen.Envelope.summary.super `
+        -and -not [string]::IsNullOrWhiteSpace([string]$Keygen.Envelope.summary.path) `
+        -and @($Keygen.Envelope.actions) -ccontains 'runtime start')
+    $profile = [IO.Path]::GetFullPath((Split-Path -Parent ([string]$Keygen.Envelope.summary.path)))
+    $device = [IO.Path]::GetFullPath($DataDir).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $device = $device -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-owned-profile" ($profile -eq $device -or $profile.StartsWith($device + [IO.Path]::DirectorySeparatorChar))
+    # No HostProfile stop/direct wrapper and no readiness retry: an uncertain
+    # Start must retain its durable evidence, not replay or replace the operation.
+    $started = Invoke-Om -Name "$Name-explicit-start" -ArgList @('--json', 'runtime', 'start') `
+        -DataDir $DataDir -AllowStatus @('ok') -NoReadyRetry
+    Assert-Smoke "$Name-started" ($started.Ok -eq $true -and $started.Exit -eq 0 `
+        -and [string]$started.Envelope.command -ceq 'runtime.start' `
+        -and [string]$started.Envelope.status -ceq 'ok')
+    $health = Get-OwnedRuntimeHealth $DataDir
+    $activeProfile = [IO.Path]::GetFullPath([string]$health.data_dir)
+    if ($IsWindows) {
+        $profile = $profile -replace '^\\\\\?\\', ''
+        $activeProfile = $activeProfile -replace '^\\\\\?\\', ''
+    }
+    Assert-Smoke "$Name-ready" ($activeProfile -eq $profile -and $health.store_ready -eq $true)
+}
+
 function Invoke-Om {
     param(
         [Parameter(Mandatory)][string]$Name,
@@ -363,6 +621,7 @@ function Invoke-Om {
         [switch]$Secret,
         [switch]$Raw,
         [switch]$HostProfile,
+        [switch]$NoReadyRetry,
         [switch]$AllowDestructiveMcpFixture,
         [switch]$AllowIndexWait,
         [string]$ModelTaskId = '',
@@ -380,8 +639,8 @@ function Invoke-Om {
     }
     $script:ActiveDataDir = $DataDir
     if ($HostProfile) {
-        # Only stop this disposable sweep runtime. The following normal command
-        # autostarts its replacement after the host has switched the profile.
+        # Only stop this disposable sweep runtime. Ordinary profile changes may
+        # autostart a replacement; successful host keygen instead requires explicit Start.
         Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
             -DataDir $DataDir -Raw -ExpectExit @(0, 2) | Out-Null
         Stop-OurRuntimes
@@ -428,8 +687,10 @@ function Invoke-Om {
     $psi.Environment['XDG_DATA_HOME'] = Join-Path $SmokeHome '.local/share'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
     $psi.Environment['RSRS_M3_DIR'] = Join-Path $Root 'models/bge-m3'
-    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets') {
-        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir)) {
+    if ($env:RSRS_ARTIFACT_SOURCE -ceq 'published-assets' -or
+        ($env:ARTIFACT_SOURCE -ceq 'build' -and $env:VALIDATION_PROFILE -ceq 'full' -and
+         $env:GITHUB_ACTIONS -ceq 'true' -and $env:RUNNER_ENVIRONMENT -ceq 'github-hosted')) {
+        if (-not $script:PublishedRuntimePaths.ContainsKey($DataDir) -or $env:RSRS_ARTIFACT_SOURCE -cne 'published-assets') {
             $install = [System.Diagnostics.ProcessStartInfo]::new()
             $install.FileName = 'python'
             $install.UseShellExecute = $false
@@ -554,7 +815,7 @@ function Invoke-Om {
             $Note = ("command=$got total=$total want $RequireCommand " + $Note).Trim()
         }
     }
-    $readyFail = ($stdout + $stderr) -match 'did not become ready'
+    $readyFail = -not $NoReadyRetry -and (($stdout + $stderr) -match 'did not become ready')
         if ($readyFail -and $readyTries -lt 2) { Stop-OurRuntimes; Start-Sleep -Seconds 1 }
     $retryIndexPending = $AllowIndexWait -and -not $indexRetried -and -not $timedOut `
         -and $exit -eq 2 -and $status -ceq 'pending' -and [string]$envlp.summary.state -ceq 'index_pending' `
@@ -605,11 +866,17 @@ function Invoke-Om {
             break
         }
     }
-    if (-not $ok) { $Note = ("failure_reason=$(Get-SafeFailureReason $envlp) $Note").Trim() }
+    $registerState = @{ account_register_vault_pending = $null; account_register_vault_published = $null }
+    if (-not $ok) {
+        $failureDiagnostic = ("failure_reason=$(Get-SafeFailureReason $envlp) $(Get-SafeAccountPhase $envlp $DataDir $resolvedRoot $registerState)").Trim()
+        $Note = ("$failureDiagnostic $Note").Trim()
+    }
     $row = [pscustomobject]@{
         Step   = $script:Step
         Name   = $Name
         Command = $commandPath
+        account_register_vault_pending = $registerState.account_register_vault_pending
+        account_register_vault_published = $registerState.account_register_vault_published
         Exit   = $exit
         Status = $status
         Ok     = $ok
@@ -621,7 +888,7 @@ function Invoke-Om {
     $flag = if (-not $ok) { 'FAIL' } elseif ($status -eq 'fail') { 'EXPECTED_ERROR' } elseif ($status -eq 'skip') { 'SKIP' } else { 'PASS' }
     Write-Host "$flag $Name exit=$exit status=$status leak=$($row.Leak)"
     if (-not $ok) {
-        $detail = if ($Secret) { "failure_reason=$(Get-SafeFailureReason $envlp)" } else { $stderr + ' ' + $stdout }
+        $detail = if ($Secret -or ($envlp.summary.reason -is [string] -and $envlp.summary.reason -ceq 'account_outcome_unknown')) { $failureDiagnostic } else { $stderr + ' ' + $stdout }
         $detail = [regex]::Replace($detail, '(?i)(super|secret|token|password|nonce|wrapped_urk|kdf_salt)[^,\s"]{0,120}', '${1}=[redacted]')
         $detail = ($detail -replace '\s+', ' ').Trim()
         if ($detail.Length -gt 240) { $detail = $detail.Substring($detail.Length - 240) }
@@ -805,6 +1072,9 @@ $configRead = Invoke-Om -Name 'config-settings-readback' -ArgList @('--json', 'c
 Assert-Smoke 'config-settings-persisted' ($configWrite.Ok -and $configRead.Ok -and $configRead.Envelope.summary.autosync -eq $false -and $configRead.Envelope.summary.cure_auto -eq $false -and [int]$configRead.Envelope.summary.rpc_parallelism -eq 1)
 $bgeInstall = Invoke-Om -Name 'model-install' -ArgList @('--json', 'model', 'install') -DataDir $DirA -TimeoutSec 900
 Assert-Smoke 'model-bge-installed' ($bgeInstall.Ok -and [string]$bgeInstall.Envelope.summary.model -eq 'm3' -and (Test-Path -LiteralPath (Join-Path $Root 'models/bge-m3/onnx/model_quantized.onnx')))
+# The installer owns the CPU cache per profile; later profiles use this shared model root.
+python -c "import sys; sys.path.insert(0, sys.argv[1]); from dev_model_fixture import share_cpu_container; share_cpu_container(sys.argv[2], {'RSRS_DATA_DIR': sys.argv[3]}, sys.argv[4])" $PSScriptRoot $Root $DirA (Join-Path $Root 'models/bge-m3')
+if ($LASTEXITCODE -ne 0) { throw 'Shared CPU model fixture preparation failed' }
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
 foreach ($configuredEngine in @('gpu', 'npu')) {
@@ -821,6 +1091,7 @@ $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
 $offlineKeys = Invoke-Om -Name 'keygen-local-success' -ArgList @('--json', 'keygen', '--pass', (New-Pass)) -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-local-v4-material' ($offlineKeys.Ok -and [bool]$offlineKeys.Envelope.summary.super -and (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
+Complete-SmokeKeygen 'keygen-local' $offlineKeys $offlineDir
 $firstLocalWrap = (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk
 $offlineEntry = Invoke-Om -Name 'keygen-local-write' -ArgList @('--json', 'remember', "offline-$stamp", '--title', "offline-$stamp", '--importance', 'important', '--force') -DataDir $offlineDir
 $offlineId = [string]$offlineEntry.Envelope.summary.id
@@ -830,6 +1101,7 @@ $localRefuse = Invoke-Om -Name 'keygen-local-overwrite-refused' -ArgList @('--js
 Assert-Smoke 'keygen-local-overwrite-guard' ($localRefuse.Ok -and $localRefuse.Exit -eq 1 -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -eq $firstLocalWrap)
 $forcedKeys = Invoke-Om -Name 'keygen-force-disposable' -ArgList @('--json', 'keygen', '--force') -DataDir $offlineDir -Secret -HostProfile
 Assert-Smoke 'keygen-force-rotates-material' ($forcedKeys.Ok -and [bool]$forcedKeys.Envelope.summary.super -and (Get-Content -LiteralPath (Join-Path $offlineDir 'session.json') -Raw | ConvertFrom-Json).wrapped_urk -ne $firstLocalWrap)
+Complete-SmokeKeygen 'keygen-force' $forcedKeys $offlineDir
 $offlineLogout = Invoke-Om -Name 'offline-full-logout' -ArgList @('--json', 'logout', '--full') -DataDir $offlineDir -HostProfile
 Assert-Smoke 'full-logout-session-file-removed' ($offlineLogout.Ok -and -not (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
 
@@ -860,11 +1132,10 @@ Assert-Smoke 'memory-revision-reads-stable' ($revisionRepeat.Ok -and [string]$re
 Invoke-Om -Name 'doctor-human' -ArgList @('doctor') -DataDir $DirA -Raw -ExpectExit @(0, 1, 2) -MinStdout 40 -TimeoutSec 180 -Note 'exit 1 means a check failed; allowed on a clean runner' | Out-Null
 $docj = Invoke-Om -Name 'doctor-json' -ArgList @('--json', 'doctor') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail', 'skip') -RequireCommand 'doctor' -Note 'the envelope must be doctor and summary.total must exist'
 $mcpBinItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp bin' } | Select-Object -First 1
-$mcpHttpItem = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'mcp http' } | Select-Object -First 1
 $binName = if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' }
 $mcpBinPath = Join-Path $DirA "bin\$binName"
-Add-SweepRow 'doctor-mcp-bin-item' ($null -ne $mcpBinItem -and [string]$mcpBinItem.status -eq 'ok') ([string]$mcpBinItem.value)
-Add-SweepRow 'doctor-mcp-http-item' ($null -ne $mcpHttpItem -and ([string]$mcpHttpItem.value -like '*/mcp*')) ([string]$mcpHttpItem.value)
+Add-SweepRow 'doctor-mcp-bin-item' ($docj.Ok -and [string]$docj.Envelope.command -ceq 'doctor' -and $null -ne $mcpBinItem -and [string]$mcpBinItem.status -ceq 'ok') ([string]$mcpBinItem.value)
+Add-SweepRow 'doctor-mcp-bin-path' ($null -ne $mcpBinItem -and [string]$mcpBinItem.value -ceq $mcpBinPath) ([string]$mcpBinItem.value)
 Add-SweepRow 'mcp-bin-file' (Test-Path -LiteralPath $mcpBinPath) $mcpBinPath
 $embedder = @($docj.Envelope.items) | Where-Object { [string]$_.name -eq 'embedder' } | Select-Object -First 1
 if ($embedder -and [string]$embedder.status -eq 'fail') {
@@ -872,7 +1143,7 @@ if ($embedder -and [string]$embedder.status -eq 'fail') {
 }
 $remoteDoctor = Invoke-Om -Name 'doctor-remote' -ArgList @('--json', 'doctor', '--remote') -DataDir $DirA -TimeoutSec 180 -AllowStatus @('ok', 'warn', 'fail') -RequireCommand 'doctor'
 $remoteItem = @($remoteDoctor.Envelope.items | Where-Object { [string]$_.name -eq 'remote' } | Select-Object -First 1)
-Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -eq 'ok' -and [string]$remoteItem[0].value -like "$Server /health -> 200*")
+Assert-Smoke 'doctor-remote-health-reachable' ($remoteDoctor.Ok -and $remoteItem.Count -eq 1 -and [string]$remoteItem[0].status -ceq 'ok' -and [string]$remoteItem[0].value -ceq 'Configured remote /health -> 200')
 
 Invoke-Om -Name 'taxonomy' -ArgList @('--json', 'taxonomy') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'taxonomy-list' -ArgList @('--json', 'taxonomy', '--list') -DataDir $DirA | Out-Null
@@ -1149,9 +1420,12 @@ $otherStatus = Invoke-Om -Name 'account-live-other-status' -ArgList @('--json', 
 Assert-Smoke 'account-live-shorthand-takeover' ($accountOther.Ok -and (Test-RuntimeChanged $mainHealth $switchedHealth (Join-Path $DirA "accounts/$otherUser")))
 Assert-Smoke 'account-live-other-identity' ($otherStatus.Ok -and [string]$otherStatus.Envelope.summary.session.user -ceq $otherUser -and $otherStatus.Envelope.summary.unlocked -eq $true)
 $profileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$rejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")
 $invalidAccount = Invoke-Om -Name 'account-live-invalid-rejected' -ArgList @('--json', 'account', 'use', '../invalid') -DataDir $DirA -AllowStatus @('fail')
+$rejectedStatus = Invoke-Om -Name 'account-live-rejected-status-readback' -ArgList @('--json', 'status') -DataDir $DirA
 $rejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeChanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
+# Keep the established coverage ID, but pre-validation must preserve, not replace, the service.
+Assert-Smoke 'account-live-rejected-restores-service' ($invalidAccount.Ok -and $invalidAccount.Exit -eq 1 -and ($invalidAccount.Envelope.errors -join ' ') -match 'profile name allows' -and (Test-RuntimeUnchanged $switchedHealth $rejectedHealth (Join-Path $DirA "accounts/$otherUser")) -and $rejectedStatus.Ok -and [string]$rejectedStatus.Envelope.summary.session.user -ceq $otherUser -and $rejectedStatus.Envelope.summary.unlocked -eq $true -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA "accounts/$otherUser")) -ceq $rejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
 $clientSwitch = Invoke-Om -Name 'account-live-client-only-rejected' -ArgList @('--client-only', '--json', 'account', 'use', 'main') -DataDir $DirA -AllowStatus @('fail')
 $clientHealth = Get-OwnedRuntimeHealth $DirA
 Assert-Smoke 'account-live-client-only-preserves-host' ($clientSwitch.Ok -and $clientSwitch.Exit -eq 1 -and ($clientSwitch.Envelope.errors -join ' ') -match 'client.only' -and [int]$clientHealth.pid -eq [int]$rejectedHealth.pid -and [string]$clientHealth.data_dir -ceq [string]$rejectedHealth.data_dir -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($profileConfig))
@@ -1191,10 +1465,12 @@ $spaceReadback = Invoke-Om -Name 'space-live-return-readback' -ArgList @('--json
 Assert-Smoke 'space-live-return-takeover' ($spaceReturn.Ok -and (Test-RuntimeChanged $spaceMainHealth $spaceReturnHealth (Join-Path $DirA 'accounts/sweepspace')))
 Assert-Smoke 'space-live-library-preserved' ($spaceReadback.Ok -and [string]$spaceReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceReadback.Envelope.details.entry.content -ceq $spaceMarker)
 $spaceProfileConfig = [IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))
+$spaceRejectionSnapshot = Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')
 $missingSpace = "missing$stamp"
 $spaceRejected = Invoke-Om -Name 'space-live-missing-rejected' -ArgList @('--json', 'space', 'use', $missingSpace) -DataDir $DirA -AllowStatus @('fail')
+$spaceRejectedReadback = Invoke-Om -Name 'space-live-rejected-library-readback' -ArgList @('--json', 'show', $spaceEntryId) -DataDir $DirA
 $spaceRejectedHealth = Get-OwnedRuntimeHealth $DirA
-Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeChanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
+Assert-Smoke 'space-live-rejected-restores-service' ($spaceRejected.Ok -and $spaceRejected.Exit -eq 2 -and [string]$spaceRejected.Envelope.summary.reason -eq 'invalid_input' -and [string]$spaceRejected.Envelope.details.error_type -eq 'user' -and ($spaceRejected.Envelope.errors -join ' ') -match ('space "' + [regex]::Escape($missingSpace) + '" does not exist') -and -not (Test-Path -LiteralPath (Join-Path $DirA "accounts/$missingSpace")) -and (Test-RuntimeUnchanged $spaceReturnHealth $spaceRejectedHealth (Join-Path $DirA 'accounts/sweepspace')) -and $spaceRejectedReadback.Ok -and [string]$spaceRejectedReadback.Envelope.details.entry.id -ceq $spaceEntryId -and [string]$spaceRejectedReadback.Envelope.details.entry.content -ceq $spaceMarker -and (Get-AccountRejectionSnapshot $DirA (Join-Path $DirA 'accounts/sweepspace')) -ceq $spaceRejectionSnapshot -and [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $DirA 'client.json'))) -ceq [Convert]::ToBase64String($spaceProfileConfig))
 $inv = Invoke-Om -Name 'space-invite' -ArgList @('--json', 'space', 'invite', '--note', 'sweep') -DataDir $DirA -Secret
 Invoke-Om -Name 'space-members' -ArgList @('--json', 'space', 'members') -DataDir $DirA | Out-Null
 $inviteCode = ''
@@ -1329,9 +1605,16 @@ if (-not (Test-Path $sessionPath)) {
     $sessionPath = Get-ChildItem -Path $DirA -Filter session.json -Recurse | Select-Object -First 1 -ExpandProperty FullName
 }
 if ($sessionPath -and (Test-Path $sessionPath)) {
-    Invoke-Om -Name 'config-addr-d' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirD | Out-Null
+    $fivekeysConfig = Invoke-Om -Name 'config-addr-d' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirD
     $sess = Get-Content $sessionPath -Raw -Encoding utf8 | ConvertFrom-Json
-    Invoke-Om -Name 'fivekeys-d' -ArgList @(
+    $fivekeysSelected = $fivekeysConfig.Envelope.summary.data_dir
+    $fivekeysNote = 'user_present={0} pass_present={1} secret_present={2} kdf_salt_present={3} wrapped_urk_present={4} urk_nonce_present={5} super_present={6} selected_profile_observed={7} selected_profile_matches={8}' -f `
+        (-not [string]::IsNullOrEmpty($user)), (-not [string]::IsNullOrEmpty($pass)), (-not [string]::IsNullOrEmpty([string]$sess.secret_key)), `
+        (-not [string]::IsNullOrEmpty([string]$sess.kdf_salt)), (-not [string]::IsNullOrEmpty([string]$sess.wrapped_urk)), `
+        (-not [string]::IsNullOrEmpty([string]$sess.urk_nonce)), (-not [string]::IsNullOrEmpty($super)), `
+        ($fivekeysSelected -is [string] -and -not [string]::IsNullOrEmpty($fivekeysSelected)), `
+        ($fivekeysSelected -is [string] -and $fivekeysSelected -eq [IO.Path]::GetFullPath($DirD))
+    $fivekeysResult = Invoke-Om -Name 'fivekeys-d' -ArgList @(
         '--json', 'fivekeys',
         '--addr', $Server,
         '--user', $user,
@@ -1341,7 +1624,15 @@ if ($sessionPath -and (Test-Path $sessionPath)) {
         '--wrapped-urk', ([string]$sess.wrapped_urk),
         '--urk-nonce', ([string]$sess.urk_nonce),
         '--super', $super
-    ) -DataDir $DirD -Secret -TimeoutSec 180 | Out-Null
+    ) -DataDir $DirD -Secret -TimeoutSec 180 -Note $fivekeysNote
+    if (-not $fivekeysResult.Ok) {
+        $fivekeysReason = 'unclassified'
+        foreach ($class in @('key_outcome_unknown', 'auth_outcome_unknown', 'identity_write_recovery_required', 'invalid_input', 'runtime_error')) {
+            if ($fivekeysResult.Envelope.summary.reason -is [string] -and $fivekeysResult.Envelope.summary.reason -ceq $class) { $fivekeysReason = $class; break }
+        }
+        $fivekeysResult.Row.Note += " fivekeys_reason=$fivekeysReason"
+        Write-SweepReport -Force
+    }
 }
 
 Invoke-Om -Name 'config-autosync-off-a' -ArgList @('--json', 'config', '--autosync', 'false') -DataDir $DirA | Out-Null
@@ -1458,7 +1749,12 @@ Assert-Smoke 'super-reset-preserves-memory' ($superReset.Ok -and [bool]$newSuper
 $oldRecoveryDir = Join-Path $Root 'old-recovery'
 Invoke-Om -Name 'old-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $oldRecoveryDir | Out-Null
 $oldRecovery = Invoke-Om -Name 'super-reset-old-code-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $oldRecoveryDir -Secret -HostProfile -AllowStatus @('fail')
-Assert-Smoke 'super-reset-old-code-rejected' ($oldRecovery.Ok -and $oldRecovery.Exit -eq 1 -and ($oldRecovery.Envelope.errors -join ' ') -match 'unwrap|decrypt')
+Assert-Smoke 'super-reset-old-code-rejected' ($oldRecovery.Ok -and $oldRecovery.Exit -eq 1 `
+    -and [string]$oldRecovery.Envelope.summary.reason -ceq 'account_outcome_unknown' `
+    -and ($oldRecovery.Envelope.errors -join ' ').EndsWith('; login_kind=vault_unlock_rejected', [StringComparison]::Ordinal) `
+    -and -not (Test-Path -LiteralPath (Join-Path $oldRecoveryDir 'session.json')) `
+    -and (-not (Test-Path -LiteralPath (Join-Path $oldRecoveryDir 'accounts')) `
+        -or @(Get-ChildItem -LiteralPath (Join-Path $oldRecoveryDir 'accounts') -Filter session.json -Recurse -ErrorAction Stop).Count -eq 0))
 $recoveryDir = Join-Path $Root 'new-recovery'
 Invoke-Om -Name 'new-recovery-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $recoveryDir | Out-Null
 $newRecovery = Invoke-Om -Name 'super-reset-new-code-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $recoveryDir -Secret -HostProfile
@@ -1478,23 +1774,66 @@ $resetDir = Join-Path $Root 'reset-vault'
 Invoke-Om -Name 'reset-vault-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $resetDir | Out-Null
 Invoke-Om -Name 'reset-vault-baseline-login' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile | Out-Null
 $resetKeys = Invoke-Om -Name 'reset-vault-local-keygen' -ArgList @('--json', 'keygen', '--force') -DataDir $resetDir -Secret -HostProfile
+Complete-SmokeKeygen 'reset-vault-keygen' $resetKeys $resetDir
 $mismatched = Invoke-Om -Name 'reset-vault-old-local-write' -ArgList @('--json', 'remember', "reset-local-old-key-$stamp", '--title', "reset-local-$stamp", '--importance', 'important', '--force') -DataDir $resetDir
 $mismatchedId = [string]$mismatched.Envelope.summary.id
 Assert-Smoke 'reset-vault-mismatched-fixture-written' ($resetKeys.Ok -and [bool]$resetKeys.Envelope.summary.super -and $mismatched.Ok -and [bool]$mismatchedId)
 $resetProfile = [string](Invoke-Om -Name 'reset-vault-selected-profile' -ArgList @('--json', 'config') -DataDir $resetDir).Envelope.summary.data_dir
 $resetSession = Join-Path $resetProfile 'session.json'
+# Preserve the live binding until its owned process has acknowledged stop and exited.
+$resetRuntime = Get-OwnedRuntimeHealth $resetDir
+if ([IO.Path]::GetFullPath([string]$resetRuntime.data_dir) -ne [IO.Path]::GetFullPath($resetProfile)) {
+    throw 'Reset fixture Runtime does not own the selected profile.'
+}
+$resetProcess = Get-Process -Id ([int]$resetRuntime.pid) -ErrorAction Stop
+try {
+    $null = $resetProcess.Handle
+    $resetStopped = Invoke-Om -Name 'host-stop-before-profile-change' -ArgList @('--runtime-internal', '--stop') `
+        -DataDir $resetDir -Raw -ExpectExit @(0) -NoReadyRetry
+    if ($resetStopped.Ok -ne $true -or $resetStopped.Exit -ne 0 -or -not $resetProcess.WaitForExit(10000)) {
+        throw 'Reset fixture owned Runtime stop and exit were not confirmed.'
+    }
+} finally { $resetProcess.Dispose() }
 # keygen clears identity; bind this fixture to the same remote identity to exercise the overwrite guard.
 $resetIdentity = Get-Content -LiteralPath $resetSession -Raw -Encoding utf8 | ConvertFrom-Json -AsHashtable
 $resetIdentity['user'] = $user
 $resetIdentity['addr'] = $Server
 [IO.File]::WriteAllText($resetSession, ($resetIdentity | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
 $beforeResetSession = (Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash
+$resetJournalPath = Join-Path $resetDir '.login-recovery.json'
+$beforeResetOperations = @((Get-Content -LiteralPath $resetJournalPath -Raw -Encoding utf8 | ConvertFrom-Json).operations |
+    ForEach-Object { $_.operation_id })
 $previousResetSuper = $env:RSRS_SUPER
 try {
     # Keep the disposable local key usable without storing its Super password in the session.
     $env:RSRS_SUPER = [string]$resetKeys.Envelope.summary.super
-    $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -HostProfile -AllowStatus @('fail')
-    Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 -and ($resetGuard.Envelope.errors -join ' ') -match 'different key material|destination belongs to another account')
+    $resetGuard = Invoke-Om -Name 'reset-vault-mismatch-refused' -ArgList @('--direct', '--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $newSuper) -DataDir $resetDir -Secret -AllowStatus @('fail')
+    $resetJournal = Get-Content -LiteralPath $resetJournalPath -Raw -Encoding utf8 | ConvertFrom-Json
+    $resetOperations = @($resetJournal.operations | Where-Object { $_.operation_id -cnotin $beforeResetOperations })
+    $resetRejection = if ($resetOperations.Count -eq 1) { $resetOperations[0] } else { $null }
+    $resetComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+    $resetRolledBack = $resetJournal.schema_version -is [long] -and $resetJournal.schema_version -eq 2 -and $null -eq $resetJournal.active `
+        -and $resetOperations.Count -eq 1 -and $resetRejection.operation_id -is [string] `
+        -and $resetRejection.operation_id -cmatch '^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$' `
+        -and $resetRejection.idempotency_key -is [string] -and $resetRejection.idempotency_key -ceq $resetRejection.operation_id `
+        -and $resetRejection.phase -is [string] -and $resetRejection.phase -ceq 'rolled_back' `
+        -and $resetRejection.account.register -is [bool] -and $resetRejection.account.register -ceq $false `
+        -and $resetRejection.account.user -is [string] -and $resetRejection.account.user -ceq $user `
+        -and $resetRejection.account.addr -is [string] -and $resetRejection.account.addr -ceq $Server `
+        -and $resetRejection.original_sha256 -is [string] -and $resetRejection.original_sha256 -ceq $beforeResetSession.ToLowerInvariant() `
+        -and $resetRejection.root -is [string] -and $resetRejection.profile -is [string] `
+        -and $null -eq $resetRejection.candidate -and $null -eq $resetRejection.backend -and $null -eq $resetRejection.account.target `
+        -and ([IO.Path]::GetFullPath(([string]$resetRejection.root -replace '^\\\\\?\\', ''))).Equals([IO.Path]::GetFullPath($resetDir), $resetComparison) `
+        -and ([IO.Path]::GetFullPath(([string]$resetRejection.profile -replace '^\\\\\?\\', ''))).Equals([IO.Path]::GetFullPath(($resetProfile -replace '^\\\\\?\\', '')), $resetComparison)
+    $resetExpectedError = if ($resetRolledBack) {
+        "account operation rolled back; operation_id=$($resetRejection.operation_id) source_profile=$($resetRejection.profile); original account was preserved"
+    } else { '' }
+    Assert-Smoke 'reset-vault-mismatch-guard' ($resetGuard.Ok -and $resetGuard.Exit -eq 1 `
+        -and [string]$resetGuard.Envelope.command -ceq 'cli' -and [string]$resetGuard.Envelope.status -ceq 'fail' `
+        -and [string]$resetGuard.Envelope.summary.reason -ceq 'runtime_error' `
+        -and [string]$resetGuard.Envelope.details.error_type -ceq 'runtime' -and $resetRolledBack `
+        -and @($resetGuard.Envelope.errors).Count -eq 1 `
+        -and $resetGuard.Envelope.errors[0] -is [string] -and $resetGuard.Envelope.errors[0] -ceq $resetExpectedError)
     Assert-Smoke 'login-key-mismatch-original-session-preserved' ((Get-FileHash -LiteralPath $resetSession -Algorithm SHA256).Hash -ceq $beforeResetSession)
     $resetRead = Invoke-Om -Name 'login-key-mismatch-original-readback' -ArgList @('--json', 'show', $mismatchedId) -DataDir $resetDir
     Assert-Smoke 'login-key-mismatch-original-data-readable' ($resetRead.Ok -and [string]$resetRead.Envelope.details.entry.content -ceq "reset-local-old-key-$stamp")
@@ -1544,31 +1883,47 @@ function Invoke-LocalSmoke {
     Assert-Smoke $Name ([int]$response.StatusCode -eq $ExpectedStatus)
     if ($ExpectedStatus -eq 200) { return ($response.Content | ConvertFrom-Json) }
 }
-$health = Invoke-LocalSmoke -Name 'runtime-http-health' -Path '/api/health' -Method GET
-Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -eq $ExpectVersion)
-$wrongToken = Invoke-LocalSmoke -Name 'runtime-http-loopback-ignores-token' -Path '/api/rpc' -Payload @{ v = 1; id = 'wrong-token'; method = 'runtime.status' } -Headers @{ Authorization = 'Bearer invalid-smoke-token' }
-if ($wrongToken.ok -ne $true -or [string]$wrongToken.id -cne 'wrong-token' -or [string]$wrongToken.bin -cne $ExpectVersion) { throw 'Loopback RPC response identity failed.' }
+# The endpoint is the separate Runtime, whose installation has its own version and digest.
+$health = Get-OwnedRuntimeHealth $DirA -TimeoutSec 90
+Assert-Smoke 'runtime-http-health' ($null -ne $health -and $health.store_ready -eq $true)
+Assert-Smoke 'runtime-health-protocol-version' ([int]$health.v -eq 1 -and [string]$health.bin -ceq [string]$health.runtime_version)
+$wrongToken = Invoke-OwnedRuntimeRpc $DirA 'runtime.status' -RequestId 'wrong-token' `
+    -Headers @{ Authorization = 'Bearer invalid-smoke-token' } -TimeoutSec 90 -FullResponse
+Assert-Smoke 'runtime-http-loopback-ignores-token' ($wrongToken.ok -eq $true -and [string]$wrongToken.id -ceq 'wrong-token')
 Invoke-LocalSmoke -Name 'runtime-http-foreign-origin' -Path '/api/rpc' -Payload @{ v = 1; id = 'foreign-origin'; method = 'runtime.status' } -Headers @{ Origin = 'https://example.invalid' } -ExpectedStatus 403 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-malformed-json' -Path '/api/rpc' -Payload '{' -RawBody -ExpectedStatus 400 | Out-Null
 Invoke-LocalSmoke -Name 'runtime-http-missing-command' -Path '/api/rpc' -Payload @{} -ExpectedStatus 400 | Out-Null
 foreach ($removed in @(@('/', 'GET'), @('/index.html', 'GET'), @('/favicon.ico', 'GET'), @('/api/invoke', 'POST'), @('/api/task/start', 'POST'))) {
     Invoke-LocalSmoke -Name "runtime-removed-ui-$($removed[0] -replace '[^a-zA-Z0-9]', '-')" -Path $removed[0] -Method $removed[1] -Payload @{} -ExpectedStatus 404 | Out-Null
 }
-function Invoke-RuntimeCli([string]$Name, [string[]]$Arguments) {
-    $response = Invoke-LocalSmoke -Name $Name -Path '/api/rpc' -Payload @{ v = 1; id = $Name; method = 'cli.exec'; args = @('--json') + $Arguments }
-    Assert-Smoke "$Name-response" ($response.ok -eq $true -and [string]$response.id -ceq $Name -and [string]$response.bin -ceq $ExpectVersion -and $null -ne $response.envelope)
+function Invoke-RuntimeCli([string]$Name, [string[]]$Arguments, [int]$ExpectedExit = 0) {
+    $response = Invoke-OwnedRuntimeRpc $DirA 'cli.exec' (@('--json') + $Arguments) `
+        -RequestId $Name -ExpectedExit $ExpectedExit -TimeoutSec 90 -FullResponse
+    Assert-Smoke $Name ($response.exit -eq $ExpectedExit)
+    Assert-Smoke "$Name-response" ($response.ok -eq ($ExpectedExit -eq 0) -and [string]$response.id -ceq $Name `
+        -and $null -ne $response.envelope -and ($ExpectedExit -eq 0 -or [string]$response.envelope.status -ceq 'fail'))
     return $response.envelope
 }
 $runtimeStatus = Invoke-RuntimeCli 'runtime-cli-status' @('status')
 Assert-Smoke 'runtime-cli-status-approved-server' ([string]$runtimeStatus.summary.server_addr -ceq $Server -and $runtimeStatus.summary.unlocked -eq $true)
 Assert-Smoke 'runtime-cli-workspace-mode-normal' ([string]$runtimeStatus.summary.workspace -ceq 'normal')
-$runtimeConfig = Invoke-RuntimeCli 'runtime-cli-config' @('config')
+foreach ($hostOnly in @(@('config'), @('agent-config'), @('inject', '--targets'))) {
+    $deniedName = "runtime-cli-$($hostOnly[0])-host-boundary"
+    $denied = Invoke-RuntimeCli $deniedName $hostOnly -ExpectedExit 2
+    Assert-Smoke "$deniedName-fenced" ([string]$denied.details.error_type -ceq 'host_boundary')
+}
+$hostConfig = Invoke-Om -Name 'runtime-cli-config' -ArgList @('--json', 'config') -DataDir $DirA -TimeoutSec 90
+$runtimeConfig = $hostConfig.Envelope
+Assert-Smoke 'runtime-cli-config-response' ($hostConfig.Ok -and $hostConfig.Exit -eq 0 -and [string]$runtimeConfig.command -ceq 'config')
 Assert-Smoke 'runtime-cli-config-approved-server' ([string]$runtimeConfig.summary.addr -ceq $Server -and $runtimeConfig.summary.autosync -eq $false)
-$runtimeAgent = Invoke-RuntimeCli 'runtime-cli-agent-config' @('agent-config')
+$hostAgent = Invoke-Om -Name 'runtime-cli-agent-config' -ArgList @('--json', 'agent-config') -DataDir $DirA -TimeoutSec 90
+$runtimeAgent = $hostAgent.Envelope
+Assert-Smoke 'runtime-cli-agent-config-response' ($hostAgent.Ok -and $hostAgent.Exit -eq 0 -and [string]$runtimeAgent.command -ceq 'agent-config')
 Assert-Smoke 'runtime-cli-diary-mode-contract' ([string]$runtimeAgent.summary.diary_mode -in @('concise', 'verbose'))
 Invoke-RuntimeCli 'runtime-cli-list' @('list', '--limit', '5') | Out-Null
 Invoke-RuntimeCli 'runtime-cli-tree' @('tree', '--depth', '3') | Out-Null
-Invoke-RuntimeCli 'runtime-cli-inject-targets' @('inject', '--targets') | Out-Null
+$hostTargets = Invoke-Om -Name 'runtime-cli-inject-targets' -ArgList @('--json', 'inject', '--targets') -DataDir $DirA -TimeoutSec 90
+Assert-Smoke 'runtime-cli-inject-targets-response' ($hostTargets.Ok -and $hostTargets.Exit -eq 0 -and [string]$hostTargets.Envelope.command -ceq 'inject')
 Assert-Smoke 'runtime-cli-retired-rerank-rejected' ($retiredInstall.Ok -and -not (Test-Path -LiteralPath (Join-Path $Root 'models/bge-reranker-base')))
 $runtimeCreated = Invoke-RuntimeCli 'runtime-cli-create' @('remember', "runtime-rpc-$stamp", '--title', "runtime-$stamp", '--importance', 'important', '--force', '--parent', $id)
 $runtimeId = [string]$runtimeCreated.summary.id

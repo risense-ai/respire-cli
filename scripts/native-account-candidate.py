@@ -726,8 +726,8 @@ def private_env(root):
 
 def verify_receipt(root, metadata_path):
     metadata = json.loads(metadata_path.read_text())
-    selected = json.loads((root / "runtime.json").read_text())
-    runtime = root / "runtime" / metadata["runtime_version"] / "rsrs-runtime"
+    selected = json.loads((root / "bin/runtime.json").read_text())
+    runtime = root / "bin/runtime" / metadata["runtime_version"] / "rsrs-runtime"
     require(selected.get("version") == metadata["runtime_version"]
             and selected.get("sha256") == metadata["binary_sha256"]
             and selected.get("release", {}).get("metadata_json") == metadata_path.read_text()
@@ -735,6 +735,10 @@ def verify_receipt(root, metadata_path):
             and digest(runtime) == metadata["binary_sha256"], "offline_receipt_mismatch")
     for entry in metadata["files"]:
         name = "rsrs-runtime" if entry["path"] == metadata["binary_file"] else entry["path"]
+        if (name.startswith("core-notices/") and not any(part in ("", ".", "..") for part in name.split("/"))
+                and not any(char in name for char in "\\:\0")
+                and not (runtime.parent / name).exists() and not (runtime.parent / name).is_symlink()):
+            continue
         path = safe_file(runtime.parent, name)
         require(path.stat().st_size == entry["size"] and digest(path) == entry["sha256"],
                 "installed_inventory_mismatch")

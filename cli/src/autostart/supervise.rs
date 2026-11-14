@@ -14,6 +14,7 @@ use super::{lifecycle, read_registration, Registration};
 #[path = "launch_authorization.rs"]
 mod launch_authorization;
 mod auth_control;
+pub(crate) mod offline_keygen;
 pub(crate) use launch_authorization::migration_control::control_migrate_profile;
 pub(crate) use launch_authorization::metadata_control::{control_metadata, control_offline_read, discover_legacy_snapshot};
 pub(crate) use launch_authorization::agent_config_control::control_agent_config;
@@ -89,6 +90,9 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     for (key, value) in &config.environment {
         std::env::set_var(key, value);
     }
+    // Runtime commands bypass the normal CLI bootstrap. Initialize only after
+    // the registration has established this supervisor's owned data root.
+    super::super::install_error_logging();
     // The registered task is the foreground owner. A kill-on-close job keeps a
     // dead supervisor from orphaning the runtime child (Windows 8+ nested jobs
     // preserve the enclosing Task Scheduler job).
@@ -115,6 +119,7 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
         let binary = match resolve_child_plan() {
             Ok(binary) => binary,
             Err(error) => {
+                respire_logging::error(format_args!("runtime resolution failed"));
                 eprintln!("runtime resolution failed: {error:#}");
                 if error.is::<crate::runtime_fetch::ManagedRuntimeRepairRequired>() {
                     lifecycle::record_supervise_event(&config, "exit_error");
@@ -149,12 +154,18 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
                 }
             }
             Ok(Err(error)) => {
+                respire_logging::error(format_args!(
+                    "runtime child supervision failed"
+                ));
                 eprintln!("runtime child supervision failed: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
                     return Ok(());
                 }
             }
             Err(error) => {
+                respire_logging::error(format_args!(
+                    "runtime child could not be started"
+                ));
                 eprintln!("runtime child could not be started: {error:#}");
                 if !failure_backoff(&config, &root, &mut failures, uptime)? {
                     return Ok(());
@@ -317,7 +328,7 @@ mod tests {
         assert_eq!(failures, 1);
         use respire_commands::output::{ResultEnvelope, Status};
         use std::cell::Cell;
-        let finished = Cell::new(false);
+        let finished = Cell::new(None);
         let operation_id = uuid::Uuid::new_v4().to_string();
         let response = |outcome: &str, secret: serde_json::Value| {
             ResultEnvelope::new("keygen", Status::Ok, serde_json::json!({
@@ -326,24 +337,41 @@ mod tests {
                 "super_password": secret,
             }), Vec::new())
         };
-        let finish = || { finished.set(true); Ok(()) };
+        let finish = |resume| { finished.set(Some(resume)); Ok(()) };
         let output = auth_control::finish_keygen(
             Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, false, false, finish)?;
-        assert!(!finished.get());
+        assert_eq!(finished.get(), Some(false));
+        finished.set(None);
         assert_eq!(output.summary, serde_json::json!({
             "path": "fixture/session.json", "super": "synthetic-recovery-code"}));
         assert_eq!(output.items[0].name, "keys");
         assert_eq!(output.actions, ["login --interactive --user <user> --pass <password>"]);
+        let failed_finish = auth_control::finish_keygen(
+            Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, true, false,
+            |resume| { assert!(!resume); anyhow::bail!("synthetic finish failure") },
+        ).err().context("committed finish failure must remain an error")?;
+        let failure = failed_finish.to_string();
+        assert!(failure.contains("keygen committed") && failure.contains(&operation_id)
+            && failure.contains("force=true") && failure.contains("do not replay keygen"));
+        assert!(!failure.contains("synthetic-recovery-code"));
+        auth_control::finish_keygen(
+            Ok(response("committed", serde_json::json!("synthetic-recovery-code"))), &operation_id, false, true, finish)?;
+        assert_eq!(finished.get(), Some(false));
+        finished.set(None);
         for missing in [serde_json::Value::Null, serde_json::json!("")] {
             assert!(auth_control::finish_keygen(Ok(response("committed", missing)), &operation_id, false, false, finish).is_err());
-            assert!(!finished.get());
+            assert_eq!(finished.get(), None);
         }
+        let mut malformed = response("committed", serde_json::json!("synthetic-recovery-code"));
+        malformed.summary = serde_json::Value::Null;
+        assert!(auth_control::finish_keygen(Ok(malformed), &operation_id, false, false, finish).is_err());
+        assert_eq!(finished.get(), None);
         let unknown = anyhow::Error::new(AuthOutcomeUnknown { operation_id: operation_id.clone(), force: true });
         let error = auth_control::finish_keygen(Err(unknown), &operation_id, true, false, finish)
             .err().context("unknown result must not finish maintenance")?;
         assert_eq!(error.downcast_ref::<AuthOutcomeUnknown>()
             .context("original operation error was lost")?.operation_id, operation_id);
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         for force in [false, true] {
             let error = auth_control::finish_keygen(
                 Ok(response("unknown", serde_json::Value::Null)), &operation_id, force, false, finish,
@@ -352,19 +380,19 @@ mod tests {
                 .context("explicit unknown lost its operation context")?;
             assert_eq!(original.operation_id, operation_id);
             assert_eq!(original.force, force);
-            assert!(!finished.get());
+            assert_eq!(finished.get(), None);
         }
         let refused = auth_control::finish_keygen(
             Err(anyhow::anyhow!("synthetic preflight rejection")), &operation_id, true, false, finish,
         ).err().context("preflight rejection must remain an error")?;
         assert!(refused.downcast_ref::<AuthOutcomeUnknown>().is_none());
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, true, finish)?;
-        assert!(!finished.get());
+        assert_eq!(finished.get(), None);
         auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, false, finish)?;
-        assert!(finished.get());
+        assert_eq!(finished.get(), Some(true));
         assert!(auth_control::finish_keygen(Ok(response("rolled_back", serde_json::Value::Null)), &operation_id, false, false,
-            || anyhow::bail!("synthetic resume failure")).is_err());
+            |resume| { assert!(resume); anyhow::bail!("synthetic resume failure") }).is_err());
         use respire_protocol::host_control::{HostAuthAccountOutcome, HostAuthAccountResult,
             HostAuthAuthorization, HostAuthLoginParams, HostAuthRegisterParams, HostAuthAccountParams};
         let binding = respire_protocol::ControlBinding {
@@ -499,6 +527,49 @@ mod tests {
             assert!(error.contains(&format!("Runtime rejected account control ({code})")));
             assert!(!error.contains(diagnostic));
         }
+        let mut register_request = prepare_auth_account_request(binding.clone(), respire_protocol::HostAuthIdentity::Absent,
+            &operation_id, AuthAccountControl::Register { addr: "https://fixture.invalid".into(),
+                user: "fixture".into(), password: "fixture-password".into(), super_password: None })?;
+        register_request.id = request.id.clone();
+        let validate_register = |response: respire_protocol::RpcResponse<ResultEnvelope>, register| {
+            launch_authorization::control::validate_account_response(
+                response, &register_request, &binding.profile, 5252, &binding.profile, register)
+        };
+        for (head, class) in [
+            ("registration outcome unknown; query the original operation, do not resend", "register_remote_unknown"),
+            ("migration keyring write/readback failed; no snapshot was published", "register_native_credentials"),
+            ("auth idempotency conflict", "register_state_conflict"),
+            ("authorization did not return a token", "register_material_invalid"),
+            ("local key compatibility could not be verified; original data was preserved", "register_local_compatibility"),
+        ] {
+            for (private, expected) in [
+                (head.to_owned(), class),
+                (format!("{head}: {diagnostic}"), class),
+                (format!("{head}-suffix: {diagnostic}"), "register_unclassified"),
+                (format!("outer: {head}: {diagnostic}"), "register_unclassified"),
+                (format!("{head}:{diagnostic}"), "register_unclassified"),
+            ] {
+                let mut rejected = rejection("account_outcome_unknown")?;
+                rejected.error = Some(private.clone());
+                rejected.envelope.as_mut().context("account rejection fixture envelope missing")?.errors = vec![private];
+                let error = validate_register(rejected.clone(), true).err().context("register rejection was accepted")?.to_string();
+                assert_eq!(error, format!("Runtime rejected account control (account_outcome_unknown): account outcome is unknown; query the original operation without replaying; register_kind={expected}"));
+                assert!(!error.contains(diagnostic));
+                assert!(!validate_register(rejected.clone(), false).err().context("register rejection was accepted")?
+                    .to_string().contains("register_kind="));
+                assert!(!validate(rejected).err().context("result rejection was accepted")?
+                    .to_string().contains("register_kind="));
+            }
+        }
+        let error = validate_register(rejection("account_outcome_unknown")?, true)
+            .err().context("unknown register rejection was accepted")?.to_string();
+        assert!(error.ends_with("register_kind=register_unclassified"));
+        assert!(!error.contains(diagnostic));
+        for code in ["unauthorized", "scope_mismatch", "auth_ownership_unavailable", "control_unavailable", "control_outcome_unknown"] {
+            let error = validate_register(rejection(code)?, true).err().context("register rejection was accepted")?.to_string();
+            assert!(!error.contains("register_kind="));
+            assert!(!error.contains(diagnostic));
+        }
         let mut valid_rejection = serde_json::to_value(rejection("unauthorized")?)?;
         valid_rejection["scope"] = serde_json::Value::Null;
         for (pointer, value) in [
@@ -525,10 +596,22 @@ mod tests {
             ("/envelope/items/1/value", serde_json::json!("true")),
         ] {
             let mut malformed = valid_rejection.clone();
-            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value;
+            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value.clone();
             let error = validate(serde_json::from_value(malformed)?)
                 .err().context("malformed rejection was accepted")?.to_string();
             assert!(!error.contains("Runtime rejected account control"), "accepted malformed field {pointer}");
+            assert!(!error.contains(diagnostic));
+            let mut register_rejection = rejection("account_outcome_unknown")?;
+            let private = format!("auth idempotency conflict: {diagnostic}");
+            register_rejection.error = Some(private.clone());
+            register_rejection.envelope.as_mut().context("account rejection fixture envelope missing")?.errors = vec![private];
+            let mut malformed = serde_json::to_value(register_rejection)?;
+            malformed["scope"] = serde_json::Value::Null;
+            let value = if pointer == "/envelope/items/0/value" { serde_json::json!("false") } else { value };
+            *malformed.pointer_mut(pointer).context("account rejection fixture field missing")? = value;
+            let error = validate_register(serde_json::from_value(malformed)?, true)
+                .err().context("malformed register rejection was accepted")?.to_string();
+            assert!(!error.contains("Runtime rejected account control"), "accepted malformed register field {pointer}");
             assert!(!error.contains(diagnostic));
         }
         let mut awaiting = response.clone();

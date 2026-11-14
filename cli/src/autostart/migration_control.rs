@@ -23,6 +23,22 @@ struct Original {
     finished: bool,
     #[serde(default)]
     terminal_receipt: Option<HostMigrationResult>,
+    #[serde(default)]
+    schema_rejection: Option<HostMigrationOperation>,
+}
+
+enum MigrationReply {
+    Receipt(HostMigrationResult),
+    SchemaRejected(HostMigrationOperation),
+}
+
+fn rejection_envelope() -> ResultEnvelope {
+    crate::set_exit_code(1);
+    let mut envelope = ResultEnvelope::new("migrate", Status::Fail,
+        serde_json::json!({"state":"rejected", "code":"migration_schema_rejected", "original_preserved":true}), Vec::new());
+    envelope.errors.push("legacy database uses an incompatible pre-encrypted demo format; export with its original version and import into rsrs; original rows were preserved".into());
+    envelope.actions.push("After correcting the source, use a new account name for a new migration; repeating this account returns the original rejection.".into());
+    envelope
 }
 
 fn canonical_id(value: &str) -> bool {
@@ -105,6 +121,11 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             && operation.key == operation.operation_id && canonical_id(&original.token), "migration recovery binding changed");
         if original.finished {
             anyhow::ensure!(original.sent, "finished migration was never sent");
+            if let Some(rejected) = original.schema_rejection.as_ref() {
+                anyhow::ensure!(original.terminal_receipt.is_none() && *rejected == original.operation,
+                    "terminal migration rejection changed its original operation");
+                return Ok(rejection_envelope());
+            }
             let receipt = original.terminal_receipt.as_ref().context(
                 "migration was already confirmed and maintenance finished, but this older recovery record has no terminal details; Runtime was not drained and no migration was replayed")?;
             validate_terminal_receipt(receipt, &original.operation, HOST_MIGRATION_PROFILE_METHOD)?;
@@ -112,7 +133,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             envelope.details = receipt.details.clone();
             return Ok(envelope);
         }
-        anyhow::ensure!(original.terminal_receipt.is_none(), "unfinished migration contains a terminal receipt");
+        anyhow::ensure!(original.terminal_receipt.is_none() && original.schema_rejection.is_none(), "unfinished migration contains a terminal receipt");
         let maintenance = super::lifecycle::resume_identity_write_maintenance(
             &root, &profile, &original.token, &original.coordinator)?;
         (original, digest, maintenance)
@@ -125,7 +146,7 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             token: super::lifecycle::current_boot_token().context("migration maintenance token missing")?,
             coordinator: binding["coordinator_id"].as_str().context("migration coordinator missing")?.to_owned(),
             was_serving: owner.is_some(), store_ready: owner.as_ref().is_some_and(|health| health.store_ready),
-            sent: false, finished: false, terminal_receipt: None };
+            sent: false, finished: false, terminal_receipt: None, schema_rejection: None };
         let bytes = serde_json::to_vec(&original)?;
         super::private_write(&path, &bytes, None)?;
         (original, super::hash(&bytes), maintenance)
@@ -141,13 +162,22 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         Ok(())
     };
     let mut finished = false;
+    let mut stage = "paused_grant";
+    let mut exchange_failure = "unclassified";
     let result: Result<ResultEnvelope> = (|| {
         maintenance.auth_launch_binding(&profile)?.context("migration lost its actual Paused grant")?;
+        stage = "owner_check";
         maintenance.check_account_runtime()?;
-        if let Some(owner) = owner.as_ref() { maintenance.drain_runtime(owner)?; }
+        if let Some(owner) = owner.as_ref() {
+            stage = "drain_owner";
+            maintenance.drain_runtime(owner)?;
+        }
+        stage = "drained_check";
         anyhow::ensure!(!crate::net_rpc::port_is_open(), "migration requires a drained Runtime");
+        stage = "selection_before_send";
         unchanged()?;
         let method = if original.sent { HOST_MIGRATION_RESULT_METHOD } else {
+            stage = "save_sent";
             original.sent = true;
             let bytes = serde_json::to_vec(&original)?;
             super::private_write(&path, &bytes, Some(&digest))?;
@@ -155,46 +185,71 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
             HOST_MIGRATION_PROFILE_METHOD
         };
         // A saved sent request always queries. A timeout never admits a replacement operation.
-        let receipt = exchange(&takeover, &mut maintenance, &original.operation, method)?;
-        if receipt.outcome == HostMigrationOutcome::Unknown {
-            let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown"}), Vec::new());
-            envelope.details = serde_json::to_value(&receipt)?;
-            envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
-                source_id, account, original.operation.operation_id));
-            crate::set_exit_code(2);
-            return Ok(envelope);
+        stage = "exchange";
+        let reply = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
+        if let MigrationReply::Receipt(receipt) = &reply {
+            if receipt.outcome == HostMigrationOutcome::Unknown {
+                stage = "encode_unknown";
+                let mut envelope = ResultEnvelope::new("migrate", Status::Fail, serde_json::json!({"outcome":"unknown", "request_phase":if method == HOST_MIGRATION_RESULT_METHOD { "result_query" } else { "initial_request" }}), Vec::new());
+                envelope.details = serde_json::to_value(&receipt)?;
+                envelope.actions.push(format!("repeat migrate --source {} --account {} to query original operation {}; do not start another migration",
+                    source_id, account, original.operation.operation_id));
+                crate::set_exit_code(2);
+                return Ok(envelope);
+            }
         }
+        stage = "selection_after_receipt";
         unchanged()?;
         let restore_owner = original.was_serving;
         let restore_store = original.store_ready;
         if restore_owner {
+            stage = "restore_owner_start";
             maintenance.start_account_runtime()?;
+            stage = "restore_owner_probe";
             let restored = crate::rpc::probe_runtime()?.context("original migration owner did not resume")?;
+            stage = "restore_owner_verify";
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest, Some(&account_id))?;
+            stage = "restore_store_ready";
             anyhow::ensure!(!restore_store || restored.store_ready, "restored migration owner did not confirm its original store readiness");
         }
+        stage = "selection_before_finish";
         unchanged()?;
+        stage = "finish_maintenance";
         maintenance.finish()?;
         finished = true;
         original.finished = true;
-        let mut envelope = ResultEnvelope::new("migrate", Status::Ok, receipt.details.clone(), Vec::new());
-        envelope.details = receipt.details.clone();
-        original.terminal_receipt = Some(receipt);
+        let envelope = match reply {
+            MigrationReply::Receipt(receipt) => {
+                let mut envelope = ResultEnvelope::new("migrate", Status::Ok, receipt.details.clone(), Vec::new());
+                envelope.details = receipt.details.clone();
+                original.terminal_receipt = Some(receipt);
+                envelope
+            }
+            MigrationReply::SchemaRejected(rejected) => {
+                original.schema_rejection = Some(rejected);
+                rejection_envelope()
+            }
+        };
+        stage = "save_terminal";
         super::private_write(&path, &serde_json::to_vec(&original)?, Some(&digest))?;
         Ok(envelope)
     })();
     if !finished {
         maintenance.mark(super::lifecycle::Phase::Paused).map_err(|_| anyhow::anyhow!(
-            "migration_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery",
+            "migration_outcome_unknown operation_id={}; Paused publication failed; query the original operation before recovery; migration_stage=paused_publication",
             original.operation.operation_id))?;
     }
     if result.is_ok() && finished { maintenance.finish_handoff()?; }
-    result.map_err(|_| anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed", original.operation.operation_id))
+    result.map_err(|_| {
+        let exchange = if stage == "exchange" { format!("; migration_exchange={exchange_failure}") } else { String::new() };
+        anyhow::anyhow!("migration_outcome_unknown operation_id={}; repeat the same migrate --source --account to query; no migration was replayed; migration_stage={}{}", original.operation.operation_id, stage, exchange)
+    })
 }
 
 
 fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintenance,
-    original: &HostMigrationOperation, method: &str) -> Result<HostMigrationResult> {
+    original: &HostMigrationOperation, method: &str, failure: &mut &'static str) -> Result<MigrationReply> {
+    let mut runtime_code = None;
     let envelope = super::control::auth_exchange(takeover, maintenance,
         Instant::now() + Duration::from_secs(185), None, |binding, identity| {
             anyhow::ensure!(binding.installation_root == original.installation_root && binding.profile == original.profile
@@ -204,9 +259,60 @@ fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintena
                 method: method.to_owned(), args: vec![serde_json::to_string(&params)?], scope: None,
                 operation_id: Some(original.operation_id.clone()), idempotency_key: Some(original.key.clone()),
                 parent_operation_id: None, queue_wait_ms: None, lifecycle: None })
-        }, |response, request, profile, pid| validate_response(response, request, profile, pid, original),
-        |_| anyhow::anyhow!("private migration exchange failed; query the original operation"))?;
-    serde_json::from_value(envelope.summary).map_err(|_| anyhow::anyhow!("invalid private migration result"))
+        }, |response, request, profile, pid| {
+            runtime_code = match response.code.as_deref() {
+                Some("invalid_request") => Some("runtime_invalid_request"),
+                Some("protocol_version_mismatch") => Some("runtime_protocol_version_mismatch"),
+                Some("control_unavailable") => Some("runtime_control_unavailable"),
+                Some("auth_recovery_pending") => Some("runtime_auth_recovery_pending"),
+                Some("unauthorized") => Some("runtime_unauthorized"),
+                Some("auth_ownership_unavailable") => Some("runtime_auth_ownership_unavailable"),
+                Some("scope_mismatch") => Some("runtime_scope_mismatch"),
+                Some("migration_outcome_unknown") => Some("runtime_migration_outcome_unknown"),
+                Some("control_outcome_unknown") => Some("runtime_control_outcome_unknown"),
+                _ => None,
+            };
+            validate_response(response, request, profile, pid, original)
+        }, |error| error).map_err(|error| {
+            *failure = error.chain().find_map(|cause| match cause.to_string().as_str() {
+                "cannot start owned host control Runtime" => Some("spawn"),
+                "missing host control input pipe" | "missing host control output pipe"
+                | "host control input owner was released" | "host control request write failed" => Some("channel"),
+                "host control request frame exceeds the protocol limit" | "missing host control response frame"
+                | "invalid host control response frame size" | "incomplete host control response frame"
+                | "extra host control response bytes" => Some("frame"),
+                "invalid host control response JSON" | "invalid private migration result" => Some("encoding"),
+                "host control deadline exceeded" | "host control response deadline or channel failure"
+                | "host control response deadline exceeded" | "host control exit deadline exceeded" => Some("deadline"),
+                "host control Runtime exit does not match its response" => Some("child_exit"),
+                "migration response binding mismatch" => Some("response_binding"),
+                "migration response profile mismatch" => Some("response_profile"),
+                "private migration envelope missing" | "invalid private migration envelope" => Some("response_envelope"),
+                "migration readiness mismatch" => Some("response_readiness"),
+                "migration result changed its original operation or identity"
+                | "terminal migration receipt changed its original operation or identity" => Some("result_identity"),
+                "invalid unknown migration result" => Some("unknown_receipt"),
+                "invalid terminal migration result" | "unknown migration result is not a terminal receipt" => Some("terminal_receipt"),
+                "migration completion directory missing" | "migration completion differs from its intent"
+                | "query cannot adopt an unbound legacy receipt" => Some("terminal_details"),
+                _ => None,
+            }).unwrap_or("unclassified");
+            if *failure == "response_envelope" {
+                *failure = runtime_code.unwrap_or(*failure);
+            }
+            anyhow::anyhow!("private migration exchange failed; query the original operation")
+        })?;
+    if envelope.summary.get("schema_version").is_some() {
+        serde_json::from_value(envelope.summary).map(MigrationReply::SchemaRejected).map_err(|_| {
+            *failure = "encoding";
+            anyhow::anyhow!("invalid private migration rejection")
+        })
+    } else {
+        serde_json::from_value(envelope.summary).map(MigrationReply::Receipt).map_err(|_| {
+            *failure = "encoding";
+            anyhow::anyhow!("invalid private migration result")
+        })
+    }
 }
 
 fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest, profile: &Path,
@@ -227,6 +333,16 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         anyhow::ensure!(items.next().is_some_and(|item| item.value == value && if name == "control_ready" {
             matches!(item.status, Status::Ok) } else { matches!(item.status, Status::Skip) }) && items.next().is_none(),
             "migration readiness mismatch");
+    }
+    if response.code.as_deref() == Some("migration_schema_rejected") {
+        anyhow::ensure!(!response.ok && response.exit == 1 && response.error.is_none()
+            && matches!(envelope.status, Status::Fail) && response.data_dir.is_some(),
+            "invalid private migration rejection");
+        let rejected: HostMigrationOperation = serde_json::from_value(envelope.summary.clone())
+            .map_err(|_| anyhow::anyhow!("invalid private migration rejection"))?;
+        anyhow::ensure!(rejected == *original && super::control::identity(profile)? == original.identity,
+            "migration rejection changed its original operation or identity");
+        return Ok(envelope);
     }
     let receipt: HostMigrationResult = serde_json::from_value(envelope.summary.clone())
         .map_err(|_| anyhow::anyhow!("invalid private migration result"))?;

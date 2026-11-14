@@ -7,7 +7,7 @@ export function regressionContract(manifest,profile='full') {
   profile=validationProfile(profile);
   const native=manifest.targets.map(t=>t.triple);
   // Legacy migration fixtures bind architectures with published pre-1.0.20 binaries.
-  const migration=native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin');
+  const migration=native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
   if(profile==='critical')return {schema:1,validation_profile:profile,native,cloud:[],migration:[],migration_gate:[],api:true};
   return {schema:1,native,cloud:native.filter(t=>t!=='x86_64-unknown-linux-gnu'),migration,migration_gate:migration,api:true};
 }
@@ -32,7 +32,7 @@ export function regressionStatus(jobs,contract){
   for(const [kind,select,match] of groups){
     const selected=jobs.filter(select);
     if(new Set(selected.map(j=>j.name)).size!==selected.length)throw Error('Duplicate '+kind+' regression');
-    const fullTargets=kind==='cloud'?contract.native.filter(t=>t!=='x86_64-unknown-linux-gnu'):contract.native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin');
+    const fullTargets=kind==='cloud'?contract.native.filter(t=>t!=='x86_64-unknown-linux-gnu'):contract.native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
     const inactive=profile==='critical'&&kind!=='native'?selected.filter(j=>j.status==='completed'&&j.conclusion==='skipped'&&fullTargets.some(target=>match(target)(j))):[];
     const placeholder=selected.filter(j=>j.name==='Native migration (${{ matrix.target }})'||j.name==='Migration gate (${{ matrix.target }})');
     // Actual API run 41291097685 emits these placeholders for unselected full-only matrices.

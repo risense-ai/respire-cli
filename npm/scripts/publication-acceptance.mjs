@@ -83,12 +83,13 @@ export function validateVerified(receipt, scoped, alias) {
   return receipt;
 }
 export function validateArmVerified(receipt,scoped,alias){
+  const platforms=['linux-arm64-gnu','linux-arm64'].filter(platform=>scoped.binaries.some(b=>b.package==='@rsrsai/'+platform));
   if(receipt?.schema!==2||receipt.kind!=='publication-arm64-verified'||receipt.state!=='verified'||
     validationProfile(receipt.validation_profile)!==validationProfile(scoped.validation_profile)||
     !same(receipt.source,scoped.source)||!same(receipt.packages,[...scoped.packages,alias.alias])||
     !same(receipt.alias_publisher,alias.publisher)||!instant(receipt.verified_at)||
-    !Array.isArray(receipt.installs)||receipt.installs.length!==2)throw Error('Missing native ARM64 public installation proof');
-  for(const platform of ['linux-arm64-gnu','linux-arm64']){
+    !platforms.length||!Array.isArray(receipt.installs)||receipt.installs.length!==platforms.length)throw Error('Missing native ARM64 public installation proof');
+  for(const platform of platforms){
     const matches=receipt.installs.filter(i=>i.platform===platform);
     if(matches.length!==1||matches[0].version!==scoped.source.version||
       !scoped.binaries.some(b=>b.package==='@rsrsai/'+platform&&b.sha256===matches[0].binary_sha256))throw Error('ARM64 install differs from exact accepted binary');
@@ -380,7 +381,7 @@ async function verifyAccepted() {
   await verifyPackages(packages.map(p=>p.name==='rsrs-cli'?{...p,dependencies:found.receipt.dependencies,optionalDependencies:found.receipt.optionalDependencies}:p),{requireInstallIndex:true,timeoutMs:60*60*1000});
   if(arm){
     const installs=[];
-    for(const platform of ['linux-arm64-gnu','linux-arm64'])installs.push(await publicInstall(scoped,found.receipt.alias,assertCurrent,platform));
+    for(const platform of ['linux-arm64-gnu','linux-arm64'].filter(platform=>sourceManifest.targets.some(t=>t.pkg==='@rsrsai/'+platform)))installs.push(await publicInstall(scoped,found.receipt.alias,assertCurrent,platform));
     assertCurrent();
     const verified=validateArmVerified({schema:2,kind:'publication-arm64-verified',state:'verified',validation_profile:validationProfile(scoped.validation_profile),source:s,packages,
       alias_publisher:found.receipt.publisher,verified_at:new Date().toISOString(),installs},scoped,found.receipt);

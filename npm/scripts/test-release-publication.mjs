@@ -185,7 +185,7 @@ test('same-run scoped tarball reuse is explicit current-main only; historical, p
   for(const owner of [repository,'fork/repo']) for(const event of ['workflow_dispatch','push']) for(const ref of ['refs/heads/main','refs/heads/feature'])
     for(const exact of [true,false]) for(const prepared of ['', '100']) for(const repair12 of [false,true])
     for(const repair14 of [false,true]) for(const reuse of [false,true]) {
-      const github={repository:owner,event_name:event,ref,sha:'a'.repeat(40)},needs={plan:{outputs:{sha:(exact?'a':'b').repeat(40)}}};
+      const github={repository:owner,event_name:event,ref,sha:'a'.repeat(40),run_attempt:'1'},needs={plan:{outputs:{sha:(exact?'a':'b').repeat(40)}}};
       const inputs={prepared_run:prepared,repair_dev12:repair12,repair_dev14:repair14,reuse_dev12_validation:reuse};
       assert.equal(selected(github,needs,inputs),owner===repository&&event==='workflow_dispatch'&&ref==='refs/heads/main'&&exact&&!prepared&&!repair12&&!repair14&&!reuse);
     }
@@ -243,8 +243,8 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
       uploads++;
     }
   }
-  // Retain prior uploads plus the instrumented, account-free Client2 source result.
-  assert.equal(uploads, 60, 'preserve publication/source evidence and both Client2 fixture results');
+  // The latest-release upgrade no longer uploads a historical draft cache.
+  assert.equal(uploads, 61, 'preserve current publication/source evidence, Intel import, both Client2 results and the published online receipt');
   const compatibility = readFileSync(new URL('client2-launcher-regression.yml', root), 'utf8');
   assert.match(compatibility, /name: client2-launcher-raw-\$\{\{ matrix.target \}\}-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   const launcherRaw = [
@@ -260,12 +260,10 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   assert(compatibility.replace(/\r\n/g, '\n').includes(launcherRaw),
     'original Client2 raw and exact GUI evidence paths must belong to the same named one-day upload');
   const candidate = readFileSync(new URL('migration-keyring-check.yml', root), 'utf8');
-  const candidateCase = "${{ inputs.cli_consumer == 'official-dev6' && 'official-dev6-business-regression' || inputs.cli_consumer == 'official-stable-contracts' && 'official-stable-contracts' || inputs.cli_consumer == 'official-stable-remote' && 'official-stable-diary-remote' || 'source-account-regression' }}";
-  const candidateLines = candidate.split(/\r?\n/);
-  assert(candidateLines.includes(`      CANDIDATE_CASE_NAME: ${candidateCase}`));
-  assert(candidateLines.includes(`          name: ${candidateCase}-\${{ github.run_id }}-\${{ github.run_attempt }}`));
-  assert(candidateLines.includes('            --root "$RUNNER_TEMP/$CANDIDATE_CASE_NAME" \\'));
-  assert(candidateLines.includes('          path: ${{ runner.temp }}/${{ env.CANDIDATE_CASE_NAME }}/result.json'));
+  assert.doesNotMatch(candidate, /runtime_candidate_sha:|source-account-regression:|\.account-runtime/);
+  assert.match(candidate, /release_run_id:/);
+  assert.match(candidate, /targeted-native-migration\/migration-platform-gate\.json/);
+  assert.match(candidate, /native-migration-keyring\/keyring-selftest\.json/);
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
@@ -722,8 +720,9 @@ test('published compatibility checks exact product pin and numeric DEV minCLI wi
 
 function publishedFullFixture(root) {
   const targets=m.targets.map(t=>t.triple), manifestHash='d'.repeat(64), context={sha:'e'.repeat(40),run_id:901,run_attempt:2};
+  const runtimeTargets=targets;
   let id=1;
-  const spec={schema:2,...Object.fromEntries(['cli','runtime'].map(kind=>[kind,{repository:`risense-ai/respire-${kind}`,version:kind==='cli'?'1.0.21-dev.5':'1.0.21-dev.4',source_sha:(kind==='cli'?'a':'b').repeat(40),release_id:kind==='cli'?21:22,producer:{run_id:91,run_attempt:2},assets:targets.flatMap(target=>publishedAssetNames(kind,target).map(name=>({id:id++,name,size:64,sha256:(kind==='cli'?'a':'b').repeat(64)})))}]))};
+  const spec={schema:2,...Object.fromEntries(['cli','runtime'].map(kind=>[kind,{repository:`risense-ai/respire-${kind}`,version:kind==='cli'?'1.0.21-dev.5':'1.0.21-dev.4',source_sha:(kind==='cli'?'a':'b').repeat(40),release_id:kind==='cli'?21:22,producer:{run_id:91,run_attempt:2},assets:(kind==='cli'?targets:runtimeTargets).flatMap(target=>publishedAssetNames(kind,target).map(name=>({id:id++,name,size:64,sha256:(kind==='cli'?'a':'b').repeat(64)})))}]))};
   const jobs=[];
   const job=name=>jobs.push({name,status:'completed',conclusion:'success',run_id:context.run_id,run_attempt:context.run_attempt,head_sha:context.sha});
   function put(artifact,file,value) {const location=path.join(root,artifact,file);mkdirSync(path.dirname(location),{recursive:true});writeFileSync(location,JSON.stringify(value));}
@@ -739,7 +738,7 @@ function publishedFullFixture(root) {
     put('resident-concurrency-'+target,'resident-stress-metrics.json',{passed:true});
     put('resident-concurrency-'+target,'fixture-dependencies.json',{synthetic:true});
     put('resident-concurrency-'+target,'fixture-process-verification.json',[{passed:true}]);
-    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'full',full_coverage:true,all_published_sources_covered:true,target,candidate_sha256:identity.binary_sha256,selected_sources:['v1.0.20'],sources:[{version:'1.0.20',passed:true}]});
+    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'critical',full_coverage:false,all_published_sources_covered:false,target,candidate_sha256:identity.binary_sha256,published_formal_sources:['v1.0.19','v1.0.20'],selected_sources:['v1.0.20'],sources:[{version:'1.0.20',formal:true,passed:true}]});
     put('published-upgrades-'+target,'v1.0.20/results/real-account-return-verification.json',[runtime]);
     if(target==='x86_64-unknown-linux-gnu')continue;
     job(`cloud-sweep (runner, ${target})`);
@@ -779,7 +778,8 @@ test('published full joins every existing report and live image identity; copied
   try {
     const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context);
     const complete=run();assert.equal(complete.full_passed,true);assert.equal(complete.harness_sha,f.context.sha);
-    assert.notEqual(complete.harness_sha,complete.product_sources.cli);assert(complete.actual_processes.length>=20);
+    assert.notEqual(complete.harness_sha,complete.product_sources.cli);
+    assert.equal(complete.actual_processes.length,2*f.targets.length+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
     for(const change of [j=>j.pop(),j=>j.push(j[0]),j=>j[0].conclusion='skipped',j=>j[0].conclusion='cancelled',j=>j[0].conclusion='failure',j=>j[0].status='in_progress',j=>j[0].run_attempt=1,j=>j[0].head_sha=f.spec.cli.source_sha,j=>j[0].run_id=900]) {
       const jobs=copy(f.jobs);change(jobs);assert.throws(()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,jobs,f.context));
     }

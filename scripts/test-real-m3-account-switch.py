@@ -31,7 +31,7 @@ if sys.platform.startswith('linux'):
 # Asynchronous stack dumps can race live frames (CPython #116008); fixture calls retain hard deadlines.
 BASE=pathlib.Path(args.output_dir).resolve()
 BASE.mkdir(parents=True,exist_ok=True)
-import cryptography, importlib.metadata, psutil
+import cryptography, importlib.metadata, importlib.util, psutil
 (BASE/'fixture-dependencies.json').write_text(json.dumps({
     'python':sys.version,'cryptography':cryptography.__version__,'psutil':psutil.__version__,
     'psutil_source':json.loads(importlib.metadata.distribution('psutil').read_text('direct_url.json') or 'null'),
@@ -123,7 +123,7 @@ for binary in BINARIES:
         return (rows,artifacts,(profile/'session.json').read_bytes())
     def observe_runtime(health=None):
         if health is None:
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                 health=json.load(response)
         profile=pathlib.Path(json.loads((main/'client.json').read_text())['data_dir']) if (main/'client.json').exists() else main
         verify_runtime_health(runtime_config,health,main,profile)
@@ -140,6 +140,7 @@ for binary in BINARIES:
         (main/'client.json').write_text(json.dumps({**public_config,'data_dir':str(profile)}),encoding='utf-8')
     worker_identities=[]
     inspector=None
+    stop_failure=None
     def checked_worker(health):
         global inspector
         if args.runtime_binary: observe_runtime(health)
@@ -181,10 +182,11 @@ for binary in BINARIES:
                 assert time.monotonic()<deadline, 'owned Core worker survived its host: '+str(pid)
                 time.sleep(.02)
     try:
-        run('--direct','model','engine','cpu')
-        stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
-        assert stopped.returncode==0,'direct engine preparation runtime stop failed'
-        global_engine=(main/'inference.json').read_bytes()
+        if not (args.seed_binary and args.runtime_binary):
+            run('--direct','model','engine','cpu')
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            assert stopped.returncode==0,'direct engine preparation runtime stop failed'
+            global_engine=(main/'inference.json').read_bytes()
         for profile in [main,alternate]:
             select(profile)
             if args.seed_binary:
@@ -193,6 +195,15 @@ for binary in BINARIES:
                     assert seeded.returncode==0,seeded.stdout.decode(errors='replace')+seeded.stderr.decode(errors='replace')
             else:
                 run('--direct','remember','Real account return fixture '+profile.name,'--title',profile.name,'--importance','important','--force')
+                if args.runtime_binary:
+                    # Durable remember may return before background embeddings finish.
+                    # Wait on this selected profile's live owner before stopping it.
+                    wait_index_ready()
+                    index_files=list((profile/'core-index').iterdir())
+                    assert index_files and all(path.is_file() and path.stat().st_size>0 for path in index_files), 'seed index artifacts missing or empty'
+                    # --direct forwards to a resident owner; drain it before raw fixture profile selection.
+                    stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+                    assert stopped.returncode==0,'direct seed runtime stop failed'
         stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
         assert stopped.returncode==0,'direct seed runtime stop failed'
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
@@ -277,6 +288,38 @@ for binary in BINARIES:
                         path.unlink()
                 old_runtime=None
                 legacy_handoff_actor='fixture'
+        if args.seed_binary and args.runtime_binary:
+            # Historical binaries must create their own libraries before a
+            # candidate Runtime can initialize the selected profile's schema.
+            run('--direct','model','engine','cpu')
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            if stopped.returncode:
+                stop_failure={'phase':'direct_engine_preparation','returncode':stopped.returncode,
+                    'timing':dict(stopped.fixture_timing),
+                    'runtime_identity_receipt_index':len(args.runtime_identity_receipts)-1,
+                    'stdout':'redaction_unavailable','stderr':'redaction_unavailable'}
+                try:
+                    # Reuse the existing bounded credential redactor; never attach raw output or fixture files.
+                    support_spec=importlib.util.spec_from_file_location('stop_diagnostic_support',
+                        pathlib.Path(__file__).with_name('dev-legacy-vault-smoke.py'))
+                    support=importlib.util.module_from_spec(support_spec)
+                    support_spec.loader.exec_module(support)
+                    redactor=object.__new__(support.Smoke)
+                    redactor.diagnostic_secrets={code,entropy.hex()}
+                    for profile in (main,alternate):
+                        redactor.diagnostic_secrets.update(value for value in
+                            json.loads((profile/'session.json').read_bytes()).values()
+                            if isinstance(value,str) and value)
+                    for stream in ('stdout','stderr'):
+                        body=getattr(stopped,stream)
+                        output=subprocess.CompletedProcess(stopped.args,stopped.returncode,
+                            body if stream=='stdout' else b'',body)
+                        stop_failure[stream]=redactor.redacted_cli_error(env,output)
+                except Exception:
+                    # Redaction failure must neither publish raw bytes nor hide the original stop failure.
+                    pass
+            assert stopped.returncode==0,'direct engine preparation runtime stop failed'
+            global_engine=(main/'inference.json').read_bytes()
         statuses=[]
         visited=set()
         generation_changes={}
@@ -310,7 +353,7 @@ for binary in BINARIES:
                     while pending.poll() is None:
                         assert time.monotonic()<deadline,'native probe exceeded the acceptance deadline'
                         start=time.monotonic()
-                        with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                        with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                             health=json.load(response)
                         assert time.monotonic()-start < 2,'health blocked behind native inference'
                         if args.expect_supervised_worker:
@@ -339,7 +382,7 @@ for binary in BINARIES:
                 deadline=time.monotonic()+10
                 policy=None
                 while policy is None and time.monotonic()<deadline:
-                    with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                    with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                         thread_health=json.load(response)
                     policy=thread_health.get('inference',{}).get('intra_threads')
                     if policy is None: time.sleep(.05)
@@ -348,7 +391,7 @@ for binary in BINARIES:
             recalled=run('recall','Real account return fixture','--titles')
             assert recalled.get('items'),'real recall returned no seeded entry'
             if args.expect_supervised_worker:
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                     assert checked_worker(json.load(response))==probe_worker,'warm recall replaced its worker'
             doctor=run('doctor',allow_failure=True)
             rows={item['name']:item for item in doctor['items'] if item['name'] in ['embedder','model index']}
@@ -373,7 +416,7 @@ for binary in BINARIES:
         stress = None
         if args.resident_stress:
             import concurrent.futures, contextlib, psutil, threading
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}), timeout=2) as response:
                 health = json.load(response)
             owned = psutil.Process(health['pid'])
             if args.runtime_binary:
@@ -419,7 +462,7 @@ for binary in BINARIES:
                     raise RuntimeError('continuous health observer failed: '+str(observer_errors))
                 sample_started=time.monotonic()
                 sample_unix=time.time()
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health', timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}), timeout=2) as response:
                     current = json.load(response)
                 health_completed=time.monotonic()
                 assert current['pid'] == owned.pid, 'stress changed runtime ownership'
@@ -578,7 +621,7 @@ for binary in BINARIES:
         restart_checked=False
         if args.expect_in_process or args.expect_supervised_worker:
             import psutil
-            with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+            with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                 health=json.load(response)
             owned=psutil.Process(health['pid'])
             retired_workers=[checked_worker(health)] if args.expect_supervised_worker else []
@@ -641,7 +684,7 @@ for binary in BINARIES:
                 assert (ready['pid'],ready['process_start_id'],ready['instance_id'])==(
                     replacement['pid'],replacement['process_start_id'],replacement['instance_id'])
             if args.expect_supervised_worker:
-                with urllib.request.urlopen(f'http://127.0.0.1:{port}/api/health',timeout=2) as response:
+                with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                     checked_worker(json.load(response))
             restart_checked=True
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
@@ -659,7 +702,8 @@ for binary in BINARIES:
             **runtime_report(args,True)})
         print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
     except Exception as error:
-        reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000]})
+        reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000],
+            **({'runtime_stop_failure':stop_failure} if stop_failure is not None else {})})
         (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
         raise
     finally:

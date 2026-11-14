@@ -9,12 +9,36 @@ import unittest
 from unittest.mock import Mock, patch
 
 import dev_model_fixture as model
+from dev_migration_diagnostics import migration_failure_diagnostics
 # This existing CI entry covers both native public input caches.
 from test_native_psutil_wheel_cache import NativePsutilWheelCacheTest
 
 cache_spec = importlib.util.spec_from_file_location("native_model_cache", Path(__file__).with_name("native-model-cache.py"))
 model_cache = importlib.util.module_from_spec(cache_spec)
 cache_spec.loader.exec_module(model_cache)
+
+
+class MigrationDiagnosticsTests(unittest.TestCase):
+    def test_only_fixed_outcome_and_phase_are_reported(self):
+        for outcome in ("unknown", "completed", "already_migrated"):
+            for phase in ("initial_request", "result_query"):
+                value = {"command": "migrate", "summary": {"outcome": outcome,
+                    "request_phase": phase, "operation_id": "synthetic-private-id",
+                    "account": "synthetic-private-account", "root": "synthetic-private-root"},
+                    "details": {"token": "synthetic-secret"},
+                    "actions": ["synthetic-secret"], "errors": ["synthetic-secret"]}
+                self.assertEqual(migration_failure_diagnostics(value), {
+                    "migration_outcome": outcome, "migration_request_phase": phase})
+                self.assertNotIn("synthetic", json.dumps(migration_failure_diagnostics(value)))
+
+    def test_untrusted_or_absent_values_cannot_enter_report(self):
+        empty = {"migration_outcome": None, "migration_request_phase": None}
+        for value in (None, [], {}, {"command": "other", "summary": {"outcome": "unknown"}},
+                      {"command": "migrate", "summary": "synthetic-secret"}):
+            self.assertEqual(migration_failure_diagnostics(value), empty)
+        for value in ("unknown synthetic-secret", "synthetic-secret", [], {}, True, 1, None):
+            self.assertEqual(migration_failure_diagnostics({"command": "migrate",
+                "summary": {"outcome": value, "request_phase": value}}), empty)
 
 
 class NativeModelCacheTests(unittest.TestCase):

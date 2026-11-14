@@ -10,6 +10,7 @@ import secrets
 import socket
 import sqlite3
 import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -17,7 +18,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dev_model_fixture import share_cpu_container
 from native_fixture_process import (install_published_runtime, add_runtime_arguments, runtime_inputs, runtime_report,
-                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt)
+                                    verify_runtime_health, scoped_rpc_request, verify_rpc_receipt, RuntimeHealthFailure)
 
 UPSTREAM = "https://api-dev.rsrs.rs"
 
@@ -195,6 +196,9 @@ class Fixture:
                if not key.startswith(("RSRS_", "ONEMEMORY_", "RESPIRE_", "XDG_"))
                and not key.endswith(("_TOKEN", "_API_KEY"))
                and key not in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "DBUS_SESSION_BUS_ADDRESS")}
+        bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
+        if sys.platform.startswith("linux") and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private" and bus.startswith("unix:"):
+            env.update(DBUS_SESSION_BUS_ADDRESS=bus, RSRS_SS_FIXTURE_BUS="private")
         env.update(HOME=str(profile / "home"), USERPROFILE=str(profile / "home"),
                    XDG_CONFIG_HOME=str(profile / "config"), XDG_DATA_HOME=str(profile / "data"),
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
@@ -209,10 +213,15 @@ class Fixture:
         with socket.socket() as listener:
             listener.bind(('127.0.0.1', 0))
             env['RSRS_RPC_PORT'] = str(listener.getsockname()[1])
-        install_published_runtime(self.args.binary, env)
+        installed = install_published_runtime(self.args.binary, env)
+        if installed is not None and os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
+            receipt = json.loads((Path(env['RSRS_DATA_DIR']) / 'bin/runtime.json').read_text(encoding='utf-8'))
+            self.args.runtime_binary = installed
+            self.args.runtime_version, self.args.runtime_sha256 = receipt['version'], receipt['sha256']
+            runtime_inputs(self.args, [self.args.binary])
         return env
 
-    def direct(self, env, command, allow_pending=False, timeout=150):
+    def direct(self, env, command, allow_pending=False, timeout=150, expected_profile=None):
         try:
             result = subprocess.run([str(self.args.binary), "--direct", "--json", *command],
                                     env=env, capture_output=True, timeout=timeout)
@@ -235,10 +244,11 @@ class Fixture:
             raise RuntimeError("direct_" + command[0] + "_invalid_json") from None
         require(not data.get("errors"), "direct_" + command[0] + "_errors")
         if self.args.runtime_binary and command[0] in ('remember', 'show', 'sync'):
-            with urllib.request.urlopen('http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + env['RSRS_RPC_PORT'] + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
-            profile = Path(env['RSRS_DATA_DIR'])
-            verify_runtime_health(self.args, health, profile, profile)
+            root = Path(env['RSRS_DATA_DIR'])
+            verify_runtime_health(self.args, health, root, expected_profile if expected_profile is not None else root)
         return data
 
     def prepare(self):
@@ -258,10 +268,21 @@ class Fixture:
         super_key = registration.get("summary", {}).get("super")
         require(isinstance(super_key, str) and bool(super_key), "generated_super_missing")
         self.direct(self.a, ["sync"], allow_pending=True)
-        self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        login = self.direct(self.b, ["login", "--interactive", "--addr", UPSTREAM, "--user", self.user, "--pass=" + self.password, "--super=" + super_key])
+        summary = login.get("summary", {})
+        require(summary.get("ok") is True and summary.get("user") == self.user
+                and summary.get("addr") == UPSTREAM, "independent_login_identity_mismatch")
+        require(isinstance(summary.get("dir"), str) and bool(summary["dir"]), "independent_login_profile_missing")
+        self.b_profile = Path(summary["dir"]).resolve(strict=True)
+        require(self.b_profile.is_relative_to(Path(self.b["RSRS_DATA_DIR"]).resolve(strict=True)),
+                "independent_login_profile_escape")
         stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
             env=self.b, capture_output=True, timeout=60)
         require(stopped.returncode == 0, 'independent_login_runtime_stop_failed')
+        # Drain A before changing the session bound to its resident Runtime.
+        stopped = subprocess.run([str(self.args.binary), '--runtime-internal', '--stop'],
+            env=self.a, capture_output=True, timeout=90)
+        require(stopped.returncode == 0, 'registered_runtime_stop_failed')
         session = json.loads(session_path.read_text(encoding="utf-8"))
         require(session.get("addr") == UPSTREAM, "unexpected_registered_upstream")
         session["addr"] = self.gate.address
@@ -276,6 +297,7 @@ class Fixture:
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
             self.port = sock.getsockname()[1]
+        self.a['RSRS_RPC_PORT'] = str(self.port)
         env = self.a.copy()
         if automatic:
             env.pop("RSRS_NO_AUTOSYNC", None)
@@ -295,7 +317,8 @@ class Fixture:
             if not endpoint_path.is_file():
                 return False
             try:
-                with urllib.request.urlopen("http://127.0.0.1:" + str(self.port) + "/api/health", timeout=5) as response:
+                with urllib.request.urlopen(urllib.request.Request(
+                        "http://127.0.0.1:" + str(self.port) + "/api/health", headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                     require(response.status == 200, "runtime_health_status_failed")
                     health = json.load(response)
             except urllib.error.HTTPError:
@@ -318,7 +341,8 @@ class Fixture:
     def rpc(self, command):
         body = {"v": 1, "id": secrets.token_hex(16), "method": "cli.exec", "args": ["--json", *command]}
         if self.args.runtime_binary:
-            with urllib.request.urlopen('http://127.0.0.1:' + str(self.port) + '/api/health', timeout=5) as response:
+            with urllib.request.urlopen(urllib.request.Request(
+                    'http://127.0.0.1:' + str(self.port) + '/api/health', headers={'X-Respire-Health': 'runtime-v1'}), timeout=5) as response:
                 health = json.load(response)
             data_dir = Path(self.a['RSRS_DATA_DIR'])
             verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
@@ -388,9 +412,9 @@ class Fixture:
                 real_acknowledged = set(memories).issubset(self.gate.acknowledged)
             return self.pending() == 0 and real_acknowledged
         wait_for(acknowledged, 150, "real_ack_timeout")
-        self.direct(self.b, ["sync"], allow_pending=True)
+        self.direct(self.b, ["sync"], allow_pending=True, expected_profile=self.b_profile)
         for memory_id, content in memories.items():
-            shown = self.direct(self.b, ["show", memory_id])
+            shown = self.direct(self.b, ["show", memory_id], expected_profile=self.b_profile)
             require(any(node.get("id") == memory_id and node.get("content") == content for node in objects(shown)), "independent_pull_decrypt_mismatch")
 
     def close(self):
@@ -614,6 +638,9 @@ def main():
         require(not report["cleanup"]["remaining_users"] and not report["cleanup"]["unconfirmed_users"]
                 and all(event["passed"] for event in report["cleanup"]["events"]), "fixture_cleanup_failed")
         report["passed"] = True
+    except RuntimeHealthFailure as error:
+        report["failure_code"] = error.code
+        report["failure_diagnostic"] = error.diagnostic()
     except Exception as error:
         # Only harness-owned error codes are safe for public diagnostics.
         report["failure_code"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
@@ -627,7 +654,7 @@ def main():
     safe_root = runner_temp and args.root.resolve() != Path(runner_temp).resolve() and args.root.resolve().is_relative_to(Path(runner_temp).resolve())
     if os.environ.get("GITHUB_ACTIONS") == "true" and safe_root and args.root.is_dir():
         (args.root / "outbox-coverage.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "remaining": report["remaining"], "cleanup": cleanup}))
+    print(json.dumps({"passed": report["passed"], "cases": report["cases"], "failure_code": report.get("failure_code"), "failure_diagnostic": report.get("failure_diagnostic"), "remaining": report["remaining"], "cleanup": cleanup}))
     return 0 if report["passed"] else 1
 
 

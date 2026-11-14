@@ -35,6 +35,10 @@ pub mod classify;
 pub mod cli_def;
 #[cfg(feature = "server")]
 pub mod engine;
+#[cfg(feature = "server")]
+pub mod lexical;
+#[cfg(feature = "server")]
+pub mod lexical_cache;
 pub mod gates;
 pub mod hooks;
 pub mod host_hooks;

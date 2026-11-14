@@ -1,4 +1,4 @@
-import {writeFileSync} from 'node:fs';
+import {readFileSync, writeFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
 
 const [output] = process.argv.slice(2);
@@ -45,7 +45,7 @@ const releases = run('gh', ['api', `repos/${repository}/releases?per_page=100`, 
   .trim().split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line));
 const previous = releases.filter(release => !release.draft).map(release => ({release, version: parse(release.tag_name)}))
   .filter(item => item.version && compare(item.version, version) < 0
-    && !item.release.prerelease && item.version[3] === null)
+    && (channel === 'dev' || (!item.release.prerelease && item.version[3] === null)))
   .sort((left, right) => compare(right.version, left.version))[0];
 let baseline;
 if (previous) {
@@ -65,15 +65,20 @@ for (const entry of commits) {
   const subject = entry.subject;
   const group = /^feat(?:\([^)]*\))?!?:/i.test(subject) ? 'Features'
     : /^fix(?:\([^)]*\))?!?:/i.test(subject) ? 'Fixes' : 'Other changes';
-  const description = entry.body.split(/\r?\n\s*\r?\n/)[0];
-  groups[group].push(`- ${text(subject)}${description ? ` — ${text(description)}` : ''} ([${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}))`);
+  groups[group].push(`- ${text(subject)} ([${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}))`);
 }
 const lines = [`# Respire CLI ${tag.slice(1)}`, '', channel === 'dev'
   ? 'Development release for testing. The npm `latest` channel remains on the stable version.' : 'Stable release.', ''];
+const manifest = JSON.parse(readFileSync(new URL('../artifact-manifest.json', import.meta.url), 'utf8'));
+if (channel === 'dev' && version[0] === 2 && !manifest.targets.some(t => t.triple === 'aarch64-unknown-linux-musl')) {
+  lines.push('Linux ARM64 musl CLI is temporarily unavailable in this 2.x DEV release; its CLI assets and npm package are not published. Track [#272](https://github.com/risense-ai/respire-cli/issues/272). The standalone Runtime retains its existing seven-platform, 21-asset inventory.', '');
+}
 if (previous) lines.push(`Changes since [${previous.release.tag_name}](https://github.com/${repository}/releases/tag/${previous.release.tag_name}).`, '');
 else lines.push(channel === 'latest' ? 'First stable release: cumulative changes with no previous published stable baseline.'
   : 'Initial release: cumulative changes with no previous published release baseline.', '');
-for (const [heading, changes] of Object.entries(groups)) lines.push(`## ${heading}`, '', ...(changes.length ? changes : ['No separately classified changes.']), '');
+for (const [heading, changes] of Object.entries(groups)) lines.push(`## ${heading}`, '',
+  ...(changes.length ? [`${changes.length} commits in this category. The complete commit list below includes every change.`, '', ...changes.slice(0, 5)]
+    : ['No separately classified changes.']), '');
 lines.push('## Commits', '', '| Commit | Change |', '| --- | --- |', ...commits.map(entry => `| [${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}) | ${text(entry.subject)} |`), '');
 if (!commits.length) lines.push('No additional commits since the previous release; this release contains the same source.', '');
 if (previous) lines.push(`[Full comparison](https://github.com/${repository}/compare/${previous.release.tag_name}...${sha})`, '');

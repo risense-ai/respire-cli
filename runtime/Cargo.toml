@@ -19,6 +19,7 @@ respire_protocol = { path = "../crates/protocol" }
 # Boot-token consumption stays aligned with the spawner semantics (P2 moves
 # this crate into the runtime repository together with respire_spawn).
 respire_spawn = { path = "../spawn" }
+respire_logging = { path = "../crates/logging" }
 anyhow = "1.0"
 serde_json = "1.0"
 

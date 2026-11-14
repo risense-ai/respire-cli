@@ -31,7 +31,7 @@ def run_command(command, *, env, check, timeout):
             raise
 
 
-def business_check(manager, env, command, roundtrips, run=run_command):
+def business_check(manager, env, command, roundtrips, run=run_command, *, timeout=900):
     report = {"passed": False, "stage": "private_environment", "cases": {},
               "business_passed": False, "keyring_cleanup": {"passed": False}}
     business_exit = None
@@ -44,7 +44,7 @@ def business_check(manager, env, command, roundtrips, run=run_command):
         if not report["credential_before_passed"]:
             raise RuntimeError("credential_cases_incomplete")
         report["stage"] = "business"
-        result = run(command, env=env, check=False, timeout=900)
+        result = run(command, env=env, check=False, timeout=timeout)
         business_exit = result.returncode
         report["business_passed"] = business_exit == 0
         report["stage"] = "credential_after"
@@ -106,11 +106,16 @@ def self_test():
         items.append(item)
     keys.cleanup_business_entries()
     assert not items
+    assert keys.business_cleanup == {"passed": True, "stage": "complete",
+        "observed_entries": 3, "validated_entries": 3, "deleted_entries": 3, "remaining_entries": 0}
     items.append(SimpleNamespace(get_attributes=lambda: {"service": "unknown"}))
     try:
         keys.cleanup_business_entries()
     except RuntimeError:
         assert len(items) == 1
+        assert keys.business_cleanup == {"passed": False, "stage": "ownership_validation",
+            "observed_entries": 1, "validated_entries": 0, "deleted_entries": 0, "remaining_entries": None}
+        assert "unknown" not in json.dumps(keys.business_cleanup)
     else:
         raise AssertionError("unknown credential accepted")
 
@@ -153,6 +158,13 @@ def self_test():
         assert report["passed"] == (business_exit == 0 and cleanup_ok)
         assert report["credential_before_passed"] and report["credential_after_passed"]
 
+    manager = FakeManager()
+    def full_run(command, **kwargs):
+        assert command == ["fake-business"] and kwargs["timeout"] == 6600
+        return SimpleNamespace(returncode=0)
+    code, report = business_check(manager, {}, ["fake-business"], roundtrips, full_run, timeout=6600)
+    assert code == 0 and report["passed"] and manager.cleaned
+
     def failed_run(*args, **kwargs):
         raise RuntimeError("sensitive-data-must-not-be-published")
 
@@ -187,7 +199,9 @@ def main():
     separator = sys.argv.index("--")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
+    parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args(sys.argv[1:separator])
+    fixture.backend.require(1 <= args.timeout <= 6600, "business_timeout_out_of_bounds")
     command = sys.argv[separator + 1:]
     fixture.backend.require(bool(command), "business_command_required")
     root = fixture.backend.owned_path(args.root)
@@ -200,7 +214,7 @@ def main():
         home.mkdir(mode=0o700)
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
         manager = fixture.backend.create(root / "keyring-home")
-        code, report = business_check(manager, env, command, fixture.roundtrips)
+        code, report = business_check(manager, env, command, fixture.roundtrips, timeout=args.timeout)
     except Exception:
         report["diagnostic_failed"] = True
     (root / "business-keyring-selftest.json").write_text(

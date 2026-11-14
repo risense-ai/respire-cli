@@ -89,6 +89,9 @@ impl CliHost {
         let (root, selected) = respire_client_host::config::control_roots()?;
         let root = root.canonicalize()?;
         let selected = selected.canonicalize()?;
+        let canonical_profile =
+            respire_client_host::config::normalize_control_path(profile)?.canonicalize()?;
+        let profile = canonical_profile.as_path();
         anyhow::ensure!(
             selected == profile && &control::identity(profile)? == identity,
             "completed account selection changed before supervisor handoff"
@@ -205,7 +208,7 @@ impl HostLifecycle for CliHost {
             .filter(|config| config.enabled && !config.manually_stopped)
         {
             anyhow::ensure!(
-                lifecycle::registered_runtime_image(&config)? == binary,
+                lifecycle::registered_runtime_image(&config, None)? == binary,
                 "account startup requires the registered installed Runtime"
             );
         } else if let Some(raw) = respire_client_host::env::var_os("RSRS_RUNTIME_BIN") {

@@ -145,8 +145,22 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
 #[test]
 fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     let pin = pinned()?;
-    anyhow::ensure!(pin.required == "1.0.21-dev.17", "unexpected pin {pin:?}");
-    anyhow::ensure!(pin.accept.contains("1.0.21-dev.17"));
+    anyhow::ensure!(pin.required == "2.0.0-dev.17", "unexpected pin {pin:?}");
+    anyhow::ensure!(pin.accept.contains("2.0.0-dev.17"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.16"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.15"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.14"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.13"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.12"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.11"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.10"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.9"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.5"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.4"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.3"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.2"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.1"));
+    anyhow::ensure!(!pin.accept.contains("1.0.21-dev.17"));
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.16"));
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.15"));
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.14"));
@@ -163,13 +177,27 @@ fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.3"));
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.2"));
     anyhow::ensure!(!pin.accept.contains("1.0.21-dev.1"));
-    anyhow::ensure!(pin.accept.contains("1.0.21"));
-    anyhow::ensure!(pin.accept.contains("1.9.9"));
+    anyhow::ensure!(pin.accept.contains("2.0.1"));
+    anyhow::ensure!(pin.accept.contains("2.9.9"));
     anyhow::ensure!(!pin.accept.contains("1.0.20"));
-    anyhow::ensure!(!pin.accept.contains("2.0.0"));
-    anyhow::ensure!(!pin.accept.contains("2.1.0-dev.1"));
+    anyhow::ensure!(!pin.accept.contains("3.0.0"));
+    anyhow::ensure!(!pin.accept.contains("3.1.0-dev.1"));
     anyhow::ensure!(
-        version_in_accept("1.0.21-dev.17")
+        version_in_accept("2.0.0-dev.17")
+            && !version_in_accept("2.0.0-dev.16")
+            && !version_in_accept("2.0.0-dev.15")
+            && !version_in_accept("2.0.0-dev.14")
+            && !version_in_accept("2.0.0-dev.13")
+            && !version_in_accept("2.0.0-dev.12")
+            && !version_in_accept("2.0.0-dev.11")
+            && !version_in_accept("2.0.0-dev.10")
+            && !version_in_accept("2.0.0-dev.9")
+            && !version_in_accept("2.0.0-dev.5")
+            && !version_in_accept("2.0.0-dev.4")
+            && !version_in_accept("2.0.0-dev.3")
+            && !version_in_accept("2.0.0-dev.2")
+            && !version_in_accept("2.0.0-dev.1")
+            && !version_in_accept("1.0.21-dev.17")
             && !version_in_accept("1.0.21-dev.16")
             && !version_in_accept("1.0.21-dev.15")
             && !version_in_accept("1.0.21-dev.14")
@@ -208,6 +236,8 @@ fn accept_ranges_reject_malformed_bounds() -> Result<()> {
     anyhow::ensure!(AcceptRange::parse("<2.0.0")?.contains("1.9.9"));
     anyhow::ensure!(!AcceptRange::parse("<2.0.0")?.contains("2.0.0"));
     anyhow::ensure!(AcceptRange::parse(">=1.0.21-dev.1")?.contains("1.0.21-dev.2"));
+    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-beta.99"));
+    anyhow::ensure!(!AcceptRange::parse(">=2.0.0-dev.15")?.contains("2.0.0-99"));
     Ok(())
 }
 
@@ -385,12 +415,16 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     let resource_hash = sha256_hex(resource_bytes);
     let core = serde_json::json!({
         "schema_version": 1, "target": triple,
-        "files": [{"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash}],
+        "files": [
+            {"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash},
+            {"path": "core-notices/NOTICES.txt", "sha256": sha256_hex(b"notices")},
+        ],
     }).to_string();
     let archive = gz(&tar_bytes(&[
         (&binary_name, b'0', 0o700, binary_bytes),
         (CORE_MANIFEST_FILE, b'0', 0o600, core.as_bytes()),
         ("lib/provider.bin", b'0', 0o600, resource_bytes),
+        ("core-notices/NOTICES.txt", b'0', 0o600, b"notices"),
     ]))?;
     let archive_path = dir.path().join("runtime.tar.gz");
     let metadata_path = dir.path().join(format!("runtime-build-{triple}.json"));
@@ -405,6 +439,7 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
             {"path": binary_name, "size": binary_bytes.len(), "sha256": hash},
             {"path": CORE_MANIFEST_FILE, "size": core.len(), "sha256": sha256_hex(core.as_bytes())},
             {"path": "lib/provider.bin", "size": resource_bytes.len(), "sha256": resource_hash},
+            {"path": "core-notices/NOTICES.txt", "size": 7, "sha256": sha256_hex(b"notices")},
         ],
     });
     fs::write(&archive_path, &archive)?;
@@ -416,6 +451,14 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     fs::write(&metadata_path, metadata.to_string())?;
     let binary = install_from_file(&archive_path, "1.0.21-dev.1")?;
     anyhow::ensure!(binary.is_file());
+    anyhow::ensure!(!version_dir("1.0.21-dev.1").join("core-notices").exists());
+    anyhow::ensure!(version_dir("1.0.21-dev.1").join(CORE_MANIFEST_FILE).is_file());
+    // Reusing an older installation leaves its authenticated notices untouched.
+    let notices = version_dir("1.0.21-dev.1").join("core-notices/NOTICES.txt");
+    fs::create_dir_all(notices.parent().context("notice parent missing")?)?;
+    fs::write(&notices, b"notices")?;
+    anyhow::ensure!(install_from_file(&archive_path, "1.0.21-dev.1")? == binary);
+    anyhow::ensure!(notices.is_file());
     let manifest = read_manifest()?.context("manifest missing after install")?;
     anyhow::ensure!(manifest.version == "1.0.21-dev.1" && manifest.sha256 == hash);
     let proof = manifest.release.as_ref().context("release proof missing")?;
@@ -424,7 +467,7 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
     anyhow::ensure!(managed_runtime_path()?.context("managed path missing")? == binary);
     anyhow::ensure!(download_and_install(Some("1.0.21-dev.1"), None)? == binary);
     // A trusted Runtime archive is not old-host migration authorization.
-    fs::create_dir(dir.path().join("bin"))?;
+    fs::create_dir_all(dir.path().join("bin"))?;
     let legacy = crate::mcp::stable_bin_path();
     fs::write(&legacy, b"old combined CLI")?;
     let before = fs::read(manifest_path())?;
@@ -594,6 +637,18 @@ fn offline_install_publishes_manifest_and_retains_one_rollback() -> Result<()> {
             .current
     );
     anyhow::ensure!(clean_old()?.is_empty());
+    // Both hosts migrate the same receipt and inventory, preserving old files.
+    let client2 = dir.path().join("client2");
+    fs::create_dir_all(&client2)?;
+    fs::rename(runtime_dir(), client2.join("runtime"))?;
+    fs::rename(manifest_path(), client2.join(MANIFEST_FILE))?;
+    shared::migrate_legacy()?;
+    anyhow::ensure!(managed_runtime_path()?.as_ref() == Some(&binary));
+    anyhow::ensure!(client2.join("runtime").join("1.0.21-dev.1").join(RUNTIME_BINARY).is_file());
+    shared::migrate_legacy()?;
+    let lock = install_lock()?;
+    anyhow::ensure!(respire_spawn::FileLock::acquire(&runtime_dir().join(".install.lock"), Duration::ZERO).is_err());
+    drop(lock);
     Ok(())
 }
 
@@ -603,6 +658,7 @@ fn explicit_runtime_override_keeps_its_existing_trust_policy() -> Result<()> {
     let dir = tempfile::tempdir()?;
     std::env::set_var("RSRS_DATA_DIR", dir.path());
     // An explicit selection still precedes managed discovery; no executable is run.
+    fs::create_dir_all(manifest_path().parent().context("manifest parent missing")?)?;
     fs::write(manifest_path(), b"invalid managed selection")?;
     let explicit = dir.path().join(RUNTIME_BINARY);
     fs::write(&explicit, b"synthetic explicit runtime")?;
@@ -626,6 +682,8 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     let library = dir.path().join("rsrs.db");
     fs::write(&session, b"legacy session bytes")?;
     fs::write(&library, b"legacy data bytes")?;
+    let legacy_receipt = dir.path().join("runtime.json");
+    fs::write(&legacy_receipt, b"legacy receipt bytes")?;
     let error = download_and_install(None, None)
         .err()
         .context("legacy owner triggered automatic installation")?;
@@ -642,6 +700,7 @@ fn automatic_install_preserves_legacy_owner_before_any_side_effects() -> Result<
     anyhow::ensure!(fs::read(&legacy)? == legacy_bytes);
     anyhow::ensure!(fs::read(&session)? == b"legacy session bytes");
     anyhow::ensure!(fs::read(&library)? == b"legacy data bytes");
+    anyhow::ensure!(fs::read(&legacy_receipt)? == b"legacy receipt bytes");
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
     Ok(())
 }
@@ -697,6 +756,23 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
     anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>());
     anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
     anyhow::ensure!(!runtime_dir().exists() && !manifest_path().exists());
+    let binary = install_lifecycle_fixture()?;
+    let directory = binary.parent().context("fixture directory missing")?;
+    let legacy = dir.path().join("runtime").join(required);
+    fs::create_dir_all(legacy.join("lib"))?;
+    for name in [RUNTIME_BINARY, CORE_MANIFEST_FILE, "lib/provider.bin"] {
+        fs::copy(directory.join(name), legacy.join(name))?;
+    }
+    let image = legacy.join(RUNTIME_BINARY);
+    anyhow::ensure!(verified_migrated_image(&image.to_string_lossy())? == Some(image.clone()));
+    fs::write(legacy.join("lib/provider.bin"), b"tampered")?;
+    anyhow::ensure!(verified_migrated_image(&image.to_string_lossy()).is_err());
+    if let Some(previous) = std::env::var_os("RSRS_TEST_PREVIOUS_FRONTEND_BIN") {
+        fs::copy(previous, crate::mcp::stable_bin_path())?;
+        verify_install_host()?;
+        fs::write(crate::mcp::stable_bin_path(), b"unapproved frontend")?;
+        anyhow::ensure!(verify_install_host().is_err());
+    }
     Ok(())
 }
 

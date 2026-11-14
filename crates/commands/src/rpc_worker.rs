@@ -216,6 +216,15 @@ pub fn shared_exclusive() -> Arc<WriteGate> {
         .clone()
 }
 
+// ported from risense-ai/respire-runtime 1f40b16 (v2.0.0-dev.7)
+pub fn generation_on_wire(generation: usize) -> u64 {
+    generation.saturating_add(1).max(1) as u64
+}
+
+pub(crate) fn wire_generation() -> u64 {
+    generation_on_wire(GENERATION.load(Ordering::Acquire))
+}
+
 pub fn sync_generation() -> usize {
     SYNC_CONTEXT
         .with(|context| context.get().map(|v| v.0))

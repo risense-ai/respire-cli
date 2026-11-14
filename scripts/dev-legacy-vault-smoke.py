@@ -178,7 +178,29 @@ class Smoke:
             ("  login password: ", password)]
         if version != 1:
             prompts.append(("  super password (A3-…): ", original_super))
-        return self.cli(env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
+        login_env = dict(env)
+        if version != 1:
+            # This case proves the original factor through the hidden prompt.
+            # A supplied environment factor bypasses that prompt in the product.
+            login_env.pop("RSRS_SUPER", None)
+        previous_alias = self.session(env).get("keyring_account")
+        completed = False
+        try:
+            result = self.cli(login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
+            completed = True
+        finally:
+            # A committed login can still fail the TTY/JSON/owned-stop checks.
+            # Claim only its new alias from this exact owned session, never an
+            # existing alias or arbitrary credential-store contents. Keep the
+            # original failure fatal while retaining exact cleanup ownership.
+            committed = self.session(env)
+            created = (bool(committed.get("token")) and bool(committed.get("keyring_account"))
+                and committed.get("keyring_account") != previous_alias)
+            if completed or created:
+                require(created, "login_credential_fixture_new_session_missing")
+                self.keys.track_created_login(committed, user,
+                    None if version == 1 else original_super, password)
+        return result
 
     def session(self, env):
         return json.loads((Path(env["RSRS_DATA_DIR"]) / "session.json").read_text())
@@ -238,6 +260,7 @@ class Smoke:
         account.update(token=session["token"], confirmed=True)
         code = registered["summary"].get("super")
         require(isinstance(code, str) and bool(code), "registered_super_missing")
+        self.keys.track_created_login(session, user, code, password)
         env["RSRS_SUPER"] = code
         self.diagnostic_secrets.update((code, session["token"]))
         vault = self.api(account, "GET", "/api/self/vault")
@@ -310,9 +333,6 @@ class Smoke:
         require(old_login.get("user") == user and bool(old_login.get("token"))
             and self.api(dict(account, token=old_login["token"]), "GET", "/api/self").get("user") == user,
             "real_legacy_auth_login_failed")
-        # The pre-migration login creates its own random native credential alias.
-        # Track that exact owned alias as well as later migration/fresh logins.
-        self.keys.track_created_login(old_login, user, None if version == 1 else original_super, password)
         require(self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == old_auth_salt,
             "ordinary_login_changed_auth_salt")
         source_config_path = source / "client.json"
@@ -356,9 +376,10 @@ class Smoke:
         # session/isolated keyring; only the password needs terminal input.
         result = self.cli(upgraded_env, "migrate", "--vault", "--addr", UPSTREAM, "--user", user,
             prompts=[("  login password: ", password)])
-        require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
         committed = self.session(upgraded_env)
+        self.keys.track_created_login(committed, user, original_super if version != 1 else None, password)
         account["token"] = committed["token"]
+        require(result["summary"].get("super_issued") is None, "migration_generated_replacement_super")
         new_auth_salt = PREFIX + hkdf(user.lower().encode(), None, b"rsrs:auth-salt:v1", 16).hex()
         require(self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == new_auth_salt
             and committed.get("auth_salt") == new_auth_salt, "authentication_salt_not_migrated")
@@ -366,7 +387,6 @@ class Smoke:
             "device_name": "legacy-auth-regression"})
         require(rejected == 401, "old_authentication_hash_still_accepted")
         if version == 1:
-            self.keys.track_created_login(committed, user, None, password)
             require(committed.get("secret") == secret, "cloud_migration_changed_account_secret")
         published = self.api(account, "GET", "/api/self/vault")
         require(published["version"] == version and published["wrapped_urk"].startswith(PREFIX), "cloud_factors_changed")
@@ -393,7 +413,6 @@ class Smoke:
             "fresh_login_did_not_use_new_auth_salt")
         account["token"] = recovered_session["token"]
         if version == 1:
-            self.keys.track_created_login(recovered_session, user, None, password)
             require(recovered_session.get("secret") == secret, "new_device_changed_account_secret")
         self.report["stage"] = f"v{version}_fresh_device_sync"
         self.save()
@@ -421,8 +440,14 @@ class Smoke:
             self.password_login(headless_env, user, password, version, original_super)
             headless = self.session(headless_env)
             account["token"] = headless["token"]
-            require("pass" not in headless and "keyring_account" not in headless,
-                "headless_v1_password_not_supplied_by_environment")
+            # Host-managed auth commits a durable operation-owned alias even
+            # with matching RSRS_PASS. Only the non-operation legacy commit
+            # path can omit native credentials. password_login verified and
+            # tracked the exact newly committed password alias above.
+            require("pass" not in headless
+                and headless.get("keyring_backend") in ("native", "secret_service")
+                and headless_env.get("RSRS_PASS") == password,
+                "headless_v1_persistent_password_commit_invalid")
             require(headless.get("secret") == secret and headless.get("vault_version") == 1,
                 "headless_v1_changed_original_factors")
             headless_urk = AESGCM(legacy_kek(1, password, secret, headless["kdf_salt"], current=True)).decrypt(
@@ -440,7 +465,7 @@ class Smoke:
             secret_key_recovery=version == 3, cloud_v1_recovery_supported=version == 1,
             original_account_secret_preserved=version == 1,
             headless_password_login_verified=version == 1,
-            headless_password_login_scope="matching_environment_commit_and_followup_read; authorization_fallback_and_absent_native_store_not_tested" if version == 1 else None,
+            headless_password_login_scope="matching_environment_persistent_host_commit_and_followup_read; authorization_fallback_and_absent_native_store_not_tested" if version == 1 else None,
             recovery_factor="login_password_and_account_secret" if version == 1 else "original_super")
         self.report["cases"][REQUIRED[version]]["authentication"] = {
             "real_server_legacy_salt_login": True, "ordinary_login_preserved_legacy_salt": True,
@@ -481,7 +506,10 @@ class Smoke:
         self.report["server_sha"] = expected_server
         import cryptography
         require(cryptography.__version__ == "46.0.3", "cryptography_version_not_pinned")
-        spec = importlib.util.spec_from_file_location("legacy_vault_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+        keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+            and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+            and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+        spec = importlib.util.spec_from_file_location("legacy_vault_keyring", Path(__file__).with_name(keyring_script))
         backend = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(backend)
         self.keys = backend.create(self.root / "keyring-home")

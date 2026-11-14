@@ -83,3 +83,20 @@ remain release gates. No external corpus replication is claimed: the user asked
 to implement the supplied algorithms without requiring the original evaluation
 archive. Lower admission floors may return candidates for questions with no
 answer; titles remain reference material, not evidence that an answer exists.
+
+## Cache availability
+
+This delivery keeps ordinary `remember` and `recall` on their existing Core
+model routes. It adds no retrieval-mode configuration or training commands.
+
+The CLI repository's lexical cache helper defaults to enabled;
+`RSRS_LEXICAL_CACHE=off` disables that helper for diagnostics. Its raw-store
+prewarm helper is not connected to production startup. The helper and its
+correctness gates retain revision validation, scope isolation, and clear fencing.
+
+Production retrieval uses the independently published Runtime selected by
+`runtime-pin.json`, currently `2.0.0-dev.10`, with Core SDK `2.0.0-dev.4`.
+That Runtime reuses authorized resident snapshots and Core leases by default
+while preserving authorization, evidence, associations, rendering, and model
+routing. The CLI's legacy server helper alone provides no measured product
+speedup; production performance claims require the Runtime and Core evidence.

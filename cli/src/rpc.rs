@@ -171,6 +171,37 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
 
 /// Host profile changes release the old library before starting its successor.
 pub fn recover_interrupted_login() -> Result<()> {
+    recover_login_for(LoginRecoveryCaller::OrdinaryRequest)
+}
+
+/// Account control resumes its own operation, but first recovers old journals.
+pub fn recover_legacy_login_before_account_control() -> Result<()> {
+    recover_login_for(LoginRecoveryCaller::AccountControl)
+}
+
+#[derive(Clone, Copy)]
+enum LoginRecoveryCaller {
+    OrdinaryRequest,
+    AccountControl,
+}
+
+fn needs_legacy_login_recovery(
+    state: respire_protocol::host_control::HostLoginRecoveryState,
+    caller: LoginRecoveryCaller,
+) -> Result<bool> {
+    use respire_protocol::host_control::HostLoginRecoveryState;
+    match state {
+        HostLoginRecoveryState::Clear => Ok(false),
+        HostLoginRecoveryState::LegacyPending => Ok(true),
+        HostLoginRecoveryState::OperationPending => match caller {
+            LoginRecoveryCaller::AccountControl => Ok(false),
+            LoginRecoveryCaller::OrdinaryRequest => anyhow::bail!(
+                "authentication recovery requires the original operation; query its result before continuing"),
+        },
+    }
+}
+
+fn recover_login_for(caller: LoginRecoveryCaller) -> Result<()> {
     respire_client_host::config::control_roots()?;
     // Presence is only a launch hint; Runtime alone parses the private journal.
     if !respire_client_host::paths::client_config_path()
@@ -178,12 +209,8 @@ pub fn recover_interrupted_login() -> Result<()> {
         return Ok(());
     }
     let takeover = crate::runtime_policy::takeover_lock()?;
-    use respire_protocol::host_control::HostLoginRecoveryState;
-    match crate::autostart::login_recovery_status(&takeover)? {
-        HostLoginRecoveryState::Clear => return Ok(()),
-        HostLoginRecoveryState::OperationPending => anyhow::bail!(
-            "authentication recovery requires the original operation; query its result before continuing"),
-        HostLoginRecoveryState::LegacyPending => {}
+    if !needs_legacy_login_recovery(crate::autostart::login_recovery_status(&takeover)?, caller)? {
+        return Ok(());
     }
     let mut maintenance =
         crate::autostart::with_explicit_recovery(crate::autostart::begin_maintenance_locked)?;
@@ -1143,6 +1170,7 @@ mod runtime_resolution_tests {
         anyhow::ensure!(resolve_runtime_executable().is_err());
         anyhow::ensure!(!directory.path().join("bin").exists());
         std::env::remove_var("RSRS_RUNTIME_BIN");
+        std::fs::create_dir_all(directory.path().join("bin"))?;
         std::fs::write(
             crate::runtime_fetch::manifest_path(),
             serde_json::to_vec(&json!({
@@ -1242,7 +1270,7 @@ mod tests {
                 && source_root.join("runtime").join(&version) == version_dir,
                 "fixture must be the official pinned managed installation");
             let root = tempfile::tempdir()?;
-            let mut pending = vec![(version_dir.to_path_buf(), root.path().join("runtime").join(&version))];
+            let mut pending = vec![(version_dir.to_path_buf(), root.path().join("bin/runtime").join(&version))];
             while let Some((source, target)) = pending.pop() {
                 let metadata = std::fs::symlink_metadata(&source)?;
                 anyhow::ensure!(!metadata.file_type().is_symlink(), "fixture contains a link");
@@ -1263,7 +1291,7 @@ mod tests {
                     std::fs::copy(source, target)?;
                 }
             }
-            std::fs::write(root.path().join("runtime.json"), receipt)?;
+            std::fs::write(root.path().join("bin/runtime.json"), receipt)?;
             std::fs::write(root.path().join("client.json"), b"{\"service_mode\":\"normal\"}")?;
             let keys = ["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_RPC_PORT", "RSRS_CORE_TEST_MODE",
                 "RSRS_NO_AUTOSYNC", "RSRS_RUNTIME_BIN", "ONEMEMORY_RUNTIME_BIN", "RESPIRE_RUNTIME_BIN",
@@ -1631,6 +1659,20 @@ mod tests {
         let own = serde_json::json!({"active":true,"id":"original","cancelled":true});
         assert_eq!(model_progress_for_task(own.clone(), "original", true)?, own);
         assert!(model_progress_for_task(serde_json::Value::Null, "original", false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_login_preflight_preserves_operation_owned_recovery() -> Result<()> {
+        use respire_protocol::host_control::HostLoginRecoveryState;
+        for caller in [LoginRecoveryCaller::OrdinaryRequest, LoginRecoveryCaller::AccountControl] {
+            assert!(!needs_legacy_login_recovery(HostLoginRecoveryState::Clear, caller)?);
+            assert!(needs_legacy_login_recovery(HostLoginRecoveryState::LegacyPending, caller)?);
+        }
+        assert!(!needs_legacy_login_recovery(
+            HostLoginRecoveryState::OperationPending, LoginRecoveryCaller::AccountControl)?);
+        assert!(needs_legacy_login_recovery(
+            HostLoginRecoveryState::OperationPending, LoginRecoveryCaller::OrdinaryRequest).is_err());
         Ok(())
     }
 

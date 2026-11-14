@@ -52,9 +52,9 @@ fn text<'a>(value: &'a Value, key: &str) -> Result<&'a str> {
 }
 
 pub(super) fn account_identity_source(profile: &Path) -> Result<String> {
-    match respire_client_host::identity::session_user_of_dir(profile)? {
+    match respire_client_host::identity::host_session_user_of_dir(profile, super::hash)? {
         Some(user) => Ok(user),
-        // Only an absent session retains the existing profile-based identity.
+        // Absent sessions and strict local claims share the profile identity.
         None => Ok(profile.display().to_string()),
     }
 }
@@ -257,7 +257,7 @@ impl StaleOwner {
                 !manager::inspect(config)?.running,
                 "registered supervisor still reports running"
             );
-            let image = lifecycle::registered_runtime_image(config)?;
+            let image = lifecycle::registered_runtime_image(config, None)?;
             anyhow::ensure!(
                 Path::new(text(&grant, "image_path")?).canonicalize()? == image,
                 "selected registered Runtime changed"

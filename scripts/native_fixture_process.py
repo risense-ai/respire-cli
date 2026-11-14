@@ -14,6 +14,8 @@ import threading
 import time
 import traceback
 import secrets
+import shutil
+import runpy
 
 
 def add_runtime_arguments(parser):
@@ -102,20 +104,24 @@ def install_official_runtime(binary, env, version, binary_hash):
                and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
                for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
         raise ValueError('official installation must remain inside the owned runner workspace')
-    if (root / 'runtime.json').exists():
-        raise ValueError('source-build fixture must start without a Runtime receipt')
-    install_env = {key: value for key, value in env.items()
-                   if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
-                   and not key.endswith(('_TOKEN', '_API_KEY'))}
-    result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
-                            env=install_env, capture_output=True, timeout=180)
-    if result.returncode:
-        raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
-    receipt = json.loads((root / 'runtime.json').read_text(encoding='utf-8'))
+    source_full = (os.environ.get('ARTIFACT_SOURCE') == 'build'
+                   and os.environ.get('VALIDATION_PROFILE') == 'full')
+    if (root / 'bin/runtime.json').exists():
+        if not source_full:
+            raise ValueError('source-build fixture must start without a Runtime receipt')
+    else:
+        install_env = {key: value for key, value in env.items()
+                       if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
+                       and not key.endswith(('_TOKEN', '_API_KEY'))}
+        result = subprocess.run([str(binary), '--json', 'runtime', 'install'],
+                                env=install_env, capture_output=True, timeout=180)
+        if result.returncode:
+            raise RuntimeError('official Runtime fixture install failed: exit ' + str(result.returncode))
+    receipt = json.loads((root / 'bin/runtime.json').read_text(encoding='utf-8'))
     proof = receipt.get('release') or {}
     metadata_bytes = proof.get('metadata_json', '').encode('utf-8')
     metadata = json.loads(metadata_bytes)
-    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
     if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
             or proof.get('metadata_sha256') != hashlib.sha256(metadata_bytes).hexdigest()
             or metadata.get('schema_version') != 2 or metadata.get('runtime_version') != version
@@ -130,8 +136,69 @@ def install_official_runtime(binary, env, version, binary_hash):
     return installed.resolve(strict=True)
 
 
+def stage_fixture_cli(binary, env, root):
+    bin_dir = pathlib.Path(env.get('RSRS_BIN_DIR') or root / 'bin')
+    if bin_dir.is_symlink():
+        raise ValueError('fixture bin must not be linked')
+    bin_dir = bin_dir.resolve()
+    if not any(bin_dir != pathlib.Path(os.environ[key]).resolve()
+               and bin_dir.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+               for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+        raise ValueError('fixture bin must remain inside the owned runner workspace')
+    bin_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staged = bin_dir / ('rsrs.exe' if os.name == 'nt' else 'rsrs')
+    if staged.is_symlink():
+        raise ValueError('fixture CLI must not be linked')
+    if not staged.exists():
+        shutil.copy2(binary, staged)
+    if staged.read_bytes() != pathlib.Path(binary).read_bytes():
+        raise ValueError('fixture CLI differs from the selected build')
+    env['RSRS_BIN_DIR'] = str(bin_dir)
+
+
 def install_published_runtime(binary, env):
     """Use the real offline installer with the selected release's unchanged bytes."""
+    if (os.environ.get('ARTIFACT_SOURCE') == 'build'
+            and os.environ.get('VALIDATION_PROFILE') == 'full'
+            and os.environ.get('GITHUB_ACTIONS') == 'true'
+            and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+            and os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets'):
+        root = pathlib.Path(env.get('RSRS_DATA_DIR') or pathlib.Path(env['HOME']) / '.rsrs')
+        if root.is_symlink():
+            raise ValueError('source installation root must not be linked')
+        root = root.resolve()
+        if not any(root != pathlib.Path(os.environ[key]).resolve()
+                   and root.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+                   for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+            raise ValueError('source installation must remain inside the owned runner workspace')
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name == 'posix':
+            root.chmod(0o700)
+        env['RSRS_RUNTIME_TRIPLE'] = os.environ['RSRS_RUNTIME_TRIPLE']
+        repository = pathlib.Path(__file__).resolve().parent.parent
+        version = os.environ['NATIVE_RUNTIME_VERSION']
+        binary_hash = os.environ['NATIVE_RUNTIME_SHA256']
+        if (version != json.loads((repository / 'runtime-pin.json').read_text(encoding='utf-8'))['required']
+                or len(binary_hash) != 64 or any(c not in '0123456789abcdef' for c in binary_hash)):
+            raise ValueError('source fixture differs from the independently pinned Runtime identity')
+        if not (root / 'bin/runtime.json').exists():
+            source = pathlib.Path(os.environ['NATIVE_RUNTIME_BIN']).resolve(strict=True)
+            if source.parent.name != version or source.parent.parent.name != 'runtime':
+                raise ValueError('official managed Runtime source required')
+            source_root = source.parent.parent.parent
+            if source_root.name != 'bin' or source_root.parent == root or not (source_root / 'runtime.json').is_file():
+                raise ValueError('independent official Runtime source receipt required')
+            source_env = dict(env, RSRS_DATA_DIR=str(source_root.parent))
+            verified = install_official_runtime(binary, source_env, version, binary_hash)
+            if not source.samefile(verified):
+                raise ValueError('official Runtime source differs from the selected image')
+            bundle = runpy.run_path(str(repository / 'scripts/runtime-acceptance-bundle.py'))
+            bundle['copy_managed_installation'](source_root, root)
+        install_env = dict(env, RSRS_DATA_DIR=str(root))
+        installed = install_official_runtime(binary, install_env, version, binary_hash)
+        env['RSRS_RUNTIME_BIN'] = install_env['RSRS_RUNTIME_BIN']
+        stage_fixture_cli(binary, env, root)
+        return installed
     if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
         return None
     if (os.environ.get('GITHUB_ACTIONS') != 'true'
@@ -166,7 +233,7 @@ def install_published_runtime(binary, env):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name == 'posix':
         root.chmod(0o700)
-    receipt_path = root / 'runtime.json'
+    receipt_path = root / 'bin/runtime.json'
     if not receipt_path.exists():
         install_env = {key: value for key, value in env.items()
                        if key not in ('RSRS_RUNTIME_BIN', 'RSRS_CORE_TEST_MODE', 'GH_TOKEN', 'GITHUB_TOKEN')
@@ -179,7 +246,7 @@ def install_published_runtime(binary, env):
             raise RuntimeError('selected published Runtime offline install failed: exit ' + str(result.returncode))
     receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
     proof = receipt.get('release', {})
-    installed = root / 'runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
+    installed = root / 'bin/runtime' / version / ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')
     if (receipt.get('version') != version or receipt.get('sha256') != binary_hash
             or proof.get('metadata_sha256') != metadata_hash
             or proof.get('metadata_json', '').encode('utf-8') != metadata_bytes
@@ -190,6 +257,7 @@ def install_published_runtime(binary, env):
             raise ValueError('managed installation image differs from the selected asset')
     env['RSRS_RUNTIME_BIN'] = str(installed.resolve(strict=True))
     env['RSRS_RUNTIME_TRIPLE'] = triple
+    stage_fixture_cli(binary, env, root)
     return installed.resolve(strict=True)
 
 
@@ -221,22 +289,62 @@ def runtime_scope_ids(root, profile, session):
     return installation, account
 
 
+HEALTH_FAILURE_CODES = frozenset({
+    'runtime_health_verification_failed', 'runtime_health_profile_escape',
+    'runtime_health_installation_not_private_owned', 'runtime_health_fields_mismatch',
+    'runtime_health_os_disk_image_mismatch', 'runtime_health_disk_image_changed',
+    'runtime_health_image_changed_during_inspection', 'runtime_health_digest_mismatch',
+    'runtime_health_os_identity_changed',
+})
+HEALTH_FIELDS = (
+    'protocol', 'pid', 'selected_image', 'exe', 'image_path', 'process_start_id',
+    'runtime_version', 'bin_version', 'installation_root', 'installation_id',
+    'profile', 'account_id', 'instance_id', 'generation',
+)
+
+
+class RuntimeHealthFailure(AssertionError):
+    """Only fixed identifiers, never health values or exception text, leave the verifier."""
+    def __init__(self, code, fields=()):
+        self.code = code if type(code) is str and code in HEALTH_FAILURE_CODES else 'runtime_health_verification_failed'
+        self.fields = tuple(name for name in HEALTH_FIELDS if name in fields)
+        super().__init__(self.code)
+
+    def diagnostic(self):
+        return {'failure_code': self.code, 'failed_fields': list(self.fields)}
+
+
 def verify_runtime_health(args, health, root, profile, pid=None):
+    try:
+        return _verify_runtime_health(args, health, root, profile, pid)
+    except RuntimeHealthFailure:
+        raise
+    except Exception:
+        # Malformed health/session data and OS errors still fail closed. Never
+        # propagate an arbitrary message, path, account, or dynamically named type.
+        raise RuntimeHealthFailure('runtime_health_verification_failed') from None
+
+
+def _verify_runtime_health(args, health, root, profile, pid=None):
     import psutil
     root, profile = pathlib.Path(root).resolve(strict=True), pathlib.Path(profile).resolve(strict=True)
     if not profile.is_relative_to(root):
-        raise AssertionError('Runtime profile escaped the owned fixture installation')
+        raise RuntimeHealthFailure('runtime_health_profile_escape')
     if os.name == 'posix' and (root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077):
-        raise AssertionError('Runtime fixture installation must be private and owned')
+        raise RuntimeHealthFailure('runtime_health_installation_not_private_owned')
     owner = psutil.Process(health['pid'])
     birth, created = process_start_id(owner.pid), owner.create_time()
     image = pathlib.Path(owner.exe()).resolve(strict=True)
     session_path = profile / 'session.json'
     session = json.loads(session_path.read_text(encoding='utf-8')) if session_path.exists() else {}
     installation_id, account_id = runtime_scope_ids(root, profile, session)
-    selected_image = ((root / 'runtime' / args.runtime_version /
+    selected_image = ((root / 'bin/runtime' / args.runtime_version /
                        ('rsrs-runtime.exe' if os.name == 'nt' else 'rsrs-runtime')).resolve()
-                      if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets' else args.runtime_binary)
+                      if (os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets'
+                          or (os.environ.get('ARTIFACT_SOURCE') == 'build'
+                              and os.environ.get('VALIDATION_PROFILE') == 'full'
+                              and os.environ.get('GITHUB_ACTIONS') == 'true'
+                              and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted')) else args.runtime_binary)
     checks = {
         'protocol': type(health.get('v')) is int and health['v'] == 1,
         'pid': pid is None or owner.pid == pid,
@@ -255,7 +363,7 @@ def verify_runtime_health(args, health, root, profile, pid=None):
     }
     failed = [name for name, passed in checks.items() if not passed]
     if failed:
-        raise AssertionError('standalone Runtime process/health/scope mismatch: ' + ', '.join(failed))
+        raise RuntimeHealthFailure('runtime_health_fields_mismatch', failed)
     identity = (owner.pid, birth, health['instance_id'], health['account_id'], health['generation'])
     previous = next((item for item in args.runtime_identity_receipts
                      if item['_identity'] == identity), None)
@@ -270,22 +378,22 @@ def verify_runtime_health(args, health, root, profile, pid=None):
         opened = os.fstat(stream.fileno())
         opened_identity = file_identity(opened)
         if opened_identity != file_identity(image.stat()):
-            raise AssertionError('OS image and verified Runtime disk file differ')
+            raise RuntimeHealthFailure('runtime_health_os_disk_image_mismatch')
         if previous is None:
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
         else:
             if previous['_file_identity'] != opened_identity:
-                raise AssertionError('Runtime disk file changed after verification')
+                raise RuntimeHealthFailure('runtime_health_disk_image_changed')
             digest = previous['image_sha256']
         if (file_identity(os.fstat(stream.fileno())) != opened_identity
                 or file_identity(image.stat()) != opened_identity):
-            raise AssertionError('Runtime image file changed during digest inspection')
+            raise RuntimeHealthFailure('runtime_health_image_changed_during_inspection')
         if digest != args.runtime_sha256 or health.get('image_sha256') != digest:
-            raise AssertionError('standalone Runtime disk image digest mismatch')
+            raise RuntimeHealthFailure('runtime_health_digest_mismatch')
         # New psutil objects force independent post-inspection OS queries.
         if (process_start_id(owner.pid) != birth or psutil.Process(owner.pid).create_time() != created
                 or pathlib.Path(psutil.Process(owner.pid).exe()).resolve(strict=True) != image):
-            raise AssertionError('Runtime OS identity changed during inspection')
+            raise RuntimeHealthFailure('runtime_health_os_identity_changed')
     if previous is None:
         receipt = {key: health[key] for key in ('installation_root', 'data_dir', 'account_id',
                    'instance_id', 'generation', 'process_start_id')}
@@ -484,11 +592,21 @@ class WorkerInspector:
                                         stdin=subprocess.PIPE, stdout=self.log, stderr=self.log)
 
     def inspect(self, request):
+        """Check one identity within the deadline; every helper error fails closed."""
         self.sequence += 1
         request = {**request, 'sequence': self.sequence}
         response = self.directory / ('response-' + str(self.sequence) + '.json')
-        self.process.stdin.write((json.dumps(request) + '\n').encode())
-        self.process.stdin.flush()
+        try:
+            self.process.stdin.write((json.dumps(request) + '\n').encode())
+            self.process.stdin.flush()
+        except OSError as error:
+            failure = RuntimeError('worker inspector request pipe failed; see ' +
+                                   str(self.directory / 'inspector.log'))
+            try:
+                self.record_failure('worker inspector request pipe failed: ' + str(error))
+            except OSError as recording_error:
+                failure.add_note('failure record could not be written: ' + str(recording_error))
+            raise failure from error
         deadline = time.monotonic() + self.timeout
         while True:
             if self.process.poll() is not None:
@@ -519,42 +637,50 @@ class WorkerInspector:
         }, indent=2), encoding='utf-8')
 
     def close(self):
+        """Reap the helper and close streams without masking a broken-pipe cause."""
         try:
             if self.process.poll() is None:
                 self.process.kill()
             self.process.wait(timeout=5)
         finally:
-            self.process.stdin.close()
-            self.log.close()
+            try:
+                # A dead helper can leave buffered request bytes behind. The
+                # helper has already been reaped; do not let its failed close
+                # flush hide the inspection failure during cleanup.
+                try:
+                    self.process.stdin.close()
+                except OSError:
+                    if self.process.poll() is None:
+                        raise
+            finally:
+                self.log.close()
 
 
 def serve(directory):
+    """Publish boundary results; the parent enforces the inspection deadline."""
     import faulthandler
     faulthandler.enable()
     directory = pathlib.Path(directory)
     import psutil
     print(json.dumps({'inspector_pid': os.getpid(), 'psutil': psutil.__version__}), flush=True)
-    # One watchdog for the helper lifetime; do not create/join a timer thread
-    # for every high-frequency check, and cover response I/O as well as psutil.
-    faulthandler.dump_traceback_later(3, repeat=True)
-    try:
-        for line in sys.stdin:
-            request = json.loads(line)
-            sequence = request['sequence']
-            def phase(name):
-                print(json.dumps({'sequence': sequence, 'phase': name, 'monotonic': time.monotonic()}), flush=True)
-            try:
-                identity = inspect_worker(request, phase)
-                result = {'passed': True, 'identity': identity}
-            except Exception:
-                result = {'passed': False, 'error': traceback.format_exc()}
-            phase('response')
-            temporary = directory / 'response.tmp'
-            temporary.write_text(json.dumps(result), encoding='utf-8')
-            os.replace(temporary, directory / ('response-' + str(sequence) + '.json'))
-            phase('responded')
-    finally:
-        faulthandler.cancel_dump_traceback_later()
+    # Keep fatal-crash diagnostics, but do not schedule asynchronous stack dumps:
+    # they can race live frames on Windows (CPython #116008). The controller's
+    # inspection deadline still kills/reaps a hung helper; phase logs locate it.
+    for line in sys.stdin:
+        request = json.loads(line)
+        sequence = request['sequence']
+        def phase(name):
+            print(json.dumps({'sequence': sequence, 'phase': name, 'monotonic': time.monotonic()}), flush=True)
+        try:
+            identity = inspect_worker(request, phase)
+            result = {'passed': True, 'identity': identity}
+        except Exception:
+            result = {'passed': False, 'error': traceback.format_exc()}
+        phase('response')
+        temporary = directory / 'response.tmp'
+        temporary.write_text(json.dumps(result), encoding='utf-8')
+        os.replace(temporary, directory / ('response-' + str(sequence) + '.json'))
+        phase('responded')
 
 
 if __name__ == '__main__':

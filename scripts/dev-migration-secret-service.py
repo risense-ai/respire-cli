@@ -127,35 +127,73 @@ class SecretServiceKeys(_base.TrackedKeys):
         require(reply.body == (self.daemon.pid,), "fixture_secret_service_owner_mismatch")
 
     def cleanup_business_entries(self):
+        diagnostic = self.business_cleanup = {"passed": False, "stage": "owner_check",
+            "observed_entries": None, "validated_entries": 0, "deleted_entries": 0,
+            "remaining_entries": None}
         self.verify_owner()
         # Only this mode runs children against our initially empty private collection.
-        # Match the existing login-interruption cleanup, including auth TOTP checkpoints.
+        # Validate the entire owned set before deleting any entry.
+        diagnostic["stage"] = "enumeration"
         items = list(self.collection.get_all_items())
+        diagnostic["observed_entries"] = len(items)
+        prefixes = ("super:", "pass:", "totp:", "classify:ds-model@", "classify:ds@", "classify:")
+        classification = self.business_classification = {
+            "classified_entries": 0,
+            "attribute_matches": {key: {"matched": 0, "mismatched": 0}
+                                  for key in ("service", "target", "application")},
+            "known_prefix_counts": {key: 0 for key in (*prefixes, "other")}}
+        ownership = []
+        # Classify every item with fixed counters; never publish attributes or aliases.
+        # Keep validated_entries as the accepted prefix before the first rejection.
         for item in items:
+            diagnostic["stage"] = "attribute_read"
             attributes = item.get_attributes()
-            require(attributes.get("service") == "rsrs"
+            for key, expected in (("service", "rsrs"), ("target", "default"),
+                                  ("application", "rust-keyring")):
+                match = "matched" if attributes.get(key) == expected else "mismatched"
+                classification["attribute_matches"][key][match] += 1
+            username = attributes.get("username", "")
+            prefix = next((key for key in prefixes
+                           if isinstance(username, str) and username.startswith(key)), "other")
+            classification["known_prefix_counts"][prefix] += 1
+            classification["classified_entries"] += 1
+            ownership.append(bool(attributes.get("service") == "rsrs"
                     and attributes.get("target") == "default"
                     and attributes.get("application") == "rust-keyring"
-                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}",
-                                     attributes.get("username", "")),
-                    "unexpected_private_credential")
+                    and isinstance(username, str)
+                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}", username)))
+        diagnostic["stage"] = "ownership_validation"
+        for owned in ownership:
+            require(owned, "unexpected_private_credential")
+            diagnostic["validated_entries"] += 1
+        diagnostic["stage"] = "deletion"
         for item in items:
             item.delete()
-        require(not list(self.collection.get_all_items()), "native_fixture_cleanup_failed")
+            diagnostic["deleted_entries"] += 1
+        diagnostic["stage"] = "readback"
+        diagnostic["remaining_entries"] = len(list(self.collection.get_all_items()))
+        require(diagnostic["remaining_entries"] == 0, "native_fixture_cleanup_failed")
+        diagnostic.update(passed=True, stage="complete")
 
     @staticmethod
     def attributes(service, slot):
         return {"target": "default", "service": service, "username": slot,
                 "application": "rust-keyring"}
 
-    def register_current_target(self, user):
-        require(not self.current_target_entries and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user),
+    def register_current_target(self, session, user):
+        # Registration has already created and verified these exact login slots.
+        # Bind normalization to that returned alias, never reserved username slots.
+        alias = session.get("keyring_account")
+        require(not self.current_target_entries
+                and re.fullmatch(r"ci-migrate-[a-f0-9]{16}", user)
+                and session.get("user") == user
+                and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "fixture_current_target_registration_invalid")
-        entries = {("rsrs", prefix + user) for prefix in ("super:", "pass:")}
+        entries = {("rsrs", prefix + alias) for prefix in ("super:", "pass:")}
         for entry in entries:
-            require(entry in self.entries and entry not in self.attribute_snapshots
-                    and self._find(*entry, check_snapshot=False) is None,
-                    "fixture_current_target_not_fresh_owned_entry")
+            require(entry in self.entries and entry in self.attribute_snapshots
+                    and self._find(*entry) is not None,
+                    "fixture_current_target_not_verified_owned_entry")
         self.current_target_entries.update(entries)
 
     def _find(self, service, slot, check_snapshot=True):
@@ -259,12 +297,23 @@ class SecretServiceKeys(_base.TrackedKeys):
             "initial_raw_snapshots_overwritten": False,
             "old_namespaces_and_migrated_aliases": "full_raw_attribute_snapshots",
         }
+        if hasattr(self, "business_cleanup"):
+            report["business_credential_cleanup"] = self.business_cleanup
+        if hasattr(self, "business_classification"):
+            report["business_credential_classification"] = self.business_classification
         if hasattr(self, "collection"):
+            collection = report["collection_cleanup"] = {"passed": False,
+                "stage": "enumeration", "remaining_entries": None}
             try:
-                require(not list(self.collection.get_all_items()), "fixture_collection_not_empty")
+                collection["remaining_entries"] = len(list(self.collection.get_all_items()))
+                collection["stage"] = "empty_check"
+                require(collection["remaining_entries"] == 0, "fixture_collection_not_empty")
+                collection.update(passed=True, stage="complete")
             except Exception:
                 report["passed"] = False
-                report["remaining_entries"].append({"code": "fixture_collection_cleanup_failed"})
+                code = "fixture_collection_not_empty" if collection["remaining_entries"] is not None \
+                    else "fixture_collection_enumeration_failed"
+                report["remaining_entries"].append({"code": code})
         if self.connection is not None:
             try:
                 self.connection.close()

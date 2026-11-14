@@ -380,6 +380,9 @@ pub(crate) fn verify_account_target(
     Ok(())
 }
 
+// Classify only known top-level Runtime contexts; private diagnostic text never leaves this module.
+use respire_host_control::register_rejection_class;
+
 pub(crate) fn validate_account_response(
     response: RpcResponse<ResultEnvelope>, request: &RpcRequest, profile: &Path, pid: u32,
     source: &Path, register: bool,
@@ -422,6 +425,15 @@ pub(crate) fn validate_account_response(
                     && response.error.as_ref() == envelope.errors.first() }),
             "invalid account control rejection envelope");
         // Never echo the Runtime diagnostic; every rejection retains the original operation.
+        if register && request.method == HOST_AUTH_REGISTER_METHOD && code == "account_outcome_unknown" {
+            let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
+            anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
+        }
+        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown" {
+            if let Some(class) = response.error.as_deref().and_then(respire_host_control::AccountCoordinator::login_rejection_class) {
+                anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind={class}");
+            }
+        }
         anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
     let envelope = response.envelope.context("account control result is missing")?;
@@ -481,9 +493,23 @@ pub(super) fn validate_auth_response(
     }
     let envelope = response.envelope.context("auth control result is missing")?;
     anyhow::ensure!(envelope.command == "keygen", "unexpected auth control command");
-    anyhow::ensure!(!matches!(response.code.as_deref(),
-        Some("control_outcome_unknown" | "auth_outcome_unknown")),
-        "auth control completion is unknown; query the original operation");
+    if matches!(response.code.as_deref(), Some("control_outcome_unknown" | "auth_outcome_unknown")) {
+        // Keep private Runtime diagnostics inside this boundary; expose only fixed classifications.
+        let diagnostic = if response.code.as_deref() == Some("control_outcome_unknown") {
+            "auth_runtime_deadline_or_parent_revoked"
+        } else {
+            response.error.as_deref().unwrap_or_default().split(": ").find_map(|cause| match cause {
+                "Secret Service initialization failed" | "kernel keyring initialization failed" =>
+                    Some("auth_credential_backend_unavailable"),
+                "offline auth requires a persistent credential backend; the volatile kernel keyring cannot recover this transaction" =>
+                    Some("auth_credential_backend_not_persistent"),
+                "migration keyring readback mismatch" | "migration keyring write/readback failed; no snapshot was published" =>
+                    Some("auth_credential_write_readback_failed"),
+                _ => None,
+            }).unwrap_or("unclassified")
+        };
+        anyhow::bail!("auth control completion is unknown; query the original operation; auth_diagnostic={diagnostic}");
+    }
     for (name, value) in [("control_ready", "true"), ("store_ready", "false")] {
         let mut items = envelope.items.iter().filter(|item| item.name == name);
         anyhow::ensure!(items.next().is_some_and(|item| item.value == value

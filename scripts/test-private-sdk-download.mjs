@@ -36,7 +36,7 @@ test('helper is packaged without credential persistence or logging',()=>{const c
 
 test('credential-shaped response bytes are rejected before returning SDK data',async()=>{const f=fixture();f.bytes=Buffer.from(token);await assert.rejects(run(f),e=>!e.message.includes(token));});
 
-for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
+for (const version of ['1.0.2-dev.24','1.1.0-dev.1','2.0.0-dev.1']) {
  test(`approved SDK ${version} downloads only independently pinned bytes`,async()=>{
   for(const kind of ['manifest','archive']) {
    const f=fixture(kind,version);assert.deepEqual(await run(f),f.bytes);
@@ -46,7 +46,7 @@ for (const version of ['1.0.2-dev.24','1.1.0-dev.1']) {
   }
  });
 }
-for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1','2.0.0-dev.1']) {
+for (const version of ['1.1.0','1.1.0-dev.0','1.1.0-dev.01','1.1.0-rc.1','1.1.0-dev.1+metadata','1.1.1-dev.1']) {
  test(`private SDK rejects unsupported version ${version} before network`,async()=>{
   const f=fixture('manifest',version);await assert.rejects(run(f));assert.equal(f.calls.length,0);
  });

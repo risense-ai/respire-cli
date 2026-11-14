@@ -3,6 +3,7 @@
 import argparse
 import base64
 from contextlib import contextmanager
+from dev_migration_diagnostics import migration_failure_diagnostics
 import hashlib
 import importlib.util
 import json
@@ -21,7 +22,10 @@ import uuid
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(support)
-keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name("dev-migration-keyring.py"))
+keyring_script = ("dev-migration-secret-service.py" if sys.platform.startswith("linux")
+    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+    and os.environ.get("DBUS_SESSION_BUS_ADDRESS", "").startswith("unix:") else "dev-migration-keyring.py")
+keyring_spec = importlib.util.spec_from_file_location("migration_native_keyring", Path(__file__).with_name(keyring_script))
 keyring_backend = importlib.util.module_from_spec(keyring_spec)
 keyring_spec.loader.exec_module(keyring_backend)
 require, digest = support.require, support.digest
@@ -59,7 +63,7 @@ class Smoke(support.Smoke):
                 cwd=self.root, env=env, capture_output=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             self.report["cli_failure"] = {"command": args[0], "timeout_seconds": timeout,
-                "error_class": "timeout"}
+                "error_class": "timeout", "has_source": "--source" in args, "has_account": "--account" in args}
             self.save()
             raise
         finally:
@@ -77,6 +81,10 @@ class Smoke(support.Smoke):
             text = (output.stdout + output.stderr).decode("utf-8", errors="replace").lower()
             categories = (
                 ("argument_contract", ("unexpected argument", "required arguments were not provided", "a value is required")),
+                ("host_required", ("client_only: explicit legacy migration is host-managed",)),
+                ("host_control", ("host control deadline exceeded", "missing host control response frame", "migration_outcome_unknown", "migration response binding mismatch", "migration response profile mismatch")),
+                ("profile_discovery", ("migration discovery did not return profiles", "legacy profile has no name", "profile root is not a directory", "invalid session metadata file")),
+                ("discovery_path", ("discovery path contains parent traversal", "discovery path contains a symlink", "discovery path contains a reparse point", "discovery ancestor is not a directory")),
                 ("rate_limited", ("too many requests", "rate limit", "http 429", "status: 429")),
                 ("native_credentials", ("keyring", "keychain", "credential manager", "osstatus")),
                 ("vault_unlock", ("failed to decrypt", "vault could not be unlocked", "super password required", "secret key required")),
@@ -96,7 +104,27 @@ class Smoke(support.Smoke):
             category = next((name for name, terms in categories if any(term in text for term in terms)), "unclassified")
             self.report["cli_failure"] = {"command": args[0], "exit_code": output.returncode,
                 "error_class": category, "json_envelope": isinstance(value, dict),
+                "has_source": "--source" in args, "has_account": "--account" in args,
                 "error": self.redacted_cli_error(env, output)}
+            self.report["cli_failure"].update(migration_failure_diagnostics(value))
+            migration_stages = ("paused_grant", "owner_check", "drain_owner", "drained_check",
+                "selection_before_send", "save_sent", "exchange", "encode_unknown", "selection_after_receipt",
+                "restore_owner_start", "restore_owner_probe", "restore_owner_verify", "restore_store_ready",
+                "selection_before_finish", "finish_maintenance", "save_terminal", "paused_publication")
+            errors = value.get("errors") if isinstance(value, dict) else None
+            stage = re.search(r"\bmigration_stage=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_stage"] = stage[1] if stage and stage[1] in migration_stages else None
+            exchange_categories = ("spawn", "channel", "frame", "encoding", "deadline", "child_exit",
+                "response_binding", "response_profile", "response_envelope", "response_readiness", "result_identity",
+                "unknown_receipt", "terminal_receipt", "terminal_details", "unclassified", "runtime_invalid_request",
+                "runtime_protocol_version_mismatch", "runtime_control_unavailable", "runtime_auth_recovery_pending",
+                "runtime_unauthorized", "runtime_auth_ownership_unavailable", "runtime_scope_mismatch",
+                "runtime_migration_outcome_unknown", "runtime_control_outcome_unknown")
+            exchange = re.search(r"\bmigration_exchange=([a-z_]+)(?=$|[;\s])", "\n".join(
+                error for error in errors if isinstance(error, str)) if isinstance(errors, list) else "")
+            self.report["cli_failure"]["migration_exchange"] = exchange[1] if stage and stage[1] == "exchange" \
+                and exchange and exchange[1] in exchange_categories else None
             self.report["cli_failure"]["runtime_signals"] = [name for name, term in (
                 ("child_exited", "host runtime exited before readiness"),
                 ("startup_identity_changed", "runtime owner changed during startup"),
@@ -115,6 +143,16 @@ class Smoke(support.Smoke):
                 "invalid_cli_json_" if not isinstance(value, dict) else "cli_error_"
             raise RuntimeError(reason + args[0])
         return value
+
+    def verify_retained_current_credentials(self, session, fixture):
+        # Only the original, already tracked login alias owns these credentials.
+        alias = session.get("keyring_account")
+        require(session.get("user") == fixture["account"]["user"]
+            and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias)
+            and alias == fixture["alias"], "existing_target_credential_identity_changed")
+        require(self.keys.read("rsrs", "super:" + alias) == fixture["code"]
+            and self.keys.read("rsrs", "pass:" + alias) == fixture["password"],
+            "existing_target_native_credentials_overwritten")
 
     def reserve_alias(self, source):
         alias = "legacy-" + keyring_backend.canonical_identity(source)[:16]
@@ -241,8 +279,8 @@ class Smoke(support.Smoke):
         result = dict(env)
         result.pop("RSRS_DATA_DIR", None)
         result.pop("RSRS_SUPER", None)
-        if os.environ.get('RSRS_ARTIFACT_SOURCE') == 'published-assets':
-            result.pop('RSRS_RUNTIME_BIN', None)
+        # Switching to HOME/.rsrs also changes the managed Runtime owner.
+        result.pop('RSRS_RUNTIME_BIN', None)
         return result
 
     def seed(self, env, path, service, label):
@@ -253,8 +291,6 @@ class Smoke(support.Smoke):
         user, password = "ci-migrate-" + secrets.token_hex(8), "ci-" + secrets.token_urlsafe(32)
         self.reserve_account(user)
         self.diagnostic_secrets.add(password)
-        if service == "rsrs" and self.keys.name == "linux-secret-service":
-            self.keys.register_current_target(user)
         account = {"user": user, "token": None, "confirmed": False,
             "pass_hash": None}
         self.accounts.append(account)
@@ -267,17 +303,17 @@ class Smoke(support.Smoke):
             and session.get("user") == user and session.get("addr") == support.UPSTREAM
             and bool(session.get("token")), "migration_registered_identity_mismatch")
         account.update(token=session["token"], confirmed=True)
-        auth_salt = bytes.fromhex(session["auth_salt"].removeprefix(support.PREFIX))
-        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
         code = value["summary"].get("super")
         require(isinstance(code, str) and bool(code), "migration_super_missing")
-        self.diagnostic_secrets.update((code, session["token"], account["pass_hash"]))
+        self.diagnostic_secrets.update((code, session["token"]))
         self.report["fixture_operation"] = "verify_registered_native_credentials"
         self.save()
-        if sys.platform != "darwin":
-            require(self.keys.read("rsrs", "super:" + user) == code
-                and self.keys.read("rsrs", "pass:" + user) == password,
-                "registered_native_credentials_not_in_owned_store")
+        self.keys.track_created_login(session, user, code, password)
+        if service == "rsrs" and self.keys.name == "linux-secret-service":
+            self.keys.register_current_target(session, user)
+        auth_salt = bytes.fromhex(self.api(account, "GET", "/auth/salt?user=" + support.urllib.parse.quote(user))["salt"].removeprefix(support.PREFIX))
+        account["pass_hash"] = hashlib.pbkdf2_hmac("sha256", password.encode(), auth_salt, 100_000, 32).hex()
+        self.diagnostic_secrets.add(account["pass_hash"])
         env["RSRS_SUPER"] = code
         self.report["fixture_operation"] = "seed_local_content"
         self.save()
@@ -342,16 +378,19 @@ class Smoke(support.Smoke):
             self.report["fixture_operation"] = "retained_current_credentials"
             self.save()
             return {"account": account, "password": password, "code": code, "service": service,
-                "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": None}
+                "source": path, "id": memory_id, "text": text, "label": label, "cipher": row, "alias": session["keyring_account"]}
         self.report["fixture_operation"] = "seed_legacy_native_credentials"
         self.save()
         self.keys.put(service, "super:" + user, code)
         self.keys.put(service, "pass:" + user, password)
+        # The old service stores credentials by user, not by the new login alias.
+        login_alias = session.pop("keyring_account")
+        session.pop("keyring_backend", None)
         # The old service is the only credential source, not an environment override.
         self.report["fixture_operation"] = "remove_current_native_credentials"
         self.save()
-        self.keys.remove("rsrs", "super:" + user)
-        self.keys.remove("rsrs", "pass:" + user)
+        self.keys.remove("rsrs", "super:" + login_alias)
+        self.keys.remove("rsrs", "pass:" + login_alias)
         env.pop("RSRS_SUPER", None)
         self.report["fixture_operation"] = "rewrite_legacy_endpoint"
         self.save()
@@ -447,6 +486,8 @@ class Smoke(support.Smoke):
             current = self.seed(env, home / ".rsrs", "rsrs", name + "-existing-rsrs")
             # A current profile must keep its existing credentials and URL untouched.
             current_env = dict(env, RSRS_DATA_DIR=str(current["source"]))
+            # This retained profile owns its own installed Runtime, not the seed environment's override.
+            current_env.pop("RSRS_RUNTIME_BIN", None)
             current_session = self.session(current_env)
         default = self.default_env(env)
         support.install_published_runtime(self.args.binary, default)
@@ -466,27 +507,54 @@ class Smoke(support.Smoke):
             fixture["destination_account"] = rows[0]["account"]
             fixture["destination"] = root / "accounts" / rows[0]["account"]
         if interrupt:
-            padding = fixtures[0]["source"] / "migration-copy-fixture.bin"
-            with padding.open("wb") as stream:
-                for _ in range(64):
-                    stream.write(bytes(1024 * 1024))
-            process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
-                "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
-                env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            deadline = time.monotonic() + 30
-            stage_seen = False
-            while process.poll() is None and time.monotonic() < deadline:
-                stage = home / ".rsrs-migration-staging"
-                if stage.is_dir() and any((p / "onememory.db").is_file() for p in stage.iterdir()) \
-                    and not fixtures[0]["destination"].exists():
-                    stage_seen = True
-                    process.kill()
-                    break
-                time.sleep(0.002)
-            if process.poll() is None:
-                process.kill()
-            process.wait(timeout=10)
-            require(stage_seen, "interruption_fixture_did_not_reach_real_stage")
+            # Hold the real SQLite snapshot in Copying; a fast file copy can
+            # otherwise reach non-replayable Transforming before the parent dies.
+            source_db = fixtures[0]["source"] / "onememory.db"
+            connection = self.wal_connections[-1]
+            require(Path(connection.execute("PRAGMA database_list").fetchone()[2]).samefile(source_db),
+                    "interruption_fixture_source_mismatch")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            require(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete",
+                    "interruption_fixture_lock_mode_failed")
+            connection.execute("BEGIN EXCLUSIVE")
+            process = None
+            try:
+                process = subprocess.Popen([str(self.args.binary), "--direct", "--json", "migrate",
+                    "--source", fixtures[0]["source_id"], "--account", fixtures[0]["destination_account"]],
+                    env=default, cwd=self.root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                deadline = time.monotonic() + 30
+                stage_seen = False
+                while process.poll() is None and time.monotonic() < deadline:
+                    stage = home / ".rsrs-migration-staging"
+                    if stage.is_dir() and any((p / "onememory.db").is_file() for p in stage.iterdir()):
+                        intents = list((home / ".rsrs-migration-intents").glob("*.json"))
+                        require(len(intents) == 1, "interruption_fixture_intent_not_unique")
+                        frames = intents[0].read_text(encoding="utf-8")
+                        require(frames.endswith("\n"), "interruption_fixture_intent_truncated")
+                        intent = json.loads(frames.splitlines()[-1])
+                        require(intent["phase"] == "copying"
+                                and intent["original"]["source_id"] == fixtures[0]["source_id"]
+                                and intent["original"]["account"] == fixtures[0]["destination_account"],
+                                "interruption_fixture_not_copying")
+                        stage_seen = True
+                        break
+                    time.sleep(0.002)
+                require(stage_seen, "interruption_fixture_did_not_reach_real_stage")
+            finally:
+                try:
+                    if process is not None:
+                        if process.poll() is None:
+                            process.kill()
+                        process.wait(timeout=10)
+                        # The control helper must release its real library lock
+                        # before the fixture unblocks its source snapshot.
+                        require((root / "lock.db").is_file(), "interruption_fixture_owner_lock_missing")
+                        with sqlite3.connect(root / "lock.db", timeout=20) as owner:
+                            owner.execute("BEGIN EXCLUSIVE")
+                            owner.rollback()
+                finally:
+                    connection.rollback()
+                    connection.execute("PRAGMA journal_mode=WAL")
             require(not fixtures[0]["destination"].exists(), "interruption_fixture_missed_prepublication_window")
         for fixture in fixtures:
             migrated = self.cli(default, "migrate", "--source", fixture["source_id"],
@@ -514,10 +582,7 @@ class Smoke(support.Smoke):
             if sys.platform == "darwin":
                 self.verify_mac_native_credentials(current_env, current)
             else:
-                user = current["account"]["user"]
-                require(self.keys.read("rsrs", "super:" + user) == current["code"]
-                    and self.keys.read("rsrs", "pass:" + user) == current["password"],
-                    "existing_target_native_credentials_overwritten")
+                self.verify_retained_current_credentials(current_session, current)
             self.read_entry(current_env, current["id"], current["text"])
             self.passed("existing_rsrs_preserved_and_legacy_imported", imported=len(fixtures))
         before = {str(p.relative_to(home)): digest(p) for p in (home / ".rsrs").rglob(".rsrs-migration.json")}
@@ -588,7 +653,9 @@ class Smoke(support.Smoke):
                 remote = self.env("independent-" + user, user)
                 remote["RSRS_SUPER"] = fixture["code"]
                 self.cli(remote, "login", "--interactive", "--addr", support.UPSTREAM, "--user", user, "--pass", fixture["password"], "--super", fixture["code"])
-                fixture["account"]["token"] = self.session(remote)["token"]
+                independent = self.session(remote)
+                self.keys.track_created_login(independent, user, fixture["code"], fixture["password"])
+                fixture["account"]["token"] = independent["token"]
                 self.cli(remote, "sync")
                 self.read_entry(remote, fixture["id"], fixture["text"])
                 self.read_entry(remote, new_id, "New-directory migration write")
@@ -666,9 +733,12 @@ class Smoke(support.Smoke):
         listed = subprocess.run([str(self.args.binary), "--direct", "--json", "migrate"],
             env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
         listing = json.loads(listed.stdout)
+        link_errors = ("symbolic link", "discovery path contains a symlink",
+                       "discovery path contains a reparse point")
         if listed.returncode != 0:
-            require(listing.get("status") == "fail" and any("symbolic link" in error
-                for error in listing.get("errors", [])), "symlink_listing_failed_for_unrelated_reason")
+            require(listing.get("status") == "fail" and any(term in error
+                for error in listing.get("errors", []) for term in link_errors),
+                "symlink_listing_failed_for_unrelated_reason")
         else:
             require(listing.get("status") == "ok", "symlink_listing_status_invalid")
             for row in listing["details"]["profiles"]:
@@ -677,9 +747,13 @@ class Smoke(support.Smoke):
                     env=self.default_env(link_env), cwd=self.root, capture_output=True, timeout=60)
                 rejection = json.loads(result.stdout)
                 require(result.returncode != 0 and rejection.get("status") == "fail"
-                    and any("symbolic link" in error for error in rejection.get("errors", [])),
+                    and any(term in error for error in rejection.get("errors", []) for term in link_errors),
                     "symlink_root_migration_not_rejected")
-        require(not (link_home / ".rsrs").exists(), "symlink_root_migration_created_destination")
+        # A host rejection may write its fixed error log, but no library or Runtime state.
+        destination = link_home / ".rsrs"
+        require(not destination.exists() or all(not path.is_symlink()
+                and str(path.relative_to(destination)).replace("\\", "/") in ("logs", "logs/cli.log")
+                for path in destination.rglob("*")), "symlink_root_migration_created_destination")
         require(digest(fixture["source"] / "onememory.db") == source_database
             and digest(fixture["source"] / "session.json") == source_session,
             "rejected_symlink_source_changed")

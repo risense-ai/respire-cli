@@ -246,7 +246,7 @@ fn start_runtime(mode: &str, legacy_path: bool, host_control: bool) -> Result<Ru
         let version = runtime.parent().and_then(std::path::Path::file_name)
             .ok_or("Runtime fixture version directory missing")?;
         let filename = runtime.file_name().ok_or("Runtime fixture binary name missing")?;
-        runtime = dir.path().join("runtime").join(version).join(filename)
+        runtime = dir.path().join("bin/runtime").join(version).join(filename)
             .canonicalize().map_err(|err| err.to_string())?;
     }
     let version = Command::new(&runtime).arg("--version").output().map_err(|err| err.to_string())?;
