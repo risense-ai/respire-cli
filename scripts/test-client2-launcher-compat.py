@@ -135,7 +135,7 @@ def main():
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
     parser.add_argument('--desktop-executable', type=Path,
-                        help='Hosted CI only: released Client2 v2.0.0-dev.5 Linux x64 desktop executable')
+                        help='Hosted CI only: exact Linux x64 desktop for the selected fixed release baseline')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
@@ -332,7 +332,7 @@ def main():
                 env['RSRS_INSTANCE_ID'] = base.name + '-' + mode
                 version = run([desktop, '--version'], env)
                 if version.returncode or helper_result(version) != {
-                        'version': '2.0.0-dev.5', 'platform': 'linux-amd64'}:
+                        'version': args.client2_baseline.removeprefix('v'), 'platform': 'linux-amd64'}:
                     raise RuntimeError('Pinned original desktop version identity changed')
                 desktop_action('start', env)
                 health = desktop_action('status', env)
