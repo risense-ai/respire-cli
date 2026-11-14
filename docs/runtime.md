@@ -17,7 +17,10 @@ operations before a replacement starts.
 
 For an in-place upgrade from a released 2.x frontend-only CLI, update the CLI
 through its original installation channel, then run `rsrs runtime install` on
-the host. This installs a verified compatible Runtime, drains an existing owner
+the host. Confirm `rsrs --version` reports the upgraded CLI first. If the old
+stable entry shadows the global package, invoke the new package explicitly;
+for the pnpm dev channel, use `pnpm dlx rsrs@dev runtime install`.
+This installs a verified compatible Runtime, drains an existing owner
 when the Runtime or stable CLI needs replacement, atomically refreshes
 `~/.rsrs/bin/rsrs`, and restarts an owner that was running. An already compatible
 installation is reused without a restart. A stopped installation stays stopped;
@@ -29,17 +32,18 @@ Older combined-binary installations still require their explicit migration path.
 
 On macOS, review any Keychain prompt for the verified new Runtime path.
 “Allow Once” grants one access; recovery checks and startup can request access
-again. If startup is uncertain, inspect the reported child and pending prompts
-before retrying. Do not delete recovery records or regenerate keys to clear a
-Keychain prompt.
+again. “Always Allow” permits later reads by that app. If startup is uncertain,
+inspect the reported child and pending prompts before retrying. Do not delete
+recovery records or regenerate keys to clear a Keychain prompt.
 
 The native macOS arm64 regression is `scripts/test-dev3-in-place-upgrade.py`.
 It uses the official CLI dev.3 to create a Runtime dev.14 home with a committed
 native keygen receipt, writes a memory, and upgrades the running original home.
 It checks the stable CLI, retained session/journal/old release, existing memory,
 new writes, recall and repeated installation. It requires an empty fixture
-directory and native Keychain access; never point it at a user's existing home
-or publish the complete fixture. The matching workflow retains only a report
+directory and native Keychain access. Headless CI explicitly authorizes the new
+Runtime in its disposable synthetic Keychain; this does not test interactive
+prompt approval. Never point it at a user's existing home or publish the complete fixture. The matching workflow retains only a report
 without credential material. Passing this fixture does not establish that an
 unavailable user-specific failing home has been repaired.
 

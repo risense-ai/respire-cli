@@ -74,6 +74,12 @@ def main():
                                  'elapsed_seconds': time.monotonic() - started,
                                  'errors': failure.get('errors', []) if failure.get('status') == 'fail' else []}
             print(json.dumps(report['failure']), flush=True)
+            if report['checks'] and binary == candidate and arguments[:2] == ('runtime', 'install'):
+                report['retained_state_after_failure'] = {
+                    'journal': journal_path.is_file() and journal_path.read_bytes() == journal_bytes,
+                    'session': session.is_file() and session.read_bytes() == original_session,
+                    'legacy_release': old_release.is_dir(),
+                }
             if arguments[:2] in (('runtime', 'install'), ('runtime', 'start')):
                 report['startup_samples'] = []
                 processes = subprocess.check_output(
@@ -167,6 +173,11 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
+        # Headless CI cannot answer Keychain prompts; grant access only in this synthetic keychain.
+        subprocess.run(['/usr/bin/security', 'set-generic-password-partition-list',
+                        '-s', 'rsrs', '-S', 'apple-tool:,apple:,unsigned:', '-k', '', keychain],
+                       env=env, check=True, capture_output=True, timeout=15)
+        report['checks'].append('synthetic native Keychain access approved for the new Runtime')
         installed = run(candidate, 'runtime', 'install')['summary']
         if installed.get('restarted') is not True or digest(stable) != digest(candidate):
             raise AssertionError('upgrade did not refresh the CLI and restart the old owner')
@@ -184,8 +195,9 @@ def main():
             raise AssertionError('pre-upgrade memory changed')
         written = run(candidate, 'remember', 'Issue 285 post-upgrade write', '--force')['summary']['id']
         run(candidate, 'show', written)
-        if not run(candidate, 'recall', content, '--titles')['items']:
-            raise AssertionError('recall returned no memories after upgrade')
+        recalled = run(candidate, 'recall', content, '--titles')
+        if memory_id not in {item['id'] for item in recalled['details']}:
+            raise AssertionError('recall did not return the pre-upgrade memory')
         report['checks'].append('status/show/remember/recall succeed against the upgraded original home')
         repeated = run(candidate, 'runtime', 'install')['summary']
         if repeated.get('restarted') is not False or health()['pid'] != upgraded_health['pid']:
