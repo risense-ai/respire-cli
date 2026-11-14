@@ -13,6 +13,7 @@ import platform
 import shutil
 import socket
 import subprocess
+import time
 import urllib.request
 
 
@@ -59,10 +60,20 @@ def main():
     report_path = root / 'upgrade-report.json'
 
     def run(binary, *arguments):
+        report['stage'] = ' '.join(arguments[:2])
+        started = time.monotonic()
         result = subprocess.run([str(binary), '--json', *arguments], env=env,
                                 capture_output=True, timeout=600)
         # Keygen stdout can include a recovery kit: never put raw output in reports.
         if result.returncode:
+            try:
+                failure = json.loads(result.stdout)
+            except (ValueError, UnicodeError):
+                failure = {}
+            report['failure'] = {'exit': result.returncode,
+                                 'elapsed_seconds': time.monotonic() - started,
+                                 'errors': failure.get('errors', []) if failure.get('status') == 'fail' else []}
+            print(json.dumps(report['failure']))
             raise RuntimeError('command failed: ' + ' '.join(arguments[:2])
                                + '; inspect the retained fixture logs')
         value = json.loads(result.stdout)
