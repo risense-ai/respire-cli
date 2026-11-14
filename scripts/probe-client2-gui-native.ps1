@@ -1269,8 +1269,11 @@ function Bind-OfflineRuntime {
     $report.offline.runtime_binding_stage = 'cim'
     $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($health.pid)"
     $report.offline.runtime_binding_stage = 'identity'
+    # Rust canonicalize uses the extended Windows namespace for the same local image.
+    $healthImage = [string]$health.exe
+    if ($healthImage.StartsWith('\\?\', [StringComparison]::Ordinal)) { $healthImage = $healthImage.Substring(4) }
     if ($health.server -ne 'respire' -or $health.v -ne 1 -or
-        -not [string]::Equals($health.exe,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
+        -not [string]::Equals($healthImage,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
         -not [string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase) -or
         -not $record -or $process.SessionId -ne $binding.session_id -or

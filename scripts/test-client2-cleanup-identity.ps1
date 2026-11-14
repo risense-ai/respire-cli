@@ -38,3 +38,47 @@ try { $null=Test-TrackedCreationIdentity ([pscustomobject]@{CreationDate='synthe
 }
 if (-not $failed) { throw 'Untyped process birth was accepted' }
 Write-Output 'Synthetic cleanup identity checks passed (not native cleanup acceptance)'
+
+# Exercise the actual binding function with synthetic health/process records only.
+$nativeAst=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1'),[ref]$tokens,[ref]$errors)
+if ($errors.Count) { throw 'Native binding helper parse failed' }
+$bind=@($nativeAst.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Bind-OfflineRuntime'},$true))
+if ($bind.Count -ne 1) { throw 'Unique native binding function required' }
+. ([scriptblock]::Create($bind[0].Extent.Text))
+$binding=@{runtime_exe='C:\fixture\rsrs-runtime.exe';data_directory='C:\fixture';session_id=2;runtime_sha256=('a'*64)}
+$nativeHealth=[pscustomobject]@{server='respire';v=1;pid=42;exe=$binding.runtime_exe;data_dir=$binding.data_directory}
+$nativeProcess=[pscustomobject]@{Id=42;Path=$binding.runtime_exe;SessionId=2;StartTime=$exact}
+$nativeRecord=[pscustomobject]@{ProcessId=42;ParentProcessId=41;ExecutablePath=$binding.runtime_exe;CreationDate=$exact;SessionId=2}
+$nativeHash='a'*64
+function Read-OfflineHttp([string]$Path) { return $nativeHealth }
+function Get-Process { param($Id,$ErrorAction) return $nativeProcess }
+function Get-CimInstance { param($ClassName,$Filter) return $nativeRecord }
+function Get-FileHash { param($LiteralPath,$Algorithm) return [pscustomobject]@{Hash=$nativeHash} }
+$OutputDirectory=Join-Path (Split-Path -Parent $PSScriptRoot) ('.verification/native-binding-'+[guid]::NewGuid().ToString('N'))
+$null=New-Item -ItemType Directory -Path $OutputDirectory
+try {
+    foreach ($image in @('C:\fixture\rsrs-runtime.exe','\\?\C:\fixture\rsrs-runtime.exe')) {
+        $nativeHealth.exe=$image; $report=@{offline=@{}}
+        Bind-OfflineRuntime
+        if ($report.offline.runtime_binding_stage -cne 'bound' -or $offlineRuntime.pid -ne 42) { throw 'Matching Runtime image did not bind' }
+    }
+    foreach ($case in @('foreign_image','empty_image','foreign_process','foreign_session','foreign_data','wrong_digest')) {
+        $nativeHealth.exe=$binding.runtime_exe; $nativeHealth.data_dir=$binding.data_directory
+        $nativeProcess.Path=$binding.runtime_exe; $nativeProcess.SessionId=2; $nativeHash='a'*64
+        switch ($case) {
+            foreign_image { $nativeHealth.exe='\\?\C:\foreign\rsrs-runtime.exe' }
+            empty_image { $nativeHealth.exe=$null }
+            foreign_process { $nativeProcess.Path='C:\foreign\rsrs-runtime.exe' }
+            foreign_session { $nativeProcess.SessionId=3 }
+            foreign_data { $nativeHealth.data_dir='C:\foreign' }
+            wrong_digest { $nativeHash='b'*64 }
+        }
+        $report=@{offline=@{}}; $rejected=$false
+        try { Bind-OfflineRuntime } catch { $rejected=$_.Exception.Message -ceq 'Offline Runtime health/process/profile/hash binding failed' }
+        if (-not $rejected) { throw "Native binding did not reject synthetic case: $case" }
+    }
+} finally {
+    Remove-Item -LiteralPath (Join-Path $OutputDirectory 'native-gui.json') -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $OutputDirectory
+}
+Write-Output 'Synthetic Runtime image binding checks passed (not native acceptance)'
