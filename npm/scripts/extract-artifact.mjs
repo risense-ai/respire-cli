@@ -272,6 +272,7 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   verifyBinary(binary,target); verifyBinary(runtimeBinary,target);
   // Existing migration joins consume this exact metadata filename, never synthesized metadata.
   copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(source,`cli-build-${target}.json`));
+  copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(destination,`cli-build-${target}.json`));
   const identity = {manifest_sha256:manifestHash,target,harness_sha:process.env.GITHUB_SHA ?? null,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},cli_artifact_layout:cli.artifact_layout,runtime_core:runtimeCore,
     producers:{cli:spec.cli.producer,runtime:spec.runtime.producer},
@@ -508,7 +509,7 @@ async function packPublished(spec, targets, source, manifestHash) {
     const core = name === manifest.npmScope || frontendLayout(manifest) ? null : JSON.parse(readFileSync(join(directory,'bin/core-runtime.json')));
     const packed = packPackage(resolve(directory),resolve('npm/release-packages'));
     validatePublishedPackage(pkg,manifest,name,core,new Set(packed.files.map(f => f.path)));
-    verifyPackFile(packed.tarballPath,packed,resolve(directory));
+    verifyPackFile(packed.tarballPath,{...packed,sha256:sha256(readFileSync(packed.tarballPath))},resolve(directory));
     if (name !== manifest.npmScope) {
       const target = manifest.targets.find(t => t.pkg === name).triple;
       const expected = spec.cli.assets.find(a => a.name === publishedAssetNames('cli',target)[1]);
