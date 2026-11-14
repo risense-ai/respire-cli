@@ -56,3 +56,4 @@ jobs:
           name: issue-285-macos-arm64
           path: ${{ runner.temp }}/issue-285/upgrade-report.json
           if-no-files-found: warn
+          retention-days: 1
