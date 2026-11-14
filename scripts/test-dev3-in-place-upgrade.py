@@ -149,7 +149,7 @@ def main():
              '-w', secret, authorized_keychain],
             ['set-generic-password-partition-list', '-s', 'rsrs', '-a', 'super:' + alias,
              '-S', 'apple-tool:,apple:,unsigned:', '-k', keychain_password, authorized_keychain],
-            ['list-keychains', '-d', 'user', '-s', authorized_keychain, keychain],
+            ['list-keychains', '-d', 'user', '-s', authorized_keychain],
             ['default-keychain', '-d', 'user', '-s', authorized_keychain],
         ]:
             try:
@@ -159,6 +159,11 @@ def main():
                 raise RuntimeError('synthetic Keychain preparation timed out') from None
             if approval.returncode:
                 raise RuntimeError('synthetic Keychain preparation failed: ' + operation[0])
+        # Retain the original file, but do not let an ambiguous duplicate select its old ACL.
+        selected = subprocess.check_output(
+            ['/usr/bin/security', 'list-keychains', '-d', 'user'], env=env, timeout=15)
+        if selected.decode().strip().strip('"') != authorized_keychain:
+            raise AssertionError('synthetic upgrade must search only its preauthorized Keychain')
         return authorized_keychain
 
     try:
