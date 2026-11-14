@@ -173,7 +173,7 @@ def main():
         original_session = session.read_bytes()
         report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
 
-        # Match Always Allow only in the empty synthetic keychain, without reading or replacing secrets.
+        # Like security -A, permit apps only in this synthetic keychain; never read or replace secrets.
         approver = root / 'approve-synthetic-keychain'
         approval_source = r'''
 #include <Security/Security.h>
@@ -188,6 +188,23 @@ int main(int argc, char **argv) {
     SecAccessRef access = NULL;
     OSStatus status = SecKeychainOpen(argv[1], &keychain);
     if (!status) status = SecAccessCreate(CFSTR("issue-285 synthetic credentials"), NULL, &access);
+    CFArrayRef decrypt = NULL;
+    if (!status) status = SecAccessCopySelectedACLList(access, CSSM_ACL_AUTHORIZATION_DECRYPT, &decrypt);
+    if (!status && CFArrayGetCount(decrypt) == 0) status = errSecParam;
+    for (CFIndex i = 0; !status && i < CFArrayGetCount(decrypt); i++) {
+        SecACLRef acl = (SecACLRef)CFArrayGetValueAtIndex(decrypt, i);
+        CFArrayRef apps = NULL;
+        CFStringRef description = NULL;
+        CSSM_ACL_KEYCHAIN_PROMPT_SELECTOR prompt;
+        status = SecACLCopySimpleContents(acl, &apps, &description, &prompt);
+        if (!status) {
+            prompt.flags &= ~CSSM_ACL_KEYCHAIN_PROMPT_REQUIRE_PASSPHRASE;
+            status = SecACLSetSimpleContents(acl, NULL, description, &prompt);
+        }
+        if (apps) CFRelease(apps);
+        if (description) CFRelease(description);
+    }
+    if (decrypt) CFRelease(decrypt);
     if (!status) status = SecKeychainSearchCreateFromAttributes(keychain, kSecGenericPasswordItemClass,
                                                                NULL, &search);
     if (status) { fprintf(stderr, "fixture ACL setup: %d\n", (int)status); return 1; }
