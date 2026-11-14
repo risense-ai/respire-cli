@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real unchanged Client2 v2.0.0-dev.5 host calls; account-free temporary installations.
+"""Pinned unchanged Client2 release host calls; account-free temporary installations.
 
 Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
 Client2 source. Optional pinned Magpie source exercises its original legacy RPC.
@@ -29,6 +29,14 @@ MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
 DESKTOP_SOURCE_SHA = CLIENT2_SHA
 DESKTOP_SHA256 = 'dc74596d983ab7b99c6b6872d8438cfb2f2e7060b93f9a9ef13db629b6a5d7a2'
 DESKTOP_ARCHIVE_SHA256 = '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
+DESKTOP_BASELINES = {
+    'v2.0.0-dev.5': {'source': CLIENT2_SHA, 'binary': DESKTOP_SHA256,
+        'archive': DESKTOP_ARCHIVE_SHA256, 'asset_id': 735418491, 'run_id': '43018703263'},
+    'v0.2.56': {'source': '57bc070826949994c3f7ce9a64277160704bdfe5',
+        'binary': '2a9b7cc40bcbf2b7b133f907e0505e2771ed12efdfa5d639a00f0e97a3bff8d7',
+        'archive': '2e980f260c4593f3dbe4f7afd2cc5112c6175fa5f0f3f975901855e3e203b6b5',
+        'asset_id': 707442952, 'run_id': None},
+}
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -69,7 +77,7 @@ def coverage_profile(value):
     return str(expected / template.name)
 
 
-def desktop_executable(value):
+def desktop_executable(value, baseline='v2.0.0-dev.5'):
     if value is None:
         return None
     if (os.environ.get('GITHUB_ACTIONS') != 'true'
@@ -77,8 +85,8 @@ def desktop_executable(value):
             or sys.platform != 'linux' or os.uname().machine != 'x86_64'):
         raise RuntimeError('Pinned desktop acceptance requires an isolated Linux x64 hosted runner')
     path = value.resolve(strict=True)
-    if not path.is_file() or sha256(path) != DESKTOP_SHA256:
-        raise RuntimeError('Require the exact released Client2 v2.0.0-dev.5 Linux x64 desktop bytes')
+    if not path.is_file() or sha256(path) != DESKTOP_BASELINES[baseline]['binary']:
+        raise RuntimeError(f'Require the exact released Client2 {baseline} Linux x64 desktop bytes')
     return path
 
 
@@ -122,6 +130,7 @@ def main():
     parser.add_argument('--runtime-archive', type=Path, required=True)
     parser.add_argument('--runtime-version', required=True)
     parser.add_argument('--client2-source', type=Path, required=True)
+    parser.add_argument('--client2-baseline', choices=DESKTOP_BASELINES, default='v2.0.0-dev.5')
     parser.add_argument('--go', type=Path, required=True)
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
@@ -135,13 +144,14 @@ def main():
     parser.add_argument('--coverage-profile-file', help='Hosted CI only: existing instrumented CLI profile template')
     args = parser.parse_args()
     profile = coverage_profile(args.coverage_profile_file)
-    desktop = desktop_executable(args.desktop_executable)
+    baseline = DESKTOP_BASELINES[args.client2_baseline]
+    desktop = desktop_executable(args.desktop_executable, args.client2_baseline)
     cli, archive, source, go = (p.resolve(strict=True) for p in
                                 [args.cli, args.runtime_archive, args.client2_source, args.go])
     def git(*argv):
         return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
-    if git('rev-parse', 'HEAD') != CLIENT2_SHA or git('status', '--porcelain'):
-        raise RuntimeError('Require unchanged Client2 v2.0.0-dev.5 source')
+    if git('rev-parse', 'HEAD') != baseline['source'] or git('status', '--porcelain'):
+        raise RuntimeError(f'Require unchanged Client2 {args.client2_baseline} source')
     magpie = args.magpie_source.resolve(strict=True) if args.magpie_source else None
     node = None
     if magpie:
@@ -171,16 +181,16 @@ def main():
     if args.offline: build_env['GOPROXY'] = 'off'
     subprocess.run([str(go), 'build', '-buildvcs=false', '-mod=mod', '-o', str(executable), '.'],
                    cwd=probe, env=build_env, check=True, timeout=300)
-    report = {'client2_source': CLIENT2_SHA, 'coverage': 'real-host-process-no-accounts',
+    report = {'client2_source': baseline['source'], 'coverage': 'real-host-process-no-accounts',
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version,
                          'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
                          'coverage_profile_file': profile},
-              'desktop_headless': {'enabled': desktop is not None, 'client2_source': DESKTOP_SOURCE_SHA,
-                                   'release': 'v2.0.0-dev.5', 'run_id': '43018703263',
-                                   'asset_id': 735418491, 'archive_sha256': DESKTOP_ARCHIVE_SHA256,
-                                   'binary_sha256': DESKTOP_SHA256 if desktop else None},
+              'desktop_headless': {'enabled': desktop is not None, 'client2_source': baseline['source'],
+                                   'release': args.client2_baseline, 'run_id': baseline['run_id'],
+                                   'asset_id': baseline['asset_id'], 'archive_sha256': baseline['archive'],
+                                   'binary_sha256': baseline['binary'] if desktop else None},
               'legacy_plugin': {'executed': magpie is not None,
                                 'source_sha': MAGPIE_SHA if magpie else None,
                                 'runtime_blob': MAGPIE_RUNTIME_BLOB if magpie else None},
