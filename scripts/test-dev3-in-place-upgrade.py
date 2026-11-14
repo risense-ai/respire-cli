@@ -130,7 +130,7 @@ def main():
 
     def preauthorize_keychain(original_session):
         # Retain the original Keychain and clone only this fixture's freshly issued secret.
-        secret = generated.get('summary', {}).get('super_password')
+        secret = generated.get('summary', {}).get('super')
         alias = json.loads(original_session).get('keyring_account')
         if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
             raise AssertionError('official keygen did not return the synthetic credential and alias')
