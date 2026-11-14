@@ -272,6 +272,7 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   verifyBinary(binary,target); verifyBinary(runtimeBinary,target);
   // Existing migration joins consume this exact metadata filename, never synthesized metadata.
   copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(source,`cli-build-${target}.json`));
+  copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(destination,`cli-build-${target}.json`));
   const identity = {manifest_sha256:manifestHash,target,harness_sha:process.env.GITHUB_SHA ?? null,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},cli_artifact_layout:cli.artifact_layout,runtime_core:runtimeCore,
     producers:{cli:spec.cli.producer,runtime:spec.runtime.producer},

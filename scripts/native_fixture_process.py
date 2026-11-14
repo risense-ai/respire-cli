@@ -136,6 +136,26 @@ def install_official_runtime(binary, env, version, binary_hash):
     return installed.resolve(strict=True)
 
 
+def stage_fixture_cli(binary, env, root):
+    bin_dir = pathlib.Path(env.get('RSRS_BIN_DIR') or root / 'bin')
+    if bin_dir.is_symlink():
+        raise ValueError('fixture bin must not be linked')
+    bin_dir = bin_dir.resolve()
+    if not any(bin_dir != pathlib.Path(os.environ[key]).resolve()
+               and bin_dir.is_relative_to(pathlib.Path(os.environ[key]).resolve())
+               for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
+        raise ValueError('fixture bin must remain inside the owned runner workspace')
+    bin_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    staged = bin_dir / ('rsrs.exe' if os.name == 'nt' else 'rsrs')
+    if staged.is_symlink():
+        raise ValueError('fixture CLI must not be linked')
+    if not staged.exists():
+        shutil.copy2(binary, staged)
+    if staged.read_bytes() != pathlib.Path(binary).read_bytes():
+        raise ValueError('fixture CLI differs from the selected build')
+    env['RSRS_BIN_DIR'] = str(bin_dir)
+
+
 def install_published_runtime(binary, env):
     """Use the real offline installer with the selected release's unchanged bytes."""
     if (os.environ.get('ARTIFACT_SOURCE') == 'build'
@@ -177,23 +197,7 @@ def install_published_runtime(binary, env):
         install_env = dict(env, RSRS_DATA_DIR=str(root))
         installed = install_official_runtime(binary, install_env, version, binary_hash)
         env['RSRS_RUNTIME_BIN'] = install_env['RSRS_RUNTIME_BIN']
-        bin_dir = pathlib.Path(env.get('RSRS_BIN_DIR') or root / 'bin')
-        if bin_dir.is_symlink():
-            raise ValueError('fixture bin must not be linked')
-        bin_dir = bin_dir.resolve()
-        if not any(bin_dir != pathlib.Path(os.environ[key]).resolve()
-                   and bin_dir.is_relative_to(pathlib.Path(os.environ[key]).resolve())
-                   for key in ('RUNNER_TEMP', 'GITHUB_WORKSPACE') if os.environ.get(key)):
-            raise ValueError('fixture bin must remain inside the owned runner workspace')
-        bin_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-        staged = bin_dir / ('rsrs.exe' if os.name == 'nt' else 'rsrs')
-        if staged.is_symlink():
-            raise ValueError('fixture CLI must not be linked')
-        if not staged.exists():
-            shutil.copy2(binary, staged)
-        if staged.read_bytes() != pathlib.Path(binary).read_bytes():
-            raise ValueError('fixture CLI differs from the selected build')
-        env['RSRS_BIN_DIR'] = str(bin_dir)
+        stage_fixture_cli(binary, env, root)
         return installed
     if os.environ.get('RSRS_ARTIFACT_SOURCE') != 'published-assets':
         return None
@@ -253,6 +257,7 @@ def install_published_runtime(binary, env):
             raise ValueError('managed installation image differs from the selected asset')
     env['RSRS_RUNTIME_BIN'] = str(installed.resolve(strict=True))
     env['RSRS_RUNTIME_TRIPLE'] = triple
+    stage_fixture_cli(binary, env, root)
     return installed.resolve(strict=True)
 
 

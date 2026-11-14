@@ -11,6 +11,7 @@ import { publishScopedPackages, acceptScopedPackages } from './parallel-publicat
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import {frontendLayout, validateBuildMetadata, verifyBinary} from './verify-binary.mjs';
+import {validateArtifactRequest} from './extract-artifact.mjs';
 
 const arg = (n, d) => { const i = process.argv.indexOf(n); return i > -1 ? process.argv[i + 1] : d; };
 const doPublish = process.argv.includes('--publish');
@@ -43,6 +44,8 @@ if (manifest.cliVersion !== version) {
   console.error(`artifact-manifest cliVersion ${manifest.cliVersion} != Cargo.toml ${version}`);
   process.exit(1);
 }
+const published = validateArtifactRequest(process.env, manifest.targets.map(t => t.triple));
+if (published && (doPublish || published.cli.version !== version)) throw Error('Published package validation requires the exact product version and forbids publication');
 // Publication consumes the receipts written by verify-packages.mjs. Do not
 // rebuild or clear dist here: that would discard the evidence we just verified.
 if (doPublish) {
@@ -128,7 +131,7 @@ for (const [triple, t] of process.argv.includes('--launcher-only') ? [] : Object
     const info = JSON.parse(readFileSync(path.join(path.dirname(src), `cli-build-${triple}.json`), 'utf8'));
     verifyBinary(src, triple);
     validateBuildMetadata(info, manifest, triple, {
-      sha:execFileSync('git', ['rev-parse', 'HEAD'], {cwd:repoRoot, encoding:'utf8'}).trim(), version,
+      sha:published?.cli.source_sha ?? execFileSync('git', ['rev-parse', 'HEAD'], {cwd:repoRoot, encoding:'utf8'}).trim(), version,
     }, {file:info.binary_file, size:statSync(src).size,
       sha256:createHash('sha256').update(readFileSync(src)).digest('hex')});
   }
