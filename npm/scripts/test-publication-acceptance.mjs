@@ -98,14 +98,14 @@ test('ARM64 installation proof requires every published native libc route, exact
   for(const mutate of [r=>r.installs.pop(),r=>r.installs[0].platform='linux-x64-gnu',r=>r.installs[0].binary_sha256='f'.repeat(64),r=>r.installs[0].version='0.0.0',r=>r.source.sha='f'.repeat(40),r=>r.alias_publisher.run_attempt=2]){
     const bad=copy(receipt);mutate(bad);assert.throws(()=>validateArmVerified(bad,f.scoped,f.alias));
   }
-  const historical=copy(f.scoped),both=copy(receipt);
-  historical.binaries.push({package:'@rsrsai/linux-arm64',target:'aarch64-unknown-linux-musl',sha256:hash});
-  both.installs.push({platform:'linux-arm64',version,binary_sha256:hash});
-  validateArmVerified(both,historical,f.alias);
-  assert.throws(()=>validateArmVerified(receipt,historical,f.alias));
+  const historical=copy(f.scoped),gnuOnly=copy(receipt);
+  historical.binaries=historical.binaries.filter(b=>b.package!=='@rsrsai/linux-arm64');
+  gnuOnly.installs=gnuOnly.installs.filter(i=>i.platform!=='linux-arm64');
+  validateArmVerified(gnuOnly,historical,f.alias);
+  assert.throws(()=>validateArmVerified(gnuOnly,f.scoped,f.alias));
 });
 
-test('GNU installation proof alone cannot authorize cleanup of a six-platform release',async()=>{
+test('GNU installation proof alone cannot authorize cleanup of a seven-platform release',async()=>{
   const f=cleanupFixture(),at=Date.parse('2026-10-27T02:00:00Z');f.artifacts.delete(16);
   assert.equal((await planCleanup(f.io,100,m,at)).skip,'no-native-arm64-public-install-proof');assert.deepEqual(f.deleted,[]);
 });

@@ -267,8 +267,7 @@ test('all Actions uploads, including both handshake receipts, retain evidence fo
   const release = readFileSync(new URL('release.yml', root), 'utf8');
   const manifest = JSON.parse(readFileSync(new URL('../../npm/artifact-manifest.json', root), 'utf8'));
   const imported = [...release.matchAll(/name: cli-release-([\w-]+)/g)].map(match => match[1]);
-  // The prepared import retains its historical seven-target contract.
-  assert.deepEqual(imported.sort(), [...manifest.targets.map(target => target.triple), 'aarch64-unknown-linux-musl'].sort());
+  assert.deepEqual(imported.sort(), manifest.targets.map(target => target.triple).sort());
   const ci = readFileSync(new URL('ci.yml', root), 'utf8');
   const client2SourceRaw = [
     '          name: client2-source-raw-${{ github.run_id }}-${{ github.run_attempt }}',

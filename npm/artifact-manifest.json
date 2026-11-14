@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "artifactLayout": "cli-frontend-v2",
-  "cliVersion": "2.0.0-dev.6",
+  "cliVersion": "2.0.0-dev.7",
   "binaryName": "rsrs",
   "commandAliases": [],
   "npmScope": "rsrs-cli",
@@ -41,6 +41,16 @@
       ],
       "libc": [
         "glibc"
+      ]
+    },
+    {
+      "triple": "aarch64-unknown-linux-musl",
+      "pkg": "@rsrsai/linux-arm64",
+      "os": [
+        "linux"
+      ],
+      "cpu": [
+        "arm64"
       ]
     },
     {

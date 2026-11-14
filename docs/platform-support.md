@@ -14,11 +14,14 @@ compiler target alone does not establish product support.
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
 | Linux ARM64 GNU | `aarch64-unknown-linux-gnu` | Existing; native `ubuntu-24.04-arm` | Pinned CPU SDK |
-| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Deferred for CLI 2.x DEV; [issue #272](https://github.com/risense-ai/respire-cli/issues/272) | Existing SDK pin retained |
+| Linux ARM64 musl | `aarch64-unknown-linux-musl` | Restored candidate for CLI 2.0.0-dev.7; native `ubuntu-24.04-arm` and Alpine | Pinned static CPU SDK |
 
-The current CLI release manifest contains six targets. Linux ARM64 musl is
-excluded from CLI assets and npm dependencies until its startup and cleanup
-failure is resolved. Existing Core SDK and Runtime releases are unchanged.
+The dev.7 CLI manifest contains seven targets: 14 frontend release assets and
+eight npm packages (the launcher plus seven platform packages). CLI 2.0.0-dev.3
+deferred Linux ARM64 musl under [issue #272](https://github.com/risense-ai/respire-cli/issues/272);
+its historical six-target release remains unchanged. The restored target is a
+candidate until its native startup, inference and owned-cleanup gates pass.
+Existing Core SDK and Runtime releases are unchanged.
 Historical Intel launcher
 selection remains supported, but no Intel dev.5 optional dependency or release
 asset is generated. Both SDK locks still pin the same eight SDKs, including
@@ -67,12 +70,13 @@ and [LoongArch requirements](https://doc.rust-lang.org/rustc/platform-support/lo
 
 ## Delivery and verification
 
-Every released target must provide `cli-build-<target>.json`,
-`rsrs-<target>[.exe]` and `rsrs-<target>-runtime.tar.gz`. Metadata binds the
-version, source commit, target, filenames and SHA-256. The runtime archive
-contains `core-runtime.json` and all runtime libraries and notices.
+Every released CLI target must provide `cli-build-<target>.json` and
+`rsrs-<target>[.exe]`. Frontend schema 2 metadata binds the version, source
+commit, target, executable filename and SHA-256. The CLI does not bundle a
+Runtime archive. The separately released Runtime retains its seven targets
+and 21 assets, including its own archives, libraries and notices.
 The build checks version and headers before staging; package verification
-checks source/target identity, headers and both archive/binary hashes.
+checks source/target identity, headers and executable hashes.
 
 Release gates run real CPU model inference, isolated account/runtime lifecycle,
 health/RPC, concurrent access and historical upgrades on native runners.

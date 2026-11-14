@@ -85,6 +85,7 @@ retain their original layout and behavior.
 | --- | --- |
 | Linux x64, musl (default) | `@rsrsai/linux-x64` |
 | Linux x64, glibc | `@rsrsai/linux-x64-gnu` |
+| Linux ARM64, musl (default) | `@rsrsai/linux-arm64` |
 | Linux ARM64, glibc | `@rsrsai/linux-arm64-gnu` |
 | Apple Silicon | `@rsrsai/macos-arm64` |
 | Windows x64 | `@rsrsai/win-x64` |
@@ -99,19 +100,21 @@ Windows ARM64 is a DEV-first release candidate and requires a version that
 actually includes its complete package. Stable 1.0.15 and 1.0.16 omit it.
 See the [support matrix](../docs/platform-support.md) for validation status and blockers.
 
-`artifact-manifest.json` defines the six current CLI release targets and names.
-Linux ARM64 musl is temporarily unavailable for CLI 2.x DEV; no
-`@rsrsai/linux-arm64` package or corresponding CLI asset is published.
-Track [#272](https://github.com/risense-ai/respire-cli/issues/272).
+`artifact-manifest.json` defines the seven CLI targets for 2.0.0-dev.7.
+Publication requires 14 CLI assets and eight npm packages: `rsrs-cli` plus
+seven platform packages, including `@rsrsai/linux-arm64`. ARM64 musl remains
+a candidate until its native release and installation gates pass.
+Historically, CLI 2.0.0-dev.3 deferred ARM64 musl under
+[#272](https://github.com/risense-ai/respire-cli/issues/272), publishing six
+CLI targets without that platform package. That release remains unchanged.
 The standalone Runtime retains its seven-platform, 21-asset inventory.
 Intel macOS is also deferred; historical Intel packages use `@rsrsai/macos-x64`
 and require macOS 13.4 or later.
-Linux x64 keeps musl as its launcher default. For this release, ARM64 without
-an explicit libc setting selects GNU only when Node reports a glibc host.
-An ARM64 musl or unrecognized host is refused; it never silently selects GNU.
-Historical packages that include ARM64 musl retain their musl default.
-On a glibc distribution, GNU can also be selected explicitly;
-select the GNU build explicitly; the same choice applies to npm and pnpm:
+Linux x64 and ARM64 use musl as the launcher default in dev.7.
+The historical dev.3 launcher selects GNU on ARM64 only when Node reports a
+glibc host, and refuses ARM64 musl or unrecognized hosts.
+On a glibc distribution, select GNU explicitly; the same choice applies to
+npm and pnpm:
 
 ```sh
 RSRS_LIBC=glibc rsrs doctor

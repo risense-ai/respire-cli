@@ -429,6 +429,11 @@ pub(crate) fn validate_account_response(
             let class = register_rejection_class(response.error.as_deref().context("account control rejection diagnostic missing")?);
             anyhow::bail!("Runtime rejected account control ({code}): {message}; register_kind={class}");
         }
+        if !register && request.method == HOST_AUTH_LOGIN_METHOD && code == "account_outcome_unknown" {
+            if let Some(class) = response.error.as_deref().and_then(respire_host_control::AccountCoordinator::login_rejection_class) {
+                anyhow::bail!("Runtime rejected account control ({code}): {message}; login_kind={class}");
+            }
+        }
         anyhow::bail!("Runtime rejected account control ({code}): {message}");
     }
     let envelope = response.envelope.context("account control result is missing")?;

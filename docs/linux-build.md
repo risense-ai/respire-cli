@@ -8,11 +8,15 @@ binary. Business commands connect to a separately installed Runtime.
 | Linux x64, glibc | `x86_64-unknown-linux-gnu` |
 | Linux x64, static musl | `x86_64-unknown-linux-musl` |
 | Linux ARM64, glibc | `aarch64-unknown-linux-gnu`, native `ubuntu-24.04-arm` |
-| Linux ARM64, static musl | Deferred from CLI 2.x DEV; [issue #272](https://github.com/risense-ai/respire-cli/issues/272) |
+| Linux ARM64, static musl | `aarch64-unknown-linux-musl`, native `ubuntu-24.04-arm` |
 | musl container | `rust:1.95.0-alpine3.23`, same CPU architecture |
 | SDK | Not needed for the CLI frontend |
 | Output | `target/ci/<target>/release/rsrs` |
 | musl verification | No ELF `INTERP`/`NEEDED`; version checks on Ubuntu and Alpine |
+
+CLI 2.0.0-dev.3 deferred Linux ARM64 musl under [issue #272](https://github.com/risense-ai/respire-cli/issues/272).
+The dev.7 configuration restores its build and acceptance gates; publication
+still requires the startup, inference and owned-cleanup checks to pass.
 
 On a glibc Linux host, use the pinned Rust toolchain to build the native GNU target:
 

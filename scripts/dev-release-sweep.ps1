@@ -191,7 +191,11 @@ function Get-SafeFailureReason($Envelope) {
                     return "account_outcome_unknown/$class"
                 }
             }
-            foreach ($class in @('vault_unlock_rejected', 'account_material_rejected')) {
+            foreach ($class in @('vault_unlock_rejected', 'account_material_rejected',
+                'auth_salt_http_unauthorized', 'auth_salt_http_forbidden', 'auth_salt_http_rate_limited', 'auth_salt_http_server_error', 'auth_salt_http_other', 'auth_salt_transport',
+                'auth_login_http_unauthorized', 'auth_login_http_forbidden', 'auth_login_http_rate_limited', 'auth_login_http_server_error', 'auth_login_http_other', 'auth_login_transport',
+                'auth_salt_missing', 'auth_salt_invalid_hex', 'auth_login_reply_parse_failed',
+                'auth_totp_ticket_missing', 'auth_totp_ticket_invalid', 'auth_login_token_missing')) {
                 if (@($Envelope.errors | Where-Object { $_ -is [string] -and $_.EndsWith("; login_kind=$class", [StringComparison]::Ordinal) }).Count -gt 0) {
                     return "account_outcome_unknown/$class"
                 }

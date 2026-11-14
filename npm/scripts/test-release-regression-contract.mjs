@@ -270,7 +270,8 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
 
 test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
   assert.equal(new Set(manifest.targets.map(t=>t.triple)).size,manifest.targets.length);
-  assert(!manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-musl'),'ARM64 musl CLI is deferred; Runtime/SDK inventories remain separate');
+  assert.equal(manifest.targets.length,7,'dev.4 requires seven CLI targets; Runtime/SDK inventories remain separate');
+  assert(manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-musl'&&t.pkg==='@rsrsai/linux-arm64'));
   assert(!manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'||t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));

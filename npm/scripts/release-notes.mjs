@@ -65,8 +65,7 @@ for (const entry of commits) {
   const subject = entry.subject;
   const group = /^feat(?:\([^)]*\))?!?:/i.test(subject) ? 'Features'
     : /^fix(?:\([^)]*\))?!?:/i.test(subject) ? 'Fixes' : 'Other changes';
-  const description = entry.body.split(/\r?\n\s*\r?\n/)[0];
-  groups[group].push(`- ${text(subject)}${description ? ` — ${text(description)}` : ''} ([${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}))`);
+  groups[group].push(`- ${text(subject)} ([${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}))`);
 }
 const lines = [`# Respire CLI ${tag.slice(1)}`, '', channel === 'dev'
   ? 'Development release for testing. The npm `latest` channel remains on the stable version.' : 'Stable release.', ''];
@@ -77,7 +76,9 @@ if (channel === 'dev' && version[0] === 2 && !manifest.targets.some(t => t.tripl
 if (previous) lines.push(`Changes since [${previous.release.tag_name}](https://github.com/${repository}/releases/tag/${previous.release.tag_name}).`, '');
 else lines.push(channel === 'latest' ? 'First stable release: cumulative changes with no previous published stable baseline.'
   : 'Initial release: cumulative changes with no previous published release baseline.', '');
-for (const [heading, changes] of Object.entries(groups)) lines.push(`## ${heading}`, '', ...(changes.length ? changes : ['No separately classified changes.']), '');
+for (const [heading, changes] of Object.entries(groups)) lines.push(`## ${heading}`, '',
+  ...(changes.length ? [`${changes.length} commits in this category. The complete commit list below includes every change.`, '', ...changes.slice(0, 5)]
+    : ['No separately classified changes.']), '');
 lines.push('## Commits', '', '| Commit | Change |', '| --- | --- |', ...commits.map(entry => `| [${entry.hash.slice(0, 8)}](https://github.com/${repository}/commit/${entry.hash}) | ${text(entry.subject)} |`), '');
 if (!commits.length) lines.push('No additional commits since the previous release; this release contains the same source.', '');
 if (previous) lines.push(`[Full comparison](https://github.com/${repository}/compare/${previous.release.tag_name}...${sha})`, '');
