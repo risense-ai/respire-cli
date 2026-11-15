@@ -666,7 +666,9 @@ jobs:
           const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report'];
           if (group === 'core') args.push('--lib', '--bins', '--examples');
           for (const name of selected) args.push('--test', name);
-          if (group === 'runtime_smoke' && !productRequested) args.push('--', '--skip', 'runtime_serves_status_and_stops', '--skip', 'unbound_explicit_runtime_restart_preserves_the_existing_owner');
+          // These library tests also launch the official Runtime, despite living under --lib.
+          if (group === 'core' && !productRequested) args.push('--', '--skip', 'rpc::tests::http_pipeline_and_nonreading_peer_keep_runtime_available', '--skip', 'rpc::tests::scoped_operation_replays_and_retains_its_result_over_real_http');
+          if (group === 'runtime_smoke' && !productRequested) args.push('--', 'no_command_without_tty_exits_2', '--exact');
           let status;
           if (group === 'core') {
             const candidateKeys = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'];
