@@ -9,6 +9,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 spec = importlib.util.spec_from_file_location("candidate", Path(__file__).with_name("native-account-candidate.py"))
@@ -309,6 +310,7 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertIn(candidate.NATIVE_STOP_CASE, candidate.G1_BUSINESS_CASES)
         self.assertEqual(candidate.selected_cases(extended_listing, "full", True), extended)
         self.assertEqual(candidate.selected_cases(extended_listing, "diagnostic-native-stop"), [candidate.NATIVE_STOP_CASE])
+        self.assertEqual(candidate.selected_cases(extended_listing, "g1-owned-stop"), [candidate.NATIVE_STOP_CASE])
         with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
             candidate.selected_cases(listing, "diagnostic-native-stop")
         with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
@@ -327,6 +329,30 @@ class CandidateFixtureTests(unittest.TestCase):
                 candidate.selected_cases("\n".join(name + ": test" for name in broken), "full")
         with self.assertRaisesRegex(RuntimeError, "unknown_business_suite"):
             candidate.selected_cases(listing, "unknown")
+
+    def test_frozen_owned_stop_requires_exact_runtime_workflow_and_original_package(self):
+        args = SimpleNamespace(suite="g1-owned-stop", owned_stop_mode="registered",
+            client2_source=self.root, cli_sha="a" * 40, runtime_sha="b" * 40,
+            runtime_archive=self.root / "original.tar.gz", runtime_metadata=self.root / "original.json",
+            official_cli_metadata=None, legacy_stable_contracts=False, require_native_stop=False,
+            stable_business_cli=None, stable_business_cli_metadata=None, stable_business_runtime_archive=None)
+        with patch.dict(os.environ, {"GITHUB_REPOSITORY": "risense-ai/respire-runtime",
+                                     "GITHUB_SHA": args.runtime_sha}):
+            for mode in ("registered", "client2-owned"):
+                args.owned_stop_mode = mode
+                candidate.validate_owned_stop_options(args)
+            for key, value in (("owned_stop_mode", None), ("client2_source", None),
+                               ("runtime_archive", None), ("runtime_metadata", None),
+                               ("runtime_sha", "c" * 40), ("cli_sha", "main")):
+                altered = copy.copy(args)
+                setattr(altered, key, value)
+                with self.subTest(key=key), self.assertRaises(RuntimeError):
+                    candidate.validate_owned_stop_options(altered)
+            for environment in ({"GITHUB_REPOSITORY": "risense-ai/respire-cli"},
+                                {"GITHUB_SHA": args.cli_sha}):
+                with patch.dict(os.environ, environment), self.assertRaises(RuntimeError):
+                    candidate.validate_owned_stop_options(args)
+        self.assertEqual(candidate.CLIENT2_OWNED_SOURCE_SHA, "1734322b6c6dd543441a753f07a3517bee5e1231")
 
     def test_compatibility_host_checkpoints_do_not_publish_private_fields(self):
         checks = [{"stage": "space-profile", "passed": True},

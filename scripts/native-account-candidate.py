@@ -101,7 +101,7 @@ def selected_cases(listing, suite, require_native_stop=False):
     if suite == "diagnostic-failures":
         require(all(names.count(case) == 1 for case in DIAGNOSTIC_CASES), "diagnostic_case_inventory_mismatch")
         return list(DIAGNOSTIC_CASES)
-    if suite == "diagnostic-native-stop":
+    if suite in ("diagnostic-native-stop", "g1-owned-stop"):
         require(names.count(NATIVE_STOP_CASE) == 1, "native_stop_business_case_missing")
         return [NATIVE_STOP_CASE]
     require(suite == "full", "unknown_business_suite")
@@ -895,23 +895,30 @@ def standalone_stop_checks(captured, runtime_sha256):
     return {"passed": True, "observations": observations}
 
 
-CLIENT2_OWNED_SOURCE_SHA = "57bc070826949994c3f7ce9a64277160704bdfe5"
+CLIENT2_OWNED_SOURCE_SHA = "1734322b6c6dd543441a753f07a3517bee5e1231"
 OWNED_PROBE_FILES = ("diagnostics_darwin.go", "diagnostics_other.go", "host_operations.go", "main.go")
 
 
 def validate_owned_stop_options(args):
+    frozen = args.suite == "g1-owned-stop"
     if args.owned_stop_mode is None:
-        require(args.client2_source is None, "owned_stop_source_requires_mode")
+        require(not frozen and args.client2_source is None, "owned_stop_source_requires_mode")
         return
     require(args.owned_stop_mode in ("registered", "client2-owned"), "unknown_owned_stop_mode")
-    require(args.suite == "diagnostic-native-stop" and args.client2_source is not None
+    require(args.suite in ("diagnostic-native-stop", "g1-owned-stop") and args.client2_source is not None
             and not args.official_cli_metadata and not args.legacy_stable_contracts
             and not any((args.stable_business_cli, args.stable_business_cli_metadata,
                          args.stable_business_runtime_archive))
-            and not args.runtime_archive and not args.runtime_metadata
             and not args.require_native_stop, "owned_stop_requires_current_candidate_diagnostic")
-    require(args.cli_sha == os.environ.get("GITHUB_SHA") and re.fullmatch(r"[a-f0-9]{40}", args.cli_sha)
+    require(bool(args.runtime_archive) == frozen and bool(args.runtime_metadata) == frozen,
+            "owned_stop_frozen_input_mismatch")
+    require(re.fullmatch(r"[a-f0-9]{40}", args.cli_sha)
             and re.fullmatch(r"[a-f0-9]{40}", args.runtime_sha), "owned_stop_workflow_source_mismatch")
+    if frozen:
+        require(os.environ.get("GITHUB_REPOSITORY") == "risense-ai/respire-runtime"
+                and args.runtime_sha == os.environ.get("GITHUB_SHA"), "owned_stop_workflow_source_mismatch")
+    else:
+        require(args.cli_sha == os.environ.get("GITHUB_SHA"), "owned_stop_workflow_source_mismatch")
 
 
 def build_owned_stop_probe(args, root, output):
@@ -1026,6 +1033,7 @@ def run(args):
               "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
                        "targeted-failure-diagnostic" if diagnostic else
                        "stable-diary-remote-subset" if stable_remote else
+                       "g1-owned-stop" if args.suite == "g1-owned-stop" else
                        "g1-business-subset" if args.suite == "g1-business" else
                        CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
@@ -1088,7 +1096,7 @@ def run(args):
             harness_sha256=digest(harness), sdk_lock_sha256=digest(args.runtime_source / "sdk/core-sdk.lock.json"),
             account_source_sha256=digest(args.runtime_source / "crates/commands/examples/cli_business_tests/account.rs"))
         report["stage"] = "candidate_archive"
-        if args.suite == "g1-business":
+        if args.suite in ("g1-business", "g1-owned-stop"):
             archive, metadata_path = frozen_runtime_package(args, runtime, version)
         else:
             archive, metadata_path = package_runtime(runtime, runtime.parent, root / "archive",
@@ -1132,8 +1140,8 @@ def run(args):
             report["selected_case_count"] = len(cases)
             report["selected_native_stop"] = NATIVE_STOP_CASE in cases
             test_args = ([*cases, "--exact", "--test-threads=1"]
-                         if args.suite in ("account", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
-            if args.compatibility_host or diagnostic or stable_remote or args.suite == "g1-business":
+                         if args.suite in ("account", "g1-business", "g1-owned-stop", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
+            if args.compatibility_host or diagnostic or stable_remote or args.suite in ("g1-business", "g1-owned-stop"):
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
@@ -1229,7 +1237,7 @@ def run(args):
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
                     "legacy_host_transitions_not_verified")
-        if args.suite == "g1-business":
+        if args.suite in ("g1-business", "g1-owned-stop"):
             report["standalone_stop"] = standalone_stop_checks(captured, report["runtime_binary_sha256"])
         if args.owned_stop_mode:
             require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
@@ -1306,7 +1314,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "g1-business", "g1-owned-stop", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
     parser.add_argument("--runtime-archive", type=Path)
     parser.add_argument("--runtime-metadata", type=Path)
     parser.add_argument("--owned-stop-mode", choices=("registered", "client2-owned"))
@@ -1322,12 +1330,12 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     args = parser.parse_args()
-    if args.suite == "g1-business":
+    if args.suite in ("g1-business", "g1-owned-stop"):
         if (not args.runtime_archive or not args.runtime_metadata or args.compatibility_host
                 or args.official_cli_metadata or args.require_native_stop or args.legacy_stable_contracts):
             parser.error("g1-business requires frozen Runtime archive/metadata and current CLI without compatibility/native-stop/stable-contracts")
     elif args.runtime_archive or args.runtime_metadata:
-        parser.error("frozen Runtime inputs require --suite g1-business")
+        parser.error("frozen Runtime inputs require --suite g1-business or g1-owned-stop")
     if args.require_native_stop and args.suite != "full":
         parser.error("--require-native-stop requires --suite full")
     stable_paths = (args.stable_business_cli, args.stable_business_cli_metadata,
