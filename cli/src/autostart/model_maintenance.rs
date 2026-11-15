@@ -7,7 +7,6 @@ use respire_protocol::model_maintenance::*;
 use respire_protocol::{ControlBinding, HostControlLaunchGrant, RpcRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-#[cfg(windows)]
 use std::io::{Read, Write};
 use std::{
     fs,
@@ -22,6 +21,260 @@ const PACKAGE_SHA256: &str = "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7
 
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+struct CpuSettings {
+    target: PathBuf,
+    target_bytes: Option<Vec<u8>>,
+    source: PathBuf,
+    source_bytes: Option<Vec<u8>>,
+    value: serde_json::Value,
+}
+
+fn read_maintenance_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                anyhow::ensure!(
+                    !metadata.file_type().is_symlink(),
+                    "model maintenance path contains a symlink"
+                );
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    anyhow::ensure!(
+                        metadata.file_attributes() & 0x400 == 0,
+                        "model maintenance path contains a reparse point"
+                    );
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() <= 64 * 1024,
+        "model maintenance input must be a bounded regular file"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(path)?
+        .take(64 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() <= 64 * 1024,
+        "model maintenance input is too large"
+    );
+    Ok(Some(bytes))
+}
+
+fn cpu_settings(root: &Path) -> Result<CpuSettings> {
+    let target = root.join("inference.json");
+    let target_bytes = read_maintenance_file(&target)?;
+    let mut source = target.clone();
+    let mut source_bytes = target_bytes.clone();
+    if source_bytes.is_none() && respire_client_host::env::var_os("RSRS_DATA_DIR").is_none() {
+        let home = dirs::home_dir()
+            .or_else(|| respire_client_host::env::var_os("HOME").map(PathBuf::from))
+            .or_else(|| respire_client_host::env::var_os("USERPROFILE").map(PathBuf::from));
+        for legacy in [".respire/inference.json", ".onememory/inference.json"] {
+            let candidate = home
+                .as_ref()
+                .map(|home| home.join(legacy))
+                .unwrap_or_else(|| PathBuf::from(format!("~/{legacy}")));
+            if let Some(bytes) = read_maintenance_file(&candidate)? {
+                source = candidate;
+                source_bytes = Some(bytes);
+                break;
+            }
+        }
+    }
+    let value: serde_json::Value = source_bytes
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()?
+        .unwrap_or_else(|| json!({"engine":"cpu"}));
+    anyhow::ensure!(value.is_object(), "inference.json must contain an object");
+    Ok(CpuSettings {
+        target,
+        target_bytes,
+        source,
+        source_bytes,
+        value,
+    })
+}
+
+fn cpu_revision(settings: &CpuSettings, selection: &str) -> Result<String> {
+    let client = read_maintenance_file(&respire_client_host::paths::client_config_path())?;
+    Ok(hash(&serde_json::to_vec(&(
+        selection,
+        &settings.target,
+        &settings.target_bytes,
+        &settings.source,
+        &settings.source_bytes,
+        &client,
+    ))?))
+}
+
+fn cpu_candidate(settings: &CpuSettings) -> Result<Vec<u8>> {
+    let mut value = settings.value.clone();
+    if let Some(model) = value.get("model") {
+        let model = model
+            .as_str()
+            .context("inference.json model must be a string")?
+            .trim()
+            .to_ascii_lowercase();
+        value["model"] = json!(model);
+    }
+    value["engine"] = json!("cpu");
+    value["force_cpu"] = json!(true);
+    Ok(serde_json::to_vec_pretty(&value)?)
+}
+
+fn apply_cpu_reset(
+    takeover: &LibraryLock,
+    maintenance: &mut super::lifecycle::Maintenance,
+    expected: &ModelMaintenancePlan,
+    unchanged: impl Fn() -> Result<()>,
+    publication_attempted: &mut bool,
+) -> Result<ModelMaintenanceReceipt> {
+    let (root, profile) = roots()?;
+    anyhow::ensure!(
+        takeover.protects(&root.join("runtime/takeover"))?,
+        "model maintenance takeover mismatch"
+    );
+    let _installation = LibraryLock::acquire(&root.join("runtime"), Duration::ZERO)?;
+    let _library = LibraryLock::acquire(&profile, Duration::ZERO)?;
+    let registry_path = root.join("embedding-profiles-v1.json");
+    let registry = read_maintenance_file(&registry_path)?;
+    // The CPU Plan phase does not take the installation or library locks itself.
+    let reviewed = exchange(
+        takeover,
+        maintenance,
+        ModelMaintenanceKind::ResetCpu,
+        ModelMaintenancePhase::Plan,
+        None,
+    )?;
+    anyhow::ensure!(
+        reviewed.plan.review == expected.review
+            && reviewed.plan.cpu_candidate_sha256 == expected.cpu_candidate_sha256
+            && read_maintenance_file(&registry_path)? == registry,
+        "model reset selection/revision conflict; no mutation performed"
+    );
+    let lock_path = root.join("inference.json.lock");
+    check_path(&lock_path)?;
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) => anyhow::ensure!(
+            metadata.is_file(),
+            "inference configuration lock is not a regular file"
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock.lock()?;
+    let before = cpu_settings(&root)?;
+    let _legacy_lock = if before.source != before.target {
+        let path = before.source.with_file_name("inference.json.lock");
+        read_maintenance_file(&path)?;
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)?;
+        lock.lock()?;
+        anyhow::ensure!(
+            read_maintenance_file(&before.source)? == before.source_bytes,
+            "legacy inference source changed while obtaining its configuration lock"
+        );
+        Some(lock)
+    } else {
+        None
+    };
+    let candidate = cpu_candidate(&before)?;
+    anyhow::ensure!(
+        cpu_revision(&before, &expected.review.selection_sha256)?
+            == expected.review.revision_sha256
+            && Some(hash(&candidate)) == expected.cpu_candidate_sha256,
+        "model reset revision or candidate changed before CAS"
+    );
+    unchanged()?;
+    maintenance
+        .auth_launch_binding(&profile)?
+        .context("model reset lost Paused authority")?;
+    let staged = root.join(format!(".inference-reset-{}.json", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged)?;
+        file.write_all(&candidate)?;
+        file.sync_all()?;
+        unchanged()?;
+        maintenance
+            .auth_launch_binding(&profile)?
+            .context("model reset lost Paused authority")?;
+        let inspected = exchange(
+            takeover,
+            maintenance,
+            ModelMaintenanceKind::ResetCpu,
+            ModelMaintenancePhase::Plan,
+            Some(&expected.review),
+        )?;
+        anyhow::ensure!(
+            inspected.phase == ModelMaintenancePhase::Plan
+                && !inspected.verified
+                && !inspected.config_applied
+                && !inspected.npu_ready
+                && inspected.plan.cpu_candidate_sha256 == expected.cpu_candidate_sha256,
+            "model reset selection or candidate changed before CAS"
+        );
+        let current = cpu_settings(&root)?;
+        anyhow::ensure!(
+            cpu_revision(&current, &expected.review.selection_sha256)?
+                == expected.review.revision_sha256
+                && read_maintenance_file(&registry_path)? == registry
+                && current.target_bytes == before.target_bytes,
+            "model reset revision changed before CAS"
+        );
+        *publication_attempted = true;
+        if before.target_bytes.is_some() {
+            respire_spawn::durable::replace_file(&staged, &before.target)?;
+        } else {
+            respire_spawn::durable::publish_new_file(&staged, &before.target)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() && staged.try_exists()? {
+        fs::remove_file(&staged)?;
+    }
+    result?;
+    anyhow::ensure!(
+        read_maintenance_file(&before.target)?.as_deref() == Some(candidate.as_slice()),
+        "CPU reset outcome unknown; inspect configuration, do not replay"
+    );
+    unchanged()?;
+    maintenance
+        .auth_launch_binding(&profile)?
+        .context("model reset lost Paused authority")?;
+    Ok(ModelMaintenanceReceipt {
+        plan: reviewed.plan,
+        phase: ModelMaintenancePhase::Apply,
+        verified: true,
+        config_applied: true,
+        npu_ready: false,
+        warning: None,
+    })
 }
 
 pub(crate) fn control_install_engines() -> Result<ResultEnvelope> {
@@ -221,12 +474,13 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
         let mut reset_reconciled = false;
         let receipt = match kind {
             ModelMaintenanceKind::ResetCpu => {
-                match exchange(
+                let mut publication_attempted = false;
+                match apply_cpu_reset(
                     &takeover,
                     &mut maintenance,
-                    kind,
-                    ModelMaintenancePhase::Apply,
-                    Some(&plan.review),
+                    &plan,
+                    &unchanged,
+                    &mut publication_attempted,
                 ) {
                     Ok(receipt) => {
                         anyhow::ensure!(
@@ -235,7 +489,7 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                         );
                         receipt
                     }
-                    Err(error) => {
+                    Err(error) if publication_attempted => {
                         // Read the postcondition once. Never repeat the uncertain CAS.
                         let inspected = exchange(
                             &takeover,
@@ -259,6 +513,7 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                         reset_reconciled = true;
                         inspected
                     }
+                    Err(error) => return Err(error),
                 }
             }
             ModelMaintenanceKind::InstallEngines | ModelMaintenanceKind::UninstallM3 => {
