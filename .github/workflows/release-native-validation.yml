@@ -336,9 +336,10 @@ jobs:
           fi
           "$py" scripts/native-psutil-wheel-cache.py validate --directory .native-psutil-wheels
           "$py" scripts/native-psutil-wheel-cache.py install --directory .native-psutil-wheels
-      - name: Verify the latest formal release upgrades automatically
+      - name: Verify selected formal release and database DEV upgrades
         shell: bash
         env:
+          UPGRADE_PROFILE: ${{ inputs.validation_profile }}
           GH_TOKEN: ${{ github.token }}
           MODEL_CACHE_HIT: ${{ steps.model-cache.outputs.cache-hit }}
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
@@ -372,7 +373,7 @@ jobs:
             --runtime-binary "$NATIVE_RUNTIME_BIN" --runtime-sha256 "$NATIVE_RUNTIME_SHA256" --runtime-version "$NATIVE_RUNTIME_VERSION" \
             --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3" \
             --legacy-model-dir native-legacy-model \
-            --output-dir "$RUNNER_TEMP/published-upgrades" --profile critical
+            --output-dir "$RUNNER_TEMP/published-upgrades" --profile "$UPGRADE_PROFILE"
       - name: Verify resident foreground and background inference under concurrent CLI load
         if: inputs.validation_profile == 'full'
         shell: bash
