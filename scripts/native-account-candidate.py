@@ -570,7 +570,35 @@ def safe_failure_diagnostics(captured, failed_cases):
                         matches.append((len(message), location))
         matches.sort(key=lambda match: -match[0])
         host_error_sources[CASE] = [location for _, location in matches[:8]]
+    provider_failures, provider_failure_invalid = [], False
+    marker = b"HOST_PROVIDER_CREDENTIAL_FAILURE "
+    for case in failed_cases:
+        for line in blocks.get(case, []):
+            if not line.startswith(marker):
+                continue
+            try:
+                failure = json.loads(line[len(marker):])
+                if (not isinstance(failure, dict)
+                        or set(failure) != {"schema_version", "stage", "error_type", "os_status", "io_error_code"}
+                        or type(failure["schema_version"]) is not int or failure["schema_version"] != 1
+                        or failure["stage"] not in {"keyring_read", "agent_read", "embedding_profiles_read"}
+                        or failure["error_type"] not in {"security_framework", "platform_failure", "io"}):
+                    raise ValueError
+                for key in ("os_status", "io_error_code"):
+                    value = failure[key]
+                    if value is not None and (type(value) is not int or not -(2**31) <= value < 2**31):
+                        raise ValueError
+                if failure["stage"] == "keyring_read":
+                    if (failure["error_type"] == "io" or failure["io_error_code"] is not None
+                            or (failure["error_type"] == "security_framework") != (failure["os_status"] is not None)):
+                        raise ValueError
+                elif failure["error_type"] != "io" or failure["os_status"] is not None:
+                    raise ValueError
+                provider_failures.append(failure)
+            except (ValueError, TypeError):
+                provider_failure_invalid = True
     return {"authorization_events": events, "authorization_event_invalid": invalid,
+            "provider_failure_events": provider_failures, "provider_failure_invalid": provider_failure_invalid,
             "failure_codes": codes, "failure_locations": locations, "host_error_sources": host_error_sources,
             "account_checkpoints": account_checkpoints,
             "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,

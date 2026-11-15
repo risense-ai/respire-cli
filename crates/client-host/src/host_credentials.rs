@@ -262,7 +262,19 @@ fn read_provider_credential(service: &str, account: &str, backends: &[&str])
             Err(keyring::Error::NoEntry) => {},
             Err(error) => return Err(match error {
                 keyring::Error::NoStorageAccess(_) => ProviderUnavailableCode::AccessDenied,
-                keyring::Error::PlatformFailure(_) => ProviderUnavailableCode::PlatformFailure,
+                keyring::Error::PlatformFailure(_error) => {
+                    #[cfg(target_os = "macos")]
+                    let os_status = _error.downcast_ref::<security_framework::base::Error>()
+                        .map(|error| error.code());
+                    #[cfg(not(target_os = "macos"))]
+                    let os_status = None::<i32>;
+                    eprintln!("HOST_PROVIDER_CREDENTIAL_FAILURE {}", serde_json::json!({
+                        "schema_version": 1, "stage": "keyring_read",
+                        "error_type": if os_status.is_some() { "security_framework" } else { "platform_failure" },
+                        "os_status": os_status, "io_error_code": null,
+                    }));
+                    ProviderUnavailableCode::PlatformFailure
+                },
                 keyring::Error::Ambiguous(_) => ProviderUnavailableCode::Ambiguous,
                 keyring::Error::BadEncoding(_) => ProviderUnavailableCode::BadEncoding,
                 keyring::Error::Invalid(_, _) => ProviderUnavailableCode::InvalidConfiguration,
@@ -273,7 +285,11 @@ fn read_provider_credential(service: &str, account: &str, backends: &[&str])
     Ok(None)
 }
 
-fn provider_io_error(error: std::io::Error) -> ProviderUnavailableCode {
+fn provider_io_error(stage: &str, error: std::io::Error) -> ProviderUnavailableCode {
+    eprintln!("HOST_PROVIDER_CREDENTIAL_FAILURE {}", serde_json::json!({
+        "schema_version": 1, "stage": stage, "error_type": "io",
+        "os_status": null, "io_error_code": error.raw_os_error(),
+    }));
     if error.kind() == std::io::ErrorKind::PermissionDenied {
         ProviderUnavailableCode::AccessDenied
     } else {
@@ -324,7 +340,7 @@ fn provider_credentials(root: &std::path::Path, profile: &std::path::Path)
         Ok(bytes) => Some(serde_json::from_slice::<serde_json::Value>(&bytes)
             .map_err(|_| ProviderUnavailableCode::InvalidConfiguration)?),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(provider_io_error(error)),
+        Err(error) => return Err(provider_io_error("agent_read", error)),
     };
     if let Some(base) = agent.as_ref().and_then(|agent| agent["recall_api_base"].as_str()) {
         hosts.push(crate::classification::host_of(base));
@@ -339,7 +355,7 @@ fn provider_credentials(root: &std::path::Path, profile: &std::path::Path)
     let bytes = match std::fs::read(root.join("embedding-profiles-v1.json")) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(result),
-        Err(error) => return Err(provider_io_error(error)),
+        Err(error) => return Err(provider_io_error("embedding_profiles_read", error)),
     };
     if bytes.len() > 1024 * 1024 {
         return Err(ProviderUnavailableCode::InvalidConfiguration);

@@ -192,6 +192,27 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertEqual(result["failure_codes"][candidate.NATIVE_STOP_CASE], ["unknown_private_failure"])
         self.assertNotIn("private-canary", json.dumps(result))
 
+        provider = dict(schema_version=1, stage="keyring_read", error_type="security_framework",
+                        os_status=-25308, io_error_code=None)
+        def provider_output(value):
+            return captured([event]) + b"\nHOST_PROVIDER_CREDENTIAL_FAILURE " + json.dumps(value).encode()
+        for diagnostic in (provider, dict(provider, error_type="platform_failure", os_status=None),
+                           dict(provider, stage="agent_read", error_type="io", os_status=None, io_error_code=5),
+                           dict(provider, stage="embedding_profiles_read", error_type="io", os_status=None)):
+            result = candidate.safe_failure_diagnostics(provider_output(diagnostic), [candidate.NATIVE_STOP_CASE])
+            self.assertEqual(result["provider_failure_events"], [diagnostic])
+            self.assertFalse(result["provider_failure_invalid"])
+        for change in ({"private": "private-canary"}, {"os_status": "private-canary"},
+                       {"os_status": True}, {"os_status": 2**31}, {"os_status": None},
+                       {"stage": "private-canary"}, {"error_type": "private-canary"},
+                       {"error_type": "platform_failure"}, {"io_error_code": 5},
+                       {"stage": "agent_read"}, {"schema_version": True}):
+            result = candidate.safe_failure_diagnostics(provider_output(dict(provider, **change)), [candidate.NATIVE_STOP_CASE])
+            self.assertEqual(result["provider_failure_events"], [])
+            self.assertTrue(result["provider_failure_invalid"])
+            self.assertNotIn("private-canary", json.dumps(result))
+        self.assertEqual(candidate.safe_failure_diagnostics(provider_output(provider), [])["provider_failure_events"], [])
+
     def test_login_receipt_failure_reports_only_fixed_code(self):
         captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
             b"Error: login session does not match its committed credential receipt\n"
