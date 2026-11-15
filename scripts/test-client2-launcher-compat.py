@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pinned unchanged Client2 release host calls; account-free temporary installations.
+"""Pinned unchanged Client2 host calls in isolated temporary installations.
 
 Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
 Client2 source. Optional pinned Magpie source exercises its original legacy RPC.
@@ -144,10 +144,18 @@ def main():
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--host-credentials', action='store_true',
+                        help='Hosted Linux private Secret Service only: seed each fresh profile through CLI keygen')
     parser.add_argument('--ordinary-cli-cold-start', action='store_true',
                         help='Also verify ordinary CLI status cold-start before original Client2 reuse')
     parser.add_argument('--coverage-profile-file', help='Hosted CI only: existing instrumented CLI profile template')
     args = parser.parse_args()
+    if args.host_credentials and not (sys.platform == 'linux'
+            and os.environ.get('GITHUB_ACTIONS') == 'true'
+            and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+            and os.environ.get('RSRS_SS_FIXTURE_BUS') == 'private'
+            and os.environ.get('DBUS_SESSION_BUS_ADDRESS')):
+        raise RuntimeError('Synthetic host keys require the hosted private Secret Service fixture')
     profile = coverage_profile(args.coverage_profile_file)
     baseline = DESKTOP_BASELINES[args.client2_baseline]
     desktop = desktop_executable(args.desktop_executable, args.client2_baseline)
@@ -186,11 +194,12 @@ def main():
     if args.offline: build_env['GOPROXY'] = 'off'
     subprocess.run([str(go), 'build', '-buildvcs=false', '-mod=mod', '-o', str(executable), '.'],
                    cwd=probe, env=build_env, check=True, timeout=300)
-    report = {'client2_source': baseline['source'], 'coverage': 'real-host-process-no-accounts',
+    report = {'client2_source': baseline['source'], 'coverage': 'real-host-process-synthetic-keys' if args.host_credentials else 'real-host-process-no-accounts',
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version,
                          'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
+                         'host_credentials': args.host_credentials,
                          'coverage_profile_file': profile},
               'desktop_headless': {'enabled': desktop is not None, 'client2_source': baseline['source'],
                                    'release': args.client2_baseline, 'run_id': baseline['run_id'],
@@ -200,7 +209,7 @@ def main():
               'legacy_plugin': {'executed': magpie is not None,
                                 'source_sha': MAGPIE_SHA if magpie else None,
                                 'runtime_blob': MAGPIE_RUNTIME_BLOB if magpie else None},
-              'excluded': ['desktop GUI', 'accounts and credentials', 'model inference',
+              'excluded': ['desktop GUI', 'cloud accounts and real user credentials', 'model inference',
                            'managed services', 'cross-platform execution'] + ([] if magpie else ['original plugin RPC'])}
     def run(argv, env):
         # Go/Rust emit UTF-8, including Chinese errors. Decode captured bytes
@@ -309,6 +318,9 @@ def main():
         env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root), RSRS_BIN_DIR=str(root/'bin'),
                    RSRS_RPC_PORT=str(port), RSRS_CORE_TEST_MODE='1', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0', RSRS_LANG='en')
+        if args.host_credentials:
+            env['DBUS_SESSION_BUS_ADDRESS'] = os.environ['DBUS_SESSION_BUS_ADDRESS']
+            env['RSRS_SS_FIXTURE_BUS'] = 'private'
         if profile is not None:
             env['LLVM_PROFILE_FILE'] = profile
         for key, name in [('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','share'),('XDG_CACHE_HOME','cache'),
@@ -321,6 +333,14 @@ def main():
             selection = json.loads((root/'bin/runtime.json').read_text())
             (root/'bin').mkdir(exist_ok=True)
             shutil.copy2(cli, root/'bin'/('rsrs.exe' if os.name=='nt' else 'rsrs'))
+            if args.host_credentials:
+                seeded = run([cli, '--json', 'keygen'], env)
+                if seeded.returncode:
+                    raise RuntimeError('Synthetic host credential setup did not commit')
+                stopped_seed = run([cli, '--json', 'runtime', 'stop'], env)
+                if stopped_seed.returncode:
+                    raise RuntimeError('Synthetic credential setup Runtime did not stop')
+                case['synthetic_host_credential'] = True
             if mode in ['client2-owned', 'desktop-owned']:
                 destination = root/'client2/runtime'/args.runtime_version
                 shutil.copytree(root/'bin/runtime'/args.runtime_version, destination)
