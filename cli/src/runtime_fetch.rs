@@ -765,6 +765,10 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
+        self.validate_for_cli(required, triple, env!("CARGO_PKG_VERSION"))
+    }
+
+    fn validate_for_cli(&self, required: &str, triple: &str, cli: &str) -> Result<()> {
         anyhow::ensure!(
             self.schema_version == 1 || self.schema_version == 2,
             "unsupported runtime metadata schema {}",
@@ -811,7 +815,6 @@ impl BuildMetadata {
         if self.schema_version == 2 {
             self.validate_schema2()?;
         }
-        let cli = env!("CARGO_PKG_VERSION");
         anyhow::ensure!(
             valid_version(&self.compat.min_cli),
             "release metadata has an invalid compat range"
@@ -821,15 +824,14 @@ impl BuildMetadata {
             "release metadata has an invalid compat range"
         );
         anyhow::ensure!(
-            respire_client_host::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
+            semver_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
             "runtime {} requires CLI >= {}; upgrade the CLI first",
             self.runtime_version,
             self.compat.min_cli
         );
         anyhow::ensure!(
             self.compat.max_cli == "*"
-                || respire_client_host::version_cmp(cli, &self.compat.max_cli)
-                    == std::cmp::Ordering::Less,
+                || semver_cmp(cli, &self.compat.max_cli) == std::cmp::Ordering::Less,
             "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
             self.runtime_version,
             self.compat.max_cli

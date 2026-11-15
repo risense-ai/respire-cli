@@ -902,6 +902,24 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
     });
     let metadata: BuildMetadata = serde_json::from_value(base.clone())?;
     metadata.validate("1.0.21-dev.1", &triple)?;
+    for (cli, minimum, maximum, accepted) in [
+        ("2.0.0", "2.0.0-dev.11", "*", true),
+        ("2.0.0-dev.11", "2.0.0-dev.11", "*", true),
+        ("2.0.0-dev.10", "2.0.0-dev.11", "*", false),
+        ("2.0.0", "2.0.1", "*", false),
+        ("2.0.0", "99.0.0", "*", false),
+        ("2.0.0", "1.0.0", "2.0.0-dev.11", false),
+        ("2.0.0-dev.10", "1.0.0", "2.0.0-dev.11", true),
+    ] {
+        let mut compat = base.clone();
+        compat["compat"]["min_cli"] = serde_json::json!(minimum);
+        compat["compat"]["max_cli"] = serde_json::json!(maximum);
+        let compat: BuildMetadata = serde_json::from_value(compat)?;
+        anyhow::ensure!(
+            compat.validate_for_cli("1.0.21-dev.1", &triple, cli).is_ok() == accepted,
+            "unexpected compat result for CLI {cli} with min_cli {minimum} and max_cli {maximum}"
+        );
+    }
     anyhow::ensure!(
         ManagedManifest::from_release(&metadata, base.to_string().as_bytes()).is_err(),
         "legacy metadata must not become complete managed release proof"
