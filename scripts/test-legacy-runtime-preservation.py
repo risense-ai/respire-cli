@@ -37,7 +37,7 @@ def main():
     if os.uname().sysname != "Linux" or os.uname().machine != "x86_64":
         raise ValueError("this fixture requires native Linux x86_64")
     report = {"legacy_version": "1.0.20", "legacy_sha256": LEGACY_SHA256,
-              "candidate_sha256": digest(candidate), "checks": [], "static_rejections": [],
+              "candidate_sha256": digest(candidate), "checks": [], "stopped_download_admission": [],
               "scope": "native legacy service preservation; no inference or new wire acceptance"}
     with tempfile.TemporaryDirectory(prefix="rsrs-legacy-preservation-") as temporary:
         root = Path(temporary)
@@ -126,7 +126,7 @@ def main():
                 child.kill()
                 child.wait(timeout=10)
             log.close()
-        for command in (("runtime", "start"), ("runtime", "restart")):
+        for command in (("runtime", "install"), ("runtime", "update")):
             stopped = root / ("stopped-" + command[1])
             stopped.mkdir()
             session = stopped / "session.json"
@@ -135,17 +135,20 @@ def main():
                                        RSRS_BIN_DIR=str(stopped / "bin"))
             result = subprocess.run([str(candidate), "--json", *command], env=stopped_environment,
                                     capture_output=True, text=True, timeout=20)
-            if result.returncode == 0 or "legacy_runtime_migration_required" not in result.stdout + result.stderr:
-                raise AssertionError(f"{command}: stopped legacy installation did not defer")
+            output = result.stdout + result.stderr
+            if (result.returncode == 0 or "downloads are disabled" not in output
+                    or "legacy_runtime_migration_required" in output):
+                raise AssertionError(f"{command}: stopped account data blocked download admission: {output}")
             if session.read_bytes() != b"legacy session fixture" or list(stopped.iterdir()) != [session]:
-                raise AssertionError(f"{command}: stopped legacy rejection wrote installation state")
-            report["static_rejections"].append({"command": list(command),
-                                                "session_preserved": True,
-                                                "installation_tree_unchanged": True})
+                raise AssertionError(f"{command}: disabled download changed the old account")
+            report["stopped_download_admission"].append({"command": list(command),
+                                                       "download_boundary_reached": True,
+                                                       "session_preserved": True,
+                                                       "installation_tree_unchanged": True})
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Passed {len(report['checks'])} native legacy preservation checks and "
-          f"{len(report['static_rejections'])} stopped-installation no-write checks")
+          f"{len(report['stopped_download_admission'])} stopped-account download admission checks")
 
 
 if __name__ == "__main__":

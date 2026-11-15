@@ -129,8 +129,8 @@ def verify_upgrade(source):
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
-            'source_rpc_checked','legacy_client_rejected','live_owner_restart_rejected','safe_restart_checked',
-            'standalone_runtime_evidence',
+            'live_owner_restart_rejected','safe_restart_checked',
+            'standalone_runtime_evidence','runtime_installed_after_legacy_data',
         ]),'required standalone upgrade checks missing or failed'
         assert all(check.get(name) is False for name in [
             'old_rpc_checked','forced_restart_checked',

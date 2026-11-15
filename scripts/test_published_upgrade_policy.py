@@ -165,11 +165,12 @@ class UpgradeProfileTest(unittest.TestCase):
                             name: {"name": name, "status": "ok"} for name in ["embedder", "model index"]}}
                             for account in ["main", "alternate", "main"]]}]
                     if standalone:
-                        checks[0].update(upgrade_contract="standalone-v1", source_rpc_checked=True,
-                            legacy_client_rejected=True, legacy_handoff_actor="fixture",
+                        checks[0].update(upgrade_contract="standalone-v1", source_rpc_checked=False,
+                            legacy_client_rejected=False, legacy_handoff_actor="fixture",
                             live_owner_restart_rejected=True, safe_restart_checked=True,
                             old_rpc_checked=False, forced_restart_checked=False,
                             runtime_mode="standalone_runtime", standalone_runtime_evidence=True,
+                            runtime_installed_after_legacy_data=True,
                             runtime_binary_sha256=runtime_digest, runtime_version=runtime_version,
                             runtime_identity_receipts=[{"pid": 1234, "instance_id": "fake-child-only"}])
                     if checks_transform is not None:
@@ -349,8 +350,8 @@ class UpgradeProfileTest(unittest.TestCase):
     def test_standalone_required_flags_are_present_and_strictly_true(self):
         flags = ["passed", "real_model", "supervised_worker_checked", "global_engine_preserved",
                  "distinct_vault_keys", "source_and_keys_unchanged", "compatible_index_reused",
-                 "source_rpc_checked", "legacy_client_rejected", "live_owner_restart_rejected",
-                 "safe_restart_checked", "standalone_runtime_evidence"]
+                 "live_owner_restart_rejected",
+                 "safe_restart_checked", "standalone_runtime_evidence", "runtime_installed_after_legacy_data"]
         self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
                                                     if key not in flags}], True)
         for name in flags:

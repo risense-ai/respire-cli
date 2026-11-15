@@ -524,9 +524,31 @@ async function packPublished(spec, targets, source, manifestHash) {
     harness_sha:process.env.GITHUB_SHA,manifest_sha256:manifestHash,product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},
     run_id:Number(process.env.GITHUB_RUN_ID),run_attempt:Number(process.env.GITHUB_RUN_ATTEMPT),packages},null,2)+'\n');
 }
+function publishedUpgradeSelection(report) {
+  // Use the producer's policy, including mandatory DEV checkpoints and exact platform gaps.
+  return JSON.parse(execFileSync(process.platform === 'win32' ? 'py' : 'python3', [...(process.platform === 'win32' ? ['-3'] : []), '-I', '-B', '-c', `
+import json, sys
+sys.path.insert(0, '.')
+from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability, select_upgrade_sources
+report = json.load(sys.stdin)
+target = report['target']
+extension = '.exe' if 'windows' in target else ''
+required = [f'rsrs-{target}{extension}', f'rsrs-{target}-runtime.tar.gz', f'cli-build-{target}.json']
+sources, gaps = {}, {}
+for tag in [*report['published_formal_sources'], *DATABASE_DEV_CHECKPOINTS]:
+    try:
+        gaps[tag] = platform_applicability(tag, target, [])
+    except ValueError:
+        pass  # This target/release has no policy exemption for absent artifacts.
+    present = tag not in gaps or any(row.get('version') == tag[1:] and row.get('passed') is True for row in report['sources'])
+    sources[tag] = {'assets': [{'name': name} for name in required] if present else []}
+print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps,
+                 'selected': sorted(select_upgrade_sources(sources, target, report['profile']))}))
+`], {cwd:new URL('../../scripts/',import.meta.url), input:JSON.stringify(report), encoding:'utf8', windowsHide:true}));
+}
 export function validatePublishedFull(spec, targets, manifestHash, directory, jobs, context) {
   requireValue(sourcePattern.test(context.sha || '') && positiveID(context.run_id) && positiveID(context.run_attempt), 'Invalid full run identity');
-  const processes = [], reports = [];
+  const processes = [], reports = [], historicalUpgrades = [];
   function job(predicate, label) {
     const matches = jobs.filter(predicate);
     requireValue(matches.length === 1 && matches[0].status === 'completed' && matches[0].conclusion === 'success'
@@ -578,20 +600,44 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
     const bounded = read('resident-concurrency-'+target,'fixture-process-verification.json');
     requireValue(Array.isArray(bounded) && bounded.length > 0 && bounded.every(r => r.passed === true), 'Fixture process bounds incomplete');
     const upgrades = read('published-upgrades-'+target,'published-upgrades.json');
-    requireValue(upgrades.passed === true && upgrades.profile === 'critical' && upgrades.full_coverage === false
-      && upgrades.all_published_sources_covered === false && upgrades.target === target
-      && upgrades.candidate_sha256 === native[0].binary_sha256 && upgrades.selected_sources?.length === 1
-      && upgrades.selected_sources[0] === upgrades.published_formal_sources?.at(-1)
-      && upgrades.sources?.length === 1, 'Latest formal release upgrade incomplete');
+    const full = upgrades.profile === 'full';
+    requireValue(upgrades.passed === true && ['critical','full'].includes(upgrades.profile)
+      && upgrades.full_coverage === full && upgrades.all_published_sources_covered === full
+      && upgrades.upgrade_contract === 'standalone-v1'
+      && upgrades.target === target && upgrades.candidate_sha256 === native[0].binary_sha256
+      && Array.isArray(upgrades.published_formal_sources) && upgrades.published_formal_sources.length > 0
+      && new Set(upgrades.published_formal_sources).size === upgrades.published_formal_sources.length
+      && upgrades.published_formal_sources.every(tag => /^v\d+\.\d+\.\d+$/.test(tag) && compareVersion(tag.slice(1),'1.0.6') >= 0)
+      && Array.isArray(upgrades.selected_sources) && Array.isArray(upgrades.sources)
+      && upgrades.sources.every(row => row && typeof row === 'object' && !Array.isArray(row))
+      && upgrades.additional_draft_baselines?.length === 0, 'Historical upgrade coverage or identity differs');
+    const policy = publishedUpgradeSelection(upgrades);
+    requireValue(ownKeys(upgrades.database_dev_checkpoints,Object.keys(policy.checkpoints))
+      && Object.entries(policy.checkpoints).every(([tag,reason]) => upgrades.database_dev_checkpoints[tag] === reason)
+      && JSON.stringify([...upgrades.selected_sources].sort()) === JSON.stringify(policy.selected)
+      && upgrades.sources.length === policy.selected.length, 'Required formal or database DEV upgrade sources differ');
+    const passed = [], notApplicable = [];
     for (const version of upgrades.selected_sources) {
       const row = upgrades.sources.filter(r => 'v'+r.version === version);
-      requireValue(row.length === 1 && row[0].passed === true && row[0].formal === true, 'Missing latest formal upgrade result');
-      if (row[0].passed) {
+      requireValue(row.length === 1 && row[0].formal === upgrades.published_formal_sources.includes(version), 'Missing or duplicate historical upgrade result');
+      if (row[0].status === 'not-applicable') {
+        requireValue(row[0].passed === undefined && policy.gaps[version] && row[0].reason === policy.gaps[version], 'Unapproved historical platform gap');
+        notApplicable.push(version);
+      } else {
+        requireValue(row[0].passed === true && row[0].status === undefined
+          && row[0].upgrade_contract === 'standalone-v1', 'Failed historical upgrade source');
         const check = read('published-upgrades-'+target,version+'/results/real-account-return-verification.json');
         requireValue(Array.isArray(check) && check.length === 1 && check[0].binary_sha256 === native[0].binary_sha256, 'Upgrade process binary differs');
+        requireValue(check[0].upgrade_contract === 'standalone-v1' && check[0].runtime_installed_after_legacy_data === true
+          && check[0].legacy_handoff_actor === 'fixture', 'Historical upgrade must download the Runtime after legacy data and retain fixture-owned handoff');
         processes.push(...validatePublishedProcessEvidence(check[0],spec,target,manifestHash));
+        passed.push(version);
       }
     }
+    requireValue(passed.length > 0 || (target === 'x86_64-apple-darwin' && upgrades.first_platform_release === true
+      && [...upgrades.published_formal_sources,...Object.keys(policy.checkpoints)].every(tag => policy.gaps[tag])
+      && upgrades.upgrade_status === 'not-applicable: first Intel macOS release; fresh inference is validated separately'), 'No actual applicable upgrade was exercised');
+    historicalUpgrades.push({target,profile:upgrades.profile,all_published_sources_covered:full,passed,not_applicable:notApplicable});
     if (target !== 'x86_64-unknown-linux-gnu') {
       job(j => j.name.startsWith('cloud-sweep (') && j.name.endsWith(', '+target+')'),target+' cloud');
       const base = read('base-release-sweep-'+target,'coverage.json');
@@ -647,7 +693,8 @@ export function validatePublishedFull(spec, targets, manifestHash, directory, jo
   }
   return {schema:1,kind:'published-assets-full',manifest_sha256:manifestHash,harness_sha:context.sha,
     product_sources:{cli:spec.cli.source_sha,runtime:spec.runtime.source_sha},...context,
-    reports,actual_processes:processes,full_passed:true,g1Passed:false,
+    reports,actual_processes:processes,historical_upgrades:historicalUpgrades,
+    full_passed:historicalUpgrades.every(report => report.profile === 'full'),g1Passed:false,
     limits:['CLI full acceptance does not authorize cross-product fullG1 or stable publication','Process image receipts hash OS-identified executable files, not loaded memory pages','Eight configured CLI platforms only; Client2 and real user database copies are not covered','API fixtures are server-contract evidence, not CLI asset execution','Core bytes are checked against published metadata and exact-source SDK locks, not an independent private SDK archive download','npm packaging uses the trusted harness wrapper plus immutable published binaries; it is not a download of the published npm tarballs']};
 }
 async function completePublished(spec,targets,directory) {
@@ -665,6 +712,7 @@ async function completePublished(spec,targets,directory) {
     requireValue(batch.jobs.length>0 && jobs.length<batch.total_count,'Incomplete full job inventory');
   }
   const result = validatePublishedFull(spec,targets,process.env.PUBLISHED_ASSETS_SHA256,directory,jobs,context);
+  requireValue(result.full_passed, 'Full acceptance requires full historical upgrade coverage');
   writeFileSync(join(directory,'published-full-result.json'),JSON.stringify(result,null,2)+'\n');
 }
 function extractBuildArtifact() {

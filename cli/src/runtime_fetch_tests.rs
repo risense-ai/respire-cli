@@ -777,12 +777,11 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
 }
 
 #[test]
-fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<()> {
+fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     for relative in [
         "runtime/endpoint.json", "runtime/autostart/registration.json", "client.json",
-        "session.json", "rsrs.db", "onememory.db",
     ] {
         let dir = tempfile::tempdir()?;
         std::env::set_var("RSRS_DATA_DIR", dir.path());
@@ -791,7 +790,7 @@ fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<(
         fs::create_dir_all(record.parent().context("legacy record parent missing")?)?;
         fs::write(&record, b"existing legacy state")?;
         let error = download_and_install(None, None)
-            .err().context("missing binary was treated as a fresh installation")?;
+            .err().context("unbound owner was treated as a stopped installation")?;
         anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>(), "missed {relative}");
         anyhow::ensure!(fs::read(&record)? == b"existing legacy state");
         anyhow::ensure!(!manifest_path().exists() && !runtime_dir().join(".install.lock").exists());
@@ -802,13 +801,24 @@ fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<(
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     let profile = dir.path().join("accounts/previous");
     fs::create_dir_all(&profile)?;
-    fs::write(profile.join("rsrs.db"), b"old profile data")?;
+    for root in [dir.path(), profile.as_path()] {
+        for name in ["session.json", "rsrs.db", "onememory.db"] {
+            fs::write(root.join(name), b"old account bytes")?;
+        }
+    }
     fs::write(dir.path().join("client.json"),
         serde_json::json!({"data_dir": profile}).to_string())?;
+    anyhow::ensure!(automatic_install_preflight(&pinned()?.required)?.is_none());
     let error = download_and_install(None, None)
-        .err().context("configured legacy profile was mistaken for a fresh installation")?;
-    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
-    anyhow::ensure!(fs::read(profile.join("rsrs.db"))? == b"old profile data");
+        .err().context("source test unexpectedly downloaded a Runtime")?;
+    anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>(),
+        "stopped account data blocked installation");
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
+    for root in [dir.path(), profile.as_path()] {
+        for name in ["session.json", "rsrs.db", "onememory.db"] {
+            anyhow::ensure!(fs::read(root.join(name))? == b"old account bytes");
+        }
+    }
     anyhow::ensure!(!manifest_path().exists() && !runtime_dir().exists());
     Ok(())
 }

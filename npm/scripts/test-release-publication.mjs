@@ -727,8 +727,24 @@ function publishedFullFixture(root) {
   const job=name=>jobs.push({name,status:'completed',conclusion:'success',run_id:context.run_id,run_attempt:context.run_attempt,head_sha:context.sha});
   function put(artifact,file,value) {const location=path.join(root,artifact,file);mkdirSync(path.dirname(location),{recursive:true});writeFileSync(location,JSON.stringify(value));}
   const identity={source_sha:spec.cli.source_sha,version:spec.cli.version,binary_sha256:'a'.repeat(64)};
-  const process={manifest_sha256:manifestHash,bundle_sha256:'b'.repeat(64),image_sha256:'b'.repeat(64),exe:'/isolated/runtime',pid:42,process_start_id:'synthetic-birth',installation_root:'/isolated',data_dir:'/isolated/profile',account_id:'account',instance_id:'instance',generation:1,protocol_v:1};
-  const runtime={...identity,passed:true,runtime_mode:'standalone_runtime',standalone_runtime_evidence:true,runtime_binary_sha256:'b'.repeat(64),runtime_version:spec.runtime.version,runtime_identity_receipts:[process]};
+  const processReceipt={manifest_sha256:manifestHash,bundle_sha256:'b'.repeat(64),image_sha256:'b'.repeat(64),exe:'/isolated/runtime',pid:42,process_start_id:'synthetic-birth',installation_root:'/isolated',data_dir:'/isolated/profile',account_id:'account',instance_id:'instance',generation:1,protocol_v:1};
+  const runtime={...identity,passed:true,runtime_mode:'standalone_runtime',standalone_runtime_evidence:true,runtime_binary_sha256:'b'.repeat(64),runtime_version:spec.runtime.version,runtime_identity_receipts:[processReceipt]};
+  const upgradedRuntime={...runtime,upgrade_contract:'standalone-v1',runtime_installed_after_legacy_data:true,legacy_handoff_actor:'fixture'};
+  const policy=JSON.parse(execFileSync(process.platform==='win32'?'py':'python3',
+    [...(process.platform==='win32'?['-3']:[]),'-I','-B','-c',`import json,sys
+sys.path.insert(0, '.')
+from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability
+gaps = {}
+for target in json.load(sys.stdin):
+    gaps[target] = {}
+    for tag in ['v1.0.19', 'v1.0.20', *DATABASE_DEV_CHECKPOINTS]:
+        try:
+            gaps[target][tag] = platform_applicability(tag, target, [])
+        except ValueError:
+            pass
+print(json.dumps({'checkpoints': DATABASE_DEV_CHECKPOINTS, 'gaps': gaps}))`],
+    {cwd:new URL('../../scripts/',import.meta.url),input:JSON.stringify(targets),encoding:'utf8',windowsHide:true}));
+  const upgradeReports={};
   for(const target of targets) {
     job(`validate / Release (${target})`);job(`native-regression / Native (${target})`);
     const runtime_producer={...spec.runtime.producer,source_sha:spec.runtime.source_sha,target,metadata_sha256:'b'.repeat(64),
@@ -738,8 +754,14 @@ function publishedFullFixture(root) {
     put('resident-concurrency-'+target,'resident-stress-metrics.json',{passed:true});
     put('resident-concurrency-'+target,'fixture-dependencies.json',{synthetic:true});
     put('resident-concurrency-'+target,'fixture-process-verification.json',[{passed:true}]);
-    put('published-upgrades-'+target,'published-upgrades.json',{passed:true,profile:'critical',full_coverage:false,all_published_sources_covered:false,target,candidate_sha256:identity.binary_sha256,published_formal_sources:['v1.0.19','v1.0.20'],selected_sources:['v1.0.20'],sources:[{version:'1.0.20',formal:true,passed:true}]});
-    put('published-upgrades-'+target,'v1.0.20/results/real-account-return-verification.json',[runtime]);
+    const formal=['v1.0.19','v1.0.20'], selected=[...formal,...Object.keys(policy.checkpoints)].sort();
+    upgradeReports[target]={passed:true,profile:'full',full_coverage:true,all_published_sources_covered:true,
+      upgrade_contract:'standalone-v1',target,candidate_sha256:identity.binary_sha256,published_formal_sources:formal,
+      additional_draft_baselines:[],database_dev_checkpoints:policy.checkpoints,selected_sources:selected,
+      first_platform_release:false,sources:selected.map(tag=>({version:tag.slice(1),formal:formal.includes(tag),
+        ...(policy.gaps[target][tag]?{status:'not-applicable',reason:policy.gaps[target][tag]}:{passed:true,upgrade_contract:'standalone-v1'})}))};
+    put('published-upgrades-'+target,'published-upgrades.json',upgradeReports[target]);
+    for(const row of upgradeReports[target].sources.filter(row=>row.passed))put('published-upgrades-'+target,'v'+row.version+'/results/real-account-return-verification.json',[upgradedRuntime]);
     if(target==='x86_64-unknown-linux-gnu')continue;
     job(`cloud-sweep (runner, ${target})`);
     put('base-release-sweep-'+target,'coverage.json',{...identity,observed_version:spec.cli.version,expected_version:spec.cli.version,base_complete:true,failed:0,required_missing:[]});
@@ -771,7 +793,7 @@ function publishedFullFixture(root) {
     apiReports[name]=createHash('sha256').update(readFileSync(path.join(root,'dev-api-coverage',name))).digest('hex');
   }
   put('dev-api-coverage','published-api-identity.json',{harness_sha:context.sha,manifest_sha256:manifestHash,run_id:context.run_id,run_attempt:context.run_attempt,reports:apiReports});
-  return {spec,targets,manifestHash,context,jobs,put,runtime};
+  return {spec,targets,manifestHash,context,jobs,put,runtime,upgradedRuntime,upgradeReports};
 }
 test('published full joins every existing report and live image identity; copied summaries and partial jobs cannot pass',()=>{
   const root=mkdtempSync(path.join(tmpdir(),'published-full-join-'));
@@ -779,11 +801,72 @@ test('published full joins every existing report and live image identity; copied
     const f=publishedFullFixture(root),run=()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,f.jobs,f.context);
     const complete=run();assert.equal(complete.full_passed,true);assert.equal(complete.harness_sha,f.context.sha);
     assert.notEqual(complete.harness_sha,complete.product_sources.cli);
-    assert.equal(complete.actual_processes.length,2*f.targets.length+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
+    assert.equal(complete.actual_processes.length,f.targets.length+Object.values(f.upgradeReports).reduce((count,r)=>count+r.sources.filter(row=>row.passed).length,0)+2*f.targets.filter(t=>t.includes('linux')&&t!=='x86_64-unknown-linux-gnu').length);
+    assert.equal(complete.historical_upgrades.length,f.targets.length);
+    assert(complete.historical_upgrades.every(r=>r.profile==='full'&&r.all_published_sources_covered));
+    for(const target of f.targets) {
+      const critical=copy(f.upgradeReports[target]);
+      critical.profile='critical';critical.full_coverage=critical.all_published_sources_covered=false;
+      critical.selected_sources=critical.selected_sources.filter(tag=>tag!=='v1.0.19');
+      critical.sources=critical.sources.filter(row=>row.version!=='1.0.19');
+      f.put('published-upgrades-'+target,'published-upgrades.json',critical);
+    }
+    const critical=run();assert.equal(critical.full_passed,false);
+    assert(critical.historical_upgrades.every(r=>r.profile==='critical'&&!r.all_published_sources_covered));
+    for(const target of f.targets)f.put('published-upgrades-'+target,'published-upgrades.json',f.upgradeReports[target]);
     for(const change of [j=>j.pop(),j=>j.push(j[0]),j=>j[0].conclusion='skipped',j=>j[0].conclusion='cancelled',j=>j[0].conclusion='failure',j=>j[0].status='in_progress',j=>j[0].run_attempt=1,j=>j[0].head_sha=f.spec.cli.source_sha,j=>j[0].run_id=900]) {
       const jobs=copy(f.jobs);change(jobs);assert.throws(()=>validatePublishedFull(f.spec,f.targets,f.manifestHash,root,jobs,f.context));
     }
     const first=f.targets[0],artifact='resident-concurrency-'+first,file='real-account-return-verification.json';
+    const checkpoint=Object.keys(f.upgradeReports[first].database_dev_checkpoints)[0];
+    for(const change of [r=>r.passed=false,r=>r.profile='unknown',r=>r.upgrade_contract='legacy-shim-v1',
+      r=>r.full_coverage=false,r=>r.all_published_sources_covered=false,r=>r.profile='critical',
+      r=>r.candidate_sha256='f'.repeat(64),r=>r.target='other',r=>r.published_formal_sources.push(r.published_formal_sources[0]),
+      r=>delete r.database_dev_checkpoints[checkpoint],r=>r.database_dev_checkpoints[checkpoint]='unapproved policy',
+      r=>{r.selected_sources=r.selected_sources.filter(tag=>tag!==checkpoint);r.sources=r.sources.filter(row=>'v'+row.version!==checkpoint);},
+      r=>{r.selected_sources=r.selected_sources.filter(tag=>tag!=='v1.0.19');r.sources=r.sources.filter(row=>row.version!=='1.0.19');},
+      r=>r.sources.pop(),r=>r.sources.push(r.sources[0]),r=>r.sources[0].passed=false,
+      r=>r.sources[0].upgrade_contract='legacy-shim-v1',r=>r.sources[0].formal=!r.sources[0].formal,
+      r=>{delete r.sources[0].passed;r.sources[0].status='not-applicable';r.sources[0].reason='not available';}]) {
+      const changed=copy(f.upgradeReports[first]);change(changed);
+      f.put('published-upgrades-'+first,'published-upgrades.json',changed);assert.throws(run);
+    }
+    f.put('published-upgrades-'+first,'published-upgrades.json',f.upgradeReports[first]);
+    for(const source of f.upgradeReports[first].sources) {
+      const changed=copy(f.upgradeReports[first]);changed.sources.find(row=>row.version===source.version).passed=false;
+      f.put('published-upgrades-'+first,'published-upgrades.json',changed);assert.throws(run,/Failed historical upgrade/);
+    }
+    f.put('published-upgrades-'+first,'published-upgrades.json',f.upgradeReports[first]);
+    for(const source of f.upgradeReports[first].sources) {
+      const upgradeFile='v'+source.version+'/results/real-account-return-verification.json';
+      for(const change of [r=>delete r.runtime_installed_after_legacy_data,r=>r.runtime_installed_after_legacy_data=false,
+        r=>r.runtime_installed_after_legacy_data='true',r=>delete r.legacy_handoff_actor,r=>r.legacy_handoff_actor='product',
+        r=>r.upgrade_contract='legacy-shim-v1',r=>r.passed=false,r=>r.runtime_binary_sha256='f'.repeat(64)]) {
+        const changed=copy(f.upgradedRuntime);change(changed);
+        f.put('published-upgrades-'+first,upgradeFile,[changed]);assert.throws(run);
+      }
+      f.put('published-upgrades-'+first,upgradeFile,[f.upgradedRuntime]);
+    }
+    const intel=f.targets.find(target=>target==='x86_64-apple-darwin');
+    const intelReport=copy(f.upgradeReports[intel]);
+    const gap=intelReport.sources.find(row=>row.status==='not-applicable');
+    gap.reason='invented gap';f.put('published-upgrades-'+intel,'published-upgrades.json',intelReport);
+    assert.throws(run,/Unapproved historical platform gap/);
+    f.put('published-upgrades-'+intel,'published-upgrades.json',f.upgradeReports[intel]);
+    for(const profile of ['full','critical']) {
+      const firstPlatform=copy(f.upgradeReports[intel]);
+      firstPlatform.profile=profile;firstPlatform.full_coverage=firstPlatform.all_published_sources_covered=profile==='full';
+      firstPlatform.published_formal_sources=['v1.0.19'];firstPlatform.first_platform_release=true;
+      firstPlatform.upgrade_status='not-applicable: first Intel macOS release; fresh inference is validated separately';
+      firstPlatform.selected_sources=firstPlatform.selected_sources.filter(tag=>tag!=='v1.0.20'&&(profile==='full'||tag!=='v1.0.19'));
+      firstPlatform.sources=firstPlatform.sources.filter(row=>firstPlatform.selected_sources.includes('v'+row.version));
+      f.put('published-upgrades-'+intel,'published-upgrades.json',firstPlatform);
+      const joined=run();assert.equal(joined.full_passed,profile==='full');
+      assert.equal(joined.historical_upgrades.find(r=>r.target===intel).passed.length,0);
+      firstPlatform.first_platform_release=false;f.put('published-upgrades-'+intel,'published-upgrades.json',firstPlatform);
+      assert.throws(run,/No actual applicable upgrade/);
+    }
+    f.put('published-upgrades-'+intel,'published-upgrades.json',f.upgradeReports[intel]);
     const producerReceipt=path.join(root,'published-assets-verification-'+first,'published-assets-receipt.json');
     const originalReceipt=readFileSync(producerReceipt);
     for(const kind of ['cli','runtime'])for(const field of ['run_id','run_attempt']){
@@ -800,7 +883,7 @@ test('published full joins every existing report and live image identity; copied
     for(const change of [r=>r.passed=false,r=>r.runtime_mode='explicit_cli_shim',r=>r.standalone_runtime_evidence=false,r=>r.runtime_binary_sha256='c'.repeat(64),r=>r.runtime_version='1.0.21-dev.3',r=>r.runtime_identity_receipts=[],r=>r.runtime_identity_receipts[0].pid=0,r=>delete r.runtime_identity_receipts[0].process_start_id,r=>r.runtime_identity_receipts[0].protocol_v=2,r=>delete r.runtime_identity_receipts[0].account_id,r=>r.runtime_identity_receipts[0].image_sha256='c'.repeat(64),r=>r.runtime_identity_receipts[0].bundle_sha256='c'.repeat(64),r=>r.runtime_identity_receipts[0].manifest_sha256='c'.repeat(64)]) {
       const row=copy(f.runtime);change(row);f.put(artifact,file,[row]);assert.throws(run);f.put(artifact,file,[f.runtime]);
     }
-    for(const [folder,name] of [['release-sweep-'+f.targets.find(t=>t.includes('linux')&&t!==first),'outbox-coverage.json'],['published-upgrades-'+first,'v1.0.20/results/real-account-return-verification.json'],['dev-api-coverage','published-api-identity.json'],['published-assets-verification-'+first,'published-assets-receipt.json']]) {
+    for(const [folder,name] of [['release-sweep-'+f.targets.find(t=>t.includes('linux')&&t!==first),'outbox-coverage.json'],...f.upgradeReports[first].sources.map(row=>['published-upgrades-'+first,'v'+row.version+'/results/real-account-return-verification.json']),['dev-api-coverage','published-api-identity.json'],['published-assets-verification-'+first,'published-assets-receipt.json']]) {
       const location=path.join(root,folder,name),bytes=readFileSync(location);rmSync(location);assert.throws(run);writeFileSync(location,bytes);
     }
     assert.equal(run().full_passed,true);

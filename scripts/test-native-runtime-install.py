@@ -56,18 +56,33 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
                 self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
 
-    def test_upgrade_fixture_installs_before_creating_legacy_session_state(self):
+    def test_upgrade_fixture_downloads_runtime_after_legacy_data_and_handoff(self):
         tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        installs = [node.lineno for node in calls if isinstance(node.func, ast.Name)
-                    and node.func.id in ('install_published_runtime', 'install_official_runtime')]
-        session_writes = [node.lineno for node in calls if isinstance(node.func, ast.Attribute)
-                          and node.func.attr == 'write_bytes'
-                          and any(isinstance(part, ast.Constant) and part.value == 'session.json'
-                                  for part in ast.walk(node.func.value))]
-        self.assertEqual(len(installs), 2)
-        self.assertTrue(session_writes)
-        self.assertLess(max(installs), min(session_writes))
+        branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)]
+        fresh = next(node for node in branches
+                     if ast.unparse(node.test) == 'not (args.seed_binary and args.runtime_binary)')
+        upgrade = next(node for node in branches
+                       if ast.unparse(node.test) == 'args.seed_binary and args.runtime_binary')
+        calls = [node for node in ast.walk(upgrade) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        install = next(node for node in calls if node.func.id == 'install_official_runtime')
+        stage = next(node for node in calls if node.func.id == 'stage_fixture_cli')
+        self.assertLess(stage.lineno, install.lineno)
+        session = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_bytes'
+                       and any(isinstance(part, ast.Constant) and part.value == 'session.json'
+                               for part in ast.walk(node.func.value)))
+        handoff = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == 'legacy_handoff_actor'
+                               for target in node.targets)
+                       and isinstance(node.value, ast.Constant) and node.value.value == 'fixture')
+        self.assertLess(fresh.end_lineno, session.lineno)
+        self.assertLess(session.lineno, handoff.lineno)
+        self.assertLess(handoff.lineno, install.lineno)
+        snapshot_assert = next(node for node in ast.walk(upgrade) if isinstance(node, ast.Assert)
+                               and any(isinstance(part, ast.Name) and part.id == 'legacy_data'
+                                       for part in ast.walk(node.test)))
+        self.assertGreater(snapshot_assert.lineno, install.lineno)
 
     def run_fixture(self, fault=None):
         with tempfile.TemporaryDirectory() as temporary:

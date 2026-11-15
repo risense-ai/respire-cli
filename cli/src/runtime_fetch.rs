@@ -1755,20 +1755,15 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
             || (semver_cmp(&manifest.version, required) == std::cmp::Ordering::Greater
                 && version_in_accept(&manifest.version))).then_some(binary)
     } else {
-        // Resolve configured paths read-only. This never imports records or
-        // turns the selected profile into request identity or migration authority.
-        let (_, profile) = respire_client_host::config::control_roots()
+        // Account data does not establish process ownership or authorize an unlock.
+        // Validate configured paths without opening or migrating the old database.
+        respire_client_host::config::control_roots()
             .context(LegacyRuntimeMigrationRequired)?;
         let records = [
             "runtime/endpoint.json",
             "runtime/autostart/registration.json",
-            "session.json",
-            "rsrs.db",
-            "onememory.db",
-        ].into_iter().map(|relative| installation_root().join(relative))
-            .chain(["session.json", "rsrs.db", "onememory.db"].into_iter()
-                .map(|name| profile.join(name)));
-        // Missing executable bytes do not prove a fresh installation.
+        ].into_iter().map(|relative| installation_root().join(relative));
+        // Unbound process and startup records still require an explicit handoff.
         for record in records {
             match fs::symlink_metadata(record) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

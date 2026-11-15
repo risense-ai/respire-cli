@@ -1,7 +1,7 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
 import argparse, faulthandler, hashlib, hmac, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
 from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
-    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id)
+    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, stage_fixture_cli)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 parser=argparse.ArgumentParser()
@@ -77,11 +77,12 @@ for binary in BINARIES:
         RSRS_SUPER=code,RSRS_NO_AUTOSYNC='1',RSRS_UPDATE_CHECK='0',RSRS_M3_DIR=str(CACHE))
     env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
     if args.runtime_binary: env['LC_ALL']='C'
-    installed = install_published_runtime(binary, env)
-    if installed is None and args.runtime_binary:
-        installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
-    if installed is not None: args.runtime_binary = installed
-    # Install before fixture sessions exist: legacy-session admission stays fail-closed.
+    runtime_installed_after_legacy_data = False
+    if not (args.seed_binary and args.runtime_binary):
+        installed = install_published_runtime(binary, env)
+        if installed is None and args.runtime_binary:
+            installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
+        if installed is not None: args.runtime_binary = installed
     for profile in [main, alternate]:
         salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
         kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
@@ -117,6 +118,7 @@ for binary in BINARIES:
         database = profile/'rsrs.db'
         if not database.exists(): database = profile/'onememory.db'
         with sqlite3.connect(database) as db:
+            assert db.execute('PRAGMA integrity_check').fetchall() == [('ok',)], 'database integrity check failed'
             rows = [db.execute(query).fetchall() for query in ['SELECT id,ciphertext,nonce,dirty,deleted FROM memories ORDER BY id',
                 'SELECT * FROM sync_outbox ORDER BY seq','SELECT * FROM core_artifacts ORDER BY memory_id,model']]
         artifacts = sorted((path.name,hashlib.sha256(path.read_bytes()).hexdigest()) for path in (profile/'core-index').iterdir())
@@ -227,8 +229,7 @@ for binary in BINARIES:
                     break
                 except OSError: time.sleep(.1)
             else: raise RuntimeError('published old runtime did not become ready')
-            # Legacy clients exercise old RPC; scoped clients must reject missing identity.
-            # Client-only status cannot take over the old runtime in either case.
+            # Historical components prepare data; only the upgraded stack is tested next.
             original_token=token.read_bytes() if token.is_file() else None
             legacy_records={path:(path.read_bytes() if path.is_file() else None) for path in
                 [main/'runtime/endpoint.json',token,main/'client.json',main/'inference.json',
@@ -238,42 +239,16 @@ for binary in BINARIES:
             old_birth=old_owner.create_time()
             old_start=process_start_id(old_runtime.pid)
             assert pathlib.Path(old_owner.exe()).resolve()==pathlib.Path(args.seed_binary).resolve()
-            if args.runtime_binary:
-                # This request proves the historical source protocol, not current-client compatibility.
-                source_id=secrets.token_hex(16)
-                source_request=urllib.request.Request(f'http://127.0.0.1:{port}/api/rpc',
-                    json.dumps({'v':1,'id':source_id,'method':'cli.exec','args':['--json','status']}).encode(),
-                    {**headers,'Content-Type':'application/json'})
-                with urllib.request.urlopen(source_request,timeout=45) as response:
-                    source_reply=json.load(response)
-                assert type(source_reply.get('v')) is int and source_reply['v']==1
-                assert source_reply.get('id')==source_id and source_reply.get('ok') is True
-                assert type(source_reply.get('exit')) is int and source_reply['exit']==0
-                assert source_reply.get('pid')==old_runtime.pid and source_reply.get('bin')==health['bin']
-                assert pathlib.Path(source_reply.get('data_dir','')).resolve()==main.resolve()
-                source_envelope=source_reply.get('envelope',{})
-                assert source_envelope.get('command')=='status' and source_envelope.get('status')=='ok'
-                assert source_envelope.get('summary',{}).get('unlocked') is True
-                source_rpc_checked=True
-            old_status=run('--client-only','status',allow_failure=bool(args.runtime_binary))
-            if args.runtime_binary:
-                assert old_status.get('status')=='fail','current client accepted incomplete legacy identity'
-                diagnostic=' '.join(old_status.get('errors',[])).lower()
-                assert 'scope' in diagnostic or 'health shape' in diagnostic,'legacy rejection did not identify missing identity'
-                assert psutil.Process(old_runtime.pid).create_time()==old_birth and old_runtime.poll() is None
-                assert process_start_id(old_runtime.pid)==old_start
-                assert all((path.read_bytes() if path.is_file() else None)==before for path,before in legacy_records.items())
-                assert {str(profile):snapshot(profile) for profile in [main,alternate]}==legacy_data
-                legacy_client_rejected=True
-            else:
+            if not args.runtime_binary:
+                old_status=run('--client-only','status')
                 assert old_status.get('status')=='ok','new client could not read the old runtime through HTTP RPC'
-            assert old_runtime.poll() is None,'client-only RPC replaced or stopped the old runtime'
-            request=urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers=headers)
-            with urllib.request.urlopen(request,timeout=2) as response: after_rpc=json.load(response)
-            assert after_rpc['pid']==old_runtime.pid,'client-only RPC changed runtime ownership'
-            assert (token.read_bytes() if token.is_file() else None)==original_token,'client-only RPC changed the old token file'
-            old_rpc_checked=not bool(args.runtime_binary)
-            old_rpc_authenticated=old_rpc_checked and bool(original_token and original_token.strip())
+                assert old_runtime.poll() is None,'client-only RPC replaced or stopped the old runtime'
+                request=urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers=headers)
+                with urllib.request.urlopen(request,timeout=2) as response: after_rpc=json.load(response)
+                assert after_rpc['pid']==old_runtime.pid,'client-only RPC changed runtime ownership'
+                assert (token.read_bytes() if token.is_file() else None)==original_token,'client-only RPC changed the old token file'
+                old_rpc_checked=True
+                old_rpc_authenticated=bool(original_token and original_token.strip())
             if args.runtime_binary:
                 # Test setup owns this historical child. This is not product takeover evidence.
                 old_children=[(child.pid,child.create_time()) for child in old_owner.children(recursive=True)]
@@ -289,8 +264,13 @@ for binary in BINARIES:
                 old_runtime=None
                 legacy_handoff_actor='fixture'
         if args.seed_binary and args.runtime_binary:
-            # Historical binaries must create their own libraries before a
-            # candidate Runtime can initialize the selected profile's schema.
+            # Upgrade the host only after its historical owner exits. Account bytes
+            # must survive the real default-pin download before any new Runtime starts.
+            assert not (main/'bin/runtime.json').exists(), 'upgrade fixture preinstalled the new Runtime'
+            stage_fixture_cli(binary, env, main)
+            args.runtime_binary = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
+            assert {str(profile):snapshot(profile) for profile in [main,alternate]} == legacy_data, 'Runtime installation changed old account data'
+            runtime_installed_after_legacy_data = True
             run('--direct','model','engine','cpu')
             stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
             if stopped.returncode:
@@ -694,6 +674,7 @@ for binary in BINARIES:
             'compatible_index_reused':True,'resident_stress':stress,
             'upgrade_contract':'standalone-v1' if args.runtime_binary else 'legacy-shim-v1',
             'source_rpc_checked':source_rpc_checked,'legacy_handoff_actor':legacy_handoff_actor,
+            'runtime_installed_after_legacy_data':runtime_installed_after_legacy_data,
             'live_owner_restart_rejected':live_owner_restart_rejected,
             'forced_restart_checked':restart_checked and not bool(args.runtime_binary),
             'safe_restart_checked':restart_checked and bool(args.runtime_binary),

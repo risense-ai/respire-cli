@@ -64,14 +64,24 @@ All eight targets in `runtime-control-contract.md` are supported. Every target
 requires the archive, metadata, naked legacy binary where applicable, and
 integrity evidence. Missing platform evidence blocks candidate promotion.
 
-## Migration admission: first preservation slice
+## Migration admission
 
-Automatic selection and CLI materialization now stop before replacing an
-unbound legacy installation. A different pinned version does not bypass
-verification of the existing Runtime selection. Existing endpoint, registration,
-session or database evidence is preserved even if the old executable disappeared.
-Configured profile paths are inspected read-only; they never supply request scope.
-A preferences-only fresh `client.json` does not establish a legacy owner.
+Automatic selection and CLI materialization stop before replacing an unbound
+legacy process or startup registration. A different pinned version does not
+bypass verification of the existing Runtime selection. Existing endpoint and
+registration records still require an explicit handoff even if the old executable
+disappeared. Configured profile paths are inspected read-only; they never supply
+request scope. Existing session and database files do not block installation of
+the new Runtime. Installation does not open the database, migrate it or authorize
+an unlock; those operations still require the host key and Runtime admission.
+
+Historical upgrade acceptance seeds both libraries with the historical binary,
+ends its fixture-owned process, stages the upgraded CLI, then uses that CLI's real
+default-pin download. No new Runtime is preinstalled before the historical data.
+The report requires verified installed bytes, unchanged ciphertext, sync work and
+session keys, and SQLite integrity checks before opening the upgraded libraries.
+This proves the stopped-library upgrade and download path, not automatic takeover
+of an old running process.
 
 A trusted Runtime archive does not establish the old host CLI's provenance.
 Replacing different stable CLI bytes therefore remains deferred until an explicit
@@ -119,8 +129,9 @@ python scripts/test-legacy-runtime-preservation.py \
 The native script starts only its isolated legacy child, checks install/update/
 start/restart/autostart deferral, then verifies the original PID, binary digest,
 endpoint, selection and registration/maintenance/takeover absence, and queries
-status with the actual old CLI. It separately checks that start/restart rejection
-leaves a stopped, session-only installation unchanged. Cleanup terminates only
+status with the actual old CLI. It separately checks that a stopped, session-only
+installation reaches the download boundary without changing the old session;
+the source-test switch deliberately disables the actual download. Cleanup terminates only
 that child. Fresh-install unit tests cover download admission and a synthetic
 verified Runtime plus mocked service manager with `enable(false)`; they do not
 prove a complete real download, service-manager registration or `--now` startup.
