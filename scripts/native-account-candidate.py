@@ -1293,7 +1293,7 @@ def run(args):
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
                     "legacy_host_transitions_not_verified")
-        if args.suite in ("g1-business", "g1-owned-stop"):
+        if args.suite == "g1-business":
             report["standalone_stop"] = standalone_stop_checks(captured, report["runtime_binary_sha256"])
         if args.owned_stop_mode:
             require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
