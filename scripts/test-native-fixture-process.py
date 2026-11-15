@@ -128,7 +128,7 @@ peak = 0
 lock = threading.Lock()
 def foreground_call(remaining, cancel):
     global active, peak
-    assert 0 < remaining <= 1
+    assert 0 < remaining <= 1, f'foreground timeout outside its one-second window: {remaining!r}'
     with lock:
         active += 1
         peak = max(peak, active)
