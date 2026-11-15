@@ -53,7 +53,7 @@ reports = []
 for binary in BINARIES:
     if args.runtime_binary: args.runtime_identity_receipts=[]
     root = BASE / ('account-return-real-' + str(time.time_ns()))
-    if os.name == 'posix':
+    if os.name == 'posix' and sys.platform != 'darwin':
         # Keep fixture paths short and isolated from the CI report
         # directory for cross-platform tools; keep the owned
         # fixture in a short workspace directory and retain reports in BASE.
@@ -78,23 +78,8 @@ for binary in BINARIES:
     env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
     if args.runtime_binary: env['LC_ALL']='C'
     runtime_installed_after_legacy_data = False
-    if not (args.seed_binary and args.runtime_binary):
-        installed = install_published_runtime(binary, env)
-        if installed is None and args.runtime_binary:
-            installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
-        if installed is not None: args.runtime_binary = installed
-    for profile in [main, alternate]:
-        salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
-        kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
-        session=json.dumps({'user':'fixture-'+str(time.time_ns()),'vault_version':4,'kdf_salt':salt.hex(),'wrapped_urk':AESGCM(kek).encrypt(nonce,urk,None).hex(),'urk_nonce':nonce.hex()}).encode()
-        (profile/'session.json').write_bytes(session)
-    seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
-    if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())
-    # Historical artifacts predate RSRS_*; keep their inputs explicit and
-    # isolated instead of accidentally testing the operator's default library.
-    for key, value in list(seed_env.items()):
-        if key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_')):
-            seed_env['ONEMEMORY_' + key[5:]] = value
+    keys=None
+    components_started=False
     def run(*args, allow_failure=False, timeout=120, cancel=None):
         result = captured_run([str(binary),'--json',*args],env=env,timeout=timeout,cancel=cancel)
         if result.returncode and not allow_failure: raise RuntimeError(result.stdout.decode(errors='replace')+result.stderr.decode(errors='replace'))
@@ -184,6 +169,32 @@ for binary in BINARIES:
                 assert time.monotonic()<deadline, 'owned Core worker survived its host: '+str(pid)
                 time.sleep(.02)
     try:
+        if sys.platform == 'darwin':
+            # Each isolated HOME needs its own verified default/search preferences.
+            keyring_spec=importlib.util.spec_from_file_location('upgrade_native_keyring',
+                pathlib.Path(__file__).with_name('dev-migration-keyring.py'))
+            keyring_backend=importlib.util.module_from_spec(keyring_spec)
+            keyring_spec.loader.exec_module(keyring_backend)
+            keys=keyring_backend.create(root/'keyring-home')
+            keys.configure_env(env)
+        components_started=True
+        if not (args.seed_binary and args.runtime_binary):
+            installed = install_published_runtime(binary, env)
+            if installed is None and args.runtime_binary:
+                installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
+            if installed is not None: args.runtime_binary = installed
+        for profile in [main, alternate]:
+            salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
+            kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
+            session=json.dumps({'user':'fixture-'+str(time.time_ns()),'vault_version':4,'kdf_salt':salt.hex(),'wrapped_urk':AESGCM(kek).encrypt(nonce,urk,None).hex(),'urk_nonce':nonce.hex()}).encode()
+            (profile/'session.json').write_bytes(session)
+        seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
+        if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())
+        # Historical artifacts predate RSRS_*; keep their inputs explicit and
+        # isolated instead of accidentally testing the operator's default library.
+        for key, value in list(seed_env.items()):
+            if key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_')):
+                seed_env['ONEMEMORY_' + key[5:]] = value
         if not (args.seed_binary and args.runtime_binary):
             run('--direct','model','engine','cpu')
             stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
@@ -681,7 +692,6 @@ for binary in BINARIES:
             'legacy_client_rejected':legacy_client_rejected,'old_rpc_checked':old_rpc_checked,
             'old_rpc_authenticated':old_rpc_authenticated,'initial_generation_changes':generation_changes,'fixture':str(root),
             **runtime_report(args,True)})
-        print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
     except Exception as error:
         reports.append({'binary':str(binary),'passed':False,'error':str(error)[:2000],
             **({'runtime_stop_failure':stop_failure} if stop_failure is not None else {})})
@@ -693,8 +703,9 @@ for binary in BINARIES:
             if inspector is not None: inspector.close()
         except Exception as error: cleanup_errors.append('inspector: '+str(error))
         try:
-            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
-            assert stopped.returncode==0,'owned runtime stop failed'
+            if components_started:
+                stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+                assert stopped.returncode==0,'owned runtime stop failed'
         except Exception as error: cleanup_errors.append('runtime: '+str(error))
         try:
             if args.expect_supervised_worker: confirm_workers_exited(worker_identities)
@@ -703,6 +714,15 @@ for binary in BINARIES:
             if old_runtime is not None and old_runtime.poll() is None:
                 old_runtime.terminate(); old_runtime.wait(timeout=15)
         except Exception as error: cleanup_errors.append('old runtime: '+str(error))
+        if keys is not None:
+            try:
+                reports[-1]['native_credential_cleanup']=keys.cleanup()
+                assert reports[-1]['native_credential_cleanup'].get('passed') is True \
+                    and not reports[-1]['native_credential_cleanup'].get('remaining_entries'), 'native credential cleanup failed'
+            except Exception as error:
+                reports[-1].setdefault('native_credential_cleanup',
+                    {'passed':False,'failure_code':type(error).__name__})
+                cleanup_errors.append('native credentials: '+str(error))
         if cleanup_errors:
             reports[-1]['passed']=False
             reports[-1]['cleanup_errors']=cleanup_errors
@@ -710,5 +730,8 @@ for binary in BINARIES:
         if args.runtime_binary and not reports[-1]['standalone_runtime_evidence']:
             reports[-1]['passed']=False
         (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
-        if cleanup_errors: raise RuntimeError('fixture cleanup failed: '+str(cleanup_errors))
+        if cleanup_errors and sys.exc_info()[0] is None:
+            raise RuntimeError('fixture cleanup failed: '+str(cleanup_errors))
+    assert reports[-1]['passed'], 'fixture evidence incomplete'
+    print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
 (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')
