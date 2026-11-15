@@ -193,47 +193,55 @@ The platform acceptance workflow uses disposable GitHub-hosted runner profiles;
 passing it does not establish physical reboot, logout/login, real-account keyring
 or model readiness on every machine.
 
-## Existing manual Windows sign-in setup
+## Upgrade regression sources
 
-For client-only tools after a restart, configure one host-owned Windows Task
-Scheduler task. It runs after the same Windows user signs in, so the user's
-selected profile and OS keyring remain available. This is a sign-in task, not a
-SYSTEM service before login. The CLI does not install it automatically.
+Published formal releases remain upgrade sources for the current DEV. The
+critical profile checks the latest applicable formal release; the full profile
+checks the supported historical formal releases. A DEV that changes persistent
+database schema or encoding becomes an additional mandatory upgrade checkpoint.
+This includes tables, columns, triggers, persisted index formats and encrypted
+record formats. Version numbers alone do not establish database compatibility.
+Unclassified historical DEV checkpoints remain covered until their database
+format has been audited. Do not remove them merely because their tag is a DEV.
 
-1. In an ordinary host terminal, run `rsrs status --json`, followed by
-   `rsrs --runtime-internal --status --json`. Verify the selected account and
-   running host. The first command installs/updates the managed native executable
-   and its verified runtime files in the installation's `bin` directory.
-2. Open **Task Scheduler → Create Task**. Name it **Respire host runtime**, select
-   your current Windows user, choose **Run only when user is logged on**, and
-   leave **Run with highest privileges** unchecked. No stored password is needed.
-3. Add **At log on** for that specific user. Add **Start a program** using the
-   absolute managed executable path (normally
-   `C:\Users\<your-user>\.rsrs\bin\rsrs.exe`) and arguments `status --json`.
-   Use the actual installation `bin` path if you configured another location.
-   Use your user home as **Start in**. Do not select an account subdirectory's
-   copy, a temporary build directory or a sandbox/client-only launcher.
-4. In **Settings**, allow on-demand execution and choose **Do not start a new
-   instance**. Disable the task's maximum-running-time stop condition: the
-   resident child must remain available. Power/battery conditions can delay a
-   task; choose these according to your own power policy.
-5. Run the task once. `status` performs normal host startup and then returns;
-   the owned runtime keeps running. Check **Last Run Result** and verify
-   `rsrs --runtime-internal --status --json` again before relying on a sandbox
-   connection. Repeat this check after your next sign-in.
+DEV releases with the same audited database format need no separate migration
+case just for launcher, download, credential custody or UI changes. Runtime
+restart locking, host unlock, login, sync, remember and recall remain independent
+required regressions. Unpublished draft artifacts are optional historical
+investigation inputs, enabled explicitly with `--include-legacy-baselines` in
+`test-published-upgrades.py`; they are not formal release coverage.
 
-After a CLI update, run the new host `rsrs status --json` once to update the
-managed executable used by the task. Custom `RSRS_DATA_DIR`, `RSRS_BIN_DIR` or
-port settings must also be present in the task's user environment; terminal-only
-variables are not inherited by Task Scheduler. The task uses the profile selected
-in the installation's `client.json`; it does not log in, generate keys or choose
-another account.
+Installing an older executable over a migrated database is not a verified
+rollback. Preserve the pre-migration backup and use the supported recovery path.
 
-To remove startup, disable/delete only your **Respire host runtime** task. Stop
-the existing owned runtime separately from a host terminal with
-`rsrs --runtime-internal --stop`. Client-only tools continue to leave lifecycle
-management to the host. `rsrs --runtime-internal --help` lists lifecycle flags
-without creating a profile or starting a runtime.
+## Host credentials and desktop startup
+
+The CLI owns native credential access: Windows Credential Manager, macOS
+Keychain, and Linux Secret Service or the existing kernel-keyring backend.
+Client2 uses that same CLI credential path instead of maintaining a second vault.
+The volatile Linux kernel keyring does not preserve credentials across a reboot;
+if no persistent credential is available, the encrypted library stays locked.
+Do not generate a replacement key to bypass an unavailable credential store.
+
+Enable CLI startup with `rsrs runtime autostart enable --now`. The registered
+entry starts the CLI supervisor, which verifies the Runtime owner and supplies
+available credentials over the private host channel. Runtime does not register
+itself with the operating system or read the native credential store. A direct
+Runtime restart without valid host input keeps its database locked.
+
+Alternatively, enable launch at login in Client2 and keep its automatic Runtime
+connection setting enabled. The OS starts Client2 with `--tray`; Client2 starts
+or reuses the verified Runtime and asks CLI `runtime unlock` to supply credentials
+when health reports `credential_state=required`. An unavailable keychain or
+missing key must be reported; a connected process alone does not prove that its
+library is unlocked. No password or private key belongs in startup arguments.
+
+The older manual Task Scheduler recipe that invoked `status` or
+`--runtime-internal` is historical. Inspect and disable only your own old task
+before enabling the managed registration; the CLI deliberately does not adopt or
+delete unknown tasks. Use `rsrs runtime autostart status --json` to inspect the
+managed registration, and `rsrs runtime autostart remove --stop` to remove it
+while preserving account data and credentials.
 
 The doctor injection count measures detected installed hosts, rather than every
 catalog target. Absent hosts are not failed injections; stale installed-host

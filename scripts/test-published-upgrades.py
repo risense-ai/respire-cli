@@ -14,8 +14,11 @@ parser.add_argument('--model-dir',required=not download_only)
 parser.add_argument('--legacy-model-dir',required=not download_only)
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
+parser.add_argument('--include-legacy-baselines',action='store_true',help='Manual historical diagnostics only: include unpublished draft and DEV baselines')
 add_runtime_arguments(parser)
 args=parser.parse_args()
+if (args.download_only or args.draft_baseline_cache) and not args.include_legacy_baselines:
+    parser.error('Draft baseline diagnostics require --include-legacy-baselines')
 if not args.download_only: runtime_inputs(args,[args.binary])
 upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
@@ -45,7 +48,7 @@ if not args.download_only and args.profile=='full' and 'v1.0.6' not in sources:
     sources[baseline['tag_name']]=baseline
 # The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
 additional_draft_baselines=[]
-if args.profile=='full' and 'v1.0.10' not in formal_sources:
+if args.include_legacy_baselines and args.profile=='full' and 'v1.0.10' not in formal_sources:
     # Draft assets retain their release/asset IDs even when the tag endpoint omits them.
     if args.draft_baseline_cache:
         assert args.draft_baseline_cache.resolve()==root,'draft cache must use the upgrade output directory'

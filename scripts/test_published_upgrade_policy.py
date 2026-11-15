@@ -173,6 +173,8 @@ class UpgradeProfileTest(unittest.TestCase):
             if download_only:
                 argv = [argv[0], "--download-only", "--target", self.target,
                         "--output-dir", str(root / "reports")]
+            if cache_draft or download_only:
+                argv += ["--include-legacy-baselines"]
             env = {key: value for key, value in os.environ.items()
                    if key not in ("RSRS_RUNTIME_BIN", "RSRS_ARTIFACT_SOURCE")
                    and not key.startswith("RSRS_PUBLISHED_")}
@@ -213,14 +215,14 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertFalse(report["all_published_sources_covered"])
         self.assertEqual(report["additional_draft_baselines"], [])
 
-    def test_default_full_keeps_all_stables_and_both_baselines(self):
+    def test_default_full_keeps_stables_and_conservative_dev_checkpoint(self):
         upgraded, report = self.run_fixture()
-        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.10", "v1.0.6-dev.37075716045"})
+        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045"})
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
         cached_upgrades, cached_report = self.run_fixture(cache_draft=True)
-        self.assertEqual(set(cached_upgrades), set(upgraded))
+        self.assertEqual(set(cached_upgrades), set(upgraded) | {"v1.0.10"})
         self.assertTrue(cached_report["all_published_sources_covered"])
         failed_upgrades, failed_report = self.run_fixture(cache_draft=True, corrupt_draft=True)
         self.assertNotIn("v1.0.10", failed_upgrades)

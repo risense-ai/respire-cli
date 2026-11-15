@@ -337,6 +337,11 @@ def main():
                 seeded = run([cli, '--json', 'keygen'], env)
                 if seeded.returncode:
                     raise RuntimeError('Synthetic host credential setup did not commit')
+                # keygen intentionally leaves its original transaction paused until
+                # public runtime start completes the verified key handoff.
+                started_seed = run([cli, '--json', 'runtime', 'start'], env)
+                if started_seed.returncode:
+                    raise RuntimeError('Synthetic credential setup Runtime did not become ready')
                 stopped_seed = run([cli, '--json', 'runtime', 'stop'], env)
                 if stopped_seed.returncode:
                     raise RuntimeError('Synthetic credential setup Runtime did not stop')
