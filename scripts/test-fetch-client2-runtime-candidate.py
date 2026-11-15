@@ -5,8 +5,12 @@ import io
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
+import sys
 import tarfile
 import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -100,6 +104,28 @@ class FixedCandidateChecks(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, 'draft/unready'):
                     candidate.read_freeze(path)
             self.assertEqual(list(Path(directory).iterdir()), [path])
+        workflow = (Path(__file__).resolve().parents[1] / '.github/workflows/client2-launcher-regression.yml').read_text(encoding='utf-8')
+        source, host = workflow.split('\n  source-checks:\n')[1].split('\n  real-host:\n')
+        self.assertNotIn('cargo build', source)
+        self.assertNotIn('gh release download', source)
+        self.assertIn("    if: github.event_name == 'workflow_dispatch'", host)
+        self.assertIn('    needs: source-checks', host)
+        self.assertNotIn('runtime-pin.json', host)
+        matrices = [json.loads(value) for value in re.findall(r"'(\[\{[^']+\}\])'", host)]
+        self.assertEqual([item['target'] for item in matrices[0]], [candidate.TARGET])
+        self.assertEqual(len(matrices[1]), 3)
+        selection = host.split('      - name: Require an explicit Runtime selection')[1].split('\n      - name: Reject an unready')[0]
+        program = textwrap.dedent(selection.split("python3 - <<'PY'\n")[1].split('\n          PY')[0])
+        for selected_candidate, release, accepted in [
+            ('false', '', False), ('true', 'v2.0.0-dev.99', False),
+            ('true', '', True), ('false', 'v2.0.0-dev.99', True),
+            ('false', 'v2.1.0', True), ('false', 'v2.0.0-dev.17', True),
+            ('false', 'latest', False), ('false', '2.0.0-dev.99', False),
+        ]:
+            with self.subTest(candidate=selected_candidate, release=release):
+                result = subprocess.run([sys.executable, '-c', program], capture_output=True, text=True,
+                                        env={**os.environ, 'USE_RUNTIME_CANDIDATE': selected_candidate, 'RUNTIME_RELEASE': release})
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
 
     def test_ready_requires_all_exact_fields(self):
         freeze, _ = synthetic()
