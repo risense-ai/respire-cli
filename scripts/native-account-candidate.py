@@ -28,6 +28,7 @@ MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle
 NATIVE_STOP_CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
 G1_BUSINESS_CASES = (
     CASE,
+    NATIVE_STOP_CASE,
     "diary_identity::remember_public_payload_covers_created_appended_and_merged",
     "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once",
 )
@@ -832,6 +833,68 @@ def cleanup_processes(root, hashes, observations=None):
     return cleaned
 
 
+def standalone_stop_checks(captured, runtime_sha256):
+    def records(marker):
+        return [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
+    stops = records(b"NATIVE_STOP_RAW ")
+    writes = records(b"NATIVE_ACCEPTED_WRITE_RAW ")
+    require(len(stops) == 2 and all(type(row.get("forced")) is bool for row in stops)
+            and {row["forced"] for row in stops} == {False, True} and len(writes) == 1,
+            "standalone_stop_case_inventory_mismatch")
+    observations = []
+    for row in [*stops, *writes]:
+        forced = row.get("forced") is True
+        write = row is writes[0]
+        health, receipt = row["runtime_identity"], row["final_receipt"]
+        require(row.get("schema") == 1 and row.get("evidence_class") == "native-raw"
+                and row.get("gate") == "not-evaluated" and row.get("startup_mode") == "standalone"
+                and health["image_sha256"] == runtime_sha256
+                and receipt["image_sha256"] == runtime_sha256
+                and all(receipt[key] == health[key] for key in
+                        ("installation_id", "instance_id", "account_id", "generation"))
+                and receipt["operation_id"] == row["accepted"]["operation_id"]
+                and row["accepted"]["state"] == "accepted"
+                and row["accepted"].get("deadline_ms") is None
+                and row["accepted"].get("timeout_state") is None,
+                "standalone_stop_identity_mismatch")
+        before, after = row["business_before_stop_ms"], row["business_held_after_stop_ms"]
+        require(type(before) is int and before > 4000 and type(after) is int and after > 0
+                and (forced or after > 4000) and row["provider_requests"] == 1
+                and row["same_key_result"]["code"] == "request_in_progress",
+                "standalone_stop_held_business_not_proven")
+        require(receipt["state"] == ("forced_timeout" if forced else "drained"),
+                "standalone_stop_final_state_mismatch")
+        if forced:
+            require(row.get("passed") is True and row["provider_http_status"] == 401
+                    and any(item["operation_id"] == row["business_result"]["operation_id"]
+                            and item["result"] == "unknown" for item in receipt["unfinished"])
+                    and row["held_health"]["inference"]["retired_worker"]["worker_reaped"] is True
+                    and row["force_requests"]
+                    and all(item["timeout_state"] == "forced_timeout"
+                            and item["operation_id"] == receipt["operation_id"]
+                            for item in row["force_requests"]),
+                    "standalone_force_outcome_not_proven")
+        else:
+            require(receipt["unfinished"] == [], "standalone_normal_stop_has_unfinished_work")
+            if write:
+                require(row["provider_http_status"] == 200 and row["encrypted_write_committed"] is True
+                        and row["plaintext_parent_matches_encrypted_payload"] is True,
+                        "standalone_accepted_write_not_committed")
+            else:
+                require(row.get("passed") is True and row["provider_http_status"] == 401
+                        and row["force_requests"] == [], "standalone_normal_stop_was_forced")
+        if not write:
+            require(row["stale_scope_result"]["code"] == "scope_mismatch"
+                    and row["restarted_receipt"]["state"] == "drained",
+                    "standalone_stop_restart_not_verified")
+        observations.append({"case": "accepted-write" if write else "explicit-force" if forced else "normal",
+            "startup_mode": "standalone", "business_before_stop_ms": before,
+            "business_held_after_stop_ms": after, "final_state": receipt["state"],
+            "provider_requests": row["provider_requests"], "encrypted_write_committed": write,
+            "forced_operation_remains_unknown": forced})
+    return {"passed": True, "observations": observations}
+
+
 CLIENT2_OWNED_SOURCE_SHA = "57bc070826949994c3f7ce9a64277160704bdfe5"
 OWNED_PROBE_FILES = ("diagnostics_darwin.go", "diagnostics_other.go", "host_operations.go", "main.go")
 
@@ -1067,9 +1130,10 @@ def run(args):
             cases = selected_cases(listing_text, args.suite, args.require_native_stop)
             report["required_cases"] = cases
             report["selected_case_count"] = len(cases)
+            report["selected_native_stop"] = NATIVE_STOP_CASE in cases
             test_args = ([*cases, "--exact", "--test-threads=1"]
                          if args.suite in ("account", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
-            if args.compatibility_host or diagnostic or stable_remote:
+            if args.compatibility_host or diagnostic or stable_remote or args.suite == "g1-business":
                 test_args.append("--show-output")
             command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
                 sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
@@ -1165,6 +1229,8 @@ def run(args):
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
                     "legacy_host_transitions_not_verified")
+        if args.suite == "g1-business":
+            report["standalone_stop"] = standalone_stop_checks(captured, report["runtime_binary_sha256"])
         if args.owned_stop_mode:
             require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
             report["owned_stop"]["observations"] = owned_stop_checks(captured, args.owned_stop_mode,

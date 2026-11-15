@@ -33,6 +33,46 @@ class CandidateFixtureTests(unittest.TestCase):
              "sha256": candidate.digest(resource)}]}
         self.save_core()
 
+    def test_standalone_stop_requires_real_identity_outcomes_and_exports_only_scalars(self):
+        identity = dict(image_sha256="a" * 64, installation_id="installation", instance_id="instance",
+                        account_id="account", generation=1)
+        common = dict(schema=1, evidence_class="native-raw", gate="not-evaluated", startup_mode="standalone",
+                      runtime_identity=identity, accepted=dict(operation_id="stop", state="accepted"),
+                      business_before_stop_ms=4201, business_held_after_stop_ms=4202,
+                      provider_requests=1, provider_http_status=401, same_key_result=dict(code="request_in_progress"),
+                      final_receipt=dict(identity, operation_id="stop", state="drained", unfinished=[]),
+                      unused_private_text="must-never-be-exported")
+        normal = dict(common, forced=False, passed=True, force_requests=[],
+                      stale_scope_result=dict(code="scope_mismatch"), restarted_receipt=dict(state="drained"))
+        forced = copy.deepcopy(normal)
+        forced.update(forced=True, business_result=dict(operation_id="write"),
+                      held_health=dict(inference=dict(retired_worker=dict(worker_reaped=True))),
+                      force_requests=[dict(operation_id="stop", timeout_state="forced_timeout")])
+        forced["final_receipt"].update(state="forced_timeout", unfinished=[dict(operation_id="write", result="unknown")])
+        write = dict(common, provider_http_status=200, encrypted_write_committed=True,
+                     plaintext_parent_matches_encrypted_payload=True)
+        rows = [normal, forced, write]
+        def captured(values):
+            return b"\n".join(marker + json.dumps(row).encode() for marker, row in zip(
+                (b"NATIVE_STOP_RAW ", b"NATIVE_STOP_RAW ", b"NATIVE_ACCEPTED_WRITE_RAW "), values))
+        report = candidate.standalone_stop_checks(captured(rows), "a" * 64)
+        self.assertTrue(report["passed"])
+        self.assertEqual({row["case"] for row in report["observations"]},
+                         {"normal", "explicit-force", "accepted-write"})
+        self.assertNotIn("must-never-be-exported", json.dumps(report))
+        for index, key, value in [(0, "runtime_identity", dict(identity, image_sha256="b" * 64)),
+                                  (0, "business_held_after_stop_ms", 4000),
+                                  (1, "forced", False), (1, "force_requests", []),
+                                  (1, "held_health", dict(inference=dict(retired_worker=dict(worker_reaped=False)))),
+                                  (2, "encrypted_write_committed", False),
+                                  (2, "provider_requests", 2)]:
+            broken = copy.deepcopy(rows)
+            broken[index][key] = value
+            with self.subTest(index=index, key=key), self.assertRaises(RuntimeError):
+                candidate.standalone_stop_checks(captured(broken), "a" * 64)
+        with self.assertRaisesRegex(RuntimeError, "standalone_stop_case_inventory_mismatch"):
+            candidate.standalone_stop_checks(captured(rows[:2]), "a" * 64)
+
     def test_owned_stop_options_are_diagnostic_current_source_only(self):
         from types import SimpleNamespace
         options = dict(owned_stop_mode="registered", client2_source=Path("source"),
@@ -254,7 +294,8 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertEqual(len(names), 30)
         listing = "\n".join(name + ": test" for name in names)
         self.assertEqual(candidate.selected_cases(listing, "account"), [candidate.CASE])
-        self.assertIn(candidate.CASE, candidate.selected_cases(listing, "g1-business"))
+        with self.assertRaisesRegex(RuntimeError, "g1_business_case_inventory_mismatch"):
+            candidate.selected_cases(listing, "g1-business")
         with self.assertRaisesRegex(RuntimeError, "original_account_case_missing"):
             candidate.selected_cases("\n".join(name + ": test" for name in names if name != candidate.CASE), "g1-business")
         self.assertEqual(candidate.selected_cases(listing, "full"), names)
@@ -262,6 +303,10 @@ class CandidateFixtureTests(unittest.TestCase):
         extended = names + [candidate.NATIVE_STOP_CASE]
         extended_listing = "\n".join(name + ": test" for name in extended)
         self.assertEqual(candidate.selected_cases(extended_listing, "full"), extended)
+        self.assertEqual(set(candidate.selected_cases(extended_listing, "g1-business")),
+                         set(candidate.G1_BUSINESS_CASES))
+        self.assertIn(candidate.CASE, candidate.G1_BUSINESS_CASES)
+        self.assertIn(candidate.NATIVE_STOP_CASE, candidate.G1_BUSINESS_CASES)
         self.assertEqual(candidate.selected_cases(extended_listing, "full", True), extended)
         self.assertEqual(candidate.selected_cases(extended_listing, "diagnostic-native-stop"), [candidate.NATIVE_STOP_CASE])
         with self.assertRaisesRegex(RuntimeError, "native_stop_business_case_missing"):
