@@ -332,6 +332,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CANDIDATE_MODE: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
+      INTEGRATION_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != '' }}
       RSRS_ENGINE: cpu
       # Several existing tests change process-global data-dir/language variables.
       # Their own parallel-request checks still create concurrent client threads.
@@ -556,7 +557,7 @@ jobs:
         run: node scripts/produce-required-tests.mjs prepare
       - name: Prepare official pinned standalone Runtime for lifecycle tests
         id: official-runtime-fixture
-        if: matrix.group == 'core' || matrix.group == 'runtime_smoke' || matrix.group == 'runtime_autostart'
+        if: env.CANDIDATE_MODE == 'true' || env.INTEGRATION_REQUESTED == 'true'
         shell: bash
         env:
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
@@ -649,12 +650,23 @@ jobs:
           const tests = metadata.packages.find(p => p.name === 'respire').targets.filter(t => t.kind.includes('test')).map(t => t.name);
           const isolated = ['runtime_smoke', 'runtime_autostart'];
           if (!isolated.every(name => tests.includes(name))) throw Error('Missing isolated coverage test target');
+          // These targets install or launch a real Runtime; source-only checks keep the library rules.
+          const product = ['model_maintenance', 'model_settings', 'private_controls', 'net_rpc_http'];
+          if (!product.every(name => tests.includes(name))) throw Error('Missing Runtime product test target');
+          const productRequested = process.env.CANDIDATE_MODE === 'true' || process.env.INTEGRATION_REQUESTED === 'true';
           const group = process.env.COVERAGE_GROUP;
           if (group !== 'core' && !isolated.includes(group)) throw Error('Unknown coverage group');
-          const selected = group === 'core' ? tests.filter(name => !isolated.includes(name)) : [group];
+          const selected = group === 'core'
+            ? tests.filter(name => !isolated.includes(name)).filter(name => productRequested || (!product.includes(name) && name !== 'runtime_help'))
+            : [group === 'runtime_autostart' && !productRequested ? 'runtime_help' : group];
+          if (!productRequested) {
+            assert.ok(!process.env.RSRS_RUNTIME_BIN, 'Source-only coverage cannot receive a Runtime fixture');
+            console.log('Source scope: real Runtime tests were not requested; no Runtime product acceptance is claimed. Run candidate validation or explicit integration after compatible Runtime publication and pin update.');
+          }
           const args = ['llvm-cov', '--locked', '-p', 'respire', '--no-report'];
           if (group === 'core') args.push('--lib', '--bins', '--examples');
           for (const name of selected) args.push('--test', name);
+          if (group === 'runtime_smoke' && !productRequested) args.push('--', '--skip', 'runtime_serves_status_and_stops', '--skip', 'unbound_explicit_runtime_restart_preserves_the_existing_owner');
           let status;
           if (group === 'core') {
             const candidateKeys = ['REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID', 'REQUIRED_CANDIDATE_SHA256'];
@@ -696,6 +708,12 @@ jobs:
           if (result.error) throw result.error;
           process.exit(status !== 0 ? status : (result.status ?? 1));
           NODE
+      - name: Retain pure RPC client checks without a Runtime fixture
+        if: matrix.group == 'core' && env.CANDIDATE_MODE != 'true' && env.INTEGRATION_REQUESTED != 'true'
+        run: |
+          set -euo pipefail
+          test -z "${RSRS_RUNTIME_BIN:-}"
+          cargo llvm-cov --locked -p respire --no-report --no-clean --test net_rpc_http -- client_
       # Product launcher coverage belongs only to explicitly requested new-stack
       # acceptance after Runtime publication/pin update, or frozen candidate validation.
       - uses: actions/checkout@v4

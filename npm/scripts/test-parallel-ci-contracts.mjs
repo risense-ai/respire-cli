@@ -20,6 +20,28 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/fail-fast: false/);assert.match(source,/RSRS_CORE_TEST_MODE: '1'/);
   assert.match(source,/targets.filter\(t => t.kind.includes\('test'\)\)/);
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
+  assert.match(source,/INTEGRATION_REQUESTED: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != '' \}\}/);
+  const selectionProgram=source.split("          const tests = metadata.packages")[1].split("          const args = ")[0];
+  assert(selectionProgram,'coverage selection must remain reviewable');
+  const productTargets=['model_maintenance','model_settings','private_controls','net_rpc_http'];
+  const targets=['capabilities','control_contract_fixtures',...productTargets,'runtime_help','runtime_smoke','runtime_autostart'];
+  const selectTargets=(candidate,integration,group='core',available=targets)=>runInNewContext(
+    `const tests = metadata.packages${selectionProgram}; JSON.stringify(selected)`,
+    {assert,metadata:{packages:[{name:'respire',targets:available.map(name=>({name,kind:['test']}))}]},
+      process:{env:{CANDIDATE_MODE:candidate,INTEGRATION_REQUESTED:integration,COVERAGE_GROUP:group}},console:{log:()=>{}}});
+  assert.deepEqual(JSON.parse(selectTargets('false','false')),['capabilities','control_contract_fixtures']);
+  for(const [candidate,integration] of [['true','false'],['false','true'],['true','true']])
+    assert.deepEqual(JSON.parse(selectTargets(candidate,integration)),['capabilities','control_contract_fixtures',...productTargets,'runtime_help']);
+  assert.deepEqual(JSON.parse(selectTargets('false','false','runtime_smoke')),['runtime_smoke']);
+  assert.deepEqual(JSON.parse(selectTargets('false','false','runtime_autostart')),['runtime_help']);
+  assert.throws(()=>selectTargets('true','false','core',targets.filter(name=>name!=='model_maintenance')),/Missing Runtime product test target/);
+  assert.match(source,/no Runtime product acceptance is claimed/);
+  const runtimeFixture=source.split('- name: Prepare official pinned standalone Runtime for lifecycle tests\n')[1].split('\n      - ')[0];
+  assert.match(runtimeFixture,/if: env.CANDIDATE_MODE == 'true' \|\| env.INTEGRATION_REQUESTED == 'true'/);
+  const pureRpc=source.split('- name: Retain pure RPC client checks without a Runtime fixture\n')[1].split('\n      - ')[0];
+  assert.match(pureRpc,/if: matrix.group == 'core' && env.CANDIDATE_MODE != 'true' && env.INTEGRATION_REQUESTED != 'true'/);
+  assert.match(pureRpc,/test -z "\$\{RSRS_RUNTIME_BIN:-\}"/);
+  assert.match(pureRpc,/--no-report --no-clean --test net_rpc_http -- client_/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/if \(process.env.CANDIDATE_MODE !== 'true' \|\| group === 'runtime_autostart'\) process.exit\(status\)/);
   assert.match(source,/process.exit\(status !== 0 \? status : \(result.status \?\? 1\)\)/);
@@ -201,7 +223,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
   }
   assert.deepEqual(selected.sort(),allTests.sort(),'every integration target must run exactly once');
-  // Source mode runs the same CLI selection but must never dispatch a Runtime harness.
+  // Source mode retains pure rules and frontend tests without injecting or dispatching a Runtime.
   for(const group of ['core','runtime_smoke','runtime_autostart'])for(const status of [0,23]){
     const exits=[],calls=[];
     assert.throws(()=>runInNewContext(program,{
@@ -212,6 +234,13 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       process:{env:{CANDIDATE_MODE:'false',COVERAGE_GROUP:group},exit:value=>{exits.push(value);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[status]);assert.equal(calls.length,1);
+    const args=Array.from(calls[0]);
+    if(group==='core'){
+      for(const target of ['model_maintenance','model_settings','private_controls','net_rpc_http','runtime_help'])assert(!args.includes(target),target);
+      for(const flag of ['--lib','--bins','--examples'])assert(args.includes(flag));
+    }else if(group==='runtime_smoke'){
+      assert.deepEqual(args.slice(args.indexOf('--test')),['--test','runtime_smoke','--','--skip','runtime_serves_status_and_stops','--skip','unbound_explicit_runtime_restart_preserves_the_existing_owner']);
+    }else assert.deepEqual(args.slice(args.indexOf('--test')),['--test','runtime_help']);
   }
   assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands/);
   for(const lane of [workspace,source]){
