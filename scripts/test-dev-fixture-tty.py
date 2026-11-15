@@ -25,10 +25,10 @@ def fixture_env(root):
 
 
 def descendant_exited(status):
-    """Read once: reaping can remove /proc status between exists() and open()."""
+    """A reaped /proc entry can disappear during either open or read."""
     try:
         state = status.read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
     return "State:\tZ" in state
 
@@ -155,10 +155,14 @@ print(json.dumps({"status": "ok"}))
         def disappeared():
             raise FileNotFoundError("synthetic reaped descendant")
 
+        def reaped_while_reading():
+            raise ProcessLookupError("synthetic reaped descendant")
+
         def denied():
             raise PermissionError("synthetic inaccessible status")
 
         self.assertTrue(descendant_exited(SimpleNamespace(read_text=disappeared)))
+        self.assertTrue(descendant_exited(SimpleNamespace(read_text=reaped_while_reading)))
         self.assertTrue(descendant_exited(SimpleNamespace(read_text=lambda: "State:\tZ (zombie)\n")))
         self.assertFalse(descendant_exited(SimpleNamespace(read_text=lambda: "State:\tS (sleeping)\n")))
         with self.assertRaises(PermissionError):
