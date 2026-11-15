@@ -198,7 +198,7 @@ class CandidateFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "owned_stop_case_inventory_mismatch"):
                 candidate.owned_stop_checks(capture(values), "client2-owned", "a" * 64, "b" * 64, cli_sha256="d" * 64)
         for field, value in (("stop_sender", "private-canary"), ("caller_timeout_ms", "private-canary"),
-                             ("caller_timeout_ms", True), ("caller_timeout_ms", 29999)):
+                             ("caller_timeout_ms", True), ("caller_timeout_ms", 34999)):
             invalid = copy.deepcopy(rows)
             invalid[1][field] = value
             payload = b"\n".join(b"NATIVE_CLIENT2_STOP_RAW " + json.dumps(row).encode() for row in invalid)

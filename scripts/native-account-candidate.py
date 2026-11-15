@@ -1039,7 +1039,7 @@ def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256, *, cli_sha25
         require(row.get("stop_sender") == expected_sender, "owned_stop_sender_mismatch")
         timeout = row.get("caller_timeout_ms")
         require(timeout is None if row["case"] == "normal" else
-                type(timeout) is int and (35000 if mode == "registered" else 30000) <= timeout <= 60000,
+                type(timeout) is int and 35000 <= timeout <= 60000,
                 "owned_stop_caller_timeout_invalid")
         forced = row["case"] == "explicit-force"
         require(row.get("encrypted_write_committed") is (not forced)
