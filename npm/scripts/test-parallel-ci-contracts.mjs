@@ -312,10 +312,10 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     assert.match(lane,/RSRS_CORE_SDK_DIR: \$\{\{ env.RSRS_RUNTIME_CORE_SDK_DIR \}\}/);
     assert.doesNotMatch(lane,/restore-keys:|secrets\./);
   }
-  assert(source.indexOf('mv .sdk/x86_64-unknown-linux-gnu')<source.indexOf('id: cli-sdk\n'));
-  assert(source.indexOf('id: cli-sdk\n')<source.indexOf('node scripts/produce-required-tests.mjs prepare'));
-  assert.match(source,/Download frozen candidate and original SDK bytes/);
-  assert.match(source,/RSRS_CORE_SDK_DIR=\$\{sdk\}/);
+  assert(source.indexOf('mv .sdk/x86_64-unknown-linux-gnu')<source.indexOf('node scripts/produce-required-tests.mjs prepare'));
+  assert.doesNotMatch(source,/id: cli-sdk|Key the CLI candidate SDK|Audit the CLI candidate SDK/);
+  assert.match(source,/Download frozen frontend candidate identity/);
+  assert.doesNotMatch(source,/`RSRS_CORE_SDK_DIR=\$\{sdk\}/);
   assert.match(integration,/needs: coverage-tests/);
   assert.match(integration,/node scripts\/fetch-runtime-test-bundle\.mjs source/);
   assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);

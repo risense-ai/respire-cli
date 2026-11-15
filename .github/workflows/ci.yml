@@ -35,11 +35,11 @@ on:
         required: false
         type: string
       required_candidate_run_id:
-        description: Same-source run containing the frozen candidate and original CLI SDK archive
+        description: Same-source run containing the frozen candidate for the frontend CLI
         required: false
         type: string
       required_candidate_artifact_id:
-        description: Exact same-repository input artifact ID containing candidate.json and sdk.tar.gz
+        description: Exact same-repository input artifact ID containing only candidate.json
         required: false
         type: string
       required_candidate_sha256:
@@ -497,7 +497,7 @@ jobs:
           assert.equal(String(artifact.workflow_run?.id), env.REQUIRED_CANDIDATE_RUN_ID);
           assert.equal(artifact.workflow_run?.head_sha, env.GITHUB_SHA);
           NODE
-      - name: Download frozen candidate and original SDK bytes
+      - name: Download frozen frontend candidate identity
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         uses: actions/download-artifact@v4
         with:
@@ -506,37 +506,6 @@ jobs:
           artifact-ids: ${{ inputs.required_candidate_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/required-tests-candidate-input
-      - name: Key the CLI candidate SDK independently
-        id: cli-sdk-key
-        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
-        run: echo "key=$(node scripts/sdk-ci-cache.mjs key x86_64-unknown-linux-gnu)" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: cli-sdk
-        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
-        with:
-          path: .sdk/x86_64-unknown-linux-gnu
-          key: ${{ steps.cli-sdk-key.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Audit the CLI candidate SDK without replacing its original archive evidence
-        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
-        env:
-          EXPECTED_KEY: ${{ steps.cli-sdk-key.outputs.key }}
-          MATCHED_KEY: ${{ steps.cli-sdk.outputs.cache-matched-key }}
-        run: |
-          set -euo pipefail
-          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
-          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
-          node --input-type=module <<'NODE'
-          import {appendFileSync, readFileSync} from 'node:fs';
-          import {resolve} from 'node:path';
-          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
-          const target = 'x86_64-unknown-linux-gnu';
-          const sdk = resolve('.sdk', target);
-          const entry = JSON.parse(readFileSync('sdk/core-sdk.lock.json', 'utf8')).targets[target];
-          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
-          appendFileSync(process.env.GITHUB_ENV, `RSRS_CORE_SDK_DIR=${sdk}\n`);
-          NODE
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -552,7 +521,7 @@ jobs:
         run: |
           node scripts/rust-ci-cache.mjs restore coverage
           cargo llvm-cov clean --profraw-only
-      - name: Bind candidate and actual SDK bytes before source execution
+      - name: Bind frontend candidate before source execution
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         run: node scripts/produce-required-tests.mjs prepare
       - name: Prepare official pinned standalone Runtime for lifecycle tests
