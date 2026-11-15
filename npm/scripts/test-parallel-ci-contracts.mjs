@@ -41,7 +41,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   const pureRpc=source.split('- name: Retain pure RPC client checks without a Runtime fixture\n')[1].split('\n      - ')[0];
   assert.match(pureRpc,/if: matrix.group == 'core' && env.CANDIDATE_MODE != 'true' && env.INTEGRATION_REQUESTED != 'true'/);
   assert.match(pureRpc,/test -z "\$\{RSRS_RUNTIME_BIN:-\}"/);
-  assert.match(pureRpc,/--no-report --no-clean --test net_rpc_http -- client_/);
+  assert.match(pureRpc,/--no-report --test net_rpc_http -- client_/);
+  assert.doesNotMatch(pureRpc,/--no-clean/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/if \(process.env.CANDIDATE_MODE !== 'true' \|\| group === 'runtime_autostart'\) process.exit\(status\)/);
   assert.match(source,/process.exit\(status !== 0 \? status : \(result.status \?\? 1\)\)/);

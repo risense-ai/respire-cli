@@ -715,7 +715,7 @@ jobs:
         run: |
           set -euo pipefail
           test -z "${RSRS_RUNTIME_BIN:-}"
-          cargo llvm-cov --locked -p respire --no-report --no-clean --test net_rpc_http -- client_
+          cargo llvm-cov --locked -p respire --no-report --test net_rpc_http -- client_
       # Product launcher coverage belongs only to explicitly requested new-stack
       # acceptance after Runtime publication/pin update, or frozen candidate validation.
       - uses: actions/checkout@v4
