@@ -2513,11 +2513,17 @@ mod tests {
             std::env::set_var("RSRS_DATA_DIR", &root);
             std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
             fs::write(root.join("session.json"), b"legacy session")?;
+            let endpoint = root.join("runtime/endpoint.json");
+            fs::create_dir_all(endpoint.parent().context("legacy endpoint parent missing")?)?;
+            let owner = br#"{"v":1,"pid":0}"#;
+            fs::write(&endpoint, owner)?;
             let error = execute(&command).err().context("unbound legacy start was accepted")?;
             anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
             anyhow::ensure!(fs::read(root.join("session.json"))? == b"legacy session");
-            anyhow::ensure!(!root.join("runtime").exists(), "rejection created takeover state");
-            anyhow::ensure!(fs::read_dir(&root)?.count() == 1);
+            anyhow::ensure!(fs::read(&endpoint)? == owner);
+            anyhow::ensure!(!root.join("runtime/takeover").exists(), "rejection created takeover state");
+            anyhow::ensure!(fs::read_dir(&root)?.count() == 2);
+            anyhow::ensure!(fs::read_dir(root.join("runtime"))?.count() == 1);
         }
 
         let directory = tempfile::tempdir()?;
@@ -2526,14 +2532,18 @@ mod tests {
         std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
         crate::runtime_fetch::require_automatic_migration_safe()?;
         let _ownership = crate::runtime_policy::takeover_lock()?;
-        // Model state appearing after initial admission. The lock is coordination
-        // metadata and must not be removed as a cleanup response to this refusal.
+        // Unbound endpoint appearing after initial admission. The lock is
+        // coordination metadata and must not be removed after this refusal.
         fs::write(root.join("session.json"), b"late legacy session")?;
+        let endpoint = root.join("runtime/endpoint.json");
+        let owner = br#"{"v":1,"pid":0}"#;
+        fs::write(&endpoint, owner)?;
         let error = start_explicit_locked().err().context("locked start skipped its second check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
         let error = restart_maintenance_locked().err().context("restart maintenance skipped its check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
         anyhow::ensure!(fs::read(root.join("session.json"))? == b"late legacy session");
+        anyhow::ensure!(fs::read(&endpoint)? == owner);
         anyhow::ensure!(root.join("runtime/takeover/lock.db").is_file());
         anyhow::ensure!(!control_path(&root).exists() && !marker_path(&root).exists());
         anyhow::ensure!(!crate::runtime_fetch::manifest_path().exists());
