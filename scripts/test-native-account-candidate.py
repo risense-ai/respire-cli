@@ -172,6 +172,25 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertEqual(len(result["owned_stop_checkpoints"]), 128)
         ignored = candidate.safe_failure_diagnostics(captured([event]), [])
         self.assertEqual(ignored["owned_stop_checkpoints"], [])
+        for message, expected in (
+                ("systemd user session unavailable", "owned_registered_systemd_unavailable"),
+                ("systemd unit load state is unavailable or unexpected", "owned_registered_systemd_load_state_invalid"),
+                ("systemd unit path missing", "owned_registered_systemd_unit_path_missing"),
+                ("unknown systemd user unit path", "owned_registered_systemd_unit_path_mismatch"),
+                ("systemd loaded working directory differs from this installation", "owned_registered_systemd_working_directory_mismatch"),
+                ("systemd unit object unavailable", "owned_registered_systemd_unit_object_missing"),
+                ("unexpected systemd unit object", "owned_registered_systemd_unit_object_invalid"),
+                ("systemctl current-user operation failed", "owned_registered_systemctl_failed"),
+                ("busctl current-user operation failed", "owned_registered_busctl_failed")):
+            private = captured([event]) + b"\n" + message.encode() + b" private-canary\n"
+            result = candidate.safe_failure_diagnostics(private, [candidate.NATIVE_STOP_CASE])
+            with self.subTest(message=message):
+                self.assertEqual(result["failure_codes"][candidate.NATIVE_STOP_CASE], [expected])
+                self.assertNotIn("private-canary", json.dumps(result))
+        private = captured([event]) + b"\nREGISTERED_LIFECYCLE_ERROR private-canary\n"
+        result = candidate.safe_failure_diagnostics(private, [candidate.NATIVE_STOP_CASE])
+        self.assertEqual(result["failure_codes"][candidate.NATIVE_STOP_CASE], ["unknown_private_failure"])
+        self.assertNotIn("private-canary", json.dumps(result))
 
     def test_login_receipt_failure_reports_only_fixed_code(self):
         captured = (b"failures:\n---- " + candidate.CASE.encode() + b" stdout ----\n"
