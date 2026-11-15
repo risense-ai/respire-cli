@@ -131,7 +131,7 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
     )?;
     let stale = if health.is_none() && endpoint_path().try_exists()? {
-        Some(crate::autostart::StaleOwner::prepare_locked()
+        Some(crate::autostart::StaleOwner::prepare_restart_locked()
             .context("runtime restart blocked: stale owner could not be verified")?)
     } else {
         None

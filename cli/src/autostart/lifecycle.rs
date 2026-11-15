@@ -2741,6 +2741,118 @@ mod tests {
             save(&mut changed)?;
             anyhow::ensure!(stale.remove_endpoint_locked().is_err());
             anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            let rejected = super::super::StaleOwner::prepare_locked()
+                .err().context("manual stop unexpectedly passed ordinary recovery")?;
+            anyhow::ensure!(format!("{rejected:#}").contains("registration changed since the consumed launch"));
+            anyhow::ensure!(super::super::StaleOwner::prepare_restart_locked().is_err());
+
+            let health: Value = serde_json::from_slice(&record)?;
+            let forced = json!({
+                "schema_version":1, "protocol_version":crate::rpc::PROTOCOL_V,
+                "operation_id":"stop-id-unknown-to-restart", "state":"forced_timeout",
+                "installation_id":health["installation_id"], "instance_id":health["instance_id"],
+                "pid":health["pid"], "process_start_id":health["process_start_id"],
+                "image_path":health["image_path"], "image_sha256":health["image_sha256"],
+                "runtime_version":health["runtime_version"], "account_id":health["account_id"],
+                "generation":health["generation"],
+                "unfinished":[{"operation_id":"unknown-write", "result":"unknown"}],
+            });
+            let stop_path = root.join("runtime").join(format!("stop-{instance}.json"));
+            for (field, invalid) in [
+                ("schema_version", json!(2)), ("protocol_version", json!(0)),
+                ("operation_id", json!("")), ("state", json!("drained")),
+                ("installation_id", json!("foreign")), ("instance_id", json!("foreign")),
+                ("pid", json!(std::process::id())), ("process_start_id", json!("reused")),
+                ("image_path", json!("foreign")), ("image_sha256", json!("foreign")),
+                ("runtime_version", json!("foreign")), ("account_id", json!("foreign")),
+                ("generation", json!(8)),
+                ("unfinished", json!([{"operation_id":"unknown-write", "result":"completed"}])),
+                ("unfinished", json!([{"operation_id":"", "result":"unknown"}])),
+            ] {
+                let mut invalid_receipt = forced.clone();
+                invalid_receipt[field] = invalid;
+                fs::write(&stop_path, serde_json::to_vec(&invalid_receipt)?)?;
+                anyhow::ensure!(super::super::StaleOwner::prepare_restart_locked().is_err(),
+                    "accepted invalid forced stop field {field}");
+                anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            }
+            let mut aborted = forced.clone();
+            aborted["unfinished"] = json!([{"operation_id":"aborted-write", "result":"aborted"}]);
+            fs::write(&stop_path, serde_json::to_vec(&aborted)?)?;
+            super::super::StaleOwner::prepare_restart_locked()?;
+            let forced_bytes = serde_json::to_vec(&forced)?;
+            fs::write(&stop_path, &forced_bytes)?;
+            state.borrow_mut().running = true;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("running supervisor was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("registered supervisor still reports running"));
+            state.borrow_mut().running = false;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", crate::net_rpc::rpc_port()))?;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("active listener was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("loopback listener is alive"));
+            drop(listener);
+            let unconsumed = claim.with_file_name(format!("launch-{instance}.json"));
+            fs::write(&unconsumed, grant.as_bytes())?;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("unconsumed launch authorization was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("consumed launch authorization is still present"));
+            fs::remove_file(&unconsumed)?;
+            struct LiveChild(std::process::Child);
+            impl Drop for LiveChild {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let child = LiveChild(std::process::Command::new("sleep").arg("300").spawn()?);
+            let live_pid = child.0.id();
+            let live_birth = manager::process_birth(live_pid)?.context("live child birth missing")?;
+            for live_runtime in [true, false] {
+                let mut live_receipt: Value = serde_json::from_slice(&receipt)?;
+                let mut live_health = health.clone();
+                let mut live_stop = forced.clone();
+                if live_runtime {
+                    live_receipt["pid"] = json!(live_pid);
+                    live_receipt["process_start_id"] = json!(live_birth);
+                    live_health["pid"] = json!(live_pid);
+                    live_health["process_start_id"] = json!(format!("linux-starttime-{live_birth}"));
+                    live_stop["pid"] = live_health["pid"].clone();
+                    live_stop["process_start_id"] = live_health["process_start_id"].clone();
+                } else {
+                    let mut live_grant: Value = serde_json::from_str(&grant)?;
+                    live_grant["supervisor_pid"] = json!(live_pid);
+                    live_grant["supervisor_birth"] = json!(live_birth);
+                    let live_grant = serde_json::to_string(&live_grant)?;
+                    live_receipt["grant_sha256"] = json!(hash(live_grant.as_bytes()));
+                    live_receipt["grant_json"] = json!(live_grant);
+                }
+                let live_receipt = serde_json::to_vec(&live_receipt)?;
+                live_health["launch_receipt_sha256"] = json!(hash(&live_receipt));
+                let live_health = serde_json::to_vec(&live_health)?;
+                fs::write(&claim, &live_receipt)?;
+                fs::write(&endpoint, &live_health)?;
+                fs::write(&stop_path, serde_json::to_vec(&live_stop)?)?;
+                let error = super::super::StaleOwner::prepare_restart_locked()
+                    .err().context("live process was accepted")?;
+                anyhow::ensure!(format!("{error:#}").contains("old runtime or supervisor is still alive"));
+                anyhow::ensure!(fs::read(&endpoint)? == live_health && fs::read(&claim)? == live_receipt);
+            }
+            fs::write(&claim, &receipt)?;
+            fs::write(&endpoint, &record)?;
+            fs::write(&stop_path, &forced_bytes)?;
+            let stale = super::super::StaleOwner::prepare_restart_locked()?;
+            fs::write(&stop_path, b"changed after verification")?;
+            anyhow::ensure!(stale.remove_endpoint_locked().is_err());
+            anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            fs::write(&stop_path, &forced_bytes)?;
+            let stale = super::super::StaleOwner::prepare_restart_locked()?;
+            let mut recovering = restart_maintenance_locked()?;
+            stale.remove_endpoint_locked()?;
+            recovering.finish()?;
+            anyhow::ensure!(!endpoint.exists() && fs::read(&claim)? == receipt
+                && fs::read(&stop_path)? == forced_bytes && !root.join("rsrs.db").exists());
+            fs::write(&endpoint, &record)?;
             fs::write(control_path(&root), &registration)?;
             super::super::StaleOwner::prepare_locked()?.remove_endpoint_locked()?;
             anyhow::ensure!(!endpoint.exists() && fs::read(&claim)? == receipt && !root.join("rsrs.db").exists());
