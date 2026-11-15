@@ -162,13 +162,13 @@ test('supported Linux ARM targets require native runners, every source feedback 
       s=>s.selected.release=null,s=>s.selected.release.metadata_sha256='b'.repeat(64),s=>s.sameImage=true,s=>s.hosted='false',
       s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])await assert.rejects(()=>simulate(change));
   }
-  for(const name of ['Verify the latest formal release upgrades automatically','Verify resident foreground and background inference under concurrent CLI load']) {
+  for(const name of ['Verify selected formal release and database DEV upgrades','Verify resident foreground and background inference under concurrent CLI load']) {
     const consumer=step(name);
     for(const [key,output,published] of [['BIN','path','RSRS_RUNTIME_BIN'],['SHA256','sha256','RSRS_PUBLISHED_RUNTIME_SHA256'],['VERSION','version','RSRS_PUBLISHED_RUNTIME_VERSION']])assert(consumer.includes(`NATIVE_RUNTIME_${key}: \u0024{{ inputs.artifact_source == 'published-assets' && env.${published} || steps.pinned-runtime.outputs.${output} }}`));
     assert.match(consumer,/test -n "\$NATIVE_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
     assert.match(consumer,/--runtime-binary "\$NATIVE_RUNTIME_BIN" --runtime-sha256 "\$NATIVE_RUNTIME_SHA256" --runtime-version "\$NATIVE_RUNTIME_VERSION"/);
   }
-  assert.match(step('Verify the latest formal release upgrades automatically'),/GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(step('Verify selected formal release and database DEV upgrades'),/GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.doesNotMatch(native,/RSRS_ARTIFACT_SOURCE: published-assets|RSRS_PUBLISHED_ASSETS_SHA256:|RSRS_PUBLISHED_BUNDLE_SHA256:/);
   const account=readFileSync(new URL('../../scripts/test-real-m3-account-switch.py',import.meta.url),'utf8');
   assert.match(account,/if key not in \('GH_TOKEN', 'GITHUB_TOKEN'\)/);
@@ -328,7 +328,7 @@ test('workflow defaults critical, retains mandatory profile gates and dispatches
   assert.doesNotMatch(part('api-smoke'),/validation_profile == 'full'/);
   assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
   assert.doesNotMatch(part('publication-ready'),/channel == 'latest' \|\| github.event_name/);
-  assert.match(native,/default: full/);assert(native.includes('--profile critical'));
+  assert.match(native,/default: full/);assert(native.includes('--profile "$UPGRADE_PROFILE"'));assert(native.includes('UPGRADE_PROFILE: ${{ inputs.validation_profile }}'));
   assert(native.indexOf('Target producer concluded')<native.indexOf('const artifacts=inventory.artifacts.filter'));
   assert.match(native,/artifacts.length>1/);assert.match(native,/current.run_attempt!==attempt/);assert.match(native,/job.conclusion==='success'/);
   assert.match(native,/if: inputs.validation_profile == 'full'[\s\S]*?resident-stress/);
@@ -547,7 +547,8 @@ test('published consumers declare every condition dependency and cannot execute 
   assert.doesNotMatch(nativeJobs.native,/contents: write|actions: write|id-token:/);
   assert.doesNotMatch(native,/historical-draft-download|draft-baseline-cache/);
   assert.doesNotMatch(nativeJobs.native,/^    needs:/m);
-  assert(nativeJobs.native.includes('--profile critical'));
+  assert(nativeJobs.native.includes('--profile "$UPGRADE_PROFILE"'));
+  assert(nativeJobs.native.includes('UPGRADE_PROFILE: ${{ inputs.validation_profile }}'));
   const upgrade=readFileSync(new URL('../../scripts/test-published-upgrades.py',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(upgrade,/if args.download_only:\n        assert tag=='v1\.0\.10' and release\['draft'\][\s\S]*?\n        return\n    with tarfile\.open/);
   assert.match(upgrade,/if args.download_only:\n    assert args.profile=='full' and not args.draft_baseline_cache[\s\S]*?\n    sys.exit\(0\)\n\ntry:/);
