@@ -229,7 +229,15 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(integration,/needs: coverage-tests/);
   assert.match(integration,/node scripts\/fetch-runtime-test-bundle\.mjs source/);
   assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);
-  assert.match(integration,/channel\(pinVersion\), channel\(cliVersion\)/);
+  assert.doesNotMatch(integration,/channel\(pinVersion\)|channel\(cliVersion\)|channels differ/);
+  assert.match(integration,/github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''/);
+  assert.match(source,/ref: d54b38529e1fdb7d9f3e3f5c999d3e747deab151/);
+  assert.match(source,/'--client2-baseline', 'host-owned-candidate', '--client2-source-sha', 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151'/);
+  assert.match(source,/assert evidence\['g1_passed'\] is False/);
+  assert.doesNotMatch(source,/be682108c555a3e5a788ad74217e088bcb25170b/);
+  const launcher=source.split('# Product launcher coverage belongs')[1].split('- name: Preserve private business credential diagnostics')[0];
+  assert.equal((launcher.match(/if: matrix.group == 'core' && \(env.CANDIDATE_MODE == 'true' \|\| \(github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''\)\)/g)||[]).length,4);
+  assert.doesNotMatch(ci,/assert.notEqual\(pin.required, '2.0.0-dev.17'/);
   assert.match(integration,/tar --exclude='\*\.profraw' -xzf/);
   assert.match(integration,/INTEGRATION_CLI_SHA256/);
   assert.match(integration,/source_archive_sha256/);
@@ -360,6 +368,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       value.runtime_metadata_json=JSON.stringify(metadata);value.runtime_metadata_sha256=hash(value.runtime_metadata_json);},
   ]){const receipt={...boundReceipt};change(receipt);assert.throws(()=>runMerge(receipt));}
   assert.match(report,/test \"\$INTEGRATION_RESULT\" = success/);
+  assert.match(report,/if \[ "\$INTEGRATION_REQUESTED" = true \]; then/);
+  assert.match(report,/Source checks only: Runtime business integration was not requested/);
   assert.match(report,/node scripts\/check-cli-coverage\.mjs/);
   assert.match(report,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
   for(const script of ['test-publication-fence','test-publication-acceptance','test-cleanup-release-artifacts','test-registry-publication','test-release-publication','test-dev6-publication-recovery','test-parallel-publication']) {
@@ -403,16 +413,26 @@ test('fail-closed aggregate separates source success from explicit candidate evi
   for(const values of [['bad','456','a'.repeat(64)],['123','0','a'.repeat(64)],['123','456','bad']]){
     assert.throws(()=>runInNewContext(validator,{assert,process:{env:{...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:'false'}}}));
   }
-  const command=complete.split('        run: ').at(-1).trim();
-  for(const candidate of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
+  const command=complete.split('- name: Require source coverage and all independent contracts')[1].split('\n      - name:')[0].split('        run: ')[1].trim();
+  const integration=section('runtime-integration');
+  for(const event of ['pull_request','push','workflow_dispatch'])for(const sha of ['', 'b'.repeat(40)]){
+    const inputs={...absent,runtime_examples_sha:sha};
+    const context={inputs,github:{event_name:event}};
+    const expected=event==='workflow_dispatch'&&sha!=='';
+    assert.equal(runInNewContext(condition(integration),context),expected);
+    const requested=complete.match(/INTEGRATION_REQUESTED: \$\{\{ (.+) \}\}/)[1];
+    assert.equal(runInNewContext(requested,context),expected);
+  }
+  for(const candidate of ['true','false'])for(const integration of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
     const result=execFileSync;
     let passed=true;
-    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:candidate==='true'?'skipped':'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
-    assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${source}/${required}`);
+    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:integration==='true'?'success':'skipped',INTEGRATION_REQUESTED:integration,REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
+    assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${integration}/${source}/${required}`);
   }
   for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT','COMMANDS_RESULT','INTEGRATION_RESULT'])for(const status of ['failure','cancelled','skipped']){
-    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
+    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:'success',INTEGRATION_REQUESTED:'true',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
   }
+  for(const status of ['success','failure','cancelled'])assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:status,INTEGRATION_REQUESTED:'false',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false'},stdio:'pipe'}));
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
   assert.match(complete,/REQUIRED_RESULT: \$\{\{ needs.required-tests.result \}\}/);

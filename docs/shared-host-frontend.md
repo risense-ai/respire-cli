@@ -1,21 +1,21 @@
 # Shared host frontend
 
-The `respire` library now owns the existing CLI frontend. The `rsrs` executable
-is a thin entry point. Runtime reuses the same Rust source to support unchanged
-Client2 host commands and the original v1 stdio account interface.
+The `respire` library owns the CLI frontend and the `rsrs` executable is its
+entry point. The pure Runtime does not embed this frontend or preserve historical
+Client2 host commands. Upgrade Client2 and CLI for the new Runtime generation.
 
 `crates/host-control` contains the shared account/key maintenance coordinator.
-Ordinary CLI behavior still uses the CLI lifecycle implementation; embedding
-provides only the selected Runtime image verifier and lifecycle callbacks.
-The embedding is process-local, not a client credential or a new protocol.
+CLI and Client2 own native credentials, installation, component management and
+Runtime startup/supervision. They deliver keys to the verified Runtime owner.
+Runtime retains login, sync, database and memory operations through RPC.
 
-An embedded command cannot download, replace, clean or materialize the Runtime
-or a stable CLI. It revalidates Client2's already selected image. Ordinary CLI
-legacy-install preservation from PR #220 is retained. No unknown account or key
-operation is replayed to make an upgrade succeed.
+Components communicate through the shared protocol and required capabilities;
+they do not require matching version numbers, source commits or SDK versions.
+Each component validates its own assets. No unknown account or key operation is
+replayed to make an upgrade succeed.
 
-The Runtime integration consumes the same frontend and shared source. Keep both
-consumers synchronized for changes to these files. Release Runtime first, then
-update the CLI pin to the published Runtime and publish the new CLI dev version.
-Previous Releases and tags are retained. Focused local tests do not replace the
-native account and multi-platform CI acceptance gates.
+Historical stacks prepare data for database-upgrade regression, rather than
+running old host commands against the new Runtime. Release Runtime first, then
+update the CLI download default and supported minimum to that generation and
+publish CLI and Client2. Previous releases and tags are retained. Focused local
+tests do not replace native new-stack and database-upgrade acceptance.

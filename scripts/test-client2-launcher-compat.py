@@ -136,6 +136,7 @@ def main():
     parser.add_argument('--runtime-version', required=True)
     parser.add_argument('--client2-source', type=Path, required=True)
     parser.add_argument('--client2-baseline', choices=DESKTOP_BASELINES, default='v2.0.0-dev.5')
+    parser.add_argument('--client2-source-sha', help='Exact host-owned source candidate; cannot select desktop bytes')
     parser.add_argument('--go', type=Path, required=True)
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
@@ -158,6 +159,14 @@ def main():
         raise RuntimeError('Synthetic host keys require the hosted private Secret Service fixture')
     profile = coverage_profile(args.coverage_profile_file)
     baseline = DESKTOP_BASELINES[args.client2_baseline]
+    if args.client2_source_sha is not None:
+        if (args.client2_baseline != 'host-owned-candidate' or args.desktop_executable is not None
+                or len(args.client2_source_sha) != 40
+                or any(char not in '0123456789abcdef' for char in args.client2_source_sha)):
+            raise RuntimeError('Source candidate requires an exact SHA, host-owned-candidate baseline and no desktop executable')
+        # Source execution has no published desktop artifact provenance.
+        baseline = dict.fromkeys(baseline)
+        baseline['source'] = args.client2_source_sha
     desktop = desktop_executable(args.desktop_executable, args.client2_baseline)
     cli, archive, source, go = (p.resolve(strict=True) for p in
                                 [args.cli, args.runtime_archive, args.client2_source, args.go])

@@ -1,5 +1,31 @@
 # Release validation
 
+## Coordinated DEV upgrade scope
+
+Validate the new protocol-compatible CLI, Runtime and Client2 together. Each
+component keeps its own version and dependency locks; matching component
+versions, source commits or Core SDK versions is not a protocol requirement.
+Source and artifact digests identify the tested products and remain mandatory
+for evidence and release integrity.
+
+Historical releases prepare the databases used by upgrade tests. After updating
+the components, the new CLI obtains the supported new Runtime and the new stack
+must preserve existing data, integrity and read/write behavior. Keep latest
+applicable stable and historical stable migration coverage. Both critical and
+full profiles also retain DEV checkpoints that changed persistent formats;
+ordinary DEV revisions do not add redundant upgrade combinations. The policy
+currently registers `v1.0.15-dev.10` and the older unclassified DEV format.
+
+Old CLI or Client2 operating against the new Runtime, and new clients operating
+against the old Runtime, are not acceptance targets. Preserve database recovery,
+locked restart, host-key delivery, login/sync and remember/recall assertions for
+the new stack. Source-only CI is not product or upgrade acceptance. Publish
+Runtime before updating the CLI's download default and supported minimum, then
+publish the hosts and verify actual public assets and database upgrades.
+
+The following release mechanics include historical release inventories. Their
+platform counts and version examples are not a current publication receipt.
+
 Job inventories are read in complete ten-job pages to keep GitHub API responses
 bounded. Publication readers retry a transient HTTP 5xx job-list read once;
 artifact waiters allow at most two consecutive failed status reads. Authentication

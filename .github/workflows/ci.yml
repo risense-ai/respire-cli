@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
       runtime_examples_sha:
-        description: Exact reviewed Runtime commit containing the migrated examples and CLI business harness
+        description: Opt in to business integration with this reviewed harness commit, only after the compatible new Runtime is published and its pin is updated
         required: false
         type: string
       version_upgrade_only:
@@ -620,21 +620,22 @@ jobs:
           if (result.error) throw result.error;
           process.exit(status !== 0 ? status : (result.status ?? 1));
           NODE
-      # Exercise the shipped default features and retain their real CLI counters.
+      # Product launcher coverage belongs only to explicitly requested new-stack
+      # acceptance after Runtime publication/pin update, or frozen candidate validation.
       - uses: actions/checkout@v4
-        if: matrix.group == 'core'
+        if: matrix.group == 'core' && (env.CANDIDATE_MODE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''))
         with:
           repository: risense-ai/respire-client2
-          ref: be682108c555a3e5a788ad74217e088bcb25170b
+          ref: d54b38529e1fdb7d9f3e3f5c999d3e747deab151
           path: .client2-source
           persist-credentials: false
       - uses: actions/setup-go@v5
-        if: matrix.group == 'core'
+        if: matrix.group == 'core' && (env.CANDIDATE_MODE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''))
         with:
           go-version: '1.26.0'
           cache: false
       - name: Verify Runtime archive for instrumented Client2 regression
-        if: matrix.group == 'core'
+        if: matrix.group == 'core' && (env.CANDIDATE_MODE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''))
         env:
           GH_TOKEN: ${{ github.token }}
           OFFICIAL_RUNTIME_ROOT: ${{ steps.official-runtime-fixture.outputs.root }}
@@ -661,9 +662,9 @@ jobs:
           assert metadata == receipt['release']['metadata_json'].encode('utf-8'), 'Archive metadata differs from verified source fixture'
           assert hashlib.sha256(metadata).hexdigest() == receipt['release']['metadata_sha256']
           PY
-      - name: Count original Client2 regression against the default instrumented CLI
+      - name: Count exact host-owned Client2 source candidate against the default instrumented CLI
         id: client2-coverage
-        if: matrix.group == 'core'
+        if: matrix.group == 'core' && (env.CANDIDATE_MODE == 'true' || (github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''))
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -680,11 +681,14 @@ jobs:
           env = {key: value for key, value in os.environ.items() if key not in ['GH_TOKEN', 'GITHUB_TOKEN', 'LLVM_PROFILE_FILE']}
           result = subprocess.run(['python3', 'scripts/test-client2-launcher-compat.py',
               '--cli', str(cli), '--runtime-archive', str(pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-coverage-runtime' / 'rsrs-runtime-x86_64-unknown-linux-gnu.tar.gz'),
-              '--runtime-version', version, '--client2-source', '.client2-source', '--go', shutil.which('go'),
+              '--runtime-version', version, '--client2-source', '.client2-source',
+              '--client2-baseline', 'host-owned-candidate', '--client2-source-sha', 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151', '--go', shutil.which('go'),
               '--ordinary-cli-cold-start', '--coverage-profile-file', template, '--report', str(report)], env=env, timeout=900)
           assert hashlib.sha256(cli.read_bytes()).hexdigest() == digest, 'Instrumented CLI changed during regression'
           assert result.returncode == 0, 'Original Client2 regression failed'
           evidence = json.loads(report.read_text())
+          assert evidence['client2_source'] == 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151'
+          assert evidence['g1_passed'] is False, 'Launcher source coverage is not new-stack acceptance'
           assert evidence['inputs']['cli_sha256'] == digest
           assert evidence['inputs']['coverage_profile_file'] == template
           assert evidence['cases'] and all(case['passed'] for case in evidence['cases'])
@@ -775,9 +779,10 @@ jobs:
           if-no-files-found: error
 
   runtime-integration:
-    # Runtime-owned assertions drive the exact current-run CLI; their counters remain in the CLI gate.
+    # Source CI does not certify a product combination. Business acceptance is explicit,
+    # uses a verified compatible release, and retains every Runtime-owned assertion.
     needs: coverage-tests
-    if: ${{ (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only) && !(inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != '' && (!inputs.research_feedback_only && !inputs.native_published_only && !inputs.artifact_run && !inputs.version_upgrade_only) && !(inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     name: CLI + Runtime integration (${{ matrix.group }})
     runs-on: ubuntu-latest
     permissions:
@@ -923,10 +928,6 @@ jobs:
           import {spawnSync} from 'node:child_process';
           assert.equal(process.env.GITHUB_ACTIONS, 'true');
           assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
-          const pinVersion = JSON.parse(readFileSync('runtime-pin.json', 'utf8')).required;
-          const cliVersion = readFileSync('cli/Cargo.toml', 'utf8').match(/^version = "([^"]+)"$/m)?.[1];
-          const channel = version => { assert.match(version ?? '', /^\d+\.\d+\.\d+(?:-[a-z]+\.\d+)?$/); return version.includes('-') ? version.split('-')[1].split('.')[0] : 'stable'; };
-          assert.equal(channel(pinVersion), channel(cliVersion), 'Official Runtime and CLI channels differ');
           const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
           const cli = resolve('target/llvm-cov-target/debug/rsrs');
           const env = {...process.env, RSRS_DATA_DIR: root};
@@ -1170,6 +1171,7 @@ jobs:
       actions: read
     env:
       CANDIDATE_MODE: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
+      INTEGRATION_REQUESTED: ${{ github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != '' && !(inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1191,7 +1193,7 @@ jobs:
           for group in core runtime_smoke runtime_autostart; do
             tar -xzf "coverage/coverage-$group.tar.gz"
           done
-          if [ "$CANDIDATE_MODE" != true ]; then
+          if [ "$INTEGRATION_REQUESTED" = true ]; then
             node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
           import {createHash} from 'node:crypto';
@@ -1237,7 +1239,16 @@ jobs:
           REQUIRED_RESULT: ${{ needs.required-tests.result }}
           COMMANDS_RESULT: ${{ needs.commands-frontend.result }}
           CANDIDATE_REQUESTED: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}
-        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$COMMANDS_RESULT" = success && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$INTEGRATION_RESULT" = skipped; else test "$INTEGRATION_RESULT" = success; fi; } && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
+        run: test "$SOURCE_RESULT" = success && test "$WORKSPACE_RESULT" = success && test "$CONTRACT_RESULT" = success && test "$COMMANDS_RESULT" = success && { if [ "$INTEGRATION_REQUESTED" = true ]; then test "$INTEGRATION_RESULT" = success; else test "$INTEGRATION_RESULT" = skipped; fi; } && { if [ "$CANDIDATE_REQUESTED" = true ]; then test "$REQUIRED_RESULT" = success; else test "$REQUIRED_RESULT" = skipped; fi; }
+      - name: State the verified acceptance scope
+        run: |
+          if [ "$CANDIDATE_MODE" = true ]; then
+            echo 'Candidate validation: source checks and required-gate evidence passed; this is not publication approval.' >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$INTEGRATION_REQUESTED" = true ]; then
+            echo 'Source checks and explicitly requested published Runtime business integration passed; release acceptance remains separate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Source checks only: Runtime business integration was not requested. No candidate, historical client compatibility or release acceptance is claimed. Use the verified new Runtime/Client2 candidate workflow and required-gate before promotion.' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
   native-fixture-contracts:
     # Isolated Python-only checks; full native Runtime acceptance remains required.
