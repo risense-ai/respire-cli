@@ -105,6 +105,7 @@ class CandidateFixtureTests(unittest.TestCase):
             stable_business_cli=None, stable_business_cli_metadata=None, stable_business_runtime_archive=None,
             runtime_archive=None, runtime_metadata=None, require_native_stop=False)
         commands = []
+        builds = []
         def fake_run(command, **kwargs):
             commands.append(command)
             if command[0] == "git":
@@ -115,42 +116,107 @@ class CandidateFixtureTests(unittest.TestCase):
                     archive.addfile(member, io.BytesIO(content))
             else:
                 self.assertEqual(command[:3], ["go", "build", "-buildvcs=false"])
+                builds.append(kwargs)
                 Path(command[command.index("-o") + 1]).write_bytes(b"synthetic probe never executed")
         with patch.dict(os.environ, {"GITHUB_SHA": "a" * 40}), \
              patch.object(candidate, "verify_source") as verify, \
              patch.object(candidate.subprocess, "check_output", return_value=b"package main\n"), \
              patch.object(candidate.subprocess, "run", side_effect=fake_run):
             binary, identity = candidate.build_owned_stop_probe(args, self.root, io.BytesIO())
-        verify.assert_called_once_with(source.resolve(), candidate.CLIENT2_OWNED_SOURCE_SHA)
+            shared_cache = self.root / "request-go-cache"
+            owned = []
+            for mode in ("registered", "client2-owned"):
+                mode_root = self.root / mode
+                mode_root.mkdir()
+                args.owned_stop_mode = mode
+                owned.append(candidate.build_owned_stop_probe(args, mode_root, io.BytesIO(),
+                                                              cache_root=shared_cache))
+        self.assertEqual(verify.call_count, 3)
+        verify.assert_called_with(source.resolve(), candidate.CLIENT2_OWNED_SOURCE_SHA)
         self.assertEqual(identity["probe_binary_sha256"], candidate.digest(binary))
         self.assertEqual(len(identity["probe_fixture_sha256"]), 4)
         self.assertEqual(commands[0][-1], candidate.CLIENT2_OWNED_SOURCE_SHA)
-        self.assertEqual(len(commands), 2)
+        self.assertEqual(len(commands), 6)
+        self.assertEqual(len(builds), 3)
+        for index, build in enumerate(builds):
+            base = self.root / "owned-stop-probe" if index == 0 else shared_cache
+            for variable, directory in (("GOPATH", "go-path"), ("GOCACHE", "go-cache"),
+                                        ("GOMODCACHE", "go-mod")):
+                self.assertEqual(build["env"][variable], str(base / directory))
+            self.assertEqual(set(build["env"]) - {"PATH", "SystemRoot", "WINDIR"},
+                             {"GOPATH", "GOCACHE", "GOMODCACHE", "GOTOOLCHAIN", "GOENV", "GOWORK"})
+            self.assertTrue(build["check"])
+            self.assertEqual(build["timeout"], 600)
+        self.assertNotEqual(builds[1]["cwd"], builds[2]["cwd"])
+        self.assertNotEqual(owned[0][0], owned[1][0])
+        for (probe, binding), mode in zip(owned, ("registered", "client2-owned")):
+            self.assertEqual(binding["mode"], mode)
+            self.assertEqual(binding["probe_binary_sha256"], candidate.digest(probe))
+            self.assertEqual(binding["probe_fixture_sha256"], identity["probe_fixture_sha256"])
+            self.assertEqual(binding["client2_source_sha"], candidate.CLIENT2_OWNED_SOURCE_SHA)
+            self.assertEqual(binding["probe_fixture_cli_sha"], args.cli_sha)
 
     def test_owned_stop_rejects_wrong_probe_or_missing_real_mode(self):
         rows = []
         for case in ("normal", "caller-timeout", "explicit-force"):
             rows.append(dict(case=case, startup_mode="client2-owned", passed=True, probe_sha256="a" * 64,
+                actor_lane="cli-host-runtime-core",
+                legacy_host=dict(pid=100, backend_pid=101, backend_instance_id="runtime-instance",
+                                 backend_process_start_id="runtime-start"),
                 business_sender="modern-harness", stop_sender="original-go-client2",
                 caller_timeout_ms=None if case == "normal" else 35000,
                 provider_http_status=200, provider_requests=1,
                 credential_cleanup_verified=True, runtime_compatibility_timeout_claimed=False,
-                runtime_identity={"image_sha256": "b" * 64},
+                runtime_identity=dict(image_sha256="b" * 64, pid=101,
+                                      instance_id="runtime-instance", process_start_id="runtime-start"),
                 encrypted_write_committed=case != "explicit-force",
                 forced_operation_remains_unknown=case == "explicit-force"))
-        captured = b"\n".join(b"NATIVE_CLIENT2_STOP_RAW " + json.dumps(row).encode() for row in rows)
-        self.assertEqual(len(candidate.owned_stop_checks(captured, "client2-owned", "a" * 64, "b" * 64)), 3)
+        def capture(values):
+            return b"\n".join(b"NATIVE_CLIENT2_STOP_RAW " + json.dumps(row).encode() for row in values)
+        captured = capture(rows)
+        observations = candidate.owned_stop_checks(captured, "client2-owned", "a" * 64, "b" * 64)
+        self.assertEqual(len(observations), 3)
+        self.assertTrue(all(row["actor_lane"] == "cli-host-runtime-core" for row in observations))
+        self.assertNotIn("runtime-instance", json.dumps(observations))
+        self.assertNotIn("legacy_host", json.dumps(observations))
+        registered = copy.deepcopy(rows)
+        for row in registered:
+            row["startup_mode"] = "cli-supervised"
+            row["stop_sender"] = "modern-cli" if row["case"] == "normal" else "original-go-client2-managed"
+            del row["actor_lane"], row["legacy_host"]
+        registered_capture = b"\n".join(b"NATIVE_REGISTERED_STOP_RAW " + json.dumps(row).encode()
+                                         for row in registered)
+        registered_observations = candidate.owned_stop_checks(registered_capture, "registered", "a" * 64, "b" * 64)
+        self.assertEqual(len(registered_observations), 3)
+        self.assertTrue(all("actor_lane" not in row for row in registered_observations))
         with self.assertRaises(RuntimeError):
             candidate.owned_stop_checks(captured, "client2-owned", "c" * 64, "b" * 64)
         with self.assertRaises(RuntimeError):
             candidate.owned_stop_checks(captured, "registered", "a" * 64, "b" * 64)
+        with self.assertRaisesRegex(RuntimeError, "unknown_owned_stop_mode"):
+            candidate.owned_stop_checks(captured, "unknown", "a" * 64, "b" * 64)
+        for values in (rows[:2], rows + rows[:1], [rows[0], rows[0], rows[2]]):
+            with self.assertRaisesRegex(RuntimeError, "owned_stop_case_inventory_mismatch"):
+                candidate.owned_stop_checks(capture(values), "client2-owned", "a" * 64, "b" * 64)
         for field, value in (("stop_sender", "private-canary"), ("caller_timeout_ms", "private-canary"),
                              ("caller_timeout_ms", True), ("caller_timeout_ms", 29999)):
-            invalid = [dict(row) for row in rows]
+            invalid = copy.deepcopy(rows)
             invalid[1][field] = value
             payload = b"\n".join(b"NATIVE_CLIENT2_STOP_RAW " + json.dumps(row).encode() for row in invalid)
             with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
                 candidate.owned_stop_checks(payload, "client2-owned", "a" * 64, "b" * 64)
+        for field, value in (("actor_lane", None), ("actor_lane", "cli-host-core"),
+                             ("startup_mode", "cli-supervised"), ("legacy_host", None),
+                             ("runtime_identity", dict(rows[0]["runtime_identity"], pid=True)),
+                             ("runtime_identity", dict(rows[0]["runtime_identity"], instance_id="")),
+                             ("legacy_host", dict(rows[0]["legacy_host"], pid=101)),
+                             ("legacy_host", dict(rows[0]["legacy_host"], backend_pid=True)),
+                             ("legacy_host", dict(rows[0]["legacy_host"], backend_instance_id="other")),
+                             ("legacy_host", dict(rows[0]["legacy_host"], backend_process_start_id="other"))):
+            invalid = copy.deepcopy(rows)
+            invalid[0][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(RuntimeError):
+                candidate.owned_stop_checks(capture(invalid), "client2-owned", "a" * 64, "b" * 64)
 
     def test_owned_failure_stages_are_bounded_and_never_publish_private_fields(self):
         def captured(events):

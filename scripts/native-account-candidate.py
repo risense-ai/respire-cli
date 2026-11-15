@@ -958,7 +958,7 @@ def validate_owned_stop_options(args):
         require(args.cli_sha == os.environ.get("GITHUB_SHA"), "owned_stop_workflow_source_mismatch")
 
 
-def build_owned_stop_probe(args, root, output):
+def build_owned_stop_probe(args, root, output, *, cache_root=None):
     # Never accept an external executable: derive the probe from both exact Git sources.
     validate_owned_stop_options(args)
     source = args.client2_source.resolve(strict=True)
@@ -991,8 +991,9 @@ def build_owned_stop_probe(args, root, output):
         "require respire-client2 v0.0.0\nreplace respire-client2 => " + json.dumps(str(extracted)) + "\n")
     (probe / "go.sum").write_bytes((extracted / "go.sum").read_bytes())
     build_env = {name: os.environ[name] for name in ("PATH", "SystemRoot", "WINDIR") if name in os.environ}
-    build_env.update(GOPATH=str(stage / "go-path"), GOCACHE=str(stage / "go-cache"),
-                     GOMODCACHE=str(stage / "go-mod"), GOTOOLCHAIN="local", GOENV="off", GOWORK="off")
+    cache_root = stage if cache_root is None else cache_root
+    build_env.update(GOPATH=str(cache_root / "go-path"), GOCACHE=str(cache_root / "go-cache"),
+                     GOMODCACHE=str(cache_root / "go-mod"), GOTOOLCHAIN="local", GOENV="off", GOWORK="off")
     binary = probe / "probe"
     subprocess.run(["go", "build", "-buildvcs=false", "-mod=mod", "-o", str(binary), "."],
                    cwd=probe, env=build_env, stdout=output, stderr=output, check=True, timeout=600)
@@ -1008,6 +1009,7 @@ def build_owned_stop_probe(args, root, output):
 
 
 def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
+    require(mode in {"registered", "client2-owned"}, "unknown_owned_stop_mode")
     marker = b"NATIVE_REGISTERED_STOP_RAW " if mode == "registered" else b"NATIVE_CLIENT2_STOP_RAW "
     rows = [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
     require(len(rows) == 3 and {row["case"] for row in rows} == {"normal", "caller-timeout", "explicit-force"},
@@ -1021,6 +1023,17 @@ def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
                 and row.get("runtime_compatibility_timeout_claimed") is False
                 and row["runtime_identity"]["image_sha256"] == runtime_sha256,
                 "owned_stop_real_consumer_evidence_mismatch")
+        if mode == "client2-owned":
+            require(row.get("actor_lane") == "cli-host-runtime-core" and isinstance(row.get("legacy_host"), dict),
+                    "owned_stop_actor_lane_mismatch")
+            host, runtime = row["legacy_host"], row["runtime_identity"]
+            require(type(host.get("pid")) is int and type(runtime.get("pid")) is int
+                    and host["pid"] > 0 and runtime["pid"] > 0 and host["pid"] != runtime["pid"]
+                    and type(host.get("backend_pid")) is int and host["backend_pid"] == runtime["pid"]
+                    and all(isinstance(runtime.get(field), str) and runtime[field]
+                            and host.get("backend_" + field) == runtime[field]
+                            for field in ("instance_id", "process_start_id")),
+                    "owned_stop_actor_binding_mismatch")
         expected_sender = ("modern-cli" if row["case"] == "normal" else "original-go-client2-managed") if mode == "registered" else "original-go-client2"
         require(row.get("stop_sender") == expected_sender, "owned_stop_sender_mismatch")
         timeout = row.get("caller_timeout_ms")
@@ -1032,9 +1045,12 @@ def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
                 and row.get("forced_operation_remains_unknown") is forced,
                 "owned_stop_write_outcome_mismatch")
     # Only source-defined scalar observations leave the private business log.
-    return [{key: row.get(key) for key in ("case", "startup_mode", "business_sender", "stop_sender",
+    fields = ("case", "startup_mode", "business_sender", "stop_sender",
         "caller_timeout_ms", "provider_http_status", "provider_requests", "encrypted_write_committed",
-        "forced_operation_remains_unknown", "credential_cleanup_verified")} for row in rows]
+        "forced_operation_remains_unknown", "credential_cleanup_verified")
+    if mode == "client2-owned":
+        fields += ("actor_lane",)
+    return [{key: row.get(key) for key in fields} for row in rows]
 
 
 def private_command(command, env, cwd, output, timeout):
