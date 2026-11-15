@@ -39,52 +39,77 @@ fn backends() -> &'static [Backend] {
     }
 }
 
-fn credential_entry(label: &str, backend: Backend) -> Result<keyring::Entry> {
+fn credential_entry(label: &str, backend: Backend) -> std::result::Result<keyring::Entry, keyring::Error> {
     match backend {
         #[cfg(any(not(target_os = "linux"), test))]
-        Backend::Native => keyring::Entry::new(SERVICE, label)
-            .map_err(|_| anyhow!("keyring initialization failed")),
+        Backend::Native => keyring::Entry::new(SERVICE, label),
         #[cfg(all(target_os = "linux", not(test)))]
         Backend::SecretService => keyring::secret_service::default_credential_builder()
             .build(None, SERVICE, label)
-            .map(keyring::Entry::new_with_credential)
-            .map_err(|_| anyhow!("Secret Service initialization failed")),
+            .map(keyring::Entry::new_with_credential),
         #[cfg(all(target_os = "linux", not(test)))]
         Backend::Kernel => keyring::keyutils::default_credential_builder()
             .build(None, SERVICE, label)
-            .map(keyring::Entry::new_with_credential)
-            .map_err(|_| anyhow!("kernel keyring initialization failed")),
+            .map(keyring::Entry::new_with_credential),
     }
 }
 
-/// Read every applicable legacy backend without writing or self-healing it.
-fn read_credentials(label: &str) -> Vec<String> {
-    let mut values = Vec::new();
-    for backend in backends() {
-        if let Ok(entry) = credential_entry(label, *backend) {
-            if let Ok(value) = entry.get_password() {
-                if !value.is_empty() && !values.contains(&value) {
-                    values.push(value);
-                }
-            }
+fn credential_error(operation: &str, backend: Backend, error: keyring::Error) -> anyhow::Error {
+    let category = match error {
+        keyring::Error::NoEntry => "missing",
+        keyring::Error::NoStorageAccess(_) => "access_denied",
+        keyring::Error::PlatformFailure(_) => "platform_failure",
+        keyring::Error::Ambiguous(_) => "ambiguous",
+        keyring::Error::BadEncoding(_) => "bad_encoding",
+        keyring::Error::Invalid(_, _) => "invalid",
+        _ => "unavailable",
+    };
+    anyhow!("classification credential {operation} failed ({}, {category})", backend.name())
+}
+
+// Only absence permits checking the next legacy backend; an existing slot keeps its backend.
+fn find_credential(label: &str) -> Result<Option<(Backend, String)>> {
+    for &backend in backends() {
+        let entry = match credential_entry(label, backend) {
+            Ok(entry) => entry,
+            Err(keyring::Error::NoEntry) => continue,
+            Err(error) => return Err(credential_error("initialization", backend, error)),
+        };
+        match entry.get_password() {
+            Ok(value) => return Ok(Some((backend, value))),
+            Err(keyring::Error::NoEntry) => continue,
+            Err(error) => return Err(credential_error("read", backend, error)),
         }
     }
-    values
+    Ok(None)
+}
+
+fn read_label(label: &str) -> Result<Option<String>> {
+    match find_credential(label)? {
+        Some((backend, value)) => {
+            anyhow::ensure!(!value.is_empty(), "classification credential is empty ({})", backend.name());
+            Ok(Some(value))
+        }
+        None => Ok(None),
+    }
 }
 
 fn save_label(label: &str, value: &str) -> Result<()> {
-    for backend in backends() {
-        let entry = credential_entry(label, *backend)?;
-        if entry.set_password(value).is_ok() {
-            if backend.name() == "kernel" {
-                eprintln!("warning: Linux credentials are in the volatile kernel keyring; enabling Secret Service alone does not preserve existing keys across reboot; restore or re-import them into the persistent store");
-            }
-            return Ok(());
-        }
+    let backend = match find_credential(label)? {
+        Some((backend, _)) => backend,
+        None => *backends().first().ok_or_else(|| anyhow!("no classification credential backend configured"))?,
+    };
+    let entry = credential_entry(label, backend)
+        .map_err(|error| credential_error("initialization", backend, error))?;
+    entry.set_password(value)
+        .map_err(|error| credential_error("write", backend, error))?;
+    let stored = entry.get_password()
+        .map_err(|error| credential_error("readback", backend, error))?;
+    anyhow::ensure!(stored == value, "classification credential readback mismatch ({})", backend.name());
+    if backend.name() == "kernel" {
+        eprintln!("warning: Linux credentials are in the volatile kernel keyring; enabling Secret Service alone does not preserve existing keys across reboot; restore or re-import them into the persistent store");
     }
-    Err(anyhow!(
-        "keyring write failed; no available credential backend"
-    ))
+    Ok(())
 }
 
 /// classify backend slot (separate account under the same OS keyring service).
@@ -106,60 +131,53 @@ pub fn save_classify_key(backend: &str, key: &str) -> Result<()> {
 }
 
 /// Load a classify backend key: OS keyring → env (DS_API_KEY / TYPESAFE_API_KEY) → None.
-pub fn load_classify_key(backend: &str) -> Option<String> {
-    let from_ring = read_credentials(&format!("classify:{backend}"))
-        .into_iter()
-        .next();
-    from_ring.or_else(|| {
-        let var = if backend.starts_with("ds") {
-            "DS_API_KEY"
-        } else {
-            "TYPESAFE_API_KEY"
-        };
-        crate::env::var(var).ok().filter(|s| !s.is_empty())
-    })
+pub fn load_classify_key(backend: &str) -> Result<Option<String>> {
+    if let Some(value) = read_label(&format!("classify:{backend}"))? {
+        return Ok(Some(value));
+    }
+    let var = if backend.starts_with("ds") {
+        "DS_API_KEY"
+    } else {
+        "TYPESAFE_API_KEY"
+    };
+    match crate::env::var(var) {
+        Ok(value) => Ok((!value.is_empty()).then_some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{var} is not valid Unicode"),
+    }
 }
 
 /// Remember the last DS endpoint used (including path, e.g. https://api.b.ai/v1)
 /// so a stored key is not paired with a host that dropped the path.
-pub fn save_ds_last_base(base: &str) {
-    if save_label("classify:ds-last-base", base).is_err() {
-        eprintln!("warning: classification endpoint could not be saved");
-    }
+pub fn save_ds_last_base(base: &str) -> Result<()> {
+    save_label("classify:ds-last-base", base)
 }
 
 /// Load the last DS endpoint used (full base).
-pub fn load_ds_last_base() -> Option<String> {
-    read_credentials("classify:ds-last-base")
-        .into_iter()
-        .next()
+pub fn load_ds_last_base() -> Result<Option<String>> {
+    read_label("classify:ds-last-base")
 }
 
 /// Remember the last model used for an endpoint (relay names differ: official deepseek-chat, b.ai deepseek-v4.1-flash).
-pub fn save_ds_model(host: &str, model: &str) {
-    if save_label(&format!("classify:ds-model@{host}"), model).is_err() {
-        eprintln!("warning: classification model could not be saved");
-    }
+pub fn save_ds_model(host: &str, model: &str) -> Result<()> {
+    save_label(&format!("classify:ds-model@{host}"), model)
 }
 
 /// Load the last model used for an endpoint.
-pub fn load_ds_model(host: &str) -> Option<String> {
-    read_credentials(&format!("classify:ds-model@{host}"))
-        .into_iter()
-        .next()
+pub fn load_ds_model(host: &str) -> Result<Option<String>> {
+    read_label(&format!("classify:ds-model@{host}"))
 }
 
 /// Remember the classify backend choice (GUI "AI backend" dropdown; "jev" | "ds").
-pub fn save_classify_backend(backend: &str) {
-    if save_label("classify:last-backend", backend).is_err() {
-        eprintln!("warning: classification backend could not be saved");
-    }
+pub fn save_classify_backend(backend: &str) -> Result<()> {
+    save_label("classify:last-backend", backend)
 }
 
 /// Load the last classify backend (None if unset; caller picks the default).
-pub fn load_classify_backend() -> Option<String> {
-    read_credentials("classify:last-backend")
-        .into_iter()
-        .next()
-        .filter(|v| v == "jev" || v == "ds")
+pub fn load_classify_backend() -> Result<Option<String>> {
+    match read_label("classify:last-backend")? {
+        Some(value) if value == "jev" || value == "ds" => Ok(Some(value)),
+        Some(_) => anyhow::bail!("stored classification backend is invalid"),
+        None => Ok(None),
+    }
 }

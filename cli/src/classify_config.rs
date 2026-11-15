@@ -5,10 +5,10 @@ use respire_client_host::classification as provider_settings;
 use std::io::{self, IsTerminal};
 
 fn backend_name(value: Option<&str>) -> Result<String> {
-    let backend = value
-        .map(str::to_owned)
-        .or_else(provider_settings::load_classify_backend)
-        .unwrap_or_else(|| "jev".to_owned());
+    let backend = match value {
+        Some(value) => value.to_owned(),
+        None => provider_settings::load_classify_backend()?.unwrap_or_else(|| "jev".to_owned()),
+    };
     ensure!(
         backend == "jev" || backend == "ds",
         "backend must be jev or ds"
@@ -17,10 +17,11 @@ fn backend_name(value: Option<&str>) -> Result<String> {
 }
 
 fn ds_base(value: Option<&str>) -> Result<String> {
-    let base = value
-        .map(str::to_owned)
-        .or_else(provider_settings::load_ds_last_base)
-        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned());
+    let base = match value {
+        Some(value) => value.to_owned(),
+        None => provider_settings::load_ds_last_base()?
+            .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned()),
+    };
     let base = base.trim().trim_end_matches('/');
     let host = provider_settings::host_of(base);
     ensure!(
@@ -39,7 +40,7 @@ pub(crate) fn status(backend: Option<&str>, api_base: Option<&str>) -> Result<se
     let (base, model, slot) = if backend == "ds" {
         let base = ds_base(api_base)?;
         let host = provider_settings::host_of(&base);
-        let model = provider_settings::load_ds_model(&host)
+        let model = provider_settings::load_ds_model(&host)?
             .unwrap_or_else(|| crate::classify::DEFAULT_DS_MODEL.to_owned());
         (base, model, format!("ds@{host}"))
     } else {
@@ -57,7 +58,7 @@ pub(crate) fn status(backend: Option<&str>, api_base: Option<&str>) -> Result<se
         "backend": backend,
         "api_base": base,
         "model": model,
-        "has_key": provider_settings::load_classify_key(&slot).is_some(),
+        "has_key": provider_settings::load_classify_key(&slot)?.is_some(),
     }))
 }
 
@@ -103,28 +104,29 @@ pub(crate) fn configure(
         ensure!(!key.is_empty(), "provider key stdin is empty");
         provider_settings::save_classify_key(&slot, key)?;
         ensure!(
-            provider_settings::load_classify_key(&slot).as_deref() == Some(key),
+            provider_settings::load_classify_key(&slot)?.as_deref() == Some(key),
             "provider key was not readable after saving"
         );
     }
     if backend == "ds" {
-        provider_settings::save_ds_last_base(&base);
+        provider_settings::save_ds_last_base(&base)?;
         ensure!(
-            provider_settings::load_ds_last_base().as_deref() == Some(base.as_str()),
+            provider_settings::load_ds_last_base()?.as_deref() == Some(base.as_str()),
             "provider endpoint was not saved"
         );
         if let Some(model) = model {
-            provider_settings::save_ds_model(&host, model);
+            provider_settings::save_ds_model(&host, model)?;
             ensure!(
-                provider_settings::load_ds_model(&host).as_deref() == Some(model),
+                provider_settings::load_ds_model(&host)?.as_deref() == Some(model),
                 "provider model was not saved"
             );
         }
     }
-    provider_settings::save_classify_backend(&backend);
-    if provider_settings::load_classify_backend().as_deref() != Some(backend.as_str()) {
+    provider_settings::save_classify_backend(&backend)?;
+    if provider_settings::load_classify_backend()?.as_deref() != Some(backend.as_str()) {
         bail!("classification backend was not saved");
     }
+    respire_host_control::lifecycle_io::refresh_running_runtime_credentials()?;
     status(
         Some(&backend),
         if backend == "ds" { Some(&base) } else { None },
