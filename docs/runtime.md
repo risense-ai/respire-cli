@@ -201,6 +201,9 @@ checks the supported historical formal releases. A DEV that changes persistent
 database schema or encoding becomes an additional mandatory upgrade checkpoint.
 This includes tables, columns, triggers, persisted index formats and encrypted
 record formats. Version numbers alone do not establish database compatibility.
+Register each published database-changing DEV in `DATABASE_DEV_CHECKPOINTS` in
+`scripts/published_upgrade_policy.py`, with its format-change reason. Both profiles
+include every registered checkpoint; missing published assets fail validation.
 Unclassified historical DEV checkpoints remain covered until their database
 format has been audited. Do not remove them merely because their tag is a DEV.
 

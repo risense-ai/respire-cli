@@ -2,6 +2,10 @@
 ARM_TARGETS = frozenset({"aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"})
 ABSENT_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16", "v1.0.17-dev.12"})
 ABSENT_WINDOWS_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16"})
+# Retain unknown historical formats until audited; add each published database-changing DEV here.
+DATABASE_DEV_CHECKPOINTS = {
+    "v1.0.6-dev.37075716045": "Unaudited historical database format; no formal 1.0.6 was published",
+}
 
 
 def select_upgrade_sources(sources, target, profile):
@@ -9,12 +13,14 @@ def select_upgrade_sources(sources, target, profile):
         return sources
     if profile != "critical":
         raise ValueError(f"unknown upgrade profile: {profile}")
-    for tag in sorted(sources, key=lambda tag: tuple(map(int, tag[1:].split("."))), reverse=True):
-        assets = [asset["name"] for asset in sources[tag]["assets"]]
+    checkpoints = {tag: source for tag, source in sources.items() if tag in DATABASE_DEV_CHECKPOINTS}
+    formal = {tag: source for tag, source in sources.items() if "-" not in tag}
+    for tag in sorted(formal, key=lambda tag: tuple(map(int, tag[1:].split("."))), reverse=True):
+        assets = [asset["name"] for asset in formal[tag]["assets"]]
         if platform_applicability(tag, target, assets) is None:
-            return {tag: sources[tag]}
-    if sources and target == "x86_64-apple-darwin":
-        return {}
+            return {tag: formal[tag], **checkpoints}
+    if formal and target == "x86_64-apple-darwin":
+        return checkpoints
     raise ValueError(f"no applicable formal stable upgrade source: {target}")
 
 

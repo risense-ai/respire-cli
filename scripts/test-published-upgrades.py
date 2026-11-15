@@ -1,7 +1,7 @@
 """Exercise actual-artifact upgrades for the selected critical or full gate."""
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
-from published_upgrade_policy import platform_applicability, select_upgrade_sources
+from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability, select_upgrade_sources
 from native_fixture_process import add_runtime_arguments, runtime_inputs
 
 parser=argparse.ArgumentParser()
@@ -41,11 +41,12 @@ registry=[] if args.download_only else sorted(set(json.loads(command('npm','view
                 set(json.loads(command('npm','view','rsrs-cli','versions','--json'))))
 missing=[version for version in registry if stable('v'+version) and 'v'+version not in sources]
 assert not missing,'published npm stable has no verifiable GitHub artifact: '+str(missing)
-# No formal 1.0.6 was published in either registry. Keep its last actual DEV as an extra baseline.
-if not args.download_only and args.profile=='full' and 'v1.0.6' not in sources:
-    baseline=next((item for item in releases if item['tag_name']=='v1.0.6-dev.37075716045' and not item['draft']),None)
-    assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
-    sources[baseline['tag_name']]=baseline
+# Database checkpoints are mandatory in both profiles, independently of optional diagnostics.
+if not args.download_only:
+    for tag in DATABASE_DEV_CHECKPOINTS:
+        baseline=next((item for item in releases if item['tag_name']==tag and not item['draft']),None)
+        assert baseline is not None,'database DEV checkpoint artifact missing: '+tag
+        sources[tag]=baseline
 # The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
 additional_draft_baselines=[]
 if args.include_legacy_baselines and args.profile=='full' and 'v1.0.10' not in formal_sources:
@@ -65,6 +66,7 @@ report={'passed':False,'target':args.target,'candidate_sha256':None if args.down
         'profile':args.profile,'selected_sources':[],'full_coverage':False,'all_published_sources_covered':False,
         'published_formal_sources':formal_sources,
         'additional_draft_baselines':additional_draft_baselines,
+        'database_dev_checkpoints':{} if args.download_only else DATABASE_DEV_CHECKPOINTS,
         'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}

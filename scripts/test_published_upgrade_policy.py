@@ -93,6 +93,7 @@ class UpgradeProfileTest(unittest.TestCase):
             releases = [self.release(tag, missing=missing_latest and tag == "v1.0.18")
                         for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045"]]
             releases[-1]["prerelease"] = True
+            releases.append(self.release("v2.0.0-dev.1", prerelease=True))
             releases.append(self.release("v1.0.10", draft=True))
             releases[-1]["id"] = 403872621
             files = {}
@@ -204,10 +205,11 @@ class UpgradeProfileTest(unittest.TestCase):
             report = root / "reports/published-upgrades.json"
             return upgraded, json.loads(report.read_text()) if report.exists() else None
 
-    def test_critical_runs_latest_only_and_marks_partial_coverage(self):
+    def test_critical_runs_latest_and_database_dev_checkpoints_and_marks_partial_coverage(self):
         upgraded, report = self.run_fixture("critical")
-        self.assertEqual(upgraded, ["v1.0.18"])
-        self.assertEqual(report["selected_sources"], ["v1.0.18"])
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045"})
+        self.assertEqual(report["selected_sources"], ["v1.0.18", "v1.0.6-dev.37075716045"])
+        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.6-dev.37075716045"})
         self.assertEqual(report["profile"], "critical")
         self.assertTrue(report["passed"])
         self.assertEqual(report["upgrade_contract"], "legacy-shim-v1")
