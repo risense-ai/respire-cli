@@ -15,7 +15,8 @@ param(
     [string]$Root = '',
     [string]$Exe = '',
     [string]$ExpectVersion = '',
-    [switch]$DeferSupplemental
+    [switch]$DeferSupplemental,
+    [switch]$BusinessOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -129,7 +130,8 @@ $script:CloudCleanupRunning = $false
 $script:ModelProgressEvidence = $null
 $script:IndexPendingEvents = New-Object System.Collections.Generic.List[object]
 $script:SweepReportClock = [Diagnostics.Stopwatch]::StartNew()
-trap { $failure = $_; Invoke-CloudCleanup; Write-SweepReport -Force; Stop-OurRuntimes; throw $failure }
+$script:BusinessStatus = 'in-progress'
+trap { $failure = $_; if ($BusinessOnly) { $script:BusinessStatus = 'failed' }; Invoke-CloudCleanup; Write-SweepReport -Force; Stop-OurRuntimes; throw $failure }
 $Rows = New-Object System.Collections.Generic.List[object]
 $script:Step = 0
 $script:PublishedRuntimePaths = @{}
@@ -167,6 +169,16 @@ function Write-SweepReport([switch]$Force) {
         supplemental_required = @($script:Catalog.supplemental_required)
         supplemental_deferred = [bool]$DeferSupplemental
         coverage_full = @($script:Catalog.required_remaining).Count -eq 0 -and @($script:Catalog.supplemental_required).Count -eq 0 -and @($Rows | Where-Object { -not $_.Ok }).Count -eq 0 -and @($script:Catalog.required_assertions | Where-Object { $required = $_; -not @($Rows | Where-Object { $_.Name -ceq $required -and $_.Ok -and $_.Status -ceq 'ok' }).Count }).Count -eq 0
+    }
+    if ($BusinessOnly) {
+        $coverage.diagnostic_only = $true
+        $coverage.publication_reusable = $false
+        $coverage.full_acceptance = $false
+        $coverage.release_acceptance = $false
+        $coverage.business_status = $script:BusinessStatus
+        $coverage.not_evaluated = @('other_cli_checks', 'supplemental_suites', 'api-smoke', 'publication_acceptance')
+        $coverage.base_complete = $false
+        $coverage.coverage_full = $false
     }
     [IO.File]::WriteAllText($CoveragePath, ($coverage | ConvertTo-Json -Depth 20) + "`n", [Text.UTF8Encoding]::new($false))
     $script:SweepReportClock.Restart()
@@ -918,6 +930,12 @@ function Get-SmokeSession([string]$DataRoot, [string]$ExpectedUser) {
     return $sessions[0]
 }
 
+function Test-SmokeProfileRoot([string]$Profile, [string]$DeviceRoot) {
+    if (-not [IO.Path]::IsPathFullyQualified($Profile)) { return $false }
+    $relative = [IO.Path]::GetRelativePath($DeviceRoot, $Profile)
+    return -not [IO.Path]::IsPathRooted($relative) -and $relative -cne '..' -and -not $relative.StartsWith('..' + [IO.Path]::DirectorySeparatorChar)
+}
+
 function Add-CloudRegistration([string]$User, [string]$Password) {
     # Record before the request: a failed response does not prove no account was created.
     if ($User -notmatch "^(sweep|oth|sps)$stamp$") { throw 'Registration is outside this sweep namespace.' }
@@ -1038,6 +1056,7 @@ $script:ObservedVersion = [string]$verJson.Envelope.summary.version
 $script:ObservedVersionDisplay = $ver.Stdout.Trim()
 Assert-Smoke 'exact-artifact-version' ($ver.Ok -and $verJson.Ok -and $script:ObservedVersion -ceq $wantVersion -and $script:ObservedVersionDisplay -ceq "rsrs $wantVersion")
 
+if (-not $BusinessOnly) {
 Invoke-Om -Name 'help' -ArgList @('--help') -DataDir $DirA -Raw | Out-Null
 foreach ($path in $script:Catalog.command_paths) {
     $helpArgs = @($path.command -split ' ') + @('--help')
@@ -1062,6 +1081,7 @@ if ($pluginHelp.Stdout -match '--list' -or $pluginHelp.Stdout -notmatch 'list sh
 Invoke-Om -Name 'plugin-reject-list-flag' -ArgList @('plugin', '--list') -DataDir $DirA -ExpectExit @(2) -Raw | Out-Null
 Invoke-Om -Name 'plugin-test-requires-event' -ArgList @('plugin', 'test') -DataDir $DirA -ExpectExit @(2) -Raw | Out-Null
 Invoke-Om -Name 'chain-reject-from-flag' -ArgList @('chain', '--from', 'missing') -DataDir $DirA -ExpectExit @(2) -Raw | Out-Null
+}
 
 Invoke-Om -Name 'config-addr' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirA | Out-Null
 $cfg = Invoke-Om -Name 'config-read' -ArgList @('--json', 'config') -DataDir $DirA
@@ -1077,6 +1097,7 @@ python -c "import sys; sys.path.insert(0, sys.argv[1]); from dev_model_fixture i
 if ($LASTEXITCODE -ne 0) { throw 'Shared CPU model fixture preparation failed' }
 $engine = Invoke-Om -Name 'model-engine-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA
 Assert-Smoke 'model-engine-cpu-selected' ($engine.Ok -and [string]$engine.Envelope.summary.engine -eq 'cpu')
+if (-not $BusinessOnly) {
 foreach ($configuredEngine in @('gpu', 'npu')) {
     $savedEngine = Invoke-Om -Name "model-engine-configure-$configuredEngine" -ArgList @('--json', 'model', 'engine', $configuredEngine) -DataDir $DirA -HostProfile
     $engineSettings = Get-Content -LiteralPath (Join-Path $DirA 'inference.json') -Raw -Encoding utf8 | ConvertFrom-Json
@@ -1084,9 +1105,11 @@ foreach ($configuredEngine in @('gpu', 'npu')) {
     Assert-Smoke "model-engine-$configuredEngine-selection-persisted" ($savedEngine.Ok -and [string]$engineSettings.engine -eq $configuredEngine -and $engineSettings.force_cpu -eq $false)
 }
 Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA -HostProfile | Out-Null
+}
 $probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
 Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok' -and [string]$probe.Envelope.summary.model -eq 'm3' -and [int]$probe.Envelope.summary.dimensions -eq 1024)
 
+if (-not $BusinessOnly) {
 $offlineDir = Join-Path $Root 'offline'
 Invoke-Om -Name 'offline-config' -ArgList @('--json', 'config', '--addr', $Server, '--autosync', 'false') -DataDir $offlineDir | Out-Null
 $offlineKeys = Invoke-Om -Name 'keygen-local-success' -ArgList @('--json', 'keygen', '--pass', (New-Pass)) -DataDir $offlineDir -Secret -HostProfile
@@ -1104,6 +1127,7 @@ Assert-Smoke 'keygen-force-rotates-material' ($forcedKeys.Ok -and [bool]$forcedK
 Complete-SmokeKeygen 'keygen-force' $forcedKeys $offlineDir
 $offlineLogout = Invoke-Om -Name 'offline-full-logout' -ArgList @('--json', 'logout', '--full') -DataDir $offlineDir -HostProfile
 Assert-Smoke 'full-logout-session-file-removed' ($offlineLogout.Ok -and -not (Test-Path -LiteralPath (Join-Path $offlineDir 'session.json')))
+}
 
 $user = "sweep$stamp"
 $pass = New-Pass
@@ -1122,6 +1146,10 @@ $st = Invoke-Om -Name 'status-json' -ArgList @('--json', 'status') -DataDir $Dir
 $serverAddr = ''
 if ($st.Envelope.summary.server_addr) { $serverAddr = [string]$st.Envelope.summary.server_addr }
 if ($serverAddr -ne $Server) { throw "status.server_addr=$serverAddr is not the test server. Aborting." }
+if ($BusinessOnly) {
+    Assert-Smoke 'business-registration-and-server' ($mainCloudAccount.Confirmed -and $st.Ok -and $st.Row.Status -ceq 'ok' -and (Test-SmokeProfileRoot ([string]$st.Envelope.summary.data_dir) $DirA))
+}
+if (-not $BusinessOnly) {
 Invoke-Om -Name 'status-human' -ArgList @('status') -DataDir $DirA -Raw | Out-Null
 $revisionInitial = Invoke-Om -Name 'memory-revision-json' -ArgList @('--json', 'memory-revision') -DataDir $DirA
 Assert-Smoke 'memory-revision-profile-token' ($revisionInitial.Ok -and [string]$revisionInitial.Envelope.command -ceq 'memory-revision' -and [string]$revisionInitial.Envelope.summary.profile -ceq [string]$st.Envelope.summary.data_dir -and [string]$revisionInitial.Envelope.summary.revision -cmatch '^[0-9a-f]{32}$')
@@ -1170,10 +1198,13 @@ try {
 Invoke-Om -Name 'inject-targets' -ArgList @('--json', 'inject', '--targets') -DataDir $DirA | Out-Null
 Invoke-Om -Name 'inject-preview-codex' -ArgList @('--json', 'inject', '--preview', '--id', 'codex') -DataDir $DirA -ExpectExit @(0, 1, 2) -Raw -Note 'preview only, do not write local agent config' | Out-Null
 Invoke-Om -Name 'inject-tui-no-tty' -ArgList @('inject', '--tui') -DataDir $DirA -ExpectExit @(1, 2) -Raw -Note 'no TTY' | Out-Null
+}
 
 # Disable autosync so the later explicit sync owns the push step.
 Invoke-Om -Name 'config-autosync-off-before-write' -ArgList @('--json', 'config', '--autosync', 'false') -DataDir $DirA | Out-Null
+if (-not $BusinessOnly) {
 $revisionBeforeWrite = Invoke-Om -Name 'memory-revision-before-write' -ArgList @('--json', 'memory-revision') -DataDir $DirA
+}
 $marker = "sweep-marker-$stamp"
 $title = "sweep-marker-$stamp"
 $rem = Invoke-Om -Name 'remember-force' -ArgList @(
@@ -1183,6 +1214,10 @@ $rem = Invoke-Om -Name 'remember-force' -ArgList @(
 $id = ''
 if ($rem.Envelope.summary.id) { $id = [string]$rem.Envelope.summary.id }
 if (-not $id) { throw 'remember returned no summary.id, the extraction chain cannot continue.' }
+if ($BusinessOnly) {
+    Assert-Smoke 'business-remember-created' ($rem.Ok -and $rem.Row.Status -ceq 'ok' -and [bool]$id)
+}
+if (-not $BusinessOnly) {
 $revisionAfterWrite = Invoke-Om -Name 'memory-revision-after-write-read' -ArgList @('--json', 'memory-revision') -DataDir $DirA
 Assert-Smoke 'memory-revision-after-write' ($revisionBeforeWrite.Ok -and $revisionAfterWrite.Ok -and [string]$revisionBeforeWrite.Envelope.command -ceq 'memory-revision' -and [string]$revisionAfterWrite.Envelope.command -ceq 'memory-revision' -and [string]$revisionBeforeWrite.Envelope.summary.profile -ceq [string]$revisionAfterWrite.Envelope.summary.profile -and [string]$revisionBeforeWrite.Envelope.summary.revision -cne [string]$revisionAfterWrite.Envelope.summary.revision)
 $short = $id.Substring(0, [Math]::Min(8, $id.Length))
@@ -1551,10 +1586,15 @@ Assert-Smoke 'grant-delete-root-auto-revoked' ($deleteGrant.Ok -and [bool]$delet
 Invoke-Om -Name 'session-list' -ArgList @('--json', 'session', 'list') -DataDir $DirA -TimeoutSec 120 | Out-Null
 Invoke-Om -Name 'session-revoke-bogus' -ArgList @('--json', 'session', 'revoke', '00000000-0000-0000-0000-000000000000') -DataDir $DirA -ExpectExit @(0, 1) -Note 'do not revoke the current session' | Out-Null
 $retiredInstall = Invoke-Om -Name 'model-install-rerank' -ArgList @('--json', 'model', 'install-rerank') -DataDir $DirA -ExpectExit @(2) -Raw
+}
 
 $syncA = Invoke-Om -Name 'sync-a' -ArgList @('--json', 'sync') -DataDir $DirA -TimeoutSec 180
 if (-not $syncA.Ok) { throw 'A sync failed' }
 Assert-Count 'A sync' $syncA.Envelope 'pushed' 1
+if ($BusinessOnly) {
+    Assert-Smoke 'business-upload-confirmed' ($syncA.Ok -and $syncA.Row.Status -ceq 'ok' -and [int]$syncA.Envelope.summary.pushed -gt 0)
+}
+if (-not $BusinessOnly) {
 Invoke-Om -Name 'sync-human' -ArgList @('sync') -DataDir $DirA -Raw -TimeoutSec 180 | Out-Null
 Invoke-Om -Name 'sync-conflicts' -ArgList @('--json', 'sync-conflicts') -DataDir $DirA -TimeoutSec 120 | Out-Null
 Invoke-Om -Name 'sync-conflicts-all' -ArgList @('--json', 'sync-conflicts', '--all') -DataDir $DirA -TimeoutSec 120 | Out-Null
@@ -1581,6 +1621,7 @@ Assert-Smoke 'sync-restore-remote-content-persisted' ($restoreRemote.Ok -and $re
 Invoke-Om -Name 'sync-resolve-bogus' -ArgList @(
     '--json', 'sync-resolve', '--epoch', '0', '--rev', '0', '--head-rev', '0', '--action', 'keep-current'
 ) -DataDir $DirA -AllowStatus @('fail') -Note 'must fail when there is no conflict' | Out-Null
+}
 
 Invoke-Om -Name 'config-addr-b' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $DirB | Out-Null
 $loginB = Invoke-Om -Name 'login-b' -ArgList @('--json', 'login', '--interactive', '--addr', $Server, '--user', $user, '--pass', $pass, '--super', $super) -DataDir $DirB -Secret -HostProfile -TimeoutSec 180
@@ -1589,11 +1630,29 @@ $stB = Invoke-Om -Name 'status-b' -ArgList @('--json', 'status') -DataDir $DirB
 $addrB = ''
 if ($stB.Envelope.summary.server_addr) { $addrB = [string]$stB.Envelope.summary.server_addr }
 if ($addrB -ne $Server) { throw "B server_addr=$addrB" }
+if ($BusinessOnly) {
+    $profileB = [string]$loginB.Envelope.summary.dir
+    $statusProfileB = [string]$stB.Envelope.summary.data_dir
+    $sameProfileB = [IO.Path]::IsPathFullyQualified($statusProfileB) -and [IO.Path]::IsPathFullyQualified($profileB) -and [IO.Path]::GetFullPath($statusProfileB) -ceq [IO.Path]::GetFullPath($profileB)
+    Assert-Smoke 'business-independent-login' ($loginB.Ok -and $loginB.Row.Status -ceq 'ok' -and $loginB.Envelope.summary.ok -eq $true -and [string]$loginB.Envelope.summary.user -ceq $user -and [string]$loginB.Envelope.summary.addr -ceq $Server -and (Test-SmokeProfileRoot $profileB $DirB) -and $sameProfileB -and $stB.Ok -and $stB.Row.Status -ceq 'ok')
+}
 $syncB = Invoke-Om -Name 'sync-b' -ArgList @('--json', 'sync') -DataDir $DirB -TimeoutSec 180
 if (-not $syncB.Ok) { throw 'B download sync failed' }
 Assert-Smoke 'device-b-sync-converged' ($syncB.Envelope.summary.converged -eq $true -and [int]$syncB.Envelope.summary.pending -eq 0)
 $recB = Invoke-Om -Name 'recall-b' -ArgList @('--json', 'recall', $marker, '--limit', '3') -DataDir $DirB -TimeoutSec 180 -AllowIndexWait
 if ($recB.Stdout -notlike "*$marker*") { throw "B recall did not return the marker $marker written by A" }
+if ($BusinessOnly) {
+    Assert-Smoke 'business-download-converged' ($syncB.Row.Status -ceq 'ok' -and $syncB.Envelope.summary.converged -eq $true -and [int]$syncB.Envelope.summary.pending -eq 0)
+    $businessHits = @($recB.Envelope.details | Where-Object { [string]$_.entry.id -ceq $id -and [string]$_.entry.content -ceq "dev sweep marker $marker on TB16P" })
+    Assert-Smoke 'business-cross-device-recall' ($recB.Ok -and $recB.Row.Status -ceq 'ok' -and $businessHits.Count -gt 0)
+    Invoke-CloudCleanup
+    if (-not $script:CloudCleanup.passed -or @($script:CloudCleanup.remaining_users).Count -gt 0) { throw 'Disposable account cleanup was not confirmed.' }
+    if (@($Rows | Where-Object { -not $_.Ok -or $_.Status -eq 'skip' }).Count -gt 0) { throw 'Business diagnostics contain failed or skipped steps.' }
+    $script:BusinessStatus = 'passed'
+    Write-SweepReport -Force
+    Stop-OurRuntimes
+    exit 0
+}
 Invoke-Om -Name 'show-b' -ArgList @('--json', 'show', $short) -DataDir $DirB | Out-Null
 $bad = Join-Path $Root 'bad'
 Invoke-Om -Name 'config-addr-bad' -ArgList @('--json', 'config', '--addr', $Server) -DataDir $bad | Out-Null

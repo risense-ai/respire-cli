@@ -17,6 +17,14 @@ on:
         description: Diagnose authenticated runtime contracts only; never validates the complete release gate
         type: boolean
         default: false
+      business_only:
+        description: Run only synthetic cross-device business diagnostics; never release acceptance
+        type: boolean
+        default: false
+      runtime_sha:
+        description: Exact published Runtime source SHA, required for business diagnostics
+        required: false
+        type: string
       cli_run_id:
         description: Validated Release run whose exact artifacts will be tested without rebuilding
         required: true
@@ -36,6 +44,12 @@ on:
       local_api_only:
         type: boolean
         default: false
+      business_only:
+        type: boolean
+        default: false
+      runtime_sha:
+        required: false
+        type: string
       cli_run_id:
         required: true
         type: string
@@ -49,14 +63,14 @@ permissions:
 
 jobs:
   sweep:
-    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.auth_salt_only }}
-    name: ${{ inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
+    if: ${{ !inputs.api_only || inputs.local_api_only || inputs.auth_salt_only || inputs.business_only }}
+    name: ${{ inputs.business_only && 'Business diagnostics (Linux musl)' || inputs.local_api_only && 'Runtime diagnostics' || format('sweep ({0})', matrix.target) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON((inputs.local_api_only || inputs.auth_salt_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
+        include: ${{ fromJSON((inputs.local_api_only || inputs.auth_salt_only || inputs.business_only) && '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"}]' || '[{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"},{"os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu"},{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]') }}
     # Full fixture mechanics only: this workflow is diagnostic, never full acceptance
     # of the harness source and never reusable as publication evidence.
     env:
@@ -78,9 +92,13 @@ jobs:
           API_ONLY: ${{ inputs.api_only }}
           LOCAL_API_ONLY: ${{ inputs.local_api_only }}
           AUTH_SALT_ONLY: ${{ inputs.auth_salt_only }}
+          BUSINESS_ONLY: ${{ inputs.business_only }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
         run: |
+          node -e 'if(process.env.BUSINESS_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true"||process.env.AUTH_SALT_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.API_ONLY==="true"&&process.env.LOCAL_API_ONLY==="true") throw new Error("Choose one diagnostic scope")'
           node -e 'if(process.env.AUTH_SALT_ONLY==="true"&&(process.env.API_ONLY==="true"||process.env.LOCAL_API_ONLY==="true")) throw new Error("Choose one diagnostic scope")'
+          node -e 'if(process.env.BUSINESS_ONLY==="true"&&!/^[a-f0-9]{40}$/.test(process.env.EXPECTED_RUNTIME_SHA||"")) throw new Error("Pass the exact published Runtime source SHA for business diagnostics")'
           node -e 'const value=process.env.RSRS_DEV_SERVER_ADDR; if(!value) throw new Error("Configure RSRS_DEV_SERVER_ADDR before testing"); const u=new URL(value); if(u.origin!=="https://api-dev.rsrs.rs"||u.pathname!=="/"||u.search||u.hash||u.username||u.password) throw new Error("CLI smoke requires https://api-dev.rsrs.rs"); if(!process.env.CLI_RUN_ID||!process.env.CLI_SHA) throw new Error("Pass the exact CI run ID and source SHA; mutable npm tags are not smoke artifacts")'
       - name: Verify the original release build
         if: inputs.cli_run_id != ''
@@ -135,6 +153,8 @@ jobs:
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
+          BUSINESS_ONLY: ${{ inputs.business_only }}
+          EXPECTED_RUNTIME_SHA: ${{ inputs.runtime_sha }}
           RSRS_DATA_DIR: ${{ runner.temp }}/diagnostic-runtime-proof
         run: |
           set -euo pipefail
@@ -167,6 +187,10 @@ jobs:
           assert.equal(runtimeMetadata.binary_sha256,receipt.sha256);
           assert.equal(runtimeMetadata.runtime_version,pin.required);
           assert.equal(runtimeMetadata.target_triple??runtimeMetadata.triple,process.env.RSRS_RUNTIME_TRIPLE);
+          if(process.env.BUSINESS_ONLY==='true'){
+            assert.match(process.env.EXPECTED_RUNTIME_SHA??'',/^[a-f0-9]{40}$/,'Exact Runtime source SHA required');
+            assert.equal(runtimeMetadata.source_commit,process.env.EXPECTED_RUNTIME_SHA,'Pinned Runtime source differs from the requested candidate');
+          }
           const runtime=fs.realpathSync(path.join(root, 'bin', 'runtime',pin.required,'rsrs-runtime'+(process.platform==='win32'?'.exe':'')));
           assert.notEqual(runtime,binary);assert.equal(hash(fs.readFileSync(runtime)),receipt.sha256);
           assert.match(process.env.GITHUB_SHA,/^[a-f0-9]{40}$/);
@@ -177,6 +201,7 @@ jobs:
             runtime:{version:receipt.version,binary_sha256:receipt.sha256,required:inventory.summary.required,accept:inventory.summary.accept,
               release_metadata_sha256:receipt.release.metadata_sha256,release_metadata:runtimeMetadata},
             limits:['Installation identity only; fixture outcomes are separate','An old CLI producer cannot establish full acceptance or publication of the new harness']};
+          if(process.env.BUSINESS_ONLY==='true') evidence.expected_runtime_source_sha=process.env.EXPECTED_RUNTIME_SHA;
           fs.writeFileSync(path.join(process.env.RUNNER_TEMP,'standalone-diagnostic-identity.json'),JSON.stringify(evidence,null,2)+'\n');
           NODE
       - name: Prepare persistent native credentials for diagnostic fixtures
@@ -214,16 +239,19 @@ jobs:
           CLI_RUN_ID: ${{ inputs.cli_run_id }}
           RSRS_ENGINE: cpu
           CLI_SHA: ${{ inputs.cli_sha }}
+          BUSINESS_ONLY: ${{ inputs.business_only }}
           RSRS_M3_DIR: ${{ runner.temp }}/sweep-model/bge-m3
         run: |
           $ErrorActionPreference = 'Stop'
+          $businessArgs = @()
+          if ($env:BUSINESS_ONLY -eq 'true') { $businessArgs += '-BusinessOnly' }
           $root = Join-Path $env:RUNNER_TEMP 'om-sweep'
           $exe = Join-Path (Resolve-Path validated-cli) $(if ($IsWindows) { 'rsrs.exe' } else { 'rsrs' })
           if ($IsLinux) {
-            & dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root (Join-Path $env:RUNNER_TEMP 'base-sweep-credentials') --timeout 6600 -- pwsh -NoProfile -File scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+            & dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root (Join-Path $env:RUNNER_TEMP 'base-sweep-credentials') --timeout 6600 -- pwsh -NoProfile -File scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental @businessArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } else {
-            ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental
+            ./scripts/dev-release-sweep.ps1 -Exe $exe -ExpectVersion $env:CLI_VERSION -Root $root -DeferSupplemental @businessArgs
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Upload base smoke diagnostics
@@ -238,7 +266,7 @@ jobs:
             ${{ runner.temp }}/base-sweep-credentials/business-keyring-selftest.json
           if-no-files-found: warn
       - name: Diagnose GNU login interruption with the original binary
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && matrix.target == 'x86_64-unknown-linux-gnu' && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && matrix.target == 'x86_64-unknown-linux-gnu' && steps.standalone_runtime.outcome == 'success' && steps.native_credentials.outcome == 'success' }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -249,7 +277,7 @@ jobs:
           python3 scripts/test-login-interruption-contract.py
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/om-sweep/models/bge-m3"
       - name: Verify all supplementary CLI contracts
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -262,7 +290,7 @@ jobs:
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
           dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private python3 scripts/dev-secret-service-keyring-selftest.py --root "$RUNNER_TEMP/supplement-credentials" --timeout 6600 -- python3 scripts/dev-smoke-supplements.py --binary "$binary" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA" --root "$RUNNER_TEMP/dev-supplements" --cli-report "$RUNNER_TEMP/om-sweep/coverage.json"
       - name: Verify historical Secret Service profile migration
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os == 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: bash
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -281,7 +309,7 @@ jobs:
           python scripts/dev-secret-service-migration-gate.py --migration-report "$root/migration-coverage.json" --report "$root/migration-platform-gate.json" --binary-sha256 "$checksum" --version "$CLI_VERSION" --source-sha "$CLI_SHA"
           test "$fixture_status" -eq 0
       - name: Verify native encrypted profile migration
-        if: ${{ !cancelled() && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
+        if: ${{ !cancelled() && !inputs.business_only && !inputs.local_api_only && !inputs.auth_salt_only && runner.os != 'Linux' && steps.supplement_python.outcome == 'success' && steps.standalone_runtime.outcome == 'success' && (runner.os != 'Linux' || steps.native_credentials.outcome == 'success') }}
         shell: pwsh
         env:
           CLI_SHA: ${{ inputs.cli_sha }}
@@ -352,7 +380,7 @@ jobs:
           if-no-files-found: error
 
   api-smoke:
-    if: ${{ !inputs.auth_salt_only }}
+    if: ${{ !inputs.auth_salt_only && !inputs.business_only }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     concurrency:
