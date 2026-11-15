@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Actual native foreground lifecycle in a disposable home; no OS registration.
+"""Actual native lifecycle in a disposable home; optional owned OS registration.
 
 The CLI and an extracted independent Runtime bundle are inputs. No credentials,
 user data or inherited Respire configuration are passed to them. Real sign-in
-service adapters require a separate platform acceptance run; passing this script
-does not claim that acceptance.
+service adapters are exercised only with --register on an ephemeral hosted
+runner; a foreground-only run does not claim registration acceptance.
 """
 import argparse
 import json
@@ -286,6 +286,11 @@ def main():
                     capture_output=True,text=True,timeout=45)
                 assert rejected.returncode != 0 and not rejected_root.exists(), "unsupported executable path created state"
                 print("PASS: unsupported systemd executable path refused before any lifecycle state")
+                # Keep the hostile-path negative case above, then exercise the
+                # real systemd lifecycle using a supported installation path.
+                root = base / "registered data spaces % and $"
+                assert not root.exists(), "registration fixture must start fresh"
+                env["RSRS_DATA_DIR"] = str(root)
 
             def collect_managed_profiles():
                 # A service manager deliberately does not inherit test-runner
