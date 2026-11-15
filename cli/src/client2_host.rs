@@ -436,33 +436,55 @@ pub(crate) fn serve() -> Result<()> {
     drop(reservation);
     let mut child = respire_spawn::spawn_owned_runtime(&mut command)?;
     let pid = child.id();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let health: crate::net_rpc::Health = loop {
-        anyhow::ensure!(child.try_wait()?.is_none(), "owned Runtime exited before readiness");
-        if let Ok(ready) = health_at(port) {
-            if ready["startup_complete"] == true {
-                break serde_json::from_value(ready)?;
+    let startup = (|| -> Result<_> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let health: crate::net_rpc::Health = loop {
+            anyhow::ensure!(child.try_wait()?.is_none(), "owned Runtime exited before readiness");
+            if let Ok(ready) = health_at(port) {
+                if ready["startup_complete"] == true {
+                    break serde_json::from_value(ready)?;
+                }
             }
+            anyhow::ensure!(Instant::now() < deadline,
+                "Runtime readiness is uncertain for child {pid}; inspect before retry");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let (installation, profile) = respire_client_host::config::control_roots()?;
+        anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
+            && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
+            && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+            && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
+            && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
+            "Runtime readiness does not match the selected child and installation");
+        let backend = Arc::new(Backend { port, health, executable, public_port,
+            host_executable: visible_path(std::env::current_exe()?)?,
+            host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
+            last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
+        backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+        expectation.confirm_credentials(&backend.health)?;
+        let server = tiny_http::Server::from_listener(listener, None)
+            .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
+        Ok((backend, server))
+    })();
+    let (backend, server) = match startup {
+        Ok(ready) => ready,
+        Err(error) => {
+            // Stop only the child we spawned; a delayed startup must not race the next owner.
+            let cleanup = (|| -> Result<()> {
+                if child.try_wait().context("could not inspect unready Runtime child")?.is_none() {
+                    child.kill().context("could not stop unready Runtime child")?;
+                }
+                child.wait().context("could not reap unready Runtime child")?;
+                Ok(())
+            })();
+            return match cleanup {
+                Ok(()) => Err(error).context(
+                    "Runtime startup failed; original data and recovery records retained"),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed: {cleanup_error:#}")),
+            };
         }
-        anyhow::ensure!(Instant::now() < deadline,
-            "Runtime readiness is uncertain for child {pid}; inspect before retry");
-        std::thread::sleep(Duration::from_millis(100));
     };
-    let (installation, profile) = respire_client_host::config::control_roots()?;
-    anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
-        && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
-        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
-        && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
-        && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
-        "Runtime readiness does not match the selected child and installation");
-    let backend = Arc::new(Backend { port, health, executable, public_port,
-        host_executable: visible_path(std::env::current_exe()?)?,
-        host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
-        last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
-    backend.verify(&serde_json::from_value(health_at(port)?)?)?;
-    expectation.confirm_credentials(&backend.health)?;
-    let server = tiny_http::Server::from_listener(listener, None)
-        .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
     if let Err(error) = publish_ready(&json!({"startup_complete":true, "pid":std::process::id(),
         "exe":backend.host_executable, "bin":crate::VERSION, "port":public_port,
         "installation_root":backend.health.installation_root,
