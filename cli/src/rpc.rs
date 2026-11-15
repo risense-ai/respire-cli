@@ -811,15 +811,21 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
+    ensure_daemon_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn ensure_daemon_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
+) -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    if crate::autostart::ensure_managed_locked()? {
+    if crate::autostart::ensure_managed_locked_with_expectation(expectation)? {
         return Ok(());
     }
     crate::autostart::check_direct_access()?;
     let current = probe_runtime()?;
     if let Some(health) = &current {
         if runtime_acceptable(health)? {
-            respire_host_control::lifecycle_io::unlock_if_needed(health)?;
+            expectation.confirm_credentials(health)?;
             return Ok(());
         }
     }
@@ -855,7 +861,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     let (mut child, instance_id) =
         crate::autostart::spawn_authorized_runtime(&executable, &arguments, None)
             .context("failed to start host runtime")?;
-    let result = wait_daemon_ready(&mut child, &executable, &instance_id);
+    let result = wait_daemon_ready(&mut child, &executable, &instance_id, expectation);
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
         child
@@ -938,6 +944,7 @@ fn wait_daemon_ready(
     child: &mut std::process::Child,
     executable: &std::path::Path,
     instance_id: &str,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
 ) -> Result<()> {
     let off_mode = respire_client_host::settings::off_mode()?;
     let mut last_store_ready = None;
@@ -975,7 +982,7 @@ fn wait_daemon_ready(
                 "runtime owner changed during startup"
             );
             if health.store_ready || off_mode || health.credential_state == "required" {
-                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                expectation.confirm_credentials(&health)?;
                 return Ok(());
             }
         }
@@ -1317,7 +1324,8 @@ mod tests {
             let (child, instance_id) = crate::autostart::spawn_authorized_runtime(
                 &executable, &arguments, None)?;
             let mut runtime = Self { child, port, _environment: environment, _root: root };
-            wait_daemon_ready(&mut runtime.child, &executable, &instance_id)?;
+            wait_daemon_ready(&mut runtime.child, &executable, &instance_id,
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)?;
             Ok(runtime)
         }
 

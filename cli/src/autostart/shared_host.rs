@@ -293,7 +293,8 @@ impl HostLifecycle for CliHost {
                 "account replacement requires the old supervisor to be stopped"
             );
         }
-        respire_host_control::lifecycle_io::start_account_runtime(launch, &self.verified_runtime()?)
+        respire_host_control::lifecycle_io::start_account_runtime(launch, &self.verified_runtime()?,
+            respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
     }
 
     fn finish_account_handoff(&self, receipt: &HostAuthAccountResult) -> Result<()> {

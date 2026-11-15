@@ -164,6 +164,11 @@ fn absent_identity_receipts_preserve_committed_pending_and_unknown_outcomes() ->
             42,
             &original,
         )?;
+        let receipt: HostIdentityWriteResult = serde_json::from_value(baseline["envelope"]["summary"].clone())?;
+        assert_eq!(restoration_expectation(&receipt).is_ok(), outcome == HostIdentityWriteOutcome::Committed);
+        if let Ok(expectation) = restoration_expectation(&receipt) {
+            assert_eq!(expectation, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock);
+        }
         let mut changed = baseline;
         changed["exit"] = json!(99);
         assert!(validate_response(
@@ -236,6 +241,18 @@ fn identity_receipts_reject_changed_context_and_stale_local_identity() -> Result
 
 #[test]
 fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result<()> {
+    use respire_host_control::lifecycle_io::AccountRuntimeExpectation;
+    let _lock = crate::TEST_ENV_LOCK.lock().map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+                None => std::env::remove_var("RSRS_DATA_DIR"),
+            }
+        }
+    }
+    let _restore = Restore(std::env::var_os("RSRS_DATA_DIR"));
     let dir = tempfile::tempdir()?;
     let profile = dir.path().canonicalize()?;
     let mut original = original(&profile);
@@ -246,6 +263,46 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
     original.operation = HostIdentityWriteOperation::Logout { full: true };
     let request = request(&original)?;
     let full = response(&original, &profile, HostIdentityWriteOutcome::Committed)?;
+    let mut receipt: HostIdentityWriteResult = serde_json::from_value(full["envelope"]["summary"].clone())?;
+    let expectation = restoration_expectation(&receipt)?;
+    assert_eq!(expectation, AccountRuntimeExpectation::LockedAfterFullLogout);
+    for outcome in [HostIdentityWriteOutcome::Pending, HostIdentityWriteOutcome::Unknown] {
+        receipt.outcome = outcome;
+        assert!(restoration_expectation(&receipt).is_err());
+    }
+    receipt.outcome = HostIdentityWriteOutcome::Committed;
+    receipt.identity = original.source_identity.clone();
+    assert!(restoration_expectation(&receipt).is_err());
+    std::env::set_var("RSRS_DATA_DIR", &profile);
+    let mut health: respire_commands::net_rpc::Health = serde_json::from_value(json!({
+        "server":"respire", "bin":"rsrs-runtime", "pid":42, "v":1,
+        "installation_root":profile, "data_dir":profile,
+        "store_ready":false, "credential_state":"required"
+    }))?;
+    // No session and no host key: only this explicit expectation may succeed.
+    expectation.confirm_credentials(&health)?;
+    assert!(AccountRuntimeExpectation::Unlock.confirm_credentials(&health).is_err());
+    health.store_ready = true;
+    assert!(expectation.confirm_credentials(&health).is_err());
+    health.store_ready = false;
+    health.credential_state = "unavailable".into();
+    assert!(expectation.confirm_credentials(&health).is_err());
+    health.credential_state = "required".into();
+    let foreign = tempfile::tempdir()?;
+    health.data_dir = foreign.path().to_string_lossy().into_owned();
+    assert!(expectation.confirm_credentials(&health).is_err());
+    health.data_dir = profile.to_string_lossy().into_owned();
+    health.installation_root = foreign.path().to_string_lossy().into_owned();
+    assert!(expectation.confirm_credentials(&health).is_err());
+    health.installation_root = profile.to_string_lossy().into_owned();
+    #[cfg(feature = "client2-host-prototype")]
+    {
+        use crate::client2_host::startup_expectation;
+        assert_eq!(startup_expectation(Vec::new().into_iter())?, AccountRuntimeExpectation::Unlock);
+        assert_eq!(startup_expectation(vec!["--locked-after-full-logout".into()].into_iter())?, expectation);
+        assert!(startup_expectation(vec!["--unknown".into()].into_iter()).is_err());
+        assert!(startup_expectation(vec!["--locked-after-full-logout".into(), "extra".into()].into_iter()).is_err());
+    }
     validate_response(
         serde_json::from_value(full)?,
         &request,
@@ -272,6 +329,10 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
         br#"{"user":"synthetic-user"}"#,
     )?;
     soft.source_identity = super::super::control::identity(&profile)?;
+    assert!(expectation.confirm_credentials(&health).is_err());
+    receipt.identity = soft.source_identity.clone();
+    receipt.operation = HostIdentityWriteOperation::Logout { full: false };
+    assert_eq!(restoration_expectation(&receipt)?, AccountRuntimeExpectation::Unlock);
     let session = "c432d4df-0846-4d1d-9d26-b9eb3f23612b";
     soft.operation = HostIdentityWriteOperation::SessionRevoke {
         session_id: session.into(),
@@ -284,6 +345,8 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
     };
     revoke["envelope"]["summary"]["session_sha256"] = json!(digest);
     revoke["envelope"]["summary"]["revoke"] = json!({"revoked":true,"session_id":session});
+    let revoked: HostIdentityWriteResult = serde_json::from_value(revoke["envelope"]["summary"].clone())?;
+    assert_eq!(restoration_expectation(&revoked)?, AccountRuntimeExpectation::Unlock);
     validate_response(
         serde_json::from_value(revoke.clone())?,
         &request,

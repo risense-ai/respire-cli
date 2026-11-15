@@ -8,6 +8,30 @@ use respire_commands::net_rpc::{self, Health};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountRuntimeExpectation {
+    Unlock,
+    LockedAfterFullLogout,
+}
+
+impl AccountRuntimeExpectation {
+    /// Call only after verifying the Runtime owner, image and launch instance.
+    pub fn confirm_credentials(self, health: &Health) -> Result<()> {
+        match self {
+            Self::Unlock => { unlock_if_needed(health)?; }
+            Self::LockedAfterFullLogout => {
+                let (root, profile) = respire_client_host::config::control_roots()?;
+                anyhow::ensure!(Path::new(&health.installation_root).canonicalize()? == root.canonicalize()?
+                    && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?
+                    && matches!(crate::identity(&profile)?, respire_protocol::HostAuthIdentity::Absent)
+                    && !health.store_ready && health.credential_state == "required",
+                    "full logout requires the selected session to remain absent and Runtime locked");
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn endpoint_path() -> PathBuf {
     respire_client_host::paths::main_data_dir().join("runtime/endpoint.json")
 }
@@ -138,7 +162,8 @@ fn start_matches(birth: &str, observed: &str) -> bool {
 
 /// A successful return proves this owned child's identity. The maintenance owner
 /// requires an open store for committed targets, but can restore an originally locked owner.
-pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -> Result<()> {
+pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime,
+    expectation: AccountRuntimeExpectation) -> Result<()> {
     anyhow::ensure!(
         image.port() == net_rpc::rpc_port(),
         "selected Runtime port differs from host transport"
@@ -184,8 +209,8 @@ pub fn start_account_runtime(context: &LaunchContext, image: &VerifiedRuntime) -
                 if health.credential_state != "required" {
                     continue;
                 }
-                unlock_if_needed(&health)?;
             }
+            expectation.confirm_credentials(&health)?;
             return Ok(());
         }
         anyhow::bail!("owned account Runtime did not become ready; query the original operation")

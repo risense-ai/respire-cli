@@ -456,9 +456,15 @@ impl Maintenance {
     }
 
     pub(crate) fn start_account_runtime(&mut self) -> Result<()> {
+        self.start_account_runtime_with_expectation(
+            respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    }
+
+    pub(crate) fn start_account_runtime_with_expectation(&mut self,
+        expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
         self.check_account_runtime()?;
         self.mark(Phase::Starting)?;
-        crate::rpc::ensure_daemon_locked()
+        crate::rpc::ensure_daemon_locked_with_expectation(expectation)
     }
 
     pub(crate) fn resume_managed_runtime(&mut self) -> Result<()> {
@@ -583,6 +589,13 @@ impl Maintenance {
 
     /// Restore only the verified serving owner after durable maintenance completion.
     pub(crate) fn finish_handoff(&self) -> Result<()> {
+        self.finish_handoff_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    }
+
+    pub(crate) fn finish_handoff_with_expectation(&self,
+        expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
+        #[cfg(not(feature = "client2-host-prototype"))]
+        let _ = expectation;
         #[cfg(feature = "client2-host-prototype")]
         {
             anyhow::ensure!(self.completed, "compatibility handoff requires completed maintenance");
@@ -593,7 +606,7 @@ impl Maintenance {
             anyhow::ensure!(respire_client_host::config::control_roots()?.0.canonicalize()? == root,
                 "completed maintenance installation changed before compatibility handoff");
             if let Some(health) = crate::rpc::probe_runtime()? {
-                finish_compatibility_handoff(&health).context(
+                finish_compatibility_handoff_with_expectation(&health, expectation).context(
                     "operation committed and maintenance finished; Client2 compatibility handoff pending; do not repeat the operation")?;
             } else {
                 anyhow::ensure!(!crate::rpc::endpoint_path().try_exists()?,
@@ -652,6 +665,13 @@ impl Drop for Maintenance {
 
 #[cfg(feature = "client2-host-prototype")]
 pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Result<()> {
+    finish_compatibility_handoff_with_expectation(owner,
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+#[cfg(feature = "client2-host-prototype")]
+fn finish_compatibility_handoff_with_expectation(owner: &crate::net_rpc::Health,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     anyhow::ensure!(current_boot_token().is_none(),
         "compatibility handoff cannot inherit maintenance authorization");
     let (root, profile) = respire_client_host::config::control_roots()?;
@@ -676,10 +696,13 @@ pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Re
     anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == profile
         && super::supervise::handoff_identity(&profile)? == identity,
         "committed selection changed before compatibility host startup");
-    crate::client2_host::start_locked()?;
+    crate::client2_host::start_locked_with_expectation(expectation)?;
     let restored = crate::rpc::probe_runtime()?.context("compatibility Runtime did not resume")?;
     super::supervise::verify_model_owner(&restored, &root, &profile, None,
         &binary, &manifest, Some(&account))?;
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        expectation.confirm_credentials(&restored)?;
+    }
     let (current_binary, current_manifest) = super::supervise::installed_model_runtime()?;
     anyhow::ensure!(restored.instance_id != owner.instance_id && (!ready || restored.store_ready)
         && current_binary == binary && current_manifest.version == manifest.version
@@ -1102,6 +1125,11 @@ pub(super) fn stop_drained_supervisor(config: &Registration) -> Result<()> {
 }
 
 pub(super) fn wait_ready(config: &Registration) -> Result<()> {
+    wait_ready_with_expectation(config, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+fn wait_ready_with_expectation(config: &Registration,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     owned(config)?;
     manager::inspect(config)?;
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1112,11 +1140,9 @@ pub(super) fn wait_ready(config: &Registration) -> Result<()> {
                 crate::runtime_fetch::version_in_accept(&health.runtime_version),
                 "managed runtime version mismatch"
             );
-            if health.credential_state == "required" {
-                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
-                return Ok(());
-            }
-            if health.store_ready || respire_client_host::settings::off_mode()? {
+            if health.credential_state == "required" || health.store_ready
+                || respire_client_host::settings::off_mode()? {
+                expectation.confirm_credentials(&health)?;
                 return Ok(());
             }
         }
@@ -1126,6 +1152,11 @@ pub(super) fn wait_ready(config: &Registration) -> Result<()> {
 }
 
 fn start_candidate(guard: &mut Maintenance) -> Result<()> {
+    start_candidate_with_expectation(guard, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+fn start_candidate_with_expectation(guard: &mut Maintenance,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     let config = guard
         .config
         .as_ref()
@@ -1148,11 +1179,12 @@ fn start_candidate(guard: &mut Maintenance) -> Result<()> {
             .as_ref()
             .context("managed registration missing")?,
     )?;
-    wait_ready(
+    wait_ready_with_expectation(
         guard
             .config
             .as_ref()
             .context("managed registration missing")?,
+        expectation,
     )
 }
 
@@ -1169,6 +1201,11 @@ pub(crate) fn may_reuse_runtime(health: &crate::net_rpc::Health) -> Result<bool>
 }
 
 pub(crate) fn ensure_managed_locked() -> Result<bool> {
+    ensure_managed_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn ensure_managed_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<bool> {
     let Some(config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return Ok(false);
     };
@@ -1204,7 +1241,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         };
         let result = (|| {
             raw_stop_owned(borrowed.config.as_ref().context("registration missing")?)?;
-            start_candidate(&mut borrowed)
+            start_candidate_with_expectation(&mut borrowed, expectation)
         })();
         // This borrowed guard does not own completion or its caller's token.
         borrowed.config = None;
@@ -1217,13 +1254,13 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         if crate::rpc::runtime_acceptable(&health)?
             && health.managed_id.as_deref() == Some(config.id.as_str())
         {
-            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+            expectation.confirm_credentials(&health)?;
             return Ok(true);
         }
     }
     let mut guard = Maintenance::begin(config, false)?;
     raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
-    start_candidate(&mut guard)?;
+    start_candidate_with_expectation(&mut guard, expectation)?;
     guard.finish()?;
     Ok(true)
 }

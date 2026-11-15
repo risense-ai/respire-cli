@@ -85,12 +85,16 @@ fn guarded_host_pid(ready: &Value, guardian: u32, executable: &Path, root: &Path
 /// library lock, or fabricated identity is retained for it.
 #[cfg(target_os = "macos")]
 pub(crate) fn supervise() -> Result<()> {
-    anyhow::ensure!(std::env::args_os().count() == 2, "exit observer accepts no extra arguments");
+    let expectation = startup_expectation(std::env::args_os().skip(2))?;
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 exit observation")?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&executable);
-    command.arg("--client2-host-internal").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    command.arg("--client2-host-internal");
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        command.arg("--locked-after-full-logout");
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
     let mut ready = receive_ready(&mut child)?;
     anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
@@ -106,7 +110,7 @@ pub(crate) fn supervise() -> Result<()> {
         host_image_sha256: hex::encode(Sha256::digest(std::fs::read(&executable)?)),
         last_health: Mutex::new(health) };
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
-    respire_host_control::lifecycle_io::unlock_if_needed(&backend.health)?;
+    expectation.confirm_credentials(&backend.health)?;
     // A disconnected launcher must not orphan a running host by making its
     // observer exit. Keep ownership and reap normally even if readiness is lost.
     let readiness = publish_ready(&ready);
@@ -378,8 +382,19 @@ fn validate_request(method: &str, path: &str, loopback: bool,
     Ok(())
 }
 
+pub(crate) fn startup_expectation(arguments: impl Iterator<Item = std::ffi::OsString>)
+    -> Result<respire_host_control::lifecycle_io::AccountRuntimeExpectation> {
+    use respire_host_control::lifecycle_io::AccountRuntimeExpectation;
+    let arguments: Vec<_> = arguments.collect();
+    match arguments.as_slice() {
+        [] => Ok(AccountRuntimeExpectation::Unlock),
+        [flag] if flag == "--locked-after-full-logout" => Ok(AccountRuntimeExpectation::LockedAfterFullLogout),
+        _ => anyhow::bail!("compatibility startup accepts only the explicit full logout expectation"),
+    }
+}
+
 pub(crate) fn serve() -> Result<()> {
-    anyhow::ensure!(std::env::args_os().count() == 2, "compatibility host accepts no extra arguments");
+    let expectation = startup_expectation(std::env::args_os().skip(2))?;
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     crate::autostart::check_direct_access()?;
@@ -445,7 +460,7 @@ pub(crate) fn serve() -> Result<()> {
         host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
         last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
-    respire_host_control::lifecycle_io::unlock_if_needed(&backend.health)?;
+    expectation.confirm_credentials(&backend.health)?;
     let server = tiny_http::Server::from_listener(listener, None)
         .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
     if let Err(error) = publish_ready(&json!({"startup_complete":true, "pid":std::process::id(),
@@ -676,6 +691,11 @@ pub(crate) fn checked_executable() -> Result<PathBuf> {
 /// Caller retains the existing takeover lock. This never takes over a healthy
 /// strict or managed owner, and never retries an uncertain spawn.
 pub(crate) fn start_locked() -> Result<()> {
+    start_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn start_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
@@ -683,10 +703,18 @@ pub(crate) fn start_locked() -> Result<()> {
     if crate::rpc::probe_runtime()?.is_some() {
         return verify_host(&health_at(crate::net_rpc::rpc_port())?, &executable, None);
     }
+    let mut arguments = Vec::new();
+    #[cfg(target_os = "macos")]
+    arguments.push(std::ffi::OsString::from("--client2-host-supervisor-internal"));
+    #[cfg(not(target_os = "macos"))]
+    arguments.push(std::ffi::OsString::from("--client2-host-internal"));
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        arguments.push("--locked-after-full-logout".into());
+    }
     #[cfg(target_os = "macos")]
     let (mut child, host_pid) = {
         let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,
-            &["--client2-host-supervisor-internal".into()])?;
+            &arguments)?;
         let ready = receive_ready(&mut guardian)?;
         let pid = guarded_host_pid(&ready, guardian.id(), &executable,
             &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
@@ -695,7 +723,7 @@ pub(crate) fn start_locked() -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     let (mut child, host_pid) = {
         let child = respire_spawn::spawn_binary_with_boot_token(&executable,
-            &["--client2-host-internal".into()], None)?;
+            &arguments, None)?;
         let pid = child.id();
         (child, pid)
     };
