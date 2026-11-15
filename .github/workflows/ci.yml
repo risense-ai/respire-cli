@@ -426,18 +426,58 @@ jobs:
           path: .runtime-examples
           persist-credentials: false
       - name: Bind Runtime business harness and SDK identity
+        id: runtime-sdk-key
         if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
         env:
           RUNTIME_TESTS_SHA: ${{ steps.runtime-tests.outputs.sha }}
         run: |
           set -euo pipefail
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_TESTS_SHA"
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {planCaches} from './scripts/sdk-ci-cache.mjs';
+          import {readPin, verifyRuntimeSdkLock} from './scripts/fetch-runtime-test-bundle.mjs';
+          verifyRuntimeSdkLock(readPin());
+          const read = file => JSON.parse(readFileSync(`.runtime-examples/${file}`, 'utf8'));
+          const entry = planCaches(read('sdk/core-sdk.lock.json'), read('crates/core-sdk/core-sdk.lock.json')).include.find(item => item.target === 'x86_64-unknown-linux-gnu');
+          appendFileSync(process.env.GITHUB_OUTPUT, `key=${entry.key}\n`);
+          NODE
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
           for module in support memory_revision diary_identity snapshot_lifecycle account capture_main; do
             test -f ".runtime-examples/crates/commands/examples/cli_business_tests/$module.rs"
           done
+      - uses: actions/cache/restore@v4
+        id: runtime-sdk
+        if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.runtime-sdk-key.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the Runtime harness SDK without credentials
+        if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
+        env:
+          EXPECTED_KEY: ${{ steps.runtime-sdk-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.runtime-sdk.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test ! -e .runtime-examples/.sdk
+          mkdir .runtime-examples/.sdk
+          mv .sdk/x86_64-unknown-linux-gnu .runtime-examples/.sdk/
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
+          const target = 'x86_64-unknown-linux-gnu';
+          const sdk = resolve('.runtime-examples/.sdk', target);
+          const entry = JSON.parse(readFileSync('.runtime-examples/sdk/core-sdk.lock.json', 'utf8')).targets[target];
+          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_CORE_SDK_DIR=${sdk}\n`);
+          NODE
       - name: Verify candidate input artifact origin
         if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
         env:
@@ -465,6 +505,37 @@ jobs:
           artifact-ids: ${{ inputs.required_candidate_artifact_id }}
           merge-multiple: true
           path: ${{ runner.temp }}/required-tests-candidate-input
+      - name: Key the CLI candidate SDK independently
+        id: cli-sdk-key
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        run: echo "key=$(node scripts/sdk-ci-cache.mjs key x86_64-unknown-linux-gnu)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        id: cli-sdk
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.cli-sdk-key.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Audit the CLI candidate SDK without replacing its original archive evidence
+        if: matrix.group == 'core' && inputs.required_candidate_sha256 != ''
+        env:
+          EXPECTED_KEY: ${{ steps.cli-sdk-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.cli-sdk.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
+          const target = 'x86_64-unknown-linux-gnu';
+          const sdk = resolve('.sdk', target);
+          const entry = JSON.parse(readFileSync('sdk/core-sdk.lock.json', 'utf8')).targets[target];
+          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_CORE_SDK_DIR=${sdk}\n`);
+          NODE
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -550,6 +621,7 @@ jobs:
         if: env.CANDIDATE_MODE == 'true' && (matrix.group == 'core' || matrix.group == 'runtime_smoke')
         env:
           GH_TOKEN: ${{ github.token }}
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           target="$(rustc -Vv | sed -n 's/^host: //p')"
@@ -557,9 +629,11 @@ jobs:
           node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
       - name: Run precompiled Runtime snapshot and diary assertions
         if: env.CANDIDATE_MODE == 'true' && matrix.group == 'core'
+        env:
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
       - name: Run this group's instrumented tests
@@ -596,7 +670,10 @@ jobs:
           if (process.env.CANDIDATE_MODE !== 'true' || group === 'runtime_autostart') process.exit(status);
           const runner = process.env.RSRS_RUNTIME_TEST_RUNNER;
           assert.ok(runner, 'Runtime business tests cannot be skipped');
-          const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
+          assert.ok(process.env.RSRS_RUNTIME_CORE_SDK_DIR, 'Runtime harness SDK must be verified independently');
+          const businessEnv = {...process.env, RSRS_CORE_SDK_DIR: process.env.RSRS_RUNTIME_CORE_SDK_DIR, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
+          for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN']) delete businessEnv[key];
+          const listing = execFileSync(runner, ['--list'], {encoding: 'utf8', env: businessEnv});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
           const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
@@ -607,7 +684,6 @@ jobs:
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
           assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',
@@ -868,17 +944,55 @@ jobs:
           path: .runtime-examples
           persist-credentials: false
       - name: Bind Runtime business harness and SDK identity
+        id: runtime-sdk-key
         env:
           RUNTIME_TESTS_SHA: ${{ steps.runtime-tests.outputs.sha }}
         run: |
           set -euo pipefail
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_TESTS_SHA"
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {planCaches} from './scripts/sdk-ci-cache.mjs';
+          import {readPin, verifyRuntimeSdkLock} from './scripts/fetch-runtime-test-bundle.mjs';
+          verifyRuntimeSdkLock(readPin());
+          const read = file => JSON.parse(readFileSync(`.runtime-examples/${file}`, 'utf8'));
+          const entry = planCaches(read('sdk/core-sdk.lock.json'), read('crates/core-sdk/core-sdk.lock.json')).include.find(item => item.target === 'x86_64-unknown-linux-gnu');
+          appendFileSync(process.env.GITHUB_OUTPUT, `key=${entry.key}\n`);
+          NODE
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
           for module in support memory_revision diary_identity snapshot_lifecycle account capture_main; do
             test -f ".runtime-examples/crates/commands/examples/cli_business_tests/$module.rs"
           done
+      - uses: actions/cache/restore@v4
+        id: runtime-sdk
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.runtime-sdk-key.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the Runtime harness SDK without credentials
+        env:
+          EXPECTED_KEY: ${{ steps.runtime-sdk-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.runtime-sdk.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test ! -e .runtime-examples/.sdk
+          mkdir .runtime-examples/.sdk
+          mv .sdk/x86_64-unknown-linux-gnu .runtime-examples/.sdk/
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
+          const target = 'x86_64-unknown-linux-gnu';
+          const sdk = resolve('.runtime-examples/.sdk', target);
+          const entry = JSON.parse(readFileSync('.runtime-examples/sdk/core-sdk.lock.json', 'utf8')).targets[target];
+          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_CORE_SDK_DIR=${sdk}\n`);
+          NODE
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
@@ -982,6 +1096,7 @@ jobs:
       - name: Verify precompiled Runtime business assertions without instrumenting Runtime
         env:
           GH_TOKEN: ${{ github.token }}
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           target="$(rustc -Vv | sed -n 's/^host: //p')"
@@ -989,9 +1104,11 @@ jobs:
           node scripts/fetch-runtime-test-bundle.mjs verify "$target" --list
       - name: Run precompiled Runtime snapshot and diary assertions
         if: matrix.group == 'core'
+        env:
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
-          unset GH_TOKEN GITHUB_TOKEN
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
       - name: Retain CLI frontend tests and SDK ownership assertions in integration
@@ -1011,7 +1128,10 @@ jobs:
           const group = process.env.COVERAGE_GROUP;
           const runner = process.env.RSRS_RUNTIME_TEST_RUNNER;
           assert.ok(runner, 'Runtime business tests cannot be skipped');
-          const listing = execFileSync(runner, ['--list'], {encoding: 'utf8'});
+          assert.ok(process.env.RSRS_RUNTIME_CORE_SDK_DIR, 'Runtime harness SDK must be verified independently');
+          const businessEnv = {...process.env, RSRS_CORE_SDK_DIR: process.env.RSRS_RUNTIME_CORE_SDK_DIR, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
+          for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN']) delete businessEnv[key];
+          const listing = execFileSync(runner, ['--list'], {encoding: 'utf8', env: businessEnv});
           const names = listing.split('\n').filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
           const modules = {memory_revision: 6, diary_identity: 12, snapshot_lifecycle: 8, account: 3, capture_main: 2};
           const assigned = Object.entries(modules).flatMap(([module, count]) => {
@@ -1022,7 +1142,6 @@ jobs:
           assert.deepEqual([...new Set(names)].sort(), assigned.sort(), 'Unassigned or duplicate Runtime business assertions');
           assert.equal(names.filter(name => name === 'diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay').length, 1, 'Missing required native stop assertion');
           const businessArgs = ['scripts/run-runtime-business-tests.sh'];
-          const businessEnv = {...process.env, RUNTIME_BUSINESS_MODULES: group === 'core' ? 'memory_revision diary_identity snapshot_lifecycle capture_main' : 'account', RUNTIME_REQUIRE_NATIVE_STOP: group === 'core' ? '1' : '0'};
           const privateArgs = ['-u', 'DBUS_SESSION_BUS_ADDRESS', '-u', 'DBUS_SESSION_BUS_PID',
             '-u', 'DBUS_STARTER_ADDRESS', '-u', 'DBUS_STARTER_BUS_TYPE', '-u', 'GNOME_KEYRING_CONTROL',
             '-u', 'GNOME_KEYRING_PID', '-u', 'SSH_AUTH_SOCK',

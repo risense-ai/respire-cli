@@ -164,14 +164,17 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     const calls=[],harness=[],exits=[],raw=[],listed=[];
     assert.throws(()=>runInNewContext(program,{
       assert,readFileSync,
-      execFileSync:(command,args)=>{
+      execFileSync:(command,args,options)=>{
         if(command==='cargo'){assert.deepEqual(Array.from(args),['metadata','--locked','--no-deps','--format-version','1']);return JSON.stringify(metadata);}
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
         assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);listed.push(command);return listing;
       },
       spawnSync:(command,args,options)=>{
         if(command==='cargo'){calls.push(args);return {status:originalStatus};}
         assert.equal(options.stdio,'inherit');
-        assert.equal(options.env.GH_TOKEN,'synthetic-gh');assert.equal(options.env.GITHUB_TOKEN,'synthetic-github');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
         if(group==='runtime_smoke'){
           assert.equal(command,'env');
           assert.deepEqual(Array.from(args),['-u','DBUS_SESSION_BUS_ADDRESS','-u','DBUS_SESSION_BUS_PID',
@@ -187,7 +190,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
         return {status:businessStatus};
       },
       captureCoverage:args=>{calls.push(args);raw.push(originalStatus);return originalStatus;},
-      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner',
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk',RUNNER_TEMP:'/synthetic-runner',
         GH_TOKEN:'synthetic-gh',GITHUB_TOKEN:'synthetic-github'},exit:status=>{exits.push(status);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[originalStatus!==0?originalStatus:group==='runtime_autostart'?0:(businessStatus??1)]);
@@ -213,7 +216,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands/);
   for(const lane of [workspace,source]){
     assert.match(lane,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
-    assert.doesNotMatch(lane,/fetch-core-sdk|path: \.sdk\/|sdk-cache-2/);
+    assert.doesNotMatch(lane,/fetch-core-sdk|sdk-cache-2/);
+    if(lane===workspace)assert.doesNotMatch(lane,/path: \.sdk\//);
   }
   assert.match(source,/name: Coverage \(\$\{\{ matrix.group \}\}\)/);
   for(const name of ['Prepare private business credential fixture','Resolve exact Runtime business test source',
@@ -226,6 +230,38 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   for(const item of registry.tests.filter(item=>item.evidence?.job==='coverage-tests')){
     assert.equal(item.evidence.job_name,'Coverage (core)');assert(source.includes(item.evidence.command_fragment));
   }
+  const helper=readFileSync(new URL('../../scripts/fetch-runtime-test-bundle.mjs',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const readProgram='(function(){const json=()=>JSON.parse(pinJSON);'+helper.split('export function readPin() {')[1].split('\n}\n')[0]+'\n})()';
+  const lockProgram='(function(pin){'+helper.split('export function verifyRuntimeSdkLock(pin) {')[1].split('\n}\n')[0]+'\n})(pin)';
+  const cliLock=Buffer.from(JSON.stringify({sdk:'independent CLI SDK'})),runtimeLock=Buffer.from(JSON.stringify({sdk:'independent Runtime SDK'}));
+  const lockHash=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const bundlePin=JSON.parse(readFileSync(new URL('../../runtime-tests-source.json',import.meta.url),'utf8'));
+  bundlePin.sdk_lock_sha256=lockHash(runtimeLock);
+  const readLocks=(second=cliLock)=>runInNewContext(readProgram,{assert,repository:'risense-ai/respire-runtime',pinJSON:JSON.stringify(bundlePin),digest:()=>{},id:()=>{},
+    execFileSync:(cmd,args)=>args[0]==='rev-parse'?'a'.repeat(40):args[1].includes(':crates/')?second:cliLock,process:{env:{}}});
+  assert.equal(readLocks().sdk_lock_sha256,lockHash(runtimeLock));
+  assert.throws(()=>readLocks(runtimeLock),/CLI SDK lock copies differ/);
+  const runtimeLocks=(head=bundlePin.source_sha,second=runtimeLock,working=runtimeLock)=>runInNewContext(lockProgram,{assert,pin:bundlePin,sha256:lockHash,join:path.posix.join,
+    execFileSync:(cmd,args)=>args[2]==='rev-parse'?head:args[3].includes(':crates/')?second:runtimeLock,
+    readFileSync:()=>working});
+  runtimeLocks();
+  assert.throws(()=>runtimeLocks('c'.repeat(40)),/checkout differs/);
+  assert.throws(()=>runtimeLocks(bundlePin.source_sha,cliLock),/Runtime SDK lock bytes differ/);
+  assert.throws(()=>runtimeLocks(bundlePin.source_sha,runtimeLock,cliLock),/checkout differs/);
+  for(const lane of [source,integration]){
+    assert.match(lane,/cmp <\(git show HEAD:sdk\/core-sdk.lock.json\) <\(git show HEAD:crates\/core-sdk\/core-sdk.lock.json\)/);
+    assert.doesNotMatch(lane,/cmp <\(git show HEAD:sdk\/core-sdk.lock.json\) <\(git -C \.runtime-examples/);
+    assert.match(lane,/verifyRuntimeSdkLock\(readPin\(\)\)/);
+    assert.match(lane,/planCaches\(read\('sdk\/core-sdk.lock.json'\), read\('crates\/core-sdk\/core-sdk.lock.json'\)\)/);
+    assert.match(lane,/mv \.sdk\/x86_64-unknown-linux-gnu \.runtime-examples\/\.sdk\//);
+    assert.match(lane,/auditSdkDirectory\(sdk, target, canonicalEntry\(target, entry\)\)/);
+    assert.match(lane,/RSRS_CORE_SDK_DIR: \$\{\{ env.RSRS_RUNTIME_CORE_SDK_DIR \}\}/);
+    assert.doesNotMatch(lane,/restore-keys:|secrets\./);
+  }
+  assert(source.indexOf('mv .sdk/x86_64-unknown-linux-gnu')<source.indexOf('id: cli-sdk\n'));
+  assert(source.indexOf('id: cli-sdk\n')<source.indexOf('node scripts/produce-required-tests.mjs prepare'));
+  assert.match(source,/Download frozen candidate and original SDK bytes/);
+  assert.match(source,/RSRS_CORE_SDK_DIR=\$\{sdk\}/);
   assert.match(integration,/needs: coverage-tests/);
   assert.match(integration,/node scripts\/fetch-runtime-test-bundle\.mjs source/);
   assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);
@@ -276,9 +312,11 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
         assert.equal(command,group==='core'?'bash':'env');
         if(group==='runtime_smoke')assert(Array.from(args).includes('RSRS_SS_FIXTURE_BUS=private'));
         assert.equal(options.env.RUNTIME_REQUIRE_NATIVE_STOP,group==='core'?'1':'0');
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
         modules.push(options.env.RUNTIME_BUSINESS_MODULES);return {status};
       },
-      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner'},
+      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk',RUNNER_TEMP:'/synthetic-runner'},
         exit:value=>{exits.push(value);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[status??1]);
@@ -298,7 +336,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       execFileSync:command=>command==='cargo'?JSON.stringify(metadata):invalid,
       spawnSync:command=>{assert.equal(command,'cargo','invalid inventory must not dispatch business modules');return {status:0};},
       captureCoverage:()=>0,
-      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner},
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk'},
         exit:()=>assert.fail('invalid inventory must fail before exit')},
     }),/Unassigned or duplicate|Missing migrated|Missing required native stop/);
   }
