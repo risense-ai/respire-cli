@@ -362,7 +362,9 @@ def main():
                                or entry.name.removeprefix('./').startswith('core-notices/')]
                     packaged.extractall(destination, members=notices, filter='data')
                 (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
-            if mode == 'reuse-cli-started':
+            if mode in ['reuse-cli-started', 'cli-host-sigterm', 'cli-host-sigkill',
+                        'cli-host-terminate', 'cli-guardian-sigkill']:
+                # Signal cases require an actual CLI host before Client2 reuses its actor.
                 started = run([cli, '--json', 'runtime', 'start'], env)
                 if started.returncode: raise RuntimeError('CLI startup failed: '+started.stderr)
             if mode == 'desktop-owned':
