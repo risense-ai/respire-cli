@@ -30,6 +30,11 @@ DESKTOP_SOURCE_SHA = CLIENT2_SHA
 DESKTOP_SHA256 = 'dc74596d983ab7b99c6b6872d8438cfb2f2e7060b93f9a9ef13db629b6a5d7a2'
 DESKTOP_ARCHIVE_SHA256 = '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
 DESKTOP_BASELINES = {
+    'host-owned-candidate': {'source': '1734322b6c6dd543441a753f07a3517bee5e1231',
+        'version': '0.2.56-dev.259',
+        'binary': '40e0c58472358b69d4b56b43c1c1ef7bfd7eb30cc3c6eff516ad5ec702beb626',
+        'archive': '056ec02a840f37bdb1eaeed1fc0825a9ac69ea9c301146615f459f1ef21f3b90',
+        'asset_id': None, 'artifact_id': 14114928434, 'run_id': '43597586002'},
     'v2.0.0-dev.5': {'source': CLIENT2_SHA, 'binary': DESKTOP_SHA256,
         'archive': DESKTOP_ARCHIVE_SHA256, 'asset_id': 735418491, 'run_id': '43018703263'},
     'v0.2.56': {'source': '57bc070826949994c3f7ce9a64277160704bdfe5',
@@ -189,6 +194,7 @@ def main():
                          'coverage_profile_file': profile},
               'desktop_headless': {'enabled': desktop is not None, 'client2_source': baseline['source'],
                                    'release': args.client2_baseline, 'run_id': baseline['run_id'],
+                                   'artifact_id': baseline.get('artifact_id'),
                                    'asset_id': baseline['asset_id'], 'archive_sha256': baseline['archive'],
                                    'binary_sha256': baseline['binary'] if desktop else None},
               'legacy_plugin': {'executed': magpie is not None,
@@ -332,7 +338,7 @@ def main():
                 env['RSRS_INSTANCE_ID'] = base.name + '-' + mode
                 version = run([desktop, '--version'], env)
                 if version.returncode or helper_result(version) != {
-                        'version': args.client2_baseline.removeprefix('v'), 'platform': 'linux-amd64'}:
+                        'version': baseline.get('version', args.client2_baseline.removeprefix('v')), 'platform': 'linux-amd64'}:
                     raise RuntimeError('Pinned original desktop version identity changed')
                 desktop_action('start', env)
                 health = desktop_action('status', env)
@@ -353,7 +359,8 @@ def main():
                 started = run([cli, '--json', 'status'], env)
                 case['ordinary_cli_start_exit'] = started.returncode
                 if started.returncode:
-                    raise RuntimeError('Ordinary CLI business cold-start failed: ' + started.stderr)
+                    raise RuntimeError('Ordinary CLI business cold-start failed: ' +
+                                       started.stdout[:4000] + started.stderr[:4000])
                 # --json renders ResultEnvelope directly; helper_result only decodes JSON.
                 initial_status = helper_result(started)
                 assert initial_status['command'] == 'status' and initial_status['status'] == 'ok'
