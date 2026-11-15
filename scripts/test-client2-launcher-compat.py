@@ -252,9 +252,15 @@ def main():
             results[name] = status
             if status != 403: raise RuntimeError(f'{name} was not rejected: HTTP {status}')
         base = {'v': 1, 'id': 'compat-boundary', 'method': 'cli.exec', 'args': ['--json', 'status']}
-        status, _ = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
+        status, rejected = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
         results['mixed_identity'] = status
-        if status != 400: raise RuntimeError(f'Mixed legacy/modern identity was not rejected: HTTP {status}')
+        # The compatibility host rejects at HTTP admission; pure Runtime rejects missing scope in RPC.
+        if not ((status == 400 and rejected == {'error': 'invalid_rpc_identity'}) or
+                (status == 200 and rejected and rejected.get('ok') is False
+                 and rejected.get('exit') == 1 and rejected.get('code') == 'scope_required'
+                 and rejected.get('id') == base['id'])):
+            raise RuntimeError(f'Mixed legacy/modern identity was not rejected: HTTP {status}')
+        results['mixed_identity_code'] = rejected.get('code') if rejected else None
         status, health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
         if status != 200 or not health: raise RuntimeError('Modern health is unavailable')
         scope = {key: health[key] for key in ['account_id', 'instance_id', 'generation']}
@@ -368,7 +374,9 @@ def main():
                 desktop_action('start', env)
                 health = desktop_action('status', env)
                 assert health['runtime_version'] == args.runtime_version
-                image = (destination / 'rsrs-runtime').resolve(strict=True)
+                image_root = (root/'bin/runtime'/args.runtime_version
+                              if args.client2_baseline == 'host-owned-candidate' else destination)
+                image = (image_root / 'rsrs-runtime').resolve(strict=True)
                 identity = verify_desktop_runtime(health, root, image, port)
                 reply = desktop_action('rpc-status', env)
                 assert reply['v'] == 1 and isinstance(reply['id'], str) and reply['id']
@@ -644,7 +652,11 @@ def main():
                     raise RuntimeError('Client2 cannot stop its visible service')
             case['passed'] = True
         except Exception as error:
-            case['failure'] = str(error)
+            frame = error.__traceback__
+            while frame and frame.tb_next:
+                frame = frame.tb_next
+            location = f'{Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}' if frame else 'unknown'
+            case['failure'] = f'{type(error).__name__} at {location}: {error}'
         finally:
             cleanup_command = ([desktop, '--headless', 'stop'] if mode == 'desktop-owned' else
                                [executable, 'stop'] if mode == 'client2-owned' else
