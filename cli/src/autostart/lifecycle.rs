@@ -1630,9 +1630,10 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
         }
         RuntimeCommand::Unlock => {
             let health = crate::net_rpc::health()?;
-            let unlocked = respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
-            emit("runtime.unlock", json!({"store_ready":unlocked,
-                "credential_state":if unlocked {"available"} else {"required"}}))
+            let receipt = respire_host_control::lifecycle_io::supply_runtime_credentials(&health)?
+                .context("Runtime is not ready for V2 credential delivery")?;
+            emit("runtime.unlock", json!({"store_ready":receipt.store_ready,
+                "credential_state":"available", "provider_status":receipt.provider_status}))
         }
         RuntimeCommand::Autostart {
             command: AutostartCommand::Enable { now },

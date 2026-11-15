@@ -30,8 +30,29 @@ pub fn probe_runtime() -> Result<Option<Health>> {
 /// Deliver keys only to the verified local profile owner. Never start a process here.
 pub fn unlock_if_needed(health: &Health) -> Result<bool> {
     if health.store_ready { return Ok(true); }
-    if health.credential_state != "required" || respire_client_host::settings::off_mode()? {
-        return Ok(false);
+    Ok(supply_runtime_credentials(health)?.is_some())
+}
+
+/// Refresh an existing owner after settings are saved; never start or restart it.
+pub fn refresh_running_runtime_credentials() -> Result<()> {
+    let result = (|| -> Result<()> {
+        let Some(health) = probe_runtime()? else { return Ok(()); };
+        let receipt = supply_runtime_credentials(&health)?
+            .context("Runtime is not ready for credential delivery")?;
+        if let respire_protocol::credentials::ProviderCredentialStatus::Unavailable { code } = receipt.provider_status {
+            anyhow::bail!("Runtime library is unlocked, but provider credentials are unavailable ({code:?})");
+        }
+        Ok(())
+    })();
+    result.context("Configuration was saved, but Runtime credential refresh could not be confirmed")
+}
+
+/// Deliver a complete V2 update and retain the verified provider outcome for CLI output.
+pub fn supply_runtime_credentials(health: &Health)
+    -> Result<Option<respire_protocol::credentials::RuntimeUnlockReceipt>> {
+    if (!health.store_ready && health.credential_state != "required")
+        || respire_client_host::settings::off_mode()? {
+        return Ok(None);
     }
     let (installation, profile) = respire_client_host::config::control_roots()?;
     anyhow::ensure!(Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
@@ -48,7 +69,7 @@ pub fn unlock_if_needed(health: &Health) -> Result<bool> {
         "unlock Runtime image changed");
     respire_client_host::host_credentials::unlock_runtime(
         &health.url, &installation, &profile, &health.instance_id, health.generation,
-    )
+    ).map(Some)
 }
 
 fn endpoint_pid() -> Result<Option<u32>> {

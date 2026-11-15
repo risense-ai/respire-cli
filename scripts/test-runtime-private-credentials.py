@@ -200,5 +200,56 @@ class ProviderTests(unittest.TestCase):
         self.assertNotIn('secret-sentinel', json.dumps(smoke.report))
 
 
+class UnlockV2SourceTests(unittest.TestCase):
+    """Source contract only; published-schema compilation and native delivery run in CI."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[1]
+        cls.sender = (cls.root / 'crates/client-host/src/host_credentials.rs').read_text(encoding='utf-8')
+        cls.lifecycle = (cls.root / 'crates/host-control/src/lifecycle_io.rs').read_text(encoding='utf-8')
+        cls.cli = (cls.root / 'cli/src/autostart/lifecycle.rs').read_text(encoding='utf-8')
+        cls.unlock = cls.sender.split('pub fn unlock_runtime(', 1)[1].split('fn credential_backends(', 1)[0]
+
+    def test_library_credentials_fail_before_optional_provider_collection(self):
+        self.assertLess(self.unlock.index('read_session_credentials(&session)?'),
+                        self.unlock.index('provider_credentials(installation, profile)'))
+        self.assertIn('Runtime session key is unavailable; library remains locked', self.unlock)
+        self.assertNotIn('keygen(', self.unlock)
+        self.assertNotIn('return Ok(false)', self.unlock)
+
+    def test_delivery_is_v2_and_complete_or_explicitly_unavailable(self):
+        self.assertIn('let input = RuntimeUnlockV2 {', self.unlock)
+        self.assertIn('schema_version: RUNTIME_UNLOCK_SCHEMA_V2', self.unlock)
+        self.assertNotIn('credentials::RuntimeUnlock {', self.unlock)
+        self.assertIn('Ok(credentials) => ProviderCredentialUpdate::Replace { credentials }', self.unlock)
+        self.assertIn('Err(code) => ProviderCredentialUpdate::Unavailable { code }', self.unlock)
+        for code in ('AccessDenied', 'PlatformFailure', 'BackendUnavailable',
+                     'InvalidConfiguration', 'Ambiguous', 'BadEncoding'):
+            with self.subTest(code=code):
+                self.assertIn('ProviderUnavailableCode::' + code, self.sender)
+        for binding in ('session_sha256:', 'instance_id:', 'generation,', 'legacy_secret:'):
+            self.assertIn(binding, self.unlock)
+        self.assertIn('.redirects(0)', self.unlock)
+        self.assertIn('.set("Authorization", &format!("Bearer {token}"))', self.unlock)
+
+    def test_receipt_and_provider_outcome_are_required(self):
+        self.assertIn('let receipt: RuntimeUnlockReceipt = reply.into_json()', self.unlock)
+        self.assertIn('receipt.schema_version == RUNTIME_UNLOCK_SCHEMA_V2', self.unlock)
+        self.assertIn('anyhow::ensure!(receipt.store_ready', self.unlock)
+        self.assertIn('receipt.provider_status == expected_provider_status', self.unlock)
+        self.assertIn('ureq::Error::Status(status, _)', self.unlock)
+        self.assertIn('ureq::Error::Transport(error)', self.unlock)
+        self.assertIn('provider credentials unavailable ({code:?})', self.unlock)
+        for identity in ('health.installation_root', 'health.data_dir', 'health.instance_id',
+                         'health.generation', 'health.process_start_id', 'health.image_sha256'):
+            self.assertIn(identity, self.lifecycle)
+        self.assertIn('Ok(supply_runtime_credentials(health)?.is_some())', self.lifecycle)
+        self.assertIn('ProviderCredentialStatus::Unavailable { code } = receipt.provider_status', self.lifecycle)
+        command = self.cli.split('RuntimeCommand::Unlock => {', 1)[1].split('RuntimeCommand::Autostart', 1)[0]
+        self.assertIn('supply_runtime_credentials(&health)?', command)
+        self.assertIn('"provider_status":receipt.provider_status', command)
+
+
 if __name__ == '__main__':
     unittest.main()
