@@ -1008,7 +1008,7 @@ def build_owned_stop_probe(args, root, output, *, cache_root=None):
     return binary, identity
 
 
-def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
+def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256, *, cli_sha256=None):
     require(mode in {"registered", "client2-owned"}, "unknown_owned_stop_mode")
     marker = b"NATIVE_REGISTERED_STOP_RAW " if mode == "registered" else b"NATIVE_CLIENT2_STOP_RAW "
     rows = [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
@@ -1024,14 +1024,15 @@ def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
                 and row["runtime_identity"]["image_sha256"] == runtime_sha256,
                 "owned_stop_real_consumer_evidence_mismatch")
         if mode == "client2-owned":
-            require(row.get("actor_lane") == "cli-host-runtime-core" and isinstance(row.get("legacy_host"), dict),
+            require(row.get("actor_lane") == "client2-cli-runtime-core" and isinstance(row.get("cli_control"), dict),
                     "owned_stop_actor_lane_mismatch")
-            host, runtime = row["legacy_host"], row["runtime_identity"]
-            require(type(host.get("pid")) is int and type(runtime.get("pid")) is int
-                    and host["pid"] > 0 and runtime["pid"] > 0 and host["pid"] != runtime["pid"]
-                    and type(host.get("backend_pid")) is int and host["backend_pid"] == runtime["pid"]
+            cli_control, runtime = row["cli_control"], row["runtime_identity"]
+            require(isinstance(cli_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", cli_sha256)
+                    and cli_control.get("sha256") == cli_sha256
+                    and all(isinstance(cli_control.get(field), str) and cli_control[field]
+                            for field in ("path", "version"))
+                    and type(runtime.get("pid")) is int and runtime["pid"] > 0
                     and all(isinstance(runtime.get(field), str) and runtime[field]
-                            and host.get("backend_" + field) == runtime[field]
                             for field in ("instance_id", "process_start_id")),
                     "owned_stop_actor_binding_mismatch")
         expected_sender = ("modern-cli" if row["case"] == "normal" else "original-go-client2-managed") if mode == "registered" else "original-go-client2"
@@ -1298,7 +1299,7 @@ def run(args):
         if args.owned_stop_mode:
             require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
             report["owned_stop"]["observations"] = owned_stop_checks(captured, args.owned_stop_mode,
-                probe_identity["probe_binary_sha256"], report["runtime_binary_sha256"])
+                probe_identity["probe_binary_sha256"], report["runtime_binary_sha256"], cli_sha256=digest(cli))
             report["owned_stop"].update(passed=True, runtime_archive_sha256=report["runtime_archive_sha256"],
                 runtime_metadata_sha256=report["runtime_metadata_sha256"], runtime_source_sha=args.runtime_sha,
                 cli_source_sha=args.cli_sha, harness_sha256=report["harness_sha256"])
