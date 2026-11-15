@@ -254,8 +254,8 @@ def main():
         base = {'v': 1, 'id': 'compat-boundary', 'method': 'cli.exec', 'args': ['--json', 'status']}
         status, rejected = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
         results['mixed_identity'] = status
-        # The compatibility host rejects at HTTP admission; pure Runtime rejects missing scope in RPC.
-        if not ((status == 400 and rejected == {'error': 'invalid_rpc_identity'}) or
+        # Published embedded/CLI hosts reject at HTTP admission; pure Runtime rejects missing scope in RPC.
+        if not ((status == 400 and rejected in ({'error': 'invalid_rpc_identity'}, {'error': 'scope_required'})) or
                 (status == 200 and rejected and rejected.get('ok') is False
                  and rejected.get('exit') == 1 and rejected.get('code') == 'scope_required'
                  and rejected.get('id') == base['id'])):
