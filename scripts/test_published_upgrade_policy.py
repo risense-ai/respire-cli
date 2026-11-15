@@ -15,12 +15,12 @@ from published_upgrade_policy import platform_applicability, select_upgrade_sour
 class UpgradePolicyTest(unittest.TestCase):
     def test_only_exact_documented_arm_gaps_are_not_applicable(self):
         for target in ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc"]:
-            gaps = ["v1.0.15", "v1.0.16"]
+            gaps = ["v1.0.15", "v1.0.15-dev.10", "v1.0.16"]
             if "linux" in target:
                 gaps.append("v1.0.17-dev.12")
             for tag in gaps:
                 self.assertIsNotNone(platform_applicability(tag, target, []))
-            for tag in ["v1.0.7", "v1.0.10", "v1.0.12", "v1.0.17", "v1.0.18"]:
+            for tag in ["v1.0.7", "v1.0.10", "v1.0.12", "v1.0.15-dev.9", "v1.0.17", "v1.0.18"]:
                 with self.assertRaises(ValueError):
                     platform_applicability(tag, target, [])
 
@@ -32,14 +32,32 @@ class UpgradePolicyTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             platform_applicability("v1.0.16", "x86_64-unknown-linux-gnu", [])
         self.assertIsNotNone(platform_applicability("v1.0.19", "x86_64-apple-darwin", []))
+        self.assertIsNotNone(platform_applicability("v1.0.15-dev.10", "x86_64-apple-darwin", []))
         for tag, assets in [("v1.0.20", []), ("v1.0.19", ["rsrs-x86_64-apple-darwin"])]:
             with self.assertRaises(ValueError):
                 platform_applicability(tag, "x86_64-apple-darwin", assets)
+        for target in ["aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl",
+                       "aarch64-pc-windows-msvc", "x86_64-apple-darwin",
+                       "x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
+                       "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]:
+            extension = ".exe" if "windows" in target else ""
+            assets = [f"rsrs-{target}{extension}", f"rsrs-{target}-runtime.tar.gz", f"cli-build-{target}.json"]
+            self.assertIsNone(platform_applicability("v1.0.15-dev.10", target, assets))
+            partial = [[asset] for asset in assets] + [
+                [asset for asset in assets if asset != missing] for missing in assets
+            ]
+            for present in partial:
+                with self.assertRaises(ValueError):
+                    platform_applicability("v1.0.15-dev.10", target, present)
+        for target in ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl",
+                       "x86_64-pc-windows-msvc", "aarch64-apple-darwin"]:
+            with self.assertRaises(ValueError):
+                platform_applicability("v1.0.15-dev.10", target, [])
 
     def test_present_historical_arm_assets_remain_required(self):
         target = "aarch64-unknown-linux-musl"
         assets = [f"rsrs-{target}", f"rsrs-{target}-runtime.tar.gz", f"cli-build-{target}.json"]
-        for tag in ["v1.0.7", "v1.0.16"]:
+        for tag in ["v1.0.7", "v1.0.15-dev.10", "v1.0.16"]:
             self.assertIsNone(platform_applicability(tag, target, assets))
 
 
@@ -76,7 +94,7 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def run_fixture(self, profile=None, missing_latest=False, registry=None, empty_checks=False,
                     checks_transform=None, standalone=False, standalone_mode="published-assets",
-                    cache_draft=False, download_only=False, corrupt_draft=False):
+                    cache_draft=False, download_only=False, corrupt_draft=False, missing_checkpoint=False):
         # Execute the real orchestration with local artifact bytes and a fake upgrade child.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -90,9 +108,11 @@ class UpgradeProfileTest(unittest.TestCase):
             archive = io.BytesIO()
             with tarfile.open(fileobj=archive, mode="w:gz"):
                 pass
-            releases = [self.release(tag, missing=missing_latest and tag == "v1.0.18")
-                        for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045"]]
-            releases[-1]["prerelease"] = True
+            releases = [self.release(tag, missing=(missing_latest and tag == "v1.0.18") or
+                                     (missing_checkpoint and tag == "v1.0.15-dev.10"))
+                        for tag in ["v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"]]
+            for release in releases[2:]:
+                release["prerelease"] = True
             releases.append(self.release("v2.0.0-dev.1", prerelease=True))
             releases.append(self.release("v1.0.10", draft=True))
             releases[-1]["id"] = 403872621
@@ -207,22 +227,32 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_critical_runs_latest_and_database_dev_checkpoints_and_marks_partial_coverage(self):
         upgraded, report = self.run_fixture("critical")
-        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045"})
-        self.assertEqual(report["selected_sources"], ["v1.0.18", "v1.0.6-dev.37075716045"])
-        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.6-dev.37075716045"})
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
+        self.assertEqual(report["selected_sources"], ["v1.0.15-dev.10", "v1.0.18", "v1.0.6-dev.37075716045"])
+        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
         self.assertEqual(report["profile"], "critical")
         self.assertTrue(report["passed"])
         self.assertEqual(report["upgrade_contract"], "legacy-shim-v1")
         self.assertFalse(report["full_coverage"])
         self.assertFalse(report["all_published_sources_covered"])
         self.assertEqual(report["additional_draft_baselines"], [])
+        upgraded, report = self.run_fixture("critical", missing_checkpoint=True)
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045"})
+        self.assertIn("v1.0.15-dev.10", report["selected_sources"])
+        checkpoint = next(item for item in report["sources"] if item["version"] == "1.0.15-dev.10")
+        self.assertEqual(checkpoint["status"], "not-applicable")
 
     def test_default_full_keeps_stables_and_conservative_dev_checkpoint(self):
         upgraded, report = self.run_fixture()
-        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045"})
+        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])
+        applicable, gap_report = self.run_fixture(missing_checkpoint=True)
+        self.assertEqual(set(applicable), set(upgraded) - {"v1.0.15-dev.10"})
+        self.assertIn("v1.0.15-dev.10", gap_report["selected_sources"])
+        checkpoint = next(item for item in gap_report["sources"] if item["version"] == "1.0.15-dev.10")
+        self.assertEqual(checkpoint["status"], "not-applicable")
         cached_upgrades, cached_report = self.run_fixture(cache_draft=True)
         self.assertEqual(set(cached_upgrades), set(upgraded) | {"v1.0.10"})
         self.assertTrue(cached_report["all_published_sources_covered"])

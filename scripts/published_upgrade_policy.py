@@ -1,10 +1,11 @@
 """Explicit historical gaps; a missing asset is never a general skip rule."""
 ARM_TARGETS = frozenset({"aarch64-unknown-linux-gnu", "aarch64-unknown-linux-musl"})
-ABSENT_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16", "v1.0.17-dev.12"})
-ABSENT_WINDOWS_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.16"})
+ABSENT_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.15-dev.10", "v1.0.16", "v1.0.17-dev.12"})
+ABSENT_WINDOWS_ARM_RELEASES = frozenset({"v1.0.15", "v1.0.15-dev.10", "v1.0.16"})
 # Retain unknown historical formats until audited; add each published database-changing DEV here.
 DATABASE_DEV_CHECKPOINTS = {
     "v1.0.6-dev.37075716045": "Unaudited historical database format; no formal 1.0.6 was published",
+    "v1.0.15-dev.10": "Added SQLite memory revision insert, update and delete triggers",
 }
 
 

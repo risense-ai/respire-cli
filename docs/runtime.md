@@ -207,6 +207,11 @@ include every registered checkpoint; missing published assets fail validation.
 Unclassified historical DEV checkpoints remain covered until their database
 format has been audited. Do not remove them merely because their tag is a DEV.
 
+The `v1.0.15-dev.10` checkpoint added SQLite revision insert, update and delete
+triggers. That release published Linux x64 (GNU and musl), Windows x64 and macOS
+ARM64 assets. Linux ARM64, Windows ARM64 and Intel macOS are not applicable for
+this release; missing or partial assets on a distributed platform still fail.
+
 DEV releases with the same audited database format need no separate migration
 case just for launcher, download, credential custody or UI changes. Runtime
 restart locking, host unlock, login, sync, remember and recall remain independent
