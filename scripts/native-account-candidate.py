@@ -27,6 +27,7 @@ MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle
                  "account": 3, "capture_main": 2}
 NATIVE_STOP_CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
 G1_BUSINESS_CASES = (
+    CASE,
     "diary_identity::remember_public_payload_covers_created_appended_and_merged",
     "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once",
 )

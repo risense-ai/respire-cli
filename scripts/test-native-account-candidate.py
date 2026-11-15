@@ -254,6 +254,9 @@ class CandidateFixtureTests(unittest.TestCase):
         self.assertEqual(len(names), 30)
         listing = "\n".join(name + ": test" for name in names)
         self.assertEqual(candidate.selected_cases(listing, "account"), [candidate.CASE])
+        self.assertIn(candidate.CASE, candidate.selected_cases(listing, "g1-business"))
+        with self.assertRaisesRegex(RuntimeError, "original_account_case_missing"):
+            candidate.selected_cases("\n".join(name + ": test" for name in names if name != candidate.CASE), "g1-business")
         self.assertEqual(candidate.selected_cases(listing, "full"), names)
         self.assertEqual(candidate.selected_cases(listing, "diagnostic-failures"), list(candidate.DIAGNOSTIC_CASES))
         extended = names + [candidate.NATIVE_STOP_CASE]
