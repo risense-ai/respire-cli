@@ -371,7 +371,7 @@ class CandidateFixtureTests(unittest.TestCase):
                                 {"GITHUB_SHA": args.cli_sha}):
                 with patch.dict(os.environ, environment), self.assertRaises(RuntimeError):
                     candidate.validate_owned_stop_options(args)
-        self.assertEqual(candidate.CLIENT2_OWNED_SOURCE_SHA, "1734322b6c6dd543441a753f07a3517bee5e1231")
+        self.assertEqual(candidate.CLIENT2_OWNED_SOURCE_SHA, "6ffa187685734873721ab51f3a54d8b2c29cd269")
 
     def test_compatibility_host_checkpoints_do_not_publish_private_fields(self):
         checks = [{"stage": "space-profile", "passed": True},

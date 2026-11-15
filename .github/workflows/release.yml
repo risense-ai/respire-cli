@@ -40,6 +40,18 @@ on:
         description: SHA-256 of the exact published_assets input bytes
         default: ''
         type: string
+      client2_release:
+        description: Explicit public Client2 tag; empty selects authenticated CI candidate evidence
+        default: ''
+        type: string
+      client2_commit:
+        description: Exact source commit of the selected Client2 release or candidate
+        default: 6ffa187685734873721ab51f3a54d8b2c29cd269
+        type: string
+      client2_candidate_run_id:
+        description: Client2 Desktop candidate run used before Client2 publication
+        default: '43721147038'
+        type: string
       prepared_run:
         description: Completed exact-source main preparation with the same selected validation profile
         default: ''
@@ -402,6 +414,9 @@ jobs:
       ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       full_validation: false
+      client2_release: ${{ inputs.client2_release }}
+      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
+      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
 
       artifact_source: ${{ inputs.artifact_source || 'build' }}
       published_assets: ${{ inputs.published_assets }}
@@ -418,6 +433,9 @@ jobs:
       ref: ${{ inputs.artifact_source == 'published-assets' && github.sha || needs.plan.outputs.sha }}
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       validation_profile: full
+      client2_release: ${{ inputs.client2_release }}
+      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
+      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
 
       artifact_source: ${{ inputs.artifact_source || 'build' }}
       published_assets: ${{ inputs.published_assets }}
@@ -436,6 +454,9 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
       validation_profile: critical
       producer_prefix: 'validate / '
+      client2_release: ${{ inputs.client2_release }}
+      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
+      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
 
   native-regression-critical-readonly:
     name: native-regression
@@ -451,6 +472,9 @@ jobs:
       version: ${{ needs.plan.outputs.version }}
       validation_profile: critical
       producer_prefix: 'validate / '
+      client2_release: ${{ inputs.client2_release }}
+      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
+      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
 
   cloud-sweep:
     env:

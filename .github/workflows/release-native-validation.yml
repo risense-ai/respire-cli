@@ -25,6 +25,18 @@ on:
       producer_prefix:
         default: ''
         type: string
+      client2_release:
+        description: Explicit public Client2 tag for product upgrade acceptance; empty selects CI candidate evidence
+        default: ''
+        type: string
+      client2_commit:
+        description: Protocol-compatible Client2 source commit, independent of CLI and Runtime versions
+        default: 6ffa187685734873721ab51f3a54d8b2c29cd269
+        type: string
+      client2_candidate_run_id:
+        description: Authenticated Desktop candidate for CLI acceptance before Client2 publication
+        default: '43721147038'
+        type: string
 
 permissions:
   contents: read
@@ -274,13 +286,26 @@ jobs:
           "$exe" --direct model probe --json
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
-      - name: Verify released Client2 online CLI installation and the existing GUI subset
+      - name: Verify selected Client2 installation and the existing GUI subset
         if: inputs.artifact_source == 'published-assets' && matrix.target == 'x86_64-pc-windows-msvc'
         timeout-minutes: 35
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLIENT2_RELEASE: ${{ inputs.client2_release }}
+          CLIENT2_COMMIT: ${{ inputs.client2_commit }}
+          CLIENT2_CANDIDATE_RUN_ID: ${{ inputs.client2_candidate_run_id }}
         run: |
           $ErrorActionPreference = 'Stop'
+          # CLI precedes Client2 publication; candidate evidence cannot claim a public product upgrade.
+          $client2 = if ($env:CLIENT2_RELEASE) {
+            @{Client2Release=$env:CLIENT2_RELEASE; Client2Commit=$env:CLIENT2_COMMIT}
+          } else {
+            if (-not $env:CLIENT2_CANDIDATE_RUN_ID) { throw 'Select an authenticated Client2 candidate or an explicit new public release' }
+            @{Client2CandidateRunId=$env:CLIENT2_CANDIDATE_RUN_ID; Client2Commit=$env:CLIENT2_COMMIT}
+          }
           ./scripts/probe-client2-gui.ps1 `
+            @client2 `
             -Cli "$PWD/target/ci/x86_64-pc-windows-msvc/release/rsrs.exe" `
             -RuntimeArchive $env:RSRS_PUBLISHED_RUNTIME_ARCHIVE `
             -RuntimeVersion $env:RSRS_PUBLISHED_RUNTIME_VERSION `

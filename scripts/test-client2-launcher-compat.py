@@ -30,11 +30,11 @@ DESKTOP_SOURCE_SHA = CLIENT2_SHA
 DESKTOP_SHA256 = 'dc74596d983ab7b99c6b6872d8438cfb2f2e7060b93f9a9ef13db629b6a5d7a2'
 DESKTOP_ARCHIVE_SHA256 = '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
 DESKTOP_BASELINES = {
-    'host-owned-candidate': {'source': '1734322b6c6dd543441a753f07a3517bee5e1231',
-        'version': '0.2.56-dev.259',
-        'binary': '40e0c58472358b69d4b56b43c1c1ef7bfd7eb30cc3c6eff516ad5ec702beb626',
-        'archive': '056ec02a840f37bdb1eaeed1fc0825a9ac69ea9c301146615f459f1ef21f3b90',
-        'asset_id': None, 'artifact_id': 14114928434, 'run_id': '43597586002'},
+    'host-owned-candidate': {'source': '6ffa187685734873721ab51f3a54d8b2c29cd269',
+        'version': '0.2.56-dev.263',
+        'binary': '4a62424ecffad8f732f5484495e1a6a5f7c6649ea7fb1809bc1b51a049f48677',
+        'archive': '4a294a7de11fdaea48e534539bbfb5693c30a90e05544aea9aff344414a3c925',
+        'asset_id': None, 'artifact_id': 14163499760, 'run_id': '43721147038'},
     'v2.0.0-dev.5': {'source': CLIENT2_SHA, 'binary': DESKTOP_SHA256,
         'archive': DESKTOP_ARCHIVE_SHA256, 'asset_id': 735418491, 'run_id': '43018703263'},
     'v0.2.56': {'source': '57bc070826949994c3f7ce9a64277160704bdfe5',

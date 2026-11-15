@@ -13,11 +13,14 @@ import {publishedAssetNames,parsePublishedAssets,validateArtifactRequest} from '
 import {createHash} from 'node:crypto';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
+// Git's Windows bin wrapper prepends system tools ahead of fixture stubs.
+const bash=process.platform==='win32'?path.resolve(execFileSync('git',['--exec-path'],{encoding:'utf8'}).trim(),'../../../usr/bin/bash.exe'):'bash';
 test('API smoke shell parses even when published-assets mode is inactive',()=>{
-  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const job=workflow.split('\n  api-smoke:\n')[1].split('\n  publish:\n')[0];
   const script=job.split('        run: |\n')[1].split('\n      - uses:')[0].replace(/^          /gm,'');
-  const result=spawnSync('bash',['-n'],{input:script,encoding:'utf8'});
+  const result=spawnSync(bash,['-n'],{input:script,encoding:'utf8'});
+  if(result.error)throw result.error;
   assert.equal(result.status,0,result.stderr);
   assert.match(script,/dev-api-smoke.py/);assert.match(script,/dev-github-api-smoke.py/);
 });
@@ -247,19 +250,26 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     stub('uname','#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n');
     // The fake digest checker isolates selection/argv tests from the 570MB real model.
     stub('sha256sum','#!/bin/sh\ncat >/dev/null\nexit "${FAKE_HASH_STATUS:-0}"\n');
-    stub('docker','#!'+process.execPath+'\nrequire("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    const docker=path.join(root,'docker.cjs');
+    writeFileSync(docker,'require("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    stub('docker','#!/bin/sh\nMSYS2_ARG_CONV_EXCL="*" exec "'+process.execPath.replaceAll('\\','/')+'" "'+docker.replaceAll('\\','/')+'" "$@"\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
-    const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,RUNNER_ARCH:'ARM64',RSRS_DATA_DIR:data,RSRS_CPU_OWNED_ORT_FILE:'',CAPTURE:capture};
-    const run=extra=>spawnSync('bash',[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile'),runtime,'a'.repeat(64),'1.0.21-dev.5'],{env:{...env,...extra},encoding:'utf8'});
+    const shellPath=file=>file.split(path.sep).join('/');
+    const env={...process.env,PATH:[bin,...(process.platform==='win32'?[path.dirname(bash)]:[]),process.env.PATH].join(path.delimiter),RUNNER_ARCH:'ARM64',RSRS_DATA_DIR:data,RSRS_CPU_OWNED_ORT_FILE:'',CAPTURE:capture};
+    const run=extra=>{
+      const result=spawnSync(bash,[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile'),runtime,'a'.repeat(64),'1.0.21-dev.5'],{env:{...env,...extra},encoding:'utf8'});
+      if(result.error)throw result.error;
+      return result;
+    };
     for(const [extra,selected] of [[{},cached],[{RSRS_CPU_OWNED_ORT_FILE:custom},custom]]){
       const result=run(extra);assert.equal(result.status,0,result.stderr);const args=JSON.parse(readFileSync(capture));
-      assert(args.includes(selected+':/cpu-model.ort:ro'));assert(args.includes(models+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
-      assert(args.includes(bundle+':/runtime:ro'));assert(args.includes(receipt+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
+      assert(args.includes(shellPath(selected)+':/cpu-model.ort:ro'));assert(args.includes(shellPath(models)+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
+      assert(args.includes(shellPath(bundle)+':/runtime:ro'));assert(args.includes(shellPath(receipt)+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
       assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
-    rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(local+':/cpu-model.ort:ro'));rmSync(capture);
+    rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(shellPath(local)+':/cpu-model.ort:ro'));rmSync(capture);
     assert.notEqual(run({FAKE_HASH_STATUS:'1'}).status,0);assert(!existsSync(capture));
     rmSync(local);assert.notEqual(run({}).status,0);assert(!existsSync(capture));
     // Explicit missing override must not silently fall back to another model.
@@ -320,6 +330,34 @@ test('workflow defaults critical, retains mandatory profile gates and dispatches
   const part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
   for(const name of ['validate','native-regression','native-regression-critical','native-regression-critical-readonly'])assert.match(part(name),/permissions:[\s\S]*?actions: read/);
   const standalone=readFileSync(new URL('../../.github/workflows/release-validation.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const client2Defaults={client2_release:"''",client2_commit:'6ffa187685734873721ab51f3a54d8b2c29cd269',client2_candidate_run_id:"'43721147038'"};
+  for(const [workflow,event] of [[release,'workflow_dispatch'],[standalone,'workflow_dispatch'],[standalone,'workflow_call'],[native,'workflow_call']]){
+    const section=workflow.split('  '+event+':\n')[1]?.split(/^  \w+:|^\S/m)[0];
+    assert(section,'missing '+event+' entry point');
+    for(const [key,value] of Object.entries(client2Defaults)){
+      const declaration=section.match(new RegExp('^      '+key+':\\n([\\s\\S]*?)(?=^      \\w+:|^    \\w+:|$(?![\\s\\S]))','m'))?.[1];
+      assert(declaration,'missing '+event+' '+key);
+      assert.match(declaration,/^        type: string$/m);
+      assert(declaration.includes('        default: '+value+'\n'),'inconsistent '+key+' default');
+    }
+  }
+  const calls=[...['validate','native-regression','native-regression-critical','native-regression-critical-readonly'].map(part),
+    standalone.split('\n  native-regression:\n')[1].split('\n  npm-dry-run:')[0]];
+  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40),client2_candidate_run_id:'456'};
+  for(const call of calls){
+    assert.match(call,/uses: \.\/\.github\/workflows\/release-(?:native-)?validation.yml/);
+    for(const key of Object.keys(client2Defaults)){
+      const expression=call.match(new RegExp('^      '+key+': \\$\\{\\{ (.+) \\}\\}$','m'))?.[1];
+      assert(expression,'missing Client2 call argument '+key);
+      assert.equal(runInNewContext(expression,{inputs:selected}),selected[key],'Client2 input lost at call boundary');
+    }
+  }
+  for(const call of ['native-regression','native-regression-critical','native-regression-critical-readonly'].map(part)){
+    for(const key of ['client2_commit','client2_candidate_run_id']){
+      const expression=call.match(new RegExp('^      '+key+': \\$\\{\\{ (.+) \\}\\}$','m'))[1];
+      assert.equal(runInNewContext(expression,{inputs:{}}),client2Defaults[key].replaceAll("'",''),'tag push lost candidate identity');
+    }
+  }
   assert.match(standalone,/permissions:\n  contents: read\n  actions: read/);
   assert.match(standalone.split('\n  native-regression:\n')[1].split('\n  npm-dry-run:')[0],/permissions:[\s\S]*?actions: read/);
   assert.match(part('native-regression'),/needs: \[plan, validate, artifact-inputs, published-assets-verification\]/);assert.match(part('native-regression'),/validation_profile: full/);

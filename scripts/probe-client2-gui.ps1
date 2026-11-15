@@ -4,23 +4,29 @@ param(
     [Parameter(Mandatory)][string]$RuntimeArchive,
     [Parameter(Mandatory)][string]$RuntimeVersion,
     [Parameter(Mandatory)][string]$OutputDirectory,
-    [Parameter(ParameterSetName='Official')][Parameter(ParameterSetName='SourceCandidate')][switch]$OfflineAcceptance,
+    [switch]$OfflineAcceptance,
     [string]$OfflineModelDirectory,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][switch]$SourceCandidate,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Exe,
     [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Manifest,
-    [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Commit
+    [Parameter(Mandatory,ParameterSetName='SourceCandidate')][string]$SourceClient2Commit,
+    [Parameter(Mandatory,ParameterSetName='Official')][string]$Client2Release,
+    [Parameter(Mandatory,ParameterSetName='DesktopCandidate')][string]$Client2CandidateRunId,
+    [Parameter(Mandatory,ParameterSetName='Official')][Parameter(Mandatory,ParameterSetName='DesktopCandidate')][string]$Client2Commit
 )
 $ErrorActionPreference = 'Stop'
-$publishedOnline = $env:ARTIFACT_SOURCE -ceq 'published-assets'
-if ($publishedOnline -and ($SourceCandidate -or -not $OfflineAcceptance -or
+$publishedAssets = $env:ARTIFACT_SOURCE -ceq 'published-assets'
+$client2Candidate = $SourceCandidate -or $PSCmdlet.ParameterSetName -ceq 'DesktopCandidate'
+$publishedOnline = $publishedAssets -and -not $client2Candidate
+if ($PSCmdlet.ParameterSetName -ne 'SourceCandidate' -and $Client2Commit -cnotmatch '\A[0-9a-f]{40}\z') { throw 'Require the exact protocol-compatible Client2 source commit' }
+if ($PSCmdlet.ParameterSetName -eq 'Official' -and $Client2Release -cnotmatch '\Av[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?\z') { throw 'Require an explicit new protocol-compatible Client2 release' }
+if ($publishedAssets -and (-not $OfflineAcceptance -or
     $env:RSRS_ARTIFACT_SOURCE -cne 'published-assets' -or $env:REQUEST_PUBLISH -cne 'false' -or
     $env:GITHUB_EVENT_NAME -cne 'workflow_dispatch')) { throw 'Online installation requires verified published assets and the official offline subset' }
 $report = [ordered]@{
-    scope = 'original Client2 Windows GUI connectivity only; not candidate/full GUI acceptance'
-    source_sha = 'be682108c555a3e5a788ad74217e088bcb25170b'
-    release = 'v2.0.0-dev.5'; asset_id = 735418527
-    expected_exe_sha256 = '52baecaebfc86426c6bc4d786e07fd8f34a26a61dc8221d628881df13cfddd27'
+    scope = 'protocol-compatible Client2 Windows GUI subset; not full GUI acceptance'
+    source_sha = $Client2Commit
+    release = $Client2Release
     environment_ready = $false; official_exe_verified = $false
     native_window_visible = $false; isolated_webview_bound = $false
     native_accessibility_read = $false; foreground_verified = $false; gui_input_observed = $false
@@ -99,6 +105,61 @@ function Copy-SourceClient2Candidate([string]$ExePath, [string]$ManifestPath, [s
     $null=Assert-CandidateRegularPath $Destination -File
     if ((Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant() -cne $manifest.exe_sha256) { throw 'Copied source candidate bytes differ' }
     return $manifest
+}
+function Assert-DesktopClient2Candidate($Run, $Artifact, [string]$ExpectedCommit, [string]$RunId) {
+    if ($RunId -cnotmatch '\A[1-9][0-9]*\z' -or $Run.id.ToString() -cne $RunId -or
+        $Run.head_sha -cne $ExpectedCommit -or $Run.repository.full_name -cne 'risense-ai/respire-client2' -or
+        $Run.head_repository.full_name -cne 'risense-ai/respire-client2' -or
+        $Run.path -cne '.github/workflows/desktop.yml' -or $Run.event -cne 'pull_request' -or
+        $Run.status -cne 'completed' -or $Run.conclusion -cne 'success' -or
+        $Artifact.workflow_run.id.ToString() -cne $RunId -or $Artifact.workflow_run.head_sha -cne $ExpectedCommit -or
+        $Artifact.name -cne 'respire-windows-amd64' -or $Artifact.expired -ne $false -or
+        $Artifact.id -le 0 -or $Artifact.size_in_bytes -le 0 -or $Artifact.digest -cnotmatch '\Asha256:[0-9a-f]{64}\z') {
+        throw 'Client2 Desktop candidate provenance differs'
+    }
+}
+function Save-DownloadedClient2([string]$Destination) {
+    if (-not $env:GH_TOKEN) { throw 'Client2 download requires an authenticated GitHub read token' }
+    $headers = @{Authorization="Bearer $env:GH_TOKEN"; Accept='application/vnd.github+json'}
+    $api = 'https://api.github.com/repos/risense-ai/respire-client2'
+    if ($Client2CandidateRunId) {
+        $run = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$Client2CandidateRunId" -TimeoutSec 60
+        $inventory = Invoke-RestMethod -Headers $headers -Uri "$api/actions/runs/$Client2CandidateRunId/artifacts?per_page=100" -TimeoutSec 60
+        $matches = @($inventory.artifacts | Where-Object { $_.name -ceq 'respire-windows-amd64' })
+        if ($inventory.total_count -ne $inventory.artifacts.Count -or $matches.Count -ne 1) { throw 'Client2 Desktop candidate inventory is incomplete or ambiguous' }
+        $artifact = $matches[0]
+        Assert-DesktopClient2Candidate $run $artifact $Client2Commit $Client2CandidateRunId
+        $zip = Join-Path $root 'client2-desktop.zip'
+        Invoke-WebRequest -Headers $headers -Uri "$api/actions/artifacts/$($artifact.id)/zip" -OutFile $zip -TimeoutSec 120
+        if ((Get-Item -LiteralPath $zip).Length -ne $artifact.size_in_bytes -or
+            ('sha256:'+(Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()) -cne $artifact.digest) { throw 'Client2 Desktop artifact digest differs' }
+        $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            $entries = @($archive.Entries | Where-Object { $_.FullName -ceq 'respire-windows-amd64.exe' })
+            if ($entries.Count -ne 1) { throw 'Client2 Desktop artifact must contain exactly one executable' }
+            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], $Destination, $false)
+        } finally { $archive.Dispose() }
+        $report.fixture_mode = 'source-client2-ui-candidate'
+        $report.source_candidate_verified = $true
+        $report.source_candidate = @{source_commit=$Client2Commit; run_id=$Client2CandidateRunId; run_attempt=$run.run_attempt
+            artifact_id=$artifact.id; artifact_digest=$artifact.digest; build_version="0.2.56-dev.$($run.run_number)"}
+        $report.Remove('release')
+    } else {
+        $release = Invoke-RestMethod -Headers $headers -Uri "$api/releases/tags/$Client2Release" -TimeoutSec 60
+        $commit = Invoke-RestMethod -Headers $headers -Uri "$api/commits/$Client2Release" -TimeoutSec 60
+        $matches = @($release.assets | Where-Object { $_.name -ceq 'respire-windows-amd64.exe' })
+        if ($release.draft -ne $false -or $release.tag_name -cne $Client2Release -or
+            $commit.sha -cne $Client2Commit -or $matches.Count -ne 1) { throw 'Published Client2 release/source identity differs' }
+        $asset = $matches[0]
+        if ($asset.id -le 0 -or $asset.size -le 0 -or $asset.digest -cnotmatch '\Asha256:[0-9a-f]{64}\z') { throw 'Published Client2 asset identity is missing' }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $Destination -TimeoutSec 120
+        if ((Get-Item -LiteralPath $Destination).Length -ne $asset.size -or
+            ('sha256:'+(Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()) -cne $asset.digest) { throw 'Published Client2 executable digest differs' }
+        $report.asset_id = $asset.id
+        $report.expected_exe_sha256 = $asset.digest.Substring(7)
+        $report.official_exe_verified = $true
+    }
+    $report.exe_sha256 = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 function Save-Report { $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root 'report.json') -Encoding utf8NoBOM }
 function Descendants([int]$parentId) {
@@ -232,10 +293,8 @@ public static class RespireGuiNative {
         $report.exe_sha256=$manifest.exe_sha256
         $report.unverified_ui_scenarios=@('pending','error','cancel')
     } else {
-        Invoke-WebRequest -Uri 'https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.5/respire-windows-amd64.exe' -OutFile $exe -TimeoutSec 60
-        $report.exe_sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($report.exe_sha256 -ne $report.expected_exe_sha256) { throw 'Official original EXE digest mismatch' }
-        $report.official_exe_verified = $true
+        if ($client2Candidate -and -not $OfflineAcceptance) { throw 'Desktop candidate requires the complete offline GUI subset' }
+        Save-DownloadedClient2 $exe
     }
     $cliPath = (Resolve-Path -LiteralPath $Cli).Path
     $archivePath = (Resolve-Path -LiteralPath $RuntimeArchive).Path
@@ -254,8 +313,8 @@ public static class RespireGuiNative {
     if ($RuntimeVersion -notmatch '^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$') { throw 'Invalid pinned Runtime version' }
     $taskHome = Join-Path $root 'profile/home'
     $taskProfile = if ($publishedOnline) { Join-Path $taskHome '.rsrs' } else { Join-Path $root 'profile' }
-    if ($publishedOnline) {
-        if ($candidateProof) { throw 'Published online acceptance cannot consume a Runtime candidate' }
+    if ($publishedAssets) {
+        if ($candidateProof) { throw 'Published acceptance cannot consume a Runtime candidate' }
         $manifestHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($env:PUBLISHED_ASSETS))).ToLowerInvariant()
         $published = $env:PUBLISHED_ASSETS | ConvertFrom-Json
         $consumer = Get-Content -Raw -LiteralPath (Join-Path (Split-Path $cliPath) 'published-consumer-identity.json') | ConvertFrom-Json
@@ -271,17 +330,22 @@ public static class RespireGuiNative {
             (Get-FileHash -LiteralPath $metadataPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne $env:RSRS_PUBLISHED_RUNTIME_METADATA_SHA256) {
             throw 'Published CLI/Runtime reference identity differs from the verified consumer receipt'
         }
-        $report.online_install = @{mode='published-assets'; manifest_sha256=$manifestHash; cli_version=$published.cli.version
-            cli_source=$published.cli.source_sha; runtime_version=$RuntimeVersion; runtime_source=$published.runtime.source_sha
-            home=$taskHome; data_root=$taskProfile; channel_source='product-default'; completed=$false}
-        foreach ($kind in @('cli','runtime')) {
-            $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/risense-ai/respire-$kind/releases?per_page=20" -TimeoutSec 60
-            $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root "online-$kind-releases-before.json") -Encoding utf8NoBOM
-            $latest = $releases | Where-Object { -not $_.draft -and $_.tag_name -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$' } |
-                Sort-Object -Property @{Expression={[semver]$_.tag_name.Substring(1)}; Descending=$true} | Select-Object -First 1
-            if ($latest.tag_name -cne ('v'+$published.$kind.version) -or $latest.id -ne $published.$kind.release_id) {
-                throw "Dev discovery does not select the exact published $kind reference; no product installation attempted"
+        $report.published_inputs = @{manifest_sha256=$manifestHash; cli_source=$published.cli.source_sha; runtime_source=$published.runtime.source_sha}
+        if ($publishedOnline) {
+            $report.online_install = @{mode='published-assets'; manifest_sha256=$manifestHash; cli_version=$published.cli.version
+                cli_source=$published.cli.source_sha; runtime_version=$RuntimeVersion; runtime_source=$published.runtime.source_sha
+                home=$taskHome; data_root=$taskProfile; channel_source='product-default'; completed=$false}
+            foreach ($kind in @('cli','runtime')) {
+                $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/risense-ai/respire-$kind/releases?per_page=20" -TimeoutSec 60
+                $releases | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath (Join-Path $root "online-$kind-releases-before.json") -Encoding utf8NoBOM
+                $latest = $releases | Where-Object { -not $_.draft -and $_.tag_name -cmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$' } |
+                    Sort-Object -Property @{Expression={[semver]$_.tag_name.Substring(1)}; Descending=$true} | Select-Object -First 1
+                if ($latest.tag_name -cne ('v'+$published.$kind.version) -or $latest.id -ne $published.$kind.release_id) {
+                    throw "Dev discovery does not select the exact published $kind reference; no product installation attempted"
+                }
             }
+        } else {
+            $report.online_install = @{mode='not-evaluated'; completed=$false; reason='authenticated Client2 CI candidate; not public product upgrade evidence'}
         }
     }
     foreach ($dir in @('home','appdata','local','temp','bin')) { New-Item -ItemType Directory -Path (Join-Path $taskProfile $dir) | Out-Null }
@@ -330,11 +394,11 @@ public static class RespireGuiNative {
         foreach ($arg in $argv) { [void]$start.ArgumentList.Add($arg) }
         return [Diagnostics.Process]::Start($start)
     }
-    $managed = if ($SourceCandidate) { Join-Path $taskProfile "bin/runtime/$RuntimeVersion" } else { Join-Path $taskProfile "client2/runtime/$RuntimeVersion" }
+    $managed = Join-Path $taskProfile "bin/runtime/$RuntimeVersion"
     if ($publishedOnline) {
         $installedCli = Join-Path $taskProfile 'bin/rsrs.exe'
         $report.online_install.cli_absent_before = -not (Test-Path -LiteralPath $installedCli)
-        $report.online_install.runtime_absent_before = -not (Test-Path -LiteralPath (Join-Path $taskProfile 'client2/runtime.json'))
+        $report.online_install.runtime_absent_before = -not (Test-Path -LiteralPath (Join-Path $taskProfile 'bin/runtime.json'))
         if (-not $report.online_install.cli_absent_before -or -not $report.online_install.runtime_absent_before -or
             (Test-Path -LiteralPath (Join-Path $root 'bootstrap'))) { throw 'Online installation requires absent CLI, Runtime and bootstrap payload' }
         $install = Child-Start $exe @('--headless','install-runtime') -CaptureOutput
@@ -345,7 +409,7 @@ public static class RespireGuiNative {
         $stderr.GetAwaiter().GetResult() | Set-Content -LiteralPath (Join-Path $root 'online-install.stderr.txt') -Encoding utf8NoBOM
         $report.online_install.exit_code = $install.ExitCode
         if ($install.ExitCode -ne 0 -or ($installText | ConvertFrom-Json).ok -ne $true) { throw 'Released Client2 online installation failed' }
-        $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') | ConvertFrom-Json
+        $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
         if ($selection.version -cne $RuntimeVersion -or $selection.sha256 -cne $consumer.runtime_binary_sha256 -or
             (Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.runtime_binary_sha256 -or
             (Get-FileHash -LiteralPath $installedCli -Algorithm SHA256).Hash.ToLowerInvariant() -cne $consumer.cli_binary_sha256 -or
@@ -378,16 +442,6 @@ public static class RespireGuiNative {
         if (-not $install.WaitForExit(60000)) { $install.Kill($true); throw 'Staged Runtime installation timed out' }
         if ($install.ExitCode -ne 0) { throw 'Staged Runtime installation failed' }
         $selection = Get-Content -Raw -LiteralPath (Join-Path $taskProfile 'bin/runtime.json') | ConvertFrom-Json
-        if (-not $SourceCandidate) {
-            if (-not (Test-Path -LiteralPath (Split-Path $managed))) {
-                New-Item -ItemType Directory -Path (Split-Path $managed) | Out-Null
-            }
-            Copy-Item -LiteralPath (Join-Path $taskProfile "bin/runtime/$RuntimeVersion") -Destination $managed -Recurse
-            # The unchanged legacy Client2 requires notices from the CLI-verified archive.
-            & tar -xzf $archivePath -C $managed ./core-notices
-            if ($LASTEXITCODE -ne 0) { throw 'Unable to restore the legacy Client2 notice fixture' }
-            @{version=$RuntimeVersion; sha256=$selection.sha256} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $taskProfile 'client2/runtime.json') -Encoding utf8NoBOM
-        }
         Copy-Item -LiteralPath $cliPath -Destination (Join-Path $taskProfile 'bin/rsrs.exe')
     }
     Write-Output 'GUI probe: Runtime installed'
@@ -448,7 +502,7 @@ public static class RespireGuiNative {
         runtime_exe=(Join-Path $managed 'rsrs-runtime.exe')
         runtime_sha256=(Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
     }
-    if ($SourceCandidate) { $report.native_binding.fixture_mode='source-client2-ui-candidate'; $report.native_binding.source_commit=$SourceClient2Commit }
+    if ($client2Candidate) { $report.native_binding.fixture_mode='source-client2-ui-candidate'; $report.native_binding.source_commit=if ($SourceCandidate) { $SourceClient2Commit } else { $Client2Commit } }
     $bindingPath = Join-Path $root 'native-binding.json'
     $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
     Write-Output 'GUI probe: window and WebView bound'
@@ -456,7 +510,7 @@ public static class RespireGuiNative {
     $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
     $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
     if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
-    if ($SourceCandidate) { $helperArgs += '-SourceCandidateStability' }
+    if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
     Write-Output 'GUI probe: starting UI Automation helper'
     $driver = Child-Start $systemPowerShell $helperArgs
     Write-Output 'GUI probe: UI Automation helper started'
@@ -468,7 +522,7 @@ public static class RespireGuiNative {
     Write-Output 'GUI probe: UI Automation helper exited'
     $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
     $report.native_gui = $native
-    if ($SourceCandidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
+    if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
         $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
         $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
     if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or

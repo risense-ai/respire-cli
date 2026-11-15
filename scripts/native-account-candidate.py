@@ -904,7 +904,7 @@ def standalone_stop_checks(captured, runtime_sha256):
     return {"passed": True, "observations": observations}
 
 
-CLIENT2_OWNED_SOURCE_SHA = "1734322b6c6dd543441a753f07a3517bee5e1231"
+CLIENT2_OWNED_SOURCE_SHA = "6ffa187685734873721ab51f3a54d8b2c29cd269"
 OWNED_PROBE_FILES = ("diagnostics_darwin.go", "diagnostics_other.go", "host_operations.go", "main.go")
 
 
