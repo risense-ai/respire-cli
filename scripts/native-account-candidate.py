@@ -1152,9 +1152,12 @@ def run(args):
                          if args.suite in ("account", "g1-business", "g1-owned-stop", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
             if args.compatibility_host or diagnostic or stable_remote or args.suite in ("g1-business", "g1-owned-stop"):
                 test_args.append("--show-output")
-            command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
-                sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
+            command = [sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
                 "--root", root / "keyring", "--", harness, *test_args]
+            if args.owned_stop_mode == "registered":
+                command.insert(3, "--hosted-user-bus")
+            else:
+                command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private", *command]
             report["stage"] = "private_diagnostic_test" if diagnostic else "private_account_test"
             report["test_requested"] = True
             invoke(command, timeout=1000 if args.suite == "account" else 2700)

@@ -1,10 +1,11 @@
-"""Real Secret Service fixtures on a private hosted D-Bus session only."""
+"""Real Secret Service fixtures with private or explicitly verified hosted-user D-Bus."""
 import importlib.util
 from importlib.metadata import version
 import os
 from pathlib import Path
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -18,10 +19,30 @@ owned_path = _base.owned_path
 canonical_identity = _base.canonical_identity
 
 
+def hosted_user_bus_environment():
+    require(sys.platform.startswith("linux")
+            and os.environ.get("GITHUB_ACTIONS") == "true"
+            and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"
+            and os.environ.get("RSRS_SS_FIXTURE_BUS") != "private",
+            "hosted_user_bus_requires_dedicated_linux_runner")
+    uid = os.getuid()
+    runtime = Path(f"/run/user/{uid}")
+    bus = runtime / "bus"
+    require(not runtime.is_symlink() and runtime.is_dir()
+            and runtime.stat().st_uid == uid
+            and stat.S_IMODE(runtime.stat().st_mode) == 0o700,
+            "hosted_user_runtime_directory_invalid")
+    require(not bus.is_symlink() and bus.exists()
+            and stat.S_ISSOCK(bus.stat().st_mode) and bus.stat().st_uid == uid,
+            "hosted_user_bus_socket_invalid")
+    return {"XDG_RUNTIME_DIR": str(runtime), "DBUS_SESSION_BUS_ADDRESS": f"unix:path={bus}",
+            "RSRS_SS_FIXTURE_BUS": "hosted-user"}
+
+
 class SecretServiceKeys(_base.TrackedKeys):
     name = "linux-secret-service"
 
-    def __init__(self, root):
+    def __init__(self, root, *, hosted_user_bus=False):
         super().__init__(root)
         self.daemon = None
         self.connection = None
@@ -30,9 +51,15 @@ class SecretServiceKeys(_base.TrackedKeys):
         self.generic_schema_observed = set()
         self.normalized_current_entries = set()
         self.bus = os.environ.get("DBUS_SESSION_BUS_ADDRESS", "")
-        require(sys.platform.startswith("linux")
-                and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
-                and self.bus.startswith("unix:"), "private_fixture_session_bus_required")
+        self.bus_mode = "hosted-user" if hosted_user_bus else "private"
+        if hosted_user_bus:
+            expected = hosted_user_bus_environment()
+            require(all(os.environ.get(key) == value for key, value in expected.items()),
+                    "hosted_user_bus_environment_mismatch")
+        else:
+            require(sys.platform.startswith("linux")
+                    and os.environ.get("RSRS_SS_FIXTURE_BUS") == "private"
+                    and self.bus.startswith("unix:"), "private_fixture_session_bus_required")
         require(version("SecretStorage") == "3.3.3" and version("jeepney") == "0.9.0",
                 "secret_service_fixture_dependencies_not_pinned")
         import secretstorage
@@ -42,6 +69,13 @@ class SecretServiceKeys(_base.TrackedKeys):
             self.connection = secretstorage.dbus_init()
             address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus",
                                   "org.freedesktop.DBus")
+            if hosted_user_bus:
+                systemd = self.connection.send_and_get_reply(new_method_call(
+                    address, "NameHasOwner", "s", ("org.freedesktop.systemd1",)))
+                require(systemd.body == (True,), "hosted_user_systemd_owner_missing")
+                owner = self.connection.send_and_get_reply(new_method_call(
+                    address, "GetConnectionUnixUser", "s", ("org.freedesktop.systemd1",)))
+                require(owner.body == (os.getuid(),), "hosted_user_systemd_owner_mismatch")
             reply = self.connection.send_and_get_reply(new_method_call(
                 address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
             require(reply.body == (False,), "fixture_bus_already_has_secret_service")
@@ -56,6 +90,8 @@ class SecretServiceKeys(_base.TrackedKeys):
                 env.pop(key, None)
             self.private_env = {key: env[key] for key in (
                 "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")}
+            if hosted_user_bus:
+                self.private_env["XDG_RUNTIME_DIR"] = expected["XDG_RUNTIME_DIR"]
             self.daemon = subprocess.Popen([
                 "gnome-keyring-daemon", "--foreground", "--unlock", "--components=secrets",
                 "--control-directory", str(control)], env=env, stdin=subprocess.PIPE,
@@ -87,6 +123,7 @@ class SecretServiceKeys(_base.TrackedKeys):
                     time.sleep(0.05)
         except Exception as error:
             fixed_codes = {
+                "hosted_user_systemd_owner_missing", "hosted_user_systemd_owner_mismatch",
                 "fixture_bus_already_has_secret_service", "fixture_secret_service_daemon_exited",
                 "fixture_secret_service_owner_not_ready", "fixture_secret_service_owner_mismatch",
                 "fixture_default_collection_locked", "fixture_default_collection_not_ready",
@@ -105,7 +142,7 @@ class SecretServiceKeys(_base.TrackedKeys):
     def configure_env(self, env):
         super().configure_env(env)
         env["DBUS_SESSION_BUS_ADDRESS"] = self.bus
-        env["RSRS_SS_FIXTURE_BUS"] = "private"
+        env["RSRS_SS_FIXTURE_BUS"] = self.bus_mode
         return env
 
     def configure_business_env(self, env):
@@ -331,6 +368,18 @@ class SecretServiceKeys(_base.TrackedKeys):
                         self.daemon.kill()
                         self.daemon.wait(timeout=5)
                 require(self.daemon.poll() is not None, "fixture_daemon_still_running")
+                if self.bus_mode == "hosted-user":
+                    from jeepney import DBusAddress, new_method_call
+                    connection = self.secretstorage.dbus_init()
+                    try:
+                        address = DBusAddress("/org/freedesktop/DBus", "org.freedesktop.DBus",
+                                              "org.freedesktop.DBus")
+                        owner = connection.send_and_get_reply(new_method_call(
+                            address, "NameHasOwner", "s", ("org.freedesktop.secrets",)))
+                        require(owner.body == (False,), "fixture_secret_service_owner_remained")
+                        report["hosted_bus_owner_released"] = True
+                    finally:
+                        connection.close()
                 self.daemon = None
             except Exception:
                 report["passed"] = False
@@ -338,8 +387,8 @@ class SecretServiceKeys(_base.TrackedKeys):
         return report
 
 
-def create(root):
+def create(root, *, hosted_user_bus=False):
     root = _base.owned_path(root)
     require(not root.exists(), "fixture_keyring_home_not_fresh")
     root.mkdir(parents=True, mode=0o700)
-    return SecretServiceKeys(root)
+    return SecretServiceKeys(root, hosted_user_bus=hosted_user_bus)
