@@ -488,12 +488,13 @@ class Smoke:
         raw = subprocess.run([str(self.args.binary), "--version"], env=self.env,
             capture_output=True, timeout=20)
         require(raw.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", raw.stdout.decode()), "binary_version_mismatch")
-        self.cli("model", "install-m3", timeout=900)
+        installed = self.cli("model", "install-m3", timeout=900)
         for relative, expected in MODEL_HASHES.items():
             require(digest(self.model / relative) == expected, "model_hash_mismatch")
-        self.cli("model", "engine", "cpu")
-        probe = self.cli("model", "probe", "--model", "m3", "--text", "CPU inference contract fixture")["summary"]
-        require(probe["ready"] and probe["dimensions"] == 1024 and str(probe["selected"]).lower() == "cpu", "real_cpu_probe_failed")
+        probe = installed["details"]["backend_load"]["evidence"]
+        require(probe.get("ready") is True and probe.get("inference_completed") is True
+            and probe.get("fresh_session") is True and probe.get("dimensions") == 1024
+            and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=probe["dimensions"], model_hashes=MODEL_HASHES)
         self.inject()
         username = "ci-ai-" + secrets.token_hex(8)
@@ -514,6 +515,9 @@ class Smoke:
         super_key = registered["summary"].get("super")
         require(isinstance(super_key, str) and bool(super_key), "registered_super_missing")
         self.env["RSRS_SUPER"] = super_key
+        self.cli("model", "engine", "cpu")
+        probe = self.cli("model", "probe", "--model", "m3", "--text", "CPU inference contract fixture")["summary"]
+        require(probe["ready"] and probe["dimensions"] == 1024 and str(probe["selected"]).lower() == "cpu", "real_cpu_probe_failed")
         roots = {}
         for name in ("CI causal root", "CI deepen explicit", "CI deepen automatic"):
             self.cli("root-create", name, "--content", "Disposable independent topic collection", "--yes")

@@ -11,6 +11,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -177,6 +178,9 @@ class Fixture:
         self.args = args
         self.root = root
         self.child = None
+        self.runtime_stdout = None
+        self.runtime_stderr = None
+        self.token_present_before_start = None
         self.gate = Gate()
         self.user = "ci-outbox-" + secrets.token_hex(12)
         # Exercise leading-option characters without reducing the random password entropy.
@@ -305,11 +309,14 @@ class Fixture:
         launch = ([env['RSRS_RUNTIME_BIN'], 'serve'] if self.args.runtime_binary else
                   [str(self.args.binary), '--runtime-internal', '--no-open'])
         self.runtime_env = env
-        self.child = subprocess.Popen([*launch, '--port', str(self.port)],
-                                      env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         data_dir = Path(env["RSRS_DATA_DIR"])
         token_path = data_dir / "runtime" / "token"
         endpoint_path = data_dir / "runtime" / "endpoint.json"
+        self.token_present_before_start = token_path.exists()
+        self.runtime_stdout = tempfile.TemporaryFile()
+        self.runtime_stderr = tempfile.TemporaryFile()
+        self.child = subprocess.Popen([*launch, '--port', str(self.port)],
+                                      env=env, stdout=self.runtime_stdout, stderr=self.runtime_stderr)
 
         def ready():
             require(self.child.poll() is None, "owned_runtime_exited_before_ready")
@@ -374,7 +381,21 @@ class Fixture:
     def diagnose(self, report, phase):
         # Only finite state and counts, never session fields or provider error strings.
         result = {"phase": phase, "runtime_alive": self.child is not None and self.child.poll() is None,
-                  "direct_failures": list(self.direct_failures)}
+                  "direct_failures": list(self.direct_failures),
+                  "token_present_before_start": self.token_present_before_start}
+        if sys.exc_info()[0] is not None and self.child is not None:
+            result["runtime_exit_code"] = self.child.poll()
+            for name, stream in (("stdout", self.runtime_stdout), ("stderr", self.runtime_stderr)):
+                stream.seek(0)
+                output = stream.read()
+                # Publish only known error markers and output metadata, never raw credentials.
+                result[name] = {"bytes": len(output), "sha256": hashlib.sha256(output).hexdigest(),
+                    "errors": [message for message in (
+                        "Runtime session credentials are unavailable", "library remains locked",
+                        "incomplete Runtime readiness frame", "compatibility host exited before readiness",
+                        "runtime launch grant is missing or consumed",
+                        "interrupted auth control must be recovered before serving",
+                    ) if message.encode() in output]}
         with self.gate.lock:
             result.update(request_counts=dict(self.gate.request_counts), sync_read_requests=self.gate.sync_read_requests,
                           injected_disconnects=self.gate.fault_requests, real_acknowledgments=len(self.gate.acknowledged),
@@ -442,6 +463,9 @@ class Fixture:
             stopped = True
         except Exception:
             self.cleanup_report["events"].append({"user": self.user, "passed": False, "code": "cleanup_runtime_shutdown_failed"})
+        for stream in (self.runtime_stdout, self.runtime_stderr):
+            if stream is not None:
+                stream.close()
         if stopped:
             self.cleanup_account()
 
