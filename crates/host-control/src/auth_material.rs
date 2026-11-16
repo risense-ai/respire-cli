@@ -5,6 +5,46 @@ use respire_crypto::crypto;
 use respire_protocol::HostAuthKeygenMaterial;
 use serde_json::Value;
 
+/// Normalize only a new auth source, before freezing any operation identity.
+/// Interrupted operations retain their original session and journal for explicit recovery.
+pub fn prepare_source(takeover: &respire_client_host::lock::LibraryLock) -> Result<bool> {
+    use respire_client_host::lock::LibraryLock;
+    use std::time::Duration;
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    ensure!(takeover.protects(&root.join("runtime/takeover"))?,
+        "host_preparation_required: auth source requires installation takeover ownership");
+    let path = profile.join("session.json");
+    let Some(original) = crate::maintenance::private_io::bounded_bytes(&path, 65536)? else { return Ok(false); };
+    let session: Value = serde_json::from_slice(&original).context("invalid auth source session")?;
+    let factor_free = |value: &Value| ["pass", "super", "secret", "secret_key"]
+        .iter().all(|field| value.get(*field).is_none());
+    if factor_free(&session) { return Ok(false); }
+    let journal = respire_client_host::paths::client_config_path().with_file_name(".login-recovery.json");
+    ensure!(!journal.try_exists()?,
+        "host_recovery_required: source factors and an existing login journal require explicit recovery; originals retained");
+    ensure!(respire_client_host::host_credentials::legacy_session_needs_migration(&session),
+        "host_preparation_required: this inline source format has no host canonicalization path; original session retained");
+    ensure!(crate::lifecycle_io::probe_runtime()?.is_none() && !crate::lifecycle_io::endpoint_path().try_exists()?,
+        "host_preparation_required: release the source Runtime owner before canonicalizing inline factors");
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    let _root_lock = LibraryLock::acquire(&root, Duration::from_secs(1))?;
+    let _profile_lock = if root == profile { None } else {
+        Some(LibraryLock::acquire(&profile, Duration::from_secs(1))?)
+    };
+    ensure!(crate::maintenance::private_io::bounded_bytes(&path, 65536)?.as_deref() == Some(original.as_slice()),
+        "host_preparation_required: auth source changed before exclusive preparation");
+    let migrated = crate::lifecycle_io::migrate_legacy_session_under_takeover(takeover)?;
+    let bytes = crate::maintenance::private_io::bounded_bytes(&path, 65536)?
+        .context("host_preparation_required: canonical auth source is missing")?;
+    let canonical: Value = serde_json::from_slice(&bytes)?;
+    ensure!(migrated && factor_free(&canonical)
+        && ["vault_version", "kdf_salt", "wrapped_urk", "urk_nonce"].iter()
+            .all(|field| canonical[*field] == session[*field]),
+        "host_preparation_required: source canonicalization did not preserve the original vault");
+    Ok(true)
+}
+
 /// Generate only for a newly admitted operation, never when reconnecting to an existing one.
 pub fn generate() -> Result<HostAuthKeygenMaterial> {
     let super_password = crypto::generate_secret_key();
@@ -23,17 +63,17 @@ pub fn generate() -> Result<HostAuthKeygenMaterial> {
 
 /// The caller holds operation ownership and durably records public material before the write.
 /// Never serialize the entire material into that record: it contains the plaintext Super Key.
-pub fn checkpoint(material: &HostAuthKeygenMaterial, before_write: impl FnOnce() -> Result<()>) -> Result<()> {
+pub fn persist(material: &HostAuthKeygenMaterial, before_write: impl FnOnce() -> Result<()>) -> Result<()> {
     validate(material)?;
     before_write()?;
     write_auth_super(&material.keyring_account, &material.keyring_backend, &material.super_password)
 }
 
 /// Registration has already recorded its password-slot intent under the same operation owner.
-pub fn checkpoint_password(material: &HostAuthKeygenMaterial, password: &str) -> Result<()> {
+pub fn persist_password(material: &HostAuthKeygenMaterial, password: &str) -> Result<()> {
     validate(material)?;
     ensure!(read_auth_super(&material.keyring_account, &material.keyring_backend)?.as_deref()
-        == Some(material.super_password.as_str()), "host registration Super Key checkpoint is missing");
+        == Some(material.super_password.as_str()), "host registration Super Key persist is missing");
     write_auth_password(&material.keyring_account, &material.keyring_backend, password)
 }
 

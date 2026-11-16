@@ -280,6 +280,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
         }
     } else {
         anyhow::ensure!(operation.is_none(), "offline keygen original record missing; no operation admitted");
+        respire_host_control::auth_material::prepare_source(&takeover)?;
         let health=crate::rpc::probe_runtime()?;
         anyhow::ensure!(health.is_some() || !crate::rpc::endpoint_path().try_exists()?, "offline keygen owner is unverifiable");
         if let Some(owner)=health.as_ref() {
@@ -322,7 +323,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
             Some(candidate) => respire_host_control::auth_material::load(candidate)?,
             None => {
                 let generated=respire_host_control::auth_material::generate()?;
-                respire_host_control::auth_material::checkpoint(&generated, || {
+                respire_host_control::auth_material::persist(&generated, || {
                     record.material=Some(serde_json::json!({"vault_version":4,
                         "kdf_salt":generated.kdf_salt,"wrapped_urk":generated.wrapped_urk,
                         "urk_nonce":generated.urk_nonce,"keyring_account":generated.keyring_account,

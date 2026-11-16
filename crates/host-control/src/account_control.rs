@@ -59,6 +59,7 @@ pub(crate) fn account_request(
                 user,
                 password,
                 super_password,
+                material: None,
             })?,
         ),
         AccountControl::Login {

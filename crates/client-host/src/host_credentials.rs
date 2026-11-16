@@ -86,6 +86,11 @@ pub fn read_auth_super(account: &str, backend: &str) -> Result<Option<String>> {
     read_auth_slot(account, backend, "super")
 }
 
+/// Exact registration recovery lookup; the receipt owner verifies its password commitment.
+pub fn read_auth_password(account: &str, backend: &str) -> Result<Option<String>> {
+    read_auth_slot(account, backend, "pass")
+}
+
 fn read_auth_slot(account: &str, backend: &str, slot: &str) -> Result<Option<String>> {
     match auth_entry(account, backend, slot)?.get_password() {
         Ok(value) => Ok(Some(value)),

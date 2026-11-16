@@ -42,7 +42,7 @@ pub(crate) fn account_request(
     let (method, argument) = match operation {
         AccountControl::Register { addr, user, password, super_password } =>
             (HOST_AUTH_REGISTER_METHOD, serde_json::to_string(&HostAuthRegisterParams {
-                schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, password, super_password,
+                schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, password, super_password, material: None,
             })?),
         AccountControl::Login { addr, user, authorization, super_password } =>
             (HOST_AUTH_LOGIN_METHOD, serde_json::to_string(&HostAuthLoginParams {
