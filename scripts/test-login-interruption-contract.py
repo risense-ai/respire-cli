@@ -289,8 +289,45 @@ class RuntimeCleanupContract(unittest.TestCase):
 
 
 class BarrierContract(unittest.TestCase):
+    def test_gui_fixture_registers_once_and_records_only_effect_counts(self):
+        factory = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
+        handler = next(node for node in ast.walk(factory) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
+        with tempfile.TemporaryDirectory() as temp:
+            receipt = Path(temp) / 'counts.json'
+            state = {'vault': None, 'posts': 0, 'gets': 0, 'registers': 0, 'logins': 0,
+                     'barrier': None, 'receipt': str(receipt), 'token': 'private-fixture-token'}
+            scope = dict(BaseHTTPRequestHandler=object, json=json, Path=Path, state=state)
+            exec(compile(ast.Module(body=[handler], type_ignores=[]), '<actual-shared-handler>', 'exec'), scope)
+            instance = scope['Handler']()
+            instance.send_error, instance.reply = Mock(), Mock()
+
+            def post(path, payload, token=None):
+                instance.path = path
+                body = json.dumps(payload).encode()
+                instance.rfile = io.BytesIO(body)
+                instance.headers = {'Content-Length': str(len(body))}
+                if token:
+                    instance.headers['Authorization'] = 'Bearer ' + token
+                instance.do_POST()
+
+            post('/register', {'user': 'synthetic', 'pass_hash': 'synthetic-hash', 'salt': 'synthetic-salt'})
+            instance.reply.assert_called_once_with({'user': 'synthetic', 'token': state['token']})
+            self.assertEqual(json.loads(receipt.read_text()), {'posts': 0, 'registers': 1, 'logins': 0})
+            # Both wraps come from actual products in the GUI run. This unit test
+            # verifies transport/counters only and supplies no fake super or pending.
+            post('/api/self/vault', {'version': 4, 'wrapped_urk': 'encrypted-register-wrap'}, state['token'])
+            post('/api/self/vault', {'version': 4, 'wrapped_urk': 'encrypted-reset-wrap'}, state['token'])
+            self.assertEqual(state['vault']['wrapped_urk'], 'encrypted-reset-wrap')
+            self.assertEqual(json.loads(receipt.read_text()), {'posts': 2, 'registers': 1, 'logins': 0})
+            frozen = receipt.read_bytes()
+            post('/register', {'user': 'synthetic', 'pass_hash': 'synthetic-hash', 'salt': 'synthetic-salt'})
+            instance.send_error.assert_called_with(409)
+            post('/api/self/vault', {'wrapped_urk': 'unauthorized'}, 'wrong-token')
+            instance.send_error.assert_called_with(401)
+            self.assertEqual(receipt.read_bytes(), frozen)
+
     def test_reset_uses_authenticated_vault_storage_and_readback(self):
-        main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
         handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
         state = {'vault': {'version': 4, 'wrapped_urk': 'original'}, 'posts': 0, 'gets': 0, 'barrier': None}
         scope = dict(BaseHTTPRequestHandler=object, json=json, state=state)
@@ -318,7 +355,7 @@ class BarrierContract(unittest.TestCase):
         self.assertEqual(state['posts'], 1)
 
     def test_timeout_latches_all_observation_and_mutation_endpoints_closed(self):
-        main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
         handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
         for barrier in ('before_publish', 'after_publish'):
             with self.subTest(barrier=barrier):

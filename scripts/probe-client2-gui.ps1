@@ -51,6 +51,7 @@ if (-not $root.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -or 
 }
 New-Item -ItemType Directory -Path $root | Out-Null
 $desktopProcess = $null
+$accountFixture = $null
 $tracked = @()
 function Assert-SourceClient2Manifest($Manifest, [string]$ExpectedCommit, [string]$RunId, [string]$RunAttempt, [string]$Job) {
     $keys=@('schema_version','mode','repository','source_commit','platform','exe_file','exe_sha256','build_version','build_command','run_id','run_attempt','job')
@@ -386,10 +387,11 @@ public static class RespireGuiNative {
     $childEnv['RSRS_DATA_DIR'] = $taskProfile; $childEnv['RSRS_BIN_DIR'] = Join-Path $taskProfile 'bin'
     $childEnv['RSRS_RPC_PORT'] = "$rpcPort"; $childEnv['RSRS_INSTANCE_ID'] = [Guid]::NewGuid().ToString('N')
     $childEnv['RSRS_CORE_TEST_MODE'] = '1'; $childEnv['RSRS_NO_AUTOSYNC'] = '1'; $childEnv['RSRS_UPDATE_CHECK'] = '0'
-    function Child-Start([string]$file, [string[]]$argv, [switch]$CaptureOutput) {
+    function Child-Start([string]$file, [string[]]$argv, [switch]$CaptureOutput, [switch]$CaptureInput) {
         $start = [Diagnostics.ProcessStartInfo]::new($file)
         $start.UseShellExecute = $false; $start.WorkingDirectory = $root
         $start.RedirectStandardOutput = [bool]$CaptureOutput; $start.RedirectStandardError = [bool]$CaptureOutput
+        $start.RedirectStandardInput = [bool]$CaptureInput
         $start.Environment.Clear()
         foreach ($key in $childEnv.Keys) { $start.Environment[$key] = $childEnv[$key] }
         foreach ($arg in $argv) { [void]$start.ArgumentList.Add($arg) }
@@ -467,8 +469,63 @@ public static class RespireGuiNative {
         $report.offline_model_hashes = $modelHashes
         $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
     }
-    $phases = if ($publishedOnline -and $OfflineAcceptance) { @('initial','restart') } else { @('initial') }
+    $phases = if ($publishedOnline -and $OfflineAcceptance) { @('initial','restart','recovery-issue','recovery-resume','recovery-verified') } else { @('initial') }
     foreach ($phase in $phases) {
+        $recoveryPhase = $phase.StartsWith('recovery-', [StringComparison]::Ordinal)
+        if ($phase -ceq 'recovery-issue') {
+            # Preserve the completed offline/restart proof. The account fixture uses
+            # a fresh profile; issue and resume share this exact profile and WebView.
+            $originalBin = Join-Path $taskProfile 'bin'
+            $originalPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
+            $taskHome = Join-Path $root 'recovery-profile/home'
+            $taskProfile = Join-Path $taskHome '.rsrs'
+            foreach ($dir in @('client2','appdata','local','temp')) {
+                New-Item -ItemType Directory -Path (Join-Path $taskProfile $dir) | Out-Null
+            }
+            Copy-Item -LiteralPath $originalBin -Destination (Join-Path $taskProfile 'bin') -Recurse
+            $preferencesPath = Join-Path $taskProfile 'client2/preferences.json'
+            $originalPreferences.autoRuntime = $false
+            $originalPreferences | ConvertTo-Json | Set-Content -LiteralPath $preferencesPath -Encoding utf8NoBOM
+            $childEnv['HOME'] = $taskHome; $childEnv['USERPROFILE'] = $taskHome
+            $childEnv['APPDATA'] = Join-Path $taskProfile 'appdata'; $childEnv['LOCALAPPDATA'] = Join-Path $taskProfile 'local'
+            $childEnv['TEMP'] = Join-Path $taskProfile 'temp'; $childEnv['TMP'] = $childEnv['TEMP']
+            $childEnv['RSRS_DATA_DIR'] = $taskProfile; $childEnv['RSRS_BIN_DIR'] = Join-Path $taskProfile 'bin'
+            $managed = Join-Path $taskProfile "bin/runtime/$RuntimeVersion"
+            $accountReceipt = Join-Path $root 'account-fixture-counts.json'
+            $serverStart = [Diagnostics.ProcessStartInfo]::new((Get-Command python -CommandType Application).Source)
+            $serverStart.UseShellExecute = $false; $serverStart.CreateNoWindow = $true
+            $serverStart.RedirectStandardOutput = $true; $serverStart.RedirectStandardError = $true
+            $serverStart.Environment.Clear()
+            foreach ($key in $childEnv.Keys) { $serverStart.Environment[$key] = $childEnv[$key] }
+            $serverStart.Environment['GITHUB_ACTIONS'] = 'true'; $serverStart.Environment['RUNNER_ENVIRONMENT'] = 'github-hosted'
+            foreach ($arg in @((Join-Path $PSScriptRoot 'dev-login-interruption-smoke.py'),'--gui-recovery-server','--receipt',$accountReceipt)) {
+                [void]$serverStart.ArgumentList.Add($arg)
+            }
+            $accountFixture = [Diagnostics.Process]::Start($serverStart)
+            $ready = $accountFixture.StandardOutput.ReadLineAsync()
+            if (-not $ready.Wait(10000)) { throw 'Loopback account fixture did not become ready' }
+            $accountAddress = ($ready.GetAwaiter().GetResult() | ConvertFrom-Json).addr
+            if ($accountFixture.HasExited -or $accountAddress -cnotmatch '\Ahttp://127\.0\.0\.1:[0-9]+\z') { throw 'Loopback account fixture failed' }
+            $report.recovery = @{status='failed'; fixture='loopback synthetic account; real CLI setup and GUI reset'; exit_method='guarded-process-termination'}
+            # Prepare the account with the released CLI, not another GUI scenario.
+            # Registration output includes real material: drain bytes without decoding or saving.
+            $recoveryStarted = [DateTime]::UtcNow
+            $registration = Child-Start (Join-Path $taskProfile 'bin/rsrs.exe') @('--json','--host-rpc-stdio') -CaptureOutput -CaptureInput
+            try {
+                $discardOut = $registration.StandardOutput.BaseStream.CopyToAsync([IO.Stream]::Null)
+                $discardErr = $registration.StandardError.BaseStream.CopyToAsync([IO.Stream]::Null)
+                $registration.StandardInput.WriteLine((@{v=1;id=('desktop-'+[guid]::NewGuid());method='auth.register';
+                    params=@{addr=$accountAddress;user='synthetic';password='gui-synthetic-registration-password'}} | ConvertTo-Json -Compress))
+                $registration.StandardInput.Close()
+                if (-not $registration.WaitForExit(180000)) { $registration.Kill($true); throw 'Real CLI account fixture registration timed out' }
+                $discardOut.GetAwaiter().GetResult(); $discardErr.GetAwaiter().GetResult()
+                $report.recovery.registration_exit_code = $registration.ExitCode
+                if ($registration.ExitCode -ne 0) { throw 'Real CLI account fixture registration failed; private output was not retained' }
+            } finally {
+                if (-not $registration.HasExited) { $registration.Kill($true); $registration.WaitForExit() }
+                $registration.Dispose()
+            }
+        }
         Write-Output ('GUI probe: starting desktop ' + $phase)
         $desktopProcess = Child-Start $exe @()
         $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
@@ -513,14 +570,20 @@ public static class RespireGuiNative {
             $report.native_binding.previous_runtime_pid = $report.initial_native_gui.offline.runtime_process.ProcessId
             $report.native_binding.previous_runtime_ticks = $report.initial_native_gui.offline.runtime_process.creation_utc_ticks
         }
+        if ($recoveryPhase) {
+            $report.native_binding.account_fixture_addr = $accountAddress
+            $report.native_binding.recovery_phase = $phase
+            if ($phase -in @('recovery-resume','recovery-verified')) { $report.native_binding.recovery_request = $report.recovery.request }
+        }
         $bindingPath = Join-Path $root 'native-binding.json'
-        $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+        $report.native_binding | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
         Write-Output 'GUI probe: window and WebView bound'
         $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
         $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
         $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
         if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
         if ($phase -eq 'restart') { $helperArgs += '-ExistingKeys' }
+        if ($recoveryPhase) { $helperArgs += @('-RecoveryPhase', $phase.Substring('recovery-'.Length)) }
         if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
         Write-Output 'GUI probe: starting UI Automation helper'
         $driver = Child-Start $systemPowerShell $helperArgs
@@ -532,11 +595,11 @@ public static class RespireGuiNative {
         }
         Write-Output 'GUI probe: UI Automation helper exited'
         $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
-        $report.native_gui = $native
+        if ($recoveryPhase) { $report.recovery_native_gui = $native } else { $report.native_gui = $native }
         if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
             $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
             $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
-        if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or
+        if ($OfflineAcceptance -and -not $recoveryPhase -and ($native.offline.status -ne 'offline-subset-passed' -or
             -not $native.offline.runtime_normal_stop_confirmed -or $native.offline.full_gui_acceptance -ne 'not-evaluated' -or
             $native.offline.g1_passed -ne $false)) { throw 'Original offline GUI subset failed; full GUI remains not-evaluated' }
         $report.native_accessibility_read = $native.accessibility_tree_read -eq $true
@@ -552,7 +615,7 @@ public static class RespireGuiNative {
             if ($persistedPreferences.runtimeChannel -cne 'dev') { throw 'Fresh product preferences did not retain the default dev discovery channel' }
         }
         if ($publishedOnline -and $OfflineAcceptance) {
-            if (-not $native.offline.recall_hit) { throw 'Published Client2 recall was not verified' }
+            if (-not $recoveryPhase -and -not $native.offline.recall_hit) { throw 'Published Client2 recall was not verified' }
             if ($phase -eq 'initial') {
                 $report.initial_native_gui = $native
                 Copy-Item -LiteralPath (Join-Path $root 'native-gui.json') -Destination (Join-Path $root 'native-gui-initial.json')
@@ -564,9 +627,40 @@ public static class RespireGuiNative {
                 }
                 if (Get-CimInstance Win32_Process -Filter "ProcessId=$($native.offline.runtime_process.ProcessId)") { throw 'Original Runtime survived before desktop restart' }
                 $report.restart = @{exit_method='guarded-process-termination'; original_tree_absent=$true; completed=$false}
-            } else {
+            } elseif ($phase -ceq 'restart') {
                 if (-not $native.offline.automatic_start -or -not $native.offline.automatic_key_handoff) { throw 'Published desktop automatic start/key handoff was not verified' }
                 $report.restart.completed = $true
+                $report.restart_native_gui = $native
+            } else {
+                if ($native.recovery.status -cne 'recovery-subset-passed' -or
+                    ($phase -cne 'recovery-verified' -and -not $native.recovery.unchecked_blocked)) {
+                    throw 'Real reset recovery acknowledgement gate was not verified'
+                }
+                $counts = Get-Content -Raw -LiteralPath $accountReceipt | ConvertFrom-Json
+                if ($counts.registers -ne 1 -or $counts.logins -ne 0 -or $counts.posts -ne 2) {
+                    throw 'CLI fixture registration and GUI reset did not publish exactly once each'
+                }
+                if ($phase -ceq 'recovery-issue') {
+                    $report.recovery.request = $native.recovery.request
+                    $report.recovery.counts_before_exit = $counts
+                    $report.recovery.issue = $native.recovery
+                } elseif ($phase -ceq 'recovery-resume') {
+                    if (-not $native.recovery.material_saved) { throw 'Recovery confirmation was not persisted' }
+                    $report.recovery.resume = $native.recovery
+                    $report.recovery.original_operation_not_repeated = $true
+                } else {
+                    if (-not $native.recovery.saved_restart_no_prompt) { throw 'Saved acknowledgement was not verified after another restart' }
+                    $report.recovery.saved_restart = $native.recovery
+                    $report.recovery.status = 'recovery-subset-passed'
+                }
+            }
+            if ($phase -in @('restart','recovery-issue','recovery-resume')) {
+                $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
+                foreach ($item in $tracked) { Stop-TrackedOwned $item }
+                foreach ($item in $tracked) {
+                    if (-not (Confirm-TrackedAbsent $item)) { throw 'Desktop tree survived before account recovery restart' }
+                }
+                if ($phase -ceq 'recovery-issue') { $report.recovery.unacknowledged_tree_absent = $true }
             }
         }
     }
@@ -578,6 +672,19 @@ public static class RespireGuiNative {
     try {
         Write-Output 'GUI probe: cleaning up tracked processes'
         if ($desktopProcess) {
+            if ($report.native_binding.recovery_phase) {
+                # This fresh account profile has its own verified Runtime image path.
+                # Include a detached actor only with the same image, session and birth scope.
+                $actors = @(Get-CimInstance Win32_Process -Filter "Name='rsrs-runtime.exe'" | Where-Object {
+                    [string]::Equals($_.ExecutablePath,$report.native_binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase)
+                })
+                foreach ($actor in $actors) {
+                    if ($actor.SessionId -ne $desktopProcess.SessionId -or $actor.CreationDate.ToUniversalTime() -lt $recoveryStarted) {
+                        throw 'Account fixture Runtime cleanup identity is outside the original scope'
+                    }
+                    $tracked += $actor
+                }
+            }
             if ($OfflineAcceptance -and $report.native_binding) {
               try {
                 $checkpointPath = Join-Path $root 'native-gui.json'
@@ -590,7 +697,7 @@ public static class RespireGuiNative {
                     $runtimeRecord.CreationDate = Read-CheckpointCreationDate $runtimeRecord
                     if ($runtimeRecord.CreationDate.ToUniversalTime().Ticks -lt $desktopStarted) { throw 'Detached actor predates the original desktop' }
                     $tracked += $runtimeRecord
-                } elseif ($checkpoint.offline) { $report.cleanup_error = 'Offline Runtime identity not established; detached cleanup is not certified' }
+                } elseif ($checkpoint.offline -and -not $report.native_binding.recovery_phase) { $report.cleanup_error = 'Offline Runtime identity not established; detached cleanup is not certified' }
               } catch { $report.cleanup_error = $_.Exception.Message }
             }
             $sameRoot = Get-Process -Id $desktopProcess.Id -ErrorAction SilentlyContinue
@@ -607,6 +714,12 @@ public static class RespireGuiNative {
             $report.cleanup_exit_confirmed = -not $report.cleanup_error
         }
     } catch { $report.cleanup_error = $_.Exception.Message }
+    if ($accountFixture) {
+        try {
+            if (-not $accountFixture.HasExited) { $accountFixture.Kill($true); $accountFixture.WaitForExit() }
+        } catch { $report.cleanup_error = 'Loopback account fixture cleanup failed'; $report.cleanup_exit_confirmed = $false }
+        $accountFixture.Dispose()
+    }
     Save-Report
 }
 if ($report.status -ne 'connectivity-passed' -or -not $report.cleanup_exit_confirmed -or $report.cleanup_error) { exit 1 }
