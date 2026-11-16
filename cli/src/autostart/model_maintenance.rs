@@ -23,7 +23,7 @@ fn hash(bytes: &[u8]) -> String {
 }
 
 /// Read only committed selection metadata. Never open Core or create a library.
-fn saved_selection(profile: &Path) -> Result<Option<serde_json::Value>> {
+pub(super) fn saved_selection(profile: &Path) -> Result<Option<serde_json::Value>> {
     use rusqlite::{Connection, OpenFlags, OptionalExtension};
     let current = profile.join("rsrs.db");
     let legacy = profile.join("onememory.db");
@@ -969,7 +969,7 @@ fn check_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn local_m3_directory() -> Result<PathBuf> {
+pub(super) fn local_m3_directory() -> Result<PathBuf> {
     let home = || {
         dirs::home_dir()
             .or_else(|| respire_client_host::env::var_os("HOME").map(PathBuf::from))
