@@ -167,6 +167,15 @@ def verify(args, result):
                 and continued.get("runtime_cleanup", {}).get("passed") is True,
                 "login_continuation_not_proven")
         result["components"]["login_interruption"]["required_observed"] = 4
+        cases(interruption, {"host_key_continue"}, "key_continuation_case_missing")
+        continued_key = interruption["cases"]["host_key_continue"]
+        require(all(continued_key.get(field) is True for field in ("awaiting_input_observed",
+                "source_super_only_deleted", "original_operation_committed", "distinct_transport_ids",
+                "reset_published_once", "recovery_without_reset_replay", "repeated_material_unchanged",
+                "new_super_decrypts_original_urk", "post_reset_remember_recall"))
+                and continued_key.get("runtime_cleanup", {}).get("passed") is True,
+                "key_continuation_not_proven")
+        result["components"]["login_interruption"]["required_observed"] = 5
 
     mapping = read(Path(__file__).with_name("dev-runtime-business-coverage.json"))
     original = read(Path(__file__).with_name("dev-local-api-coverage.json"))["actions"]

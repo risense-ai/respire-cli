@@ -50,7 +50,13 @@ class LoginContinuationSummaryTests(unittest.TestCase):
         observation = {'passed': True, 'awaiting_input_observed': True, 'original_operation_committed': True,
                        'recovery_without_authentication_replay': True, 'distinct_transport_ids': True,
                        'repeated_material_unchanged': True, 'runtime_cleanup': {'passed': True}}
-        native = {'credential_mode': 'secret_service', 'cases': {'host_login_continue': observation}}
+        key_observation = {'passed': True, 'awaiting_input_observed': True, 'source_super_only_deleted': True,
+                           'original_operation_committed': True, 'distinct_transport_ids': True,
+                           'reset_published_once': True, 'recovery_without_reset_replay': True,
+                           'repeated_material_unchanged': True, 'new_super_decrypts_original_urk': True,
+                           'post_reset_remember_recall': True, 'runtime_cleanup': {'passed': True}}
+        native = {'credential_mode': 'secret_service', 'cases': {'host_login_continue': observation,
+                                                               'host_key_continue': key_observation}}
         candidates = [(native, None), ({'credential_mode': 'headless', 'cases': {}}, None),
                       ({'credential_mode': 'secret_service', 'cases': {}}, 'login_continuation_case_missing')]
         for field in observation:
@@ -58,6 +64,17 @@ class LoginContinuationSummaryTests(unittest.TestCase):
             incomplete['cases']['host_login_continue'].pop(field)
             candidates.append((incomplete, 'login_continuation_case_missing' if field == 'passed'
                                else 'login_continuation_not_proven'))
+        no_key = copy.deepcopy(native)
+        no_key['cases'].pop('host_key_continue')
+        candidates.append((no_key, 'key_continuation_case_missing'))
+        for field in key_observation:
+            for wrong in (None, False):
+                incomplete = copy.deepcopy(native)
+                incomplete['cases']['host_key_continue'][field] = wrong
+                if field == 'runtime_cleanup':
+                    incomplete['cases']['host_key_continue'][field] = {'passed': wrong}
+                candidates.append((incomplete, 'key_continuation_case_missing' if field == 'passed'
+                                   else 'key_continuation_not_proven'))
         for report, error in candidates:
             with self.subTest(report=report, error=error):
                 result = {'components': {'login_interruption': {'passed': True, 'required_observed': 3}}}
@@ -68,7 +85,7 @@ class LoginContinuationSummaryTests(unittest.TestCase):
                 else:
                     exec(code, scope)
                     self.assertEqual(result['components']['login_interruption']['required_observed'],
-                                     4 if report['credential_mode'] == 'secret_service' else 3)
+                                     5 if report['credential_mode'] == 'secret_service' else 3)
 
 
 class MigrationJoinReportTests(unittest.TestCase):

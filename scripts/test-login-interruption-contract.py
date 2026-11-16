@@ -6,6 +6,7 @@ import json
 import io
 from unittest.mock import Mock
 import os
+import re
 from pathlib import Path
 import select
 import signal
@@ -20,7 +21,7 @@ SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
 NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation',
          'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt',
-         'runtime_stop_receipt', 'fixture_runtime_owners'}
+         'runtime_stop_receipt', 'fixture_runtime_owners', 'key_continuation_receipt', 'remove_fixture_super'}
 
 
 def require(value, message):
@@ -163,6 +164,59 @@ class JournalContract(unittest.TestCase):
         self.assertNotIn('.unlink(', SOURCE)
         self.assertNotIn('pop("operation_id"', SOURCE)
 
+    def test_key_continuation_requires_original_identity_and_missing_super(self):
+        for outcome in ('awaiting_input', 'committed'):
+            summary = {'operation_id': self.id, 'source_profile': str(self.root), 'outcome': outcome}
+            summary.update({'operation': {'kind': 'super_reset'}, 'required_inputs': ['super_password']}
+                           if outcome == 'awaiting_input' else {'ok': True, 'super': 'synthetic-new-super'})
+            key_continuation_receipt(summary, self.id, self.root, outcome)
+            wrong_fields = [('operation_id', str(uuid.uuid4())), ('source_profile', '/other'), ('outcome', 'unknown')]
+            wrong_fields += ([('required_inputs', []), ('operation', {'kind': 'fivekeys'}), ('super', 'exposed')]
+                             if outcome == 'awaiting_input' else [('super', None), ('ok', False)])
+            for field, wrong in wrong_fields:
+                with self.subTest(outcome=outcome, field=field), self.assertRaises(RuntimeError):
+                    key_continuation_receipt(dict(summary, **{field: wrong}), self.id, self.root, outcome)
+
+    def test_key_fixture_deletes_only_bound_super_and_keeps_password(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / 'session.json'
+            alias = 'login-' + uuid.uuid4().hex
+            session = {'user': 'synthetic', 'addr': self.addr, 'vault_version': 4,
+                       'keyring_backend': 'secret_service', 'keyring_account': alias}
+            attributes = lambda service, slot: {'target': 'default', 'service': service,
+                                               'username': slot, 'application': 'rust-keyring'}
+            for invalid in (None, 'user', 'addr', 'vault_version', 'keyring_backend', 'keyring_account',
+                            'super', 'attributes', 'credential', 'collision'):
+                candidate = dict(session)
+                if invalid in session:
+                    candidate[invalid] = 'other'
+                if invalid == 'super':
+                    candidate['super'] = 'inline-secret'
+                path.write_text(json.dumps(candidate), encoding='utf-8')
+                before = path.read_bytes()
+                super_item, pass_item, keys = Mock(), Mock(), Mock()
+                super_item.get_secret.return_value = b'wrong' if invalid == 'credential' else b'synthetic-old-super'
+                pass_item.get_secret.return_value = b'synthetic-login-password'
+                super_item.get_attributes.return_value = attributes('rsrs', 'super:' + alias)
+                pass_item.get_attributes.return_value = attributes('rsrs', 'pass:' + alias)
+                if invalid == 'attributes':
+                    super_item.get_attributes.return_value['service'] = 'other'
+                if invalid == 'collision':
+                    keys._find.side_effect = RuntimeError('fixture_secret_service_entry_ambiguous')
+                else:
+                    keys._find.side_effect = [super_item, pass_item, None, pass_item]
+                keys.attributes.side_effect = attributes
+                if invalid:
+                    with self.subTest(invalid=invalid), self.assertRaises(RuntimeError):
+                        remove_fixture_super(keys, path, Path(td), self.addr, 'synthetic-old-super')
+                    super_item.delete.assert_not_called()
+                else:
+                    remove_fixture_super(keys, path, Path(td), self.addr, 'synthetic-old-super')
+                    super_item.delete.assert_called_once_with()
+                    keys.verify_owner.assert_called_once_with()
+                pass_item.delete.assert_not_called()
+                self.assertEqual(path.read_bytes(), before)
+
 
 class RuntimeCleanupContract(unittest.TestCase):
     def test_finally_rejects_pending_exit_and_surviving_owner(self):
@@ -177,6 +231,7 @@ class RuntimeCleanupContract(unittest.TestCase):
                 runner = Mock(return_value=subprocess.CompletedProcess([], exit_code, receipt))
                 scope = dict(globals(), binary=Path('fixture-cli'), command_env={},
                              directory=Path('fixture'), images=[Path('fixture-cli')], observation=observation,
+                             key_observation={},
                              subprocess=SimpleNamespace(run=runner), fixture_runtime_owners=Mock(return_value=owners))
                 code = compile(ast.Module(body=cleanup, type_ignores=[]), '<actual-cleanup>', 'exec')
                 if passed:
@@ -204,6 +259,34 @@ class RuntimeCleanupContract(unittest.TestCase):
 
 
 class BarrierContract(unittest.TestCase):
+    def test_reset_uses_authenticated_vault_storage_and_readback(self):
+        main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
+        handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
+        state = {'vault': {'version': 4, 'wrapped_urk': 'original'}, 'posts': 0, 'gets': 0, 'barrier': None}
+        scope = dict(BaseHTTPRequestHandler=object, json=json, state=state)
+        exec(compile(ast.Module(body=[handler], type_ignores=[]), '<actual-vault-handler>', 'exec'), scope)
+        instance = scope['Handler']()
+        instance.path = '/api/self/vault'
+        replacement = {'version': 4, 'wrapped_urk': 'replacement'}
+        body = json.dumps(replacement).encode()
+        instance.headers = {'Content-Length': str(len(body))}
+        instance.send_error, instance.reply = Mock(), Mock()
+        for method in (instance.do_GET, instance.do_POST):
+            instance.rfile = io.BytesIO(body)
+            before = copy.deepcopy(state)
+            method()
+            instance.send_error.assert_called_with(401)
+            self.assertEqual(state, before)
+            instance.reply.assert_not_called()
+        instance.headers['Authorization'] = 'Bearer synthetic-token'
+        instance.rfile = io.BytesIO(body)
+        instance.do_POST()
+        self.assertEqual(state['vault'], replacement)
+        self.assertEqual(state['posts'], 1)
+        instance.do_GET()
+        instance.reply.assert_called_with(replacement)
+        self.assertEqual(state['posts'], 1)
+
     def test_timeout_latches_all_observation_and_mutation_endpoints_closed(self):
         main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
         handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
@@ -218,7 +301,7 @@ class BarrierContract(unittest.TestCase):
                 instance = scope['Handler']()
                 instance.path = '/api/self/vault'
                 body = json.dumps({'candidate': True}).encode()
-                instance.headers = {'Content-Length': str(len(body))}
+                instance.headers = {'Content-Length': str(len(body)), 'Authorization': 'Bearer synthetic-token'}
                 instance.rfile = io.BytesIO(body)
                 instance.send_error, instance.reply = Mock(), Mock()
                 if barrier == 'before_publish':

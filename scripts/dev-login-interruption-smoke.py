@@ -39,6 +39,10 @@ FAILURE_CODES = FAILURE_CODES | frozenset({
     "login_continuation_transport_mismatch", "login_continuation_envelope_mismatch",
     "login_continuation_query_failed", "login_continuation_admission_effects_mismatch",
     "login_continuation_target_escaped", "unowned_fixture_login_custody",
+    "key_continuation_identity_mismatch", "key_continuation_inputs_mismatch",
+    "key_continuation_effects_mismatch", "key_continuation_material_changed",
+    "key_continuation_unlock_failed", "key_continuation_memory_failed",
+    "key_continuation_credential_not_owned", "key_continuation_query_failed",
 })
 
 
@@ -314,7 +318,129 @@ def fixture_runtime_owners(directory, images):
     return owners
 
 
-def host_login_continuation(binary, directory, env, state, addr, code, observation):
+def key_continuation_receipt(summary, operation_id, source, outcome):
+    require(summary.get("operation_id") == operation_id
+            and summary.get("source_profile") == str(source.resolve())
+            and summary.get("outcome") == outcome, "key_continuation_identity_mismatch")
+    if outcome == "awaiting_input":
+        require(summary.get("operation", {}).get("kind") == "super_reset"
+                and summary.get("required_inputs") == ["super_password"]
+                and not summary.get("super_password") and not summary.get("super"),
+                "key_continuation_inputs_mismatch")
+    else:
+        require(summary.get("ok") is True and isinstance(summary.get("super"), str)
+                and bool(summary["super"]), "key_continuation_inputs_mismatch")
+
+
+def remove_fixture_super(keys, session_path, directory, addr, code):
+    """Delete only the exact super slot bound to this synthetic V4 login."""
+    require(session_path.resolve().is_relative_to(directory.resolve()), "key_continuation_credential_not_owned")
+    session = json.loads(session_path.read_bytes())
+    alias = session.get("keyring_account")
+    require(session.get("user") == "synthetic" and session.get("addr") == addr
+            and session.get("vault_version") == 4 and session.get("keyring_backend") == "secret_service"
+            and isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias)
+            and all(field not in session for field in ("super", "pass", "secret", "secret_key")),
+            "key_continuation_credential_not_owned")
+    keys.verify_owner()
+    items = [keys._find("rsrs", prefix + alias) for prefix in ("super:", "pass:")]
+    for item, prefix in zip(items, ("super:", "pass:")):
+        require(item is not None and all(item.get_attributes().get(key) == value
+                for key, value in keys.attributes("rsrs", prefix + alias).items()),
+                "key_continuation_credential_not_owned")
+    require(items[0].get_secret().decode("utf-8") == code, "key_continuation_credential_not_owned")
+    password = items[1].get_secret()
+    items[0].delete()
+    require(keys._find("rsrs", "super:" + alias) is None
+            and keys._find("rsrs", "pass:" + alias).get_secret() == password,
+            "key_continuation_credential_not_owned")
+
+
+def host_key_continuation(binary, directory, env, state, addr, code, keys, source, rpc, observation):
+    """Reach Runtime's missing-super branch without modifying its operation journal."""
+    observation.update(passed=False, stage="remove_source_super")
+    session_path = source / "session.json"
+    original_session = session_path.read_bytes()
+    vault = json.loads(original_session)
+    original_urk = AESGCM(legacy.v4_kek(code, vault["kdf_salt"], vault["wrapped_urk"])).decrypt(
+        bytes.fromhex(vault["urk_nonce"]), legacy.encrypted_bytes(vault["wrapped_urk"]), None)
+    remove_fixture_super(keys, session_path, directory, addr, code)
+    effects = state["logins"], state["posts"], state["password_posts"]
+    observation["stage"] = "reset_without_super"
+    pending, initial_transport = rpc("auth.reset", {}, 2)
+    operation_id = pending.get("operation_id")
+    require(isinstance(operation_id, str) and str(uuid.UUID(operation_id)) == operation_id
+            and uuid.UUID(operation_id).version == 4 and operation_id != initial_transport,
+            "key_continuation_identity_mismatch")
+    key_continuation_receipt(pending, operation_id, source, "awaiting_input")
+    require(session_path.read_bytes() == original_session
+            and (state["logins"], state["posts"], state["password_posts"]) == effects,
+            "key_continuation_effects_mismatch")
+    journal_path = source / ".login-recovery.json"
+    pending_journal = journal_path.read_bytes()
+
+    def query(expected_exit, outcome):
+        result = subprocess.run([str(binary), "--json", "runtime", "key-result", "--operation-id", operation_id,
+            "--source-profile", str(source.resolve())], env=env, capture_output=True, timeout=180)
+        envelope = json.loads(result.stdout)
+        require(result.returncode == expected_exit and envelope.get("status") == ("pending" if expected_exit == 2 else "ok")
+                and not envelope.get("errors"), "key_continuation_query_failed")
+        summary = envelope.get("summary") or {}
+        key_continuation_receipt(summary, operation_id, source, outcome)
+        return summary
+
+    observation.update(operation_id=operation_id, stage="query_original_pending")
+    query(2, "awaiting_input")
+    require(session_path.read_bytes() == original_session and journal_path.read_bytes() == pending_journal
+            and (state["logins"], state["posts"], state["password_posts"]) == effects,
+            "key_continuation_effects_mismatch")
+    observation["stage"] = "continue_original_key"
+    params = {"operation_id": operation_id, "source_profile": str(source.resolve()),
+              "input": {"super_password": code}}
+    committed, continue_transport = rpc("auth.key.continue", params, 0)
+    key_continuation_receipt(committed, operation_id, source, "committed")
+    require(continue_transport not in (initial_transport, operation_id), "login_continuation_transport_mismatch")
+    require((state["logins"], state["posts"], state["password_posts"])
+            == (effects[0], effects[1] + 1, effects[2]), "key_continuation_effects_mismatch")
+    effects = state["logins"], state["posts"], state["password_posts"]
+    saved = session_path.read_bytes(), journal_path.read_bytes(), dict(state["vault"])
+    observation["stage"] = "recover_committed_key"
+    require(query(0, "committed")["super"] == committed["super"], "key_continuation_material_changed")
+    repeated, repeated_transport = rpc("auth.key.continue", params, 0)
+    key_continuation_receipt(repeated, operation_id, source, "committed")
+    require(repeated_transport not in (initial_transport, continue_transport, operation_id),
+            "login_continuation_transport_mismatch")
+    require(repeated["super"] == committed["super"]
+            and (session_path.read_bytes(), journal_path.read_bytes(), state["vault"]) == saved
+            and (state["logins"], state["posts"], state["password_posts"]) == effects,
+            "key_continuation_material_changed")
+    vault = json.loads(session_path.read_bytes())
+    published = {"version": vault["vault_version"], **{key: vault[key]
+                 for key in ("kdf_salt", "wrapped_urk", "urk_nonce")}}
+    require(published == state["vault"] and committed["super"] != code, "key_continuation_material_changed")
+    new_urk = AESGCM(legacy.v4_kek(committed["super"], vault["kdf_salt"], vault["wrapped_urk"])).decrypt(
+        bytes.fromhex(vault["urk_nonce"]), legacy.encrypted_bytes(vault["wrapped_urk"]), None)
+    require(new_urk == original_urk, "key_continuation_unlock_failed")
+    observation["stage"] = "post_reset_memory"
+    plaintext, title = "Synthetic memory after key continuation", "Key continuation fixture"
+    written = subprocess.run([str(binary), "--json", "remember", plaintext, "--title", title,
+        "--force", "--importance", "important"], env=env, capture_output=True, timeout=180)
+    require(written.returncode == 0, "key_continuation_memory_failed")
+    with sqlite3.connect((source / "rsrs.db").as_uri() + "?mode=ro", uri=True) as db:
+        rows = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (title,)).fetchall()
+    require(len(rows) == 1 and plaintext.encode() in legacy.decrypt_content(new_urk, rows[0][1], rows[0][2]),
+            "key_continuation_memory_failed")
+    recalled = subprocess.run([str(binary), "--json", "show", rows[0][0]], env=env,
+        capture_output=True, timeout=180)
+    require(recalled.returncode == 0 and plaintext in json.dumps(json.loads(recalled.stdout)),
+            "key_continuation_memory_failed")
+    observation.update(passed=True, stage="committed", awaiting_input_observed=True,
+        source_super_only_deleted=True, original_operation_committed=True, distinct_transport_ids=True,
+        reset_published_once=True, recovery_without_reset_replay=True, repeated_material_unchanged=True,
+        new_super_decrypts_original_urk=True, post_reset_remember_recall=True)
+
+
+def host_login_continuation(binary, directory, env, state, addr, code, observation, keys, key_observation):
     """Real host admission without a super key; only the original operation may resume."""
     directory.mkdir(mode=0o700)
     source, home = directory / "library", directory / "home"
@@ -411,6 +537,7 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
                 "result_replayed_authentication")
         observation.update(stage="committed", awaiting_input_observed=True, original_operation_committed=True,
             recovery_without_authentication_replay=True, distinct_transport_ids=True, repeated_material_unchanged=True)
+        host_key_continuation(binary, directory, command_env, state, addr, code, keys, target, rpc, key_observation)
     finally:
         observation["runtime_cleanup"] = {"passed": False}
         stopped = subprocess.run([str(binary), "--json", "--runtime-internal", "--stop"],
@@ -418,6 +545,7 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         runtime_stop_receipt(stopped)
         require(not fixture_runtime_owners(directory, images), "owned_runtime_cleanup_failed")
         observation["runtime_cleanup"].update(passed=True, stopped_confirmed=True, no_live_owner=True)
+        key_observation["runtime_cleanup"] = dict(observation["runtime_cleanup"])
     observation["passed"] = True
 
 
@@ -476,6 +604,9 @@ def main():
                     state["logins"] += 1
                     self.reply({"user": "synthetic", "token": "synthetic-token", "session_id": "fixture"})
                 elif self.path == "/api/self/vault":
+                    if self.headers.get("Authorization") != "Bearer synthetic-token":
+                        self.send_error(401)
+                        return
                     state["vault"] = data
                     state["posts"] += 1
                     if state["barrier"] == "after_publish":
@@ -521,6 +652,9 @@ def main():
                     return
                 if self.path != "/api/self/vault":
                     self.send_error(404)
+                    return
+                if self.headers.get("Authorization") != "Bearer synthetic-token":
+                    self.send_error(401)
                     return
                 state["gets"] += 1
                 if state["barrier"] == "before_publish" and state["gets"] == 2:
@@ -599,10 +733,13 @@ def main():
         try:
             report["stage"] = "host_login_continue"
             report["cases"]["host_login_continue"] = {"status": "not-evaluated-private-secret-service-required"}
+            report["cases"]["host_key_continue"] = {"status": "not-evaluated-private-secret-service-required"}
             if keys:
                 report["cases"]["host_login_continue"] = {}
+                report["cases"]["host_key_continue"] = {}
                 host_login_continuation(args.binary, args.root / "host-login-continue", env, state, addr, code,
-                                        report["cases"]["host_login_continue"])
+                                        report["cases"]["host_login_continue"], keys, report["cases"]["host_key_continue"])
+                state["vault"] = v4
             report["stage"] = "initial_authentication"
             version = cli("--version").stdout.decode()
             require(args.version in version, "binary_version_mismatch")
@@ -1126,7 +1263,7 @@ def main():
                 # alias from these owned transactions as well as the credential schema.
                 for item in keys.collection.get_all_items():
                     attributes = item.get_attributes()
-                    require(attributes.get("service") == "rsrs" and re.fullmatch(r"(?:(?:super|pass):(?:login-[a-f0-9]{32}|legacy-[a-f0-9]{16})|login-control:login-[a-f0-9]{32})", attributes.get("username", "")), "unexpected_private_credential")
+                    require(attributes.get("service") == "rsrs" and re.fullmatch(r"(?:(?:super|pass):(?:login-[a-f0-9]{32}|legacy-[a-f0-9]{16})|(?:login-control|key-control):login-[a-f0-9]{32})", attributes.get("username", "")), "unexpected_private_credential")
                     require(attributes["username"].split(":", 1)[1] in native_aliases,
                             "credential_not_bound_to_fixture_transaction")
                     item.delete()
