@@ -22,6 +22,8 @@ struct Original {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_marker_sha256: Option<String>,
     original_identity: HostAuthIdentity, session_sha256: Option<String>, stage: Stage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    material: Option<serde_json::Value>,
     actor: Option<RuntimeIdentity>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     final_actor: Option<RuntimeIdentity>,
@@ -85,6 +87,14 @@ fn valid_digest(value:&str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 fn validate_record(record:&Original,root:&Path) -> Result<()> {
+    if let Some(candidate)=record.material.as_ref() {
+        anyhow::ensure!(candidate.as_object().is_some_and(|object| object.len() == 7)
+            && candidate["vault_version"] == 4
+            && candidate["auth_operation_id"].as_str() == Some(record.operation_id.as_str())
+            && ["kdf_salt","wrapped_urk","urk_nonce","keyring_account","keyring_backend"]
+                .iter().all(|field| candidate[*field].as_str().is_some_and(|value| !value.is_empty())),
+            "offline keygen material does not belong to the original operation");
+    }
     anyhow::ensure!(record.schema == 1 && canonical_id(&record.operation_id) && canonical_id(&record.token)
         && record.root == root && record.source == record.profile && record.profile.is_absolute()
         && record.binary.is_absolute() && !record.coordinator.is_empty()
@@ -270,6 +280,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
         }
     } else {
         anyhow::ensure!(operation.is_none(), "offline keygen original record missing; no operation admitted");
+        respire_host_control::auth_material::prepare_source(&takeover)?;
         let health=crate::rpc::probe_runtime()?;
         anyhow::ensure!(health.is_some() || !crate::rpc::endpoint_path().try_exists()?, "offline keygen owner is unverifiable");
         if let Some(owner)=health.as_ref() {
@@ -288,7 +299,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
             let record=Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force,
                 root:root.clone(),source:profile.clone(),profile:profile.clone(),binary:binary.clone(),image_sha256:image_sha256.clone(),
                 token:token.to_owned(),coordinator:coordinator.to_owned(),marker_sha256:marker_sha256.to_owned(),pending_marker_sha256:None,
-                original_identity:control::identity(&profile)?,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,
+                original_identity:control::identity(&profile)?,session_sha256:None,stage:Stage::Prepared,material:None,actor:None,final_actor:None,
                 was_serving:health.is_some(),store_ready:health.as_ref().is_some_and(|owner| owner.store_ready) };
             verify_selection(&record)?;
             save(&record,&mut digest)?;
@@ -304,14 +315,32 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     verify_selection(&record)?;
     update_marker(&mut record,&mut maintenance)?;
     let send=keygen_sends_original(record.stage,operation.is_some())?;
+    let mut material=if send { None } else {
+        record.material.as_ref().map(respire_host_control::auth_material::load).transpose()?
+    };
     if send {
         anyhow::ensure!(control::identity(&record.profile)? == record.original_identity, "offline keygen source identity changed");
         require_no_owner()?;
+        material=Some(match record.material.as_ref() {
+            Some(candidate) => respire_host_control::auth_material::load(candidate)?,
+            None => {
+                let generated=respire_host_control::auth_material::generate()?;
+                respire_host_control::auth_material::persist(&generated, || {
+                    record.material=Some(serde_json::json!({"vault_version":4,
+                        "kdf_salt":generated.kdf_salt,"wrapped_urk":generated.wrapped_urk,
+                        "urk_nonce":generated.urk_nonce,"keyring_account":generated.keyring_account,
+                        "keyring_backend":generated.keyring_backend,"auth_operation_id":record.operation_id}));
+                    save(&record,&mut digest)
+                })?;
+                generated
+            }
+        });
         record.stage=Stage::Sent;
     }
     save(&record,&mut digest)?; // sent + current controller durable before any exchange.
-    let envelope=if send { control::auth_keygen_locked(&takeover,&mut maintenance,&record.operation_id,force)? }
-        else { control::auth_result_locked(&takeover,&mut maintenance,&record.operation_id,force)? };
+    let envelope=if send { control::auth_keygen_locked(&takeover,&mut maintenance,&record.operation_id,force,
+        material.as_ref().context("offline keygen host material is missing")?)? }
+        else { control::auth_result_locked(&takeover,&mut maintenance,&record.operation_id,force,material.as_ref())? };
     verify_selection(&record)?;
     let result:HostAuthResult=serde_json::from_value(envelope.summary.clone())?;
     anyhow::ensure!(result.operation_id == record.operation_id && result.path == record.profile.join("session.json"),
@@ -430,6 +459,17 @@ fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,reco
         "offline keygen rollback original identity changed");
     lifecycle::verify_offline_keygen_marker(&record.root,&record.profile,&record.token,&record.coordinator,&record.marker_sha256)?;
     require_no_owner()?;
+    if let Some(candidate)=record.material.as_ref() {
+        let account=candidate["keyring_account"].as_str().context("offline keygen cleanup account missing")?;
+        let backend=candidate["keyring_backend"].as_str().context("offline keygen cleanup backend missing")?;
+        if respire_client_host::host_credentials::read_auth_super(account,backend)?.is_some() {
+            let material=respire_host_control::auth_material::load(candidate)?;
+            respire_host_control::auth_material::remove(&material,None)?;
+        } else {
+            anyhow::ensure!(respire_client_host::host_credentials::read_auth_password(account,backend)?.is_none(),
+                "offline keygen cleanup found a foreign password slot; original operation retained");
+        }
+    }
     claim_rollback(record,digest)?;
     if record.was_serving {
         maintenance.start_account_runtime()?;
@@ -587,7 +627,8 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
     let mut maintenance=lifecycle::resume_key_maintenance(&root,&profile,&record.source,&record.token,&record.coordinator)?;
     let mut digest=Some(digest);
     update_marker(&mut record,&mut maintenance)?; save(&record,&mut digest)?;
-    let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force)?;
+    let material=record.material.as_ref().map(respire_host_control::auth_material::load).transpose()?;
+    let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force,material.as_ref())?;
     let receipt:HostAuthResult=serde_json::from_value(envelope.summary)
         .map_err(|_| anyhow::anyhow!("offline keygen query receipt invalid"))?;
     if receipt.outcome == HostAuthOutcome::RolledBack {
@@ -751,7 +792,7 @@ mod tests {
         Original { schema:1,operation_id:uuid::Uuid::new_v4().to_string(),force:false,
             root:root.to_owned(),source:root.to_owned(),profile:root.to_owned(),binary:root.join("runtime-image"),
             image_sha256:"a".repeat(64),token:uuid::Uuid::new_v4().to_string(),coordinator:"synthetic-coordinator".into(),
-            marker_sha256:"b".repeat(64),pending_marker_sha256:None,original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,actor:None,final_actor:None,was_serving:false,store_ready:false }
+            marker_sha256:"b".repeat(64),pending_marker_sha256:None,original_identity:HostAuthIdentity::Absent,session_sha256:None,stage:Stage::Prepared,material:None,actor:None,final_actor:None,was_serving:false,store_ready:false }
     }
     #[test]
     fn absent_pending_probe_does_not_create_first_use_paths() -> Result<()> {

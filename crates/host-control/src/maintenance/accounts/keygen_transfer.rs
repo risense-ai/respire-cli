@@ -145,9 +145,15 @@ pub(crate) fn prepare_keygen_account(takeover: &LibraryLock, host: Arc<dyn HostL
         account_origin: None, account_record: None, completed: false };
     let authority = owner.binding(&source.profile, LaunchPurpose::Account)?;
     let grant = crate::launch::prepare_grant(&runtime, &authority, &identity)?;
+    let session_bytes = private_io::bounded_bytes(&source.profile.join("session.json"), 65536)?
+        .context("keygen transfer source session missing")?;
+    anyhow::ensure!(matches!(&identity, HostAuthIdentity::Unbound { session_sha256, .. }
+        if hash(&session_bytes) == *session_sha256), "keygen transfer source changed before material input");
+    let session: serde_json::Value = serde_json::from_slice(&session_bytes)?;
+    let material = crate::auth_material::load(&session)?;
     let params = HostAuthKeygenParams { schema_version: HOST_AUTH_SCHEMA_V,
         binding: ControlBinding { installation_root: source.root.clone(), profile: source.profile.clone(),
-            launch_id: grant.instance_id.clone(), expected_account_id: None }, identity: identity.clone(), force: source.force };
+            launch_id: grant.instance_id.clone(), expected_account_id: None }, identity: identity.clone(), force: source.force, material: Some(material) };
     let request = RpcRequest { v: crate::PROTOCOL_V, id: uuid::Uuid::new_v4().to_string(),
         method: HOST_AUTH_RESULT_METHOD.to_owned(), args: vec![serde_json::to_string(&params)?],
         scope: None, operation_id: Some(source.original_operation_id.clone()),

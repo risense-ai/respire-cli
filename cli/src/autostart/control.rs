@@ -42,7 +42,7 @@ pub(crate) fn account_request(
     let (method, argument) = match operation {
         AccountControl::Register { addr, user, password, super_password } =>
             (HOST_AUTH_REGISTER_METHOD, serde_json::to_string(&HostAuthRegisterParams {
-                schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, password, super_password,
+                schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, password, super_password, material: None,
             })?),
         AccountControl::Login { addr, user, authorization, super_password } =>
             (HOST_AUTH_LOGIN_METHOD, serde_json::to_string(&HostAuthLoginParams {
@@ -155,8 +155,9 @@ pub(crate) fn auth_keygen_locked(
     maintenance: &mut super::lifecycle::Maintenance,
     operation_id: &str,
     force: bool,
+    material: &respire_protocol::HostAuthKeygenMaterial,
 ) -> Result<ResultEnvelope> {
-    auth_request(takeover, maintenance, operation_id, force, false)
+    auth_request(takeover, maintenance, operation_id, force, false, Some(material))
 }
 
 /// Reconnect with the original operation ID and force; this never issues keygen.
@@ -165,8 +166,9 @@ pub(crate) fn auth_result_locked(
     maintenance: &mut super::lifecycle::Maintenance,
     operation_id: &str,
     force: bool,
+    material: Option<&respire_protocol::HostAuthKeygenMaterial>,
 ) -> Result<ResultEnvelope> {
-    auth_request(takeover, maintenance, operation_id, force, true)
+    auth_request(takeover, maintenance, operation_id, force, true, material)
 }
 
 pub(crate) fn identity(profile: &Path) -> Result<HostAuthIdentity> {
@@ -282,6 +284,7 @@ fn auth_request(
     operation_id: &str,
     force: bool,
     query_only: bool,
+    material: Option<&respire_protocol::HostAuthKeygenMaterial>,
 ) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("private account control")?;
     let id = uuid::Uuid::parse_str(operation_id).context("invalid auth operation ID")?;
@@ -289,7 +292,8 @@ fn auth_request(
         "auth operation ID must be a canonical random UUID");
     auth_exchange(takeover, maintenance, Instant::now() + Duration::from_secs(12), None,
         |binding, identity| {
-            let params = HostAuthKeygenParams { schema_version: HOST_AUTH_SCHEMA_V, binding, identity, force };
+            let params = HostAuthKeygenParams { schema_version: HOST_AUTH_SCHEMA_V, binding, identity, force,
+                material: material.cloned() };
             Ok(RpcRequest {
                 v: respire_commands::rpc_client::PROTOCOL_V, id: uuid::Uuid::new_v4().to_string(),
                 method: if query_only { HOST_AUTH_RESULT_METHOD } else { HOST_AUTH_KEYGEN_METHOD }.to_owned(),
