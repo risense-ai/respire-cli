@@ -279,11 +279,18 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
         "installation_root":profile, "data_dir":profile,
         "store_ready":false, "credential_state":"required"
     }))?;
-    // No session and no host key: only this explicit expectation may succeed.
+    // Account restoration stays strict; ordinary startup may accept this verified locked profile.
     expectation.confirm_credentials(&health)?;
     assert!(AccountRuntimeExpectation::Unlock.confirm_credentials(&health).is_err());
+    AccountRuntimeExpectation::Startup.confirm_credentials(&health)?;
+    std::fs::write(profile.join("session.json"), br#"{"user":"synthetic"}"#)?;
+    assert!(AccountRuntimeExpectation::Startup.confirm_credentials(&health).is_err());
+    std::fs::write(profile.join("session.json"), b"{")?;
+    assert!(AccountRuntimeExpectation::Startup.confirm_credentials(&health).is_err());
+    std::fs::remove_file(profile.join("session.json"))?;
     health.store_ready = true;
     assert!(expectation.confirm_credentials(&health).is_err());
+    assert!(AccountRuntimeExpectation::Startup.confirm_credentials(&health).is_err());
     health.store_ready = false;
     health.credential_state = "unavailable".into();
     assert!(expectation.confirm_credentials(&health).is_err());
@@ -298,7 +305,8 @@ fn full_logout_and_revoke_receipts_match_the_resulting_local_session() -> Result
     #[cfg(feature = "client2-host-prototype")]
     {
         use crate::client2_host::startup_expectation;
-        assert_eq!(startup_expectation(Vec::new().into_iter())?, AccountRuntimeExpectation::Unlock);
+        assert_eq!(startup_expectation(Vec::new().into_iter())?, AccountRuntimeExpectation::Startup);
+        assert_eq!(startup_expectation(vec!["--require-unlocked".into()].into_iter())?, AccountRuntimeExpectation::Unlock);
         assert_eq!(startup_expectation(vec!["--locked-after-full-logout".into()].into_iter())?, expectation);
         assert!(startup_expectation(vec!["--unknown".into()].into_iter()).is_err());
         assert!(startup_expectation(vec!["--locked-after-full-logout".into(), "extra".into()].into_iter()).is_err());

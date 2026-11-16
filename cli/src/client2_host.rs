@@ -122,8 +122,10 @@ pub(crate) fn supervise() -> Result<()> {
     let executable = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&executable);
     command.arg("--client2-host-internal");
-    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
-        command.arg("--locked-after-full-logout");
+    match expectation {
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock => { command.arg("--require-unlocked"); }
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout => { command.arg("--locked-after-full-logout"); }
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup => {}
     }
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
@@ -422,9 +424,10 @@ pub(crate) fn startup_expectation(arguments: impl Iterator<Item = std::ffi::OsSt
     use respire_host_control::lifecycle_io::AccountRuntimeExpectation;
     let arguments: Vec<_> = arguments.collect();
     match arguments.as_slice() {
-        [] => Ok(AccountRuntimeExpectation::Unlock),
+        [] => Ok(AccountRuntimeExpectation::Startup),
+        [flag] if flag == "--require-unlocked" => Ok(AccountRuntimeExpectation::Unlock),
         [flag] if flag == "--locked-after-full-logout" => Ok(AccountRuntimeExpectation::LockedAfterFullLogout),
-        _ => anyhow::bail!("compatibility startup accepts only the explicit full logout expectation"),
+        _ => anyhow::bail!("unsupported compatibility startup credential expectation"),
     }
 }
 
@@ -767,10 +770,6 @@ pub(crate) fn checked_executable() -> Result<PathBuf> {
 
 /// Caller retains the existing takeover lock. This never takes over a healthy
 /// strict or managed owner, and never retries an uncertain spawn.
-pub(crate) fn start_locked() -> Result<()> {
-    start_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
-}
-
 pub(crate) fn start_locked_with_expectation(
     expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
@@ -785,8 +784,10 @@ pub(crate) fn start_locked_with_expectation(
     arguments.push(std::ffi::OsString::from("--client2-host-supervisor-internal"));
     #[cfg(not(target_os = "macos"))]
     arguments.push(std::ffi::OsString::from("--client2-host-internal"));
-    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
-        arguments.push("--locked-after-full-logout".into());
+    match expectation {
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock => arguments.push("--require-unlocked".into()),
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout => arguments.push("--locked-after-full-logout".into()),
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup => {}
     }
     let mut child = respire_spawn::spawn_binary_with_readiness(&executable, &arguments)?;
     let ready = receive_ready(&mut child)?;

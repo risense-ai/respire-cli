@@ -889,7 +889,7 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
-    ensure_daemon_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    ensure_daemon_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
 }
 
 pub(crate) fn ensure_daemon_locked_with_expectation(
@@ -915,7 +915,7 @@ pub(crate) fn ensure_daemon_locked_with_expectation(
             .join("runtime/autostart/registration.json")
             .exists()
     {
-        return crate::client2_host::start_locked();
+        return crate::client2_host::start_locked_with_expectation(expectation);
     }
     // Resolve before stopping the resident owner: a missing or damaged release
     // must fail without replacing it with a CLI shim.

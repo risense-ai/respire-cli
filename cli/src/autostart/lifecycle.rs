@@ -457,7 +457,7 @@ impl Maintenance {
 
     pub(crate) fn start_account_runtime(&mut self) -> Result<()> {
         self.start_account_runtime_with_expectation(
-            respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+            respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
     }
 
     pub(crate) fn start_account_runtime_with_expectation(&mut self,
@@ -589,7 +589,7 @@ impl Maintenance {
 
     /// Restore only the verified serving owner after durable maintenance completion.
     pub(crate) fn finish_handoff(&self) -> Result<()> {
-        self.finish_handoff_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+        self.finish_handoff_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
     }
 
     pub(crate) fn finish_handoff_with_expectation(&self,
@@ -666,7 +666,7 @@ impl Drop for Maintenance {
 #[cfg(feature = "client2-host-prototype")]
 pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Result<()> {
     finish_compatibility_handoff_with_expectation(owner,
-        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
 }
 
 #[cfg(feature = "client2-host-prototype")]
@@ -1126,7 +1126,7 @@ pub(super) fn stop_drained_supervisor(config: &Registration) -> Result<()> {
 }
 
 pub(super) fn wait_ready(config: &Registration) -> Result<()> {
-    wait_ready_with_expectation(config, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    wait_ready_with_expectation(config, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
 }
 
 fn wait_ready_with_expectation(config: &Registration,
@@ -1153,7 +1153,7 @@ fn wait_ready_with_expectation(config: &Registration,
 }
 
 fn start_candidate(guard: &mut Maintenance) -> Result<()> {
-    start_candidate_with_expectation(guard, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    start_candidate_with_expectation(guard, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
 }
 
 fn start_candidate_with_expectation(guard: &mut Maintenance,
@@ -1202,7 +1202,7 @@ pub(crate) fn may_reuse_runtime(health: &crate::net_rpc::Health) -> Result<bool>
 }
 
 pub(crate) fn ensure_managed_locked() -> Result<bool> {
-    ensure_managed_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    ensure_managed_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup)
 }
 
 pub(crate) fn ensure_managed_locked_with_expectation(
@@ -1291,7 +1291,7 @@ fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> R
             if health.managed_id.as_deref() == Some(config.id.as_str())
                 && crate::rpc::runtime_acceptable(&health)?
             {
-                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock.confirm_credentials(&health)?;
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Startup.confirm_credentials(&health)?;
                 reset_attempts(&config)?;
                 return Ok(());
             }
