@@ -51,7 +51,8 @@ test('source CI avoids coverage while the reusable SDK check retains its policy'
   assert.match(ci, /respire_host_control/);
   assert.match(ci, /cargo test -p respire_crypto --no-default-features --lib --locked/);
   assert.match(ci, /--test net_rpc_http -- client_/);
-  assert.match(ci, /needs: \[workspace-tests, rust-build-save, contract-checks, native-fixture-contracts, client2-focus-contract\]/);
+  assert.match(ci, /cargo test --locked -p respire_client_host --lib/);
+  assert.match(ci, /needs: \[workspace-tests, windows-client-host, rust-build-save, contract-checks, native-fixture-contracts, client2-focus-contract\]/);
   assert.match(ci, /if: \$\{\{ always\(\) \}\}/);
   assert.match(ci, /job\['result'\] != 'success'/);
   assert.match(token, /node scripts\/check-cli-coverage\.mjs/);
