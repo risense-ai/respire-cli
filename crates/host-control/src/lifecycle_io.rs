@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AccountRuntimeExpectation {
     Unlock,
+    Startup,
     LockedAfterFullLogout,
 }
 
@@ -18,6 +19,15 @@ impl AccountRuntimeExpectation {
     /// Call only after verifying the Runtime owner, image and launch instance.
     pub fn confirm_credentials(self, health: &Health) -> Result<()> {
         match self {
+            Self::Startup => {
+                let (_, profile) = respire_client_host::config::control_roots()?;
+                // Initial startup may remain locked; account restoration still requires Unlock.
+                if matches!(crate::identity(&profile)?, respire_protocol::HostAuthIdentity::Absent) {
+                    Self::LockedAfterFullLogout.confirm_credentials(health)
+                } else {
+                    Self::Unlock.confirm_credentials(health)
+                }?;
+            }
             // Startup coordinators already hold takeover ownership and migrated before spawn.
             Self::Unlock if !health.store_ready => { supply_verified_runtime_credentials(health)?; }
             Self::Unlock => {}
