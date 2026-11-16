@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -30,6 +31,55 @@ ALIAS = 'login-' + '2' * 32
 OTHER = 'login-' + '3' * 32
 PASSWORD = 'synthetic-password-never-report'
 SUPER = 'synthetic-super-never-report'
+
+
+class KeylessRuntimeIdentityTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.profile = Path(temporary.name)
+        self.runtime = self.profile / 'rsrs-runtime.exe'
+        self.runtime.touch()
+        self.other = self.profile / 'other'
+        self.other.mkdir()
+        (self.other / self.runtime.name).touch()
+        self.metadata = dict(runtime_version='2.0.0-dev.22', binary_sha256='a' * 64)
+        self.health = dict(v=1, pid=123, runtime_version=self.metadata['runtime_version'],
+            image_sha256=self.metadata['binary_sha256'], image_path=str(self.runtime),
+            installation_root=str(self.profile), data_dir=str(self.profile))
+        tree = ast.parse((HERE / 'dev-profile-migration-smoke.py').read_text())
+        assertion = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name) and node.func.id == 'require'
+            and len(node.args) == 2 and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == 'keyless_runtime_identity_mismatch')
+        self.assertion = compile(ast.Expression(assertion), '<keyless-runtime-identity>', 'eval')
+
+    def verify(self):
+        eval(self.assertion, dict(require=profile.require, health=self.health,
+            child=SimpleNamespace(pid=123), metadata=self.metadata, runtime=self.runtime,
+            profile=self.profile.resolve(), keyring_backend=native, sys=sys, Path=Path))
+
+    def test_exact_identity_passes(self):
+        self.verify()
+
+    @unittest.skipUnless(sys.platform == 'win32', 'Windows final-path identity')
+    def test_windows_extended_path_and_case_use_full_file_identity(self):
+        for path in ('\\\\?\\' + str(self.runtime),
+                     ('\\\\?\\' + str(self.runtime)).upper().replace('\\', '/')):
+            with self.subTest(path_form=path[:7]):
+                self.health['image_path'] = path
+                self.verify()
+
+    def test_every_identity_field_remains_strict(self):
+        for field, value in dict(v=2, pid=456, runtime_version='2.0.0-dev.21',
+                image_sha256='b' * 64, image_path=str(self.other / self.runtime.name),
+                installation_root=str(self.other), data_dir=str(self.other)).items():
+            with self.subTest(field=field):
+                original = self.health[field]
+                self.health[field] = value
+                with self.assertRaisesRegex(RuntimeError, '^keyless_runtime_identity_mismatch$'):
+                    self.verify()
+                self.health[field] = original
 
 
 class MemoryKeys(native.TrackedKeys):

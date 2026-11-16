@@ -725,7 +725,9 @@ class Smoke(support.Smoke):
                     require(health.get("v") == 1 and health.get("pid") == child.pid
                         and health.get("runtime_version") == metadata["runtime_version"]
                         and health.get("image_sha256") == metadata["binary_sha256"]
-                        and Path(health.get("image_path", "")).resolve() == runtime.resolve()
+                        and (keyring_backend.canonical_identity(health.get("image_path", ""))
+                            == keyring_backend.canonical_identity(runtime) if sys.platform == "win32"
+                            else Path(health.get("image_path", "")).resolve() == runtime.resolve())
                         and Path(health.get("installation_root", "")).resolve() == profile
                         and Path(health.get("data_dir", "")).resolve() == profile,
                         "keyless_runtime_identity_mismatch")
