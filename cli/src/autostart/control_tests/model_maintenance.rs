@@ -149,6 +149,9 @@ fn uninstall_removes_only_the_exact_model_tree_and_is_idempotent() -> Result<()>
         b"unrelated model marker"
     );
     assert!(!remove_m3(&root, &profile, &target)?);
+    let plan = local_plan(ModelMaintenanceKind::UninstallM3, &root, &profile)?;
+    assert_eq!(plan.uninstall_directory.as_deref(), Some(target.as_path()));
+    assert!(plan.catalog.is_none() && plan.preparation.is_none());
     fs::write(&target, b"not a directory")?;
     assert!(remove_m3(&root, &profile, &target).is_err());
     assert_eq!(fs::read(&target)?, b"not a directory");
@@ -189,8 +192,83 @@ fn uninstall_preserves_installation_profile_home_and_linked_content() -> Result<
 
 #[test]
 fn model_account_read_is_metadata_only_and_rejects_invalid_sessions() -> Result<()> {
+    let _guard = crate::TEST_ENV_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
     let dir = tempfile::tempdir()?;
     let profile = dir.path().canonicalize()?;
+    let _restore = isolate(&profile);
+    let root = profile.join("installation");
+    fs::create_dir_all(&root)?;
+    assert!(saved_selection(&profile)?.is_none());
+    let empty = local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile)?;
+    assert!(
+        empty.catalog.is_none()
+            && empty.uninstall_directory.is_none()
+            && empty.preparation.is_none()
+    );
+    fs::write(
+        root.join("inference.json"),
+        br#"{"engine":"npu","model":" FP16 "}"#,
+    )?;
+    let cpu = local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile)?;
+    assert_ne!(cpu.review, empty.review);
+    let settings = cpu_settings(&root)?;
+    let candidate = cpu_candidate(&settings)?;
+    assert_eq!(cpu.cpu_candidate_sha256, Some(hash(&candidate)));
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&candidate)?,
+        json!({"engine":"cpu","force_cpu":true,"model":"fp16"})
+    );
+    fs::write(root.join("inference.json"), br#"{"model":"unknown-model"}"#)?;
+    assert!(local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile).is_err());
+    fs::remove_file(root.join("inference.json"))?;
+    let db = rusqlite::Connection::open(profile.join("rsrs.db"))?;
+    db.execute_batch("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);")?;
+    db.execute(
+        "INSERT INTO meta VALUES (?1, ?2)",
+        [
+            "embedding.active.selection.v1",
+            r#"{"model":"m3","backend":"onnx"}"#,
+        ],
+    )?;
+    assert!(saved_selection(&profile)?.is_some());
+    assert!(local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile).is_err());
+    db.execute("DELETE FROM meta", [])?;
+    assert!(local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile).is_ok());
+    fs::write(profile.join("onememory.db"), b"foreign database")?;
+    assert!(saved_selection(&profile).is_err());
+    fs::remove_file(profile.join("onememory.db"))?;
+    let bytes = b"synthetic non-executable catalog";
+    let mut catalog = ModelCatalogPin {
+        version: "fixture".into(),
+        package_source: "fixture".into(),
+        package_sha256: "0".repeat(64),
+        archive_member: "fixture".into(),
+        destination: root.join("catalog.dll"),
+        dll_size: bytes.len() as u64,
+        dll_sha256: hash(bytes),
+    };
+    fs::write(&catalog.destination, bytes)?;
+    verify_catalog(&catalog)?;
+    catalog.dll_sha256 = "0".repeat(64);
+    assert!(verify_catalog(&catalog).is_err());
+    fs::write(&catalog.destination, b"truncated")?;
+    assert!(verify_catalog(&catalog).is_err());
+    #[cfg(windows)]
+    {
+        let official = catalog_pin(&root)?;
+        assert_eq!(official.package_sha256, PACKAGE_SHA256);
+        assert_eq!(
+            official.destination,
+            root.join("engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll")
+        );
+        assert!(official.dll_size > 0 && official.dll_sha256.len() == 64);
+        let mut foreign = official;
+        foreign.archive_member = "foreign.dll".into();
+        assert!(install_catalog(&root, Some(&foreign)).is_err());
+        assert!(!root.join("engines").exists());
+    }
     assert_eq!(account(&profile)?, None);
     fs::write(
         profile.join("session.json"),
