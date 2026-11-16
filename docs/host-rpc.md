@@ -58,6 +58,10 @@ fails without admitting authentication or creating a replacement operation.
 Read pending receipts from `envelope.summary`, including `operation_id`,
 `source_profile`, `outcome` and `login.required_inputs` (or `required_inputs` for
 keys). Initial login also returns this receipt without attempting terminal prompts.
+Committed key replies retain `operation_id`, `source_profile` and
+`outcome: "committed"` alongside the existing success fields. Recovery keeps
+`ok`, `user` and `addr`; super-reset keeps `ok` and `super` for material
+confirmation. These summaries never include private challenges or material.
 Use a new transport `id` while retaining the same operation and source.
 For a paused key operation, `runtime key-result --operation-id <ID>
 --source-profile <DIR>` validates the original selected source inside the host;
