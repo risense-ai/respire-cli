@@ -149,8 +149,14 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
         std::env::set_var("RSRS_M3_DIR", OsString::from_vec(vec![0xff]));
         assert!(allowed_model_roots().is_err());
     }
+    // Preserve Runtime's configured path spelling, rather than the canonical control root.
+    std::env::set_var("RSRS_DATA_DIR", dir.path());
+    std::env::set_var("RSRS_M3_DIR", &explicit);
     let directory = root.join("models/bge-m3");
-    let ort = directory.join("onnx/model_quantized.cpu-v1.ort");
+    let ort = std::path::absolute(respire_client_host::roots::default_user_model_dir()?
+        .join("onnx").join("model_quantized.cpu-v1.ort"))?;
+    #[cfg(windows)]
+    assert!(!ort.to_str().context("cache path must be Unicode")?.starts_with(r"\\?\"));
     let tokenizer = host_tokenizer(&directory)?;
     let cpu = host_cpu_container(&ort)?;
     let mut core = AssetsStatus::installation_plan(vec![tokenizer.clone(), cpu]);

@@ -204,7 +204,8 @@ pub(crate) fn prepare_model_locked(
     let selected = super::model_maintenance::saved_selection(&roots.1)?;
     let installation = host_installation_plan(intent, &plan.assets, selected.as_ref(),
         &super::model_maintenance::local_m3_directory()?,
-        &roots.0.join("models/bge-m3/onnx/model_quantized.cpu-v1.ort"))?;
+        &std::path::absolute(respire_client_host::roots::default_user_model_dir()?
+            .join("onnx").join("model_quantized.cpu-v1.ort"))?)?;
     let sources = local_model_sources(intent, &installation)?;
     let skipped = respire_commands::model_asset_files::prepare_model_assets_with_sources(&installation, &allowed, &sources)?;
     let verified = model_install_verify_locked(takeover, maintenance, intent, &plan.selection_sha256)?.assets;
