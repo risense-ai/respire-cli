@@ -24,6 +24,10 @@ struct Original {
     coordinator: String,
     was_serving: bool,
     store_ready: bool,
+    #[serde(default)]
+    credential_backend: Option<String>,
+    #[serde(default)]
+    legacy_factor: bool,
     sent: bool,
 }
 
@@ -83,6 +87,58 @@ fn read_original(path: &Path) -> Result<Option<(Original, String)>> {
     Ok(Some((original, super::hash(&bytes))))
 }
 
+fn credential_alias(original: &Original) -> Result<String> {
+    Ok(format!("login-{}", uuid::Uuid::parse_str(&original.operation_id)?.simple()))
+}
+
+fn material(original: &Original, invite_code: Option<&str>) -> Result<Option<HostSpaceMaterial>> {
+    if matches!(original.operation, HostSpaceOperation::Kick { .. }) { return Ok(None); }
+    let backend = original.credential_backend.as_deref().context("space host credential checkpoint missing; retain the original operation")?;
+    let alias = credential_alias(original)?;
+    let (secret, legacy_secret) = if original.sent && original.legacy_factor {
+        let session = json!({"vault_version":3,"keyring_account":alias,"keyring_backend":backend,"legacy_secret_backend":backend});
+        let (secret, legacy) = respire_client_host::host_credentials::read_export_factors(&session)?;
+        (secret.context("space host credential missing; retain the original operation")?, legacy)
+    } else if original.sent {
+        (respire_client_host::host_credentials::read_auth_super(&alias, backend)?
+            .context("space host credential missing; retain the original operation")?, None)
+    } else {
+        let (secret, legacy) = match original.operation {
+            HostSpaceOperation::Invite { .. } => {
+                let session: serde_json::Value = serde_json::from_slice(&std::fs::read(original.profile.join("session.json"))?)?;
+                let (secret, legacy) = respire_client_host::host_credentials::read_export_factors(&session)?;
+                (secret.context("space source super password unavailable")?, legacy)
+            }
+            HostSpaceOperation::Join { .. } => {
+                let value = respire::space::parse_invite(invite_code.context("join invite input missing")?)?;
+                (value["super"].as_str().filter(|value| !value.is_empty()).context("join super password missing")?.to_owned(),
+                    value["secret_key"].as_str().filter(|value| !value.is_empty()).map(str::to_owned))
+            }
+            HostSpaceOperation::Kick { .. } => unreachable!("kick has no credential material"),
+        };
+        anyhow::ensure!(legacy.is_some() == original.legacy_factor, "space legacy factor differs from its checkpoint");
+        if let Some(factor) = legacy.as_deref() {
+            let session = json!({"vault_version":3,"super":secret,"secret_key":factor,
+                "keyring_account":alias,"keyring_backend":backend});
+            let prepared = respire_client_host::host_credentials::prepare_legacy_session(&session,&alias)?;
+            anyhow::ensure!(prepared["keyring_backend"].as_str() == Some(backend)
+                && prepared["legacy_secret_backend"].as_str() == Some(backend), "space legacy credential backend changed");
+        } else { respire_client_host::host_credentials::write_auth_super(&alias, backend, &secret)?; }
+        (secret, legacy)
+    };
+    Ok(Some(HostSpaceMaterial { super_password: secret, keyring_account: alias, keyring_backend: backend.to_owned(), legacy_secret }))
+}
+
+fn checkpoint_invite(original: &Original, code: Option<&str>) -> Result<Option<String>> {
+    if !matches!(original.operation, HostSpaceOperation::Invite { .. }) { return Ok(None); }
+    let backend = original.credential_backend.as_deref().context("space host credential backend missing")?;
+    let alias = credential_alias(original)?;
+    if let Some(code) = code {
+        respire_client_host::host_credentials::write_auth_password(&alias, backend, code)?;
+    }
+    respire_client_host::host_credentials::read_auth_password(&alias, backend)
+}
+
 fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Result<HostSpaceResult> {
     crate::runtime_policy::require_host("private space write")?;
     respire_client_host::settings::ensure_writable()?;
@@ -96,6 +152,9 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
     let profile = profile.canonicalize()?;
     let path = root.join("runtime/autostart/space-write.json");
     let saved = read_original(&path)?;
+    if saved.is_none() {
+        respire_host_control::auth_material::prepare_source(&takeover)?;
+    }
     if saved.is_none() && matches!(&operation, HostSpaceOperation::Join { .. }) {
         // A retained operation may already own the target; only preflight new joins.
         respire::space::validate_join(invite_code.context("join invite input missing")?)?;
@@ -130,14 +189,25 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
             &original.token, &original.coordinator)?;
         (original, Some(digest), maintenance)
     } else {
+        let legacy_factor = match &operation {
+            HostSpaceOperation::Invite { .. } => {
+                let session: serde_json::Value = serde_json::from_slice(&std::fs::read(profile.join("session.json"))?)?;
+                session["vault_version"].as_u64() == Some(3)
+            }
+            HostSpaceOperation::Join { .. } => respire::space::parse_invite(invite_code.context("join invite input missing")?)?
+                ["secret_key"].as_str().is_some_and(|value| !value.is_empty()),
+            HostSpaceOperation::Kick { .. } => false,
+        };
         let mut maintenance = super::lifecycle::begin_maintenance_locked()?;
         let binding = maintenance.auth_launch_binding(&profile)?.context("space write requires persistent Paused maintenance")?;
         let id = uuid::Uuid::new_v4().to_string();
+        let credential_backend = if matches!(operation, HostSpaceOperation::Kick { .. }) { None }
+            else { Some(if cfg!(target_os = "linux") { "secret_service" } else { "native" }.to_owned()) };
         let original = Original { schema_version: HOST_SPACE_SCHEMA_V, root: root.clone(), profile: profile.clone(),
             operation_id: id.clone(), key: id, source_identity: expected, operation,
             token: super::lifecycle::current_boot_token().context("identity maintenance token missing")?,
             coordinator: binding["coordinator_id"].as_str().context("identity coordinator missing")?.to_owned(),
-            was_serving: owner.is_some(), store_ready: owner.as_ref().is_some_and(|owner| owner.store_ready), sent: false };
+            was_serving: owner.is_some(), store_ready: owner.as_ref().is_some_and(|owner| owner.store_ready), credential_backend, legacy_factor, sent: false };
         let bytes = serde_json::to_vec(&original)?;
         super::private_write(&path, &bytes, None)?;
         (original, Some(super::hash(&bytes)), maintenance)
@@ -148,6 +218,8 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
         if let Some(owner) = owner.as_ref() { maintenance.drain_runtime(owner)?; }
         anyhow::ensure!(!crate::net_rpc::port_is_open(), "space write requires the serving Runtime to be drained");
         let query_only = original.sent;
+        let host_material = material(&original, invite_code)?;
+        let mut checkpoint_code = checkpoint_invite(&original, None)?;
         if !query_only {
             anyhow::ensure!(super::control::identity(&profile)? == original.source_identity,
                 "identity source changed before sending the operation");
@@ -171,7 +243,12 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
                 anyhow::ensure!(binding.installation_root == original.root && binding.profile == original.profile,
                     "space write launch selection changed");
                 let params = HostSpaceParams { schema_version: HOST_SPACE_SCHEMA_V, binding, identity,
-                    source_identity: original.source_identity.clone(), operation: original.operation.clone(), invite_code: invite_code.map(str::to_owned) };
+                    source_identity: original.source_identity.clone(), operation: original.operation.clone(),
+                    invite_code: if matches!(original.operation, HostSpaceOperation::Invite { .. }) { checkpoint_code.clone() }
+                        else { invite_code.map(str::to_owned) },
+                    material: host_material.as_ref().map(|value| HostSpaceMaterial { super_password:value.super_password.clone(),
+                        keyring_account:value.keyring_account.clone(),keyring_backend:value.keyring_backend.clone(),
+                        legacy_secret:value.legacy_secret.clone() }) };
                 let method = if query { HOST_SPACE_RESULT_METHOD } else { match &original.operation {
                     HostSpaceOperation::Invite { .. } => HOST_SPACE_INVITE_METHOD,
                     HostSpaceOperation::Join { .. } => HOST_SPACE_JOIN_METHOD, HostSpaceOperation::Kick { .. } => HOST_SPACE_KICK_METHOD,
@@ -183,13 +260,21 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
             }, |response, request, profile, pid| validate_response(response, request, profile, pid, &original), |error| error)?;
         let receipt: HostSpaceResult = serde_json::from_value(envelope.summary)
             .map_err(|_| anyhow::anyhow!("invalid space write receipt"))?;
-        // Only a durable pre-POST Pending receipt permits this original O to continue.
-        // Unknown never reaches this continuation, and no replacement O is generated.
+        // Pending may admit the first POST or require a host code checkpoint.
+        // Runtime's durable phase fences continuation; Unknown never replays a POST.
+        if receipt.outcome == HostSpaceOutcome::Pending && receipt.invite_code.is_some() {
+            checkpoint_code = checkpoint_invite(&original, receipt.invite_code.as_deref())?;
+            continue;
+        }
         if query && receipt.outcome == HostSpaceOutcome::Pending { continue; }
         received = Some(receipt);
         break;
         }
         let receipt = received.context("space continuation did not return a receipt")?;
+        if matches!(original.operation, HostSpaceOperation::Invite { .. }) && receipt.outcome == HostSpaceOutcome::Committed {
+            anyhow::ensure!(receipt.invite_code.is_some() && receipt.invite_code == checkpoint_code,
+                "committed invite differs from the host checkpoint");
+        }
         if !matches!(receipt.outcome,HostSpaceOutcome::Committed | HostSpaceOutcome::Rejected) {
             maintenance.mark(super::lifecycle::Phase::Paused)?;
             return Ok(receipt);
@@ -212,10 +297,17 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
         finished = true;
         anyhow::ensure!(read_original(&path)?.as_ref().map(|(_, hash)| hash.as_str()) == digest.as_deref(),
             "space recovery context changed before cleanup");
-        std::fs::remove_file(&path)?;
-        if respire_spawn::durable::sync_directory(path.parent().context("identity context parent missing")?).is_err() {
-            eprintln!("Space operation committed; recovery namespace cleanup needs a later check.");
+        if receipt.outcome == HostSpaceOutcome::Rejected {
+            if let Some(value) = &host_material {
+                if let Some(legacy) = value.legacy_secret.as_deref() {
+                    respire_client_host::host_credentials::space::remove_legacy(&value.keyring_account,&value.keyring_backend,legacy)?;
+                }
+                respire_client_host::host_credentials::remove_auth_material(&value.keyring_account,
+                    &value.keyring_backend, &value.super_password, None)?;
+            }
         }
+        std::fs::remove_file(&path)?;
+        respire_spawn::durable::sync_directory(path.parent().context("identity context parent missing")?)?;
         Ok(receipt)
     })();
     if result.is_ok() && finished { maintenance.finish_handoff()?; }
@@ -332,7 +424,7 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         HostSpaceOperation::Invite { readonly, .. } => {
             anyhow::ensure!(receipt.target_profile.is_none() && receipt.target_account_id.is_none()
                 && receipt.target_session_sha256.is_none() && receipt.kick.is_empty(), "invite receipt contains unrelated effects");
-            if receipt.outcome == HostSpaceOutcome::Committed {
+            if receipt.outcome == HostSpaceOutcome::Committed || receipt.outcome == HostSpaceOutcome::Pending && receipt.invite_code.is_some() {
                 let code = receipt.invite_code.as_deref().context("committed invite code missing")?;
                 let value = respire::space::parse_invite(code)?;
                 anyhow::ensure!(value["readonly"].as_bool() == Some(*readonly)
@@ -383,7 +475,7 @@ mod tests {
             let original = Original { schema_version: HOST_SPACE_SCHEMA_V, root: root.clone(), profile: root.clone(),
                 operation_id: operation_id.clone(), key: operation_id.clone(), source_identity: HostAuthIdentity::Absent,
                 operation: HostSpaceOperation::Kick { session_id: None, all: true }, token: "fixture-maintenance".into(),
-                coordinator: uuid::Uuid::new_v4().to_string(), was_serving: false, store_ready: false, sent: true };
+                coordinator: uuid::Uuid::new_v4().to_string(), was_serving: false, store_ready: false, credential_backend:None, legacy_factor:false, sent: true };
             let receipt = HostSpaceResult { operation_id: operation_id.clone(), fingerprint: original.fingerprint()?,
                 profile: root.clone(), identity: original.source_identity.clone(), operation: original.operation.clone(),
                 outcome: HostSpaceOutcome::Committed, invite_code: None, session_id: None, target_profile: None,
@@ -491,7 +583,12 @@ mod tests {
 
     #[test]
     fn typed_success_and_receipt_binding_remain_unchanged() -> Result<()> {
-        let fixture = Fixture::new()?;
+        let mut fixture = Fixture::new()?;
+        assert_eq!(credential_alias(&fixture.original)?,format!("login-{}",uuid::Uuid::parse_str(&fixture.original.operation_id)?.simple()));
+        assert!(material(&fixture.original,None)?.is_none());
+        assert!(checkpoint_invite(&fixture.original,None)?.is_none());
+        assert!(respire_client_host::host_credentials::space::remove_legacy("foreign-owner","native","fixture-factor").is_err());
+        assert!(respire_client_host::host_credentials::space::remove_legacy("login-fixture","kernel","fixture-factor").is_err());
         let accepted = fixture.validate(fixture.response.clone())?;
         assert_eq!(serde_json::to_value(accepted)?, fixture.response["envelope"]);
         for (pointer, value) in [
@@ -507,6 +604,33 @@ mod tests {
             *response.pointer_mut(pointer).context("fixture receipt field missing")? = value;
             fixture.reject_malformed(response).with_context(|| format!("receipt field {pointer}"))?;
         }
+        let session = serde_json::to_vec(&json!({"user":"invite-owner","token":"fixture-session"}))?;
+        std::fs::write(fixture.original.profile.join("session.json"),&session)?;
+        fixture.original.source_identity = HostAuthIdentity::Bound { account_id:super::super::hash(b"invite-owner"),
+            session_sha256:super::super::hash(&session) };
+        fixture.original.operation = HostSpaceOperation::Invite { note:None,readonly:true };
+        let sid = uuid::Uuid::new_v4().to_string();
+        let code = format!("1mem-invite:{}",hex::encode(serde_json::to_vec(&json!({"space":"fixture",
+            "addr":"https://fixture.invalid","user":"invite-owner","token":"fixture-token","super":"fixture-factor",
+            "readonly":true,"session_id":sid,"control_operation_id":fixture.original.operation_id,
+            "control_fingerprint":fixture.original.fingerprint()?}))?));
+        let mut pending = fixture.response.clone();
+        pending["envelope"]["status"] = json!("pending");
+        pending["envelope"]["summary"] = json!({"operation_id":fixture.original.operation_id,
+            "fingerprint":fixture.original.fingerprint()?,"profile":fixture.original.profile,
+            "identity":fixture.original.source_identity,"operation":fixture.original.operation,"outcome":"pending",
+            "invite_code":code,"session_id":sid,"target_profile":null,"target_account_id":null,
+            "target_session_sha256":null,"kick":[],"remaining":null});
+        fixture.validate(pending.clone())?;
+        let mut unknown = pending.clone();
+        unknown["ok"] = json!(false);
+        unknown["exit"] = json!(2);
+        unknown["code"] = json!("space_outcome_unknown");
+        unknown["envelope"]["status"] = json!("fail");
+        unknown["envelope"]["summary"]["outcome"] = json!("unknown");
+        fixture.reject_malformed(unknown)?;
+        pending["envelope"]["summary"]["session_id"] = json!(uuid::Uuid::new_v4().to_string());
+        fixture.reject_malformed(pending)?;
         Ok(())
     }
 }
