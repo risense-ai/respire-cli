@@ -72,6 +72,6 @@ docker run --rm --network none --user "$(id -u):$(id -g)" \
     cp /runtime-selection.json /profile/bin/runtime.json
     cmp /runtime-selection.json /profile/bin/runtime.json
     trap "status=\$?; trap - EXIT; /rsrs --json runtime stop || exit 1; exit \$status" EXIT
-    /rsrs --json runtime start
-    /rsrs --direct model probe --json
+    /rsrs --direct model install-m3 --json > /profile/inference.json
   '
+python -c 'import json,sys; r=json.load(open(sys.argv[1])); p=r["details"]["backend_load"]["evidence"]; assert r["status"] == "ok" and p["ready"] is True and p["inference_completed"] is True and p["fresh_session"] is True and p["dimensions"] == 1024 and p["selected"] == "CPU", "Alpine CPU inference was not confirmed"' "$profile/inference.json"

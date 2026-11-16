@@ -232,7 +232,8 @@ fn run_config_control_inner(
                     .unwrap_or(false);
             let metadata_only = match &validation.target_identity {
                 HostAuthIdentity::Unbound { .. } => true,
-                HostAuthIdentity::Absent => fresh_empty,
+                HostAuthIdentity::Absent => fresh_empty
+                    || (owner.is_none() && source == target && source_identity == HostAuthIdentity::Absent),
                 HostAuthIdentity::Bound { .. } => false,
             };
             let actual_workers = if metadata_only {
@@ -241,7 +242,7 @@ fn run_config_control_inner(
                         && validation.target_profile == target,
                     "idle target lacks exact Runtime identity validation"
                 );
-                // Only verified keygen-Unbound or newly created Absent targets stay idle.
+                // Verified keygen-Unbound, new empty, and already idle Absent profiles stay idle.
                 // A control receipt is not a serving/store-ready proof.
                 maintenance.mark(super::lifecycle::Phase::Paused)?;
                 None

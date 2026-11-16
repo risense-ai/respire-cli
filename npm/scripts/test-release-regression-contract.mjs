@@ -119,11 +119,12 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(source,/scripts\/probe-native-arm64-alpine.sh/);
   for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
-  assert.match(alpine,/--network none/);assert.match(alpine,/--direct model probe --json/);
+  assert.match(alpine,/--network none/);assert.match(alpine,/--direct model install-m3 --json/);
   assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,4);
   assert.doesNotMatch(alpine,/--check|--status/);
-  assert.match(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
-  assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model probe'),'mounted CPU artifact must be checked before inference');
+  assert.doesNotMatch(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
+  assert.match(alpine,/p\["inference_completed"\] is True/);assert.match(alpine,/p\["fresh_session"\] is True/);
+  assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model install-m3'),'mounted CPU artifact must be checked before inference');
   assert.match(alpine,/test -z "\$\{RSRS_CORE_TEST_MODE:-\}"/);assert.doesNotMatch(alpine,/-e (?:GH_TOKEN|GITHUB_TOKEN|CORE_SDK_READ_TOKEN|RSRS_CORE_TEST_MODE)/);
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
   assert.match(background,/runs-on: ubuntu-24.04-arm/);assert.match(background,/VERIFY_ARM64: 'true'/);
@@ -251,7 +252,11 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     // The fake digest checker isolates selection/argv tests from the 570MB real model.
     stub('sha256sum','#!/bin/sh\ncat >/dev/null\nexit "${FAKE_HASH_STATUS:-0}"\n');
     const docker=path.join(root,'docker.cjs');
-    writeFileSync(docker,'require("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    writeFileSync(docker,`const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2);
+fs.writeFileSync(process.env.CAPTURE,JSON.stringify(args));
+const mount=args.find(arg=>arg.endsWith(':/profile')).slice(0,-':/profile'.length);
+fs.writeFileSync(path.join(mount,'inference.json'),JSON.stringify({status:'ok',details:{backend_load:{evidence:{ready:true,inference_completed:process.env.FAKE_INFERENCE!=='incomplete',fresh_session:true,dimensions:1024,selected:'CPU'}}}}));
+`);
     stub('docker','#!/bin/sh\nMSYS2_ARG_CONV_EXCL="*" exec "'+process.execPath.replaceAll('\\','/')+'" "'+docker.replaceAll('\\','/')+'" "$@"\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
     const shellPath=file=>file.split(path.sep).join('/');
@@ -269,6 +274,7 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
+    assert.notEqual(run({FAKE_INFERENCE:'incomplete'}).status,0,'incomplete inference cannot pass acceptance');rmSync(capture);
     rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(shellPath(local)+':/cpu-model.ort:ro'));rmSync(capture);
     assert.notEqual(run({FAKE_HASH_STATUS:'1'}).status,0);assert(!existsSync(capture));
     rmSync(local);assert.notEqual(run({}).status,0);assert(!existsSync(capture));

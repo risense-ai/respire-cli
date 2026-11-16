@@ -411,7 +411,8 @@ def main():
 
         def cli(*flags, success=True):
             command_env = dict(env)
-            if keys and "migrate" in flags:
+            if keys and ("migrate" in flags or report["stage"] in ("before_publish", "after_publish")
+                         and any(action in flags for action in ("account-result", "account-rollback"))):
                 command_env.pop("RSRS_SUPER")
             elif "migrate" in flags:
                 command_env["RSRS_SUPER"] = old_super
@@ -508,6 +509,8 @@ def main():
             report["cases"]["legacy_pending_automatic_recovery"] = {
                 "passed": True, "synthetic_legacy_schema": True, "original_profile_restored": True,
                 "ciphertext_preserved": True, "credential_mode": "secret_service" if keys else "headless"}
+            # Recovery must unlock the legacy candidate, not the initial v4 fixture.
+            env["RSRS_SUPER"] = old_super
             for barrier in ("before_publish", "after_publish"):
                 report["stage"] = barrier
                 state.update(vault=dict(v2), auth_salt=old_auth_salt, gets=0, posts=0,
@@ -645,6 +648,7 @@ def main():
                     "no_authentication_replay": True, "vault_posts": state["posts"],
                     "password_posts": state["password_posts"],
                     "credential_mode": "secret_service" if keys else "headless"})
+            env["RSRS_SUPER"] = code
             report["stage"] = "legacy_recovery"
             # DEV.4 has no journal. Preserve its inconsistent profile and recover by
             # importing the actual original library through the public migration API.
