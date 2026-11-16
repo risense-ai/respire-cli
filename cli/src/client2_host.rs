@@ -533,10 +533,10 @@ pub(crate) fn serve() -> Result<()> {
             return match cleanup {
                 Ok(()) => Err(error).with_context(||
                     "Runtime startup failed; original data and recovery records retained".to_owned()),
-                Err(cleanup_error) => {
-                    Err(error).context("owned Runtime cleanup failed after startup failure").context(format!(
-                        "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed: {cleanup_error:#}"))
-                },
+                Err(cleanup_error) => Err(cleanup_error).context(error)
+                    .context("owned Runtime cleanup failed after startup failure")
+                    .with_context(|| format!(
+                        "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed")),
             };
         }
     };
