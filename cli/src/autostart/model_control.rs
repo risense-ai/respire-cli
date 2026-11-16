@@ -469,7 +469,12 @@ fn host_installation_plan(
                     let variant = requirement.version.as_deref().context("core model variant missing")?;
                     if variant != "quantized" { assets.push(host_variant(directory, variant)?); }
                 },
-                "bge-m3-cpu-ort" => assets.push(host_cpu_container(cpu_container)?),
+                "bge-m3-cpu-ort" => {
+                    // Match Runtime's loader: use an existing cache, otherwise the selected model directory.
+                    let path = if cpu_container.is_file() { cpu_container.to_owned() }
+                        else { directory.join("onnx/model_quantized.cpu-v1.ort") };
+                    assets.push(host_cpu_container(&path)?);
+                },
                 _ => anyhow::bail!("core resource {} requires separate component preparation: {}", requirement.name,
                     requirement.reason.as_deref().unwrap_or("no host file installation contract")),
             }
