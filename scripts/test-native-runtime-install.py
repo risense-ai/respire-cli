@@ -5,6 +5,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 import tempfile
 import types
@@ -15,6 +16,33 @@ from native_fixture_process import install_official_runtime, same_existing_path,
 
 
 class FixtureInstallationTests(unittest.TestCase):
+    def test_published_autostart_uses_verified_archive_and_requires_hosted_registration(self):
+        scripts = Path(__file__).resolve().parent
+        workflow = (scripts.parent / '.github/workflows/release-native-validation.yml').read_text(encoding='utf-8')
+        self.assertIn('os: macos-15\n            target: aarch64-apple-darwin', workflow)
+        name = 'Verify OS autostart registration from published release bytes'
+        step = workflow.split('      - name: ' + name + '\n')[1].split('\n      - ')[0]
+        self.assertIn("if: inputs.artifact_source == 'published-assets' && inputs.validation_profile == 'full'", step)
+        self.assertIn('set -euo pipefail', step)
+        self.assertIn('unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN', step)
+        for variable in ('RSRS_PUBLISHED_RUNTIME_ARCHIVE', 'RSRS_PUBLISHED_RUNTIME_VERSION'):
+            self.assertIn('${' + variable + ':?Verified published Runtime ', step)
+        self.assertIn('exe="target/ci/${{ matrix.target }}/release/rsrs"', step)
+        self.assertIn('if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi', step)
+        self.assertIn('python scripts/test-runtime-autostart.py --binary "$exe" --register \\\n'
+                      '            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"', step)
+        self.assertLess(workflow.index('run: node npm/scripts/extract-artifact.mjs validated-cli'), workflow.index(name))
+        for forbidden in ('--previous-binary', '--runtime-binary', 'cargo ', 'continue-on-error', '|| true'):
+            self.assertNotIn(forbidden, step)
+        for actions, runner in [('false', 'github-hosted'), ('true', 'self-hosted'), ('true', '')]:
+            with self.subTest(actions=actions, runner=runner):
+                result = subprocess.run([sys.executable, str(scripts / 'test-runtime-autostart.py'),
+                                         '--binary', 'must-not-execute', '--register'],
+                                        env={**os.environ, 'GITHUB_ACTIONS': actions, 'RUNNER_ENVIRONMENT': runner},
+                                        capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('OS registration acceptance is limited to an ephemeral GitHub-hosted runner', result.stderr)
+
     def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary).resolve()
