@@ -1134,14 +1134,26 @@ fn main_body() -> i32 {
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--client2-host-supervisor-internal") {
         return match client2_host::supervise() {
             Ok(()) => 0,
-            Err(error) => { eprintln!("Client2 exit observation failed: {error:#}"); 1 }
+            Err(error) => {
+                if let Err(output_error) = client2_host::report_failure("exit observation", &error) {
+                    eprintln!("Client2 startup diagnostic delivery failed ({:?})",
+                        output_error.downcast_ref::<std::io::Error>().map(|error| error.kind()));
+                }
+                1
+            }
         };
     }
     #[cfg(feature = "client2-host-prototype")]
     if std::env::args_os().nth(1).is_some_and(|arg| arg == "--client2-host-internal") {
         return match client2_host::serve() {
             Ok(()) => 0,
-            Err(error) => { eprintln!("Client2 compatibility host failed: {error:#}"); 1 }
+            Err(error) => {
+                if let Err(output_error) = client2_host::report_failure("compatibility host", &error) {
+                    eprintln!("Client2 startup diagnostic delivery failed ({:?})",
+                        output_error.downcast_ref::<std::io::Error>().map(|error| error.kind()));
+                }
+                1
+            }
         };
     }
     let roots_requested = std::env::args_os().any(|arg| arg == "--roots");
