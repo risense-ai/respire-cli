@@ -275,6 +275,33 @@ def login_continuation_receipt(summary, operation_id, source, addr, outcome):
             "login_continuation_inputs_mismatch")
 
 
+def runtime_stop_receipt(stopped):
+    require(stopped.returncode == 0, "owned_runtime_cleanup_failed")
+    receipt = json.loads(stopped.stdout)
+    require(receipt.get("status") == "ok" and not receipt.get("errors")
+            and receipt.get("summary", {}).get("state") == "stopped", "owned_runtime_cleanup_failed")
+
+
+def fixture_runtime_owners(directory):
+    """Check every fixture profile, including a target selected during login."""
+    owners = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            profiles = [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == b"--data-dir"]
+            if not any(Path(os.fsdecode(profile)).resolve().is_relative_to(directory.resolve())
+                       for profile in profiles):
+                continue
+            raw = (entry / "stat").read_text()
+            if raw[raw.rfind(")") + 2:].split()[0] != "Z":
+                owners.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return owners
+
+
 def host_login_continuation(binary, directory, env, state, addr, code, observation):
     """Real host admission without a super key; only the original operation may resume."""
     directory.mkdir(mode=0o700)
@@ -368,10 +395,12 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         observation.update(stage="committed", awaiting_input_observed=True, original_operation_committed=True,
             recovery_without_authentication_replay=True, distinct_transport_ids=True, repeated_material_unchanged=True)
     finally:
-        stopped = subprocess.run([str(binary), "--runtime-internal", "--stop"],
+        observation["runtime_cleanup"] = {"passed": False}
+        stopped = subprocess.run([str(binary), "--json", "--runtime-internal", "--stop"],
             env=command_env, capture_output=True, timeout=60)
-        observation["runtime_cleanup"] = {"passed": stopped.returncode in (0, 2)}
-        require(observation["runtime_cleanup"]["passed"], "owned_runtime_cleanup_failed")
+        runtime_stop_receipt(stopped)
+        require(not fixture_runtime_owners(directory), "owned_runtime_cleanup_failed")
+        observation["runtime_cleanup"].update(passed=True, stopped_confirmed=True, no_live_owner=True)
     observation["passed"] = True
 
 

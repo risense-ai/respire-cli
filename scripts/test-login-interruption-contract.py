@@ -19,7 +19,8 @@ import uuid
 SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
 NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation',
-         'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt'}
+         'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt',
+         'runtime_stop_receipt', 'fixture_runtime_owners'}
 
 
 def require(value, message):
@@ -163,6 +164,45 @@ class JournalContract(unittest.TestCase):
         self.assertNotIn('pop("operation_id"', SOURCE)
 
 
+class RuntimeCleanupContract(unittest.TestCase):
+    def test_finally_rejects_pending_exit_and_surviving_owner(self):
+        function = next(node for node in TREE.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'host_login_continuation')
+        cleanup = next(node.finalbody for node in function.body if isinstance(node, ast.Try))
+        from types import SimpleNamespace
+        receipt = json.dumps({'status': 'ok', 'summary': {'state': 'stopped'}}).encode()
+        for exit_code, owners, passed in ((2, [], False), (0, [123], False), (0, [], True)):
+            with self.subTest(exit=exit_code, owners=owners):
+                observation = {}
+                runner = Mock(return_value=subprocess.CompletedProcess([], exit_code, receipt))
+                scope = dict(globals(), binary=Path('fixture-cli'), command_env={},
+                             directory=Path('fixture'), observation=observation,
+                             subprocess=SimpleNamespace(run=runner), fixture_runtime_owners=Mock(return_value=owners))
+                code = compile(ast.Module(body=cleanup, type_ignores=[]), '<actual-cleanup>', 'exec')
+                if passed:
+                    exec(code, scope)
+                    self.assertTrue(observation['runtime_cleanup']['no_live_owner'])
+                else:
+                    with self.assertRaisesRegex(RuntimeError, 'owned_runtime_cleanup_failed'):
+                        exec(code, scope)
+                self.assertIs(observation['runtime_cleanup']['passed'], passed)
+                self.assertIn('--json', runner.call_args.args[0])
+
+    def test_only_explicit_successful_stop_receipt_is_accepted(self):
+        good = {'status': 'ok', 'summary': {'state': 'stopped'}, 'errors': []}
+        runtime_stop_receipt(subprocess.CompletedProcess([], 0, json.dumps(good).encode()))
+        for exit_code, receipt in ((2, good), (1, good),
+                (0, {**good, 'status': 'pending'}),
+                (0, {**good, 'summary': {'state': 'pending'}}),
+                (0, {**good, 'summary': {'state': 'unknown'}}),
+                (0, {**good, 'errors': ['stop failed']}), (0, {})):
+            with self.subTest(exit=exit_code, receipt=receipt):
+                with self.assertRaisesRegex(RuntimeError, 'owned_runtime_cleanup_failed'):
+                    runtime_stop_receipt(subprocess.CompletedProcess([], exit_code, json.dumps(receipt).encode()))
+        with self.assertRaises(json.JSONDecodeError):
+            runtime_stop_receipt(subprocess.CompletedProcess([], 0, b'not-json'))
+
+
 class BarrierContract(unittest.TestCase):
     def test_timeout_latches_all_observation_and_mutation_endpoints_closed(self):
         main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'main')
@@ -202,6 +242,26 @@ class BarrierContract(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith('linux') and hasattr(os, 'pidfd_open'), 'Linux pidfd required')
 class ProcessContract(unittest.TestCase):
+    def test_cleanup_detects_live_owner_in_selected_target_and_ignores_other_fixture(self):
+        with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
+            target = Path(temp) / 'selected-profile'
+            child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
+                                      '--data-dir', str(target)])
+            unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
+                                          '--data-dir', other])
+            try:
+                self.assertEqual(fixture_runtime_owners(Path(temp)), [child.pid])
+                child.terminate()
+                child.wait(timeout=5)
+                self.assertEqual(fixture_runtime_owners(Path(temp)), [])
+                self.assertIsNone(unrelated.poll())
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+                unrelated.terminate()
+                unrelated.wait(timeout=5)
+
     def test_private_helper_exit_proven_and_unrelated_process_survives(self):
         with tempfile.TemporaryDirectory() as temp:
             ready = Path(temp) / 'ready'
