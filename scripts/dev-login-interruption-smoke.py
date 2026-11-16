@@ -17,6 +17,7 @@ import sqlite3
 from dev_witness_fixture import register_witness_functions, verify_fixture_witness
 import subprocess
 import threading
+import time
 import uuid
 import select
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -430,10 +431,23 @@ def host_key_continuation(binary, directory, env, state, addr, code, keys, sourc
         rows = db.execute("SELECT id,ciphertext,nonce FROM memories WHERE title=? AND deleted=0", (title,)).fetchall()
     require(len(rows) == 1 and plaintext.encode() in legacy.decrypt_content(new_urk, rows[0][1], rows[0][2]),
             "key_continuation_memory_failed")
-    recalled = subprocess.run([str(binary), "--json", "show", rows[0][0]], env=env,
+    shown = subprocess.run([str(binary), "--json", "show", rows[0][0]], env=env,
         capture_output=True, timeout=180)
-    require(recalled.returncode == 0 and plaintext in json.dumps(json.loads(recalled.stdout)),
+    require(shown.returncode == 0 and plaintext in json.dumps(json.loads(shown.stdout)),
             "key_continuation_memory_failed")
+    # Recall can observe the persisted source before its derived index is ready.
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        recalled = subprocess.run([str(binary), "--json", "recall", plaintext, "--titles"], env=env,
+            capture_output=True, timeout=180)
+        envelope = json.loads(recalled.stdout)
+        require(recalled.returncode == 0 and envelope.get("status") == "ok" and not envelope.get("errors"),
+                "key_continuation_memory_failed")
+        if any(row.get("id") == rows[0][0] and row.get("title") == title for row in envelope["details"]):
+            break
+        time.sleep(.1)
+    else:
+        raise RuntimeError("key_continuation_memory_failed")
     observation.update(passed=True, stage="committed", awaiting_input_observed=True,
         source_super_only_deleted=True, original_operation_committed=True, distinct_transport_ids=True,
         reset_published_once=True, recovery_without_reset_replay=True, repeated_material_unchanged=True,

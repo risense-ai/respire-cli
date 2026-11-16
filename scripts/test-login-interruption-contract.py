@@ -177,6 +177,36 @@ class JournalContract(unittest.TestCase):
                 with self.subTest(outcome=outcome, field=field), self.assertRaises(RuntimeError):
                     key_continuation_receipt(dict(summary, **{field: wrong}), self.id, self.root, outcome)
 
+    def test_post_reset_recall_waits_for_exact_record_and_rejects_failure(self):
+        from types import SimpleNamespace
+        function = next(node for node in TREE.body
+                        if isinstance(node, ast.FunctionDef) and node.name == 'host_key_continuation')
+        start = next(index for index, node in enumerate(function.body)
+                     if isinstance(node, ast.Assign) and ast.unparse(node.targets[0]) == 'shown')
+        code = compile(ast.Module(body=function.body[start:-1], type_ignores=[]), '<actual-post-reset-recall>', 'exec')
+        memory_id, title, plaintext = 'owned-memory', 'Key continuation fixture', 'Synthetic memory after key continuation'
+        shown = subprocess.CompletedProcess([], 0, json.dumps({'details': {'entry': {'content': plaintext}}}).encode())
+        matching = {'id': memory_id, 'title': title}
+        for pending in ([], [{'id': 'other', 'title': title}], [{'id': memory_id, 'title': 'other'}]):
+            for failure in (False, True):
+                with self.subTest(pending=pending, failure=failure):
+                    def reply(details, status='ok'):
+                        return subprocess.CompletedProcess([], 1 if status == 'fail' else 0,
+                            json.dumps({'status': status, 'details': details}).encode())
+                    runner = Mock(side_effect=[shown, reply(pending), reply([matching], 'fail' if failure else 'ok')])
+                    clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 1, 2]), sleep=Mock())
+                    scope = dict(require=require, subprocess=SimpleNamespace(run=runner), time=clock, json=json,
+                                 binary=Path('fixture-cli'), env={}, rows=[(memory_id,)], title=title, plaintext=plaintext)
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, 'key_continuation_memory_failed'):
+                            exec(code, scope)
+                    else:
+                        exec(code, scope)
+                    self.assertEqual(runner.call_count, 3)
+                    for call in runner.call_args_list[1:]:
+                        self.assertEqual(call.args[0][1:], ['--json', 'recall', plaintext, '--titles'])
+                    clock.sleep.assert_called_once_with(.1)
+
     def test_key_fixture_deletes_only_bound_super_and_keeps_password(self):
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / 'session.json'
