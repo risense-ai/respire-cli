@@ -43,14 +43,17 @@ test('report command failures and JSON errors cannot become advisory success', (
   assert.deepEqual(calls[0][1].slice(6), ['--show-missing-lines']);
   assert.deepEqual(calls[1][1].slice(6), ['--json','--summary-only']);
 });
-test('both workflows use the same policy and preserve candidate hard gating', () => {
+test('source CI avoids coverage while the reusable SDK check retains its policy', () => {
   const ci=readFileSync(new URL('../.github/workflows/ci.yml',import.meta.url),'utf8');
   const token=readFileSync(new URL('../.github/workflows/token-free-sdk-check.yml',import.meta.url),'utf8');
-  const pattern=/node scripts\/check-cli-coverage\.mjs '([^']+)'/;
-  assert.equal(ci.match(pattern)?.[1], token.match(pattern)?.[1]);
-  assert(ci.match(pattern)?.[1].includes('cli/src/frontend'));
-  const step=ci.split('- name: CLI line coverage (')[1].split('- name: Require source')[0];
-  assert(step.includes("CANDIDATE_MODE: ${{ inputs.required_candidate_run_id != '' || inputs.required_candidate_artifact_id != '' || inputs.required_candidate_sha256 != '' }}"));
-  assert.doesNotMatch(step, /continue-on-error|\|\| true/);
-  assert(ci.includes('scripts/test-cli-coverage-policy.mjs'));
+  assert.doesNotMatch(ci, /llvm-cov|llvm-tools|coverage-tests|required_candidate_|CANDIDATE_MODE/);
+  assert.match(ci, /cargo test --locked -p respire_spawn/);
+  assert.match(ci, /respire_host_control/);
+  assert.match(ci, /cargo test -p respire_crypto --no-default-features --lib --locked/);
+  assert.match(ci, /--test net_rpc_http -- client_/);
+  assert.match(ci, /needs: \[workspace-tests, rust-build-save, contract-checks, native-fixture-contracts, client2-focus-contract\]/);
+  assert.match(ci, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(ci, /job\['result'\] != 'success'/);
+  assert.match(token, /node scripts\/check-cli-coverage\.mjs/);
+  assert.doesNotMatch(ci, /continue-on-error|\|\| true/);
 });

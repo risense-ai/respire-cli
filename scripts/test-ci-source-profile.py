@@ -22,12 +22,7 @@ def main():
                if not any(word in key.upper() for word in ("TOKEN", "SECRET", "PASSWORD"))}
         # Preserve the job's actual profile settings; do not provide defaults
         # that could hide a missing/weakening workflow configuration.
-        env.update(CARGO_TARGET_DIR=str(root / "target"),
-                   LLVM_PROFILE_FILE=str(root / "profile-%p.profraw"))
-        if "CARGO_ENCODED_RUSTFLAGS" in env:
-            env["CARGO_ENCODED_RUSTFLAGS"] += "\x1f-C\x1finstrument-coverage"
-        else:
-            env["RUSTFLAGS"] = (env.get("RUSTFLAGS", "") + " -C instrument-coverage").strip()
+        env.update(CARGO_TARGET_DIR=str(root / "target"))
         result = subprocess.run(["cargo", "test", "--offline", "--verbose", "--manifest-path", str(root / "Cargo.toml")],
                                 cwd=Path(__file__).resolve().parents[1], env=env, text=True,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=120)
@@ -38,9 +33,7 @@ def main():
             raise RuntimeError("CI tests unexpectedly enabled optimization")
         if "-C debuginfo=line-tables-only" not in result.stdout:
             raise RuntimeError("CI compiler did not use the intended line-table debug metadata")
-        if not any(path.stat().st_size > 0 for path in root.glob("profile-*.profraw")):
-            raise RuntimeError("Instrumented profile produced no LLVM coverage counters")
-        print("PASS: line-table metadata, debug assertions, overflow checks and LLVM counters retained")
+        print("PASS: line-table metadata, debug assertions and overflow checks retained")
 
 
 if __name__ == "__main__":
