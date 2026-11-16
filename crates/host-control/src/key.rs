@@ -186,6 +186,11 @@ fn committed_summary(receipt: &HostKeyResult) -> Result<Value> {
     Ok(summary)
 }
 
+fn host_completion_required(receipt: &HostKeyResult) -> bool {
+    receipt.verification_required
+        || matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack)
+}
+
 fn canonical(value: &str) -> bool {
     uuid::Uuid::parse_str(value)
         .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value)
@@ -444,7 +449,7 @@ fn control_key_inner(host: Arc<dyn HostLifecycle>, action: Action<'_>,
             )?
         };
         if source.is_some()
-            && !matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack)
+            && !host_completion_required(&receipt)
             && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput)
         {
             maintenance.pause_key()?;
@@ -1253,6 +1258,21 @@ mod tests {
         result.operation_id = original.operation_id.clone();
         result.source_profile = PathBuf::from("/synthetic/foreign");
         assert!(validate_receipt(&result, &original).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_or_applied_key_results_require_host_completion() -> Result<()> {
+        let original = original();
+        for outcome in [HostKeyOutcome::Unknown, HostKeyOutcome::Pending, HostKeyOutcome::AwaitingInput] {
+            assert!(!host_completion_required(&receipt(&original, outcome)?));
+        }
+        for outcome in [HostKeyOutcome::Committed, HostKeyOutcome::RolledBack] {
+            assert!(host_completion_required(&receipt(&original, outcome)?));
+        }
+        let mut applied = receipt(&original, HostKeyOutcome::Pending)?;
+        applied.verification_required = true;
+        assert!(host_completion_required(&applied));
         Ok(())
     }
 
