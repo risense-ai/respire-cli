@@ -244,6 +244,8 @@ jobs:
       - run: python3 scripts/test_published_upgrade_policy.py
       - run: node --test scripts/test-cli-coverage-policy.mjs scripts/test-private-sdk-download.mjs scripts/test-sdk-ci-cache.mjs
       - run: node --test scripts/test-stage-core-runtime.mjs
+      - name: Verify publication transactions and immutable artifact contracts offline
+        run: node --test npm/scripts/test-release-publication.mjs npm/scripts/test-publication-acceptance.mjs npm/scripts/test-release-regression-contract.mjs npm/scripts/test-parallel-publication.mjs
       - run: python3 scripts/test-dev-smoke-gate.py
       - run: python3 scripts/test-dev-api-contract.py
       - run: python3 scripts/test-dev-model-fixture.py
