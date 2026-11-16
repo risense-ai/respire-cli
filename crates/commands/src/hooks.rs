@@ -86,16 +86,29 @@ pub fn config_path() -> std::path::PathBuf {
 
 /// Compatibility entry for Runtime callers using their current data directory.
 #[cfg(feature = "server")]
-pub fn read_config() -> HooksConfig {
+pub fn read_config() -> anyhow::Result<HooksConfig> {
     read_config_at(&config_path())
 }
 
-/// Preserve plugins.json compatibility: missing or corrupt files mean no hooks.
-pub fn read_config_at(path: &Path) -> HooksConfig {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+/// A missing config means no plugins; unreadable or invalid config is an error.
+pub fn read_config_at(path: &Path) -> anyhow::Result<HooksConfig> {
+    use anyhow::Context;
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HooksConfig::default()),
+        Err(error) => return Err(error).with_context(|| format!("read plugin config {}", path.display())),
+    };
+    let config: HooksConfig = serde_json::from_str(&text)
+        .with_context(|| format!("parse plugin config {}", path.display()))?;
+    for (event, specs) in &config.hooks {
+        anyhow::ensure!(HookEvent::parse(event).is_some(), "unknown plugin event {event}");
+        for spec in specs {
+            anyhow::ensure!(!spec.cmd.trim().is_empty(), "empty plugin command for {event}");
+            anyhow::ensure!(matches!(spec.on_error.as_str(), "" | "block" | "warn" | "skip"),
+                "unknown plugin failure policy {} for {event}", spec.on_error);
+        }
+    }
+    Ok(config)
 }
 
 /// Result of one fire() call.
@@ -124,13 +137,24 @@ enum HookOutcome {
 /// Compatibility entry for Runtime callers using their current data directory.
 #[cfg(feature = "server")]
 pub fn fire(event: HookEvent, payload: serde_json::Value) -> HookVerdict {
-    fire_at(&config_path(), event, payload)
+    match fire_at(&config_path(), event, payload) {
+        Ok(verdict) => verdict,
+        Err(error) => HookVerdict {
+            blocked: event.is_pre(),
+            reason: format!("invalid plugin configuration: {error:#}"),
+            warnings: vec![format!("invalid plugin configuration: {error:#}")],
+        },
+    }
 }
 
 /// Fire one event: run every hook for it in order.
 /// payload is a summary-level business payload; combined with event/ts into JSON on plugin stdin.
-pub fn fire_at(path: &Path, event: HookEvent, payload: serde_json::Value) -> HookVerdict {
-    let cfg = read_config_at(path);
+pub fn fire_at(path: &Path, event: HookEvent, payload: serde_json::Value) -> anyhow::Result<HookVerdict> {
+    Ok(fire_config(&read_config_at(path)?, event, payload))
+}
+
+/// Execute the validated configuration captured before submitting a core command.
+pub fn fire_config(cfg: &HooksConfig, event: HookEvent, payload: serde_json::Value) -> HookVerdict {
     let specs = match cfg.hooks.get(event.as_str()) {
         Some(v) if !v.is_empty() => v,
         _ => return HookVerdict::allow(),
@@ -146,10 +170,15 @@ pub fn fire_at(path: &Path, event: HookEvent, payload: serde_json::Value) -> Hoo
             HookOutcome::Ok(mut w) => verdict.warnings.append(&mut w),
             HookOutcome::Blocked(reason) => {
                 // Explicit veto always applies, regardless of on_error - skip only covers faults, not verdicts.
-                verdict.blocked = true;
-                verdict.reason = format!("hook {} blocked: {reason}", spec.cmd);
+                if event.is_pre() {
+                    verdict.blocked = true;
+                    verdict.reason = format!("hook {} blocked: {reason}", spec.cmd);
+                } else {
+                    verdict.warnings.push(format!("hook {} returned a veto after commit (ignored): {reason}", spec.cmd));
+                }
             }
             HookOutcome::Failed(fail) => {
+                eprintln!("HOOK event={} command={} failed={fail}", event.as_str(), spec.cmd);
                 let policy = if spec.on_error.is_empty() && event.is_pre() {
                     "warn"
                 } else if spec.on_error.is_empty() {
@@ -495,9 +524,9 @@ mod tests {
     fn test_config_missing_is_empty() -> anyhow::Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("missing/plugins.json");
-        let cfg = read_config_at(&path);
+        let cfg = read_config_at(&path)?;
         assert!(cfg.hooks.is_empty());
-        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}))?;
         assert!(!v.blocked);
         Ok(())
     }
@@ -523,7 +552,7 @@ mod tests {
             }
         });
         std::fs::write(&path, cfg.to_string())?;
-        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({"title":"t"}));
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({"title":"t"}))?;
         assert!(!v.blocked);
         let cfg_block = serde_json::json!({
             "hooks": {
@@ -531,7 +560,7 @@ mod tests {
             }
         });
         std::fs::write(&path, cfg_block.to_string())?;
-        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
+        let v = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}))?;
         assert!(v.blocked);
         Ok(())
     }
@@ -546,7 +575,7 @@ mod tests {
         assert_eq!(forget_payload("x")["id"], "x");
         assert_eq!(sync_payload(1, 2)["pulled"], 1);
         let dir = tempfile::tempdir()?;
-        let v = fire_at(&dir.path().join("plugins.json"), HookEvent::PostSync, serde_json::json!({}));
+        let v = fire_at(&dir.path().join("plugins.json"), HookEvent::PostSync, serde_json::json!({}))?;
         assert!(!v.blocked);
         Ok(())
     }
@@ -571,7 +600,7 @@ mod tests {
                 {"cmd": "exit 1", "on_error": policy, "timeout_ms": 2000}
             ]}});
             std::fs::write(&path, cfg.to_string())?;
-            let verdict = fire_at(&path, event, serde_json::json!({}));
+            let verdict = fire_at(&path, event, serde_json::json!({}))?;
             assert_eq!(
                 verdict.blocked,
                 blocked,
@@ -600,7 +629,7 @@ mod tests {
             serde_json::json!({"data": "x".repeat(2 * 1024 * 1024)}),
         ] {
             // The echo hook exits without reading stdin, including a payload larger than the pipe.
-            let verdict = fire_at(&path, HookEvent::PreRemember, payload);
+            let verdict = fire_at(&path, HookEvent::PreRemember, payload)?;
             assert!(verdict.blocked, "{} {:?}", verdict.reason, verdict.warnings);
             assert!(verdict.reason.contains("private data"));
             assert!(verdict.warnings.is_empty(), "a veto must stop later hooks");
@@ -618,7 +647,12 @@ mod tests {
             _ => panic!("a broken pipe without an explicit veto must still fail"),
         }
         std::fs::write(&path, "invalid json")?;
-        assert!(read_config_at(&path).hooks.is_empty());
+        assert!(read_config_at(&path).is_err());
+        let post = fire_config(&serde_json::from_value(serde_json::json!({"hooks": {"post-sync": [
+            {"cmd": veto_command}, {"cmd": "exit 1", "on_error": "warn"}
+        ]}}))?, HookEvent::PostSync, serde_json::json!({}));
+        assert!(!post.blocked, "post events cannot veto committed work");
+        assert_eq!(post.warnings.len(), 2, "post veto must not suppress later hooks");
         Ok(())
     }
 

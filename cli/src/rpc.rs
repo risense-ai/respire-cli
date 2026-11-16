@@ -558,6 +558,17 @@ pub(crate) fn call_method(
     args: Vec<String>,
     auto_start: bool,
 ) -> Result<RpcResponse> {
+    let plugins = if method == "cli.exec"
+        && matches!(command_name(&args), Some("remember" | "recall" | "forget" | "sync"))
+    {
+        use clap::Parser;
+        let cli = crate::Cli::try_parse_from(std::iter::once("rsrs".to_owned()).chain(args.clone()))?;
+        let (_, profile) = respire_client_host::config::control_roots()?;
+        let config = respire_commands::hooks::read_config_at(&profile.join("plugins.json"))?;
+        cli.command.map(|command| (command, config))
+    } else {
+        None
+    };
     let auto = auto_start && !crate::net_rpc::no_autostart();
     // Validate/start the runtime for this data directory before submitting work.
     // Once submitted, a disconnect must not cause a mutating command to be replayed.
@@ -568,9 +579,74 @@ pub(crate) fn call_method(
         anyhow::ensure!(!crate::net_rpc::health()?.inference_stalled(),
             "inference is unresponsive after cancellation; run rsrs from the host terminal to recover the runtime; this request was not submitted");
     }
+    if let Some((command, config)) = plugins.as_ref().filter(|(_, config)| !config.hooks.is_empty()) {
+        // Old runtimes execute plugins themselves. Reject them before submitting
+        // business work so a host plugin cannot run twice.
+        let capabilities = http_roundtrip("cli.exec", &["--json".into(), "capabilities".into()])?;
+        anyhow::ensure!(compatible(&capabilities) && capabilities.ok
+            && capabilities.envelope.as_ref().is_some_and(|envelope| envelope.summary["host_plugin_events"].is_array()),
+            "runtime does not support host plugin events; command was not submitted");
+        return run_plugin_hooks(command, config, || {
+            let response = http_roundtrip(method, &args)?;
+            anyhow::ensure!(compatible(&response), "local runtime protocol/version mismatch");
+            Ok(response)
+        });
+    }
     let response = http_roundtrip(method, &args)?;
     if !compatible(&response) {
         bail!("local runtime protocol/version mismatch");
+    }
+    Ok(response)
+}
+
+/// The pre hook runs before submission; post receipts describe actual core events,
+/// including commits followed by a later command failure. Never replay the RPC.
+fn run_plugin_hooks(
+    command: &crate::Command,
+    config: &respire_commands::hooks::HooksConfig,
+    submit: impl FnOnce() -> Result<RpcResponse>,
+) -> Result<RpcResponse> {
+    use respire_commands::hooks::{self, HookEvent};
+    if let crate::Command::Remember { content, title, importance, r#type, project, .. } = command {
+        let verdict = hooks::fire_config(config, HookEvent::PreRemember,
+            hooks::remember_payload(title, importance, r#type.as_deref().unwrap_or("context"), project, content));
+        for warning in verdict.warnings {
+            eprintln!("WARN {warning}");
+        }
+        anyhow::ensure!(!verdict.blocked, "{}; write was not submitted", verdict.reason);
+    }
+    let mut response = submit()?;
+    let Some(envelope) = response.envelope.as_mut() else {
+        // Admission failures have no business events. A successful response must
+        // carry its event receipts, otherwise hook delivery is unknown.
+        anyhow::ensure!(!response.ok, "runtime omitted plugin event receipts; do not retry the command");
+        return Ok(response);
+    };
+    let events = envelope.summary.get("host_plugin_events")
+        .and_then(Value::as_array)
+        .context("runtime omitted plugin event receipts; do not retry the command")?;
+    let expected = match command {
+        crate::Command::Remember { .. } => HookEvent::PostRemember,
+        crate::Command::Recall { .. } => HookEvent::PostRecall,
+        crate::Command::Forget { .. } => HookEvent::PostForget,
+        crate::Command::Sync => HookEvent::PostSync,
+        _ => bail!("unsupported plugin command"),
+    };
+    // Validate the full receipt before launching any shell commands.
+    for receipt in events {
+        anyhow::ensure!(receipt["event"].as_str() == Some(expected.as_str()) && receipt["data"].is_object(),
+            "runtime returned invalid plugin event receipts; do not retry the command");
+    }
+    for receipt in events {
+        let verdict = hooks::fire_config(config, expected, receipt["data"].clone());
+        for warning in verdict.warnings {
+            eprintln!("WARN {warning}");
+            envelope.errors.push(warning);
+            if matches!(envelope.status, OutputStatus::Ok | OutputStatus::Skip) {
+                envelope.status = OutputStatus::Warn;
+                response.exit = respire_commands::output_state::status_exit_code(envelope.status);
+            }
+        }
     }
     Ok(response)
 }
@@ -1485,7 +1561,8 @@ mod tests {
     }
 
     #[test]
-    fn compatible_requires_version_and_bin() {
+    fn compatible_requires_version_and_bin() -> Result<()> {
+        use clap::Parser;
         let mut response = test_response("s");
         assert!(compatible(&response));
         response.v = 99;
@@ -1495,6 +1572,43 @@ mod tests {
         assert!(compatible(&response));
         response.code = Some("protocol_version_mismatch".into());
         assert!(!compatible(&response));
+
+        let command = crate::Cli::try_parse_from(["rsrs", "remember", "private content"])?
+            .command.context("remember command missing")?;
+        let veto = if cfg!(windows) {
+            "echo {\"verdict\":\"block\",\"reason\":\"private data\"}"
+        } else {
+            "echo '{\"verdict\":\"block\",\"reason\":\"private data\"}'"
+        };
+        let config = serde_json::from_value(json!({"hooks": {"pre-remember": [
+            {"cmd": veto, "on_error": "skip"}
+        ]}}))?;
+        let blocked = run_plugin_hooks(&command, &config, || panic!("vetoed write reached Runtime"));
+        assert!(blocked.err().context("pre hook did not veto")?.to_string().contains("private data"));
+        let config = serde_json::from_value(json!({"hooks": {"pre-remember": [
+            {"cmd": "exit 1", "on_error": "block"}
+        ]}}))?;
+        assert!(run_plugin_hooks(&command, &config, || panic!("failed pre hook reached Runtime")).is_err());
+
+        let config = serde_json::from_value(json!({"hooks": {"post-remember": [
+            {"cmd": veto}, {"cmd": "exit 1", "on_error": "warn"}
+        ]}}))?;
+        for failed_after_commit in [false, true] {
+            let mut response = test_response("committed");
+            response.ok = !failed_after_commit;
+            response.exit = if failed_after_commit { 1 } else { 0 };
+            response.envelope = Some(ResultEnvelope::new("remember",
+                if failed_after_commit { OutputStatus::Fail } else { OutputStatus::Ok },
+                json!({"host_plugin_events": [{"event": "post-remember", "data": {"id": "committed"}}]}), Vec::new()));
+            let result = run_plugin_hooks(&command, &config, || Ok(response))?;
+            assert_eq!(result.ok, !failed_after_commit);
+            assert_eq!(result.exit, if failed_after_commit { 1 } else { 2 });
+            let envelope = result.envelope.context("missing command result")?;
+            assert_eq!(envelope.errors.len(), 2, "a post veto must not suppress later hooks");
+            assert_eq!(envelope.summary["host_plugin_events"][0]["data"]["id"], "committed");
+        }
+        assert!(run_plugin_hooks(&command, &config, || Ok(test_response("missing-receipts"))).is_err());
+        Ok(())
     }
 
     #[test]
