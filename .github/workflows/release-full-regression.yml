@@ -43,6 +43,5 @@ jobs:
             -f ref="$GITHUB_SHA" -f publish=false -f validation_profile=full \
             -f artifact_source=published-assets \
             -f published_assets="$PUBLISHED_ASSETS" -f published_assets_sha256="$PUBLISHED_ASSETS_SHA256" \
-            -f client2_release="$CLIENT2_RELEASE" -f client2_commit="$CLIENT2_COMMIT" \
-            -f client2_candidate_run_id=
+            -f client2_release="$CLIENT2_RELEASE" -f client2_commit="$CLIENT2_COMMIT"
           echo 'Dispatched final published-assets acceptance. This dispatch is not a validation result; require published-full-complete and published-full-result.json from the Release run.' >> "$GITHUB_STEP_SUMMARY"

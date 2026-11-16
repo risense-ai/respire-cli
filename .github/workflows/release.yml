@@ -41,39 +41,13 @@ on:
         default: ''
         type: string
       client2_release:
-        description: Explicit public Client2 tag; empty selects authenticated CI candidate evidence
+        description: Final public Client2 tag required for published-assets acceptance
         default: ''
         type: string
       client2_commit:
-        description: Exact source commit of the selected Client2 release or candidate
-        default: 6ffa187685734873721ab51f3a54d8b2c29cd269
-        type: string
-      client2_candidate_run_id:
-        description: Client2 Desktop candidate run used before Client2 publication
-        default: '43721147038'
-        type: string
-      prepared_run:
-        description: Completed exact-source main preparation with the same selected validation profile
+        description: Exact source commit of the final public Client2 release
         default: ''
         type: string
-
-      reuse_dev12_validation:
-        description: DEV13 only; rebuild versioned artifacts and reuse successful DEV12 regressions
-        default: false
-        type: boolean
-      repair_dev12:
-        description: Repair only missing linux-arm64-gnu DEV12 using the already validated public release
-        default: false
-        type: boolean
-      repair_dev14:
-        description: Repair only missing linux-arm64-gnu DEV14 using the already validated public release
-        default: false
-        type: boolean
-      resume_dev6_publication:
-        description: Strict publication-only recovery of validated run 38251121403 and immutable dev.6 bytes
-        default: false
-        type: boolean
-
 permissions:
   contents: read
 
@@ -85,11 +59,6 @@ env:
   VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
   RELEASE_REF: ${{ inputs.ref || github.ref }}
   DEV_VERSION: ${{ inputs.dev_version }}
-  PREPARED_RUN: ${{ inputs.prepared_run }}
-  REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
-  REPAIR_DEV12: ${{ inputs.repair_dev12 }}
-  REPAIR_DEV14: ${{ inputs.repair_dev14 }}
-  RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
   GH_TOKEN: ${{ github.token }}
 
 jobs:
@@ -108,11 +77,6 @@ jobs:
       VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
       RELEASE_REF: ${{ inputs.ref || github.ref }}
       DEV_VERSION: ${{ inputs.dev_version }}
-      PREPARED_RUN: ${{ inputs.prepared_run }}
-      REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
-      REPAIR_DEV12: ${{ inputs.repair_dev12 }}
-      REPAIR_DEV14: ${{ inputs.repair_dev14 }}
-      RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -121,8 +85,11 @@ jobs:
       - name: Reject full acceptance before public Release assets exist
         env:
           REQUIRE_FULL: ${{ inputs.full_regression_before_publish }}
+          CLIENT2_RELEASE: ${{ inputs.client2_release }}
+          CLIENT2_COMMIT: ${{ inputs.client2_commit }}
         run: |
           node -e "if(process.env.ARTIFACT_SOURCE==='build'&&(process.env.VALIDATION_PROFILE==='full'||process.env.REQUIRE_FULL==='true'))throw Error('Full acceptance requires artifact_source=published-assets, validation_profile=full and publish=false after final CLI/Runtime/Client2 publication')"
+          node -e "if(process.env.ARTIFACT_SOURCE==='published-assets'&&(!process.env.CLIENT2_RELEASE||!/^[a-f0-9]{40}$/.test(process.env.CLIENT2_COMMIT||'')))throw Error('Final public Client2 tag and exact commit must be explicit')"
       - name: Reject mixed publication and published-asset modes before planning
         id: validated
         run: node npm/scripts/extract-artifact.mjs --validate-published
@@ -163,11 +130,6 @@ jobs:
       VALIDATION_PROFILE: ${{ inputs.validation_profile || 'critical' }}
       RELEASE_REF: ${{ inputs.ref || github.ref }}
       DEV_VERSION: ${{ inputs.dev_version }}
-      PREPARED_RUN: ${{ inputs.prepared_run }}
-      REUSE_DEV12: ${{ inputs.reuse_dev12_validation }}
-      REPAIR_DEV12: ${{ inputs.repair_dev12 }}
-      REPAIR_DEV14: ${{ inputs.repair_dev14 }}
-      RESUME_DEV6: ${{ inputs.resume_dev6_publication }}
       CLI_TARGET: ${{ matrix.target }}
       GH_TOKEN: ${{ github.token }}
     steps:
@@ -222,18 +184,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  reject-prepared-recovery:
-    if: ${{ (inputs.prepared_run != '' && (inputs.reuse_dev12_validation || inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication)) && (inputs.artifact_source || 'build') == 'build' }}
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - run: |
-          echo 'Prepared publication cannot be combined with historical recovery or repair modes.'
-          exit 1
-
   plan:
     needs: artifact-inputs
-    if: ${{ (!inputs.resume_dev6_publication && !(inputs.repair_dev12 || inputs.repair_dev14) && !(inputs.prepared_run != '' && inputs.reuse_dev12_validation)) && (inputs.artifact_source || 'build') == 'build' }}
+    if: ${{ needs.artifact-inputs.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -249,66 +202,7 @@ jobs:
       tag: ${{ steps.plan.outputs.tag }}
       channel: ${{ steps.plan.outputs.channel }}
       publish: ${{ steps.plan.outputs.publish }}
-      reuse_validation: ${{ steps.plan.outputs.reuse_validation }}
-      prepared_run: ${{ steps.prepared.outputs.prepared_run }}
-      prepared_attempt: ${{ steps.prepared.outputs.prepared_attempt }}
-      prepared_artifact_id: ${{ steps.prepared.outputs.prepared_artifact_id }}
-      prepared_artifact_digest: ${{ steps.prepared.outputs.prepared_artifact_digest }}
-      prepared_receipt_sha256: ${{ steps.prepared.outputs.prepared_receipt_sha256 }}
-      prepared_binary_artifact_ids: ${{ steps.prepared.outputs.prepared_binary_artifact_ids }}
     steps:
-      - name: Verify the explicitly approved DEV12 regression reuse
-        id: prior
-        if: inputs.reuse_dev12_validation
-        env:
-          REUSE_REF: ${{ inputs.ref }}
-          REUSE_PUBLISH: ${{ inputs.publish }}
-          REUSE_REPAIR: ${{ inputs.repair_dev12 || inputs.repair_dev14 }}
-          REUSE_FULL: ${{ inputs.full_regression_before_publish }}
-        run: |
-          node - <<'NODE'
-          const fs=require('fs');
-          async function verifyPrior(){
-            if(process.env.REUSE_FULL==='true') throw new Error('Fresh full regression cannot be combined with old regression reuse');
-            const repo=process.env.GITHUB_REPOSITORY,sha='d8314480e10a27767544f781083e35c8e85657f0';
-            if(process.env.GITHUB_EVENT_NAME!=='workflow_dispatch'||process.env.REUSE_PUBLISH!=='true'||
-               process.env.REUSE_REPAIR==='true'||process.env.REUSE_REF!==sha||repo!=='risense-ai/respire-cli') throw new Error('Regression reuse is approved only for the fixed DEV13 source');
-            const read=async path=>{
-              const response=await fetch(`https://api.github.com/repos/${repo}/${path}`,{
-                headers:{Accept:'application/vnd.github+json','User-Agent':'rsrs-release-validation'},signal:AbortSignal.timeout(30000)});
-              if(response.status!==200) throw new Error(`Public DEV12 evidence HTTP ${response.status}`);
-              return response.json();
-            };
-            const run=await read('actions/runs/37716872717');
-            if(run.status!=='completed'||run.conclusion!=='success'||run.head_sha!==sha||
-               run.path!=='.github/workflows/release.yml'||!Number.isInteger(run.run_attempt)) throw new Error('DEV12 source run is not a successful matching release');
-            const page=await read(`actions/runs/37716872717/attempts/${run.run_attempt}/jobs?per_page=100`);
-            if(!Array.isArray(page.jobs)||page.total_count!==page.jobs.length) throw new Error('Incomplete DEV12 latest-attempt jobs');
-            const targets=['x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','x86_64-unknown-linux-musl',
-              'aarch64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc','aarch64-pc-windows-msvc'];
-            const native=targets.map(target=>`validate / native-regression / Native (${target})`);
-            const cloud=['cloud-sweep (ubuntu-latest, x86_64-unknown-linux-musl)',
-              'cloud-sweep (macos-latest, aarch64-apple-darwin)','cloud-sweep (windows-latest, x86_64-pc-windows-msvc)'];
-            for(const name of [...native,...cloud,'api-smoke']){
-              const matching=page.jobs.filter(job=>job.name===name);
-              if(matching.length!==1||matching[0].status!=='completed'||matching[0].conclusion!=='success') throw new Error(`DEV12 regression not successful: ${name}`);
-            }
-            const release=await read('releases/tags/v1.0.11-dev.12');
-            let tag=(await read('git/ref/tags/v1.0.11-dev.12')).object;
-            if(tag.type==='tag') tag=(await read(`git/tags/${tag.sha}`)).object;
-            const expected=targets.flatMap(target=>[`cli-build-${target}.json`,`rsrs-${target}${target.includes('windows')?'.exe':''}`,`rsrs-${target}-runtime.tar.gz`]).sort();
-            if(release.draft||!release.prerelease||release.tag_name!=='v1.0.11-dev.12'||
-               JSON.stringify(release.assets.map(asset=>asset.name).sort())!==JSON.stringify(expected)||
-               tag.type!=='commit'||tag.sha!==sha) throw new Error('Public DEV12 release/source mismatch');
-            const response=await fetch('https://api.dev.rsrs.rs/health',{signal:AbortSignal.timeout(30000)});
-            if(response.status!==200) throw new Error(`DEV server health HTTP ${response.status}`);
-            const health=await response.json();
-            if(health.ok!==true||health.service!=='respire'||health.source_revision!=='63c3da9e64a4ce182bfd802518030b102dd362a3') throw new Error('DEV server changed since the approved regressions');
-            fs.appendFileSync(process.env.GITHUB_OUTPUT,'prior_verified=true\n');
-            console.log('Reusing DEV12 regressions from the same product/SDK source and DEV server; DEV13 artifacts will be rebuilt and checked');
-          }
-          verifyPrior().catch(error=>{console.error(error.message);process.exit(1)});
-          NODE
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref || github.ref }}
@@ -318,7 +212,7 @@ jobs:
         id: validation
         env:
           REQUESTED_PROFILE: ${{ inputs.validation_profile || 'critical' }}
-          REQUIRE_FULL: ${{ inputs.full_regression_before_publish || inputs.reuse_dev12_validation }}
+          REQUIRE_FULL: ${{ inputs.full_regression_before_publish }}
         run: |
           node - <<'NODE'
           const fs=require('fs');
@@ -328,33 +222,11 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT,'profile='+profile+'\n');
           console.log('Synchronous validation profile: '+profile);
           NODE
-      - name: Select an exact completed preparation before any draft/version mutation
-        id: prepared
-        if: inputs.prepared_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREPARED_RUN: ${{ inputs.prepared_run }}
-          CLI_VERSION: ${{ inputs.dev_version }}
-          PREPARED_REQUEST_PUBLISH: ${{ inputs.publish }}
-          VALIDATION_PROFILE: ${{ steps.validation.outputs.profile }}
-        run: |
-          set -euo pipefail
-          test "$PREPARED_REQUEST_PUBLISH" = true
-          CLI_SHA="$(git rev-parse HEAD)" node npm/scripts/release-preparation.mjs inspect
-      - uses: actions/upload-artifact@v4
-        if: inputs.prepared_run != ''
-        with:
-          retention-days: 1
-          name: prepared-consumer-${{ github.run_id }}-${{ github.run_attempt }}
-          path: prepared-consumer.json
-          if-no-files-found: error
       - id: plan
         env:
           RELEASE_REF: ${{ inputs.ref || github.ref }}
           RELEASE_PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
-          REUSE_VALIDATION: ${{ inputs.reuse_dev12_validation }}
-          PRIOR_VERIFIED: ${{ steps.prior.outputs.prior_verified }}
-          RELEASE_DEV_VERSION: ${{ inputs.dev_version || steps.prepared.outputs.prepared_version }}
+          RELEASE_DEV_VERSION: ${{ inputs.dev_version }}
           GH_TOKEN: ${{ github.token }}
         run: |
           node - <<'NODE'
@@ -379,8 +251,6 @@ jobs:
           // Stable promotion stays closed until complete G1 verification is implemented and authorized.
           if(['latest','stable'].includes(channel)) throw new Error('Stable publication is disabled: complete G1 evidence is not verified');
           const sha=cp.execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
-          if(process.env.REUSE_VALIDATION==='true'&&(process.env.PRIOR_VERIFIED!=='true'||
-             version!=='1.0.11-dev.13'||channel!=='dev'||sha!=='d8314480e10a27767544f781083e35c8e85657f0')) throw new Error('Approved regression reuse applies only to DEV13');
           // Drafts reserve DEV numbers; only planning/publication hold this lock.
           if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true'){
             const reservedJson=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/releases?per_page=100`,'--paginate','--jq',`.[] | select(.tag_name=="v${version}") | {draft,prerelease,asset_count:(.assets|length),body}`],{encoding:'utf8'}).trim();
@@ -405,11 +275,11 @@ jobs:
                 '--target',sha,'--title',`v${version}`,'--notes',notes],{stdio:'inherit'});
             }
           }
-          fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\nreuse_validation=${process.env.REUSE_VALIDATION==='true'&&process.env.PRIOR_VERIFIED==='true'}\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,`sha=${sha}\nversion=${version}\ntag=v${version}\nchannel=${channel}\npublish=${process.env.RELEASE_PUBLISH}\n`);
           NODE
 
   validate:
-    if: ${{ always() && ((needs.plan.result == 'success' && (inputs.prepared_run == '') && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
+    if: ${{ always() && ((needs.plan.result == 'success' && (inputs.artifact_source || 'build') == 'build') || (inputs.artifact_source == 'published-assets' && needs.artifact-inputs.result == 'success' && needs.published-assets-verification.result == 'success')) }}
     needs: [plan, artifact-inputs, published-assets-verification]
     permissions:
       contents: write
@@ -420,8 +290,8 @@ jobs:
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       full_validation: false
       client2_release: ${{ inputs.client2_release }}
-      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
-      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
+      client2_commit: ${{ inputs.client2_commit }}
+      client2_candidate_run_id: ''
 
       artifact_source: ${{ inputs.artifact_source || 'build' }}
       published_assets: ${{ inputs.published_assets }}
@@ -439,8 +309,8 @@ jobs:
       version: ${{ inputs.artifact_source == 'published-assets' && needs.artifact-inputs.outputs.version || needs.plan.outputs.version }}
       validation_profile: full
       client2_release: ${{ inputs.client2_release }}
-      client2_commit: ${{ inputs.client2_commit || '6ffa187685734873721ab51f3a54d8b2c29cd269' }}
-      client2_candidate_run_id: ${{ inputs.client2_candidate_run_id || '43721147038' }}
+      client2_commit: ${{ inputs.client2_commit }}
+      client2_candidate_run_id: ''
 
       artifact_source: ${{ inputs.artifact_source || 'build' }}
       published_assets: ${{ inputs.published_assets }}
@@ -917,201 +787,10 @@ jobs:
             ${{ runner.temp }}/published-api-identity.json
           if-no-files-found: error
 
-  preparation-receipt:
-    # This read-only proof is deliberately not a publication fast path. A later
-    # consumer must independently validate its source/attempt, jobs and bytes.
-    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.result == 'success' && needs.validate.result == 'success' && needs.plan.outputs.validation_profile == 'critical' && needs.plan.outputs.sha == github.sha && needs.plan.outputs.publish == 'false' && !inputs.reuse_dev12_validation && !inputs.resume_dev6_publication && !inputs.repair_dev12 && !inputs.repair_dev14 && (inputs.artifact_source || 'build') == 'build' }}
-    needs: [plan, validate]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: cli-release-*
-          path: prepared-assets
-          merge-multiple: true
-      - uses: actions/download-artifact@v4
-        with:
-          name: npm-release-packages
-          path: prepared-packs
-      - name: Bind every successful gate and exact prepared asset/package digest
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
-        run: node npm/scripts/release-preparation.mjs attest prepared-assets prepared-packs release-prepared.json
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: release-prepared-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release-prepared.json
-          if-no-files-found: error
-
-  prepared-import:
-    if: ${{ (inputs.prepared_run != '' && needs.plan.outputs.prepared_run == inputs.prepared_run) && (inputs.artifact_source || 'build') == 'build' }}
-    needs: plan
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      actions: read
-    env:
-      CLI_SHA: ${{ needs.plan.outputs.sha }}
-      CLI_VERSION: ${{ needs.plan.outputs.version }}
-      VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
-      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
-      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
-      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
-      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
-      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ needs.plan.outputs.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/setup-node@v5
-        with:
-          node-version: '24'
-      - name: Pin the same pack tool used during complete preparation
-        run: npm install --global npm@11.5.1
-      - run: node npm/scripts/set-build-version.mjs '${{ needs.plan.outputs.version }}'
-      - name: Select copies from the exact prepared source platform inventory
-        id: platforms
-        run: |
-          node --input-type=module - <<'NODE'
-          import {readFileSync,appendFileSync} from 'node:fs';
-          const m=JSON.parse(readFileSync('npm/artifact-manifest.json'));
-          const targets=m.targets.map(t=>t.triple);
-          const gnu=targets.includes('aarch64-unknown-linux-gnu'),musl=targets.includes('aarch64-unknown-linux-musl');
-          if(gnu!==musl)throw Error('Prepared Linux ARM64 inventory must include both libc routes');
-          appendFileSync(process.env.GITHUB_OUTPUT,`arm64=${gnu}\nwindows_arm64=${targets.includes('aarch64-pc-windows-msvc')}\n`);
-          NODE
-      - name: Require registration before reading cross-run binary artifacts
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node npm/scripts/prepared-import.mjs consumer
-      - uses: actions/download-artifact@v4
-        with:
-          artifact-ids: ${{ needs.plan.outputs.prepared_binary_artifact_ids }}
-          run-id: ${{ needs.plan.outputs.prepared_run }}
-          github-token: ${{ github.token }}
-          path: imported-assets
-          merge-multiple: true
-      - name: Verify original bytes and independently preflight every local npm tarball
-        run: |
-          set -euo pipefail
-          node npm/scripts/verify-packages.mjs imported-assets --assets-only
-          node npm/scripts/assemble-artifacts.mjs imported-assets target/ci
-          node npm/scripts/pack.mjs --root target/ci
-          node npm/scripts/verify-packages.mjs imported-assets --pack imported-packs
-      - name: Record the verified current-run import and original selected-profile validation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node npm/scripts/prepared-import.mjs record imported-assets imported-packs prepared-import.json
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-x86_64-unknown-linux-gnu
-          path: |
-            imported-assets/rsrs-x86_64-unknown-linux-gnu
-            imported-assets/rsrs-x86_64-unknown-linux-gnu-runtime.tar.gz
-            imported-assets/cli-build-x86_64-unknown-linux-gnu.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-x86_64-unknown-linux-musl
-          path: |
-            imported-assets/rsrs-x86_64-unknown-linux-musl
-            imported-assets/rsrs-x86_64-unknown-linux-musl-runtime.tar.gz
-            imported-assets/cli-build-x86_64-unknown-linux-musl.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-x86_64-apple-darwin
-          path: |
-            imported-assets/rsrs-x86_64-apple-darwin
-            imported-assets/rsrs-x86_64-apple-darwin-runtime.tar.gz
-            imported-assets/cli-build-x86_64-apple-darwin.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-aarch64-apple-darwin
-          path: |
-            imported-assets/rsrs-aarch64-apple-darwin
-            imported-assets/rsrs-aarch64-apple-darwin-runtime.tar.gz
-            imported-assets/cli-build-aarch64-apple-darwin.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: cli-release-x86_64-pc-windows-msvc
-          path: |
-            imported-assets/rsrs-x86_64-pc-windows-msvc.exe
-            imported-assets/rsrs-x86_64-pc-windows-msvc-runtime.tar.gz
-            imported-assets/cli-build-x86_64-pc-windows-msvc.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: steps.platforms.outputs.windows_arm64 == 'true'
-        with:
-          retention-days: 1
-          name: cli-release-aarch64-pc-windows-msvc
-          path: |
-            imported-assets/rsrs-aarch64-pc-windows-msvc.exe
-            imported-assets/rsrs-aarch64-pc-windows-msvc-runtime.tar.gz
-            imported-assets/cli-build-aarch64-pc-windows-msvc.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: steps.platforms.outputs.arm64 == 'true'
-        with:
-          retention-days: 1
-          name: cli-release-aarch64-unknown-linux-gnu
-          path: |
-            imported-assets/rsrs-aarch64-unknown-linux-gnu
-            imported-assets/rsrs-aarch64-unknown-linux-gnu-runtime.tar.gz
-            imported-assets/cli-build-aarch64-unknown-linux-gnu.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        if: steps.platforms.outputs.arm64 == 'true'
-        with:
-          retention-days: 1
-          name: cli-release-aarch64-unknown-linux-musl
-          path: |
-            imported-assets/rsrs-aarch64-unknown-linux-musl
-            imported-assets/rsrs-aarch64-unknown-linux-musl-runtime.tar.gz
-            imported-assets/cli-build-aarch64-unknown-linux-musl.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: npm-release-packages
-          path: imported-packs/*
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: prepared-import-${{ github.run_id }}-${{ github.run_attempt }}
-          path: prepared-import.json
-          if-no-files-found: error
-
   publication-ready:
     # Long read-only gates never hold the publication transaction lock.
-    if: ${{ (!cancelled() && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.resume_dev6_publication) && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') || (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success'))) && (inputs.artifact_source || 'build') == 'build' }}
-    needs: [plan, validate, prepared-import]
+    if: ${{ !cancelled() && needs.plan.result == 'success' && needs.plan.outputs.publish == 'true' && needs.validate.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
+    needs: [plan, validate]
     runs-on: ubuntu-latest
     timeout-minutes: 145
     env:
@@ -1119,10 +798,6 @@ jobs:
     permissions:
       contents: read
       actions: read
-    outputs:
-      imported_artifact_id: ${{ steps.imported.outputs.imported_artifact_id }}
-      imported_artifact_digest: ${{ steps.imported.outputs.imported_artifact_digest }}
-      imported_receipt_sha256: ${{ steps.imported.outputs.imported_receipt_sha256 }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1133,7 +808,6 @@ jobs:
         with:
           node-version: '24'
       - name: Require successful CLI CI for this exact source
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 21
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1162,7 +836,6 @@ jobs:
           requireCi().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
       - name: Require every regression in the selected profile before publication
-        if: ${{ inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 121
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1187,26 +860,10 @@ jobs:
           }
           requireRegression().catch(error=>{console.error(error.message);process.exit(1)});
           NODE
-      - name: Require the completed trusted import and original selected-profile validation
-        id: imported
-        if: inputs.prepared_run != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_SHA: ${{ needs.plan.outputs.sha }}
-          CLI_VERSION: ${{ needs.plan.outputs.version }}
-          VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
-          PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
-          PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
-          PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
-          PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
-          PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
-        run: node npm/scripts/prepared-import.mjs readiness
-
   publish:
-    name: ${{ inputs.resume_dev6_publication && 'unused-standard-publish' || 'publish' }}
-    # Every stable/DEV publication waits for the selected profile readiness.
-    needs: [artifact-inputs, plan, validate, prepared-import, publication-ready]
-    if: ${{ (always() && !cancelled() && !inputs.resume_dev6_publication && ((github.event_name == 'workflow_dispatch' && (inputs.repair_dev12 || inputs.repair_dev14) && !inputs.reuse_dev12_validation && inputs.prepared_run == '' && inputs.publish) || (!(inputs.repair_dev12 || inputs.repair_dev14) && needs.plan.result == 'success' && ((inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped') || (inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success' && needs.plan.outputs.prepared_run == inputs.prepared_run)) && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' && (!inputs.reuse_dev12_validation || needs.plan.outputs.reuse_validation == 'true')))) && needs.artifact-inputs.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
+    # Publication requires fresh exact-source validation and current-run readiness.
+    needs: [artifact-inputs, plan, validate, publication-ready]
+    if: ${{ !cancelled() && needs.artifact-inputs.result == 'success' && needs.plan.result == 'success' && needs.validate.result == 'success' && needs.publication-ready.result == 'success' && needs.plan.outputs.publish == 'true' && (inputs.artifact_source || 'build') == 'build' }}
     runs-on: ubuntu-latest
     concurrency:
       group: cli-release-publication
@@ -1214,43 +871,15 @@ jobs:
       cancel-in-progress: false
     env:
       VALIDATION_PROFILE: ${{ needs.plan.outputs.validation_profile }}
-      PREPARED_RUN: ${{ needs.plan.outputs.prepared_run }}
-      PREPARED_ATTEMPT: ${{ needs.plan.outputs.prepared_attempt }}
-      PREPARED_ARTIFACT_ID: ${{ needs.plan.outputs.prepared_artifact_id }}
-      PREPARED_ARTIFACT_DIGEST: ${{ needs.plan.outputs.prepared_artifact_digest }}
-      PREPARED_RECEIPT_SHA256: ${{ needs.plan.outputs.prepared_receipt_sha256 }}
-      IMPORTED_ARTIFACT_ID: ${{ needs.publication-ready.outputs.imported_artifact_id }}
-      IMPORTED_ARTIFACT_DIGEST: ${{ needs.publication-ready.outputs.imported_artifact_digest }}
-      IMPORTED_RECEIPT_SHA256: ${{ needs.publication-ready.outputs.imported_receipt_sha256 }}
-      REPAIR_VERSION: ${{ inputs.repair_dev14 && '1.0.11-dev.14' || '1.0.11-dev.12' }}
-      REPAIR_SHA: ${{ inputs.repair_dev14 && 'fd0e5463f8c59f304ff17d622efb1f6221f9b04c' || 'd8314480e10a27767544f781083e35c8e85657f0' }}
-      REPAIR_RUN: ${{ inputs.repair_dev14 && '37728949557' || '37716872717' }}
-      REUSE_VALIDATED_PACKS: ${{ github.run_attempt == '1' && github.repository == 'risense-ai/respire-cli' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha && inputs.prepared_run == '' && !(inputs.repair_dev12 || inputs.repair_dev14 || inputs.reuse_dev12_validation) }}
+      REUSE_VALIDATED_PACKS: ${{ github.run_attempt == '1' && github.repository == 'risense-ai/respire-cli' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && needs.plan.outputs.sha == github.sha }}
     permissions:
       contents: write
       actions: write
       id-token: write
     steps:
-      - name: Require the exact successful release before single-package repair
-        if: inputs.repair_dev12 || inputs.repair_dev14
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          node - <<'NODE'
-          const cp=require('child_process');
-          const repo=process.env.GITHUB_REPOSITORY;
-          if(repo!=='risense-ai/respire-cli') throw new Error('Repair repository mismatch');
-          const run=JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/actions/runs/${process.env.REPAIR_RUN}`],{encoding:'utf8'}));
-          if(run.status!=='completed'||run.conclusion!=='success'||run.path!=='.github/workflows/release.yml'||
-             run.head_sha!==process.env.REPAIR_SHA) throw new Error('Original release was not verified');
-          const release=JSON.parse(cp.execFileSync('gh',['release','view',`v${process.env.REPAIR_VERSION}`,'--repo',repo,
-            '--json','isDraft,isPrerelease,assets'],{encoding:'utf8'}));
-          if(release.isDraft||!release.isPrerelease||release.assets.length!==21) throw new Error('Repair requires a complete public prerelease');
-          console.log('Verified successful source run and public release; repair is limited to one package');
-          NODE
       - uses: actions/checkout@v5
         with:
-          ref: ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_SHA || needs.plan.outputs.sha }}
+          ref: ${{ needs.plan.outputs.sha }}
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-node@v4
@@ -1258,13 +887,11 @@ jobs:
           node-version: '24'
           registry-url: https://registry.npmjs.org
       - name: Require publication barrier support before any npm write
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         run: |
           # Old refs lacking the protocol must fail before scoped publication.
           test "$(node npm/scripts/release-publication.mjs protocol)" = 2
           node --input-type=module -e "import fs from 'node:fs'; if (JSON.parse(fs.readFileSync('npm/artifact-manifest.json')).npmScope !== 'rsrs-cli') throw Error('New publication requires the direct rsrs-cli launcher')"
       - name: Reject previously fenced version owners before npm or asset mutation
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
@@ -1272,18 +899,8 @@ jobs:
         run: node npm/scripts/release-publication.mjs check-fence-accepted
       - run: npm install --global npm@11.5.1
       - name: Prepare ephemeral build version
-        run: node npm/scripts/set-build-version.mjs ${{ (inputs.repair_dev12 || inputs.repair_dev14) && env.REPAIR_VERSION || needs.plan.outputs.version }}
-      - name: Download the immutable validated public repair assets
-        if: inputs.repair_dev12 || inputs.repair_dev14
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse "v${REPAIR_VERSION}^{commit}")" = "$REPAIR_SHA"
-          test "$(git rev-parse HEAD)" = "$REPAIR_SHA"
-          gh release download "v${REPAIR_VERSION}" --repo risense-ai/respire-cli --dir release-assets
+        run: node npm/scripts/set-build-version.mjs ${{ needs.plan.outputs.version }}
       - uses: actions/download-artifact@v4
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         with:
           pattern: cli-release-*
           path: release-assets
@@ -1302,38 +919,19 @@ jobs:
             node npm/scripts/verify-packages.mjs release-assets --pack npm/publication-packages
           fi
       - uses: actions/upload-artifact@v4
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         with:
           retention-days: 1
           name: npm-publication-packages-${{ github.run_id }}-${{ github.run_attempt }}
           path: npm/publication-packages/*
           if-no-files-found: error
-      - name: Materialize the actual local tarballs for prepared-byte equality checks
-        if: inputs.prepared_run != ''
-        run: node npm/scripts/verify-packages.mjs release-assets --pack npm/release-packages
       - name: Generate release descriptions and the complete commit list
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/release-notes.mjs "$RUNNER_TEMP/release-notes.md"
-      - name: Disclose the approved DEV12 regression reuse in DEV13 release notes
-        if: inputs.reuse_dev12_validation
-        run: |
-          node - <<'NODE'
-          const fs=require('fs'),path=require('path');
-          fs.appendFileSync(path.join(process.env.RUNNER_TEMP,'release-notes.md'),[
-            '', '## DEV13 validation scope', '',
-            'DEV13 is a version-only republication. Product source `d8314480e10a27767544f781083e35c8e85657f0` and Core SDK `1.0.2-dev.4` are unchanged.',
-            'Business regressions reuse the successful [DEV12 release run 37716872717](https://github.com/risense-ai/respire-cli/actions/runs/37716872717) for the same source, SDK and DEV server `63c3da9e64a4ce182bfd802518030b102dd362a3`.',
-            'The 35 historical upgrades, cloud regressions and API regressions were not rerun for DEV13.',
-            'All seven platform binaries are newly built and checked for DEV13. The macOS CPU inference probe and npm package checks are executed separately for these new artifacts.', ''
-          ].join('\n'));
-          NODE
       - name: Preserve durable version ownership in the generated Release notes
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
@@ -1341,7 +939,6 @@ jobs:
           RELEASE_NOTES_FILE: ${{ runner.temp }}/release-notes.md
         run: node npm/scripts/release-publication.mjs bind-fence-notes-accepted
       - name: Create a draft and upload every verified artifact
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
@@ -1371,7 +968,6 @@ jobs:
           if(JSON.stringify(expected)!==JSON.stringify(required)||JSON.stringify(actual)!==JSON.stringify(required)) throw new Error('Draft release must contain every exact-source asset required by the manifest layout');
           NODE
       - name: Reconcile any interrupted previous-attempt npm submission
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
@@ -1379,7 +975,6 @@ jobs:
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/release-publication.mjs guard-accepted
       - name: Publish npm using Trusted Publishing
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_SHA: ${{ needs.plan.outputs.sha }}
@@ -1387,14 +982,13 @@ jobs:
         run: |
           node npm/scripts/pack.mjs --root target/ci --publish --accepted-only --verified-packs npm/publication-packages --tag "$CLI_CHANNEL"
       - uses: actions/upload-artifact@v4
-        if: ${{ always() && !(inputs.repair_dev12 || inputs.repair_dev14) }}
+        if: always()
         with:
           retention-days: 1
           name: npm-submissions-${{ github.run_id }}-${{ github.run_attempt }}
           path: scoped-submissions.json
           if-no-files-found: ignore
       - name: Bind successful scoped npm submissions to the draft
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 20
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1403,126 +997,29 @@ jobs:
           CLI_CHANNEL: ${{ needs.plan.outputs.channel }}
         run: node npm/scripts/release-publication.mjs scoped-accepted
       - uses: actions/upload-artifact@v4
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         with:
           retention-days: 1
           name: scoped-accepted-${{ github.run_id }}-${{ github.run_attempt }}
           path: scoped-accepted.json
           if-no-files-found: error
       - name: Start the matching short-package publisher after scoped acceptance
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh workflow run npm-alias.yml --ref '${{ github.ref_name }}' -f release_run='${{ github.run_id }}' -f release_attempt='${{ github.run_attempt }}'
       - name: Require every matching npm submission acceptance
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         timeout-minutes: 21
         env:
           GH_TOKEN: ${{ github.token }}
         run: node npm/scripts/release-publication.mjs await-alias-accepted
-      - name: Repair only the missing Linux ARM64 GNU package
-        if: inputs.repair_dev12 || inputs.repair_dev14
-        run: |
-          node - <<'NODE'
-          const fs=require('fs'),cp=require('child_process');
-          const name='@rsrsai/linux-arm64-gnu',version=process.env.REPAIR_VERSION;
-          const dir='npm/dist/@rsrsai/linux-arm64-gnu';
-          const pkg=JSON.parse(fs.readFileSync(`${dir}/package.json`,'utf8'));
-          if(pkg.name!==name||pkg.version!==version||JSON.stringify(pkg.os)!=='["linux"]'||
-             JSON.stringify(pkg.cpu)!=='["arm64"]'||JSON.stringify(pkg.libc)!=='["glibc"]') throw new Error('Repair package identity mismatch');
-          async function repair(){
-            const url=`https://registry.npmjs.org/${encodeURIComponent(name)}/${version}?repair=${Date.now()}`;
-            const result=await fetch(url,{headers:{'Cache-Control':'no-cache'},signal:AbortSignal.timeout(30000)});
-            if(result.status===200){
-              const existing=await result.json();
-              if(existing.name!==name||existing.version!==version||!existing.dist?.integrity||!existing.dist?.tarball||
-                 existing.repository?.url!==pkg.repository.url||JSON.stringify(existing.os)!==JSON.stringify(pkg.os)||
-                 JSON.stringify(existing.cpu)!==JSON.stringify(pkg.cpu)||JSON.stringify(existing.libc)!==JSON.stringify(pkg.libc)) throw new Error('Existing repair package metadata mismatch');
-              const packed=cp.spawnSync('npm',['pack',dir,'--json','--pack-destination',process.env.RUNNER_TEMP],{encoding:'utf8'});
-              if(packed.status!==0) throw new Error('Repair package integrity packing failed');
-              const report=JSON.parse(packed.stdout);
-              if(report.length!==1||report[0].name!==name||report[0].version!==version||!report[0].integrity||
-                 report[0].integrity!==existing.dist.integrity) throw new Error('Existing repair package content integrity mismatch');
-              console.log(`${name}@${version} already exists with verified content; no publication or tag changes`);return;
-            }
-            if(result.status!==404) throw new Error(`Registry returned HTTP ${result.status}; publication refused`);
-            const publish=cp.spawnSync('npm',['publish',dir,'--access','public','--tag','dev'],{stdio:'inherit'});
-            if(publish.status!==0) throw new Error('Single-package publication failed; do not overwrite or retry other packages');
-            console.log('Single-package publication accepted; verify registry version, dev tag and tarball visibility separately');
-          }
-          repair().catch(error=>{console.error(error.message);process.exit(1)});
-          NODE
       - name: Make the complete release public
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         env:
           GH_TOKEN: ${{ github.token }}
           CLI_TAG: ${{ needs.plan.outputs.tag }}
           FULL_REGRESSION_REQUIRED: ${{ needs.plan.outputs.validation_profile == 'full' }}
         run: node npm/scripts/release-publication.mjs finalize-accepted
       - uses: actions/upload-artifact@v4
-        if: ${{ !(inputs.repair_dev12 || inputs.repair_dev14) }}
         with:
           retention-days: 1
           name: publication-accepted-${{ github.run_id }}-${{ github.run_attempt }}
           path: publication-accepted.json
           if-no-files-found: error
-
-  dev6-publication-resume:
-    needs: artifact-inputs
-    name: ${{ inputs.resume_dev6_publication && 'publish' || 'unused-dev6-publication-resume' }}
-    if: ${{ (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.resume_dev6_publication && inputs.prepared_run == '') && needs.artifact-inputs.result == 'success' && (inputs.artifact_source || 'build') == 'build' }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    concurrency:
-      group: cli-release-publication
-      queue: max
-      cancel-in-progress: false
-    permissions:
-      contents: write
-      actions: write
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          # Tooling is real current workflow code; product remains pinned f0002c4.
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Revalidate original DEV6 gates, assets and existing npm bytes without publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RECOVERY_REF: ${{ inputs.ref }}
-          RECOVERY_VERSION: ${{ inputs.dev_version }}
-          RECOVERY_PUBLISH: ${{ inputs.publish }}
-          RECOVERY_FULL: ${{ inputs.full_regression_before_publish }}
-          RECOVERY_REUSE: ${{ inputs.reuse_dev12_validation }}
-          RECOVERY_REPAIR12: ${{ inputs.repair_dev12 }}
-          RECOVERY_REPAIR14: ${{ inputs.repair_dev14 }}
-        run: node npm/scripts/release-publication.mjs recovery-ready
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: dev6-recovery-validation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: recovery-validation.json
-          if-no-files-found: error
-      - uses: actions/upload-artifact@v4
-        with:
-          retention-days: 1
-          name: scoped-ready-${{ github.run_id }}-${{ github.run_attempt }}
-          path: scoped-ready.json
-          if-no-files-found: error
-      - name: Start the matching historical short-package publisher
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh workflow run npm-alias.yml --ref '${{ github.ref_name }}' -f release_run='${{ github.run_id }}' -f release_attempt='${{ github.run_attempt }}'
-      - name: Require the matching short-package publisher and public install
-        timeout-minutes: 81
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node npm/scripts/release-publication.mjs await-alias
-      - name: Make the complete original DEV6 release public
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: node npm/scripts/release-publication.mjs finalize

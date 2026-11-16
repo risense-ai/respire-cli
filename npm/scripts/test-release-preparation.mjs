@@ -150,22 +150,13 @@ test('actual synthetic npm packs must match the full exact-version local pack in
   }finally{rmSync(folder,{recursive:true,force:true});}
 });
 
-test('unpublished preparation proof remains read-only and waits for every original producer',()=>{
+test('Release no longer emits or consumes unpublished preparation proofs',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  const job=release.split('\n  preparation-receipt:\n')[1].split(/\n  [a-z][\w-]*:\n/)[0];
-  assert.match(job,/needs: \[plan, validate\]/);
-  assert.doesNotMatch(job,/native-regression|cloud-sweep|native-migration|migration-gate|api-smoke/);
-  assert.match(job,/needs.plan.outputs.publish == 'false'/);assert.match(job,/needs.plan.outputs.validation_profile == 'critical'/);
-  assert.match(job,/github.ref == 'refs\/heads\/main'/);assert.match(job,/needs.plan.outputs.sha == github.sha/);
-  assert.match(job,/contents: read/);assert.match(job,/actions: read/);assert.match(job,/persist-credentials: false/);
-  assert.doesNotMatch(job,/contents: write|actions: write|id-token:|secrets\.|npm publish|npm install|fetch-core-sdk|concurrency:/);
-  assert.match(job,/retention-days: 1/);assert.match(job,/if-no-files-found: error/);
-  const publisher=release.split('\n  publish:\n')[1].split(/\n  [a-z][\w-]*:\n/)[0];
+  assert.doesNotMatch(release,/preparation-receipt:|prepared-import:|release-preparation.mjs|prepared_run/);
+  const publisher=release.split('\n  publish:\n')[1];
   assert.match(publisher,/needs.validate.result == 'success'/);
   assert.match(publisher,/needs.publication-ready.result == 'success'/);
-  assert.doesNotMatch(publisher,/needs.preparation-receipt.result/);
-  assert.match(publisher,/needs.prepared-import.result == 'success'/);
-  assert.match(publisher,/needs.validate.result == 'skipped'/);
+  assert.doesNotMatch(publisher,/needs.validate.result == 'skipped'/);
 });
 
 test('actual attester subprocess reads only main-bound mock APIs and rejects stale/foreign proofs before writing',()=>{
