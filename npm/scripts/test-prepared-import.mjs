@@ -5,29 +5,17 @@ import {validateImportedEvidence,importedAnchor,validateImportAnchor,assertImpor
 import {preparedConsumerFlow} from './fixtures/prepared-consumer-flow.mjs';
 import {readFileSync} from 'node:fs';
 
-test('Release wires registered read-only import and explicit fail-closed publication joins',()=>{
+test('Release requires fresh validation and has no prepared publication entry',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.doesNotMatch(release,/prepared_run|prepared-import|PREPARED_|IMPORTED_/);
   const job=name=>release.split(`\n  ${name}:\n`)[1].split(/\n  [a-z][\w-]*:\n/)[0];
-  const importer=job('prepared-import'),ready=job('publication-ready'),publish=job('publish'),plan=job('plan');
-  assert.match(importer,/contents: read/);assert.match(importer,/actions: read/);
-  assert.doesNotMatch(importer,/id-token:|contents: write|actions: write|secrets\.|fetch-core-sdk|npm publish|concurrency:/);
-  assert(importer.indexOf('prepared-import.mjs consumer')<importer.indexOf('artifact-ids:'));
-  assert(importer.indexOf('--pack imported-packs')<importer.indexOf('prepared-import.mjs record'));
-  assert.match(importer,/run-id: \$\{\{ needs.plan.outputs.prepared_run \}\}/);
-  assert.match(importer,/npm@11\.5\.1/);
-  for(const triple of ['x86_64-unknown-linux-gnu','x86_64-unknown-linux-musl','aarch64-unknown-linux-gnu','aarch64-unknown-linux-musl','aarch64-apple-darwin','x86_64-pc-windows-msvc'])assert(importer.includes('name: cli-release-'+triple));
-  assert(plan.indexOf('release-preparation.mjs inspect')<plan.indexOf('gh\',\[\'release\',\'create'));
-  for(const joined of [ready,publish]){
-    assert.match(joined,/inputs.prepared_run == '' && needs.validate.result == 'success' && needs.prepared-import.result == 'skipped'/);
-    assert.match(joined,/inputs.prepared_run != '' && needs.validate.result == 'skipped' && needs.prepared-import.result == 'success'/);
+  for(const joined of [job('publication-ready'),job('publish')]){
+    assert.match(joined,/needs.validate.result == 'success'/);
+    assert.doesNotMatch(joined,/needs.validate.result == 'skipped'/);
   }
-  assert.match(ready,/prepared-import.mjs readiness/);
+  assert.match(job('publication-ready'),/Require successful CLI CI for this exact source/);
+  const publish=job('publish');
   assert(publish.indexOf('guard-accepted')<publish.indexOf('--publish --accepted-only'));
-  for(const pin of ['PREPARED_ARTIFACT_ID','PREPARED_ARTIFACT_DIGEST','PREPARED_RECEIPT_SHA256','IMPORTED_ARTIFACT_ID','IMPORTED_ARTIFACT_DIGEST','IMPORTED_RECEIPT_SHA256'])assert(publish.includes(pin+':'));
-  const acceptance=readFileSync(new URL('./publication-acceptance.mjs',import.meta.url),'utf8');
-  assert.match(acceptance,/assertImportedContents\(source,m,'release-assets','npm\/release-packages',importPinFromEnv\(\)\)/);
-  const source=readFileSync(new URL('../../.github/workflows/release-validation.yml',import.meta.url),'utf8');
-  assert.match(source,/npm@11\.5\.1/);
 });
 
 test('actual helper processes bind preparation, registered import, readiness and mandatory publication bytes',()=>{

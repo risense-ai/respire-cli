@@ -327,6 +327,10 @@ test('critical publication requires build identity and final full acceptance con
   runInNewContext(guard,{channel:'dev'});
   assert.match(release,/validation_profile:[\s\S]*?default: critical/);
   assert.match(release,/Reject full acceptance before public Release assets exist/);
+  const client2Guard=release.match(/node -e "(if\(process.env.ARTIFACT_SOURCE==='published-assets'.*)"/)[1];
+  for(const env of [{},{CLIENT2_RELEASE:'v2.0.0-dev.6'},{CLIENT2_COMMIT:'c'.repeat(40)},{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'main'}])assert.throws(()=>runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',...env}}}),/must be explicit/);
+  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'c'.repeat(40)}}});
+  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'build'}}});
   assert.doesNotMatch(release,/^  native-regression-critical(?:-readonly)?:/m);
   assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
   assert.match(part('publication-ready'),/Require successful CLI CI for this exact source/);
@@ -335,14 +339,16 @@ test('critical publication requires build identity and final full acceptance con
   assert.match(daily,/-f publish=false -f validation_profile=full/);
   assert.match(daily,/-f artifact_source=published-assets/);
   assert.match(daily,/-f client2_release="\$CLIENT2_RELEASE" -f client2_commit="\$CLIENT2_COMMIT"/);
-  assert.match(daily,/-f client2_candidate_run_id=/);
+  assert.doesNotMatch(daily,/client2_candidate_run_id/);
+  assert.doesNotMatch(release,/43721147038|6ffa187685734873721ab51f3a54d8b2c29cd269/);
   assert.match(text('release-validation.yml'),/full_validation:\n        default: false/);
-  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40),client2_candidate_run_id:''};
+  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40)};
+  for(const call of ['validate','native-regression'].map(part))assert.match(call,/client2_candidate_run_id: ''/);
   for(const call of ['validate','native-regression'].map(part))for(const key of Object.keys(selected)){
     const expression=call.match(new RegExp('^      '+key+': \\$\\{\\{ (.+) \\}\\}$','m'))?.[1];
     assert(expression);
     const actual=runInNewContext(expression,{inputs:selected});
-    if(key!=='client2_candidate_run_id')assert.equal(actual,selected[key]);
+    assert.equal(actual,selected[key]);
   }
 });
 
