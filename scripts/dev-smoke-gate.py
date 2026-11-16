@@ -158,6 +158,15 @@ def verify(args, result):
             "full_library_reencrypted", "original_source_preserved", "original_factors_preserved")),
             "DEV4_original_profile_migration_not_proven")
     result["components"]["login_interruption"] = {"passed": True, "required_observed": 3}
+    if interruption.get("credential_mode") == "secret_service":
+        cases(interruption, {"host_login_continue"}, "login_continuation_case_missing")
+        continued = interruption["cases"]["host_login_continue"]
+        require(all(continued.get(field) is True for field in ("awaiting_input_observed",
+                "original_operation_committed", "recovery_without_authentication_replay",
+                "distinct_transport_ids", "repeated_material_unchanged"))
+                and continued.get("runtime_cleanup", {}).get("passed") is True,
+                "login_continuation_not_proven")
+        result["components"]["login_interruption"]["required_observed"] = 4
 
     mapping = read(Path(__file__).with_name("dev-runtime-business-coverage.json"))
     original = read(Path(__file__).with_name("dev-local-api-coverage.json"))["actions"]

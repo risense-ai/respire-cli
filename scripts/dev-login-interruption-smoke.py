@@ -34,6 +34,14 @@ require = legacy.require
 FAILURE_CODES = frozenset(['cli_expectation_failed', 'API_config_changed', 'DEV4_recovery_failed', 'SIGINT_fixture_requires_linux_pidfd', 'binary_hash_mismatch', 'binary_version_mismatch', 'ciphertext_fixture_missing', 'cleanup_control_helper_still_running', 'cleanup_process_identity_changed', 'cleanup_process_lifetime_unproven', 'cleanup_untracked_group_member', 'commit_barrier_not_reached', 'credential_journal_outside_fixture', 'credential_not_bound_to_fixture_transaction', 'data_key_changed', 'durable_recovery_missing', 'explicit_retry_login_count_changed', 'fresh_fixture_required', 'fresh_login_replaced_maintenance_owner', 'fresh_login_replaced_original_operation', 'fresh_login_replayed_authentication', 'full_library_namespace_not_migrated', 'inconsistent_factors_modified_state', 'inconsistent_profile_overwritten', 'interrupted_control_helper_still_running', 'interrupted_group_still_running', 'interrupted_native_credential_not_deleted', 'interrupted_native_password_not_deleted', 'interrupted_operation_advanced', 'interrupted_phase_not_proven', 'interruption_already_completed', 'interruption_child_not_owned', 'interruption_control_helper_not_bound', 'interruption_group_changed', 'interruption_group_has_unbound_member', 'interruption_session_not_owned', 'invalid_publication_barrier', 'invalid_recovery_action', 'legacy_credential_collision', 'legacy_fixture_requires_clean_journal', 'legacy_interrupted_credential_not_deleted', 'legacy_original_ciphertexts_changed', 'legacy_original_profile_not_restored', 'legacy_recovery_not_retired', 'migrated_fixture_witness_invalid', 'migration_effects_not_exactly_once', 'native_alias_missing', 'native_backend_not_used', 'native_credential_not_written', 'native_fixture_cleanup_failed', 'operation_journal_schema_missing', 'operation_recovery_not_retired', 'original_account_identity_changed', 'original_candidate_changed_during_completion', 'original_ciphertexts_changed', 'original_factors_not_recovered', 'original_login_password_changed', 'original_operation_binding_changed', 'original_operation_invalid', 'original_operation_missing', 'original_operation_not_committed', 'original_operation_not_unique', 'original_password_not_written', 'original_plaintext_not_recovered', 'original_profile_not_discovered', 'original_profile_not_migrated', 'original_profile_not_restored', 'original_profile_selection_failed', 'original_recovery_image_changed', 'original_result_not_repeatable', 'original_rollback_not_confirmed', 'original_source_changed', 'original_terminal_receipt_missing', 'original_vault_factors_changed', 'owned_child_not_interrupted', 'owned_runtime_cleanup_failed', 'password_update_not_authorized', 'publication_checkpoint_not_proven', 'publication_window_not_proven', 'repeated_result_changed_material', 'result_replayed_authentication', 'rollback_receipt_not_retained', 'rollback_replayed_authentication', 'server_transfer_changed_source', 'server_transfer_copy_missing', 'server_transfer_count_failed', 'server_transfer_not_reencrypted', 'server_transfer_remote_duplicated', 'server_transfer_retry_duplicated', 'server_transfer_reused_source', 'server_transfer_sync_warning_missing', 'transfer_push_not_authorized', 'unexpected_private_credential', 'unknown_result_changed_material', 'unknown_result_released_maintenance', 'unknown_result_replayed_effect', 'unknown_rollback_changed_material', 'unknown_rollback_deleted_credentials', 'unowned_fixture_alias', 'unowned_fixture_operation_alias', 'wrong_recovery_modified_state'])
 
 
+FAILURE_CODES = FAILURE_CODES | frozenset({
+    "login_continuation_identity_mismatch", "login_continuation_inputs_mismatch",
+    "login_continuation_transport_mismatch", "login_continuation_envelope_mismatch",
+    "login_continuation_query_failed", "login_continuation_admission_effects_mismatch",
+    "login_continuation_target_escaped", "unowned_fixture_login_custody",
+})
+
+
 @contextmanager
 def fixture_report(args, report):
     report["stage"] = "bootstrap"
@@ -257,6 +265,162 @@ def terminal_operation(journal, record, outcome):
             "original_terminal_receipt_missing")
 
 
+def login_continuation_receipt(summary, operation_id, source, addr, outcome):
+    require(summary.get("operation_id") == operation_id
+            and summary.get("source_profile") == str(source.resolve())
+            and summary.get("outcome") == outcome, "login_continuation_identity_mismatch")
+    login = summary.get("login") or {}
+    require(login.get("user") == "synthetic" and login.get("addr") == addr
+            and login.get("required_inputs") == (["super_password"] if outcome == "awaiting_input" else []),
+            "login_continuation_inputs_mismatch")
+
+
+def runtime_stop_receipt(stopped):
+    require(stopped.returncode == 0, "owned_runtime_cleanup_failed")
+    receipt = json.loads(stopped.stdout)
+    require(receipt.get("status") == "ok" and not receipt.get("errors")
+            and receipt.get("summary", {}).get("state") == "stopped", "owned_runtime_cleanup_failed")
+
+
+def fixture_runtime_owners(directory, images):
+    """Match owned images before reading private profile scope from argv/environment."""
+    images = {Path(image).resolve() for image in images}
+    owners = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
+        try:
+            if entry.stat().st_uid != os.geteuid():
+                continue
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            # Spawned CLI/Runtime argv[0] is its executable path; inspect only those images.
+            if not argv[0] or Path(os.fsdecode(argv[0])).resolve() not in images:
+                continue
+            if (entry / "exe").resolve(strict=True) not in images:
+                continue
+            profiles = [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == b"--data-dir"]
+            profiles.extend(arg.split(b"=", 1)[1] for arg in argv if arg.startswith(b"--data-dir="))
+            environment = (entry / "environ").read_bytes().split(b"\0")
+            profiles.extend(item.split(b"=", 1)[1] for item in environment
+                            if item.startswith(b"RSRS_DATA_DIR="))
+            if not any(Path(os.fsdecode(profile)).resolve().is_relative_to(directory.resolve())
+                       for profile in profiles):
+                continue
+            raw = (entry / "stat").read_text()
+            if raw[raw.rfind(")") + 2:].split()[0] != "Z":
+                owners.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    return owners
+
+
+def host_login_continuation(binary, directory, env, state, addr, code, observation):
+    """Real host admission without a super key; only the original operation may resume."""
+    directory.mkdir(mode=0o700)
+    source, home = directory / "library", directory / "home"
+    source.mkdir(mode=0o700)
+    home.mkdir(mode=0o700)
+    command_env = dict(env, HOME=str(home), RSRS_DATA_DIR=str(source))
+    command_env.pop("RSRS_SUPER", None)
+    command_env.pop("RSRS_RUNTIME_BIN", None)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        command_env["RSRS_RPC_PORT"] = str(listener.getsockname()[1])
+    observation.update(passed=False, stage="runtime_install")
+    installed_runtime = install_published_runtime(binary, command_env)
+    images = [binary]
+    if installed_runtime is not None:
+        images.append(installed_runtime)
+    if command_env.get("RSRS_BIN_DIR"):
+        images.append(Path(command_env["RSRS_BIN_DIR"]) / "rsrs")
+
+    def rpc(method, params, expected_exit):
+        transport_id = "host-login-" + uuid.uuid4().hex
+        request = {"v": 1, "id": transport_id, "method": method, "params": params}
+        result = subprocess.run([str(binary), "--json", "--host-rpc-stdio"],
+            input=json.dumps(request).encode(), env=command_env, capture_output=True, timeout=180)
+        reply = json.loads(result.stdout)
+        envelope = reply.get("envelope") or {}
+        status, outcome = envelope.get("status"), (envelope.get("summary") or {}).get("outcome")
+        observation["last_rpc"] = {"method": method, "exit": result.returncode,
+            "status": status if status in ("pending", "ok", "warn", "fail") else "unrecognized",
+            "outcome": outcome if outcome in ("awaiting_input", "awaiting_verification", "committed",
+                "rolled_back", "pending", "unknown") else "absent-or-unrecognized"}
+        require(result.returncode == expected_exit and reply.get("v") == 1
+                and reply.get("id") == transport_id and reply.get("exit") == expected_exit
+                and reply.get("ok") is (expected_exit == 0), "login_continuation_transport_mismatch")
+        require(envelope.get("status") == ("pending" if expected_exit == 2 else "ok")
+                and not envelope.get("errors"), "login_continuation_envelope_mismatch")
+        return envelope["summary"], transport_id
+
+    def query(expected_exit):
+        result = subprocess.run([str(binary), *account_recovery_flags("account-result", record)],
+            env=command_env, capture_output=True, timeout=180)
+        require(result.returncode == expected_exit, "login_continuation_query_failed")
+        envelope = json.loads(result.stdout)
+        require(envelope.get("status") == ("pending" if expected_exit == 2 else "ok")
+                and not envelope.get("errors"), "login_continuation_envelope_mismatch")
+        return envelope["summary"]
+
+    effects = state["logins"], state["posts"], state["password_posts"]
+    try:
+        observation["stage"] = "admit_without_super"
+        pending, initial_transport = rpc("auth.login",
+            {"addr": addr, "user": "synthetic", "password": "synthetic-password"}, 2)
+        operation_id = pending.get("operation_id")
+        require(isinstance(operation_id, str), "original_operation_missing")
+        parsed = uuid.UUID(operation_id)
+        require(parsed.version == 4 and str(parsed) == operation_id
+                and operation_id != initial_transport, "original_operation_invalid")
+        login_continuation_receipt(pending, operation_id, source, addr, "awaiting_input")
+        journal_path = source / ".login-recovery.json"
+        journal = json.loads(journal_path.read_bytes())
+        rows = [row for row in journal["operations"] if row["operation_id"] == operation_id]
+        require(len(rows) == 1 and rows[0]["idempotency_key"] == operation_id
+                and rows[0]["root"] == str(source.resolve()) and rows[0]["profile"] == str(source.resolve())
+                and journal["active"]["operation_id"] == operation_id, "original_operation_binding_changed")
+        record = rows[0]
+        require((state["logins"], state["posts"], state["password_posts"])
+                == (effects[0] + 1, effects[1], effects[2]), "login_continuation_admission_effects_mismatch")
+        effects = state["logins"], state["posts"], state["password_posts"]
+        observation.update(operation_id=operation_id, stage="query_original_pending")
+        login_continuation_receipt(query(2), operation_id, source, addr, "awaiting_input")
+        require((state["logins"], state["posts"], state["password_posts"]) == effects,
+                "result_replayed_authentication")
+        observation["stage"] = "continue_original"
+        params = {"operation_id": operation_id, "source_profile": str(source.resolve()),
+                  "continuation": {}, "super_password": code}
+        committed, continue_transport = rpc("auth.login.continue", params, 0)
+        require(continue_transport != initial_transport and continue_transport != operation_id,
+                "login_continuation_transport_mismatch")
+        login_continuation_receipt(committed, operation_id, source, addr, "committed")
+        terminal_operation(json.loads(journal_path.read_bytes()), record, "committed")
+        target = Path(committed["target_profile"])
+        require(target.resolve().is_relative_to(directory.resolve()), "login_continuation_target_escaped")
+        session_path = target / "session.json"
+        saved = session_path.read_bytes(), journal_path.read_bytes()
+        observation["stage"] = "recover_committed_original"
+        login_continuation_receipt(query(0), operation_id, source, addr, "committed")
+        repeated, repeated_transport = rpc("auth.login.continue", params, 0)
+        require(repeated_transport not in (initial_transport, continue_transport, operation_id),
+                "login_continuation_transport_mismatch")
+        login_continuation_receipt(repeated, operation_id, source, addr, "committed")
+        require((session_path.read_bytes(), journal_path.read_bytes()) == saved,
+                "repeated_result_changed_material")
+        require((state["logins"], state["posts"], state["password_posts"]) == effects,
+                "result_replayed_authentication")
+        observation.update(stage="committed", awaiting_input_observed=True, original_operation_committed=True,
+            recovery_without_authentication_replay=True, distinct_transport_ids=True, repeated_material_unchanged=True)
+    finally:
+        observation["runtime_cleanup"] = {"passed": False}
+        stopped = subprocess.run([str(binary), "--json", "--runtime-internal", "--stop"],
+            env=command_env, capture_output=True, timeout=60)
+        runtime_stop_receipt(stopped)
+        require(not fixture_runtime_owners(directory, images), "owned_runtime_cleanup_failed")
+        observation["runtime_cleanup"].update(passed=True, stopped_confirmed=True, no_live_owner=True)
+    observation["passed"] = True
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("binary", "root", "model-dir"):
@@ -271,7 +435,8 @@ def main():
     require(not args.root.exists(), "fresh_fixture_required")
     args.root.mkdir(mode=0o700)
     report = {"source_sha": args.source_sha, "version": args.version,
-              "binary_sha256": args.binary_sha256, "passed": False, "cases": {}}
+              "binary_sha256": args.binary_sha256, "passed": False, "cases": {},
+              "credential_mode": "secret_service" if args.native_credentials else "headless"}
     with fixture_report(args, report):
         code = "A3-" + "-".join(secrets.token_hex(3).upper() for _ in range(6))
         urk = secrets.token_bytes(32)
@@ -432,6 +597,12 @@ def main():
         migration_keys = None
         native_aliases = set()
         try:
+            report["stage"] = "host_login_continue"
+            report["cases"]["host_login_continue"] = {"status": "not-evaluated-private-secret-service-required"}
+            if keys:
+                report["cases"]["host_login_continue"] = {}
+                host_login_continuation(args.binary, args.root / "host-login-continue", env, state, addr, code,
+                                        report["cases"]["host_login_continue"])
             report["stage"] = "initial_authentication"
             version = cli("--version").stdout.decode()
             require(args.version in version, "binary_version_mismatch")
@@ -922,6 +1093,18 @@ def main():
                 # Discover interrupted aliases only from our synthetic files, including
                 # failures before a barrier. Never claim arbitrary credential-store items.
                 for path in args.root.rglob("*.json"):
+                    if path.name.startswith("account-login-"):
+                        custody = json.loads(path.read_bytes())
+                        operation_id = custody["operation_id"]
+                        parsed = uuid.UUID(operation_id)
+                        require(parsed.version == 4 and str(parsed) == operation_id
+                                and path == Path(custody["root"]) / "runtime/autostart" / ("account-login-" + operation_id + ".json")
+                                and all(Path(custody[key]).resolve().is_relative_to(args.root.resolve())
+                                        for key in ("root", "source"))
+                                and custody["account"] == "login-" + parsed.hex
+                                and custody["backend"] == "secret_service", "unowned_fixture_login_custody")
+                        native_aliases.add(custody["account"])
+                        continue
                     if path.name not in ("session.json", ".login-recovery.json"):
                         continue
                     value = json.loads(path.read_bytes())
@@ -943,7 +1126,7 @@ def main():
                 # alias from these owned transactions as well as the credential schema.
                 for item in keys.collection.get_all_items():
                     attributes = item.get_attributes()
-                    require(attributes.get("service") == "rsrs" and re.fullmatch(r"(?:super|pass):(?:login-[a-f0-9]{32}|legacy-[a-f0-9]{16})", attributes.get("username", "")), "unexpected_private_credential")
+                    require(attributes.get("service") == "rsrs" and re.fullmatch(r"(?:(?:super|pass):(?:login-[a-f0-9]{32}|legacy-[a-f0-9]{16})|login-control:login-[a-f0-9]{32})", attributes.get("username", "")), "unexpected_private_credential")
                     require(attributes["username"].split(":", 1)[1] in native_aliases,
                             "credential_not_bound_to_fixture_transaction")
                     item.delete()

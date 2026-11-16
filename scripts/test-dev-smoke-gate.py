@@ -1,3 +1,4 @@
+import ast
 import copy
 import importlib.util
 import json
@@ -37,6 +38,37 @@ class BusinessSummaryTests(unittest.TestCase):
             with self.subTest(rows=len(rows), retained=mapping["retained"]):
                 with self.assertRaises(RuntimeError):
                     gate.business_summary(rows, mapping)
+
+
+class LoginContinuationSummaryTests(unittest.TestCase):
+    def test_native_summary_requires_continuation_evidence_and_cleanup(self):
+        tree = ast.parse((root / 'dev-smoke-gate.py').read_text())
+        verify = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'verify')
+        check = next(node for node in verify.body if isinstance(node, ast.If)
+                     and ast.unparse(node.test) == "interruption.get('credential_mode') == 'secret_service'")
+        code = compile(ast.Module(body=[check], type_ignores=[]), '<actual-continuation-summary>', 'exec')
+        observation = {'passed': True, 'awaiting_input_observed': True, 'original_operation_committed': True,
+                       'recovery_without_authentication_replay': True, 'distinct_transport_ids': True,
+                       'repeated_material_unchanged': True, 'runtime_cleanup': {'passed': True}}
+        native = {'credential_mode': 'secret_service', 'cases': {'host_login_continue': observation}}
+        candidates = [(native, None), ({'credential_mode': 'headless', 'cases': {}}, None),
+                      ({'credential_mode': 'secret_service', 'cases': {}}, 'login_continuation_case_missing')]
+        for field in observation:
+            incomplete = copy.deepcopy(native)
+            incomplete['cases']['host_login_continue'].pop(field)
+            candidates.append((incomplete, 'login_continuation_case_missing' if field == 'passed'
+                               else 'login_continuation_not_proven'))
+        for report, error in candidates:
+            with self.subTest(report=report, error=error):
+                result = {'components': {'login_interruption': {'passed': True, 'required_observed': 3}}}
+                scope = dict(interruption=report, result=result, require=gate.require, cases=gate.cases)
+                if error:
+                    with self.assertRaisesRegex(RuntimeError, error):
+                        exec(code, scope)
+                else:
+                    exec(code, scope)
+                    self.assertEqual(result['components']['login_interruption']['required_observed'],
+                                     4 if report['credential_mode'] == 'secret_service' else 3)
 
 
 class MigrationJoinReportTests(unittest.TestCase):
