@@ -29,10 +29,20 @@ class FixtureInstallationTests(unittest.TestCase):
         for variable in ('RSRS_PUBLISHED_RUNTIME_ARCHIVE', 'RSRS_PUBLISHED_RUNTIME_VERSION'):
             self.assertIn('${' + variable + ':?Verified published Runtime ', step)
         self.assertIn('exe="target/ci/${{ matrix.target }}/release/rsrs"', step)
-        self.assertIn('if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi', step)
-        self.assertIn('python scripts/test-runtime-autostart.py --binary "$exe" --register \\\n'
+        self.assertIn('exe="$exe.exe"', step)
+        self.assertIn('py="$RUNNER_TEMP/upgrade-python/bin/python"', step)
+        self.assertIn('py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"', step)
+        self.assertIn('"$py" scripts/test-runtime-autostart.py --binary "$exe" --register \\\n'
                       '            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"', step)
         self.assertLess(workflow.index('run: node npm/scripts/extract-artifact.mjs validated-cli'), workflow.index(name))
+        preparation = 'Prepare isolated upgrade Python and the fixed Windows wheel key'
+        self.assertLess(workflow.index(preparation), workflow.index(name))
+        self.assertEqual(workflow.count('python -m venv "$RUNNER_TEMP/upgrade-python"'), 1)
+        for dependency in ('dbus-x11 gnome-keyring', 'SecretStorage==3.3.3 jeepney==0.9.0'):
+            self.assertEqual(workflow.count(dependency), 1)
+            self.assertLess(workflow.index(dependency), workflow.index(name))
+        self.assertNotIn('login-regression-python', workflow)
+        self.assertIn('dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private "$RUNNER_TEMP/upgrade-python/bin/python" scripts/dev-login-interruption-smoke.py', workflow)
         for forbidden in ('--previous-binary', '--runtime-binary', 'cargo ', 'continue-on-error', '|| true'):
             self.assertNotIn(forbidden, step)
         for actions, runner in [('false', 'github-hosted'), ('true', 'self-hosted'), ('true', '')]:
@@ -54,10 +64,39 @@ class FixtureInstallationTests(unittest.TestCase):
                       '"registration changed the CLI image used for key custody"',
                       '"synthetic native credential cleanup failed; fixture retained"'):
             self.assertIn(proof, source)
+        for proof in ('query.returncode == 0, "unlocked foreground status failed"',
+                      'query.returncode == 2 and status_reply["status"] == "warn"',
+                      'status_reply["summary"]["credential_state"] == "required"',
+                      'status_reply["summary"]["store_ready"] is False'):
+            self.assertIn(proof, source)
         self.assertNotIn('"session.json").write', source)
         self.assertNotIn('keys.put(', source)
         # Execute the actual seeding helper; subprocesses stand in only for this offline contract.
-        seed = runpy.run_path(str(scripts / 'test-runtime-autostart.py'))['seed_local_credentials']
+        helpers = runpy.run_path(str(scripts / 'test-runtime-autostart.py'))
+        seed = helpers['seed_local_credentials']
+        ready = helpers['foreground_health_ready']
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / 'official-runtime'
+            runtime.write_bytes(b'offline-image-never-executed')
+            foreign = root / 'foreign'
+            foreign.mkdir()
+            health = dict(server='respire', managed_id=None, exe=str(runtime),
+                installation_root=str(root), data_dir=str(root), pid=123, instance_id='owned-instance',
+                process_start_id='owned-birth', image_sha256='a'*64, store_ready=False, startup_complete=False)
+            owner, complete = ready(health, root, runtime, False, None)
+            self.assertFalse(complete, 'store_ready=false must not accept incomplete startup')
+            for expected in (False, True):
+                for startup in (None, False, True):
+                    candidate = dict(health, store_ready=expected, startup_complete=startup)
+                    self.assertEqual(ready(candidate, root, runtime, expected, owner)[1], startup is True)
+                self.assertFalse(ready(dict(health, startup_complete=True), root, runtime, not health['store_ready'], owner)[1])
+            for field, value in (('data_dir', str(foreign)), ('installation_root', str(foreign)),
+                                 ('exe', str(root)), ('instance_id', 'replacement'), ('pid', 124),
+                                 ('process_start_id', 'replacement'), ('image_sha256', 'b'*64)):
+                with self.subTest(health=field), self.assertRaises(AssertionError):
+                    ready(dict(health, **{field: value}), root, runtime, False, owner)
+        self.assertIn('health.get("startup_complete") is True', source)
         operation = '12345678-1234-4234-9234-123456789abc'
         alias = 'login-' + operation.replace('-', '')
         for fault in ('', 'keygen', 'handoff', 'locked', 'bound', 'foreign', 'stop'):

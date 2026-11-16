@@ -21,12 +21,26 @@ import time
 import urllib.request
 import uuid
 
+from native_fixture_process import same_existing_path
+
 
 def backend_health(port):
     # These callers verify the native Runtime's OS identity, not the legacy host view.
     request = urllib.request.Request(f"http://127.0.0.1:{port}/api/health",
                                      headers={"X-Respire-Health": "runtime-v1"})
     return urllib.request.urlopen(request, timeout=5)
+
+
+def foreground_health_ready(health, root, runtime, expected_ready, owner):
+    assert health["server"] == "respire" and health["managed_id"] is None, "unexpected foreground owner"
+    assert same_existing_path(health["exe"], runtime), "foreground Runtime image differs"
+    assert same_existing_path(health["installation_root"], root), "foreground installation differs"
+    assert same_existing_path(health["data_dir"], root), "foreground profile differs"
+    assert isinstance(health["instance_id"], str) and health["instance_id"], "foreground instance missing"
+    identity = tuple(health[key] for key in
+                     ("pid", "instance_id", "process_start_id", "image_sha256"))
+    assert owner is None or identity == owner, "foreground owner changed during startup"
+    return identity, health.get("startup_complete") is True and health.get("store_ready") is expected_ready
 
 
 def seed_local_credentials(binary, env, keys):
@@ -190,6 +204,7 @@ def main():
                                          stdout=log, stderr=log)
                 foreground_stopped = False
                 health = None
+                owner = None
                 try:
                     deadline = time.monotonic() + 30
                     while time.monotonic() < deadline:
@@ -199,28 +214,32 @@ def main():
                             with urllib.request.urlopen(
                                 f"http://127.0.0.1:{port}/api/health", timeout=1
                             ) as response:
-                                health = json.load(response)
-                            if health.get("store_ready") is expected_ready:
+                                candidate = json.load(response)
+                            identity, ready = foreground_health_ready(candidate, root, env["RSRS_RUNTIME_BIN"], expected_ready, owner)
+                            assert candidate["pid"] != child.pid, "foreground health identified the CLI instead of Runtime"
+                            health, owner = candidate, identity
+                            if ready:
                                 break
                         except (OSError, ValueError):
                             pass
                         time.sleep(0.1)
-                    assert health and health["store_ready"] is expected_ready, "foreground readiness differs from fixture credentials"
+                    assert health and health.get("startup_complete") is True and health["store_ready"] is expected_ready, "foreground readiness differs from fixture credentials"
                     if not expected_ready:
                         assert health["credential_state"] == "required", "keyless foreground must require credentials"
                         assert not (root / "session.json").exists(), "keyless startup created a session"
                         assert not (root / "rsrs.db").exists() and not (root / "onememory.db").exists(), "keyless startup opened a library"
-                    assert health["pid"] != child.pid and health["managed_id"] is None
-                    assert os.path.samefile(health["exe"], env["RSRS_RUNTIME_BIN"])
-                    assert Path(health["installation_root"]).resolve() == root.resolve()
                     # Status runs inside Runtime and reports its own environment's
                     # autosync switch without needing keys or an inference model.
                     query=command("--client-only","status")
-                    assert query.returncode == 0, f"foreground status RPC failed: {query.stdout} {query.stderr}"
                     status_reply=json.loads(query.stdout)
                     assert status_reply["command"] == "status"
                     if expected_ready:
+                        assert query.returncode == 0, "unlocked foreground status failed"
                         assert status_reply["summary"]["autosync"] is False
+                    else:
+                        assert query.returncode == 2 and status_reply["status"] == "warn", "locked status must report a credential warning"
+                        assert status_reply["summary"]["credential_state"] == "required"
+                        assert status_reply["summary"]["store_ready"] is False
                     assert child.poll() is None, "status RPC terminated the foreground host"
                     stopped = command("runtime", "stop")
                     assert stopped.returncode == 0, stopped.stderr
