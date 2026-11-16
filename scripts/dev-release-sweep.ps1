@@ -1106,8 +1106,6 @@ foreach ($configuredEngine in @('gpu', 'npu')) {
 }
 Invoke-Om -Name 'model-engine-restore-cpu' -ArgList @('--json', 'model', 'engine', 'cpu') -DataDir $DirA -HostProfile | Out-Null
 }
-$probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
-Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok' -and [string]$probe.Envelope.summary.model -eq 'm3' -and [int]$probe.Envelope.summary.dimensions -eq 1024)
 
 if (-not $BusinessOnly) {
 $offlineDir = Join-Path $Root 'offline'
@@ -1141,6 +1139,10 @@ if ($reg.Envelope.summary.super) { $super = [string]$reg.Envelope.summary.super 
 if (-not $super) { throw 'register response has no summary.super' }
 $regAddr = [string]$reg.Envelope.summary.addr
 if ($regAddr -ne $Server) { throw "register address is not the test server: $regAddr" }
+
+# Serving inference requires the explicitly registered fixture's session credentials.
+$probe = Invoke-Om -Name 'model-probe-m3' -ArgList @('--json', 'model', 'probe', '--text', 'isolated release smoke') -DataDir $DirA -TimeoutSec 300
+Assert-Smoke 'model-m3-default-probe-success' ($probe.Ok -and [string]$probe.Envelope.status -eq 'ok' -and [string]$probe.Envelope.summary.model -eq 'm3' -and [int]$probe.Envelope.summary.dimensions -eq 1024)
 
 $st = Invoke-Om -Name 'status-json' -ArgList @('--json', 'status') -DataDir $DirA
 $serverAddr = ''

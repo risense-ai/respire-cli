@@ -855,6 +855,15 @@ fn anonymous_owner_host_config_reports_workers_without_restarting_the_owner() ->
         .join("runtime/autostart/registration.json")
         .exists());
     runtime.stop()?;
+    let (output, result) = runtime.fixture.command(&["config", "--addr", "https://fixture.invalid"])?;
+    anyhow::ensure!(output.status.success(), "idle absent config failed: {result}");
+    assert_eq!(result["summary"]["addr"], "https://fixture.invalid");
+    assert!(!runtime.fixture.marker().exists());
+    assert!(!runtime.fixture.profile.join("session.json").exists());
+    assert!(std::net::TcpStream::connect(("127.0.0.1", runtime.fixture.port)).is_err());
+    let (output, result) = runtime.fixture.command(&["config"])?;
+    anyhow::ensure!(output.status.success(), "idle config read failed: {result}");
+    assert_eq!(result["summary"]["addr"], "https://fixture.invalid");
     Ok(())
 }
 

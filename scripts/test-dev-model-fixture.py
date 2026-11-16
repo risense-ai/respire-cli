@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -113,7 +114,21 @@ class NativeModelCacheTests(unittest.TestCase):
         self.assertIn("enableCrossOsArchive: false", workflow)
         self.assertIn('test "$MATCHED_KEY" = "$EXPECTED_KEY"', workflow)
         self.assertIn('"$exe" --direct model install-m3 --json', workflow)
-        self.assertIn('"$exe" --direct model probe --json', workflow)
+        self.assertIn('const proof = result.details.backend_load.evidence;', workflow)
+        for name, filename in [('release-native-validation.yml', 'native-model-inference.json'),
+                               ('release-validation.yml', 'macos-model-inference.json')]:
+            source = (Path(__file__).parents[1] / '.github/workflows' / name).read_text(encoding='utf-8')
+            start = source.index("          node --input-type=module <<'NODE'", source.index(filename))
+            program = source[start:].split('\n', 1)[1].split('          NODE', 1)[0]
+            with tempfile.TemporaryDirectory() as td:
+                proof = dict(ready=True, inference_completed=True, fresh_session=True, dimensions=1024, selected='CPU')
+                for change in ({}, {'ready': False}, {'inference_completed': False},
+                               {'fresh_session': False}, {'dimensions': 0}, {'selected': 'GPU'}):
+                    (Path(td) / filename).write_text(json.dumps(dict(status='ok',
+                        details=dict(backend_load=dict(evidence=dict(proof, **change))))))
+                    checked = subprocess.run(['node', '--input-type=module', '-e', program],
+                        env=dict(os.environ, RUNNER_TEMP=td), capture_output=True)
+                    self.assertEqual(checked.returncode == 0, not change, checked.stderr.decode())
         self.assertIn('"$py" scripts/test-published-upgrades.py', workflow)
         self.assertIn('UPGRADE_PROFILE: ${{ inputs.validation_profile }}', workflow)
         self.assertIn('--output-dir "$RUNNER_TEMP/published-upgrades" --profile "$UPGRADE_PROFILE"', workflow)

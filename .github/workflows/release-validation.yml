@@ -256,9 +256,19 @@ jobs:
           RSRS_RUNTIME_BIN="$(python scripts/native_fixture_process.py --install-published "$exe")"
           export RSRS_RUNTIME_BIN
           trap 'status=$?; trap - EXIT; "$exe" --json runtime stop || exit 1; exit "$status"' EXIT
-          "$exe" --direct model install-m3 --json
-          "$exe" --json runtime start
-          "$exe" --direct model probe --json
+          "$exe" --direct model install-m3 --json > "$RUNNER_TEMP/macos-model-inference.json"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const result = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/macos-model-inference.json`, 'utf8'));
+          assert.equal(result.status, 'ok');
+          const proof = result.details.backend_load.evidence;
+          assert.equal(proof.ready, true);
+          assert.equal(proof.inference_completed, true);
+          assert.equal(proof.fresh_session, true);
+          assert.equal(proof.dimensions, 1024);
+          assert.equal(proof.selected, 'CPU');
+          NODE
       - name: Prepare versioned CLI artifacts
         if: inputs.artifact_source != 'published-assets'
         run: node npm/scripts/stage-artifacts.mjs ${{ matrix.target }}
