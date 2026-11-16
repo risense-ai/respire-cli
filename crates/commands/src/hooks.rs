@@ -119,6 +119,8 @@ pub struct HookVerdict {
     pub reason: String,
     /// Warnings (`on_error=warn` or plugin stderr summary); the caller may display them.
     pub warnings: Vec<String>,
+    /// Execution faults remain visible to acknowledged host event delivery, including skip policy.
+    pub failures: Vec<String>,
 }
 
 impl HookVerdict {
@@ -143,6 +145,7 @@ pub fn fire(event: HookEvent, payload: serde_json::Value) -> HookVerdict {
             blocked: event.is_pre(),
             reason: format!("invalid plugin configuration: {error:#}"),
             warnings: vec![format!("invalid plugin configuration: {error:#}")],
+            failures: vec![format!("invalid plugin configuration: {error:#}")],
         },
     }
 }
@@ -178,6 +181,7 @@ pub fn fire_config(cfg: &HooksConfig, event: HookEvent, payload: serde_json::Val
                 }
             }
             HookOutcome::Failed(fail) => {
+                verdict.failures.push(format!("hook {} failed: {fail}", spec.cmd));
                 eprintln!("HOOK event={} command={} failed={fail}", event.as_str(), spec.cmd);
                 let policy = if spec.on_error.is_empty() && event.is_pre() {
                     "warn"
@@ -608,6 +612,7 @@ mod tests {
                 event.as_str()
             );
             assert_eq!(!verdict.warnings.is_empty(), warned);
+            assert_eq!(verdict.failures.len(), 1, "execution errors must reach host acknowledgements, including skip");
             assert!(!verdict.reason.contains("failed to start"));
             assert!(verdict
                 .warnings
