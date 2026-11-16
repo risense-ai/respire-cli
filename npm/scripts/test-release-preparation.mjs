@@ -153,9 +153,9 @@ test('actual synthetic npm packs must match the full exact-version local pack in
 test('unpublished preparation proof remains read-only and waits for every original producer',()=>{
   const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const job=release.split('\n  preparation-receipt:\n')[1].split(/\n  [a-z][\w-]*:\n/)[0];
-  assert.match(job,/needs: \[plan, validate, native-regression, native-regression-critical, native-regression-critical-readonly, cloud-sweep, native-migration, migration-gate, api-smoke\]/);
-  assert.match(job,/needs.native-regression-critical-readonly.result == 'skipped'/);
-  assert.match(job,/needs.plan.outputs.publish == 'false'/);assert.match(job,/needs.plan.outputs.validation_profile == 'full'/);assert.match(job,/needs.plan.outputs.validation_profile == 'critical'/);assert.match(job,/always\(\)/);
+  assert.match(job,/needs: \[plan, validate\]/);
+  assert.doesNotMatch(job,/native-regression|cloud-sweep|native-migration|migration-gate|api-smoke/);
+  assert.match(job,/needs.plan.outputs.publish == 'false'/);assert.match(job,/needs.plan.outputs.validation_profile == 'critical'/);
   assert.match(job,/github.ref == 'refs\/heads\/main'/);assert.match(job,/needs.plan.outputs.sha == github.sha/);
   assert.match(job,/contents: read/);assert.match(job,/actions: read/);assert.match(job,/persist-credentials: false/);
   assert.doesNotMatch(job,/contents: write|actions: write|id-token:|secrets\.|npm publish|npm install|fetch-core-sdk|concurrency:/);
@@ -216,12 +216,12 @@ test('actual attester subprocess reads only main-bound mock APIs and rejects sta
 test('preparation profiles preserve old full proofs and reject critical as full authority',()=>{
   const old=fixture();delete old.receipt.validation_profile;validatePreparation(old.receipt,old.context);
   const f=fixture(),c=f.context;
-  c.jobs=c.jobs.filter(j=>!j.name.startsWith('cloud-sweep (')&&!j.name.startsWith('Native migration (')&&!j.name.startsWith('Migration gate ('));
+  c.jobs=c.jobs.filter(j=>j.name.startsWith('validate / ')||j.name==='preparation-receipt');
   c.jobs.at(-1).status='in_progress';delete c.jobs.at(-1).conclusion;delete c.jobs.at(-1).completed_at;c.run.status='in_progress';
   const receipt=createPreparation({...c,profile:'critical'});
   Object.assign(c.jobs.at(-1),{status:'completed',conclusion:'success',completed_at:time(4)});c.run.status='completed';
   assert.equal(receipt.validation_profile,'critical');validatePreparation(receipt,{...c,validation_profile:'critical'});
   assert.throws(()=>validatePreparation(receipt,{...c,validation_profile:'full'}));
   for(const profile of [undefined,'full','invalid']){const r=structuredClone(receipt);if(profile===undefined)delete r.validation_profile;else r.validation_profile=profile;assert.throws(()=>validatePreparation(r,c))}
-  const skipped=structuredClone(c);skipped.jobs.find(j=>j.name.startsWith('native-regression / Native')).conclusion='skipped';assert.throws(()=>validatePreparation(receipt,skipped));
+  const skipped=structuredClone(c);skipped.jobs.find(j=>j.name.startsWith('validate / Release')).conclusion='skipped';assert.throws(()=>validatePreparation(receipt,skipped));
 });

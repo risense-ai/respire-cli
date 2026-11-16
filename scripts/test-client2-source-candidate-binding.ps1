@@ -3,30 +3,76 @@ $ErrorActionPreference='Stop'
 $tokens=$null; $errors=$null
 $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'probe-client2-gui.ps1'),[ref]$tokens,[ref]$errors)
 if ($errors.Count) { throw 'Candidate launcher parse failed' }
-foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath','Copy-SourceClient2Candidate')) {
+foreach ($name in @('Assert-SourceClient2Manifest','Assert-CandidateRegularPath','Copy-SourceClient2Candidate','Assert-DesktopClient2Candidate','Save-DownloadedClient2')) {
     $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
     if ($nodes.Count -ne 1) { throw 'Candidate contract function missing' }
     . ([scriptblock]::Create($nodes[0].Extent.Text))
 }
 $source=$ast.Extent.Text
-foreach ($anchor in @("DefaultParameterSetName=`"Official`"", "release = 'v2.0.0-dev.5'; asset_id = 735418527", "source_sha = 'be682108c555a3e5a788ad74217e088bcb25170b'", "expected_exe_sha256 = '52baecaebfc86426c6bc4d786e07fd8f34a26a61dc8221d628881df13cfddd27'", "https://github.com/risense-ai/respire-client2/releases/download/v2.0.0-dev.5/respire-windows-amd64.exe")) {
-    if (-not $source.Contains($anchor)) { throw 'Official fixture default changed' }
+foreach ($old in @("release = 'v2.0.0-dev.5'", "source_sha = 'be682108", '/releases/download/v2.0.0-dev.5/')) {
+    if ($source.Contains($old)) { throw 'Old Client2 defaults remain' }
 }
 $paramText=$ast.ParamBlock.Extent.Text
 $paramText=$paramText.Substring($paramText.IndexOf('param('))
 $bind=[scriptblock]::Create('[CmdletBinding(DefaultParameterSetName="Official")]'+"`n"+$paramText+"`n"+'return $PSCmdlet.ParameterSetName')
 $common=@{Cli='x';RuntimeArchive='x';RuntimeVersion='1.0.0';OutputDirectory='x'}
-if ((& $bind @common) -cne 'Official' -or (& $bind @common -OfflineAcceptance) -cne 'Official') { throw 'Original parameter binding changed' }
+$official=@{Client2Release='v2.0.0-dev.6';Client2Commit=('a'*40)}
+if ((& $bind @common @official) -cne 'Official' -or (& $bind @common @official -OfflineAcceptance) -cne 'Official') { throw 'Explicit release binding changed' }
+if ((& $bind @common -Client2CandidateRunId 123 -Client2Commit ('a'*40)) -cne 'DesktopCandidate') { throw 'Desktop candidate binding is not distinct' }
+foreach ($name in @('Client2Release','Client2CandidateRunId','Client2Commit')) {
+    $parameter=@($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -ceq $name })
+    if ($parameter.Count -ne 1 -or $parameter[0].DefaultValue -or $parameter[0].Extent.Text -notmatch 'Mandatory') { throw 'Client2 identity input is not explicit and mandatory' }
+}
 if ((& $bind @common -SourceCandidate -SourceClient2Exe x -SourceClient2Manifest x -SourceClient2Commit x) -cne 'SourceCandidate') { throw 'Candidate parameter set is not distinct' }
-$guard=@($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith("if (`$PSCmdlet.ParameterSetName") })
+$identityGuards=@($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith("if (`$PSCmdlet.ParameterSetName -ne 'SourceCandidate'") -or $_.Extent.Text.StartsWith("if (`$PSCmdlet.ParameterSetName -eq 'Official'") })
+if ($identityGuards.Count -ne 2) { throw 'Explicit release identity guards missing' }
+$identityHarness=[scriptblock]::Create('[CmdletBinding(DefaultParameterSetName="Official")]'+"`n"+$paramText+"`n"+($identityGuards.Extent.Text -join "`n"))
+foreach ($case in @('valid','old','invalid_tag','invalid_commit')) {
+    $values=@{Client2Release='v2.0.0-dev.6';Client2Commit=('a'*40)}
+    switch ($case) {
+        'old' { $values.Client2Release='v2.0.0-dev.5' }
+        'invalid_tag' { $values.Client2Release='latest' }
+        'invalid_commit' { $values.Client2Commit='main' }
+    }
+    $accepted=$false
+    try { & $identityHarness @common @values; $accepted=$true } catch {}
+    if ($accepted -ne ($case -in @('valid','old'))) { throw 'Explicit release syntax guard failed; compatibility must be checked by the real probe' }
+}
+$guard=@($ast.EndBlock.Statements | Where-Object { $_.Extent.Text.StartsWith("if (`$PSCmdlet.ParameterSetName -ceq 'SourceCandidate'") })
 if ($guard.Count -ne 1) { throw 'Explicit candidate mode guard missing' }
 $guardHarness=[scriptblock]::Create('[CmdletBinding(DefaultParameterSetName="Official")]'+"`n"+$paramText+"`n"+$guard[0].Extent.Text)
 $caught=$false
 try { & $guardHarness @common -SourceCandidate:$false -SourceClient2Exe x -SourceClient2Manifest x -SourceClient2Commit x } catch { $caught=$true }
 if (-not $caught) { throw 'False candidate switch bypassed explicit mode' }
+$runJson='{"id":123,"head_sha":"COMMIT","repository":{"full_name":"risense-ai/respire-client2"},"head_repository":{"full_name":"risense-ai/respire-client2"},"path":".github/workflows/desktop.yml","event":"pull_request","status":"completed","conclusion":"success"}'
+$artifactJson='{"id":456,"name":"respire-windows-amd64","expired":false,"size_in_bytes":100,"digest":"sha256:DIGEST","workflow_run":{"id":123,"head_sha":"COMMIT"}}'
+foreach ($case in @('valid','run','sha','repository','fork','workflow','event','status','conclusion','artifact_run','artifact_sha','name','expired','digest','size','id')) {
+    $run=$runJson.Replace('COMMIT',('a'*40)) | ConvertFrom-Json
+    $artifact=$artifactJson.Replace('COMMIT',('a'*40)).Replace('DIGEST',('b'*64)) | ConvertFrom-Json
+    switch ($case) {
+        'run' { $run.id=124 }
+        'sha' { $run.head_sha='c'*40 }
+        'repository' { $run.repository.full_name='other/repository' }
+        'fork' { $run.head_repository.full_name='other/repository' }
+        'workflow' { $run.path='.github/workflows/other.yml' }
+        'event' { $run.event='workflow_dispatch' }
+        'status' { $run.status='in_progress' }
+        'conclusion' { $run.conclusion='failure' }
+        'artifact_run' { $artifact.workflow_run.id=124 }
+        'artifact_sha' { $artifact.workflow_run.head_sha='c'*40 }
+        'name' { $artifact.name='respire-windows-arm64' }
+        'expired' { $artifact.expired=$true }
+        'digest' { $artifact.digest='unverified' }
+        'size' { $artifact.size_in_bytes=0 }
+        'id' { $artifact.id=0 }
+    }
+    $accepted=$false
+    try { Assert-DesktopClient2Candidate $run $artifact ('a'*40) '123'; $accepted=$true } catch {}
+    if ($accepted -ne ($case -eq 'valid')) { throw "Desktop candidate provenance guard failed: $case" }
+}
 $root=Join-Path ([IO.Path]::GetTempPath()) ('candidate-contract-'+[guid]::NewGuid().ToString('N'))
 $null=New-Item -ItemType Directory -Path $root
-$saved=@{}; foreach ($name in @('GITHUB_WORKSPACE','RUNNER_TEMP','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB')) { $saved[$name]=[Environment]::GetEnvironmentVariable($name) }
+$saved=@{}; foreach ($name in @('GITHUB_WORKSPACE','RUNNER_TEMP','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB','GH_TOKEN')) { $saved[$name]=[Environment]::GetEnvironmentVariable($name) }
 function Get-Item {
     param($LiteralPath,[switch]$Force,$ErrorAction)
     $item=Microsoft.PowerShell.Management\Get-Item -LiteralPath $LiteralPath -Force -ErrorAction Stop
@@ -80,6 +126,32 @@ try {
         if ($accepted -ne ($case -eq 'valid')) { throw 'Candidate binding accepted invalid provenance or bytes' }
         if ($case -eq 'valid' -and ($result.mode -cne 'source-client2-ui-candidate' -or (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLowerInvariant() -cne $valid.exe_sha256)) { throw 'Candidate copy did not bind actual bytes' }
     }
+    & {
+        $Client2Release='v2.0.0-dev.6'; $Client2Commit='a'*40; $Client2CandidateRunId=$null; $env:GH_TOKEN='synthetic-read-token'
+        function Invoke-RestMethod { param($Headers,$Uri,$TimeoutSec)
+            if ($Uri -like '*/commits/*') { return @{sha=$tagCommit} }; return $release
+        }
+        function Invoke-WebRequest { param($Uri,$OutFile,$TimeoutSec) [IO.File]::WriteAllText($OutFile,'synthetic-not-executable') }
+        $digest='sha256:'+(Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+        foreach ($case in @('valid','draft','tag','commit','missing','duplicate','digestless','digest','size')) {
+            $report=[ordered]@{}; $tagCommit=$Client2Commit
+            $asset=@{id=1;name='respire-windows-amd64.exe';size=(Get-Item -LiteralPath $exe).Length;digest=$digest;browser_download_url='https://example.invalid/test'}
+            $release=@{draft=$false;tag_name=$Client2Release;assets=@($asset)}
+            switch ($case) {
+                'draft' { $release.draft=$true }
+                'tag' { $release.tag_name='v2.0.0-dev.5' }
+                'commit' { $tagCommit='b'*40 }
+                'missing' { $release.assets=@() }
+                'duplicate' { $release.assets=@($asset,$asset) }
+                'digestless' { $asset.digest=$null }
+                'digest' { $asset.digest='sha256:'+('0'*64) }
+                'size' { $asset.size=1 }
+            }
+            $accepted=$false
+            try { Save-DownloadedClient2 (Join-Path $outputRoot ('release-'+$case+'.exe')); $accepted=$true } catch {}
+            if ($accepted -ne ($case -eq 'valid')) { throw "Published Client2 asset guard failed: $case" }
+        }
+    }
     foreach ($badPath in @('\\server\share\candidate.exe','C:\outside-candidate\candidate.exe',($exe+':stream'))) {
         $accepted=$false
         try { $null=Assert-CandidateRegularPath $badPath -File; $accepted=$true } catch {}
@@ -89,4 +161,4 @@ try {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name,$saved[$name]) }
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $root -Recurse -Force
 }
-Write-Host 'PASS: explicit source candidate binding and unchanged official defaults'
+Write-Host 'PASS: explicit release/source/Desktop candidate inputs and authenticated candidate provenance'

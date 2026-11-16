@@ -1717,8 +1717,7 @@ mod tests {
 
     #[test]
     fn rpc_port_reads_env() -> Result<(), String> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = respire_client_host::env::var("RSRS_RPC_PORT").ok();
         std::env::set_var("RSRS_RPC_PORT", "26111");
         let got = rpc_port();
@@ -1794,8 +1793,7 @@ mod tests {
 
     #[test]
     fn token_env_beats_file() -> Result<(), String> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
         let prev_data = respire_client_host::env::var("RSRS_DATA_DIR").ok();
         let prev_tok = respire_client_host::env::var("RSRS_RPC_TOKEN").ok();
@@ -1818,8 +1816,7 @@ mod tests {
 
     #[test]
     fn persist_and_load_token_file() -> Result<(), String> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
 
         let fixture = dir.path().join("token-reader");

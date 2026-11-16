@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Offline fixture regressions; no native credential store or network access."""
 import ast
+from contextlib import closing
 import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -31,6 +33,7 @@ SUPER = 'synthetic-super-never-report'
 
 
 class MemoryKeys(native.TrackedKeys):
+    credential_backend = 'native'
     def __init__(self):
         super().__init__(Path('unused'))
         self.values = {}
@@ -114,14 +117,17 @@ class AliasTests(unittest.TestCase):
                 def cli(env, *args, **kwargs):
                     alias = next(aliases)
                     keys.created(alias, None if version == 1 else SUPER)
-                    current.update(user=USER, keyring_account=alias, token="synthetic-token")
+                    current.update(user=USER, keyring_account=alias, token="synthetic-token", vault_version=version)
+                    if version in (1, 3):
+                        current['legacy_secret_backend'] = 'native'
+                        keys.values['rsrs', 'legacy-secret:' + alias] = 'synthetic-factor'
                     return {'summary': {'ok': True}}
                 smoke.cli = cli
                 smoke.session = lambda env: current
                 for env in ({}, {'RSRS_PASS': PASSWORD}):
                     smoke.password_login(env, USER, PASSWORD, version, SUPER)
                     self.assertIn(('rsrs', 'pass:' + current['keyring_account']), keys.entries)
-                self.assertEqual(len(keys.entries), 2 if version == 1 else 4)
+                self.assertEqual(len(keys.entries), 6 if version == 3 else 4)
                 self.assertTrue(keys.cleanup()['passed'])
                 self.assertFalse(keys.values)
 
@@ -144,7 +150,10 @@ class AliasTests(unittest.TestCase):
                 self.assertNotIn(SUPER, args)
                 self.assertNotIn(PASSWORD, args)
                 keys.created(ALIAS, None if version == 1 else SUPER)
-                current.update(keyring_account=ALIAS, token='synthetic-token')
+                current.update(keyring_account=ALIAS, token='synthetic-token', vault_version=version)
+                if version in (1, 3):
+                    current['legacy_secret_backend'] = 'native'
+                    keys.values['rsrs', 'legacy-secret:' + ALIAS] = 'synthetic-factor'
                 return {'summary': {}}
             smoke.cli = cli
             smoke.session = lambda env: dict(current)
@@ -251,6 +260,111 @@ class AliasTests(unittest.TestCase):
             smoke.password_login({}, USER, PASSWORD, 1, SUPER)
         self.assertFalse(smoke.keys.entries)
 
+    def test_legacy_slot_names_are_bounded_to_owned_aliases_and_current_service(self):
+        keys = MemoryKeys()
+        for alias in (ALIAS, 'legacy-' + 'a' * 16, 'legacy-' + 'b' * 64):
+            keys.reserve('rsrs', 'legacy-secret:' + alias)
+        for prefix in ('super:', 'pass:'):
+            keys.reserve('rsrs', prefix + 'legacy-' + 'b' * 64)
+            with self.assertRaisesRegex(RuntimeError, '^credential_name_not_a_migration_fixture$'):
+                keys.reserve('respire', prefix + 'legacy-' + 'b' * 64)
+        for service, alias in (('1memory', ALIAS), ('rsrs', USER),
+                               ('rsrs', 'legacy-' + 'a' * 17), ('rsrs', 'login-foreign'),
+                               ('rsrs', 'legacy-' + 'a' * 63), ('rsrs', 'legacy-' + 'a' * 65),
+                               ('rsrs', 'legacy-' + 'A' * 64)):
+            with self.assertRaisesRegex(RuntimeError, '^credential_name_not_a_migration_fixture$'):
+                keys.reserve(service, 'legacy-secret:' + alias)
+        foreign_slot = 'legacy-secret:legacy-' + 'c' * 64
+        keys.values['rsrs', foreign_slot] = 'foreign'
+        with self.assertRaisesRegex(RuntimeError, '^fixture_credential_already_exists$'):
+            keys.reserve('rsrs', foreign_slot)
+        with self.assertRaisesRegex(RuntimeError, '^credential_not_owned_by_fixture$'):
+            keys.remove('rsrs', foreign_slot)
+        self.assertTrue(keys.cleanup()['passed'])
+        self.assertEqual(keys.values, {('rsrs', foreign_slot): 'foreign'})
+
+    def test_legacy_custody_and_failed_primary_readback_still_track_cleanup(self):
+        for version in (1, 3):
+            for backend, inline in (('native', False), ('native', True), ('kernel', False)):
+                keys = MemoryKeys()
+                keys.created(ALIAS, None if version == 1 else SUPER)
+                keys.values['rsrs', 'legacy-secret:' + ALIAS] = 'synthetic-factor'
+                session = dict(user=USER, keyring_account=ALIAS, vault_version=version,
+                               legacy_secret_backend=backend)
+                if inline:
+                    session['secret' if version == 1 else 'secret_key'] = 'synthetic-factor'
+                with self.assertRaises(RuntimeError):
+                    keys.track_created_login(session, USER, None if version == 1 else SUPER, 'wrong')
+                report = keys.cleanup()
+                self.assertTrue(report['passed'])
+                # A different backend is never claimed as this manager's slot.
+                self.assertEqual(bool(keys.values), backend != 'native')
+                self.assertNotIn('synthetic-factor', json.dumps(report))
+        for backend in ('native', 'secret_service'):
+            keys = MemoryKeys()
+            keys.credential_backend = backend
+            keys.values['rsrs', 'pass:' + ALIAS] = ''
+            keys.values['rsrs', 'legacy-secret:' + ALIAS] = 'synthetic-factor'
+            session = dict(user=USER, keyring_account=ALIAS, vault_version=1,
+                           legacy_secret_backend=backend)
+            keys.track_created_login(session, USER, None, '')
+            self.assertEqual(keys.read('rsrs', 'pass:' + ALIAS), '')
+            self.assertTrue(keys.cleanup()['passed'])
+            self.assertFalse(keys.values)
+
+    def test_mac_v1_probe_removes_temporary_slot_restores_session_and_keeps_failures(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        import sqlite3
+        for failure in (None, 'show', 'cleanup'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                code, salt, nonce, urk = 'A3-' + 'ab' * 18, 'cd' * 16, bytes(12), bytes(range(32))
+                wrapped = legacy.PREFIX + AESGCM(legacy.v4_kek(code, salt, legacy.PREFIX)).encrypt(nonce, urk, None).hex()
+                session = dict(user=USER, vault_version=4, keyring_account=ALIAS,
+                               keyring_backend='native', kdf_salt=salt, wrapped_urk=wrapped, urk_nonce=nonce.hex())
+                session_path = root / 'session.json'
+                original = json.dumps(session).encode()
+                session_path.write_bytes(original)
+                ciphertext = legacy.PREFIX + AESGCM(legacy.hkdf(urk, None, b'rsrs:data:v1')).encrypt(nonce, b'payload', None).hex()
+                with closing(sqlite3.connect(root / 'rsrs.db')) as db, db:
+                    db.execute('CREATE TABLE memories(id TEXT, ciphertext TEXT, nonce TEXT)')
+                    db.execute('INSERT INTO memories VALUES(?,?,?)', ('fixture', ciphertext, nonce.hex()))
+                keys = MemoryKeys()
+                keys.created(ALIAS, code)
+                keys.track_created_login(session, USER, code, PASSWORD)
+                smoke = object.__new__(profile.Smoke)
+                smoke.root, smoke.keys, smoke.report, smoke.diagnostic_secrets = root, keys, {}, set()
+                smoke.save = lambda: None
+                def cli(env, *args):
+                    if args[0] == 'keys-export':
+                        Path(args[-1]).write_text('super password: ' + code + '\n', encoding='utf-8')
+                        return {}
+                    probe = json.loads(session_path.read_text(encoding='utf-8'))
+                    keys.values['rsrs', 'legacy-secret:' + ALIAS] = probe.pop('secret')
+                    probe['legacy_secret_backend'] = 'native'
+                    session_path.write_text(json.dumps(probe), encoding='utf-8')
+                    if failure == 'show':
+                        raise RuntimeError('synthetic_show_failed')
+                    return {'details': {'entry': {'content': 'text'}}}
+                smoke.cli = cli
+                remove = keys._remove
+                if failure == 'cleanup':
+                    keys._remove = lambda *args: (_ for _ in ()).throw(RuntimeError('synthetic_cleanup_failed'))
+                fixture = dict(account={'user': USER}, code=code, password=PASSWORD, id='fixture', text='text',
+                               cipher=(ciphertext, nonce.hex()))
+                with patch.object(profile.keyring_backend, 'owned_path', lambda path: path):
+                    if failure:
+                        with self.assertRaisesRegex(RuntimeError, '^synthetic_' + failure + '_failed$'):
+                            smoke.verify_mac_native_credentials({'RSRS_DATA_DIR': str(root)}, fixture)
+                    else:
+                        for _ in range(2):
+                            smoke.verify_mac_native_credentials({'RSRS_DATA_DIR': str(root)}, fixture)
+                self.assertEqual(session_path.read_bytes(), original)
+                self.assertFalse(list(root.glob('native-recovery-*.txt')))
+                self.assertEqual(('rsrs', 'legacy-secret:' + ALIAS) in keys.values, failure == 'cleanup')
+                keys._remove = remove
+                self.assertTrue(keys.cleanup()['passed'])
+
 
 class Item:
     def __init__(self, collection, attributes, value):
@@ -319,12 +433,148 @@ class SnapshotTests(unittest.TestCase):
         for forbidden in (PASSWORD, SUPER, USER, ALIAS, OTHER, 'foreign'):
             self.assertNotIn(forbidden, json.dumps(report))
 
+    def test_business_cleanup_accepts_factor_slots_but_never_deletes_foreign_entries(self):
+        self.keys.verify_owner = lambda: None
+        for alias in (ALIAS, 'legacy-' + 'a' * 16, 'legacy-' + 'b' * 64):
+            for prefix in ('pass:', 'super:', 'legacy-secret:'):
+                self.keys.collection.items.append(Item(self.keys.collection,
+                    self.keys.attributes('rsrs', prefix + alias), 'synthetic-factor'))
+        foreign = Item(self.keys.collection,
+            self.keys.attributes('rsrs', 'legacy-secret:' + USER), 'foreign')
+        self.keys.collection.items.append(foreign)
+        before = list(self.keys.collection.items)
+        with self.assertRaisesRegex(RuntimeError, '^unexpected_private_credential$'):
+            self.keys.cleanup_business_entries()
+        self.assertEqual(self.keys.collection.items, before)
+        self.assertEqual(self.keys.business_cleanup['deleted_entries'], 0)
+        self.keys.collection.items.remove(foreign)
+        self.keys.cleanup_business_entries()
+        self.assertFalse(self.keys.collection.items)
+        self.assertTrue(self.keys.business_cleanup['passed'])
+        self.assertEqual(self.keys.business_classification['known_prefix_counts']['legacy-secret:'], 3)
+
     def test_all_tracked_cleanup_is_empty(self):
         self.keys.register_current_target(self.session, USER)
         report = self.keys.cleanup()
         self.assertTrue(report['passed'])
         self.assertEqual(report['provider_schema_baseline']['registered_entries'], 2)
         self.assertFalse(self.keys.collection.items)
+
+
+class UpgradeLibraryStateTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from contextlib import closing
+        import hashlib
+        import sqlite3
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
+        functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                     and node.name in ('recover_fixture_urk', 'library_state', 'snapshot')]
+        namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing)
+        exec(compile(ast.Module(body=functions, type_ignores=[]), '<upgrade-library-fixture>', 'exec'), namespace)
+        cls.helpers = namespace
+
+    def test_actual_seed_setup_covers_legacy_v1_v3_and_current_v4(self):
+        import secrets
+        import tempfile
+        import time
+        from types import SimpleNamespace
+        tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
+        loop = next(node for node in tree.body if isinstance(node, ast.For))
+        body = next(node for node in loop.body if isinstance(node, ast.Try)).body
+        start = next(index for index, node in enumerate(body) if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == 'expected_urks' for target in node.targets))
+        end = next(index for index, node in enumerate(body) if isinstance(node, ast.Assign)
+                   and any(isinstance(target, ast.Name) and target.id == 'seed_env' for target in node.targets))
+        code = compile(ast.Module(body=body[start:end], type_ignores=[]), '<actual-upgrade-seed>', 'exec')
+        for historical in (False, True):
+            with self.subTest(historical=historical), tempfile.TemporaryDirectory() as directory:
+                main, alternate = Path(directory) / 'main', Path(directory) / 'alternate'
+                main.mkdir(); alternate.mkdir()
+                namespace = dict(self.helpers, main=main, alternate=alternate, secrets=secrets, time=time,
+                                 args=SimpleNamespace(seed_binary=historical), code='A3-' + '12' * 18)
+                exec(code, namespace)
+                self.assertEqual(namespace['seed_vault_versions'], [1, 3] if historical else [4, 4])
+                for profile in (main, alternate):
+                    recovered = self.helpers['recover_fixture_urk'](
+                        json.loads((profile / 'session.json').read_text()), namespace['recovery_factors'][str(profile)])
+                    self.assertEqual(recovered, namespace['expected_urks'][str(profile)])
+
+    def test_legacy_session_slot_changes_and_rebuilt_indexes_preserve_real_library_state(self):
+        from contextlib import closing
+        import sqlite3
+        import tempfile
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.exceptions import InvalidTag
+        for version in (1, 3, 4):
+            with self.subTest(version=version), tempfile.TemporaryDirectory() as directory:
+                profile = Path(directory)
+                urk, salt, nonce = bytes(range(32)), 'ab' * 16, bytes.fromhex('cd' * 12)
+                factors = {'pass': PASSWORD, 'super': 'A3-' + '12' * 18,
+                           'secret': 'original-secret', 'secret_key': 'original-secret-key'}
+                def wrap(current, key=urk):
+                    kek = (legacy.v4_kek(factors['super'], salt, legacy.PREFIX if current else '')
+                           if version == 4 else legacy.legacy_kek(version,
+                           factors['pass'] if version == 1 else factors['super'],
+                           factors['secret'] if version == 1 else factors['secret_key'], salt, current=current))
+                    return (legacy.PREFIX if current else '') + AESGCM(kek).encrypt(nonce, key, None).hex()
+                def encrypt(current, payload=b'original record', key=urk):
+                    info = b'rsrs:data:v1' if current else b'onememory:data:v1'
+                    return (legacy.PREFIX if current else '') + AESGCM(legacy.hkdf(key, None, info)).encrypt(nonce, payload, None).hex()
+                session = dict(vault_version=version, kdf_salt=salt, urk_nonce=nonce.hex(),
+                               wrapped_urk=wrap(False), **factors)
+                (profile / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+                (profile / 'core-index').mkdir()
+                (profile / 'core-index/index').write_bytes(b'old index')
+                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    db.executescript('CREATE TABLE memories(id TEXT,ciphertext TEXT,nonce TEXT,dirty INTEGER,deleted INTEGER);'
+                        'CREATE TABLE sync_outbox(seq INTEGER,operation TEXT);'
+                        'CREATE TABLE core_artifacts(memory_id TEXT,model TEXT,source TEXT);')
+                    db.execute('INSERT INTO memories VALUES(?,?,?,?,?)', ('original', encrypt(False), nonce.hex(), 1, 0))
+                    db.execute('INSERT INTO sync_outbox VALUES(1,?)', ('pending original write',))
+                    db.execute('INSERT INTO core_artifacts VALUES(?,?,?)', ('original', 'm3', 'old index source'))
+                snapshot, state = self.helpers['snapshot'], self.helpers['library_state']
+                before = snapshot(profile)
+                expected = state(before, factors)
+                self.assertEqual(expected[2], urk)
+                migrated = {key: value for key, value in session.items() if key not in factors}
+                migrated.update(wrapped_urk=wrap(True), keyring_account='legacy-' + '1' * 16,
+                                keyring_backend='native')
+                (profile / 'session.json').write_text(json.dumps(migrated), encoding='utf-8')
+                (profile / 'core-index/index').write_bytes(b'rebuilt index')
+                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    db.execute('UPDATE memories SET ciphertext=?', (encrypt(True),))
+                    db.execute('UPDATE core_artifacts SET source=?', ('rebuilt source',))
+                self.assertNotEqual(snapshot(profile), before)
+                self.assertEqual(state(snapshot(profile), factors), expected)
+                for field in ('super',) if version == 4 else ('pass', 'secret') if version == 1 else ('super', 'secret_key'):
+                    with self.subTest(wrong_factor=field), self.assertRaises(InvalidTag):
+                        state(snapshot(profile), {**factors, field: 'A3-' + '34' * 18 if field == 'super' and version == 4 else 'wrong'})
+                for mutation, restore in (("UPDATE memories SET id='replacement'", "UPDATE memories SET id='original'"),
+                        ('DELETE FROM memories', None), ('UPDATE memories SET dirty=0', 'UPDATE memories SET dirty=1'),
+                        ('UPDATE memories SET deleted=1', 'UPDATE memories SET deleted=0'),
+                        ('DELETE FROM sync_outbox', "INSERT INTO sync_outbox VALUES(1,'pending original write')")):
+                    with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                        db.execute(mutation)
+                    self.assertNotEqual(state(snapshot(profile), factors), expected)
+                    with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                        if restore is None:
+                            db.execute('INSERT INTO memories VALUES(?,?,?,?,?)', ('original', encrypt(True), nonce.hex(), 1, 0))
+                        else:
+                            db.execute(restore)
+                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    db.execute('UPDATE memories SET ciphertext=?', (encrypt(True, b'changed record'),))
+                self.assertNotEqual(state(snapshot(profile), factors), expected)
+                replacement_urk = bytes(reversed(range(32)))
+                migrated['wrapped_urk'] = wrap(True, replacement_urk)
+                (profile / 'session.json').write_text(json.dumps(migrated), encoding='utf-8')
+                with self.assertRaises(InvalidTag):
+                    state(snapshot(profile), factors)
+                with closing(sqlite3.connect(profile / 'rsrs.db')) as db, db:
+                    db.execute('UPDATE memories SET ciphertext=?', (encrypt(True, key=replacement_urk),))
+                self.assertEqual(state(snapshot(profile), factors)[0], expected[0])
+                self.assertNotEqual(state(snapshot(profile), factors), expected)
 
 
 class OriginalFactorTests(unittest.TestCase):

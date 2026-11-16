@@ -1,9 +1,24 @@
-name: Daily full release regression
+name: Final published release regression
 
 on:
-  schedule:
-    - cron: '0 3 * * *'
   workflow_dispatch:
+    inputs:
+      published_assets:
+        description: Exact schema-2 inventory of final public CLI and Runtime asset IDs and hashes
+        required: true
+        type: string
+      published_assets_sha256:
+        description: SHA-256 of the exact published_assets input bytes
+        required: true
+        type: string
+      client2_release:
+        description: Final public Client2 tag; independent of CLI and Runtime versions
+        required: true
+        type: string
+      client2_commit:
+        description: Exact source commit of the final public Client2 release
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,12 +28,21 @@ jobs:
   full-validation:
     runs-on: ubuntu-latest
     steps:
-      - name: Start a nonpublishing full run with its own complete evidence
+      - name: Start one full acceptance against the final public product assets
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
+          PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+          PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+          CLIENT2_RELEASE: ${{ inputs.client2_release }}
+          CLIENT2_COMMIT: ${{ inputs.client2_commit }}
         run: |
-          gh workflow run release.yml --repo "$REPOSITORY" --ref main \
-            -f ref=main -f publish=false -f validation_profile=full \
-            -f full_regression_before_publish=true
-          echo 'The dispatched Release run reports full results and source-bound evidence; this dispatch is not a validation result.' >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          test -n "$CLIENT2_RELEASE" && test -n "$CLIENT2_COMMIT"
+          gh workflow run release.yml --repo "$REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f ref="$GITHUB_SHA" -f publish=false -f validation_profile=full \
+            -f artifact_source=published-assets \
+            -f published_assets="$PUBLISHED_ASSETS" -f published_assets_sha256="$PUBLISHED_ASSETS_SHA256" \
+            -f client2_release="$CLIENT2_RELEASE" -f client2_commit="$CLIENT2_COMMIT" \
+            -f client2_candidate_run_id=
+          echo 'Dispatched final published-assets acceptance. This dispatch is not a validation result; require published-full-complete and published-full-result.json from the Release run.' >> "$GITHUB_STEP_SUMMARY"

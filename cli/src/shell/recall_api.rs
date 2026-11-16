@@ -19,27 +19,28 @@ pub(super) struct Form {
 }
 
 pub(super) fn base() -> Result<String> {
-    Ok(respire_client_host::settings::read_agent_config()?["recall_api_base"]
-        .as_str()
-        .map(str::to_owned)
-        .or_else(provider_settings::load_ds_last_base)
-        .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned()))
+    let config = respire_client_host::settings::read_agent_config()?;
+    match config["recall_api_base"].as_str() {
+        Some(base) => Ok(base.to_owned()),
+        None => Ok(provider_settings::load_ds_last_base()?
+            .unwrap_or_else(|| crate::classify::DEFAULT_DS_BASE.to_owned())),
+    }
 }
 
-fn key_for(base: &str) -> Option<String> {
-    respire::env::var("RSRS_RECALL_API_KEY")
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .or_else(|| {
-            provider_settings::load_classify_key(&format!(
-                "ds@{}",
-                provider_settings::host_of(base)
-            ))
-        })
+fn key_for(base: &str) -> Result<Option<String>> {
+    match respire::env::var("RSRS_RECALL_API_KEY") {
+        Ok(key) if !key.trim().is_empty() => return Ok(Some(key)),
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("RSRS_RECALL_API_KEY is not valid Unicode"),
+    }
+    provider_settings::load_classify_key(&format!(
+        "ds@{}",
+        provider_settings::host_of(base)
+    ))
 }
 
 pub(super) fn ready() -> Result<bool> {
-    Ok(key_for(&base()?).is_some())
+    Ok(key_for(&base()?)?.is_some())
 }
 
 impl Form {
@@ -93,7 +94,7 @@ impl Form {
         self.saving = Some((Instant::now(), receiver));
         self.error.clear();
         std::thread::spawn(move || {
-            let _ = sender.send(Self::save(&values).map_err(|error| error.to_string()));
+            let _ = sender.send(Self::save(&values).map_err(|error| format!("{error:#}")));
         });
     }
 
@@ -150,7 +151,7 @@ impl Form {
             )
         );
         anyhow::ensure!(
-            !key.is_empty() || key_for(base).is_some(),
+            !key.is_empty() || key_for(base)?.is_some(),
             "{}",
             t(
                 "\u{8bf7}\u{8f93}\u{5165}\u{6b64}\u{5730}\u{5740}\u{7684} API Key",
@@ -167,6 +168,7 @@ impl Form {
             retrieval_action(&["agent-config", "--set", &format!("{name}={value}")])
                 .map_err(|e| anyhow!(e))?;
         }
+        respire_host_control::lifecycle_io::refresh_running_runtime_credentials()?;
         Ok(())
     }
 

@@ -1,4 +1,4 @@
-// Read-only evidence for reusing fully validated, exact-source release bytes.
+// Read-only evidence for reusing exact-source bytes validated by the selected profile.
 // A preparation is never npm acceptance and never authorizes stale writes.
 import {createHash} from 'node:crypto';
 import {lstatSync,readFileSync,readdirSync,writeFileSync} from 'node:fs';
@@ -74,7 +74,7 @@ export function preparationValidation(jobs,ci,source,manifest,profile='full'){
     at=Math.max(at,completed(matching[0],name));
   }
   const inventory=regressionContract(manifest,profile);
-  requireValue(regressionStatus(jobs,inventory)==='success','Prepared regressions are incomplete');
+  requireValue(regressionStatus(jobs,inventory)==='success','Prepared selected-profile gates are incomplete');
   const regressionAt=regressionCompletedAt(jobs,inventory,new Date(at).toISOString());
   requireValue(regressionAt!==null,'Prepared regression completion time is missing');
   return {inventory,completed_at:new Date(Math.max(at,regressionAt)).toISOString(),

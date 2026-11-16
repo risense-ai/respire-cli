@@ -499,6 +499,7 @@ function Find-OfflineControl([string]$Type, [string]$Name, [double]$Seconds = 10
     $clock = [Diagnostics.Stopwatch]::StartNew()
     if ($ObserveStartStopSelector) {
         # Historical selector observations only, never an acceptance condition.
+        $report.offline.runtime_binding_stage = 'stop_control'
         $report.offline.runtime_start_stop_selector = @{state='unobservable';complete_samples=0}
     }
     do {
@@ -1238,6 +1239,8 @@ function Read-OfflineHttp([string]$Path, $Body = $null) {
     if ($Path -notin @('/api/health','/api/rpc')) { throw 'Offline oracle permits only fixed local health/RPC paths' }
     $request = [Net.HttpWebRequest]::Create('http://127.0.0.1:' + $binding.rpc_port + $Path)
     $request.Proxy = $null; $request.Timeout = 10000; $request.ReadWriteTimeout = 10000
+    # Match Client2's health request: verify the Runtime actor behind the CLI compatibility host.
+    if ($Path -eq '/api/health') { $request.Headers['X-Respire-Health'] = 'runtime-v1' }
     if ($null -ne $Body) {
         $request.Method = 'POST'; $request.ContentType = 'application/json'
         $bytes = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Compress -Depth 6))
@@ -1259,21 +1262,34 @@ function Read-OfflineHttp([string]$Path, $Body = $null) {
     } finally { $response.Dispose() }
 }
 function Bind-OfflineRuntime {
+    $report.offline.runtime_binding_stage = 'health'
     $health = Read-OfflineHttp '/api/health'
+    $report.offline.runtime_binding_stage = 'process'
     $process = Get-Process -Id $health.pid -ErrorAction Stop
+    $report.offline.runtime_binding_stage = 'cim'
     $record = Get-CimInstance Win32_Process -Filter "ProcessId=$($health.pid)"
-    if ($health.server -ne 'respire' -or $health.v -ne 1 -or
-        -not [string]::Equals($health.exe,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase) -or
-        -not [string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase) -or
-        -not $record -or $process.SessionId -ne $binding.session_id -or
-        (Get-FileHash -LiteralPath $process.Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $binding.runtime_sha256) {
+    $report.offline.runtime_binding_stage = 'identity'
+    # Rust canonicalize uses the extended Windows namespace for the same local image.
+    $healthImage = [string]$health.exe
+    if ($healthImage.StartsWith('\\?\', [StringComparison]::Ordinal)) { $healthImage = $healthImage.Substring(4) }
+    # Record only original short-circuit comparisons; never export raw identity fields.
+    $report.offline.runtime_binding_checks=@{}
+    $identityChecks=$report.offline.runtime_binding_checks
+    if (-not ($identityChecks.server=(-not ($health.server -ne 'respire'))) -or
+        -not ($identityChecks.protocol=(-not ($health.v -ne 1))) -or
+        -not ($identityChecks.health_image=[string]::Equals($healthImage,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase)) -or
+        -not ($identityChecks.process_image=[string]::Equals($process.Path,$binding.runtime_exe,[StringComparison]::OrdinalIgnoreCase)) -or
+        -not ($identityChecks.data_directory=[string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase)) -or
+        -not ($identityChecks.process_record=[bool]$record) -or
+        -not ($identityChecks.session=(-not ($process.SessionId -ne $binding.session_id))) -or
+        -not ($identityChecks.image_digest=(-not ((Get-FileHash -LiteralPath $process.Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $binding.runtime_sha256)))) {
         throw 'Offline Runtime health/process/profile/hash binding failed'
     }
     $script:offlineRuntime = @{pid=$process.Id; started_ticks=$process.StartTime.ToUniversalTime().Ticks; record=$record}
     # Store process identity only, never the session/keygen payload.
     $report.offline.runtime_process = $record | Select-Object ProcessId,ParentProcessId,ExecutablePath,CreationDate,SessionId,@{Name="creation_utc_ticks";Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)}}
     $report.offline.runtime_bound = $true
+    $report.offline.runtime_binding_stage = 'bound'
     # Persist only the guarded actor record before credential verification or business action.
     # The parent can still clean this detached actor if this helper reaches its watchdog.
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'),
@@ -1456,6 +1472,7 @@ function Invoke-OfflineGuiAcceptance {
     Wait-OfflineRecoveryDismissed
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
+    $report.offline.runtime_binding_stage = 'start_control'
     $report.offline.action_stage = 'runtime_start'
     Press-OfflineButton ([regex]::Unescape('\u005e\u542f\u52a8\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024'))
     $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) 60 -ObserveStartStopSelector

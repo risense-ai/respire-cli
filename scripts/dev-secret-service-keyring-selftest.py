@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hosted private D-Bus credential checks, optionally around existing business tests."""
+"""Owned credential checks on a private bus or an explicitly verified hosted user bus."""
 import argparse
 import importlib.util
 import json
@@ -78,11 +78,12 @@ def business_check(manager, env, command, roundtrips, run=run_command, *, timeou
 
 def self_test():
     from types import SimpleNamespace
-    from unittest.mock import patch
+    from unittest.mock import MagicMock, patch
 
     backend = load("pure_secret_service_environment", "dev-migration-secret-service.py")
     keys = object.__new__(backend.SecretServiceKeys)
     keys.bus = "unix:private-fixture"
+    keys.bus_mode = "private"
     keys.private_env = {key: "private-fixture" for key in (
         "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_RUNTIME_DIR")}
     with patch.object(backend._base, "owned_path", lambda path: path):
@@ -94,6 +95,56 @@ def self_test():
     assert all(env[key] == value for key, value in keys.private_env.items())
     assert not any(key in env for key in ("DBUS_STARTER_ADDRESS", "GNOME_KEYRING_CONTROL", "GH_TOKEN"))
     assert env["HOME"] == env["USERPROFILE"] == "fixture-home"
+    keys.bus_mode = "hosted-user"
+    keys.bus = "unix:path=/run/user/123/bus"
+    keys.private_env["XDG_RUNTIME_DIR"] = "/run/user/123"
+    with patch.object(backend._base, "owned_path", lambda path: path):
+        env = keys.configure_business_env({"HOME": "fixture-home", "USERPROFILE": "fixture-home"})
+    assert env["RSRS_SS_FIXTURE_BUS"] == "hosted-user"
+    assert env["DBUS_SESSION_BUS_ADDRESS"] == keys.bus and env["XDG_RUNTIME_DIR"] == "/run/user/123"
+    assert env["HOME"] == env["USERPROFILE"] == "fixture-home"
+
+    runtime, bus = MagicMock(), MagicMock()
+    runtime.__str__.return_value = "/run/user/123"
+    bus.__str__.return_value = "/run/user/123/bus"
+    runtime.__truediv__.return_value = bus
+    runtime.is_symlink.return_value = bus.is_symlink.return_value = False
+    runtime.is_dir.return_value = bus.exists.return_value = True
+    runtime.stat.return_value = SimpleNamespace(st_uid=123, st_mode=backend.stat.S_IFDIR | 0o700)
+    bus.stat.return_value = SimpleNamespace(st_uid=123, st_mode=backend.stat.S_IFSOCK | 0o600)
+    hosted = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted"}
+    with patch.object(backend.sys, "platform", "linux"), \
+            patch.object(backend.os, "getuid", return_value=123, create=True), \
+            patch.object(backend, "Path", return_value=runtime), \
+            patch.dict(os.environ, hosted, clear=True):
+        session = backend.hosted_user_bus_environment()
+        assert session == {"XDG_RUNTIME_DIR": "/run/user/123",
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/bus", "RSRS_SS_FIXTURE_BUS": "hosted-user"}
+        for invalid in ({"RUNNER_ENVIRONMENT": "self-hosted"}, {"GITHUB_ACTIONS": "false"},
+                        {"RSRS_SS_FIXTURE_BUS": "private"}):
+            with patch.dict(os.environ, invalid):
+                try:
+                    backend.hosted_user_bus_environment()
+                except RuntimeError as error:
+                    assert str(error) == "hosted_user_bus_requires_dedicated_linux_runner"
+                else:
+                    raise AssertionError("unverified hosted session accepted")
+        for owner, mode in ((999, backend.stat.S_IFSOCK), (123, backend.stat.S_IFREG)):
+            bus.stat.return_value = SimpleNamespace(st_uid=owner, st_mode=mode)
+            try:
+                backend.hosted_user_bus_environment()
+            except RuntimeError as error:
+                assert str(error) == "hosted_user_bus_socket_invalid"
+            else:
+                raise AssertionError("unowned or nonsocket bus accepted")
+    with patch.object(backend._base.TrackedKeys, "__init__", lambda *args: None), \
+            patch.object(backend.sys, "platform", "linux"), patch.dict(os.environ, session, clear=True):
+        try:
+            backend.SecretServiceKeys(Path("unused"))
+        except RuntimeError as error:
+            assert str(error) == "private_fixture_session_bus_required"
+        else:
+            raise AssertionError("private mode accepted the hosted bus")
 
     items = []
     keys.verify_owner = lambda: None
@@ -200,6 +251,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--hosted-user-bus", action="store_true",
+                        help="Use the verified dedicated Linux runner bus for real systemd registration")
     args = parser.parse_args(sys.argv[1:separator])
     fixture.backend.require(1 <= args.timeout <= 6600, "business_timeout_out_of_bounds")
     command = sys.argv[separator + 1:]
@@ -213,10 +266,22 @@ def main():
         home = root / "business-home"
         home.mkdir(mode=0o700)
         env = dict(os.environ, HOME=str(home), USERPROFILE=str(home))
-        manager = fixture.backend.create(root / "keyring-home")
+        if args.hosted_user_bus:
+            session = fixture.backend.hosted_user_bus_environment()
+            os.environ.update(session)
+            env.update(session)
+        manager = fixture.backend.create(root / "keyring-home", hosted_user_bus=args.hosted_user_bus)
         code, report = business_check(manager, env, command, fixture.roundtrips, timeout=args.timeout)
-    except Exception:
+    except Exception as error:
         report["diagnostic_failed"] = True
+        if isinstance(error, RuntimeError) and str(error) in {
+                "hosted_user_bus_requires_dedicated_linux_runner", "hosted_user_runtime_directory_invalid",
+                "hosted_user_bus_socket_invalid", "hosted_user_bus_environment_mismatch",
+                "hosted_user_systemd_owner_missing", "hosted_user_systemd_owner_mismatch",
+                "fixture_bus_already_has_secret_service", "fixture_default_collection_not_empty",
+                "fixture_secret_service_initialization_failed"}:
+            report["failure_code"] = str(error)
+    report["bus_mode"] = "hosted-user" if args.hosted_user_bus else "private"
     (root / "business-keyring-selftest.json").write_text(
         json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({"stage": report["stage"], "passed": report["passed"],

@@ -74,7 +74,10 @@ class TrackedKeys:
 
     def reserve(self, service, slot):
         require(service in ("1memory", "memocap", "respire", "rsrs")
-                and re.fullmatch(r"(?:super|pass):(?:ci-migrate-[a-f0-9]{16}|legacy-[a-f0-9]{16})", slot),
+                and (re.fullmatch(r"(?:super|pass):(?:ci-migrate-[a-f0-9]{16}|legacy-[a-f0-9]{16})", slot)
+                     or service == "rsrs" and re.fullmatch(
+                         r"(?:super|pass):legacy-[a-f0-9]{64}"
+                         r"|legacy-secret:(?:login-[a-f0-9]{32}|legacy-(?:[a-f0-9]{16}|[a-f0-9]{64}))", slot)),
                 "credential_name_not_a_migration_fixture")
         entry = (service, slot)
         if entry in self.entries:
@@ -96,17 +99,31 @@ class TrackedKeys:
         alias = session.get("keyring_account")
         require(isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias),
                 "login_credential_fixture_alias_invalid")
-        for prefix, expected in (("super:", super_password), ("pass:", login_password)):
-            if expected is None:
-                continue
+        slots = [(prefix, expected) for prefix, expected in
+                 (("super:", super_password), ("pass:", login_password)) if expected is not None]
+        legacy = session.get("vault_version") in (1, 3)
+        custody = (not legacy or session.get("legacy_secret_backend") == self.credential_backend
+                   and self.credential_backend in ("native", "secret_service")
+                   and all(key not in session for key in ("pass", "super", "secret", "secret_key")))
+        if legacy and session.get("legacy_secret_backend") == self.credential_backend:
+            slots.append(("legacy-secret:", None))
+        found = []
+        for prefix, expected in slots:
             entry = ("rsrs", prefix + alias)
-            require(entry not in self.entries and self._read(*entry) is not None,
-                    "login_credential_fixture_alias_not_created")
-            self.entries.add(entry)
+            require(entry not in self.entries, "login_credential_fixture_alias_not_created")
+            present = self._read(*entry) is not None
+            found.append(present)
+            if present:
+                self.entries.add(entry)
+        require(all(found), "login_credential_fixture_alias_not_created")
+        require(custody, "login_legacy_credential_custody_invalid")
+        for prefix, expected in slots:
             # macOS keeps the product ACL unchanged; the CLI consumer verifies
             # its values separately, while metadata suffices for exact cleanup.
             if sys.platform != "darwin":
-                require(self.read(*entry) == expected, "login_credential_fixture_value_changed")
+                value = self.read("rsrs", prefix + alias)
+                require(value == expected if expected is not None else bool(value),
+                        "login_credential_fixture_value_changed")
 
     def put(self, service, slot, value):
         self.reserve(service, slot)
@@ -133,6 +150,7 @@ class TrackedKeys:
 
 class LinuxKeys(TrackedKeys):
     name = "linux-keyutils"
+    credential_backend = "kernel"
     no_entry_errors = (getattr(errno, "ENOKEY", 126), errno.EACCES,
                        getattr(errno, "EKEYREVOKED", 128), getattr(errno, "EKEYEXPIRED", 127))
 
@@ -200,6 +218,7 @@ class LinuxKeys(TrackedKeys):
 
 class WindowsKeys(TrackedKeys):
     name = "windows-credential-manager"
+    credential_backend = "native"
 
     def __init__(self, root):
         super().__init__(root)
@@ -255,6 +274,7 @@ class WindowsKeys(TrackedKeys):
 
 class MacKeys(TrackedKeys):
     name = "macos-keychain-synthetic-acl"
+    credential_backend = "native"
 
     def __init__(self, root):
         super().__init__(root)

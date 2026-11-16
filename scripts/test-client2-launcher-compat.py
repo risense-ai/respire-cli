@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real unchanged Client2 v2.0.0-dev.5 host calls; account-free temporary installations.
+"""Pinned unchanged Client2 host calls in isolated temporary installations.
 
 Requires official CLI/Runtime bytes and an unmodified checkout of the pinned
 Client2 source. Optional pinned Magpie source exercises its original legacy RPC.
@@ -29,6 +29,19 @@ MAGPIE_RUNTIME_BLOB = 'ac5de49cac36a2a6a697abb9a9529b2426a9ef49'
 DESKTOP_SOURCE_SHA = CLIENT2_SHA
 DESKTOP_SHA256 = 'dc74596d983ab7b99c6b6872d8438cfb2f2e7060b93f9a9ef13db629b6a5d7a2'
 DESKTOP_ARCHIVE_SHA256 = '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
+DESKTOP_BASELINES = {
+    'host-owned-candidate': {'source': '6ffa187685734873721ab51f3a54d8b2c29cd269',
+        'version': '0.2.56-dev.263',
+        'binary': '4a62424ecffad8f732f5484495e1a6a5f7c6649ea7fb1809bc1b51a049f48677',
+        'archive': '4a294a7de11fdaea48e534539bbfb5693c30a90e05544aea9aff344414a3c925',
+        'asset_id': None, 'artifact_id': 14163499760, 'run_id': '43721147038'},
+    'v2.0.0-dev.5': {'source': CLIENT2_SHA, 'binary': DESKTOP_SHA256,
+        'archive': DESKTOP_ARCHIVE_SHA256, 'asset_id': 735418491, 'run_id': '43018703263'},
+    'v0.2.56': {'source': '57bc070826949994c3f7ce9a64277160704bdfe5',
+        'binary': '2a9b7cc40bcbf2b7b133f907e0505e2771ed12efdfa5d639a00f0e97a3bff8d7',
+        'archive': '2e980f260c4593f3dbe4f7afd2cc5112c6175fa5f0f3f975901855e3e203b6b5',
+        'asset_id': 707442952, 'run_id': None},
+}
 
 def sha256(path):
     digest = hashlib.sha256()
@@ -69,7 +82,7 @@ def coverage_profile(value):
     return str(expected / template.name)
 
 
-def desktop_executable(value):
+def desktop_executable(value, baseline='v2.0.0-dev.5'):
     if value is None:
         return None
     if (os.environ.get('GITHUB_ACTIONS') != 'true'
@@ -77,8 +90,8 @@ def desktop_executable(value):
             or sys.platform != 'linux' or os.uname().machine != 'x86_64'):
         raise RuntimeError('Pinned desktop acceptance requires an isolated Linux x64 hosted runner')
     path = value.resolve(strict=True)
-    if not path.is_file() or sha256(path) != DESKTOP_SHA256:
-        raise RuntimeError('Require the exact released Client2 v2.0.0-dev.5 Linux x64 desktop bytes')
+    if not path.is_file() or sha256(path) != DESKTOP_BASELINES[baseline]['binary']:
+        raise RuntimeError(f'Require the exact released Client2 {baseline} Linux x64 desktop bytes')
     return path
 
 
@@ -122,26 +135,45 @@ def main():
     parser.add_argument('--runtime-archive', type=Path, required=True)
     parser.add_argument('--runtime-version', required=True)
     parser.add_argument('--client2-source', type=Path, required=True)
+    parser.add_argument('--client2-baseline', choices=DESKTOP_BASELINES, default='v2.0.0-dev.5')
+    parser.add_argument('--client2-source-sha', help='Exact host-owned source candidate; cannot select desktop bytes')
     parser.add_argument('--go', type=Path, required=True)
     parser.add_argument('--magpie-source', type=Path)
     parser.add_argument('--node', type=Path)
     parser.add_argument('--desktop-executable', type=Path,
-                        help='Hosted CI only: released Client2 v2.0.0-dev.5 Linux x64 desktop executable')
+                        help='Hosted CI only: exact Linux x64 desktop for the selected fixed release baseline')
     parser.add_argument('--report', type=Path, required=True)
     parser.add_argument('--go-mod-cache', type=Path)
     parser.add_argument('--offline', action='store_true')
+    parser.add_argument('--host-credentials', action='store_true',
+                        help='Hosted Linux private Secret Service only: seed each fresh profile through CLI keygen')
     parser.add_argument('--ordinary-cli-cold-start', action='store_true',
                         help='Also verify ordinary CLI status cold-start before original Client2 reuse')
     parser.add_argument('--coverage-profile-file', help='Hosted CI only: existing instrumented CLI profile template')
     args = parser.parse_args()
+    if args.host_credentials and not (sys.platform == 'linux'
+            and os.environ.get('GITHUB_ACTIONS') == 'true'
+            and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
+            and os.environ.get('RSRS_SS_FIXTURE_BUS') == 'private'
+            and os.environ.get('DBUS_SESSION_BUS_ADDRESS')):
+        raise RuntimeError('Synthetic host keys require the hosted private Secret Service fixture')
     profile = coverage_profile(args.coverage_profile_file)
-    desktop = desktop_executable(args.desktop_executable)
+    baseline = DESKTOP_BASELINES[args.client2_baseline]
+    if args.client2_source_sha is not None:
+        if (args.client2_baseline != 'host-owned-candidate' or args.desktop_executable is not None
+                or len(args.client2_source_sha) != 40
+                or any(char not in '0123456789abcdef' for char in args.client2_source_sha)):
+            raise RuntimeError('Source candidate requires an exact SHA, host-owned-candidate baseline and no desktop executable')
+        # Source execution has no published desktop artifact provenance.
+        baseline = dict.fromkeys(baseline)
+        baseline['source'] = args.client2_source_sha
+    desktop = desktop_executable(args.desktop_executable, args.client2_baseline)
     cli, archive, source, go = (p.resolve(strict=True) for p in
                                 [args.cli, args.runtime_archive, args.client2_source, args.go])
     def git(*argv):
         return subprocess.check_output(['git', '-C', str(source), *argv], text=True).strip()
-    if git('rev-parse', 'HEAD') != CLIENT2_SHA or git('status', '--porcelain'):
-        raise RuntimeError('Require unchanged Client2 v2.0.0-dev.5 source')
+    if git('rev-parse', 'HEAD') != baseline['source'] or git('status', '--porcelain'):
+        raise RuntimeError(f'Require unchanged Client2 {args.client2_baseline} source')
     magpie = args.magpie_source.resolve(strict=True) if args.magpie_source else None
     node = None
     if magpie:
@@ -171,20 +203,22 @@ def main():
     if args.offline: build_env['GOPROXY'] = 'off'
     subprocess.run([str(go), 'build', '-buildvcs=false', '-mod=mod', '-o', str(executable), '.'],
                    cwd=probe, env=build_env, check=True, timeout=300)
-    report = {'client2_source': CLIENT2_SHA, 'coverage': 'real-host-process-no-accounts',
+    report = {'client2_source': baseline['source'], 'coverage': 'real-host-process-synthetic-keys' if args.host_credentials else 'real-host-process-no-accounts',
               'g1_passed': False, 'root': str(base), 'cases': [],
               'inputs': {'cli_sha256': sha256(cli), 'runtime_archive_sha256': sha256(archive),
                          'runtime_version': args.runtime_version,
                          'ordinary_cli_cold_start': args.ordinary_cli_cold_start,
+                         'host_credentials': args.host_credentials,
                          'coverage_profile_file': profile},
-              'desktop_headless': {'enabled': desktop is not None, 'client2_source': DESKTOP_SOURCE_SHA,
-                                   'release': 'v2.0.0-dev.5', 'run_id': '43018703263',
-                                   'asset_id': 735418491, 'archive_sha256': DESKTOP_ARCHIVE_SHA256,
-                                   'binary_sha256': DESKTOP_SHA256 if desktop else None},
+              'desktop_headless': {'enabled': desktop is not None, 'client2_source': baseline['source'],
+                                   'release': args.client2_baseline, 'run_id': baseline['run_id'],
+                                   'artifact_id': baseline.get('artifact_id'),
+                                   'asset_id': baseline['asset_id'], 'archive_sha256': baseline['archive'],
+                                   'binary_sha256': baseline['binary'] if desktop else None},
               'legacy_plugin': {'executed': magpie is not None,
                                 'source_sha': MAGPIE_SHA if magpie else None,
                                 'runtime_blob': MAGPIE_RUNTIME_BLOB if magpie else None},
-              'excluded': ['desktop GUI', 'accounts and credentials', 'model inference',
+              'excluded': ['desktop GUI', 'cloud accounts and real user credentials', 'model inference',
                            'managed services', 'cross-platform execution'] + ([] if magpie else ['original plugin RPC'])}
     def run(argv, env):
         # Go/Rust emit UTF-8, including Chinese errors. Decode captured bytes
@@ -227,9 +261,15 @@ def main():
             results[name] = status
             if status != 403: raise RuntimeError(f'{name} was not rejected: HTTP {status}')
         base = {'v': 1, 'id': 'compat-boundary', 'method': 'cli.exec', 'args': ['--json', 'status']}
-        status, _ = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
+        status, rejected = request(port, '/api/rpc', {**base, 'operation_id': 'mixed-identity'})
         results['mixed_identity'] = status
-        if status != 400: raise RuntimeError(f'Mixed legacy/modern identity was not rejected: HTTP {status}')
+        # Published embedded/CLI hosts reject at HTTP admission; pure Runtime rejects missing scope in RPC.
+        if not ((status == 400 and rejected in ({'error': 'invalid_rpc_identity'}, {'error': 'scope_required'})) or
+                (status == 200 and rejected and rejected.get('ok') is False
+                 and rejected.get('exit') == 1 and rejected.get('code') == 'scope_required'
+                 and rejected.get('id') == base['id'])):
+            raise RuntimeError(f'Mixed legacy/modern identity was not rejected: HTTP {status}')
+        results['mixed_identity_code'] = rejected.get('code') if rejected else None
         status, health = request(port, '/api/health', headers={'X-Respire-Health': 'runtime-v1'})
         if status != 200 or not health: raise RuntimeError('Modern health is unavailable')
         scope = {key: health[key] for key in ['account_id', 'instance_id', 'generation']}
@@ -293,6 +333,9 @@ def main():
         env = {k: os.environ[k] for k in ['PATH', 'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'COMSPEC', 'PATHEXT'] if k in os.environ}
         env.update(HOME=str(home), USERPROFILE=str(home), RSRS_DATA_DIR=str(root), RSRS_BIN_DIR=str(root/'bin'),
                    RSRS_RPC_PORT=str(port), RSRS_CORE_TEST_MODE='1', RSRS_NO_AUTOSYNC='1', RSRS_UPDATE_CHECK='0', RSRS_LANG='en')
+        if args.host_credentials:
+            env['DBUS_SESSION_BUS_ADDRESS'] = os.environ['DBUS_SESSION_BUS_ADDRESS']
+            env['RSRS_SS_FIXTURE_BUS'] = 'private'
         if profile is not None:
             env['LLVM_PROFILE_FILE'] = profile
         for key, name in [('XDG_CONFIG_HOME','config'),('XDG_DATA_HOME','share'),('XDG_CACHE_HOME','cache'),
@@ -305,6 +348,19 @@ def main():
             selection = json.loads((root/'bin/runtime.json').read_text())
             (root/'bin').mkdir(exist_ok=True)
             shutil.copy2(cli, root/'bin'/('rsrs.exe' if os.name=='nt' else 'rsrs'))
+            if args.host_credentials:
+                seeded = run([cli, '--json', 'keygen'], env)
+                if seeded.returncode:
+                    raise RuntimeError('Synthetic host credential setup did not commit')
+                # keygen intentionally leaves its original transaction paused until
+                # public runtime start completes the verified key handoff.
+                started_seed = run([cli, '--json', 'runtime', 'start'], env)
+                if started_seed.returncode:
+                    raise RuntimeError('Synthetic credential setup Runtime did not become ready')
+                stopped_seed = run([cli, '--json', 'runtime', 'stop'], env)
+                if stopped_seed.returncode:
+                    raise RuntimeError('Synthetic credential setup Runtime did not stop')
+                case['synthetic_host_credential'] = True
             if mode in ['client2-owned', 'desktop-owned']:
                 destination = root/'client2/runtime'/args.runtime_version
                 shutil.copytree(root/'bin/runtime'/args.runtime_version, destination)
@@ -315,19 +371,23 @@ def main():
                                or entry.name.removeprefix('./').startswith('core-notices/')]
                     packaged.extractall(destination, members=notices, filter='data')
                 (root/'client2/runtime.json').write_text(json.dumps({'version':args.runtime_version,'sha256':selection['sha256']}))
-            if mode == 'reuse-cli-started':
+            if mode in ['reuse-cli-started', 'cli-host-sigterm', 'cli-host-sigkill',
+                        'cli-host-terminate', 'cli-guardian-sigkill']:
+                # Signal cases require an actual CLI host before Client2 reuses its actor.
                 started = run([cli, '--json', 'runtime', 'start'], env)
                 if started.returncode: raise RuntimeError('CLI startup failed: '+started.stderr)
             if mode == 'desktop-owned':
                 env['RSRS_INSTANCE_ID'] = base.name + '-' + mode
                 version = run([desktop, '--version'], env)
                 if version.returncode or helper_result(version) != {
-                        'version': '2.0.0-dev.5', 'platform': 'linux-amd64'}:
+                        'version': baseline.get('version', args.client2_baseline.removeprefix('v')), 'platform': 'linux-amd64'}:
                     raise RuntimeError('Pinned original desktop version identity changed')
                 desktop_action('start', env)
                 health = desktop_action('status', env)
                 assert health['runtime_version'] == args.runtime_version
-                image = (destination / 'rsrs-runtime').resolve(strict=True)
+                image_root = (root/'bin/runtime'/args.runtime_version
+                              if args.client2_baseline == 'host-owned-candidate' else destination)
+                image = (image_root / 'rsrs-runtime').resolve(strict=True)
                 identity = verify_desktop_runtime(health, root, image, port)
                 reply = desktop_action('rpc-status', env)
                 assert reply['v'] == 1 and isinstance(reply['id'], str) and reply['id']
@@ -343,7 +403,8 @@ def main():
                 started = run([cli, '--json', 'status'], env)
                 case['ordinary_cli_start_exit'] = started.returncode
                 if started.returncode:
-                    raise RuntimeError('Ordinary CLI business cold-start failed: ' + started.stderr)
+                    raise RuntimeError('Ordinary CLI business cold-start failed: ' +
+                                       started.stdout[:4000] + started.stderr[:4000])
                 # --json renders ResultEnvelope directly; helper_result only decodes JSON.
                 initial_status = helper_result(started)
                 assert initial_status['command'] == 'status' and initial_status['status'] == 'ok'
@@ -602,7 +663,11 @@ def main():
                     raise RuntimeError('Client2 cannot stop its visible service')
             case['passed'] = True
         except Exception as error:
-            case['failure'] = str(error)
+            frame = error.__traceback__
+            while frame and frame.tb_next:
+                frame = frame.tb_next
+            location = f'{Path(frame.tb_frame.f_code.co_filename).name}:{frame.tb_lineno}' if frame else 'unknown'
+            case['failure'] = f'{type(error).__name__} at {location}: {error}'
         finally:
             cleanup_command = ([desktop, '--headless', 'stop'] if mode == 'desktop-owned' else
                                [executable, 'stop'] if mode == 'client2-owned' else

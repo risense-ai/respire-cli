@@ -27,6 +27,8 @@ MODULE_COUNTS = {"memory_revision": 6, "diary_identity": 11, "snapshot_lifecycle
                  "account": 3, "capture_main": 2}
 NATIVE_STOP_CASE = "diary_identity::native_stop_waits_and_explicit_force_reaps_real_core_without_replay"
 G1_BUSINESS_CASES = (
+    CASE,
+    NATIVE_STOP_CASE,
     "diary_identity::remember_public_payload_covers_created_appended_and_merged",
     "diary_identity::concurrent_same_day_client_commands_preserve_each_successful_addition_once",
 )
@@ -99,7 +101,7 @@ def selected_cases(listing, suite, require_native_stop=False):
     if suite == "diagnostic-failures":
         require(all(names.count(case) == 1 for case in DIAGNOSTIC_CASES), "diagnostic_case_inventory_mismatch")
         return list(DIAGNOSTIC_CASES)
-    if suite == "diagnostic-native-stop":
+    if suite in ("diagnostic-native-stop", "g1-owned-stop"):
         require(names.count(NATIVE_STOP_CASE) == 1, "native_stop_business_case_missing")
         return [NATIVE_STOP_CASE]
     require(suite == "full", "unknown_business_suite")
@@ -226,7 +228,29 @@ def safe_failure_diagnostics(captured, failed_cases):
             invalid = True
 
     known = {
+        b'completed account selection changed before supervisor handoff': 'account_handoff_selection_changed',
+        b'compatibility handoff cannot inherit maintenance authorization': 'account_handoff_inherited_maintenance',
+        b'compatibility handoff requires an unregistered host and completed durable maintenance': 'account_handoff_maintenance_incomplete',
+        b'Client2 requires the same verified CLI bytes at the stable bin path': 'account_handoff_stable_cli_mismatch',
+        b'compatibility startup cannot inherit account maintenance': 'account_handoff_start_inherited_maintenance',
+        b'compatibility host exited before readiness': 'account_handoff_host_exited',
+        b'compatibility startup is uncertain for child': 'account_handoff_start_unknown',
+        b'compatibility listener is not the launched child': 'account_handoff_listener_pid_mismatch',
+        b'compatibility host identity does not match this installation': 'account_handoff_host_identity_mismatch',
+        b'compatibility host backend binding changed': 'account_handoff_backend_binding_changed',
+        b'compatibility Runtime failed independent committed-owner handoff verification': 'account_handoff_runtime_verification_failed',
+        b'account rollback did not restore the original source identity': 'account_rollback_source_identity_changed',
+        b'rollback serving state differs from the actually drained owner': 'account_rollback_serving_state_changed',
         b'registered lifecycle command failed with exit code': 'owned_registered_lifecycle_failed',
+        b'systemd user session unavailable': 'owned_registered_systemd_unavailable',
+        b'systemd unit load state is unavailable or unexpected': 'owned_registered_systemd_load_state_invalid',
+        b'systemd unit path missing': 'owned_registered_systemd_unit_path_missing',
+        b'unknown systemd user unit path': 'owned_registered_systemd_unit_path_mismatch',
+        b'systemd loaded working directory differs from this installation': 'owned_registered_systemd_working_directory_mismatch',
+        b'systemd unit object unavailable': 'owned_registered_systemd_unit_object_missing',
+        b'unexpected systemd unit object': 'owned_registered_systemd_unit_object_invalid',
+        b'systemctl current-user operation failed': 'owned_registered_systemctl_failed',
+        b'busctl current-user operation failed': 'owned_registered_busctl_failed',
         b'registered service could not unlock its actual persistent credential': 'owned_registered_unlock_failed',
         b'original Go Manager.Start failed': 'owned_client2_start_failed',
         b'original Go startup/RPC failed': 'owned_client2_start_rpc_failed',
@@ -237,6 +261,16 @@ def safe_failure_diagnostics(captured, failed_cases):
         b'REGISTERED_STOP_CLEANUP_FAILED': 'owned_registered_cleanup_preserved',
         b'CLIENT2_OWNED_STOP_CLEANUP_FAILED': 'owned_client2_cleanup_preserved',
         b"authorized OAuth login failed": "account_authorized_login_failed",
+        b"OAuth login did not report the verified account": "account_login_result_mismatch",
+        b"login changed unrelated API preferences or escaped the fixture": "account_login_preferences_changed",
+        b"headless login persisted an unexpected credential": "account_login_session_mismatch",
+        b"login did not retain exactly one completed new operation": "account_login_receipt_count_mismatch",
+        b"login session does not match its committed credential receipt": "account_login_receipt_mismatch",
+        b"could not stop the isolated OAuth runtime": "account_login_stop_failed",
+        b"cloud fixture row missing": "account_cloud_fixture_missing",
+        b"trailing characters at line": "account_json_trailing_data",
+        b"EOF while parsing": "account_json_incomplete",
+        b"expected value at line": "account_json_invalid_value",
         b"owned space command": "account_owned_space_command_failed",
         b"join never fetched": "account_join_request_not_observed",
         b"join did not authenticate its ordered GET": "account_join_authorization_mismatch",
@@ -434,9 +468,19 @@ def safe_failure_diagnostics(captured, failed_cases):
                 response_events.append(clean)
             except (ValueError, TypeError):
                 response_invalid = True
+    account_stages = {"oauth_completed", "receipt_verified", "oauth_runtime_stopped",
+                      "cloud_memory_seeded", "cloud_store_opened", "cloud_fixture_staged"}
+    account_checkpoints = [line[len(b"account-checkpoint "):].decode("ascii")
+        for line in blocks.get(CASE, []) if line.startswith(b"account-checkpoint ")
+        and line[len(b"account-checkpoint "):] in {stage.encode() for stage in account_stages}][:32]
     codes, locations = {}, {}
     for case in failed_cases:
-        block = b"\n".join(blocks.get(case, []))
+        lines = list(blocks.get(case, []))
+        # libtest prints returned Result errors outside the captured stdout block.
+        if failed_cases == [CASE] and case == CASE:
+            lines.extend(line for line in captured.splitlines()
+                         if line.startswith(b"Error: ") and len(line) <= 65536)
+        block = b"\n".join(lines)
         codes[case] = list(dict.fromkeys(code for text, code in known.items() if text in block))
         # HTTP details can contain URLs and response data. Retain only a fixed
         # status when the same line identifies this failed stop exchange.
@@ -504,8 +548,59 @@ def safe_failure_diagnostics(captured, failed_cases):
             owned_checkpoints.append(event)
         except (ValueError, TypeError):
             owned_invalid = True
+    # Report only checked-out source locations matching static error text, never captured text.
+    host_error_sources = {}
+    if CASE in failed_cases:
+        source_root = Path(__file__).resolve().parents[1]
+        block = b"\n".join(blocks.get(CASE, []))
+        matches = []
+        for directory in ("cli/src", "crates/host-control/src"):
+            for path in sorted((source_root / directory).rglob("*.rs")):
+                if path.is_symlink():
+                    continue
+                text = path.read_text(encoding="utf-8")
+                for literal in re.finditer(r'"(?:[^"\\]|\\.)*"', text):
+                    try:
+                        message = json.loads(literal.group()).split("{", 1)[0].rstrip()
+                    except ValueError:
+                        continue
+                    if len(message) >= 32 and message.encode() in block:
+                        location = {"file": path.relative_to(source_root).as_posix(),
+                                    "line": text.count("\n", 0, literal.start()) + 1}
+                        matches.append((len(message), location))
+        matches.sort(key=lambda match: -match[0])
+        host_error_sources[CASE] = [location for _, location in matches[:8]]
+    provider_failures, provider_failure_invalid = [], False
+    marker = b"HOST_PROVIDER_CREDENTIAL_FAILURE "
+    for case in failed_cases:
+        for line in blocks.get(case, []):
+            if not line.startswith(marker):
+                continue
+            try:
+                failure = json.loads(line[len(marker):])
+                if (not isinstance(failure, dict)
+                        or set(failure) != {"schema_version", "stage", "error_type", "os_status", "io_error_code"}
+                        or type(failure["schema_version"]) is not int or failure["schema_version"] != 1
+                        or failure["stage"] not in {"keyring_read", "agent_read", "embedding_profiles_read"}
+                        or failure["error_type"] not in {"security_framework", "platform_failure", "io"}):
+                    raise ValueError
+                for key in ("os_status", "io_error_code"):
+                    value = failure[key]
+                    if value is not None and (type(value) is not int or not -(2**31) <= value < 2**31):
+                        raise ValueError
+                if failure["stage"] == "keyring_read":
+                    if (failure["error_type"] == "io" or failure["io_error_code"] is not None
+                            or (failure["error_type"] == "security_framework") != (failure["os_status"] is not None)):
+                        raise ValueError
+                elif failure["error_type"] != "io" or failure["os_status"] is not None:
+                    raise ValueError
+                provider_failures.append(failure)
+            except (ValueError, TypeError):
+                provider_failure_invalid = True
     return {"authorization_events": events, "authorization_event_invalid": invalid,
-            "failure_codes": codes, "failure_locations": locations,
+            "provider_failure_events": provider_failures, "provider_failure_invalid": provider_failure_invalid,
+            "failure_codes": codes, "failure_locations": locations, "host_error_sources": host_error_sources,
+            "account_checkpoints": account_checkpoints,
             "legacy_snapshot_stages": snapshot_stages, "legacy_snapshot_stage_invalid": stage_invalid,
             "response_events": response_events, "response_event_invalid": response_invalid,
             "native_stop_checkpoints": checkpoints, "native_stop_checkpoint_invalid": checkpoint_invalid,
@@ -775,26 +870,95 @@ def cleanup_processes(root, hashes, observations=None):
     return cleaned
 
 
-CLIENT2_OWNED_SOURCE_SHA = "57bc070826949994c3f7ce9a64277160704bdfe5"
+def standalone_stop_checks(captured, runtime_sha256):
+    def records(marker):
+        return [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
+    stops = records(b"NATIVE_STOP_RAW ")
+    writes = records(b"NATIVE_ACCEPTED_WRITE_RAW ")
+    require(len(stops) == 2 and all(type(row.get("forced")) is bool for row in stops)
+            and {row["forced"] for row in stops} == {False, True} and len(writes) == 1,
+            "standalone_stop_case_inventory_mismatch")
+    observations = []
+    for row in [*stops, *writes]:
+        forced = row.get("forced") is True
+        write = row is writes[0]
+        health, receipt = row["runtime_identity"], row["final_receipt"]
+        require(row.get("schema") == 1 and row.get("evidence_class") == "native-raw"
+                and row.get("gate") == "not-evaluated" and row.get("startup_mode") == "standalone"
+                and health["image_sha256"] == runtime_sha256
+                and receipt["image_sha256"] == runtime_sha256
+                and all(receipt[key] == health[key] for key in
+                        ("installation_id", "instance_id", "account_id", "generation"))
+                and receipt["operation_id"] == row["accepted"]["operation_id"]
+                and row["accepted"]["state"] == "accepted"
+                and row["accepted"].get("deadline_ms") is None
+                and row["accepted"].get("timeout_state") is None,
+                "standalone_stop_identity_mismatch")
+        before, after = row["business_before_stop_ms"], row["business_held_after_stop_ms"]
+        require(type(before) is int and before > 4000 and type(after) is int and after > 0
+                and (forced or after > 4000) and row["provider_requests"] == 1
+                and row["same_key_result"]["code"] == "request_in_progress",
+                "standalone_stop_held_business_not_proven")
+        require(receipt["state"] == ("forced_timeout" if forced else "drained"),
+                "standalone_stop_final_state_mismatch")
+        if forced:
+            require(row.get("passed") is True and row["provider_http_status"] == 401
+                    and any(item["operation_id"] == row["business_result"]["operation_id"]
+                            and item["result"] == "unknown" for item in receipt["unfinished"])
+                    and row["held_health"]["inference"]["retired_worker"]["worker_reaped"] is True
+                    and row["force_requests"]
+                    and all(item["timeout_state"] == "forced_timeout"
+                            and item["operation_id"] == receipt["operation_id"]
+                            for item in row["force_requests"]),
+                    "standalone_force_outcome_not_proven")
+        else:
+            require(receipt["unfinished"] == [], "standalone_normal_stop_has_unfinished_work")
+            if write:
+                require(row["provider_http_status"] == 200 and row["encrypted_write_committed"] is True
+                        and row["plaintext_parent_matches_encrypted_payload"] is True,
+                        "standalone_accepted_write_not_committed")
+            else:
+                require(row.get("passed") is True and row["provider_http_status"] == 401
+                        and row["force_requests"] == [], "standalone_normal_stop_was_forced")
+        if not write:
+            require(row["stale_scope_result"]["code"] == "scope_mismatch"
+                    and row["restarted_receipt"]["state"] == "drained",
+                    "standalone_stop_restart_not_verified")
+        observations.append({"case": "accepted-write" if write else "explicit-force" if forced else "normal",
+            "startup_mode": "standalone", "business_before_stop_ms": before,
+            "business_held_after_stop_ms": after, "final_state": receipt["state"],
+            "provider_requests": row["provider_requests"], "encrypted_write_committed": write,
+            "forced_operation_remains_unknown": forced})
+    return {"passed": True, "observations": observations}
+
+
+CLIENT2_OWNED_SOURCE_SHA = "6ffa187685734873721ab51f3a54d8b2c29cd269"
 OWNED_PROBE_FILES = ("diagnostics_darwin.go", "diagnostics_other.go", "host_operations.go", "main.go")
 
 
 def validate_owned_stop_options(args):
+    frozen = args.suite == "g1-owned-stop"
     if args.owned_stop_mode is None:
-        require(args.client2_source is None, "owned_stop_source_requires_mode")
+        require(not frozen and args.client2_source is None, "owned_stop_source_requires_mode")
         return
     require(args.owned_stop_mode in ("registered", "client2-owned"), "unknown_owned_stop_mode")
-    require(args.suite == "diagnostic-native-stop" and args.client2_source is not None
+    require(args.suite in ("diagnostic-native-stop", "g1-owned-stop") and args.client2_source is not None
             and not args.official_cli_metadata and not args.legacy_stable_contracts
             and not any((args.stable_business_cli, args.stable_business_cli_metadata,
                          args.stable_business_runtime_archive))
-            and not args.runtime_archive and not args.runtime_metadata
             and not args.require_native_stop, "owned_stop_requires_current_candidate_diagnostic")
-    require(args.cli_sha == os.environ.get("GITHUB_SHA") and re.fullmatch(r"[a-f0-9]{40}", args.cli_sha)
+    require(bool(args.runtime_archive) == frozen and bool(args.runtime_metadata) == frozen,
+            "owned_stop_frozen_input_mismatch")
+    require(re.fullmatch(r"[a-f0-9]{40}", args.cli_sha)
             and re.fullmatch(r"[a-f0-9]{40}", args.runtime_sha), "owned_stop_workflow_source_mismatch")
+    if frozen:
+        require(os.environ.get("GITHUB_REPOSITORY") == "risense-ai/respire-runtime"
+                and args.runtime_sha == os.environ.get("GITHUB_SHA"), "owned_stop_workflow_source_mismatch")
+    else:
+        require(args.cli_sha == os.environ.get("GITHUB_SHA"), "owned_stop_workflow_source_mismatch")
 
 
-def build_owned_stop_probe(args, root, output):
+def build_owned_stop_probe(args, root, output, *, cache_root=None):
     # Never accept an external executable: derive the probe from both exact Git sources.
     validate_owned_stop_options(args)
     source = args.client2_source.resolve(strict=True)
@@ -827,8 +991,9 @@ def build_owned_stop_probe(args, root, output):
         "require respire-client2 v0.0.0\nreplace respire-client2 => " + json.dumps(str(extracted)) + "\n")
     (probe / "go.sum").write_bytes((extracted / "go.sum").read_bytes())
     build_env = {name: os.environ[name] for name in ("PATH", "SystemRoot", "WINDIR") if name in os.environ}
-    build_env.update(GOPATH=str(stage / "go-path"), GOCACHE=str(stage / "go-cache"),
-                     GOMODCACHE=str(stage / "go-mod"), GOTOOLCHAIN="local", GOENV="off", GOWORK="off")
+    cache_root = stage if cache_root is None else cache_root
+    build_env.update(GOPATH=str(cache_root / "go-path"), GOCACHE=str(cache_root / "go-cache"),
+                     GOMODCACHE=str(cache_root / "go-mod"), GOTOOLCHAIN="local", GOENV="off", GOWORK="off")
     binary = probe / "probe"
     subprocess.run(["go", "build", "-buildvcs=false", "-mod=mod", "-o", str(binary), "."],
                    cwd=probe, env=build_env, stdout=output, stderr=output, check=True, timeout=600)
@@ -843,7 +1008,8 @@ def build_owned_stop_probe(args, root, output):
     return binary, identity
 
 
-def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
+def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256, *, cli_sha256=None):
+    require(mode in {"registered", "client2-owned"}, "unknown_owned_stop_mode")
     marker = b"NATIVE_REGISTERED_STOP_RAW " if mode == "registered" else b"NATIVE_CLIENT2_STOP_RAW "
     rows = [json.loads(line.split(marker, 1)[1]) for line in captured.splitlines() if marker in line]
     require(len(rows) == 3 and {row["case"] for row in rows} == {"normal", "caller-timeout", "explicit-force"},
@@ -857,20 +1023,35 @@ def owned_stop_checks(captured, mode, probe_sha256, runtime_sha256):
                 and row.get("runtime_compatibility_timeout_claimed") is False
                 and row["runtime_identity"]["image_sha256"] == runtime_sha256,
                 "owned_stop_real_consumer_evidence_mismatch")
+        if mode == "client2-owned":
+            require(row.get("actor_lane") == "client2-cli-runtime-core" and isinstance(row.get("cli_control"), dict),
+                    "owned_stop_actor_lane_mismatch")
+            cli_control, runtime = row["cli_control"], row["runtime_identity"]
+            require(isinstance(cli_sha256, str) and re.fullmatch(r"[0-9a-f]{64}", cli_sha256)
+                    and cli_control.get("sha256") == cli_sha256
+                    and all(isinstance(cli_control.get(field), str) and cli_control[field]
+                            for field in ("path", "version"))
+                    and type(runtime.get("pid")) is int and runtime["pid"] > 0
+                    and all(isinstance(runtime.get(field), str) and runtime[field]
+                            for field in ("instance_id", "process_start_id")),
+                    "owned_stop_actor_binding_mismatch")
         expected_sender = ("modern-cli" if row["case"] == "normal" else "original-go-client2-managed") if mode == "registered" else "original-go-client2"
         require(row.get("stop_sender") == expected_sender, "owned_stop_sender_mismatch")
         timeout = row.get("caller_timeout_ms")
         require(timeout is None if row["case"] == "normal" else
-                type(timeout) is int and (35000 if mode == "registered" else 30000) <= timeout <= 60000,
+                type(timeout) is int and 35000 <= timeout <= 60000,
                 "owned_stop_caller_timeout_invalid")
         forced = row["case"] == "explicit-force"
         require(row.get("encrypted_write_committed") is (not forced)
                 and row.get("forced_operation_remains_unknown") is forced,
                 "owned_stop_write_outcome_mismatch")
     # Only source-defined scalar observations leave the private business log.
-    return [{key: row.get(key) for key in ("case", "startup_mode", "business_sender", "stop_sender",
+    fields = ("case", "startup_mode", "business_sender", "stop_sender",
         "caller_timeout_ms", "provider_http_status", "provider_requests", "encrypted_write_committed",
-        "forced_operation_remains_unknown", "credential_cleanup_verified")} for row in rows]
+        "forced_operation_remains_unknown", "credential_cleanup_verified")
+    if mode == "client2-owned":
+        fields += ("actor_lane",)
+    return [{key: row.get(key) for key in fields} for row in rows]
 
 
 def private_command(command, env, cwd, output, timeout):
@@ -906,6 +1087,7 @@ def run(args):
               "case": ("native-stop-diagnostic" if args.suite == "diagnostic-native-stop" else
                        "targeted-failure-diagnostic" if diagnostic else
                        "stable-diary-remote-subset" if stable_remote else
+                       "g1-owned-stop" if args.suite == "g1-owned-stop" else
                        "g1-business-subset" if args.suite == "g1-business" else
                        CASE if args.suite == "account" else "full-business-suite"), "suite": args.suite,
               "client2_host_prototype": args.compatibility_host,
@@ -968,7 +1150,7 @@ def run(args):
             harness_sha256=digest(harness), sdk_lock_sha256=digest(args.runtime_source / "sdk/core-sdk.lock.json"),
             account_source_sha256=digest(args.runtime_source / "crates/commands/examples/cli_business_tests/account.rs"))
         report["stage"] = "candidate_archive"
-        if args.suite == "g1-business":
+        if args.suite in ("g1-business", "g1-owned-stop"):
             archive, metadata_path = frozen_runtime_package(args, runtime, version)
         else:
             archive, metadata_path = package_runtime(runtime, runtime.parent, root / "archive",
@@ -1010,13 +1192,17 @@ def run(args):
             cases = selected_cases(listing_text, args.suite, args.require_native_stop)
             report["required_cases"] = cases
             report["selected_case_count"] = len(cases)
+            report["selected_native_stop"] = NATIVE_STOP_CASE in cases
             test_args = ([*cases, "--exact", "--test-threads=1"]
-                         if args.suite in ("account", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
-            if args.compatibility_host or diagnostic or stable_remote:
+                         if args.suite in ("account", "g1-business", "g1-owned-stop", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote") else ["--test-threads=1"])
+            if args.compatibility_host or diagnostic or stable_remote or args.suite in ("g1-business", "g1-owned-stop"):
                 test_args.append("--show-output")
-            command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private",
-                sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
+            command = [sys.executable, "-B", args.cli_source / "scripts/dev-secret-service-keyring-selftest.py",
                 "--root", root / "keyring", "--", harness, *test_args]
+            if args.owned_stop_mode == "registered":
+                command.insert(3, "--hosted-user-bus")
+            else:
+                command = ["dbus-run-session", "--", "env", "RSRS_SS_FIXTURE_BUS=private", *command]
             report["stage"] = "private_diagnostic_test" if diagnostic else "private_account_test"
             report["test_requested"] = True
             invoke(command, timeout=1000 if args.suite == "account" else 2700)
@@ -1108,10 +1294,12 @@ def run(args):
             require(checks is not None and checks and all(check["passed"] for check in checks)
                     and expected.issubset({check["stage"] for check in checks}),
                     "legacy_host_transitions_not_verified")
+        if args.suite == "g1-business":
+            report["standalone_stop"] = standalone_stop_checks(captured, report["runtime_binary_sha256"])
         if args.owned_stop_mode:
             require(digest(probe) == probe_identity["probe_binary_sha256"], "owned_stop_probe_binary_changed")
             report["owned_stop"]["observations"] = owned_stop_checks(captured, args.owned_stop_mode,
-                probe_identity["probe_binary_sha256"], report["runtime_binary_sha256"])
+                probe_identity["probe_binary_sha256"], report["runtime_binary_sha256"], cli_sha256=digest(cli))
             report["owned_stop"].update(passed=True, runtime_archive_sha256=report["runtime_archive_sha256"],
                 runtime_metadata_sha256=report["runtime_metadata_sha256"], runtime_source_sha=args.runtime_sha,
                 cli_source_sha=args.cli_sha, harness_sha256=report["harness_sha256"])
@@ -1183,7 +1371,7 @@ def main():
         parser.add_argument("--" + name, required=True, type=Path)
     parser.add_argument("--cli-sha", required=True)
     parser.add_argument("--runtime-sha", required=True)
-    parser.add_argument("--suite", choices=("account", "full", "g1-business", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
+    parser.add_argument("--suite", choices=("account", "full", "g1-business", "g1-owned-stop", "diagnostic-failures", "diagnostic-native-stop", "stable-diary-remote"), default="account")
     parser.add_argument("--runtime-archive", type=Path)
     parser.add_argument("--runtime-metadata", type=Path)
     parser.add_argument("--owned-stop-mode", choices=("registered", "client2-owned"))
@@ -1199,12 +1387,12 @@ def main():
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     args = parser.parse_args()
-    if args.suite == "g1-business":
+    if args.suite in ("g1-business", "g1-owned-stop"):
         if (not args.runtime_archive or not args.runtime_metadata or args.compatibility_host
                 or args.official_cli_metadata or args.require_native_stop or args.legacy_stable_contracts):
             parser.error("g1-business requires frozen Runtime archive/metadata and current CLI without compatibility/native-stop/stable-contracts")
     elif args.runtime_archive or args.runtime_metadata:
-        parser.error("frozen Runtime inputs require --suite g1-business")
+        parser.error("frozen Runtime inputs require --suite g1-business or g1-owned-stop")
     if args.require_native_stop and args.suite != "full":
         parser.error("--require-native-stop requires --suite full")
     stable_paths = (args.stable_business_cli, args.stable_business_cli_metadata,

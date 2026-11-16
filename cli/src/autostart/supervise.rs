@@ -93,6 +93,8 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     // Runtime commands bypass the normal CLI bootstrap. Initialize only after
     // the registration has established this supervisor's owned data root.
     super::super::install_error_logging();
+    // Parent-driven launches migrated under takeover before waiting for this child.
+    respire_host_control::lifecycle_io::migrate_legacy_session()?;
     // The registered task is the foreground owner. A kill-on-close job keeps a
     // dead supervisor from orphaning the runtime child (Windows 8+ nested jobs
     // preserve the enclosing Task Scheduler job).
@@ -194,6 +196,7 @@ fn wait_child(
     child: &mut std::process::Child,
     stopped: &AtomicBool,
 ) -> Result<Option<std::process::ExitStatus>> {
+    let mut credentials_checked = false;
     loop {
         if let Some(status) = child.try_wait()? {
             return Ok(Some(status));
@@ -204,6 +207,16 @@ fn wait_child(
                 .wait()
                 .context("cannot reap the stopped runtime child")?;
             return Ok(None);
+        }
+        if !credentials_checked {
+            if let Ok(Some(health)) = crate::rpc::probe_runtime() {
+                if health.pid == child.id() {
+                    credentials_checked = true;
+                    if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
+                        eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(250));
     }

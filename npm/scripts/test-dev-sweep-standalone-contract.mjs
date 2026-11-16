@@ -5,22 +5,66 @@ import {createHash} from 'node:crypto';
 import {runInNewContext} from 'node:vm';
 import {spawnSync} from 'node:child_process';
 import path from 'node:path';
-const workflow=readFileSync(new URL('../../.github/workflows/dev-sweep.yml',import.meta.url),'utf8');
+const workflow=readFileSync(new URL('../../.github/workflows/dev-sweep.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+const sweep=readFileSync(new URL('../../scripts/dev-release-sweep.ps1',import.meta.url),'utf8').replace(/\r\n/g,'\n');
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const step=name=>workflow.split(`      - name: ${name}\n`)[1]?.split(/\n      - (?:name|uses):/)[0];
 const binding=step("Bind diagnostic fixtures to the CLI's official pinned Runtime");
 const script=binding.split("<<'NODE'\n")[1].split('\n          NODE')[0].replace(/^          /gm,'');
 test('diagnostic wiring preserves dispatch, permissions, source producer checks and API job',()=>{
   // Exact pre-existing trust boundaries; full Release checks are not weakened by this repair.
-  assert.equal(hash(workflow.split('jobs:\n')[0]),'251cbc82190bc45915963d50bc3ecd83cb1e4bfe72f9bed86ee33faf0b2c347a');
+  const dispatchInput="      business_only:\n        description: Run only synthetic cross-device business diagnostics; never release acceptance\n        type: boolean\n        default: false\n";
+  const callInput="      business_only:\n        type: boolean\n        default: false\n";
+  const dispatchRuntime="      runtime_sha:\n        description: Exact published Runtime source SHA, required for business diagnostics\n        required: false\n        type: string\n";
+  const callRuntime="      runtime_sha:\n        required: false\n        type: string\n";
+  const header=workflow.split('jobs:\n')[0];
+  for(const input of [dispatchInput,callInput,dispatchRuntime,callRuntime])assert(header.includes(input));
+  assert.equal(hash(header.replace(dispatchInput,'').replace(callInput,'').replace(dispatchRuntime,'').replace(callRuntime,'')),'251cbc82190bc45915963d50bc3ecd83cb1e4bfe72f9bed86ee33faf0b2c347a');
   assert.equal(hash(step('Verify the original release build')),'c07d866f172e6c28e49889fc0f3d8d5fa1ad6bf9ecb26724e4db35d2e2bbabfe');
   assert.equal(hash(step('Verify and extract the original binary')),'2cf493f2afd7eae32aa0f49ec56815a50dffafb00d64015d38b0b8a2c10ecc8b');
-  assert.equal(hash(workflow.split('\n  api-smoke:\n')[1]),'88aebc2bef3afed3d4426e2aa9fcffb3ecad36bd973084af62af28284c732718');
+  const api=workflow.split('\n  api-smoke:\n')[1];
+  assert(api.includes('if: ${{ !inputs.auth_salt_only && !inputs.business_only }}'));
+  assert.equal(hash(api.replace('if: ${{ !inputs.auth_salt_only && !inputs.business_only }}','if: ${{ !inputs.auth_salt_only }}')),'88aebc2bef3afed3d4426e2aa9fcffb3ecad36bd973084af62af28284c732718');
   assert.match(workflow,/required=\[\.\.\.m.targets.map\(t=>`Release \(\$\{t.triple\}\)`\),'npm-dry-run'\]/);
   assert.match(workflow,/run.head_sha!==sha/);
   assert.match(workflow,/j.conclusion==='success'/);
   assert.match(workflow,/Choose one diagnostic scope/);
   assert.doesNotMatch(workflow,/ARTIFACT_SOURCE: published-assets|RSRS_ARTIFACT_SOURCE:|continue-on-error:/);
+
+  const expression=line=>line.match(/\$\{\{ (.*) \}\}/)[1];
+  const evaluate=(line,inputs)=>runInNewContext(expression(line),{inputs,cancelled:()=>false,
+    runner:{os:'Linux'},matrix:{target:'x86_64-unknown-linux-musl'},steps:{supplement_python:{outcome:'success'},standalone_runtime:{outcome:'success'},native_credentials:{outcome:'success'}}});
+  const job=name=>workflow.split(`\n  ${name}:\n`)[1].split('\n')[0];
+  const normal={api_only:false,local_api_only:false,auth_salt_only:false,business_only:false};
+  const business={...normal,business_only:true};
+  assert.equal(evaluate(job('sweep'),normal),true);assert.equal(evaluate(job('api-smoke'),normal),true);
+  assert.equal(evaluate(job('sweep'),business),true);assert.equal(evaluate(job('api-smoke'),business),false);
+  assert.equal(evaluate(job('sweep'),{...business,api_only:true}),true);
+  assert.equal(evaluate(step('Sweep the exact CI binary').split('\n')[0],business),true);
+  for(const name of ['Verify all supplementary CLI contracts','Verify historical Secret Service profile migration','Verify native encrypted profile migration'])
+    assert.equal(evaluate(step(name).split('\n')[0],business),false,name);
+  assert.match(workflow,/inputs\.business_only\) && '\[\{"os":"ubuntu-latest","target":"x86_64-unknown-linux-musl"\}\]'/);
+  const guards=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)].slice(0,3).map(m=>m[1]);
+  assert.equal(guards.length,3);
+  for(let mask=0;mask<16;mask++){
+    const env=Object.fromEntries(['API_ONLY','LOCAL_API_ONLY','AUTH_SALT_ONLY','BUSINESS_ONLY'].map((name,i)=>[name,String(Boolean(mask&(1<<i)))]));
+    const run=()=>guards.forEach(body=>runInNewContext(body,{process:{env}}));
+    if(Object.values(env).filter(v=>v==='true').length>1)assert.throws(run,/Choose one diagnostic scope/);
+    else assert.doesNotThrow(run);
+  }
+  const runtimeGuard=[...step('Require the approved development server').matchAll(/node -e '([^']+)'/g)][3][1];
+  for(const expected of ['', 'd'.repeat(39), 'D'.repeat(40)])assert.throws(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'true',EXPECTED_RUNTIME_SHA:expected}}}),/Runtime source SHA/);
+  assert.doesNotThrow(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'true',EXPECTED_RUNTIME_SHA:'d'.repeat(40)}}}));
+  assert.doesNotThrow(()=>runInNewContext(runtimeGuard,{process:{env:{BUSINESS_ONLY:'false',EXPECTED_RUNTIME_SHA:''}}}));
+  assert.match(step('Sweep the exact CI binary'),/\$businessArgs \+= '-BusinessOnly'/);
+  for(const value of ["$coverage.diagnostic_only = $true","$coverage.publication_reusable = $false","$coverage.full_acceptance = $false","$coverage.release_acceptance = $false","$coverage.base_complete = $false","$coverage.coverage_full = $false","'api-smoke'","'supplemental_suites'","'business-independent-login'","'business-upload-confirmed'","'business-download-converged'","'business-cross-device-recall'"])assert(sweep.includes(value),value);
+  assert.match(sweep,/Test-SmokeProfileRoot \(\[string\]\$st\.Envelope\.summary\.data_dir\) \$DirA/);
+  assert.match(sweep,/Test-SmokeProfileRoot \$profileB \$DirB/);
+  assert.match(sweep,/GetFullPath\(\$statusProfileB\) -ceq \[IO\.Path\]::GetFullPath\(\$profileB\)/);
+  assert.match(sweep,/\[string\]\$_\.entry\.id -ceq \$id -and \[string\]\$_\.entry\.content -ceq/);
+  const completion=sweep.split("Assert-Smoke 'business-cross-device-recall'")[1].split("Invoke-Om -Name 'show-b'")[0];
+  assert(completion.indexOf('Invoke-CloudCleanup')<completion.indexOf("$script:BusinessStatus = 'passed'"));
+  assert.match(completion,/CloudCleanup\.passed/);assert.match(completion,/remaining_users/);assert.match(completion,/Status -eq 'skip'/);
 });
 test('standalone identity precedes credentials and every dependent fixture is fail-closed',()=>{
   for(const text of ['ARTIFACT_SOURCE: build','VALIDATION_PROFILE: full','RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}']) assert(workflow.includes(text));
@@ -60,11 +104,11 @@ function simulate(change=()=>{}){
   state.receipt={version:state.pin.required,sha256:hash(state.runtime),release:{metadata_json:JSON.stringify(state.runtimeMetadata)}};
   state.receipt.release.metadata_sha256=hash(state.receipt.release.metadata_json);
   change(state);
-  const env={RSRS_DATA_DIR:'/temp/proof',RUNNER_TEMP:'/temp',RSRS_RUNTIME_TRIPLE:state.metadata.target,CLI_SHA:'c'.repeat(40),CLI_RUN_ID:'42',GITHUB_SHA:'a'.repeat(40),GITHUB_RUN_ID:'43',GITHUB_RUN_ATTEMPT:'1',GH_TOKEN:'synthetic-secret',SERVICE_API_KEY:'synthetic-secret',RSRS_RUNTIME_BIN:'untrusted'};
+  const env={RSRS_DATA_DIR:'/temp/proof',RUNNER_TEMP:'/temp',RSRS_RUNTIME_TRIPLE:state.metadata.target,CLI_SHA:'c'.repeat(40),CLI_RUN_ID:'42',GITHUB_SHA:'a'.repeat(40),GITHUB_RUN_ID:'43',GITHUB_RUN_ATTEMPT:'1',GH_TOKEN:'synthetic-secret',SERVICE_API_KEY:'synthetic-secret',RSRS_RUNTIME_BIN:'untrusted',BUSINESS_ONLY:String(Boolean(state.business)),EXPECTED_RUNTIME_SHA:state.expectedRuntime??''};
   let report;
   const fs={realpathSync:p=>p==='cli'?'/cli':state.runtimePath,readFileSync:p=>p==='runtime-pin.json'?JSON.stringify(state.pin):p.startsWith('validated-cli/')?JSON.stringify(state.metadata):p==='/temp/proof/bin/runtime.json'?JSON.stringify(state.receipt):p==='/cli'?state.cli:state.runtime,writeFileSync:(p,text)=>{assert.equal(p,'/temp/standalone-diagnostic-identity.json');report=JSON.parse(text);}};
   const cp={execFileSync:(binary,args,options)=>{assert.equal(binary,'/cli');assert.equal(options.timeout,30000);for(const key of ['GH_TOKEN','SERVICE_API_KEY','RSRS_RUNTIME_BIN'])assert.equal(options.env[key],undefined);assert.equal(options.env.HOME,'/temp/proof/home');return args.includes('list')?JSON.stringify(state.inventory):args.includes('v')?JSON.stringify(state.version):state.display;}};
-  runInNewContext(script,{require:name=>({fs,path,child_process:cp,'assert/strict':assert,crypto:{createHash}})[name],process:{argv:['node','-','cli'],env,platform:'linux'}});
+  runInNewContext(script,{require:name=>({fs,path:path.posix,child_process:cp,'assert/strict':assert,crypto:{createHash}})[name],process:{argv:['node','-','cli'],env,platform:'linux'}});
   return report;
 }
 test('executed identity body separates H from C and records only verified installation proof',()=>{
@@ -72,9 +116,11 @@ test('executed identity body separates H from C and records only verified instal
   assert.equal(report.cli.binary_sha256,hash('CLI'));assert.equal(report.runtime.binary_sha256,hash('RUNTIME'));
   assert.equal(report.diagnostic_only,true);assert.equal(report.full_acceptance,false);assert.equal(report.publication_reusable,false);
   assert(!JSON.stringify(report).includes('synthetic-secret'));
+  const business=simulate(s=>{s.business=true;s.expectedRuntime='d'.repeat(40)});
+  assert.equal(business.expected_runtime_source_sha,'d'.repeat(40));
 });
 test('executed identity body rejects mismatched pin, producer, C version, hashes and Runtime proof',()=>{
-  for(const change of [s=>s.inventory.summary.required='2.0.0-dev.5',s=>s.inventory.summary.accept='*',s=>s.inventory.status='fail',s=>s.metadata.git_sha='a'.repeat(40),s=>s.metadata.producer.run_id=41,s=>s.cli+='changed',s=>s.version.summary.version='1.2.3-dev.5',s=>s.version.status='fail',s=>s.display+='wrong',s=>s.receipt.version='2.0.0-dev.5',s=>s.receipt.release.metadata_sha256='0'.repeat(64),s=>s.runtime+='changed',s=>s.runtimePath='/cli',s=>{s.runtimeMetadata.binary_sha256='0'.repeat(64);s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);},s=>{s.runtimeMetadata.target_triple='wrong';s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);},s=>{s.runtimeMetadata.runtime_version='wrong';s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);}])assert.throws(()=>simulate(change));
+  for(const change of [s=>{s.business=true;s.expectedRuntime='f'.repeat(40)},s=>{s.business=true;s.expectedRuntime=''},s=>s.inventory.summary.required='2.0.0-dev.5',s=>s.inventory.summary.accept='*',s=>s.inventory.status='fail',s=>s.metadata.git_sha='a'.repeat(40),s=>s.metadata.producer.run_id=41,s=>s.cli+='changed',s=>s.version.summary.version='1.2.3-dev.5',s=>s.version.status='fail',s=>s.display+='wrong',s=>s.receipt.version='2.0.0-dev.5',s=>s.receipt.release.metadata_sha256='0'.repeat(64),s=>s.runtime+='changed',s=>s.runtimePath='/cli',s=>{s.runtimeMetadata.binary_sha256='0'.repeat(64);s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);},s=>{s.runtimeMetadata.target_triple='wrong';s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);},s=>{s.runtimeMetadata.runtime_version='wrong';s.receipt.release.metadata_json=JSON.stringify(s.runtimeMetadata);s.receipt.release.metadata_sha256=hash(s.receipt.release.metadata_json);}])assert.throws(()=>simulate(change));
 });
 test('all bash step bodies parse offline',()=>{
   for(const block of workflow.split(/\n      - (?:name|uses):/)){

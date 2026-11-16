@@ -103,13 +103,13 @@ See the [support matrix](../docs/platform-support.md) for validation status and 
 `artifact-manifest.json` configures eight CLI targets for the next DEV release.
 Publication requires 16 CLI assets and nine npm packages: `rsrs-cli` plus
 eight platform packages, including `@rsrsai/linux-arm64` and `@rsrsai/macos-x64`.
-Official Runtime 2.0.0-dev.17 is pinned; Intel remains a candidate until its
+Official Runtime 2.0.0-dev.18 is pinned; Intel remains a candidate until its
 native release and installation gates pass.
 Historically, CLI 2.0.0-dev.3 deferred ARM64 musl under
 [#272](https://github.com/risense-ai/respire-cli/issues/272), publishing six
 CLI targets without that platform package. That release remains unchanged.
 Runtime 2.0.0-dev.16 retains its immutable seven-platform, 21-asset inventory.
-Official Runtime 2.0.0-dev.17 provides eight targets and 24 assets, including
+Official Runtime 2.0.0-dev.18 provides eight targets and 24 assets, including
 Intel. CLI CI downloads that release and does not build Runtime. Intel packages use
 `@rsrsai/macos-x64` and require macOS 13.4 or later.
 Linux x64 and ARM64 use musl as the launcher default in dev.7.

@@ -145,8 +145,9 @@ fn release_fixture(triple: &str) -> Result<(Vec<u8>, String)> {
 #[test]
 fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     let pin = pinned()?;
-    anyhow::ensure!(pin.required == "2.0.0-dev.17", "unexpected pin {pin:?}");
-    anyhow::ensure!(pin.accept.contains("2.0.0-dev.17"));
+    anyhow::ensure!(pin.required == "2.0.0-dev.18", "unexpected pin {pin:?}");
+    anyhow::ensure!(pin.accept.contains("2.0.0-dev.18"));
+    anyhow::ensure!(!pin.accept.contains("2.0.0-dev.17"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.16"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.15"));
     anyhow::ensure!(!pin.accept.contains("2.0.0-dev.14"));
@@ -183,7 +184,8 @@ fn pin_file_parses_and_accept_range_gates_versions() -> Result<()> {
     anyhow::ensure!(!pin.accept.contains("3.0.0"));
     anyhow::ensure!(!pin.accept.contains("3.1.0-dev.1"));
     anyhow::ensure!(
-        version_in_accept("2.0.0-dev.17")
+        version_in_accept("2.0.0-dev.18")
+            && !version_in_accept("2.0.0-dev.17")
             && !version_in_accept("2.0.0-dev.16")
             && !version_in_accept("2.0.0-dev.15")
             && !version_in_accept("2.0.0-dev.14")
@@ -777,12 +779,11 @@ fn automatic_install_allows_fresh_and_materialized_current_cli() -> Result<()> {
 }
 
 #[test]
-fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<()> {
+fn automatic_install_preserves_legacy_data_and_requires_owner_handoff() -> Result<()> {
     let _env = env_scope(&["RSRS_DATA_DIR", "RSRS_BIN_DIR", "RSRS_CORE_TEST_MODE"])?;
     std::env::set_var("RSRS_CORE_TEST_MODE", "1");
     for relative in [
         "runtime/endpoint.json", "runtime/autostart/registration.json", "client.json",
-        "session.json", "rsrs.db", "onememory.db",
     ] {
         let dir = tempfile::tempdir()?;
         std::env::set_var("RSRS_DATA_DIR", dir.path());
@@ -791,7 +792,7 @@ fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<(
         fs::create_dir_all(record.parent().context("legacy record parent missing")?)?;
         fs::write(&record, b"existing legacy state")?;
         let error = download_and_install(None, None)
-            .err().context("missing binary was treated as a fresh installation")?;
+            .err().context("unbound owner was treated as a stopped installation")?;
         anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>(), "missed {relative}");
         anyhow::ensure!(fs::read(&record)? == b"existing legacy state");
         anyhow::ensure!(!manifest_path().exists() && !runtime_dir().join(".install.lock").exists());
@@ -802,13 +803,24 @@ fn automatic_install_does_not_treat_missing_legacy_binary_as_fresh() -> Result<(
     std::env::set_var("RSRS_BIN_DIR", dir.path().join("bin"));
     let profile = dir.path().join("accounts/previous");
     fs::create_dir_all(&profile)?;
-    fs::write(profile.join("rsrs.db"), b"old profile data")?;
+    for root in [dir.path(), profile.as_path()] {
+        for name in ["session.json", "rsrs.db", "onememory.db"] {
+            fs::write(root.join(name), b"old account bytes")?;
+        }
+    }
     fs::write(dir.path().join("client.json"),
         serde_json::json!({"data_dir": profile}).to_string())?;
+    anyhow::ensure!(automatic_install_preflight(&pinned()?.required)?.is_none());
     let error = download_and_install(None, None)
-        .err().context("configured legacy profile was mistaken for a fresh installation")?;
-    anyhow::ensure!(error.is::<LegacyRuntimeMigrationRequired>());
-    anyhow::ensure!(fs::read(profile.join("rsrs.db"))? == b"old profile data");
+        .err().context("source test unexpectedly downloaded a Runtime")?;
+    anyhow::ensure!(!error.is::<LegacyRuntimeMigrationRequired>(),
+        "stopped account data blocked installation");
+    anyhow::ensure!(format!("{error:#}").contains("downloads are disabled"));
+    for root in [dir.path(), profile.as_path()] {
+        for name in ["session.json", "rsrs.db", "onememory.db"] {
+            anyhow::ensure!(fs::read(root.join(name))? == b"old account bytes");
+        }
+    }
     anyhow::ensure!(!manifest_path().exists() && !runtime_dir().exists());
     Ok(())
 }
@@ -902,6 +914,24 @@ fn metadata_validation_rejects_cross_purpose_documents() -> Result<()> {
     });
     let metadata: BuildMetadata = serde_json::from_value(base.clone())?;
     metadata.validate("1.0.21-dev.1", &triple)?;
+    for (cli, minimum, maximum, accepted) in [
+        ("2.0.0", "2.0.0-dev.11", "*", true),
+        ("2.0.0-dev.11", "2.0.0-dev.11", "*", true),
+        ("2.0.0-dev.10", "2.0.0-dev.11", "*", false),
+        ("2.0.0", "2.0.1", "*", false),
+        ("2.0.0", "99.0.0", "*", false),
+        ("2.0.0", "1.0.0", "2.0.0-dev.11", false),
+        ("2.0.0-dev.10", "1.0.0", "2.0.0-dev.11", true),
+    ] {
+        let mut compat = base.clone();
+        compat["compat"]["min_cli"] = serde_json::json!(minimum);
+        compat["compat"]["max_cli"] = serde_json::json!(maximum);
+        let compat: BuildMetadata = serde_json::from_value(compat)?;
+        anyhow::ensure!(
+            compat.validate_for_cli("1.0.21-dev.1", &triple, cli).is_ok() == accepted,
+            "unexpected compat result for CLI {cli} with min_cli {minimum} and max_cli {maximum}"
+        );
+    }
     anyhow::ensure!(
         ManagedManifest::from_release(&metadata, base.to_string().as_bytes()).is_err(),
         "legacy metadata must not become complete managed release proof"

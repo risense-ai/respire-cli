@@ -318,26 +318,13 @@ pub(crate) fn exchange_control(
                 .spawn(move || {
                     let response = (|| -> Result<RpcResponse<ResultEnvelope>> {
                         let written = input.write_all(&frames).and_then(|()| input.flush());
-                        // Return the writer before blocking on stdout so the owner can revoke it.
+                        written.context("host control request write failed")?;
+                        let response = respire_client_host::host_credentials::read_control_response(
+                            &mut input, &mut output,
+                        )?;
                         input_sender.send(input).map_err(|_| {
                             anyhow::anyhow!("host control input owner was released")
                         })?;
-                        written.context("host control request write failed")?;
-                        let mut length = [0u8; 4];
-                        output
-                            .read_exact(&mut length)
-                            .context("missing host control response frame")?;
-                        let length = u32::from_be_bytes(length) as usize;
-                        anyhow::ensure!(
-                            length > 0 && length <= HOST_CONTROL_MAX_FRAME_BYTES,
-                            "invalid host control response frame size"
-                        );
-                        let mut bytes = vec![0u8; length];
-                        output
-                            .read_exact(&mut bytes)
-                            .context("incomplete host control response frame")?;
-                        let response = serde_json::from_slice(&bytes)
-                            .map_err(|_| anyhow::anyhow!("invalid host control response JSON"))?;
                         let mut extra = [0u8; 1];
                         anyhow::ensure!(
                             output.read(&mut extra)? == 0,

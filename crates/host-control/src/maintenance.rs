@@ -20,7 +20,7 @@ use crate::VerifiedRuntime;
 mod accounts;
 pub(crate) use accounts::{finish_account_routing, pending_account, prepare_keygen_account, lookup_keygen_account};
 pub use accounts::{KeygenAccountTransfer, KeygenAccountAdmission};
-mod private_io;
+pub(crate) mod private_io;
 mod takeover;
 use private_io::{marker_bytes, private_write, registration_digest};
 pub use takeover::takeover_lock;

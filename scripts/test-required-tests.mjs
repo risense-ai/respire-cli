@@ -132,15 +132,19 @@ const cases = [
 // Each mutation uses synthetic native SDK bytes/identities, never a real CI result.
 function v2Case(name, owner, mutate = () => {}, error) {
   const value = { owner, candidate: structuredClone(candidate), report: {
-    ...structuredClone(report), repository: `fixture/${owner}`, actual_native_sdk: nativeSdk(owner, "target-a"),
+    ...structuredClone(report), repository: `fixture/${owner}`, actual_native_sdk: owner === "cli" ? null : nativeSdk(owner, "target-a"),
   } };
   mutate(value);
   value.report.candidate_sha256 = createHash("sha256").update(JSON.stringify(value.candidate)).digest("hex");
   return { name, ...value, error };
 }
 cases.push(
-  v2Case("CLI keeps dev.20 while Runtime keeps dev.21", "cli"),
+  v2Case("frontend CLI does not adopt the historical candidate SDK identity", "cli"),
   v2Case("Client2 explicit null", "client2"),
+  v2Case("frontend CLI explicit null without borrowing Runtime SDK", "cli", v => {
+    v.candidate.components.cli.artifacts["target-a"].native_sdk = null;
+    v.report.actual_native_sdk = null;
+  }),
   v2Case("candidate v1 rejected", "runtime", v => { v.candidate.schema = 1; }, "candidate schema 2 required"),
   v2Case("report v1 rejected", "runtime", v => { v.report.schema = 1; }, "required-execution/v2 report schema required"),
   v2Case("registry v1 rejected", "runtime", v => { v.tests = [{...ready, report_schema: "required-execution/v1"}]; }, "required-execution/v2 report schema required"),
@@ -151,7 +155,7 @@ cases.push(
   v2Case("Client2 report missing null", "client2", v => { delete v.report.actual_native_sdk; }, "must be explicit null"),
   v2Case("Client2 report cannot claim Runtime SDK", "client2", v => { v.report.actual_native_sdk = nativeSdk("runtime", "target-a"); }, "must be explicit null"),
 );
-for (const owner of ["runtime", "cli"]) {
+for (const owner of ["runtime"]) {
   cases.push(
     v2Case(`${owner} candidate missing SDK`, owner, v => { delete v.candidate.components[owner].artifacts["target-a"].native_sdk; }, "requires native SDK"),
     v2Case(`${owner} candidate null SDK`, owner, v => { v.candidate.components[owner].artifacts["target-a"].native_sdk = null; }, "requires native SDK"),
@@ -168,6 +172,10 @@ for (const owner of ["runtime", "cli"]) {
     );
   }
 }
+cases.push(
+  v2Case("frontend CLI report missing null", "cli", v => {delete v.report.actual_native_sdk;}, "must be explicit null"),
+  v2Case("frontend CLI report cannot borrow Runtime SDK", "cli", v => {v.report.actual_native_sdk = nativeSdk("runtime", "target-a");}, "must be explicit null"),
+);
 // All target bindings coexist. Passing one target is not an eight-target result.
 const nativeTargets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "aarch64-apple-darwin",
   "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
@@ -175,11 +183,11 @@ for (const owner of ["runtime", "cli", "client2"]) {
   const scenario = v2Case(`${owner} eight distinct target SDK bindings`, owner, v => {
     for (const component of ["runtime", "cli", "client2"]) v.candidate.components[component].artifacts =
       Object.fromEntries(nativeTargets.map(target => [target, {
-        archive_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), native_sdk: nativeSdk(component, target),
+        archive_sha256: "b".repeat(64), binary_sha256: "c".repeat(64), native_sdk: component === "cli" ? null : nativeSdk(component, target),
       }]));
     v.tests = [{...ready, required_targets: nativeTargets}];
   });
-  scenario.reports = nativeTargets.map(target => ({...scenario.report, target, actual_native_sdk: nativeSdk(owner, target)}));
+  scenario.reports = nativeTargets.map(target => ({...scenario.report, target, actual_native_sdk: owner === "cli" ? null : nativeSdk(owner, target)}));
   cases.push(scenario, {...scenario, name: `${owner} eight-target reports cannot shrink`, reports: scenario.reports.slice(0, 1), error: "target set is missing or different"});
 }
 
@@ -467,19 +475,18 @@ writeFileSync(join(chainRoot, 'sdk', 'core-sdk.lock.json'), JSON.stringify({targ
 let chainIndex = 0, spawnCalls = 0;
 const originalCwd = process.cwd();
 const writeJson = (path, value) => writeFileSync(path, JSON.stringify(value, null, 2) + '\n');
-function chainFixture() {
+function chainFixture(frontend = false) {
   const localTemp = join(chainRoot, `chain-${chainIndex++}`), sdkDir = join(localTemp, 'installed-sdk');
   const inputs = join(localTemp, 'required-tests-candidate-input'), raw = join(localTemp, 'required-tests-raw-cli-core');
-  mkdirSync(inputs, {recursive: true}); mkdirSync(join(sdkDir, 'lib'), {recursive: true});
-  writeFileSync(join(sdkDir, 'manifest.json'), fixtureSdk.manifestBytes);
-  writeFileSync(join(sdkDir, 'lib', 'core.a'), sdkPayload);
+  mkdirSync(inputs, {recursive: true});
   const value = structuredClone(producerCandidate);
-  value.components.cli.artifacts[sdkManifest.target].native_sdk = fixtureSdk.native;
+  value.components.cli.artifacts[sdkManifest.target].native_sdk = frontend ? null : fixtureSdk.native;
   const bytes = Buffer.from(JSON.stringify(value));
-  writeFileSync(join(inputs, 'candidate.json'), bytes); writeFileSync(join(inputs, 'sdk.tar.gz'), fixtureSdk.archive);
+  writeFileSync(join(inputs, 'candidate.json'), bytes);
   Object.assign(process.env, contextEnv, {RUNNER_TEMP: localTemp, RSRS_CORE_SDK_DIR: sdkDir,
     REQUIRED_CANDIDATE_SHA256: sdkHash(bytes), REQUIRED_CANDIDATE_RUN_ID: '9', REQUIRED_CANDIDATE_ARTIFACT_ID: '11',
     REQUIRED_RAW_ARTIFACT_ID: '31'});
+  delete process.env.RSRS_CORE_SDK_DIR;
   return {localTemp, sdkDir, inputs, raw};
 }
 const readJson = path => JSON.parse(readFileSync(path));
@@ -494,22 +501,24 @@ try {
   };
   syncBuiltinESMExports();
   rawCheck('candidate prepare capture produce complete chain', () => {
-    const f = chainFixture(); prepare();
+    for (const frontend of [false, true]) {
+    const f = chainFixture(frontend); prepare();
     const original = readFileSync(join(f.raw, 'preflight.json'));
     assert.throws(prepare, /fresh raw directory/);
     assert.ok(original.equals(readFileSync(join(f.raw, 'preflight.json'))));
     assert.equal(captureCoverage(coverageArgs), 0);
     const execution = readJson(join(f.raw, 'execution.json'));
     assert.equal(execution.preflight_sha256, sdkHash(original));
-    assert.equal(execution.sdk_directory, f.sdkDir);
-    assert.deepEqual(execution.actual_native_sdk, fixtureSdk.native);
+    assert.equal(execution.sdk_directory, null);
+    assert.equal(execution.actual_native_sdk, null);
     produce();
     for (const id of ['cli.release-metadata-dual-digest', 'cli.release-metadata-legacy-mapping']) {
       const report = readJson(join(f.localTemp, 'required-tests-report-cli', 'reports', `${id}.json`));
       assert.equal(report.schema, 2); assert.equal(report.coverage, 'source-test'); assert.equal(report.artifact_id, 31);
-      assert.deepEqual(report.actual_native_sdk, fixtureSdk.native); assert.equal(report.gate, undefined);
+      assert.equal(report.actual_native_sdk, null); assert.equal(report.gate, undefined);
     }
     assert.ok(readFileSync(join(f.localTemp, 'required-tests-report-cli', 'candidate.json')).equals(readFileSync(join(f.inputs, 'candidate.json'))));
+    }
   });
   rawCheck('CLI prepare and produce accept validated synthetic inputs', () => {
     const f = chainFixture();
@@ -543,16 +552,11 @@ try {
     ['old run', () => { process.env.GITHUB_RUN_ID = '18'; }],
     ['different candidate run ID', () => { process.env.REQUIRED_CANDIDATE_RUN_ID = '10'; }],
     ['different candidate artifact ID', () => { process.env.REQUIRED_CANDIDATE_ARTIFACT_ID = '12'; }],
-    ['different SDK directory', f => { const other = join(f.localTemp, 'other-sdk'); mkdirSync(join(other, 'lib'), {recursive: true});
-      writeFileSync(join(other, 'manifest.json'), fixtureSdk.manifestBytes); writeFileSync(join(other, 'lib', 'core.a'), sdkPayload);
-      process.env.RSRS_CORE_SDK_DIR = other; }],
     ['changed candidate bytes', f => { writeFileSync(join(f.inputs, 'candidate.json'), readFileSync(join(f.inputs, 'candidate.json'), 'utf8') + '\n'); }],
     ['changed candidate with updated hash', f => { const bytes = Buffer.concat([readFileSync(join(f.inputs, 'candidate.json')), Buffer.from('\n')]);
       writeFileSync(join(f.inputs, 'candidate.json'), bytes); process.env.REQUIRED_CANDIDATE_SHA256 = sdkHash(bytes); }],
     ['changed retained candidate', f => { writeFileSync(join(f.raw, 'candidate.json'), '{}'); }],
-    ['changed archive', f => { writeFileSync(join(f.inputs, 'sdk.tar.gz'), 'corrupt'); }],
-    ['changed installed payload', f => { writeFileSync(join(f.sdkDir, 'lib', 'core.a'), 'corrupt'); }],
-    ['changed manifest', f => { writeFileSync(join(f.sdkDir, 'manifest.json'), '{}'); }],
+    ['unexpected SDK archive', f => { writeFileSync(join(f.inputs, 'sdk.tar.gz'), fixtureSdk.archive); }],
     ['missing hash', () => { delete process.env.REQUIRED_CANDIDATE_SHA256; }],
     ['extra input', f => { writeFileSync(join(f.inputs, 'extra.json'), '{}'); }],
     ['existing raw logs', f => { writeFileSync(join(f.raw, 'stdout.log'), sourceOutput); }],
@@ -574,7 +578,6 @@ try {
     ['changed preflight bytes', f => { writeFileSync(join(f.raw, 'preflight.json'), readFileSync(join(f.raw, 'preflight.json'), 'utf8') + '\n'); }],
     ['changed candidate bytes', f => { writeFileSync(join(f.inputs, 'candidate.json'), '{}'); }],
     ['changed input ID', () => { process.env.REQUIRED_CANDIDATE_ARTIFACT_ID = '12'; }],
-    ['changed SDK', f => { writeFileSync(join(f.sdkDir, 'lib', 'core.a'), 'corrupt'); }],
     ['changed logs', f => { writeFileSync(join(f.raw, 'stderr.log'), 'changed'); }],
     ['raw mode', f => { const e = readJson(join(f.raw, 'execution.json')); e.evidence_class = 'source-raw'; e.candidate_sha256 = null; e.actual_native_sdk = null; writeJson(join(f.raw, 'execution.json'), e); }],
     ['execution before prepare', f => { const e = readJson(join(f.raw, 'execution.json')); e.started_at = '2000-01-01T00:00:00.000Z'; writeJson(join(f.raw, 'execution.json'), e); }],
@@ -594,11 +597,10 @@ try {
     assert.equal(buildReports(context, p, e, out, err, 31).length, 2);
     for (const mutate of [
       v => { v.c.target = 'other'; }, v => { v.c.run_attempt = '0'; },
-      v => { v.p.actual_native_sdk.extra = 'invalid'; v.e.actual_native_sdk.extra = 'invalid'; },
-      v => { v.p.actual_native_sdk.version = ''; v.e.actual_native_sdk.version = ''; },
+      v => { v.p.actual_native_sdk = fixtureSdk.native; v.e.actual_native_sdk = fixtureSdk.native; },
       v => { v.e.schema = 2; }, v => { v.p.schema = 1; },
       v => { v.e.gate = 'G1'; }, v => { v.e.evidence_class = 'source-raw'; },
-      v => { v.e.actual_native_sdk = null; }, v => { v.e.candidate_run_id = '10'; },
+      v => { delete v.e.actual_native_sdk; }, v => { v.e.candidate_run_id = '10'; },
       v => { v.e.preflight_sha256 = '0'.repeat(64); },
       v => { v.e.command.push('--release'); }, v => { v.e.command.push('--test', 'fixture'); },
       v => { v.e.command.push('--test', '../unsafe'); }, v => { v.e.command[1] = 'test'; },

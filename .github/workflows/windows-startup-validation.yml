@@ -5,19 +5,32 @@ on:
       - '.github/workflows/windows-startup-validation.yml'
       - 'runtime-pin.json'
       - 'scripts/test-windows-host-startup.ps1'
+      - 'scripts/test-native-runtime-install.py'
       - 'cli/tests/runtime_help.rs'
       - 'cli/src/main.rs'
+      - 'cli/src/autostart.rs'
+      - 'cli/src/autostart/**'
+      - 'cli/src/client2_host.rs'
+      - 'crates/client-host/**'
+      - 'crates/host-control/**'
+      - 'crates/protocol/**'
       - 'cli/src/rpc.rs'
       - 'cli/src/runtime_policy.rs'
       - 'crates/commands/src/runtime_policy.rs'
       - 'spawn/**'
       - 'docs/runtime.md'
   workflow_dispatch:
+    inputs:
+      runtime_source_sha:
+        description: Exact reviewed source of the compatible newly published Runtime; update runtime-pin.json before product validation
+        type: string
+        required: true
 permissions:
   contents: read
   actions: read
 jobs:
-  startup:
+  source-checks:
+    name: Windows startup source checks
     cache-mode: read
     runs-on: windows-latest
     timeout-minutes: 20
@@ -33,6 +46,11 @@ jobs:
         with:
           node-version: '24'
           package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify offline fixture installation and workflow contracts
+        run: python scripts/test-native-runtime-install.py
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: x86_64-pc-windows-msvc
@@ -70,19 +88,61 @@ jobs:
         run: |
           cargo test --locked -p respire --test runtime_help --target x86_64-pc-windows-msvc --target-dir target/startup-validation
           if ($LASTEXITCODE -ne 0) { throw 'Native runtime help tests failed' }
-      - name: Prepare official pinned standalone Runtime for startup validation
+      - name: Record source-only validation scope
+        shell: pwsh
+        run: |
+          'Source and fixture checks only. Published Runtime sign-in startup is a separate explicit manual job.' >> $env:GITHUB_STEP_SUMMARY
+
+  startup:
+    name: Published Runtime Windows sign-in startup
+    if: github.event_name == 'workflow_dispatch'
+    needs: source-checks
+    cache-mode: read
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      RSRS_ENGINE: cpu
+      RUST_MIN_STACK: '16777216'
+      RUST_TEST_THREADS: '1'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build the current native CLI for explicit product validation
+        shell: pwsh
+        env:
+          RUSTFLAGS: '-C target-feature=-crt-static'
+        run: |
+          if ($env:CORE_SDK_READ_TOKEN) { throw 'No private download credential is allowed' }
+          cargo build --locked -p respire --bin rsrs --target x86_64-pc-windows-msvc --target-dir target/startup-validation
+          if ($LASTEXITCODE -ne 0) { throw 'Native CLI build failed' }
+      - name: Prepare and authenticate the explicitly reviewed published Runtime
         shell: bash
         env:
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+          SDK_TARGET: x86_64-pc-windows-msvc
+          EXPECTED_RUNTIME_SOURCE_SHA: ${{ inputs.runtime_source_sha }}
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
           import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
           import {join, resolve} from 'node:path';
           import {spawnSync} from 'node:child_process';
           assert.equal(process.env.GITHUB_ACTIONS, 'true');
           assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          assert.match(process.env.EXPECTED_RUNTIME_SOURCE_SHA ?? '', /^[a-f0-9]{40}$/, 'Select the reviewed newly published Runtime source explicitly');
           const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
           const cli = resolve('target/startup-validation/x86_64-pc-windows-msvc/debug/rsrs.exe');
           const env = {...process.env, RSRS_DATA_DIR: root};
@@ -93,9 +153,23 @@ jobs:
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          assert.equal(selected.version, pin.required);
+          assert.ok(selected.release?.metadata_json, 'Official Runtime release proof is required');
+          assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.schema_version, 2);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.equal(metadata.triple ?? metadata.target_triple, process.env.SDK_TARGET);
+          assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_SOURCE_SHA);
+          assert.equal(metadata.binary_sha256, selected.sha256);
           const runtime = join(root, 'bin', 'runtime', pin.required, 'rsrs-runtime.exe');
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          assert.equal(hash(readFileSync(runtime)), selected.sha256);
+          assert.equal(hash(readFileSync(join(root, 'bin', 'runtime', pin.required, 'core-runtime.json'))),
+            metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
       - name: Exercise a limited current-user sign-in task in an isolated profile

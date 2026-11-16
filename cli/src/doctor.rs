@@ -600,7 +600,11 @@ mod tests {
                 assert!(matches!(repair(&result)?.status, Status::Ok));
                 Ok(())
             })?;
-            // A client never opens the local store to inspect selection; missing Runtime fails closed.
+            // A client never opens the local store; an unbound endpoint blocks repair.
+            let endpoint = root.join("runtime/endpoint.json");
+            std::fs::create_dir_all(endpoint.parent().context("legacy endpoint parent missing")?)?;
+            let owner = br#"{"v":1,"pid":0}"#;
+            std::fs::write(&endpoint, owner)?;
             let unused = std::net::TcpListener::bind("127.0.0.1:0")?;
             std::env::set_var("RSRS_RPC_PORT", unused.local_addr()?.port().to_string());
             drop(unused);
@@ -610,6 +614,7 @@ mod tests {
                 .err()
                 .context("invalid selection was accepted")?;
             assert!(failure.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
+            assert_eq!(std::fs::read(&endpoint)?, owner);
             assert_eq!(std::fs::read(&database)?, before);
             assert!(!root.join("models").exists());
             Ok(())

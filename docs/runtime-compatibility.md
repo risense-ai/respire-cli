@@ -2,10 +2,18 @@
 
 ## Version selection
 
-Consumers resolve one exact Runtime version from a pinned compatibility
-manifest. `latest` is never a compatibility source. A release is installable
-only when runtime version, CLI version, Client2 version, protocol range,
-required capabilities, target, asset names, and source binding all match.
+Components match through the wire protocol and required capabilities, not equal
+product versions, SDK versions or source commits. The upgraded CLI obtains the
+current supported Runtime through its published download pin. Resolve and verify
+that release's target, assets and integrity before installation; a `latest`
+label alone does not prove compatibility. Candidate hashes identify tested
+artifacts and do not bind independently released components in production.
+
+Upgrade regression prepares data with each supported historical stack, upgrades
+the components, then verifies database migration, integrity and memory operations
+with the new compatible stack. Include database-changing DEV checkpoints; omit
+redundant DEV combinations with unchanged persistent formats. Running old clients
+against the new Runtime is not an acceptance requirement.
 
 ## Wire protocol
 
@@ -35,6 +43,10 @@ combination remains active and is reported as dev.
 
 ## Legacy consumers
 
+The following describes historical installers and preservation checks. These
+clients supply upgrade databases; their old Runtime interfaces are not a support
+requirement for the coordinated DEV update.
+
 The old CLI consumers that treat `sha256` and `binary_sha256` as the same value
 cannot install canonical schema 2 archives whose hashes differ. They keep only
 their previously verified combinations until repaired. New consumers may support
@@ -52,14 +64,24 @@ All eight targets in `runtime-control-contract.md` are supported. Every target
 requires the archive, metadata, naked legacy binary where applicable, and
 integrity evidence. Missing platform evidence blocks candidate promotion.
 
-## Migration admission: first preservation slice
+## Migration admission
 
-Automatic selection and CLI materialization now stop before replacing an
-unbound legacy installation. A different pinned version does not bypass
-verification of the existing Runtime selection. Existing endpoint, registration,
-session or database evidence is preserved even if the old executable disappeared.
-Configured profile paths are inspected read-only; they never supply request scope.
-A preferences-only fresh `client.json` does not establish a legacy owner.
+Automatic selection and CLI materialization stop before replacing an unbound
+legacy process or startup registration. A different pinned version does not
+bypass verification of the existing Runtime selection. Existing endpoint and
+registration records still require an explicit handoff even if the old executable
+disappeared. Configured profile paths are inspected read-only; they never supply
+request scope. Existing session and database files do not block installation of
+the new Runtime. Installation does not open the database, migrate it or authorize
+an unlock; those operations still require the host key and Runtime admission.
+
+Historical upgrade acceptance seeds both libraries with the historical binary,
+ends its fixture-owned process, stages the upgraded CLI, then uses that CLI's real
+default-pin download. No new Runtime is preinstalled before the historical data.
+The report requires verified installed bytes, unchanged ciphertext, sync work and
+session keys, and SQLite integrity checks before opening the upgraded libraries.
+This proves the stopped-library upgrade and download path, not automatic takeover
+of an old running process.
 
 A trusted Runtime archive does not establish the old host CLI's provenance.
 Replacing different stable CLI bytes therefore remains deferred until an explicit
@@ -107,8 +129,9 @@ python scripts/test-legacy-runtime-preservation.py \
 The native script starts only its isolated legacy child, checks install/update/
 start/restart/autostart deferral, then verifies the original PID, binary digest,
 endpoint, selection and registration/maintenance/takeover absence, and queries
-status with the actual old CLI. It separately checks that start/restart rejection
-leaves a stopped, session-only installation unchanged. Cleanup terminates only
+status with the actual old CLI. It separately checks that a stopped, session-only
+installation reaches the download boundary without changing the old session;
+the source-test switch deliberately disables the actual download. Cleanup terminates only
 that child. Fresh-install unit tests cover download admission and a synthetic
 verified Runtime plus mocked service manager with `enable(false)`; they do not
 prove a complete real download, service-manager registration or `--now` startup.

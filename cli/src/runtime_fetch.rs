@@ -765,6 +765,10 @@ impl BuildMetadata {
     }
 
     fn validate(&self, required: &str, triple: &str) -> Result<()> {
+        self.validate_for_cli(required, triple, env!("CARGO_PKG_VERSION"))
+    }
+
+    fn validate_for_cli(&self, required: &str, triple: &str, cli: &str) -> Result<()> {
         anyhow::ensure!(
             self.schema_version == 1 || self.schema_version == 2,
             "unsupported runtime metadata schema {}",
@@ -811,7 +815,6 @@ impl BuildMetadata {
         if self.schema_version == 2 {
             self.validate_schema2()?;
         }
-        let cli = env!("CARGO_PKG_VERSION");
         anyhow::ensure!(
             valid_version(&self.compat.min_cli),
             "release metadata has an invalid compat range"
@@ -821,15 +824,14 @@ impl BuildMetadata {
             "release metadata has an invalid compat range"
         );
         anyhow::ensure!(
-            respire_client_host::version_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
+            semver_cmp(cli, &self.compat.min_cli) != std::cmp::Ordering::Less,
             "runtime {} requires CLI >= {}; upgrade the CLI first",
             self.runtime_version,
             self.compat.min_cli
         );
         anyhow::ensure!(
             self.compat.max_cli == "*"
-                || respire_client_host::version_cmp(cli, &self.compat.max_cli)
-                    == std::cmp::Ordering::Less,
+                || semver_cmp(cli, &self.compat.max_cli) == std::cmp::Ordering::Less,
             "runtime {} only accepts CLI versions below {}; upgrade the runtime explicitly",
             self.runtime_version,
             self.compat.max_cli
@@ -1753,20 +1755,15 @@ fn automatic_install_preflight(required: &str) -> Result<Option<PathBuf>> {
             || (semver_cmp(&manifest.version, required) == std::cmp::Ordering::Greater
                 && version_in_accept(&manifest.version))).then_some(binary)
     } else {
-        // Resolve configured paths read-only. This never imports records or
-        // turns the selected profile into request identity or migration authority.
-        let (_, profile) = respire_client_host::config::control_roots()
+        // Account data does not establish process ownership or authorize an unlock.
+        // Validate configured paths without opening or migrating the old database.
+        respire_client_host::config::control_roots()
             .context(LegacyRuntimeMigrationRequired)?;
         let records = [
             "runtime/endpoint.json",
             "runtime/autostart/registration.json",
-            "session.json",
-            "rsrs.db",
-            "onememory.db",
-        ].into_iter().map(|relative| installation_root().join(relative))
-            .chain(["session.json", "rsrs.db", "onememory.db"].into_iter()
-                .map(|name| profile.join(name)));
-        // Missing executable bytes do not prove a fresh installation.
+        ].into_iter().map(|relative| installation_root().join(relative));
+        // Unbound process and startup records still require an explicit handoff.
         for record in records {
             match fs::symlink_metadata(record) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

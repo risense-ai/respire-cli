@@ -20,6 +20,29 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   assert.match(source,/fail-fast: false/);assert.match(source,/RSRS_CORE_TEST_MODE: '1'/);
   assert.match(source,/targets.filter\(t => t.kind.includes\('test'\)\)/);
   assert.match(source,/tests.filter\(name => !isolated.includes\(name\)\)/);
+  assert.match(source,/INTEGRATION_REQUESTED: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != '' \}\}/);
+  const selectionProgram=source.split("          const tests = metadata.packages")[1].split("          const args = ")[0];
+  assert(selectionProgram,'coverage selection must remain reviewable');
+  const productTargets=['model_maintenance','model_settings','private_controls','net_rpc_http'];
+  const targets=['capabilities','control_contract_fixtures',...productTargets,'runtime_help','runtime_smoke','runtime_autostart'];
+  const selectTargets=(candidate,integration,group='core',available=targets)=>runInNewContext(
+    `const tests = metadata.packages${selectionProgram}; JSON.stringify(selected)`,
+    {assert,metadata:{packages:[{name:'respire',targets:available.map(name=>({name,kind:['test']}))}]},
+      process:{env:{CANDIDATE_MODE:candidate,INTEGRATION_REQUESTED:integration,COVERAGE_GROUP:group}},console:{log:()=>{}}});
+  assert.deepEqual(JSON.parse(selectTargets('false','false')),['capabilities','control_contract_fixtures']);
+  for(const [candidate,integration] of [['true','false'],['false','true'],['true','true']])
+    assert.deepEqual(JSON.parse(selectTargets(candidate,integration)),['capabilities','control_contract_fixtures',...productTargets,'runtime_help']);
+  assert.deepEqual(JSON.parse(selectTargets('false','false','runtime_smoke')),['runtime_smoke']);
+  assert.deepEqual(JSON.parse(selectTargets('false','false','runtime_autostart')),['runtime_help']);
+  assert.throws(()=>selectTargets('true','false','core',targets.filter(name=>name!=='model_maintenance')),/Missing Runtime product test target/);
+  assert.match(source,/no Runtime product acceptance is claimed/);
+  const runtimeFixture=source.split('- name: Prepare official pinned standalone Runtime for lifecycle tests\n')[1].split('\n      - ')[0];
+  assert.match(runtimeFixture,/if: env.CANDIDATE_MODE == 'true' \|\| env.INTEGRATION_REQUESTED == 'true'/);
+  const pureRpc=source.split('- name: Retain pure RPC client checks without a Runtime fixture\n')[1].split('\n      - ')[0];
+  assert.match(pureRpc,/if: matrix.group == 'core' && env.CANDIDATE_MODE != 'true' && env.INTEGRATION_REQUESTED != 'true'/);
+  assert.match(pureRpc,/test -z "\$\{RSRS_RUNTIME_BIN:-\}"/);
+  assert.match(pureRpc,/--no-report --test net_rpc_http -- client_/);
+  assert.doesNotMatch(pureRpc,/--no-clean/);
   assert.match(source,/args.push\('--lib', '--bins', '--examples'\)/);
   assert.match(source,/if \(process.env.CANDIDATE_MODE !== 'true' \|\| group === 'runtime_autostart'\) process.exit\(status\)/);
   assert.match(source,/process.exit\(status !== 0 \? status : \(result.status \?\? 1\)\)/);
@@ -156,6 +179,13 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     .flatMap(entry=>entry.isFile()&&entry.name.endsWith('.rs')?[entry.name.slice(0,-3)]:
       entry.isDirectory()&&existsSync(new URL(`../../cli/tests/${entry.name}/main.rs`,import.meta.url))?[entry.name]:[]);
   const metadata={packages:[{name:'respire',targets:allTests.map(name=>({name,kind:['test']}))}]};
+  const fixtureConsumers=allTests.filter(name=>/RSRS_RUNTIME_BIN|support::install_(?:runtime|host)_fixture/.test(
+    readFileSync(new URL(`../../cli/tests/${name}.rs`,import.meta.url),'utf8')));
+  assert.deepEqual(fixtureConsumers.sort(),['model_maintenance','model_settings','net_rpc_http','private_controls','runtime_autostart','runtime_smoke'],
+    'review source/product selection whenever a native target gains a Runtime fixture dependency');
+  const runtimeLibraryCases=readFileSync(new URL('../../cli/src/rpc.rs',import.meta.url),'utf8')
+    .split(/\n\s*#\[test\]\s*\n/).slice(1).filter(body=>body.includes('OfficialRuntime::start()?'))
+    .map(body=>`rpc::tests::${body.match(/fn\s+(\w+)/)[1]}`);
   const runner='runtime-business-test-runner';
   const listing=Object.entries({memory_revision:6,diary_identity:12,snapshot_lifecycle:8,account:3,capture_main:2})
     .flatMap(([module,count])=>Array.from({length:count},(_,i)=>`${module}::${module==='diary_identity'&&i===11?'native_stop_waits_and_explicit_force_reaps_real_core_without_replay':`case_${i}`}: test`)).join('\n');
@@ -164,14 +194,17 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     const calls=[],harness=[],exits=[],raw=[],listed=[];
     assert.throws(()=>runInNewContext(program,{
       assert,readFileSync,
-      execFileSync:(command,args)=>{
+      execFileSync:(command,args,options)=>{
         if(command==='cargo'){assert.deepEqual(Array.from(args),['metadata','--locked','--no-deps','--format-version','1']);return JSON.stringify(metadata);}
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
         assert.equal(command,runner);assert.deepEqual(Array.from(args),['--list']);listed.push(command);return listing;
       },
       spawnSync:(command,args,options)=>{
         if(command==='cargo'){calls.push(args);return {status:originalStatus};}
         assert.equal(options.stdio,'inherit');
-        assert.equal(options.env.GH_TOKEN,'synthetic-gh');assert.equal(options.env.GITHUB_TOKEN,'synthetic-github');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
         if(group==='runtime_smoke'){
           assert.equal(command,'env');
           assert.deepEqual(Array.from(args),['-u','DBUS_SESSION_BUS_ADDRESS','-u','DBUS_SESSION_BUS_PID',
@@ -187,7 +220,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
         return {status:businessStatus};
       },
       captureCoverage:args=>{calls.push(args);raw.push(originalStatus);return originalStatus;},
-      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner',
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk',RUNNER_TEMP:'/synthetic-runner',
         GH_TOKEN:'synthetic-gh',GITHUB_TOKEN:'synthetic-github'},exit:status=>{exits.push(status);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[originalStatus!==0?originalStatus:group==='runtime_autostart'?0:(businessStatus??1)]);
@@ -196,9 +229,11 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
     assert.deepEqual(harness,group==='runtime_autostart'?[]:[group==='core'?'memory_revision diary_identity snapshot_lifecycle capture_main':'account']);
     if(originalStatus===0&&businessStatus===0)for(let i=0;i<calls[0].length;i++)if(calls[0][i]==='--test')selected.push(calls[0][i+1]);
     if(group==='core')for(const flag of ['--lib','--bins','--examples'])assert(calls[0].includes(flag));
+    assert(!calls[0].includes('--skip'),'candidate runs must retain real Runtime library tests');
+    assert(!calls[0].includes('--exact'),'candidate runs must retain the full Runtime smoke suite');
   }
   assert.deepEqual(selected.sort(),allTests.sort(),'every integration target must run exactly once');
-  // Source mode runs the same CLI selection but must never dispatch a Runtime harness.
+  // Source mode retains pure rules and frontend tests without injecting or dispatching a Runtime.
   for(const group of ['core','runtime_smoke','runtime_autostart'])for(const status of [0,23]){
     const exits=[],calls=[];
     assert.throws(()=>runInNewContext(program,{
@@ -209,11 +244,34 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       process:{env:{CANDIDATE_MODE:'false',COVERAGE_GROUP:group},exit:value=>{exits.push(value);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[status]);assert.equal(calls.length,1);
+    const args=Array.from(calls[0]);
+    if(group==='core'){
+      for(const target of ['model_maintenance','model_settings','private_controls','net_rpc_http','runtime_help'])assert(!args.includes(target),target);
+      for(const flag of ['--lib','--bins','--examples'])assert(args.includes(flag));
+      assert.deepEqual(args.slice(args.indexOf('--')),['--','--skip','rpc::tests::http_pipeline_and_nonreading_peer_keep_runtime_available','--skip','rpc::tests::scoped_operation_replays_and_retains_its_result_over_real_http']);
+      assert.deepEqual(args.filter((value,index)=>args[index-1]==='--skip').sort(),runtimeLibraryCases.sort(),
+        'every official Runtime library fixture caller must stay in explicit product validation');
+    }else if(group==='runtime_smoke'){
+      assert.deepEqual(args.slice(args.indexOf('--test')),['--test','runtime_smoke','--','no_command_without_tty_exits_2','--exact']);
+    }else assert.deepEqual(args.slice(args.indexOf('--test')),['--test','runtime_help']);
+  }
+  for(const group of ['core','runtime_smoke','runtime_autostart']){
+    const calls=[],exits=[];
+    assert.throws(()=>runInNewContext(program,{
+      assert,execFileSync:()=>JSON.stringify(metadata),
+      spawnSync:(command,args)=>{assert.equal(command,'cargo');calls.push(args);return {status:0};},
+      captureCoverage:args=>{calls.push(args);return 0;},
+      process:{env:{CANDIDATE_MODE:'false',INTEGRATION_REQUESTED:'true',COVERAGE_GROUP:group},exit:value=>{exits.push(value);throw exits;}},
+    }),error=>error===exits);
+    assert.deepEqual(exits,[0]);assert.equal(calls.length,1);
+    assert(!calls[0].includes('--skip'),'explicit published integration must retain real Runtime library tests');
+    assert(!calls[0].includes('--exact'),'explicit published integration must retain the full Runtime smoke suite');
   }
   assert.match(workspace,/cargo test --locked -p respire_spawn -p respire_protocol -p respire_client_host -p respire_commands/);
   for(const lane of [workspace,source]){
     assert.match(lane,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
-    assert.doesNotMatch(lane,/fetch-core-sdk|path: \.sdk\/|sdk-cache-2/);
+    assert.doesNotMatch(lane,/fetch-core-sdk|sdk-cache-2/);
+    if(lane===workspace)assert.doesNotMatch(lane,/path: \.sdk\//);
   }
   assert.match(source,/name: Coverage \(\$\{\{ matrix.group \}\}\)/);
   for(const name of ['Prepare private business credential fixture','Resolve exact Runtime business test source',
@@ -226,10 +284,50 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
   for(const item of registry.tests.filter(item=>item.evidence?.job==='coverage-tests')){
     assert.equal(item.evidence.job_name,'Coverage (core)');assert(source.includes(item.evidence.command_fragment));
   }
+  const helper=readFileSync(new URL('../../scripts/fetch-runtime-test-bundle.mjs',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const readProgram='(function(){const json=()=>JSON.parse(pinJSON);'+helper.split('export function readPin() {')[1].split('\n}\n')[0]+'\n})()';
+  const lockProgram='(function(pin){'+helper.split('export function verifyRuntimeSdkLock(pin) {')[1].split('\n}\n')[0]+'\n})(pin)';
+  const cliLock=Buffer.from(JSON.stringify({sdk:'independent CLI SDK'})),runtimeLock=Buffer.from(JSON.stringify({sdk:'independent Runtime SDK'}));
+  const lockHash=bytes=>createHash('sha256').update(bytes).digest('hex');
+  const bundlePin=JSON.parse(readFileSync(new URL('../../runtime-tests-source.json',import.meta.url),'utf8'));
+  bundlePin.sdk_lock_sha256=lockHash(runtimeLock);
+  const readLocks=(second=cliLock)=>runInNewContext(readProgram,{assert,repository:'risense-ai/respire-runtime',pinJSON:JSON.stringify(bundlePin),digest:()=>{},id:()=>{},
+    execFileSync:(cmd,args)=>args[0]==='rev-parse'?'a'.repeat(40):args[1].includes(':crates/')?second:cliLock,process:{env:{}}});
+  assert.equal(readLocks().sdk_lock_sha256,lockHash(runtimeLock));
+  assert.throws(()=>readLocks(runtimeLock),/CLI SDK lock copies differ/);
+  const runtimeLocks=(head=bundlePin.source_sha,second=runtimeLock,working=runtimeLock)=>runInNewContext(lockProgram,{assert,pin:bundlePin,sha256:lockHash,join:path.posix.join,
+    execFileSync:(cmd,args)=>args[2]==='rev-parse'?head:args[3].includes(':crates/')?second:runtimeLock,
+    readFileSync:()=>working});
+  runtimeLocks();
+  assert.throws(()=>runtimeLocks('c'.repeat(40)),/checkout differs/);
+  assert.throws(()=>runtimeLocks(bundlePin.source_sha,cliLock),/Runtime SDK lock bytes differ/);
+  assert.throws(()=>runtimeLocks(bundlePin.source_sha,runtimeLock,cliLock),/checkout differs/);
+  for(const lane of [source,integration]){
+    assert.match(lane,/cmp <\(git show HEAD:sdk\/core-sdk.lock.json\) <\(git show HEAD:crates\/core-sdk\/core-sdk.lock.json\)/);
+    assert.doesNotMatch(lane,/cmp <\(git show HEAD:sdk\/core-sdk.lock.json\) <\(git -C \.runtime-examples/);
+    assert.match(lane,/verifyRuntimeSdkLock\(readPin\(\)\)/);
+    assert.match(lane,/planCaches\(read\('sdk\/core-sdk.lock.json'\), read\('crates\/core-sdk\/core-sdk.lock.json'\)\)/);
+    assert.match(lane,/mv \.sdk\/x86_64-unknown-linux-gnu \.runtime-examples\/\.sdk\//);
+    assert.match(lane,/auditSdkDirectory\(sdk, target, canonicalEntry\(target, entry\)\)/);
+    assert.match(lane,/RSRS_CORE_SDK_DIR: \$\{\{ env.RSRS_RUNTIME_CORE_SDK_DIR \}\}/);
+    assert.doesNotMatch(lane,/restore-keys:|secrets\./);
+  }
+  assert(source.indexOf('mv .sdk/x86_64-unknown-linux-gnu')<source.indexOf('node scripts/produce-required-tests.mjs prepare'));
+  assert.doesNotMatch(source,/id: cli-sdk|Key the CLI candidate SDK|Audit the CLI candidate SDK/);
+  assert.match(source,/Download frozen frontend candidate identity/);
+  assert.doesNotMatch(source,/`RSRS_CORE_SDK_DIR=\$\{sdk\}/);
   assert.match(integration,/needs: coverage-tests/);
   assert.match(integration,/node scripts\/fetch-runtime-test-bundle\.mjs source/);
   assert.match(integration,/ref: \$\{\{ steps.runtime-tests.outputs.sha \}\}/);
-  assert.match(integration,/channel\(pinVersion\), channel\(cliVersion\)/);
+  assert.doesNotMatch(integration,/channel\(pinVersion\)|channel\(cliVersion\)|channels differ/);
+  assert.match(integration,/github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''/);
+  assert.match(source,/ref: d54b38529e1fdb7d9f3e3f5c999d3e747deab151/);
+  assert.match(source,/'--client2-baseline', 'host-owned-candidate', '--client2-source-sha', 'd54b38529e1fdb7d9f3e3f5c999d3e747deab151'/);
+  assert.match(source,/assert evidence\['g1_passed'\] is False/);
+  assert.doesNotMatch(source,/be682108c555a3e5a788ad74217e088bcb25170b/);
+  const launcher=source.split('# Product launcher coverage belongs')[1].split('- name: Preserve private business credential diagnostics')[0];
+  assert.equal((launcher.match(/if: matrix.group == 'core' && \(env.CANDIDATE_MODE == 'true' \|\| \(github.event_name == 'workflow_dispatch' && inputs.runtime_examples_sha != ''\)\)/g)||[]).length,4);
+  assert.doesNotMatch(ci,/assert.notEqual\(pin.required, '2.0.0-dev.17'/);
   assert.match(integration,/tar --exclude='\*\.profraw' -xzf/);
   assert.match(integration,/INTEGRATION_CLI_SHA256/);
   assert.match(integration,/source_archive_sha256/);
@@ -268,9 +366,11 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
         assert.equal(command,group==='core'?'bash':'env');
         if(group==='runtime_smoke')assert(Array.from(args).includes('RSRS_SS_FIXTURE_BUS=private'));
         assert.equal(options.env.RUNTIME_REQUIRE_NATIVE_STOP,group==='core'?'1':'0');
+        assert.equal(options.env.RSRS_CORE_SDK_DIR,'/runtime-sdk');
+        for(const key of ['GH_TOKEN','GITHUB_TOKEN','CORE_SDK_READ_TOKEN'])assert.equal(options.env[key],undefined);
         modules.push(options.env.RUNTIME_BUSINESS_MODULES);return {status};
       },
-      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RUNNER_TEMP:'/synthetic-runner'},
+      process:{env:{COVERAGE_GROUP:group,RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk',RUNNER_TEMP:'/synthetic-runner'},
         exit:value=>{exits.push(value);throw exits;}},
     }),error=>error===exits);
     assert.deepEqual(exits,[status??1]);
@@ -290,7 +390,7 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       execFileSync:command=>command==='cargo'?JSON.stringify(metadata):invalid,
       spawnSync:command=>{assert.equal(command,'cargo','invalid inventory must not dispatch business modules');return {status:0};},
       captureCoverage:()=>0,
-      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner},
+      process:{env:{CANDIDATE_MODE:'true',COVERAGE_GROUP:'core',RSRS_RUNTIME_TEST_RUNNER:runner,RSRS_RUNTIME_CORE_SDK_DIR:'/runtime-sdk',RSRS_CORE_SDK_DIR:'/cli-sdk'},
         exit:()=>assert.fail('invalid inventory must fail before exit')},
     }),/Unassigned or duplicate|Missing migrated|Missing required native stop/);
   }
@@ -360,6 +460,8 @@ test('independent contract checks do not wait for Rust coverage or receive SDK/p
       value.runtime_metadata_json=JSON.stringify(metadata);value.runtime_metadata_sha256=hash(value.runtime_metadata_json);},
   ]){const receipt={...boundReceipt};change(receipt);assert.throws(()=>runMerge(receipt));}
   assert.match(report,/test \"\$INTEGRATION_RESULT\" = success/);
+  assert.match(report,/if \[ "\$INTEGRATION_REQUESTED" = true \]; then/);
+  assert.match(report,/Source checks only: Runtime business integration was not requested/);
   assert.match(report,/node scripts\/check-cli-coverage\.mjs/);
   assert.match(report,/CANDIDATE_MODE: \$\{\{ inputs.required_candidate_run_id/);
   for(const script of ['test-publication-fence','test-publication-acceptance','test-cleanup-release-artifacts','test-registry-publication','test-release-publication','test-dev6-publication-recovery','test-parallel-publication']) {
@@ -403,16 +505,26 @@ test('fail-closed aggregate separates source success from explicit candidate evi
   for(const values of [['bad','456','a'.repeat(64)],['123','0','a'.repeat(64)],['123','456','bad']]){
     assert.throws(()=>runInNewContext(validator,{assert,process:{env:{...Object.fromEntries(envKeys.map((k,i)=>[k,values[i]])),GITHUB_EVENT_NAME:'workflow_dispatch',FOCUSED_MODE:'false'}}}));
   }
-  const command=complete.split('        run: ').at(-1).trim();
-  for(const candidate of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
+  const command=complete.split('- name: Require source coverage and all independent contracts')[1].split('\n      - name:')[0].split('        run: ')[1].trim();
+  const integration=section('runtime-integration');
+  for(const event of ['pull_request','push','workflow_dispatch'])for(const sha of ['', 'b'.repeat(40)]){
+    const inputs={...absent,runtime_examples_sha:sha};
+    const context={inputs,github:{event_name:event}};
+    const expected=event==='workflow_dispatch'&&sha!=='';
+    assert.equal(runInNewContext(condition(integration),context),expected);
+    const requested=complete.match(/INTEGRATION_REQUESTED: \$\{\{ (.+) \}\}/)[1];
+    assert.equal(runInNewContext(requested,context),expected);
+  }
+  for(const candidate of ['true','false'])for(const integration of ['true','false'])for(const source of ['success','failure','cancelled','skipped'])for(const required of ['success','failure','cancelled','skipped']){
     const result=execFileSync;
     let passed=true;
-    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:candidate==='true'?'skipped':'success',REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
-    assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${source}/${required}`);
+    try{result('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:source,WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:integration==='true'?'success':'skipped',INTEGRATION_REQUESTED:integration,REQUIRED_RESULT:required,CANDIDATE_REQUESTED:candidate},stdio:'pipe'});}catch{passed=false;}
+    assert.equal(passed,source==='success'&&required===(candidate==='true'?'success':'skipped'),`${candidate}/${integration}/${source}/${required}`);
   }
   for(const lane of ['WORKSPACE_RESULT','CONTRACT_RESULT','COMMANDS_RESULT','INTEGRATION_RESULT'])for(const status of ['failure','cancelled','skipped']){
-    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:'success',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
+    assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:'success',INTEGRATION_REQUESTED:'true',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false',[lane]:status},stdio:'pipe'}));
   }
+  for(const status of ['success','failure','cancelled'])assert.throws(()=>execFileSync('bash',['-c',command],{env:{...process.env,SOURCE_RESULT:'success',WORKSPACE_RESULT:'success',CONTRACT_RESULT:'success',COMMANDS_RESULT:'success',INTEGRATION_RESULT:status,INTEGRATION_REQUESTED:'false',REQUIRED_RESULT:'skipped',CANDIDATE_REQUESTED:'false'},stdio:'pipe'}));
   assert.match(complete,/contents: read/);assert.match(complete,/actions: read/);assert.doesNotMatch(complete,/id-token:|actions: write|secrets\./);
   assert.match(complete,/SOURCE_RESULT: \$\{\{ needs.coverage-tests.result \}\}/);
   assert.match(complete,/REQUIRED_RESULT: \$\{\{ needs.required-tests.result \}\}/);

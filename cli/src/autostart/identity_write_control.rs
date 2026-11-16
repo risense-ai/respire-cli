@@ -204,11 +204,15 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
         }
         unchanged(&original, &receipt.identity, &binary, &manifest)?;
         if original.was_serving {
-            maintenance.start_account_runtime()?;
+            maintenance.start_account_runtime_with_expectation(restoration_expectation(&receipt)?)?;
             let restored = crate::rpc::probe_runtime()?.context("identity owner did not resume")?;
             super::model_control::verify_model_owner(&restored, &root, &profile, managed, &binary, &manifest,
                 Some(&account(&receipt.identity, &profile)))?;
-            anyhow::ensure!(!original.store_ready || restored.store_ready, "identity owner store readiness was not restored");
+            if matches!(original.operation, HostIdentityWriteOperation::Logout { full: true }) {
+                anyhow::ensure!(!restored.store_ready, "full logout reopened the store without a session");
+            } else {
+                anyhow::ensure!(!original.store_ready || restored.store_ready, "identity owner store readiness was not restored");
+            }
         }
         unchanged(&original, &receipt.identity, &binary, &manifest)?;
         maintenance.finish()?;
@@ -221,7 +225,9 @@ fn control_write(operation: HostIdentityWriteOperation) -> Result<HostIdentityWr
         }
         Ok(receipt)
     })();
-    if result.is_ok() && finished { maintenance.finish_handoff()?; }
+    if let Ok(receipt) = &result {
+        if finished { maintenance.finish_handoff_with_expectation(restoration_expectation(receipt)?)?; }
+    }
     result.map_err(|error| {
         let error = if finished {
             error.context("identity operation committed and maintenance finished; recovery context cleanup failed")
@@ -247,6 +253,20 @@ fn unchanged(original: &Original, expected: &HostAuthIdentity, binary: &Path,
         && super::control::identity(&original.profile)? == *expected,
         "identity write installation, profile, image or resulting identity changed");
     Ok(())
+}
+
+fn restoration_expectation(receipt: &HostIdentityWriteResult)
+    -> Result<respire_host_control::lifecycle_io::AccountRuntimeExpectation> {
+    use respire_host_control::lifecycle_io::AccountRuntimeExpectation;
+    anyhow::ensure!(receipt.outcome == HostIdentityWriteOutcome::Committed,
+        "identity owner restoration requires a committed receipt");
+    if matches!(receipt.operation, HostIdentityWriteOperation::Logout { full: true }) {
+        anyhow::ensure!(matches!(receipt.identity, HostAuthIdentity::Absent),
+            "full logout restoration requires an absent session");
+        Ok(AccountRuntimeExpectation::LockedAfterFullLogout)
+    } else {
+        Ok(AccountRuntimeExpectation::Unlock)
+    }
 }
 
 fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest, profile: &Path,

@@ -124,14 +124,14 @@ pub fn stop_if_running() -> Result<()> {
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    let _takeover = crate::runtime_policy::takeover_lock()?;
+    let takeover = crate::runtime_policy::takeover_lock()?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
     // An unavailable health response is not permission to discover or kill a PID.
     let health = probe_runtime().context(
         "runtime restart blocked: owner health is unavailable; no process was forced to exit",
     )?;
     let stale = if health.is_none() && endpoint_path().try_exists()? {
-        Some(crate::autostart::StaleOwner::prepare_locked()
+        Some(crate::autostart::StaleOwner::prepare_restart_locked()
             .context("runtime restart blocked: stale owner could not be verified")?)
     } else {
         None
@@ -140,6 +140,7 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     if let Some(stale) = stale {
         stale.remove_endpoint_locked()?;
     }
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
     if crate::autostart::managed_enabled()?
@@ -157,8 +158,8 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
         crate::autostart::restart_stage("restart_start");
         ensure_daemon_locked()?;
     }
-    crate::net_rpc::health()?;
-    if !respire_client_host::settings::off_mode()? {
+    let health = crate::net_rpc::health()?;
+    if !respire_client_host::settings::off_mode()? && health.credential_state != "required" {
         verify_open_store(&respire_client_host::config::control_roots()?.1)?;
     }
     maintenance.finish()?;
@@ -768,11 +769,13 @@ pub(crate) fn ensure_daemon() -> Result<()> {
     // begins when startup, replacement or recovery is actually required.
     if let Some(health) = probe_runtime()? {
         if runtime_acceptable(&health)? {
+            respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
             return Ok(());
         }
     }
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    let _takeover = crate::runtime_policy::takeover_lock()?;
+    let takeover = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     ensure_daemon_locked()
 }
 
@@ -810,19 +813,27 @@ pub(crate) fn runtime_acceptable(health: &crate::net_rpc::Health) -> Result<bool
 }
 
 pub(crate) fn ensure_daemon_locked() -> Result<()> {
+    ensure_daemon_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn ensure_daemon_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
+) -> Result<()> {
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    if crate::autostart::ensure_managed_locked()? {
+    if crate::autostart::ensure_managed_locked_with_expectation(expectation)? {
         return Ok(());
     }
     crate::autostart::check_direct_access()?;
     let current = probe_runtime()?;
     if let Some(health) = &current {
         if runtime_acceptable(health)? {
+            expectation.confirm_credentials(health)?;
             return Ok(());
         }
     }
     #[cfg(feature = "client2-host-prototype")]
     if current.is_none()
+        && !respire::env::var("RSRS_CLIENT2_HOST").is_ok_and(|value| value == "1")
         && crate::autostart::lifecycle_boot_token().is_none()
         && !respire_client_host::paths::main_data_dir()
             .join("runtime/autostart/registration.json")
@@ -852,7 +863,7 @@ pub(crate) fn ensure_daemon_locked() -> Result<()> {
     let (mut child, instance_id) =
         crate::autostart::spawn_authorized_runtime(&executable, &arguments, None)
             .context("failed to start host runtime")?;
-    let result = wait_daemon_ready(&mut child, &executable, &instance_id);
+    let result = wait_daemon_ready(&mut child, &executable, &instance_id, expectation);
     if result.is_err() && child.try_wait()?.is_none() {
         // Do not leave a delayed startup racing the next lock holder.
         child
@@ -935,6 +946,7 @@ fn wait_daemon_ready(
     child: &mut std::process::Child,
     executable: &std::path::Path,
     instance_id: &str,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation,
 ) -> Result<()> {
     let off_mode = respire_client_host::settings::off_mode()?;
     let mut last_store_ready = None;
@@ -946,10 +958,6 @@ fn wait_daemon_ready(
         }
         if let Some(health) = probe_runtime()? {
             last_store_ready = Some(health.store_ready);
-            // Off mode deliberately leaves the store closed; owner checks still apply.
-            if !health.store_ready && !off_mode {
-                continue;
-            }
             let birth = crate::autostart::process_birth(child.id())?
                 .context("starting runtime process exited")?;
             let birth_prefix = if cfg!(windows) {
@@ -975,7 +983,10 @@ fn wait_daemon_ready(
                     ),
                 "runtime owner changed during startup"
             );
-            return Ok(());
+            if health.store_ready || off_mode || health.credential_state == "required" {
+                expectation.confirm_credentials(&health)?;
+                return Ok(());
+            }
         }
     }
     bail!("host runtime did not become ready (off_mode={off_mode}, last_store_ready={last_store_ready:?})")
@@ -1315,7 +1326,8 @@ mod tests {
             let (child, instance_id) = crate::autostart::spawn_authorized_runtime(
                 &executable, &arguments, None)?;
             let mut runtime = Self { child, port, _environment: environment, _root: root };
-            wait_daemon_ready(&mut runtime.child, &executable, &instance_id)?;
+            wait_daemon_ready(&mut runtime.child, &executable, &instance_id,
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)?;
             Ok(runtime)
         }
 

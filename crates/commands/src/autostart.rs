@@ -26,6 +26,8 @@ pub enum RuntimeCommand {
     Restart,
     /// Inspect the existing host without creating a profile or starting it.
     Status,
+    /// Supply the existing local private key to the selected Runtime, without starting it.
+    Unlock,
     /// Query an operation using its original context without starting a runtime.
     Result {
         #[arg(long, value_name = "JSON", value_parser = parse_operation_context)]

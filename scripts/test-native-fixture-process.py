@@ -23,6 +23,80 @@ results = []
 # Exercise the actual sampler without starting a runtime: frequent samples read
 # fresh memory values, while the original boundary audit discovers new children.
 tree = ast.parse(pathlib.Path(__file__).with_name('test-real-m3-account-switch.py').read_text(encoding='utf-8'))
+# Execute the account fixture's real Mac setup and finally block without native
+# credentials. These checks prove ordering/error propagation, not a Mac migration.
+fixture_loop = next(node for node in tree.body if isinstance(node, ast.For))
+fixture_try = next(node for node in fixture_loop.body if isinstance(node, ast.Try))
+mac_setup = fixture_try.body[0]
+assert isinstance(mac_setup, ast.If) and "darwin" in ast.unparse(mac_setup.test)
+seed_copy = next(node for node in fixture_try.body if isinstance(node, ast.Assign)
+                 and any(isinstance(target, ast.Name) and target.id == 'seed_env' for target in node.targets))
+assert mac_setup.lineno < seed_copy.lineno
+assert "sys.platform != 'darwin'" in ast.unparse(fixture_loop.body[2].test)
+for body_failure, cleanup_mode in [(False, 'ok'), (False, 'failed'), (False, 'remaining'),
+                                   (False, 'raise'), (True, 'failed'), (True, 'ok'),
+                                   (False, 'configure-failed')]:
+    events = []
+    class Keys:
+        def configure_env(self, env):
+            events.append('configure')
+            if cleanup_mode == 'configure-failed': raise RuntimeError('fixture-configure-failed')
+            env['configured'] = True
+        def cleanup(self):
+            events.append('keys-cleanup')
+            if cleanup_mode == 'raise': raise RuntimeError('fixture-keychain-cleanup-failed')
+            return {'passed': cleanup_mode != 'failed',
+                    'remaining_entries': ['remaining'] if cleanup_mode == 'remaining' else []}
+    manager = Keys()
+    backend = types.SimpleNamespace(create=lambda root: manager)
+    util = types.SimpleNamespace(
+        spec_from_file_location=lambda *a: types.SimpleNamespace(loader=types.SimpleNamespace(exec_module=lambda m: None)),
+        module_from_spec=lambda spec: backend)
+    def body():
+        events.append('body')
+        if body_failure: raise RuntimeError('fixture-body-failed')
+        namespace['reports'].append({'passed': True})
+    def stop(*a, **kw):
+        events.append('runtime-stop')
+        return types.SimpleNamespace(returncode=0)
+    old_runtime = types.SimpleNamespace(poll=lambda: None,
+        terminate=lambda: events.append('old-terminate'), wait=lambda **kw: events.append('old-wait'))
+    namespace = dict(sys=types.SimpleNamespace(platform='darwin', exc_info=sys.exc_info),
+        importlib=types.SimpleNamespace(util=util), pathlib=pathlib, __file__=__file__,
+        root=output, BASE=output, env={'HOME': str(output)}, keys=None, components_started=False,
+        LEGACY_CACHE=output, binary=pathlib.Path('fixture-cli'), stop_failure=None, reports=[],
+        args=types.SimpleNamespace(runtime_binary=None, expect_supervised_worker=True),
+        inspector=None, old_runtime=old_runtime, worker_identities=[], json=json,
+        captured_run=stop, confirm_workers_exited=lambda ids: events.append('workers-reaped'),
+        runtime_report=lambda *a: {}, exercise=body)
+    body_nodes = [mac_setup, ast.parse('components_started=True').body[0], seed_copy,
+                  ast.parse('exercise()').body[0]]
+    check = ast.Try(body=body_nodes, handlers=fixture_try.handlers,
+                    orelse=[], finalbody=fixture_try.finalbody)
+    failure = None
+    try:
+        exec(compile(ast.fix_missing_locations(ast.Module(body=[check], type_ignores=[])),
+                     str(__file__), 'exec'), namespace)
+    except RuntimeError as error:
+        failure = str(error)
+    report = namespace['reports'][-1]
+    saved = json.loads((output / 'real-account-return-verification.json').read_text())[-1]
+    assert saved == report
+    if cleanup_mode == 'configure-failed':
+        assert failure == 'fixture-configure-failed' and 'body' not in events and 'runtime-stop' not in events
+    else:
+        assert namespace['seed_env']['configured'] is True
+        assert events.index('configure') < events.index('body') < events.index('runtime-stop')
+    assert events.index('workers-reaped') < events.index('old-wait') < events.index('keys-cleanup')
+    assert report['passed'] is (not body_failure and cleanup_mode == 'ok')
+    if body_failure:
+        assert failure == 'fixture-body-failed' and report['error'] == failure
+    elif cleanup_mode in ('failed', 'remaining', 'raise'):
+        assert failure.startswith('fixture cleanup failed:') and report['cleanup_errors']
+    elif cleanup_mode == 'ok':
+        assert failure is None and report['native_credential_cleanup']['passed'] is True
+results.append({'scenario': 'Mac HOME configured before seed copy; cleanup preserves real failures',
+                'passed': True, 'failure_paths': 7, 'scope': 'fixture control flow only'})
 sampler = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'total_memory')
 scans = []
 children = []
@@ -54,7 +128,7 @@ peak = 0
 lock = threading.Lock()
 def foreground_call(remaining, cancel):
     global active, peak
-    assert 0 < remaining <= 1
+    assert 0 < remaining <= 1, f'foreground timeout outside its one-second window: {remaining!r}'
     with lock:
         active += 1
         peak = max(peak, active)

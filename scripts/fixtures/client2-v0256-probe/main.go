@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"respire-client2/internal/host"
 	"time"
@@ -13,6 +15,7 @@ func main() {
 	if e != nil {
 		panic(e)
 	}
+	var selectedCLI map[string]any
 	if len(os.Args) > 1 {
 		var actionErr error
 		var observedPID uint32
@@ -25,7 +28,18 @@ func main() {
 			}
 			return
 		} else if os.Args[1] == "start" {
-			actionErr = m.Start()
+			cli, err := m.External(context.Background())
+			if err != nil {
+				actionErr = err
+			} else {
+				content, err := os.ReadFile(cli.Path)
+				if err != nil {
+					actionErr = err
+				} else {
+					selectedCLI = map[string]any{"path": cli.Path, "version": cli.Version, "sha256": fmt.Sprintf("%x", sha256.Sum256(content))}
+					actionErr = m.Start()
+				}
+			}
 		} else if os.Args[1] == "stop" {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			before, _, err := m.Health(ctx)
@@ -64,7 +78,7 @@ func main() {
 		}
 		return e.Error()
 	}
-	json.NewEncoder(os.Stdout).Encode(map[string]any{"catalog": catalog, "catalog_error": errText(ce), "progress": progress, "progress_error": errText(pe), "variants": variants, "variants_error": errText(ve), "health": h, "health_error": errText(he), "diagnostic_rpc": r, "diagnostic_error": errText(re), "business_status": s, "business_error": errText(se)})
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"selected_cli": selectedCLI, "catalog": catalog, "catalog_error": errText(ce), "progress": progress, "progress_error": errText(pe), "variants": variants, "variants_error": errText(ve), "health": h, "health_error": errText(he), "diagnostic_rpc": r, "diagnostic_error": errText(re), "business_status": s, "business_error": errText(se)})
 	if he != nil || re != nil || se != nil || ce != nil || pe != nil || ve != nil {
 		os.Exit(1)
 	}

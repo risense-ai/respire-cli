@@ -10,6 +10,10 @@ on:
       - 'scripts/test-native-runtime-install.py'
       - 'cli/src/autostart.rs'
       - 'cli/src/autostart/**'
+      - 'cli/src/client2_host.rs'
+      - 'crates/client-host/**'
+      - 'crates/host-control/**'
+      - 'crates/protocol/**'
       - 'cli/tests/model_maintenance.rs'
       - 'cli/tests/support/**'
       - 'cli/src/main.rs'
@@ -26,11 +30,17 @@ on:
       - 'cli/src/mcp.rs'
       - 'spawn/**'
   workflow_dispatch:
+    inputs:
+      runtime_source_sha:
+        description: Exact reviewed source of the compatible newly published Runtime; update runtime-pin.json before product validation
+        type: string
+        required: true
 permissions:
   contents: read
   actions: read
 jobs:
-  user-runtime:
+  source-checks:
+    name: Source checks (${{ matrix.os }})
     cache-mode: read
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
@@ -102,34 +112,96 @@ jobs:
           cargo test --locked -p respire_spawn --target "$SDK_TARGET" --target-dir target/autostart-validation
           cargo test --locked -p respire --lib autostart:: --target "$SDK_TARGET" --target-dir target/autostart-validation -- --test-threads=1 --show-output
           cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
-      - name: Prepare official pinned standalone Runtime for supervision validation
+      - name: Record source-only validation scope
+        shell: bash
+        run: echo 'Source and fixture checks only. Published Runtime product supervision is a separate explicit manual job.' >> "$GITHUB_STEP_SUMMARY"
+
+  user-runtime:
+    name: Published Runtime supervision (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: source-checks
+    cache-mode: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu, suffix: '', previous_package: '@rsrsai/linux-x64-gnu'}
+          - {os: macos-latest, target: aarch64-apple-darwin, suffix: '', previous_package: '@rsrsai/macos-arm64'}
+          - {os: windows-latest, target: x86_64-pc-windows-msvc, suffix: '.exe', previous_package: '@rsrsai/win-x64'}
+    env:
+      RSRS_ENGINE: cpu
+      RUST_TEST_THREADS: '1'
+      RUST_MIN_STACK: '16777216'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build the current native CLI for explicit product validation
+        shell: bash
+        env:
+          SDK_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}"
+          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
+          cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
+      - name: Prepare and authenticate the explicitly reviewed published Runtime
         shell: bash
         env:
           SDK_TARGET: ${{ matrix.target }}
           EXE_SUFFIX: ${{ matrix.suffix }}
           RUNTIME_FIXTURE_HOSTED: ${{ runner.environment == 'github-hosted' }}
+          EXPECTED_RUNTIME_SOURCE_SHA: ${{ inputs.runtime_source_sha }}
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
           import assert from 'node:assert/strict';
+          import {createHash} from 'node:crypto';
           import {appendFileSync, mkdtempSync, readFileSync, realpathSync, statSync} from 'node:fs';
           import {join, resolve} from 'node:path';
           import {spawnSync} from 'node:child_process';
           assert.equal(process.env.GITHUB_ACTIONS, 'true');
           assert.equal(process.env.RUNTIME_FIXTURE_HOSTED, 'true', 'Runtime fixtures require a dedicated GitHub-hosted runner');
+          assert.match(process.env.EXPECTED_RUNTIME_SOURCE_SHA ?? '', /^[a-f0-9]{40}$/, 'Select the reviewed newly published Runtime source explicitly');
           const root = mkdtempSync(join(process.env.RUNNER_TEMP, 'official-runtime-'));
           const cli = resolve('target/autostart-validation', process.env.SDK_TARGET, 'debug', `rsrs${process.env.EXE_SUFFIX}`);
           const env = {...process.env, RSRS_DATA_DIR: root};
           // Keep the test environment intact; only the official installer may download.
           delete env.RSRS_CORE_TEST_MODE;
           const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');
-          const result = await installPinnedRuntime(cli, {env}, '${{ matrix.target }}');
+          const result = await installPinnedRuntime(cli, {env}, process.env.SDK_TARGET);
           if (result.error) throw result.error;
           assert.equal(result.status, 0, 'Official pinned Runtime installation failed');
           const pin = JSON.parse(readFileSync('runtime-pin.json', 'utf8'));
+          const selected = JSON.parse(readFileSync(join(root, 'bin', 'runtime.json'), 'utf8'));
+          const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+          assert.equal(selected.version, pin.required);
+          assert.ok(selected.release?.metadata_json, 'Official Runtime release proof is required');
+          assert.equal(hash(selected.release.metadata_json), selected.release.metadata_sha256);
+          const metadata = JSON.parse(selected.release.metadata_json);
+          assert.equal(metadata.schema_version, 2);
+          assert.equal(metadata.runtime_version, pin.required);
+          assert.equal(metadata.triple ?? metadata.target_triple, process.env.SDK_TARGET);
+          assert.equal(metadata.source_commit, process.env.EXPECTED_RUNTIME_SOURCE_SHA);
+          assert.equal(metadata.binary_sha256, selected.sha256);
           const runtime = join(root, 'bin', 'runtime', pin.required, `rsrs-runtime${process.env.EXE_SUFFIX}`);
           assert.ok(statSync(runtime).isFile());
           assert.notEqual(realpathSync(runtime), realpathSync(cli), 'CLI cannot be the Runtime fixture');
+          assert.equal(hash(readFileSync(runtime)), selected.sha256);
+          assert.equal(hash(readFileSync(join(root, 'bin', 'runtime', pin.required, 'core-runtime.json'))),
+            metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           NODE
       - name: Verify anonymous owner model maintenance on the native platform

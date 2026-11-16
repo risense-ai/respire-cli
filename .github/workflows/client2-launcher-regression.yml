@@ -1,4 +1,4 @@
-name: Client2 launcher compatibility prototype
+name: Protocol-compatible Client2 launcher regression
 
 on:
   pull_request:
@@ -16,30 +16,47 @@ on:
       - '.github/workflows/client2-launcher-regression.yml'
   workflow_dispatch:
     inputs:
+      client2_candidate_run_id:
+        description: Authenticated Client2 Desktop candidate run (must match the reviewed host-owned-candidate baseline)
+        type: string
+        default: '43721147038'
       use_runtime_candidate:
         description: Use the reviewed fixed Windows Runtime candidate; draft freeze refuses before downloads
         type: boolean
         default: false
+      runtime_release:
+        description: Explicit protocol-compatible public Runtime tag; mutually exclusive with use_runtime_candidate
+        type: string
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
+  source-checks:
+    name: Source and artifact contracts only (no product acceptance)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Verify source and fixed artifact contracts without network or products
+        run: |
+          python3 -B scripts/test-fetch-client2-runtime-candidate.py
+          python3 -c 'import ast, pathlib; ast.parse(pathlib.Path("scripts/test-client2-launcher-compat.py").read_text())'
   real-host:
-    name: Unchanged Client2 host (${{ matrix.target }} prototype)
+    name: New Client2 host (${{ matrix.target }})
+    if: github.event_name == 'workflow_dispatch'
+    needs: source-checks
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
-            exe: ''
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            exe: ''
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            exe: '.exe'
+        include: >-
+          ${{ fromJSON(inputs.use_runtime_candidate
+            && '[{"os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":".exe"}]'
+            || '[{"os":"ubuntu-24.04","target":"x86_64-unknown-linux-gnu","exe":""},{"os":"macos-latest","target":"aarch64-apple-darwin","exe":""},{"os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":".exe"}]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -47,8 +64,21 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Verify fixed candidate artifact checks without network or products
-        run: python3 -B scripts/test-fetch-client2-runtime-candidate.py
+      - name: Require an explicit Runtime selection before downloads or product work
+        env:
+          USE_RUNTIME_CANDIDATE: ${{ inputs.use_runtime_candidate }}
+          RUNTIME_RELEASE: ${{ inputs.runtime_release }}
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          candidate = os.environ['USE_RUNTIME_CANDIDATE'] == 'true'
+          release = os.environ['RUNTIME_RELEASE']
+          if candidate == bool(release):
+              raise SystemExit('Select exactly one explicit Runtime release or reviewed frozen candidate; no public pin fallback')
+          if release and not re.fullmatch(r'v[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?', release):
+              raise SystemExit('Runtime release must be an exact public version tag')
+          PY
       - name: Reject an unready candidate freeze before other downloads or product work
         if: github.event_name == 'workflow_dispatch' && inputs.use_runtime_candidate
         shell: bash
@@ -56,7 +86,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: risense-ai/respire-client2
-          ref: be682108c555a3e5a788ad74217e088bcb25170b
+          ref: 6ffa187685734873721ab51f3a54d8b2c29cd269
           path: .client2-source
           persist-credentials: false
       - uses: actions/checkout@v4
@@ -75,12 +105,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Compile the opt-in transport prototype
         run: cargo build --locked -p respire --features client2-host-prototype
-      - name: Stage authenticated official Runtime or frozen Windows candidate
+      - name: Stage the explicitly selected public Runtime or frozen Windows candidate
         id: runtime-input
         env:
           GH_TOKEN: ${{ github.token }}
           RUNTIME_TARGET: ${{ matrix.target }}
-          USE_RUNTIME_CANDIDATE: ${{ github.event_name == 'workflow_dispatch' && inputs.use_runtime_candidate && runner.os == 'Windows' }}
+          USE_RUNTIME_CANDIDATE: ${{ inputs.use_runtime_candidate }}
+          RUNTIME_RELEASE: ${{ inputs.runtime_release }}
         shell: bash
         run: |
           set -euo pipefail
@@ -93,9 +124,9 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/client2-runtime"
-          version="$(python3 -c 'import json; print(json.load(open("runtime-pin.json"))["required"])')"
-          gh api "repos/risense-ai/respire-runtime/releases/tags/v$version" > "$RUNNER_TEMP/client2-runtime/release.json"
-          gh release download "v$version" --repo risense-ai/respire-runtime \
+          version="${RUNTIME_RELEASE#v}"
+          gh api "repos/risense-ai/respire-runtime/releases/tags/$RUNTIME_RELEASE" > "$RUNNER_TEMP/client2-runtime/release.json"
+          gh release download "$RUNTIME_RELEASE" --repo risense-ai/respire-runtime \
             --pattern "rsrs-runtime-$RUNTIME_TARGET.tar.gz" \
             --pattern "runtime-build-$RUNTIME_TARGET.json" \
             --dir "$RUNNER_TEMP/client2-runtime"
@@ -103,33 +134,57 @@ jobs:
           import hashlib, json, os, pathlib
           root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-runtime'
           release = json.loads((root / 'release.json').read_text(encoding='utf-8'))
-          assert not release['draft'] and release['prerelease']
+          assert not release['draft'] and release['tag_name'] == os.environ['RUNTIME_RELEASE']
           target = os.environ['RUNTIME_TARGET']
           for name in [f'rsrs-runtime-{target}.tar.gz', f'runtime-build-{target}.json']:
               asset, = [a for a in release['assets'] if a['name'] == name]
               data = (root / name).read_bytes()
               assert len(data) == asset['size'] and 'sha256:' + hashlib.sha256(data).hexdigest() == asset['digest'], name
+          metadata = json.loads((root / f'runtime-build-{target}.json').read_text(encoding='utf-8'))
+          assert metadata['runtime_version'] == os.environ['RUNTIME_RELEASE'][1:]
+          assert metadata['target_triple'] == target
           PY
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: Stage released Client2 Linux x64 headless executable
+      - name: Authenticate the reviewed Client2 Desktop candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import ast, json, os, pathlib, subprocess
+          tree = ast.parse(pathlib.Path('scripts/test-client2-launcher-compat.py').read_text())
+          baselines = next(n.value for n in tree.body if isinstance(n, ast.Assign)
+                           and any(isinstance(t, ast.Name) and t.id == 'DESKTOP_BASELINES' for t in n.targets))
+          baseline = next(ast.literal_eval(value) for key, value in zip(baselines.keys, baselines.values)
+                          if isinstance(key, ast.Constant) and key.value == 'host-owned-candidate')
+          assert os.environ['CLIENT2_RUN'] == baseline['run_id'], 'Candidate run differs from reviewed baseline'
+          run = json.loads(subprocess.check_output(['gh', 'api', 'repos/risense-ai/respire-client2/actions/runs/' + baseline['run_id']]))
+          assert run['head_sha'] == baseline['source'] and run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'risense-ai/respire-client2'
+          assert run['path'] == '.github/workflows/desktop.yml' and run['event'] == 'pull_request'
+          PY
+      - name: Stage authenticated Client2 Linux x64 candidate executable
         if: runner.os == 'Linux'
         env:
           GH_TOKEN: ${{ github.token }}
+          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
         shell: bash
         run: |
           set -euo pipefail
           bash scripts/ci-apt-get.sh update -qq
           bash scripts/ci-apt-get.sh install -y libgtk-3-0 libwebkit2gtk-4.1-0 libx11-6
           mkdir -p "$RUNNER_TEMP/client2-desktop"
-          gh release download v2.0.0-dev.5 --repo risense-ai/respire-client2 \
-            --pattern respire-linux-amd64.tar.gz --dir "$RUNNER_TEMP/client2-desktop"
+          gh run download "$CLIENT2_RUN" --repo risense-ai/respire-client2 \
+            --name respire-linux-amd64 --dir "$RUNNER_TEMP/client2-desktop"
           python3 - <<'PY'
           import hashlib, os, pathlib
           archive = pathlib.Path(os.environ['RUNNER_TEMP']) / 'client2-desktop/respire-linux-amd64.tar.gz'
-          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '69707b8a65df1f46e73b4ea5ddc33235c861a0870f8d0260f261437228c7356a'
+          assert hashlib.sha256(archive.read_bytes()).hexdigest() == '4a294a7de11fdaea48e534539bbfb5693c30a90e05544aea9aff344414a3c925'
           PY
           tar -xzf "$RUNNER_TEMP/client2-desktop/respire-linux-amd64.tar.gz" -C "$RUNNER_TEMP/client2-desktop" respire
-      - name: Exercise original Client2 host and all startup orders
+      - name: Exercise new Client2 host and all startup orders
         env:
           RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
         shell: bash
@@ -138,8 +193,11 @@ jobs:
           set --
           if [[ "$RUNNER_OS" == Linux ]]; then
             set -- --desktop-executable "$RUNNER_TEMP/client2-desktop/respire"
+          else
+            set -- --client2-source-sha 6ffa187685734873721ab51f3a54d8b2c29cd269
           fi
           python3 scripts/test-client2-launcher-compat.py \
+            --client2-baseline host-owned-candidate \
             --ordinary-cli-cold-start \
             --cli target/debug/rsrs${{ matrix.exe }} \
             --runtime-archive "$RUNNER_TEMP/client2-runtime/rsrs-runtime-${{ matrix.target }}.tar.gz" \
@@ -170,16 +228,20 @@ jobs:
           if (-not $env:MATCHED_KEY -or $env:MATCHED_KEY -ne $env:EXPECTED_KEY) { throw 'Exact public CPU model cache unavailable; offline GUI acceptance environment blocked' }
           python scripts/native-model-cache.py restore --model-dir "$env:RUNNER_TEMP/client2-gui-models" --legacy-dir "$env:RUNNER_TEMP/client2-gui-legacy-model"
           if ($LASTEXITCODE -ne 0) { throw 'Pinned public CPU model verification failed' }
-      - name: Probe original Windows Client2 GUI and real offline subset (not full GUI acceptance)
+      - name: Probe authenticated Windows Client2 candidate GUI and real offline subset
         timeout-minutes: 10
         env:
+          GH_TOKEN: ${{ github.token }}
           RUNTIME_VERSION: ${{ steps.runtime-input.outputs.version }}
+          CLIENT2_RUN: ${{ inputs.client2_candidate_run_id || '43721147038' }}
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $version = $env:RUNTIME_VERSION
           ./scripts/probe-client2-gui.ps1 `
+            -Client2CandidateRunId $env:CLIENT2_RUN `
+            -Client2Commit '6ffa187685734873721ab51f3a54d8b2c29cd269' `
             -Cli "$PWD/target/debug/rsrs.exe" `
             -RuntimeArchive "$env:RUNNER_TEMP/client2-runtime/rsrs-runtime-x86_64-pc-windows-msvc.tar.gz" `
             -RuntimeVersion $version `

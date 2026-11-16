@@ -1458,10 +1458,11 @@ fn run_classify_config(
     key_stdin: bool,
 ) -> Result<()> {
     let value = if set {
-        let selected = backend
-            .map(str::to_owned)
-            .or_else(respire_client_host::classification::load_classify_backend)
-            .unwrap_or_else(|| "jev".to_owned());
+        let selected = match backend {
+            Some(backend) => backend.to_owned(),
+            None => respire_client_host::classification::load_classify_backend()?
+                .unwrap_or_else(|| "jev".to_owned()),
+        };
         classify_config::configure(&selected, api_base, model, key_stdin)?
     } else {
         if key_stdin || model.is_some() {

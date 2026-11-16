@@ -456,9 +456,15 @@ impl Maintenance {
     }
 
     pub(crate) fn start_account_runtime(&mut self) -> Result<()> {
+        self.start_account_runtime_with_expectation(
+            respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    }
+
+    pub(crate) fn start_account_runtime_with_expectation(&mut self,
+        expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
         self.check_account_runtime()?;
         self.mark(Phase::Starting)?;
-        crate::rpc::ensure_daemon_locked()
+        crate::rpc::ensure_daemon_locked_with_expectation(expectation)
     }
 
     pub(crate) fn resume_managed_runtime(&mut self) -> Result<()> {
@@ -583,6 +589,13 @@ impl Maintenance {
 
     /// Restore only the verified serving owner after durable maintenance completion.
     pub(crate) fn finish_handoff(&self) -> Result<()> {
+        self.finish_handoff_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+    }
+
+    pub(crate) fn finish_handoff_with_expectation(&self,
+        expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
+        #[cfg(not(feature = "client2-host-prototype"))]
+        let _ = expectation;
         #[cfg(feature = "client2-host-prototype")]
         {
             anyhow::ensure!(self.completed, "compatibility handoff requires completed maintenance");
@@ -593,7 +606,7 @@ impl Maintenance {
             anyhow::ensure!(respire_client_host::config::control_roots()?.0.canonicalize()? == root,
                 "completed maintenance installation changed before compatibility handoff");
             if let Some(health) = crate::rpc::probe_runtime()? {
-                finish_compatibility_handoff(&health).context(
+                finish_compatibility_handoff_with_expectation(&health, expectation).context(
                     "operation committed and maintenance finished; Client2 compatibility handoff pending; do not repeat the operation")?;
             } else {
                 anyhow::ensure!(!crate::rpc::endpoint_path().try_exists()?,
@@ -652,6 +665,13 @@ impl Drop for Maintenance {
 
 #[cfg(feature = "client2-host-prototype")]
 pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Result<()> {
+    finish_compatibility_handoff_with_expectation(owner,
+        respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+#[cfg(feature = "client2-host-prototype")]
+fn finish_compatibility_handoff_with_expectation(owner: &crate::net_rpc::Health,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     anyhow::ensure!(current_boot_token().is_none(),
         "compatibility handoff cannot inherit maintenance authorization");
     let (root, profile) = respire_client_host::config::control_roots()?;
@@ -676,10 +696,13 @@ pub(super) fn finish_compatibility_handoff(owner: &crate::net_rpc::Health) -> Re
     anyhow::ensure!(respire_client_host::config::control_roots()?.1.canonicalize()? == profile
         && super::supervise::handoff_identity(&profile)? == identity,
         "committed selection changed before compatibility host startup");
-    crate::client2_host::start_locked()?;
+    crate::client2_host::start_locked_with_expectation(expectation)?;
     let restored = crate::rpc::probe_runtime()?.context("compatibility Runtime did not resume")?;
     super::supervise::verify_model_owner(&restored, &root, &profile, None,
         &binary, &manifest, Some(&account))?;
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        expectation.confirm_credentials(&restored)?;
+    }
     let (current_binary, current_manifest) = super::supervise::installed_model_runtime()?;
     anyhow::ensure!(restored.instance_id != owner.instance_id && (!ready || restored.store_ready)
         && current_binary == binary && current_manifest.version == manifest.version
@@ -988,6 +1011,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
     owned(&config)?;
     let was_running = crate::rpc::probe_runtime()?.is_some();
     let mut guard = Maintenance::begin(config, false)?;
@@ -1102,6 +1126,11 @@ pub(super) fn stop_drained_supervisor(config: &Registration) -> Result<()> {
 }
 
 pub(super) fn wait_ready(config: &Registration) -> Result<()> {
+    wait_ready_with_expectation(config, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+fn wait_ready_with_expectation(config: &Registration,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     owned(config)?;
     manager::inspect(config)?;
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -1112,7 +1141,9 @@ pub(super) fn wait_ready(config: &Registration) -> Result<()> {
                 crate::runtime_fetch::version_in_accept(&health.runtime_version),
                 "managed runtime version mismatch"
             );
-            if health.store_ready || respire_client_host::settings::off_mode()? {
+            if health.credential_state == "required" || health.store_ready
+                || respire_client_host::settings::off_mode()? {
+                expectation.confirm_credentials(&health)?;
                 return Ok(());
             }
         }
@@ -1122,6 +1153,11 @@ pub(super) fn wait_ready(config: &Registration) -> Result<()> {
 }
 
 fn start_candidate(guard: &mut Maintenance) -> Result<()> {
+    start_candidate_with_expectation(guard, respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+fn start_candidate_with_expectation(guard: &mut Maintenance,
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     let config = guard
         .config
         .as_ref()
@@ -1144,11 +1180,12 @@ fn start_candidate(guard: &mut Maintenance) -> Result<()> {
             .as_ref()
             .context("managed registration missing")?,
     )?;
-    wait_ready(
+    wait_ready_with_expectation(
         guard
             .config
             .as_ref()
             .context("managed registration missing")?,
+        expectation,
     )
 }
 
@@ -1165,6 +1202,11 @@ pub(crate) fn may_reuse_runtime(health: &crate::net_rpc::Health) -> Result<bool>
 }
 
 pub(crate) fn ensure_managed_locked() -> Result<bool> {
+    ensure_managed_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn ensure_managed_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<bool> {
     let Some(config) = read_registration(&respire_client_host::paths::main_data_dir())? else {
         return Ok(false);
     };
@@ -1200,7 +1242,7 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         };
         let result = (|| {
             raw_stop_owned(borrowed.config.as_ref().context("registration missing")?)?;
-            start_candidate(&mut borrowed)
+            start_candidate_with_expectation(&mut borrowed, expectation)
         })();
         // This borrowed guard does not own completion or its caller's token.
         borrowed.config = None;
@@ -1213,19 +1255,21 @@ pub(crate) fn ensure_managed_locked() -> Result<bool> {
         if crate::rpc::runtime_acceptable(&health)?
             && health.managed_id.as_deref() == Some(config.id.as_str())
         {
+            expectation.confirm_credentials(&health)?;
             return Ok(true);
         }
     }
     let mut guard = Maintenance::begin(config, false)?;
     raw_stop_owned(guard.config.as_ref().context("registration missing")?)?;
-    start_candidate(&mut guard)?;
+    start_candidate_with_expectation(&mut guard, expectation)?;
     guard.finish()?;
     Ok(true)
 }
 
-fn start_explicit_locked() -> Result<()> {
+fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> Result<()> {
     super::supervise::offline_keygen::reject_generic_recovery(&respire_client_host::paths::main_data_dir())?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(takeover)?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
         return crate::rpc::ensure_daemon_locked();
@@ -1247,6 +1291,7 @@ fn start_explicit_locked() -> Result<()> {
             if health.managed_id.as_deref() == Some(config.id.as_str())
                 && crate::rpc::runtime_acceptable(&health)?
             {
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock.confirm_credentials(&health)?;
                 reset_attempts(&config)?;
                 return Ok(());
             }
@@ -1618,9 +1663,16 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             crate::runtime_fetch::require_automatic_migration_safe()?;
             let ownership = crate::runtime_policy::takeover_lock()?;
             if !super::supervise::offline_keygen::start_explicit(&ownership)? {
-                start_explicit_locked()?;
+                start_explicit_locked(&ownership)?;
             }
             emit("runtime.start", status()?)
+        }
+        RuntimeCommand::Unlock => {
+            let health = crate::net_rpc::health()?;
+            let receipt = respire_host_control::lifecycle_io::supply_runtime_credentials(&health)?
+                .context("Runtime is not ready for V2 credential delivery")?;
+            emit("runtime.unlock", json!({"store_ready":receipt.store_ready,
+                "credential_state":"available", "provider_status":receipt.provider_status}))
         }
         RuntimeCommand::Autostart {
             command: AutostartCommand::Enable { now },
@@ -1635,20 +1687,13 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             file,
             version,
             mirror,
-        } => install_runtime(file.as_deref(), version.as_deref(), mirror.as_deref()),
+        } => install_runtime("runtime.install", file.as_deref(), version.as_deref(), mirror.as_deref()),
         RuntimeCommand::List => emit("runtime.list", runtime_inventory()?),
         RuntimeCommand::Clean => {
             let removed = crate::runtime_fetch::clean_old()?;
             emit("runtime.clean", json!({"removed": removed}))
         }
-        RuntimeCommand::Update => {
-            let binary = crate::runtime_fetch::download_and_install(None, None)?;
-            let version = crate::runtime_fetch::read_manifest()?.context("Runtime selection missing after update")?.version;
-            emit(
-                "runtime.update",
-                json!({"version": version, "binary": binary}),
-            )
-        }
+        RuntimeCommand::Update => install_runtime("runtime.update", None, None, None),
         RuntimeCommand::Supervise { data_dir } => {
             return super::supervise::supervise(data_dir);
         }
@@ -1665,15 +1710,11 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
 
 /// `runtime install`: pinned download by default, or an offline archive with
 /// `--file`/`--version`, with an optional explicit `--mirror` origin.
-fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
-    match (file, version) {
+fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mirror: Option<&str>) -> Result<()> {
+    let (binary, source) = match (file, version) {
         (Some(archive), Some(explicit_version)) => {
             anyhow::ensure!(mirror.is_none(), "--mirror is only accepted for downloads");
-            let binary = crate::runtime_fetch::install_from_file(archive, explicit_version)?;
-            emit(
-                "runtime.install",
-                json!({"source":"file","version":explicit_version,"binary":binary}),
-            )
+            (crate::runtime_fetch::install_from_file(archive, explicit_version)?, "file")
         }
         (Some(_), None) => bail!("--file requires --version"),
         (None, Some(_)) => bail!("--version is only accepted together with --file"),
@@ -1681,13 +1722,35 @@ fn install_runtime(file: Option<&Path>, version: Option<&str>, mirror: Option<&s
             if let Some(origin) = mirror {
                 respire_commands::model_download::validate_mirror(origin)?;
             }
-            let binary = crate::runtime_fetch::download_and_install(None, mirror)?;
-            emit(
-                "runtime.install",
-                json!({"source":"download","version":crate::runtime_fetch::pinned()?.required.clone(),"binary":binary}),
-            )
+            (crate::runtime_fetch::download_and_install(None, mirror)?, "download")
+        }
+    };
+    // Keep old images and account data; replace the stable CLI only after an authenticated drain.
+    let _ownership = crate::runtime_policy::takeover_lock()?;
+    let previous = crate::rpc::probe_runtime()?;
+    let cli_binary = crate::mcp::stable_bin_path();
+    let refresh_cli = crate::mcp::bin_needs_refresh(&std::env::current_exe()?, &cli_binary)
+        .map_err(anyhow::Error::msg)?;
+    let restart_runtime = previous.as_ref().map(crate::rpc::runtime_acceptable)
+        .transpose()?.is_some_and(|acceptable| !acceptable);
+    let mut restarted = false;
+    if refresh_cli || restart_runtime {
+        let mut maintenance = begin_maintenance_locked()?;
+        if let Some(health) = previous.as_ref() {
+            maintenance.drain_runtime(health)?;
+        }
+        crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
+        maintenance.finish()?;
+        if previous.is_some() {
+            start_explicit_locked(&_ownership).context(
+                "Runtime and CLI installed; restart failed; old data and recovery records were retained; inspect the startup error before running rsrs runtime start")?;
+            restarted = true;
         }
     }
+    let selected_version = crate::runtime_fetch::read_manifest()?
+        .context("Runtime selection missing after installation")?.version;
+    emit(command, json!({"source":source,"version":selected_version,
+        "binary":binary,"cli_binary":cli_binary,"restarted":restarted}))
 }
 
 fn runtime_inventory() -> Result<Value> {
@@ -1711,6 +1774,7 @@ fn enable(now: bool) -> Result<()> {
     // A platform-rejected native path must not even create lifecycle state.
     manager::validate_executable(Platform::current()?, &crate::mcp::stable_bin_path())?;
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
     // Resolve before creating the registration: otherwise our new registration
     // would look like an unbound legacy owner to the materialization preflight.
     crate::rpc::resolve_runtime_executable()?;
@@ -1870,6 +1934,7 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
         check_direct_access()?;
     }
     verify_managed_boot()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session()?;
     let stopped = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
@@ -1896,6 +1961,7 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
     let birth = manager::process_birth(pid)?;
     let mut drain: Option<std::thread::JoinHandle<Result<()>>> = None;
     let mut drain_requested = false;
+    let mut credentials_checked = false;
     let result = (|| -> Result<()> {
         loop {
             if let Some(status) = child.try_wait().context("cannot reap foreground Runtime")? {
@@ -1904,6 +1970,16 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
                 }
                 crate::set_exit_code(status.code().unwrap_or(1));
                 return Ok(());
+            }
+            if !credentials_checked && !stopped.load(Ordering::Acquire) {
+                if let Ok(Some(health)) = crate::rpc::probe_runtime() {
+                    if health.pid == pid && health.instance_id == instance_id {
+                        credentials_checked = true;
+                        if respire_host_control::lifecycle_io::unlock_if_needed(&health).is_err() {
+                            eprintln!("host could not unlock Runtime; waiting for explicit host credentials");
+                        }
+                    }
+                }
             }
             if drain.as_ref().is_some_and(|drain| drain.is_finished()) {
                 if let Some(drain) = drain.take() {
@@ -2478,11 +2554,17 @@ mod tests {
             std::env::set_var("RSRS_DATA_DIR", &root);
             std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
             fs::write(root.join("session.json"), b"legacy session")?;
+            let endpoint = root.join("runtime/endpoint.json");
+            fs::create_dir_all(endpoint.parent().context("legacy endpoint parent missing")?)?;
+            let owner = br#"{"v":1,"pid":0}"#;
+            fs::write(&endpoint, owner)?;
             let error = execute(&command).err().context("unbound legacy start was accepted")?;
             anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
             anyhow::ensure!(fs::read(root.join("session.json"))? == b"legacy session");
-            anyhow::ensure!(!root.join("runtime").exists(), "rejection created takeover state");
-            anyhow::ensure!(fs::read_dir(&root)?.count() == 1);
+            anyhow::ensure!(fs::read(&endpoint)? == owner);
+            anyhow::ensure!(!root.join("runtime/takeover").exists(), "rejection created takeover state");
+            anyhow::ensure!(fs::read_dir(&root)?.count() == 2);
+            anyhow::ensure!(fs::read_dir(root.join("runtime"))?.count() == 1);
         }
 
         let directory = tempfile::tempdir()?;
@@ -2491,14 +2573,18 @@ mod tests {
         std::env::set_var("RSRS_BIN_DIR", root.join("bin"));
         crate::runtime_fetch::require_automatic_migration_safe()?;
         let _ownership = crate::runtime_policy::takeover_lock()?;
-        // Model state appearing after initial admission. The lock is coordination
-        // metadata and must not be removed as a cleanup response to this refusal.
+        // Unbound endpoint appearing after initial admission. The lock is
+        // coordination metadata and must not be removed after this refusal.
         fs::write(root.join("session.json"), b"late legacy session")?;
-        let error = start_explicit_locked().err().context("locked start skipped its second check")?;
+        let endpoint = root.join("runtime/endpoint.json");
+        let owner = br#"{"v":1,"pid":0}"#;
+        fs::write(&endpoint, owner)?;
+        let error = start_explicit_locked(&_ownership).err().context("locked start skipped its second check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
         let error = restart_maintenance_locked().err().context("restart maintenance skipped its check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
         anyhow::ensure!(fs::read(root.join("session.json"))? == b"late legacy session");
+        anyhow::ensure!(fs::read(&endpoint)? == owner);
         anyhow::ensure!(root.join("runtime/takeover/lock.db").is_file());
         anyhow::ensure!(!control_path(&root).exists() && !marker_path(&root).exists());
         anyhow::ensure!(!crate::runtime_fetch::manifest_path().exists());
@@ -2652,9 +2738,9 @@ mod tests {
         let inventory = runtime_inventory()?;
         anyhow::ensure!(inventory["required"] == version && inventory["installed"][0]["version"] == version
             && inventory["installed"][0]["current"] == true);
-        anyhow::ensure!(install_runtime(Some(&runtime), None, None).is_err());
-        anyhow::ensure!(install_runtime(None, Some(&version), None).is_err());
-        anyhow::ensure!(install_runtime(Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), None, None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", None, Some(&version), None).is_err());
+        anyhow::ensure!(install_runtime("runtime.install", Some(&runtime), Some(&version), Some("https://example.invalid")).is_err());
 
         // Recovery must revalidate the registered owner again at the cleanup boundary.
         {
@@ -2707,6 +2793,118 @@ mod tests {
             save(&mut changed)?;
             anyhow::ensure!(stale.remove_endpoint_locked().is_err());
             anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            let rejected = super::super::StaleOwner::prepare_locked()
+                .err().context("manual stop unexpectedly passed ordinary recovery")?;
+            anyhow::ensure!(format!("{rejected:#}").contains("registration changed since the consumed launch"));
+            anyhow::ensure!(super::super::StaleOwner::prepare_restart_locked().is_err());
+
+            let health: Value = serde_json::from_slice(&record)?;
+            let forced = json!({
+                "schema_version":1, "protocol_version":crate::rpc::PROTOCOL_V,
+                "operation_id":"stop-id-unknown-to-restart", "state":"forced_timeout",
+                "installation_id":health["installation_id"], "instance_id":health["instance_id"],
+                "pid":health["pid"], "process_start_id":health["process_start_id"],
+                "image_path":health["image_path"], "image_sha256":health["image_sha256"],
+                "runtime_version":health["runtime_version"], "account_id":health["account_id"],
+                "generation":health["generation"],
+                "unfinished":[{"operation_id":"unknown-write", "result":"unknown"}],
+            });
+            let stop_path = root.join("runtime").join(format!("stop-{instance}.json"));
+            for (field, invalid) in [
+                ("schema_version", json!(2)), ("protocol_version", json!(0)),
+                ("operation_id", json!("")), ("state", json!("drained")),
+                ("installation_id", json!("foreign")), ("instance_id", json!("foreign")),
+                ("pid", json!(std::process::id())), ("process_start_id", json!("reused")),
+                ("image_path", json!("foreign")), ("image_sha256", json!("foreign")),
+                ("runtime_version", json!("foreign")), ("account_id", json!("foreign")),
+                ("generation", json!(8)),
+                ("unfinished", json!([{"operation_id":"unknown-write", "result":"completed"}])),
+                ("unfinished", json!([{"operation_id":"", "result":"unknown"}])),
+            ] {
+                let mut invalid_receipt = forced.clone();
+                invalid_receipt[field] = invalid;
+                fs::write(&stop_path, serde_json::to_vec(&invalid_receipt)?)?;
+                anyhow::ensure!(super::super::StaleOwner::prepare_restart_locked().is_err(),
+                    "accepted invalid forced stop field {field}");
+                anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            }
+            let mut aborted = forced.clone();
+            aborted["unfinished"] = json!([{"operation_id":"aborted-write", "result":"aborted"}]);
+            fs::write(&stop_path, serde_json::to_vec(&aborted)?)?;
+            super::super::StaleOwner::prepare_restart_locked()?;
+            let forced_bytes = serde_json::to_vec(&forced)?;
+            fs::write(&stop_path, &forced_bytes)?;
+            state.borrow_mut().running = true;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("running supervisor was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("registered supervisor still reports running"));
+            state.borrow_mut().running = false;
+            let listener = std::net::TcpListener::bind(("127.0.0.1", crate::net_rpc::rpc_port()))?;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("active listener was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("loopback listener is alive"));
+            drop(listener);
+            let unconsumed = claim.with_file_name(format!("launch-{instance}.json"));
+            fs::write(&unconsumed, grant.as_bytes())?;
+            let error = super::super::StaleOwner::prepare_restart_locked()
+                .err().context("unconsumed launch authorization was accepted")?;
+            anyhow::ensure!(format!("{error:#}").contains("consumed launch authorization is still present"));
+            fs::remove_file(&unconsumed)?;
+            struct LiveChild(std::process::Child);
+            impl Drop for LiveChild {
+                fn drop(&mut self) {
+                    let _ = self.0.kill();
+                    let _ = self.0.wait();
+                }
+            }
+            let child = LiveChild(std::process::Command::new("sleep").arg("300").spawn()?);
+            let live_pid = child.0.id();
+            let live_birth = manager::process_birth(live_pid)?.context("live child birth missing")?;
+            for live_runtime in [true, false] {
+                let mut live_receipt: Value = serde_json::from_slice(&receipt)?;
+                let mut live_health = health.clone();
+                let mut live_stop = forced.clone();
+                if live_runtime {
+                    live_receipt["pid"] = json!(live_pid);
+                    live_receipt["process_start_id"] = json!(live_birth);
+                    live_health["pid"] = json!(live_pid);
+                    live_health["process_start_id"] = json!(format!("linux-starttime-{live_birth}"));
+                    live_stop["pid"] = live_health["pid"].clone();
+                    live_stop["process_start_id"] = live_health["process_start_id"].clone();
+                } else {
+                    let mut live_grant: Value = serde_json::from_str(&grant)?;
+                    live_grant["supervisor_pid"] = json!(live_pid);
+                    live_grant["supervisor_birth"] = json!(live_birth);
+                    let live_grant = serde_json::to_string(&live_grant)?;
+                    live_receipt["grant_sha256"] = json!(hash(live_grant.as_bytes()));
+                    live_receipt["grant_json"] = json!(live_grant);
+                }
+                let live_receipt = serde_json::to_vec(&live_receipt)?;
+                live_health["launch_receipt_sha256"] = json!(hash(&live_receipt));
+                let live_health = serde_json::to_vec(&live_health)?;
+                fs::write(&claim, &live_receipt)?;
+                fs::write(&endpoint, &live_health)?;
+                fs::write(&stop_path, serde_json::to_vec(&live_stop)?)?;
+                let error = super::super::StaleOwner::prepare_restart_locked()
+                    .err().context("live process was accepted")?;
+                anyhow::ensure!(format!("{error:#}").contains("old runtime or supervisor is still alive"));
+                anyhow::ensure!(fs::read(&endpoint)? == live_health && fs::read(&claim)? == live_receipt);
+            }
+            fs::write(&claim, &receipt)?;
+            fs::write(&endpoint, &record)?;
+            fs::write(&stop_path, &forced_bytes)?;
+            let stale = super::super::StaleOwner::prepare_restart_locked()?;
+            fs::write(&stop_path, b"changed after verification")?;
+            anyhow::ensure!(stale.remove_endpoint_locked().is_err());
+            anyhow::ensure!(fs::read(&endpoint)? == record && fs::read(&claim)? == receipt);
+            fs::write(&stop_path, &forced_bytes)?;
+            let stale = super::super::StaleOwner::prepare_restart_locked()?;
+            let mut recovering = restart_maintenance_locked()?;
+            stale.remove_endpoint_locked()?;
+            recovering.finish()?;
+            anyhow::ensure!(!endpoint.exists() && fs::read(&claim)? == receipt
+                && fs::read(&stop_path)? == forced_bytes && !root.join("rsrs.db").exists());
+            fs::write(&endpoint, &record)?;
             fs::write(control_path(&root), &registration)?;
             super::super::StaleOwner::prepare_locked()?.remove_endpoint_locked()?;
             anyhow::ensure!(!endpoint.exists() && fs::read(&claim)? == receipt && !root.join("rsrs.db").exists());
@@ -2719,7 +2917,7 @@ mod tests {
         anyhow::ensure!(!ensure_managed_locked()? && !stop_managed_locked()?);
         run_foreground(Some(&config.id), Some(&root), false)?;
         std::env::set_var("RSRS_RUNTIME_BIN", root.join("missing-runtime"));
-        anyhow::ensure!(start_explicit_locked().is_err());
+        anyhow::ensure!(start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         std::env::remove_var("RSRS_RUNTIME_BIN");
         config = read_registration(&root)?.context("disabled registration disappeared")?;
         anyhow::ensure!(!config.enabled && !config.manually_stopped
@@ -2870,7 +3068,7 @@ mod tests {
         );
         let unchanged = fs::read(control_path(&root))?;
         state.borrow_mut().dropin = true;
-        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked().is_err());
+        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         anyhow::ensure!(fs::read(control_path(&root))? == unchanged && marker(&root)?.is_none());
         state.borrow_mut().dropin = false;
         let original_port = std::env::var("RSRS_RPC_PORT")?;
@@ -2880,7 +3078,7 @@ mod tests {
             "65534"
         };
         std::env::set_var("RSRS_RPC_PORT", different);
-        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked().is_err());
+        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         anyhow::ensure!(fs::read(control_path(&root))? == unchanged && marker(&root)?.is_none());
         std::env::set_var("RSRS_RPC_PORT", original_port);
         let mut restarted = restart_maintenance_locked()?;

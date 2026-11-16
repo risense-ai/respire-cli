@@ -1,7 +1,7 @@
 """Exercise actual-artifact upgrades for the selected critical or full gate."""
 import argparse, hashlib, json, pathlib, re, shutil, subprocess, sys, tarfile
 from concurrent.futures import ThreadPoolExecutor
-from published_upgrade_policy import platform_applicability, select_upgrade_sources
+from published_upgrade_policy import DATABASE_DEV_CHECKPOINTS, platform_applicability, select_upgrade_sources
 from native_fixture_process import add_runtime_arguments, runtime_inputs
 
 parser=argparse.ArgumentParser()
@@ -14,8 +14,11 @@ parser.add_argument('--model-dir',required=not download_only)
 parser.add_argument('--legacy-model-dir',required=not download_only)
 parser.add_argument('--output-dir',required=True)
 parser.add_argument('--profile',choices=['critical','full'],default='full')
+parser.add_argument('--include-legacy-baselines',action='store_true',help='Manual historical diagnostics only: include unpublished draft and DEV baselines')
 add_runtime_arguments(parser)
 args=parser.parse_args()
+if (args.download_only or args.draft_baseline_cache) and not args.include_legacy_baselines:
+    parser.error('Draft baseline diagnostics require --include-legacy-baselines')
 if not args.download_only: runtime_inputs(args,[args.binary])
 upgrade_contract='standalone-v1' if args.runtime_binary else 'legacy-shim-v1'
 root=pathlib.Path(args.output_dir).resolve(); root.mkdir(parents=True,exist_ok=True)
@@ -38,14 +41,15 @@ registry=[] if args.download_only else sorted(set(json.loads(command('npm','view
                 set(json.loads(command('npm','view','rsrs-cli','versions','--json'))))
 missing=[version for version in registry if stable('v'+version) and 'v'+version not in sources]
 assert not missing,'published npm stable has no verifiable GitHub artifact: '+str(missing)
-# No formal 1.0.6 was published in either registry. Keep its last actual DEV as an extra baseline.
-if not args.download_only and args.profile=='full' and 'v1.0.6' not in sources:
-    baseline=next((item for item in releases if item['tag_name']=='v1.0.6-dev.37075716045' and not item['draft']),None)
-    assert baseline is not None,'1.0.6 compatibility baseline artifact missing'
-    sources[baseline['tag_name']]=baseline
+# Database checkpoints are mandatory in both profiles, independently of optional diagnostics.
+if not args.download_only:
+    for tag in DATABASE_DEV_CHECKPOINTS:
+        baseline=next((item for item in releases if item['tag_name']==tag and not item['draft']),None)
+        assert baseline is not None,'database DEV checkpoint artifact missing: '+tag
+        sources[tag]=baseline
 # The complete 1.0.10 draft is an explicit compatibility baseline, not a formal release.
 additional_draft_baselines=[]
-if args.profile=='full' and 'v1.0.10' not in formal_sources:
+if args.include_legacy_baselines and args.profile=='full' and 'v1.0.10' not in formal_sources:
     # Draft assets retain their release/asset IDs even when the tag endpoint omits them.
     if args.draft_baseline_cache:
         assert args.draft_baseline_cache.resolve()==root,'draft cache must use the upgrade output directory'
@@ -62,6 +66,7 @@ report={'passed':False,'target':args.target,'candidate_sha256':None if args.down
         'profile':args.profile,'selected_sources':[],'full_coverage':False,'all_published_sources_covered':False,
         'published_formal_sources':formal_sources,
         'additional_draft_baselines':additional_draft_baselines,
+        'database_dev_checkpoints':{} if args.download_only else DATABASE_DEV_CHECKPOINTS,
         'unpublished_draft_stables':sorted({item['tag_name'] for item in releases if item['draft'] and stable(item['tag_name'])} | set(additional_draft_baselines)),
         'registry_formal_versions':sorted(version for version in registry if stable('v'+version)),
         'sources':[]}
@@ -119,13 +124,15 @@ def verify_upgrade(source):
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
-        'source_and_keys_unchanged','compatible_index_reused',
+        'original_records_preserved','original_sync_work_preserved','urk_preserved',
+        'old_records_decrypted','post_upgrade_recall_checked',
     ]),'required real upgrade checks missing or failed'
+    assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
-            'source_rpc_checked','legacy_client_rejected','live_owner_restart_rejected','safe_restart_checked',
-            'standalone_runtime_evidence',
+            'live_owner_restart_rejected','safe_restart_checked',
+            'standalone_runtime_evidence','runtime_installed_after_legacy_data',
         ]),'required standalone upgrade checks missing or failed'
         assert all(check.get(name) is False for name in [
             'old_rpc_checked','forced_restart_checked',

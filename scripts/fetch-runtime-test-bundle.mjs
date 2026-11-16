@@ -30,10 +30,9 @@ export function readPin() {
   digest(pin.sdk_lock_sha256);
   const head = execFileSync('git', ['rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
   assert.match(head, /^[a-f0-9]{40}$/);
-  for (const file of ['sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json']) {
-    const bytes = execFileSync('git', ['show', `${head}:${file}`]);
-    assert.equal(sha256(bytes), pin.sdk_lock_sha256, 'The committed CLI SDK lock bytes differ from the bundle');
-  }
+  const cliLocks = ['sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json']
+    .map(file => execFileSync('git', ['show', `${head}:${file}`]));
+  assert.deepEqual(cliLocks[0], cliLocks[1], 'The committed CLI SDK lock copies differ');
   assert.deepEqual(pin.features, ['cpu-owned-ort-experiment']);
   assert.equal(pin.tests?.business?.length, 31);
   assert.equal(new Set(pin.tests.business).size, 31);
@@ -42,6 +41,17 @@ export function readPin() {
     if (requested) assert.equal(requested, pin.source_sha, 'Runtime source overrides must equal the reviewed bundle source');
   }
   return pin;
+}
+
+export function verifyRuntimeSdkLock(pin) {
+  const source = '.runtime-examples';
+  const head = execFileSync('git', ['-C', source, 'rev-parse', 'HEAD'], {encoding: 'utf8'}).trim();
+  assert.equal(head, pin.source_sha, 'Runtime checkout differs from the reviewed bundle source');
+  for (const file of ['sdk/core-sdk.lock.json', 'crates/core-sdk/core-sdk.lock.json']) {
+    const bytes = execFileSync('git', ['-C', source, 'show', `${head}:${file}`]);
+    assert.equal(sha256(bytes), pin.sdk_lock_sha256, 'The committed Runtime SDK lock bytes differ from the bundle');
+    assert.deepEqual(JSON.parse(readFileSync(join(source, file), 'utf8')), JSON.parse(bytes), 'Runtime SDK lock checkout differs from its committed data');
+  }
 }
 
 function api(path) {
@@ -179,6 +189,7 @@ async function main() {
     return;
   }
   assert(command === 'fetch' || command === 'verify', 'Use source, fetch TARGET [DESTINATION], or verify TARGET [DESTINATION] --list');
+  verifyRuntimeSdkLock(pin);
   assert(pin.targets[target], 'Missing exact Runtime test target');
   id(pin.targets[target].artifact_id);
   digest(pin.targets[target].sha256);
@@ -218,7 +229,9 @@ async function main() {
   verifyManifest(pin, target, manifest);
   if (arguments_.includes('--list')) {
     const runner = realpathSync(join(destination, manifest.roles.business_tests));
-    const output = execFileSync(runner, ['--list'], {encoding: 'utf8', timeout: 60_000});
+    const env = {...process.env};
+    for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN']) delete env[key];
+    const output = execFileSync(runner, ['--list'], {encoding: 'utf8', timeout: 60_000, env});
     const names = output.split(/\r?\n/).filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
     assert.deepEqual(names.sort(), [...pin.tests.business].sort(), 'The executable must contain exactly the original 31 business assertions');
     for (const [role, key, filter] of [['app_tests', 'app', 'snapshot::tests::'],
@@ -228,7 +241,7 @@ async function main() {
       assert.equal(new Set(expected).size, expected.length);
       assert(expected.every(name => name.startsWith(filter)));
       const listing = execFileSync(realpathSync(join(destination, manifest.roles[role])), [filter, '--list'],
-        {encoding: 'utf8', timeout: 60_000});
+        {encoding: 'utf8', timeout: 60_000, env});
       const actual = listing.split(/\r?\n/).filter(line => line.endsWith(': test')).map(line => line.slice(0, -6));
       assert.deepEqual(actual.sort(), [...expected].sort(), 'The precompiled internal filter must retain every declared assertion');
     }

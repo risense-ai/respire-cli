@@ -42,6 +42,7 @@ pub use metadata::{
 };
 
 pub mod runtime;
+pub mod credentials;
 pub use runtime::{
     BackendLoadBackend, BackendLoadCpuNodeFallback, BackendLoadEngine, BackendLoadEvidence,
     BackendLoadModule, BackendLoadModuleIdentitySource, BackendLoadNodeAssignment,

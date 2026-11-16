@@ -33,6 +33,15 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: '24'
+      - name: Verify CLI source and internal SDK lock copies
+        shell: bash
+        env:
+          CLI_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$CLI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CLI_SOURCE_SHA"
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git show HEAD:crates/core-sdk/core-sdk.lock.json)
       - name: Require an exact reviewed Runtime example source
         id: runtime-source
         if: inputs.feedback_probe
@@ -49,21 +58,64 @@ jobs:
           path: .runtime-examples
           persist-credentials: false
       - name: Bind Runtime example source to the verified SDK lock
+        id: runtime-sdk-key
         if: inputs.feedback_probe
         shell: bash
         env:
           RUNTIME_EXAMPLES_SHA: ${{ steps.runtime-source.outputs.sha }}
-          CLI_SOURCE_SHA: ${{ inputs.source_sha }}
+          SDK_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          [[ "$CLI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$CLI_SOURCE_SHA"
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {planCaches} from './scripts/sdk-ci-cache.mjs';
+          import {readPin, verifyRuntimeSdkLock} from './scripts/fetch-runtime-test-bundle.mjs';
+          verifyRuntimeSdkLock(readPin());
+          if (process.env.SDK_TARGET !== 'x86_64-apple-darwin') {
+            const read = file => JSON.parse(readFileSync(`.runtime-examples/${file}`, 'utf8'));
+            const entry = planCaches(read('sdk/core-sdk.lock.json'), read('crates/core-sdk/core-sdk.lock.json')).include.find(item => item.target === process.env.SDK_TARGET);
+            assert.ok(entry, 'Missing independently pinned Runtime SDK target');
+            appendFileSync(process.env.GITHUB_OUTPUT, `key=${entry.key}\n`);
+          }
+          NODE
           test -f .runtime-examples/crates/commands/examples/feedback_contract_probe.rs
           test -f .runtime-examples/crates/commands/examples/ablation_bench.rs
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
+      - uses: actions/cache/restore@v4
+        id: runtime-sdk
+        if: inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin'
+        with:
+          path: .sdk/${{ inputs.target }}
+          key: ${{ steps.runtime-sdk-key.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the Runtime harness SDK without credentials
+        if: inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin'
+        shell: bash
+        env:
+          SDK_TARGET: ${{ inputs.target }}
+          EXPECTED_KEY: ${{ steps.runtime-sdk-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.runtime-sdk.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test ! -e .runtime-examples/.sdk
+          mkdir .runtime-examples/.sdk
+          mv ".sdk/$SDK_TARGET" .runtime-examples/.sdk/
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
+          const target = process.env.SDK_TARGET;
+          const sdk = resolve('.runtime-examples/.sdk', target);
+          const entry = JSON.parse(readFileSync('.runtime-examples/sdk/core-sdk.lock.json', 'utf8')).targets[target];
+          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_CORE_SDK_DIR=${sdk}\n`);
+          NODE
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ inputs.target }}
@@ -121,6 +173,7 @@ jobs:
           assert.equal(createHash('sha256').update(selected.release.metadata_json).digest('hex'), selected.release.metadata_sha256);
           const metadata = JSON.parse(selected.release.metadata_json);
           assert.equal(metadata.schema_version, 2);
+          assert.match(metadata.source_commit, /^[0-9a-f]{40}$/);
           assert.equal(metadata.triple ?? metadata.target_triple, process.env.RSRS_RUNTIME_TRIPLE);
           assert.equal(metadata.runtime_version, pin.required);
           assert.equal(metadata.binary_sha256, selected.sha256);
@@ -132,10 +185,11 @@ jobs:
           assert.equal(createHash('sha256').update(coreBytes).digest('hex'),
             metadata.files.find(file => file.path === 'core-runtime.json')?.sha256);
           const core = JSON.parse(coreBytes);
-          const sdk = JSON.parse(readFileSync('sdk/core-sdk.lock.json', 'utf8')).targets[process.env.SDK_TARGET];
-          assert.ok(sdk, 'The native target must have a pinned SDK identity');
+          assert.equal(core.schema_version, 1);
           assert.equal(core.target, process.env.SDK_TARGET);
-          assert.equal(core.sdk_version, sdk.sdk_version);
+          // The authenticated Runtime manifest owns its SDK identity independently of CLI.
+          assert.equal(typeof core.sdk_version, 'string');
+          assert.ok(core.sdk_version.trim(), 'The Runtime must declare its own SDK identity');
           appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_BIN=${runtime}\n`);
           const result = spawnSync('bash', ['scripts/probe-native-arm64-alpine.sh', process.env.RSRS_RUNTIME_TRIPLE,
             process.env.CLI_FIXTURE_BINARY, process.env.RSRS_M3_DIR, join(process.env.RUNNER_TEMP, 'arm-alpine-probe'),
@@ -150,6 +204,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SDK_TARGET: ${{ inputs.target }}
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           node scripts/fetch-runtime-test-bundle.mjs fetch "$SDK_TARGET"
@@ -161,6 +216,7 @@ jobs:
           SDK_TARGET: ${{ inputs.target }}
           RSRS_CLI_SOURCE_SHA: ${{ inputs.source_sha }}
           RSRS_CORE_TEST_MODEL_DIR: ${{ runner.temp }}/private-sdk-probe/model
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
@@ -168,7 +224,7 @@ jobs:
           suffix=''; if [[ "$SDK_TARGET" == *windows-msvc ]]; then suffix=.exe; fi
           export RSRS_CLI_BIN="$(node -p 'require("node:path").resolve(process.argv[1])' "target/ci/$SDK_TARGET/debug/rsrs$suffix")"
           export RSRS_CLI_SOURCE_DIR="$(node -p 'process.cwd()')"
-          unset GH_TOKEN GITHUB_TOKEN
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_STORAGE_TESTS" transport::local::sync::diary_tests:: --test-threads=1
           RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_TEST_RUNNER" --test-threads=1
@@ -183,8 +239,8 @@ jobs:
           test -f "$RSRS_RUNTIME_BIN"
           fixture_root="$(dirname "$(dirname "$(dirname "$(dirname "$RSRS_RUNTIME_BIN")")")")"
           fixture_binary="/runtime-fixture/bin/runtime/$(basename "$(dirname "$RSRS_RUNTIME_BIN")")/$(basename "$RSRS_RUNTIME_BIN")"
-          unset GH_TOKEN GITHUB_TOKEN
-          docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model -e RSRS_RUNTIME_APP_TESTS="/workspace/${RSRS_RUNTIME_APP_TESTS#"$PWD/"}" -e RSRS_RUNTIME_STORAGE_TESTS="/workspace/${RSRS_RUNTIME_STORAGE_TESTS#"$PWD/"}" -e RSRS_RUNTIME_TEST_RUNNER="/workspace/${RSRS_RUNTIME_TEST_RUNNER#"$PWD/"}" rust:1.95.0-alpine3.23 sh -ec '
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          docker run --rm -v "$PWD:/workspace" -v "$fixture_root:/runtime-fixture:ro" -w /workspace -e TARGET="$SDK_TARGET" -e RSRS_CORE_SDK_DIR="/workspace/.runtime-examples/.sdk/$SDK_TARGET" -e RSRS_RUNTIME_BIN="$fixture_binary" -e RSRS_CLI_BIN="/workspace/target/ci/$SDK_TARGET/release/rsrs" -e RSRS_CLI_SOURCE_DIR=/workspace -e RSRS_CLI_SOURCE_SHA="$RSRS_CLI_SOURCE_SHA" -e RSRS_CORE_TEST_MODEL_DIR=/runtime-fixture/model -e RSRS_RUNTIME_APP_TESTS="/workspace/${RSRS_RUNTIME_APP_TESTS#"$PWD/"}" -e RSRS_RUNTIME_STORAGE_TESTS="/workspace/${RSRS_RUNTIME_STORAGE_TESTS#"$PWD/"}" -e RSRS_RUNTIME_TEST_RUNNER="/workspace/${RSRS_RUNTIME_TEST_RUNNER#"$PWD/"}" rust:1.95.0-alpine3.23 sh -ec '
             echo "Checking minimal-musl ps syntax (diagnostic only):"
             if ps -p $$ -o pid= -o stat=; then echo "ps syntax available"; else echo "ps syntax unavailable; Linux lifecycle requires verified procfs"; fi
             RSRS_CORE_TEST_MODE=1 "$RSRS_RUNTIME_APP_TESTS" snapshot::tests:: --test-threads=1
@@ -198,6 +254,7 @@ jobs:
           SDK_TARGET: ${{ inputs.target }}
           RSRS_M3_DIR: ${{ runner.temp }}/private-sdk-probe/model
           RSRS_DATA_DIR: ${{ runner.temp }}/private-sdk-probe
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           test -z "${CORE_SDK_READ_TOKEN:-}"; test -z "${RSRS_CORE_TEST_MODE:-}"
@@ -240,15 +297,57 @@ jobs:
           path: .runtime-examples
           persist-credentials: false
       - name: Bind coverage Runtime source and SDK identity
+        id: runtime-sdk-key
         shell: bash
         env:
           RUNTIME_EXAMPLES_SHA: ${{ steps.runtime-source.outputs.sha }}
+          CLI_SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
+          [[ "$CLI_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CLI_SOURCE_SHA"
           test "$(git -C .runtime-examples rev-parse HEAD)" = "$RUNTIME_EXAMPLES_SHA"
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json)
-          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git show HEAD:sdk/core-sdk.lock.json) <(git show HEAD:crates/core-sdk/core-sdk.lock.json)
+          cmp <(git -C .runtime-examples show HEAD:sdk/core-sdk.lock.json) <(git -C .runtime-examples show HEAD:crates/core-sdk/core-sdk.lock.json)
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {planCaches} from './scripts/sdk-ci-cache.mjs';
+          import {readPin, verifyRuntimeSdkLock} from './scripts/fetch-runtime-test-bundle.mjs';
+          verifyRuntimeSdkLock(readPin());
+          const read = file => JSON.parse(readFileSync(`.runtime-examples/${file}`, 'utf8'));
+          const entry = planCaches(read('sdk/core-sdk.lock.json'), read('crates/core-sdk/core-sdk.lock.json')).include.find(item => item.target === 'x86_64-unknown-linux-gnu');
+          appendFileSync(process.env.GITHUB_OUTPUT, `key=${entry.key}\n`);
+          NODE
           test -f .runtime-examples/crates/commands/examples/cli_business_tests.rs
+      - uses: actions/cache/restore@v4
+        id: runtime-sdk
+        with:
+          path: .sdk/x86_64-unknown-linux-gnu
+          key: ${{ steps.runtime-sdk-key.outputs.key }}
+          enableCrossOsArchive: true
+          fail-on-cache-miss: true
+      - name: Isolate and audit the Runtime harness SDK without credentials
+        shell: bash
+        env:
+          EXPECTED_KEY: ${{ steps.runtime-sdk-key.outputs.key }}
+          MATCHED_KEY: ${{ steps.runtime-sdk.outputs.cache-matched-key }}
+        run: |
+          set -euo pipefail
+          test -z "${CORE_SDK_READ_TOKEN:-}" && test -z "${GH_TOKEN:-}" && test -z "${GITHUB_TOKEN:-}"
+          test -n "$EXPECTED_KEY" && test "$EXPECTED_KEY" = "$MATCHED_KEY"
+          test ! -e .runtime-examples/.sdk
+          mkdir .runtime-examples/.sdk
+          mv .sdk/x86_64-unknown-linux-gnu .runtime-examples/.sdk/
+          node --input-type=module <<'NODE'
+          import {appendFileSync, readFileSync} from 'node:fs';
+          import {resolve} from 'node:path';
+          import {auditSdkDirectory, canonicalEntry} from './scripts/sdk-ci-cache.mjs';
+          const target = 'x86_64-unknown-linux-gnu';
+          const sdk = resolve('.runtime-examples/.sdk', target);
+          const entry = JSON.parse(readFileSync('.runtime-examples/sdk/core-sdk.lock.json', 'utf8')).targets[target];
+          auditSdkDirectory(sdk, target, canonicalEntry(target, entry));
+          appendFileSync(process.env.GITHUB_ENV, `RSRS_RUNTIME_CORE_SDK_DIR=${sdk}\n`);
+          NODE
       - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ inputs.target }}
@@ -336,6 +435,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          RSRS_CORE_SDK_DIR: ${{ env.RSRS_RUNTIME_CORE_SDK_DIR }}
         run: |
           set -euo pipefail
           node scripts/fetch-runtime-test-bundle.mjs fetch x86_64-unknown-linux-gnu
@@ -364,7 +464,8 @@ jobs:
             export RSRS_CLI_SOURCE_SHA="$(git rev-parse HEAD)"
             test -x "$RSRS_CLI_BIN"
             original_cli="$(sha256sum "$RSRS_CLI_BIN")"
-            unset GH_TOKEN GITHUB_TOKEN
+            unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+            export RSRS_CORE_SDK_DIR="$RSRS_RUNTIME_CORE_SDK_DIR"
             env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SESSION_BUS_PID \
               -u DBUS_STARTER_ADDRESS -u DBUS_STARTER_BUS_TYPE \
               -u GNOME_KEYRING_CONTROL -u GNOME_KEYRING_PID -u SSH_AUTH_SOCK \

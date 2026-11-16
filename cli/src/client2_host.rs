@@ -85,12 +85,16 @@ fn guarded_host_pid(ready: &Value, guardian: u32, executable: &Path, root: &Path
 /// library lock, or fabricated identity is retained for it.
 #[cfg(target_os = "macos")]
 pub(crate) fn supervise() -> Result<()> {
-    anyhow::ensure!(std::env::args_os().count() == 2, "exit observer accepts no extra arguments");
+    let expectation = startup_expectation(std::env::args_os().skip(2))?;
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 exit observation")?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&executable);
-    command.arg("--client2-host-internal").stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+    command.arg("--client2-host-internal");
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        command.arg("--locked-after-full-logout");
+    }
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
     let mut ready = receive_ready(&mut child)?;
     anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
@@ -106,6 +110,7 @@ pub(crate) fn supervise() -> Result<()> {
         host_image_sha256: hex::encode(Sha256::digest(std::fs::read(&executable)?)),
         last_health: Mutex::new(health) };
     backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+    expectation.confirm_credentials(&backend.health)?;
     // A disconnected launcher must not orphan a running host by making its
     // observer exit. Keep ownership and reap normally even if readiness is lost.
     let readiness = publish_ready(&ready);
@@ -250,6 +255,22 @@ impl Backend {
         anyhow::ensure!(bytes.len() as u64 <= LIMIT, "request body is too large");
         anyhow::ensure!(request.method() != &tiny_http::Method::Get || bytes.is_empty(),
             "GET compatibility requests cannot carry a body");
+        if request.url() == "/api/rpc" {
+            let (outgoing, original) = match prepare_legacy_rpc(&bytes, &health) {
+                Ok(value) => value,
+                Err(_) => return Ok((400, "application/json".into(), br#"{"error":"invalid_rpc_identity"}"#.to_vec())),
+            };
+            let (status, content_type, body) = self.forward(request, &headers, &outgoing)?;
+            let body = match original {
+                Some(original) if status == 200 => project_legacy_rpc(&body, &original, &health)?,
+                _ => body,
+            };
+            return Ok((status, content_type, body));
+        }
+        if request.url() == "/api/runtime/stop" && bytes.is_empty() {
+            bytes = serde_json::to_vec(&json!({"installation_id":health.installation_id,
+                "instance_id":health.instance_id,"account_id":health.account_id,"generation":health.generation}))?;
+        }
         self.forward(request, &headers, &bytes)
     }
 
@@ -265,7 +286,7 @@ impl Backend {
             outgoing = outgoing.set("X-Respire-Lifecycle", "coordinator-v1");
         }
         // Original Host/Origin are validated above. No caller credential or
-        // forwarding header is copied, and no scope or operation ID is added.
+        // forwarding header is copied. Legacy RPC identity is supplied by this host.
         let response = match if request.method() == &tiny_http::Method::Get {
             outgoing.call()
         } else { outgoing.send_bytes(bytes) } {
@@ -287,6 +308,56 @@ impl Backend {
         }
         Ok((status, content_type, body))
     }
+}
+
+fn prepare_legacy_rpc(body: &[u8], health: &crate::net_rpc::Health)
+    -> Result<(Vec<u8>, Option<respire_protocol::RpcRequest>)>
+{
+    let original: respire_protocol::RpcRequest = serde_json::from_slice(body)?;
+    if original.scope.is_some() { return Ok((body.to_vec(), None)); }
+    anyhow::ensure!(original.operation_id.is_none() && original.idempotency_key.is_none()
+        && original.parent_operation_id.is_none(), "scope_required");
+    let mut request = original.clone();
+    request.scope = Some(crate::net_rpc::request_scope(health)?);
+    if request.method != "runtime.result" {
+        request.operation_id = Some(request.id.clone());
+        request.idempotency_key = Some(request.id.clone());
+    }
+    Ok((serde_json::to_vec(&request)?, Some(original)))
+}
+
+fn project_legacy_rpc(body: &[u8], original: &respire_protocol::RpcRequest,
+    health: &crate::net_rpc::Health) -> Result<Vec<u8>>
+{
+    type Reply = respire_protocol::RpcResponse<Value>;
+    let same_actor = |reply: &Reply| reply.v == 1 && reply.scope.as_ref().is_some_and(|scope|
+        scope.account_id == health.account_id && scope.instance_id == health.instance_id);
+    let strip = |reply: &mut Reply| {
+        reply.scope = None; reply.operation_id = None; reply.idempotency_key = None;
+    };
+    let mut reply: Reply = serde_json::from_slice(body)?;
+    anyhow::ensure!(reply.id == original.id && same_actor(&reply),
+        "legacy result identity differs from the owned Runtime");
+    if original.method == "runtime.result" {
+        if let Some(summary) = reply.envelope.as_mut().and_then(|envelope| envelope.get_mut("summary"))
+            .and_then(Value::as_object_mut) {
+            if summary.get("state").and_then(Value::as_str) == Some("failed") {
+                summary.insert("state".into(), json!("completed"));
+            }
+            if let Some(value) = summary.get_mut("response").filter(|value| !value.is_null()) {
+                let mut child: Reply = serde_json::from_value(value.clone())?;
+                anyhow::ensure!(original.args.first() == Some(&child.id) && same_actor(&child),
+                    "legacy cached result identity differs from the original request");
+                strip(&mut child);
+                *value = serde_json::to_value(child)?;
+            }
+            for field in ["scope", "operation_id", "idempotency_key"] { summary.remove(field); }
+            summary.insert("request_id".into(), json!(original.args.first()));
+            summary.insert("retention".into(), json!("last 64 completed requests in this runtime; unknown is not proof of non-commit; never replay a write automatically"));
+        }
+    }
+    strip(&mut reply);
+    Ok(serde_json::to_vec(&reply)?)
 }
 
 fn validate_request(method: &str, path: &str, loopback: bool,
@@ -311,8 +382,19 @@ fn validate_request(method: &str, path: &str, loopback: bool,
     Ok(())
 }
 
+pub(crate) fn startup_expectation(arguments: impl Iterator<Item = std::ffi::OsString>)
+    -> Result<respire_host_control::lifecycle_io::AccountRuntimeExpectation> {
+    use respire_host_control::lifecycle_io::AccountRuntimeExpectation;
+    let arguments: Vec<_> = arguments.collect();
+    match arguments.as_slice() {
+        [] => Ok(AccountRuntimeExpectation::Unlock),
+        [flag] if flag == "--locked-after-full-logout" => Ok(AccountRuntimeExpectation::LockedAfterFullLogout),
+        _ => anyhow::bail!("compatibility startup accepts only the explicit full logout expectation"),
+    }
+}
+
 pub(crate) fn serve() -> Result<()> {
-    anyhow::ensure!(std::env::args_os().count() == 2, "compatibility host accepts no extra arguments");
+    let expectation = startup_expectation(std::env::args_os().skip(2))?;
     respire_client_host::roots::validate_client_environment()?;
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     crate::autostart::check_direct_access()?;
@@ -347,33 +429,62 @@ pub(crate) fn serve() -> Result<()> {
     let executable = crate::rpc::resolve_runtime_executable()?.canonicalize()?;
     let digest = hex::encode(Sha256::digest(std::fs::read(&executable)?));
     let mut command = Command::new(&executable);
-    command.args(["--runtime-internal", "--runtime-background-internal", "--port", &port.to_string()])
+    command.args(["serve", "--port", &port.to_string()])
         .env("RSRS_RPC_PORT", port.to_string()).env_remove("RSRS_RUNTIME_BOOT_TOKEN")
         .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
-        .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit());
     drop(reservation);
     let mut child = respire_spawn::spawn_owned_runtime(&mut command)?;
     let pid = child.id();
-    let reader = child.stdout.take().context("Runtime readiness pipe is missing")?;
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
-    let ready = receiver.recv_timeout(Duration::from_secs(30))
-        .with_context(|| format!("Runtime readiness is uncertain for child {pid}; inspect before retry"))??;
-    let health: crate::net_rpc::Health = serde_json::from_value(ready)?;
-    let (installation, profile) = respire_client_host::config::control_roots()?;
-    anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
-        && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
-        && crate::runtime_fetch::version_in_accept(&health.runtime_version)
-        && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
-        && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
-        "Runtime readiness does not match the selected child and installation");
-    let backend = Arc::new(Backend { port, health, executable, public_port,
-        host_executable: visible_path(std::env::current_exe()?)?,
-        host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
-        last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
-    backend.verify(&serde_json::from_value(health_at(port)?)?)?;
-    let server = tiny_http::Server::from_listener(listener, None)
-        .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
+    let startup = (|| -> Result<_> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let health: crate::net_rpc::Health = loop {
+            anyhow::ensure!(child.try_wait()?.is_none(), "owned Runtime exited before readiness");
+            if let Ok(ready) = health_at(port) {
+                if ready["startup_complete"] == true {
+                    break serde_json::from_value(ready)?;
+                }
+            }
+            anyhow::ensure!(Instant::now() < deadline,
+                "Runtime readiness is uncertain for child {pid}; inspect before retry");
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let (installation, profile) = respire_client_host::config::control_roots()?;
+        anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
+            && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
+            && crate::runtime_fetch::version_in_accept(&health.runtime_version)
+            && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
+            && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
+            "Runtime readiness does not match the selected child and installation");
+        let backend = Arc::new(Backend { port, health, executable, public_port,
+            host_executable: visible_path(std::env::current_exe()?)?,
+            host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
+            last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
+        backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+        expectation.confirm_credentials(&backend.health)?;
+        let server = tiny_http::Server::from_listener(listener, None)
+            .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
+        Ok((backend, server))
+    })();
+    let (backend, server) = match startup {
+        Ok(ready) => ready,
+        Err(error) => {
+            // Stop only the child we spawned; a delayed startup must not race the next owner.
+            let cleanup = (|| -> Result<()> {
+                if child.try_wait().context("could not inspect unready Runtime child")?.is_none() {
+                    child.kill().context("could not stop unready Runtime child")?;
+                }
+                child.wait().context("could not reap unready Runtime child")?;
+                Ok(())
+            })();
+            return match cleanup {
+                Ok(()) => Err(error).context(
+                    "Runtime startup failed; original data and recovery records retained"),
+                Err(cleanup_error) => Err(error).context(format!(
+                    "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed: {cleanup_error:#}")),
+            };
+        }
+    };
     if let Err(error) = publish_ready(&json!({"startup_complete":true, "pid":std::process::id(),
         "exe":backend.host_executable, "bin":crate::VERSION, "port":public_port,
         "installation_root":backend.health.installation_root,
@@ -602,6 +713,11 @@ pub(crate) fn checked_executable() -> Result<PathBuf> {
 /// Caller retains the existing takeover lock. This never takes over a healthy
 /// strict or managed owner, and never retries an uncertain spawn.
 pub(crate) fn start_locked() -> Result<()> {
+    start_locked_with_expectation(respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock)
+}
+
+pub(crate) fn start_locked_with_expectation(
+    expectation: respire_host_control::lifecycle_io::AccountRuntimeExpectation) -> Result<()> {
     crate::runtime_policy::require_host("Client2 compatibility startup")?;
     anyhow::ensure!(crate::autostart::lifecycle_boot_token().is_none(),
         "compatibility startup cannot inherit account maintenance");
@@ -609,10 +725,18 @@ pub(crate) fn start_locked() -> Result<()> {
     if crate::rpc::probe_runtime()?.is_some() {
         return verify_host(&health_at(crate::net_rpc::rpc_port())?, &executable, None);
     }
+    let mut arguments = Vec::new();
+    #[cfg(target_os = "macos")]
+    arguments.push(std::ffi::OsString::from("--client2-host-supervisor-internal"));
+    #[cfg(not(target_os = "macos"))]
+    arguments.push(std::ffi::OsString::from("--client2-host-internal"));
+    if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
+        arguments.push("--locked-after-full-logout".into());
+    }
     #[cfg(target_os = "macos")]
     let (mut child, host_pid) = {
         let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,
-            &["--client2-host-supervisor-internal".into()])?;
+            &arguments)?;
         let ready = receive_ready(&mut guardian)?;
         let pid = guarded_host_pid(&ready, guardian.id(), &executable,
             &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
@@ -621,7 +745,7 @@ pub(crate) fn start_locked() -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     let (mut child, host_pid) = {
         let child = respire_spawn::spawn_binary_with_boot_token(&executable,
-            &["--client2-host-internal".into()], None)?;
+            &arguments, None)?;
         let pid = child.id();
         (child, pid)
     };
@@ -656,6 +780,40 @@ mod tests {
             assert!(guarded_host_pid(&wrong, 456, &executable, &root, 15169).is_err(), "{key}");
         }
         Ok(())
+    }
+
+    #[test]
+    fn legacy_rpc_identity_is_supplied_and_projected_by_the_host() -> Result<()> {
+        let _guard = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let root = tempfile::tempdir()?;
+        let previous = std::env::var_os("RSRS_DATA_DIR");
+        std::env::set_var("RSRS_DATA_DIR", root.path());
+        let result = (|| -> Result<()> {
+        let health: crate::net_rpc::Health = serde_json::from_value(json!({
+            "server":"respire","bin":"fixture","v":1,"pid":42,"account_id":"account",
+            "instance_id":"instance","generation":7,"installation_root":root.path()
+        }))?;
+        let raw = serde_json::to_vec(&json!({"v":1,"id":"original","method":"cli.exec","args":["--json","status"]}))?;
+        let (bound, original) = prepare_legacy_rpc(&raw, &health)?;
+        let bound: respire_protocol::RpcRequest = serde_json::from_slice(&bound)?;
+        assert_eq!(bound.scope, Some(crate::net_rpc::request_scope(&health)?));
+        assert_eq!(bound.operation_id.as_deref(), Some("original"));
+        let original = original.context("missing legacy projection")?;
+        let response = json!({"v":1,"id":"original","ok":true,"exit":0,"bin":"fixture",
+            "scope":bound.scope,"operation_id":"original","idempotency_key":"original"});
+        let projected: Value = serde_json::from_slice(&project_legacy_rpc(&serde_json::to_vec(&response)?, &original, &health)?)?;
+        for field in ["scope","operation_id","idempotency_key"] { assert!(projected.get(field).is_none()); }
+        let mut changed = response; changed["scope"]["instance_id"] = json!("foreign");
+        assert!(project_legacy_rpc(&serde_json::to_vec(&changed)?, &original, &health).is_err());
+        let mut mixed = original; mixed.operation_id = Some("foreign".into());
+        assert!(prepare_legacy_rpc(&serde_json::to_vec(&mixed)?, &health).is_err());
+        Ok(())
+        })();
+        match previous {
+            Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+            None => std::env::remove_var("RSRS_DATA_DIR"),
+        }
+        result
     }
 
     #[test]

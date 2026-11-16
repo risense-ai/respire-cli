@@ -14,9 +14,14 @@ pub(crate) struct StaleOwner {
     endpoint_bytes: Vec<u8>,
     receipt: PathBuf,
     receipt_bytes: Vec<u8>,
+    forced_stop: Option<(PathBuf, Vec<u8>)>,
 }
 
 fn read_record(path: &Path) -> Result<Vec<u8>> {
+    read_bounded_record(path, 65536)
+}
+
+fn read_bounded_record(path: &Path, limit: u64) -> Result<Vec<u8>> {
     for ancestor in path.ancestors() {
         let metadata = fs::symlink_metadata(ancestor)?;
         anyhow::ensure!(
@@ -35,12 +40,12 @@ fn read_record(path: &Path) -> Result<Vec<u8>> {
     let file = fs::File::open(path)?;
     let metadata = file.metadata()?;
     anyhow::ensure!(
-        metadata.is_file() && metadata.len() <= 65536,
+        metadata.is_file() && metadata.len() <= limit,
         "invalid recovery record"
     );
     let mut bytes = Vec::new();
-    file.take(65537).read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= 65536, "recovery record exceeds 64 KiB");
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= limit, "recovery record exceeds size limit");
     Ok(bytes)
 }
 
@@ -90,9 +95,46 @@ fn refused() -> Result<()> {
     }
 }
 
+fn validate_forced_stop(
+    health: &crate::net_rpc::Health,
+    receipt: &respire_protocol::RuntimeStopReceipt,
+) -> Result<()> {
+    anyhow::ensure!(
+        receipt.schema_version == 1
+            && receipt.protocol_version == health.v
+            && health.pid > 0
+            && health.generation > 0
+            && !receipt.operation_id.is_empty()
+            && receipt.installation_id == health.installation_id
+            && receipt.instance_id == health.instance_id
+            && receipt.pid == health.pid
+            && receipt.process_start_id == health.process_start_id
+            && receipt.image_path == health.image_path
+            && receipt.image_sha256 == health.image_sha256
+            && receipt.runtime_version == health.runtime_version
+            && receipt.account_id == health.account_id
+            && receipt.generation == health.generation
+            && receipt.state == respire_protocol::RuntimeStopOutcome::ForcedTimeout
+            && receipt
+                .unfinished
+                .iter()
+                .all(|operation| !operation.operation_id.is_empty()),
+        "forced stop receipt does not match the exited runtime"
+    );
+    Ok(())
+}
+
 impl StaleOwner {
     /// The caller must hold the installation takeover lock for this whole guard.
     pub(crate) fn prepare_locked() -> Result<Self> {
+        Self::prepare(false)
+    }
+
+    pub(crate) fn prepare_restart_locked() -> Result<Self> {
+        Self::prepare(true)
+    }
+
+    fn prepare(allow_forced_stop: bool) -> Result<Self> {
         let endpoint = crate::rpc::endpoint_path();
         let endpoint_bytes = read_record(&endpoint)?;
         let record: Value = serde_json::from_slice(&endpoint_bytes)?;
@@ -104,17 +146,30 @@ impl StaleOwner {
             nonce.get_version_num() == 4 && nonce.to_string() == instance,
             "invalid recovery instance"
         );
-        let receipt = respire_client_host::paths::main_data_dir()
-            .canonicalize()?
+        let root = respire_client_host::paths::main_data_dir().canonicalize()?;
+        let receipt = root
             .join("runtime/autostart/launch")
             .join(format!("launch-{instance}.claimed"));
         let receipt_bytes =
             read_record(&receipt).context("complete consumed launch receipt is missing")?;
+        let forced_stop = if allow_forced_stop
+            && read_registration(&root)?
+                .as_ref()
+                .is_some_and(|config| config.manually_stopped)
+        {
+            let path = root.join("runtime").join(format!("stop-{instance}.json"));
+            let bytes = read_bounded_record(&path, 1024 * 1024)
+                .context("forced stop receipt is missing or invalid")?;
+            Some((path, bytes))
+        } else {
+            None
+        };
         let guard = Self {
             endpoint,
             endpoint_bytes,
             receipt,
             receipt_bytes,
+            forced_stop,
         };
         guard.verify()?;
         refused()?;
@@ -216,6 +271,15 @@ impl StaleOwner {
                 && health.bin == health.runtime_version,
             "crash recovery identity/root/account/version mismatch"
         );
+        if let Some((path, bytes)) = &self.forced_stop {
+            anyhow::ensure!(
+                read_bounded_record(path, 1024 * 1024)? == *bytes,
+                "forced stop receipt changed"
+            );
+            let stop: respire_protocol::RuntimeStopReceipt =
+                serde_json::from_slice(bytes).context("invalid forced stop receipt")?;
+            validate_forced_stop(&health, &stop)?;
+        }
         // sync_generation is a boot fence, not the process's actual wire scope.
         anyhow::ensure!(
             grant["sync_generation"].as_u64().is_some(),
@@ -242,11 +306,19 @@ impl StaleOwner {
                 "launch registration digest mismatch"
             );
             let mut recorded: Registration = serde_json::from_str(original)?;
-            // Maintenance is the only field the existing successful launch changes.
+            // Maintenance and a verified forced stop are the only permitted changes.
             recorded.maintenance = config.maintenance;
+            let manual_transition = self.forced_stop.is_some()
+                && !recorded.manually_stopped
+                && config.manually_stopped
+                && config.enabled
+                && health.managed_id.as_deref() == Some(config.id.as_str());
+            if manual_transition {
+                recorded.manually_stopped = true;
+            }
             anyhow::ensure!(
                 serde_json::to_value(&recorded)? == serde_json::to_value(config)?
-                    && !config.manually_stopped
+                    && (!config.manually_stopped || manual_transition)
                     && health
                         .managed_id
                         .as_deref()
@@ -302,6 +374,12 @@ impl StaleOwner {
                 && read_record(&self.receipt)? == self.receipt_bytes,
             "stale records changed before cleanup"
         );
+        if let Some((path, bytes)) = &self.forced_stop {
+            anyhow::ensure!(
+                read_bounded_record(path, 1024 * 1024)? == *bytes,
+                "forced stop receipt changed before cleanup"
+            );
+        }
         // Keep the consumed claim as a permanent anti-replay tombstone.
         fs::remove_file(&self.endpoint)?;
         respire_spawn::durable::sync_directory(

@@ -3,12 +3,11 @@
 // Only the two mapped CLI source tests. This never certifies published assets.
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { gunzipSync } from 'node:zlib';
 import { inspectArchive } from '../crates/core-sdk/prepare-sdk.mjs';
-import { auditSdkDirectory } from './sdk-ci-cache.mjs';
 
 const target = 'x86_64-unknown-linux-gnu';
 export const sourceCases = [
@@ -53,10 +52,10 @@ export function verifyCandidate(bytes, expectedHash, context) {
       requireValue(/^[a-z0-9_-]+$/.test(name) && digest(artifact?.archive_sha256) && digest(artifact?.binary_sha256),
         `Candidate has invalid ${owner}/${name} digests`);
       const native = artifact.native_sdk;
-      requireValue(owner === 'client2' ? native === null : native && typeof native === 'object' && !Array.isArray(native) &&
+      requireValue(owner === 'client2' ? native === null : (owner === 'cli' && native === null) || native && typeof native === 'object' && !Array.isArray(native) &&
         Object.keys(native).sort().join(',') === 'archive_sha256,manifest_sha256,version' &&
         typeof native.version === 'string' && native.version.trim() && digest(native.manifest_sha256) && digest(native.archive_sha256),
-      `Candidate ${owner}/${name} requires native SDK identity, or explicit null for client2`);
+      `Candidate ${owner}/${name} requires native SDK identity, or explicit null for frontend cli/client2`);
     }
   }
   requireValue(candidate.components.cli.source_sha.toLowerCase() === context.source_sha && candidate.components.cli.artifacts[target],
@@ -144,9 +143,6 @@ const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const candidateKeys = ['REQUIRED_CANDIDATE_SHA256', 'REQUIRED_CANDIDATE_RUN_ID', 'REQUIRED_CANDIDATE_ARTIFACT_ID'];
 const timestamp = value => typeof value === 'string' && Number.isFinite(Date.parse(value)) &&
   new Date(value).toISOString() === value;
-const nativeShape = sdk => sdk && typeof sdk === 'object' && !Array.isArray(sdk) &&
-  Object.keys(sdk).sort().join(',') === 'archive_sha256,manifest_sha256,version' &&
-  typeof sdk.version === 'string' && sdk.version.trim() && digest(sdk.archive_sha256) && digest(sdk.manifest_sha256);
 function validateCommand(command) {
   const prefix = ['cargo', 'llvm-cov', '--locked', '-p', 'respire', '--no-report', '--lib', '--bins', '--examples'];
   requireValue(Array.isArray(command) && prefix.every((arg, i) => command[i] === arg) &&
@@ -162,21 +158,13 @@ function validateCommand(command) {
 function validatedInputs(context) {
   requireValue(positiveId(process.env.REQUIRED_CANDIDATE_RUN_ID) && positiveId(process.env.REQUIRED_CANDIDATE_ARTIFACT_ID),
     'Candidate input IDs must be positive integer strings');
-  requireValue(readdirSync(inputRoot()).sort().join(',') === 'candidate.json,sdk.tar.gz',
-    'Candidate input must contain only candidate.json and sdk.tar.gz');
   const bytes = ordinary(join(inputRoot(), 'candidate.json'));
-  const candidate = verifyCandidate(bytes, process.env.REQUIRED_CANDIDATE_SHA256, context);
-  const archivePath = join(inputRoot(), 'sdk.tar.gz');
-  requireValue(existsSync(archivePath), 'SDK archive evidence missing: input artifact must contain sdk.tar.gz; the SDK cache retains only extracted files');
-  const entry = json('sdk/core-sdk.lock.json').targets[target];
-  requireValue(process.env.RSRS_CORE_SDK_DIR, 'Prepared SDK directory is missing');
-  const directory = resolve(process.env.RSRS_CORE_SDK_DIR);
-  auditSdkDirectory(directory, target, entry);
-  const sdk = verifySdk(ordinary(archivePath), ordinary(join(directory, 'manifest.json')), entry,
-    candidate.components.cli.artifacts[target].native_sdk);
-  return { bytes, binding: { ...context, candidate_sha256: hash(bytes), actual_native_sdk: sdk,
+  verifyCandidate(bytes, process.env.REQUIRED_CANDIDATE_SHA256, context);
+  requireValue(readdirSync(inputRoot()).sort().join(',') === 'candidate.json',
+    'Frontend candidate input must contain only candidate.json; the CLI does not consume a native SDK');
+  return { bytes, binding: { ...context, candidate_sha256: hash(bytes), actual_native_sdk: null,
     candidate_run_id: process.env.REQUIRED_CANDIDATE_RUN_ID, candidate_artifact_id: process.env.REQUIRED_CANDIDATE_ARTIFACT_ID,
-    sdk_directory: directory, sdk_real_directory: realpathSync(directory) } };
+    sdk_directory: null, sdk_real_directory: null } };
 }
 
 export function prepare() {
@@ -238,13 +226,15 @@ export function buildReports(context, preflight, execution, stdout, stderr, arti
   requireValue(preflight.schema === 2 && execution.schema === 1 && execution.evidence_class === 'candidate-source' &&
     execution.gate === 'not-evaluated' && digest(execution.preflight_sha256) &&
     digest(preflight.candidate_sha256) && execution.candidate_sha256 === preflight.candidate_sha256 &&
-    nativeShape(preflight.actual_native_sdk) && nativeShape(execution.actual_native_sdk) &&
+    preflight.actual_native_sdk === null && execution.actual_native_sdk === null &&
     same(execution.actual_native_sdk, preflight.actual_native_sdk),
   'Missing or changed pre-execution candidate/SDK binding');
   requireValue(execution.preflight_sha256 === hash(Buffer.from(JSON.stringify(preflight, null, 2) + '\n')),
     'Original preflight bytes differ from execution');
-  for (const key of ['candidate_run_id', 'candidate_artifact_id', 'sdk_directory', 'sdk_real_directory'])
+  for (const key of ['candidate_run_id', 'candidate_artifact_id'])
     requireValue(typeof preflight[key] === 'string' && preflight[key].length > 0 && execution[key] === preflight[key], `Invalid execution binding: ${key}`);
+  for (const key of ['sdk_directory', 'sdk_real_directory'])
+    requireValue(preflight[key] === null && execution[key] === null, `Invalid execution binding: ${key}`);
   requireValue(positiveId(preflight.candidate_run_id) && positiveId(preflight.candidate_artifact_id), 'Invalid candidate input IDs');
   requireValue([preflight.started_at, preflight.completed_at, execution.started_at, execution.completed_at].every(timestamp) &&
     preflight.started_at <= preflight.completed_at && preflight.completed_at <= execution.started_at &&

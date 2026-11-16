@@ -3,6 +3,8 @@ import hashlib
 import ast
 import json
 import os
+import re
+import subprocess
 from pathlib import Path
 import tempfile
 import types
@@ -54,18 +56,33 @@ class FixtureInstallationTests(unittest.TestCase):
                 self.assertTrue(same_existing_path('\\\\?\\' + str(first.resolve()), first))
                 self.assertTrue(same_existing_path('\\\\?\\' + str(root.resolve()), root))
 
-    def test_upgrade_fixture_installs_before_creating_legacy_session_state(self):
+    def test_upgrade_fixture_downloads_runtime_after_legacy_data_and_handoff(self):
         tree = ast.parse(Path(__file__).with_name('test-real-m3-account-switch.py').read_text())
-        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-        installs = [node.lineno for node in calls if isinstance(node.func, ast.Name)
-                    and node.func.id in ('install_published_runtime', 'install_official_runtime')]
-        session_writes = [node.lineno for node in calls if isinstance(node.func, ast.Attribute)
-                          and node.func.attr == 'write_bytes'
-                          and any(isinstance(part, ast.Constant) and part.value == 'session.json'
-                                  for part in ast.walk(node.func.value))]
-        self.assertEqual(len(installs), 2)
-        self.assertTrue(session_writes)
-        self.assertLess(max(installs), min(session_writes))
+        branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)]
+        fresh = next(node for node in branches
+                     if ast.unparse(node.test) == 'not (args.seed_binary and args.runtime_binary)')
+        upgrade = next(node for node in branches
+                       if ast.unparse(node.test) == 'args.seed_binary and args.runtime_binary')
+        calls = [node for node in ast.walk(upgrade) if isinstance(node, ast.Call)
+                 and isinstance(node.func, ast.Name)]
+        install = next(node for node in calls if node.func.id == 'install_official_runtime')
+        stage = next(node for node in calls if node.func.id == 'stage_fixture_cli')
+        self.assertLess(stage.lineno, install.lineno)
+        session = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
+                       and any(isinstance(part, ast.Constant) and part.value == 'session.json'
+                               for part in ast.walk(node.func.value)))
+        handoff = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                       and any(isinstance(target, ast.Name) and target.id == 'legacy_handoff_actor'
+                               for target in node.targets)
+                       and isinstance(node.value, ast.Constant) and node.value.value == 'fixture')
+        self.assertLess(fresh.end_lineno, session.lineno)
+        self.assertLess(session.lineno, handoff.lineno)
+        self.assertLess(handoff.lineno, install.lineno)
+        snapshot_assert = next(node for node in ast.walk(upgrade) if isinstance(node, ast.Assert)
+                               and any(isinstance(part, ast.Name) and part.id == 'legacy_data'
+                                       for part in ast.walk(node.test)))
+        self.assertGreater(snapshot_assert.lineno, install.lineno)
 
     def run_fixture(self, fault=None):
         with tempfile.TemporaryDirectory() as temporary:
@@ -141,6 +158,64 @@ class FixtureInstallationTests(unittest.TestCase):
                     and isinstance(node.func, ast.Name) and node.func.id == 'stage_runtime')
         self.assertTrue(any(arg.arg == 'installation_root' and isinstance(arg.value, ast.Attribute)
                             and arg.value.attr == 'installation_root' for arg in call.keywords))
+        workflows = Path(__file__).resolve().parents[1] / '.github/workflows'
+        programs = []
+        for name, product_job in [('runtime-autostart-validation.yml', 'user-runtime'),
+                                  ('windows-startup-validation.yml', 'startup')]:
+            text = (workflows / name).read_text(encoding='utf-8')
+            source, product = text.split('\n  ' + product_job + ':\n')
+            self.assertIn('  source-checks:\n', source)
+            self.assertNotIn('installPinnedRuntime', source)
+            self.assertNotIn('test-runtime-autostart.py --binary', source)
+            self.assertNotIn('./scripts/test-windows-host-startup.ps1', source)
+            self.assertIn('Source and fixture checks only.', source)
+            self.assertIn("if: github.event_name == 'workflow_dispatch'", product)
+            self.assertIn('needs: source-checks', product)
+            self.assertIn('EXPECTED_RUNTIME_SOURCE_SHA: ${{ inputs.runtime_source_sha }}', product)
+            self.assertIn('      runtime_source_sha:\n', source)
+            self.assertIn('        required: true\n', source)
+            self.assertNotIn('continue-on-error', text)
+            body = product.split("node --input-type=module <<'NODE'\n")[1].split('          NODE')[0]
+            body = re.sub(r'^\s*import .+;\s*$', '', body, flags=re.MULTILINE)
+            body = body.replace("const {installPinnedRuntime} = await import('./scripts/ci-install-pinned-runtime.mjs');", '')
+            programs.append({'target': 'x86_64-pc-windows-msvc' if product_job == 'startup'
+                             else 'x86_64-unknown-linux-gnu', 'program': body})
+        # Execute only the workflow verifier with synthetic bytes; never install a product.
+        check = r'''
+import assert from 'node:assert/strict';
+import {createHash} from 'node:crypto';
+import {readFileSync} from 'node:fs';
+import {posix} from 'node:path';
+import {runInNewContext} from 'node:vm';
+const programs=JSON.parse(readFileSync(0,'utf8'));
+const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
+for(const {target,program} of programs)for(const fault of ['', 'input', 'source', 'proof', 'image', 'core', 'target', 'version', 'installer']){
+ const version='3.4.0-dev.1',suffix=target.includes('windows')?'.exe':'';
+ const runtime=`/fixture/bin/runtime/${version}/rsrs-runtime${suffix}`;
+ const core=Buffer.from('synthetic core inventory'),image=Buffer.from('synthetic Runtime; never executed');
+ const metadata={schema_version:2,runtime_version:version,target_triple:target,source_commit:(fault==='source'?'b':'a').repeat(40),
+  binary_sha256:hash(image),files:[{path:'core-runtime.json',sha256:hash(core)}]};
+ if(fault==='target')metadata.target_triple='wrong-target';
+ const encoded=JSON.stringify(metadata);
+ const receipt={version:fault==='version'?'3.4.0-dev.2':version,sha256:hash(image),release:{metadata_json:encoded,metadata_sha256:fault==='proof'?'0'.repeat(64):hash(encoded)}};
+ const files=new Map([['runtime-pin.json',JSON.stringify({required:version})],['/fixture/bin/runtime.json',JSON.stringify(receipt)],
+  [runtime,fault==='image'?Buffer.from('changed'):image],[`/fixture/bin/runtime/${version}/core-runtime.json`,fault==='core'?Buffer.from('changed'):core]]);
+ const writes=[];
+ const sandbox={assert,createHash,join:posix.join,resolve:()=>'/cli',spawnSync:()=>assert.fail('No product execution in self-check'),
+  mkdtempSync:()=>'/fixture',realpathSync:value=>value,statSync:()=>({isFile:()=>true}),
+  readFileSync:file=>{assert(files.has(file),`Unexpected file ${file}`);return files.get(file);},appendFileSync:(file,value)=>writes.push(value),
+  installPinnedRuntime:async()=>({status:fault==='installer'?1:0}),
+  process:{env:{GITHUB_ACTIONS:'true',RUNTIME_FIXTURE_HOSTED:'true',EXPECTED_RUNTIME_SOURCE_SHA:fault==='input'?'':'a'.repeat(40),
+   SDK_TARGET:target,EXE_SUFFIX:suffix,RUNNER_TEMP:'/temp',GITHUB_ENV:'/output'}}};
+ const run=()=>runInNewContext('(async()=>{'+program+'})()',sandbox);
+ if(fault){await assert.rejects(run);assert.equal(writes.length,0);}
+ else {await run();assert.deepEqual(writes,[`RSRS_RUNTIME_BIN=${runtime}\n`]);}
+}
+console.log('PASS: both workflow verifiers bind explicit source and original receipt/image/core hashes; no product executed');
+'''
+        result = subprocess.run(['node', '--input-type=module', '-e', check], input=json.dumps(programs),
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_invalid_installation_never_rebinds_runtime(self):
         for fault in ('exit', 'image', 'target', 'proof', 'version', 'existing', 'host', 'outside'):

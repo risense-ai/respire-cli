@@ -13,11 +13,14 @@ import {publishedAssetNames,parsePublishedAssets,validateArtifactRequest} from '
 import {createHash} from 'node:crypto';
 const manifest=JSON.parse(readFileSync(new URL('../artifact-manifest.json',import.meta.url)));
 const contract=regressionContract(manifest),copy=structuredClone;
+// Git's Windows bin wrapper prepends system tools ahead of fixture stubs.
+const bash=process.platform==='win32'?path.resolve(execFileSync('git',['--exec-path'],{encoding:'utf8'}).trim(),'../../../usr/bin/bash.exe'):'bash';
 test('API smoke shell parses even when published-assets mode is inactive',()=>{
-  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8');
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const job=workflow.split('\n  api-smoke:\n')[1].split('\n  publish:\n')[0];
   const script=job.split('        run: |\n')[1].split('\n      - uses:')[0].replace(/^          /gm,'');
-  const result=spawnSync('bash',['-n'],{input:script,encoding:'utf8'});
+  const result=spawnSync(bash,['-n'],{input:script,encoding:'utf8'});
+  if(result.error)throw result.error;
   assert.equal(result.status,0,result.stderr);
   assert.match(script,/dev-api-smoke.py/);assert.match(script,/dev-github-api-smoke.py/);
 });
@@ -162,13 +165,13 @@ test('supported Linux ARM targets require native runners, every source feedback 
       s=>s.selected.release=null,s=>s.selected.release.metadata_sha256='b'.repeat(64),s=>s.sameImage=true,s=>s.hosted='false',
       s=>{s.selected.release.metadata_json=JSON.stringify({triple:'wrong-gnu-target',runtime_version:version});s.selected.release.metadata_sha256=createHash('sha256').update(s.selected.release.metadata_json).digest('hex');}])await assert.rejects(()=>simulate(change));
   }
-  for(const name of ['Verify the latest formal release upgrades automatically','Verify resident foreground and background inference under concurrent CLI load']) {
+  for(const name of ['Verify selected formal release and database DEV upgrades','Verify resident foreground and background inference under concurrent CLI load']) {
     const consumer=step(name);
     for(const [key,output,published] of [['BIN','path','RSRS_RUNTIME_BIN'],['SHA256','sha256','RSRS_PUBLISHED_RUNTIME_SHA256'],['VERSION','version','RSRS_PUBLISHED_RUNTIME_VERSION']])assert(consumer.includes(`NATIVE_RUNTIME_${key}: \u0024{{ inputs.artifact_source == 'published-assets' && env.${published} || steps.pinned-runtime.outputs.${output} }}`));
     assert.match(consumer,/test -n "\$NATIVE_RUNTIME_BIN" && test -n "\$NATIVE_RUNTIME_SHA256" && test -n "\$NATIVE_RUNTIME_VERSION"/);
     assert.match(consumer,/--runtime-binary "\$NATIVE_RUNTIME_BIN" --runtime-sha256 "\$NATIVE_RUNTIME_SHA256" --runtime-version "\$NATIVE_RUNTIME_VERSION"/);
   }
-  assert.match(step('Verify the latest formal release upgrades automatically'),/GH_TOKEN: \$\{\{ github.token \}\}/);
+  assert.match(step('Verify selected formal release and database DEV upgrades'),/GH_TOKEN: \$\{\{ github.token \}\}/);
   assert.doesNotMatch(native,/RSRS_ARTIFACT_SOURCE: published-assets|RSRS_PUBLISHED_ASSETS_SHA256:|RSRS_PUBLISHED_BUNDLE_SHA256:/);
   const account=readFileSync(new URL('../../scripts/test-real-m3-account-switch.py',import.meta.url),'utf8');
   assert.match(account,/if key not in \('GH_TOKEN', 'GITHUB_TOKEN'\)/);
@@ -247,19 +250,26 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     stub('uname','#!/bin/sh\ncase "$1" in -s) echo Linux;; -m) echo aarch64;; esac\n');
     // The fake digest checker isolates selection/argv tests from the 570MB real model.
     stub('sha256sum','#!/bin/sh\ncat >/dev/null\nexit "${FAKE_HASH_STATUS:-0}"\n');
-    stub('docker','#!'+process.execPath+'\nrequire("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    const docker=path.join(root,'docker.cjs');
+    writeFileSync(docker,'require("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    stub('docker','#!/bin/sh\nMSYS2_ARG_CONV_EXCL="*" exec "'+process.execPath.replaceAll('\\','/')+'" "'+docker.replaceAll('\\','/')+'" "$@"\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
-    const env={...process.env,PATH:bin+path.delimiter+process.env.PATH,RUNNER_ARCH:'ARM64',RSRS_DATA_DIR:data,RSRS_CPU_OWNED_ORT_FILE:'',CAPTURE:capture};
-    const run=extra=>spawnSync('bash',[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile'),runtime,'a'.repeat(64),'1.0.21-dev.5'],{env:{...env,...extra},encoding:'utf8'});
+    const shellPath=file=>file.split(path.sep).join('/');
+    const env={...process.env,PATH:[bin,...(process.platform==='win32'?[path.dirname(bash)]:[]),process.env.PATH].join(path.delimiter),RUNNER_ARCH:'ARM64',RSRS_DATA_DIR:data,RSRS_CPU_OWNED_ORT_FILE:'',CAPTURE:capture};
+    const run=extra=>{
+      const result=spawnSync(bash,[script,'aarch64-unknown-linux-musl',exe,models,path.join(root,'container profile'),runtime,'a'.repeat(64),'1.0.21-dev.5'],{env:{...env,...extra},encoding:'utf8'});
+      if(result.error)throw result.error;
+      return result;
+    };
     for(const [extra,selected] of [[{},cached],[{RSRS_CPU_OWNED_ORT_FILE:custom},custom]]){
       const result=run(extra);assert.equal(result.status,0,result.stderr);const args=JSON.parse(readFileSync(capture));
-      assert(args.includes(selected+':/cpu-model.ort:ro'));assert(args.includes(models+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
-      assert(args.includes(bundle+':/runtime:ro'));assert(args.includes(receipt+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
+      assert(args.includes(shellPath(selected)+':/cpu-model.ort:ro'));assert(args.includes(shellPath(models)+':/models:ro'));assert(args.includes('RSRS_CPU_OWNED_ORT_FILE=/cpu-model.ort'));assert.equal(args[args.indexOf('--network')+1],'none');
+      assert(args.includes(shellPath(bundle)+':/runtime:ro'));assert(args.includes(shellPath(receipt)+':/runtime-selection.json:ro'));assert(!args.some(arg=>arg.startsWith('RSRS_RUNTIME_BIN=')));
       assert(args.includes('RSRS_RUNTIME_TRIPLE=aarch64-unknown-linux-musl'));
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
-    rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(local+':/cpu-model.ort:ro'));rmSync(capture);
+    rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(shellPath(local)+':/cpu-model.ort:ro'));rmSync(capture);
     assert.notEqual(run({FAKE_HASH_STATUS:'1'}).status,0);assert(!existsSync(capture));
     rmSync(local);assert.notEqual(run({}).status,0);assert(!existsSync(capture));
     // Explicit missing override must not silently fall back to another model.
@@ -268,28 +278,30 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
   }finally{rmSync(root,{recursive:true,force:true});}
 });
 
-test('critical and legacy full inventories cannot be interchanged or weakened by skipped native jobs',()=>{
+test('critical build-package identity and legacy full inventories cannot be interchanged or weakened by skipped gates',()=>{
   assert.equal(new Set(manifest.targets.map(t=>t.triple)).size,manifest.targets.length);
   assert.equal(manifest.targets.length,8,'Intel restoration requires eight CLI targets; Runtime/SDK inventories remain separate');
   assert(manifest.targets.some(t=>t.triple==='aarch64-unknown-linux-musl'&&t.pkg==='@rsrsai/linux-arm64'));
   assert(manifest.targets.some(t=>t.triple==='x86_64-apple-darwin'&&t.pkg==='@rsrsai/macos-x64'));
   const critical=regressionContract(manifest,'critical');
   assert.equal(validationProfile(), 'full');assert.throws(()=>validationProfile('unknown'));
-  assert.equal(critical.native.length,manifest.targets.length);assert.equal(critical.cloud.length,0);assert.equal(critical.migration.length,0);assert.equal(critical.migration_gate.length,0);assert.equal(critical.api,true);
+  assert.equal(critical.binaries.length,manifest.targets.length);assert.equal(critical.package,true);assert.equal(critical.native.length,0);assert.equal(critical.cloud.length,0);assert.equal(critical.migration.length,0);assert.equal(critical.migration_gate.length,0);assert.equal(critical.api,false);
   validateRegressionContract(critical,manifest,'critical');validateRegressionContract(contract,manifest,'full');
   assert.throws(()=>validateRegressionContract(critical,manifest,'full'));assert.throws(()=>validateRegressionContract(contract,manifest,'critical'));
   const unlabelled=copy(critical);delete unlabelled.validation_profile;assert.throws(()=>validateRegressionContract(unlabelled,manifest));
-  const jobs=[...critical.native.map(t=>job('native-regression / Native ('+t+')')),job('api-smoke')];
+  const jobs=[...critical.binaries.map(t=>job('validate / Release ('+t+')')),job('validate / npm-dry-run')];
   assert.equal(regressionStatus(jobs,critical),'success');assert.equal(regressionStatus(jobs,contract),'pending');
-  for(const conclusion of ['failure','cancelled','skipped']){const changed=copy(jobs);changed[0].conclusion=conclusion;assert.throws(()=>regressionStatus(changed,critical))}
-  const absent=copy(jobs);absent.shift();assert.equal(regressionStatus(absent,critical),'pending');
+  for(const index of [0,jobs.length-1]){
+    for(const conclusion of ['failure','cancelled','skipped']){const changed=copy(jobs);changed[index].conclusion=conclusion;assert.throws(()=>regressionStatus(changed,critical))}
+    const absent=copy(jobs);absent.splice(index,1);assert.equal(regressionStatus(absent,critical),'pending');
+  }
   assert.throws(()=>regressionStatus([...jobs,jobs[0]],critical));
   const foreign=copy(jobs);foreign[0].name='native-regression / Native (foreign-target)';assert.throws(()=>regressionStatus(foreign,critical));
 });
 
 test('only explicit inactive full matrices are ignored by critical and never enter its completion clock',()=>{
   const critical=regressionContract(manifest,'critical');
-  const jobs=[...critical.native.map(t=>({...job('native-regression / Native ('+t+')'),started_at:'2026-11-01T00:00:00Z',completed_at:'2026-11-01T00:01:00Z'})),{...job('api-smoke'),started_at:'2026-11-01T00:00:00Z',completed_at:'2026-11-01T00:01:00Z'}];
+  const jobs=[...critical.binaries.map(t=>({...job('validate / Release ('+t+')'),started_at:'2026-11-01T00:00:00Z',completed_at:'2026-11-01T00:01:00Z'})),{...job('validate / npm-dry-run'),started_at:'2026-11-01T00:00:00Z',completed_at:'2026-11-01T00:01:00Z'}];
   const skipped=name=>({name,status:'completed',conclusion:'skipped'});
   const inactive=[skipped('Native migration (${{ matrix.target }})'),skipped('Migration gate (${{ matrix.target }})')];
   // Exact names from GitHub API run 41291097685 attempt1, read during this change.
@@ -306,55 +318,45 @@ test('only explicit inactive full matrices are ignored by critical and never ent
   assert.throws(()=>regressionStatus([...inventory(),...inactive],contract));
 });
 
-test('workflow defaults critical, retains mandatory profile gates and dispatches nonpublishing daily full',()=>{
-  const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  const native=readFileSync(new URL('../../.github/workflows/release-native-validation.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
-  assert(guard,'stable planning must fail closed before any reservation or output');
-  for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
-  runInNewContext(guard,{channel:'dev'});
-  assert(release.indexOf(guard)<release.indexOf("if(channel==='dev'&&process.env.RELEASE_PUBLISH==='true')"));
-  const daily=readFileSync(new URL('../../.github/workflows/release-full-regression.yml',import.meta.url),'utf8');
-  assert.match(release,/validation_profile:[\s\S]*?default: critical/);assert.match(release,/REQUIRE_FULL:.*inputs.full_regression_before_publish/);
-  assert.match(release,/process.env.REQUIRE_FULL==='true'\?'full':requested/);
-  const part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-  for(const name of ['validate','native-regression','native-regression-critical','native-regression-critical-readonly'])assert.match(part(name),/permissions:[\s\S]*?actions: read/);
-  const standalone=readFileSync(new URL('../../.github/workflows/release-validation.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
-  assert.match(standalone,/permissions:\n  contents: read\n  actions: read/);
-  assert.match(standalone.split('\n  native-regression:\n')[1].split('\n  npm-dry-run:')[0],/permissions:[\s\S]*?actions: read/);
-  assert.match(part('native-regression'),/needs: \[plan, validate, artifact-inputs, published-assets-verification\]/);assert.match(part('native-regression'),/validation_profile: full/);
-  assert.match(part('native-regression-critical'),/name: native-regression/);assert.match(part('native-regression-critical'),/needs: plan/);assert.match(part('native-regression-critical'),/validation_profile: critical/);
-  for(const name of ['cloud-sweep','native-migration','migration-gate'])assert.match(part(name),/validation_profile == 'full'/);
-  assert.doesNotMatch(part('api-smoke'),/validation_profile == 'full'/);
-  assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
-  assert.doesNotMatch(part('publication-ready'),/channel == 'latest' \|\| github.event_name/);
-  assert.match(native,/default: full/);assert(native.includes('--profile critical'));
-  assert(native.indexOf('Target producer concluded')<native.indexOf('const artifacts=inventory.artifacts.filter'));
-  assert.match(native,/artifacts.length>1/);assert.match(native,/current.run_attempt!==attempt/);assert.match(native,/job.conclusion==='success'/);
-  assert.match(native,/if: inputs.validation_profile == 'full'[\s\S]*?resident-stress/);
-  assert.match(daily,/schedule:/);assert.match(daily,/-f publish=false -f validation_profile=full/);assert.doesNotMatch(daily,/-f publish=true(?:\s|$)|npm publish/);
-});
-
-test('critical cache writers and readers are mutually exclusive and full callers stay read-only',()=>{
+test('critical publication requires build identity and final full acceptance consumes only published assets',()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8').replace(/\r\n/g,'\n');
   const release=text('release.yml'),part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
-  const writer=part('native-regression-critical'),reader=part('native-regression-critical-readonly');
-  assert.match(writer,/cache-mode: write/);assert.match(reader,/cache-mode: read/);assert.match(part('native-regression'),/cache-mode: read/);
-  assert.match(text('release-validation.yml'),/^cache-mode: read$/m);
-  assert.doesNotMatch(text('release-validation.yml').split('\n  native-regression:\n')[1].split('\n  npm-dry-run:')[0],/cache-mode: (?:write|write-only)/);
-  assert.doesNotMatch(text('release-native-validation.yml'),/cache-mode:/);
-  for(const block of [writer,reader]){
-    assert.match(block,/name: native-regression/);assert.match(block,/needs: plan/);assert.match(block,/validation_profile: critical/);assert.match(block,/producer_prefix: 'validate \/ '/);
+  const guard=release.split('\n').find(line=>line.includes("if(['latest','stable'].includes(channel))"));
+  assert(guard);
+  for(const channel of ['latest','stable'])assert.throws(()=>runInNewContext(guard,{channel}),/complete G1/);
+  runInNewContext(guard,{channel:'dev'});
+  assert.match(release,/validation_profile:[\s\S]*?default: critical/);
+  assert.match(release,/Reject full acceptance before public Release assets exist/);
+  assert.doesNotMatch(release,/^  native-regression-critical(?:-readonly)?:/m);
+  assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
+  assert.match(part('publication-ready'),/Require successful CLI CI for this exact source/);
+  const daily=text('release-full-regression.yml');
+  assert.doesNotMatch(daily,/schedule:/);
+  assert.match(daily,/-f publish=false -f validation_profile=full/);
+  assert.match(daily,/-f artifact_source=published-assets/);
+  assert.match(daily,/-f client2_release="\$CLIENT2_RELEASE" -f client2_commit="\$CLIENT2_COMMIT"/);
+  assert.match(daily,/-f client2_candidate_run_id=/);
+  assert.match(text('release-validation.yml'),/full_validation:\n        default: false/);
+  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40),client2_candidate_run_id:''};
+  for(const call of ['validate','native-regression'].map(part))for(const key of Object.keys(selected)){
+    const expression=call.match(new RegExp('^      '+key+': \\$\\{\\{ (.+) \\}\\}$','m'))?.[1];
+    assert(expression);
+    const actual=runInNewContext(expression,{inputs:selected});
+    if(key!=='client2_candidate_run_id')assert.equal(actual,selected[key]);
   }
-  const condition=block=>block.match(/    if: \$\{\{ (.+) \}\}/)[1];
-  for(const repository of ['risense-ai/respire-cli','foreign/repo'])for(const ref of ['refs/heads/main','refs/tags/v1.2.3'])for(const sameSha of [true,false])for(const event of ['push','workflow_dispatch','pull_request','workflow_run'])for(const profile of ['critical','full']){
-    const context={github:{repository,ref,sha:'a'.repeat(40),event_name:event},inputs:{reuse_dev12_validation:false,prepared_run:''},needs:{plan:{outputs:{sha:(sameSha?'a':'b').repeat(40),validation_profile:profile}}}};
-    const write=runInNewContext(condition(writer),context),read=runInNewContext(condition(reader),context);
-    assert.equal(Number(write)+Number(read),profile==='critical'?1:0,'exactly one critical native matrix may run');
-    assert.equal(write,profile==='critical'&&repository==='risense-ai/respire-cli'&&ref==='refs/heads/main'&&sameSha&&['push','workflow_dispatch'].includes(event));
-    for(const inputs of [{reuse_dev12_validation:true,prepared_run:''},{reuse_dev12_validation:false,prepared_run:'123'}]){
-      assert.equal(runInNewContext(condition(writer),{...context,inputs}),false);assert.equal(runInNewContext(condition(reader),{...context,inputs}),false);
-    }
+});
+
+test('all release business consumers require published assets and no critical native caller remains',()=>{
+  const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const release=text('release.yml'),part=name=>release.split('\n  '+name+':\n')[1]?.split(/\n  [a-z][\w-]*:\n/)[0];
+  assert.equal(part('native-regression-critical'),undefined);
+  assert.equal(part('native-regression-critical-readonly'),undefined);
+  assert.match(part('native-regression'),/cache-mode: read/);
+  assert.match(text('release-validation.yml'),/^cache-mode: read$/m);
+  for(const name of ['native-regression','cloud-sweep','native-migration','migration-gate','api-smoke']){
+    const condition=part(name).match(/    if: \$\{\{ (.+) \}\}/)[1].replace(/needs\.([a-z][a-z0-9-]*)/g,(_,id)=>`needs[${JSON.stringify(id)}]`);
+    const needs=new Proxy({},{get:()=>({result:'success',outputs:{validation_profile:'critical'}})});
+    for(const artifact_source of ['build','published-assets'])assert.equal(Boolean(runInNewContext(condition,{always:()=>true,needs,inputs:{artifact_source}})),artifact_source==='published-assets',name);
   }
 });
 
@@ -523,7 +525,7 @@ test('published consumers declare every condition dependency and cannot execute 
     const make=(mode,failed)=>new Proxy(Object.fromEntries(dependencies.map(id=>[id,{result:id===failed?'failure':id==='plan'&&mode==='published-assets'?'skipped':id==='published-assets-verification'&&mode==='build'?'skipped':'success',outputs:{validation_profile:'full'}}])),{get(t,key){assert(dependencies.includes(key),'undeclared '+name+' dependency '+key);return t[key];}});
     for(const mode of ['build','published-assets']) {
       const context={always:()=>true,needs:make(mode),inputs:{artifact_source:mode,reuse_dev12_validation:false,prepared_run:''}};
-      assert.equal(Boolean(runInNewContext(js(condition),context)),true,name+' '+mode);
+      assert.equal(Boolean(runInNewContext(js(condition),context)),mode==='published-assets'||name==='validate',name+' '+mode);
       const required=mode==='published-assets'?['artifact-inputs','published-assets-verification',...(name==='native-regression'?['validate']:[]),...(name==='migration-gate'?['cloud-sweep','native-migration']:[])]:dependencies.filter(id=>!['artifact-inputs','published-assets-verification'].includes(id));
       for(const failed of required)assert.equal(Boolean(runInNewContext(js(condition),{...context,needs:make(mode,failed)})),false,name+' accepted failed '+failed);
     }
@@ -547,7 +549,8 @@ test('published consumers declare every condition dependency and cannot execute 
   assert.doesNotMatch(nativeJobs.native,/contents: write|actions: write|id-token:/);
   assert.doesNotMatch(native,/historical-draft-download|draft-baseline-cache/);
   assert.doesNotMatch(nativeJobs.native,/^    needs:/m);
-  assert(nativeJobs.native.includes('--profile critical'));
+  assert(nativeJobs.native.includes('--profile "$UPGRADE_PROFILE"'));
+  assert(nativeJobs.native.includes('UPGRADE_PROFILE: ${{ inputs.validation_profile }}'));
   const upgrade=readFileSync(new URL('../../scripts/test-published-upgrades.py',import.meta.url),'utf8').replace(/\r\n/g,'\n');
   assert.match(upgrade,/if args.download_only:\n        assert tag=='v1\.0\.10' and release\['draft'\][\s\S]*?\n        return\n    with tarfile\.open/);
   assert.match(upgrade,/if args.download_only:\n    assert args.profile=='full' and not args.draft_baseline_cache[\s\S]*?\n    sys.exit\(0\)\n\ntry:/);

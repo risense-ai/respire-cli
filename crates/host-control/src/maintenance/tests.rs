@@ -192,6 +192,27 @@ fn publication_is_private_bounded_and_exact_compare_and_replace() -> Result<()> 
     fs::remove_file(&path)?;
     assert!(private_write(&path, b"unexpected recreation", Some(&hash(b"next"))).is_err());
     assert!(!path.try_exists()?);
+    let session = directory.path().join("session.json");
+    let old = br#"{"vault_version":1,"pass":"","secret":"synthetic-factor"}"#;
+    private_io::private_write_record(&session, old, None, 65536)?;
+    assert!(private_io::private_write_record(&session, b"{}", Some("stale-digest"), 65536).is_err());
+    assert_eq!(fs::read(&session)?, old);
+    let journal = directory.path().join(".login-recovery.json");
+    crate::lifecycle_io::legacy_recovery_clear(directory.path(), &journal)?;
+    for name in ["account-active.json", "key-control.json", "offline-keygen.json"] {
+        let pending = directory.path().join("runtime/autostart").join(name);
+        fs::write(&pending, b"{}")?;
+        assert!(crate::lifecycle_io::legacy_recovery_clear(directory.path(), &journal).is_err());
+        fs::remove_file(pending)?;
+    }
+    for (active, phase, clear) in [(serde_json::Value::Null, "committed", true),
+        (serde_json::Value::Null, "rolled_back", true), (serde_json::Value::Null, "prepared", false),
+        (serde_json::json!({}), "committed", false)] {
+        fs::write(&journal, serde_json::to_vec(&serde_json::json!({
+            "schema_version":2, "active":active, "operations":[{"phase":phase}]}))?)?;
+        assert_eq!(crate::lifecycle_io::legacy_recovery_clear(directory.path(), &journal).is_ok(), clear);
+    }
+    assert_eq!(fs::read(&session)?, old);
     Ok(())
 }
 

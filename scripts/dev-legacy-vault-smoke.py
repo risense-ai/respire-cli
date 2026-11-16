@@ -240,6 +240,14 @@ class Smoke:
         result = self.cli(env, "show", memory_id)
         require(plaintext in json.dumps(result), "old_ciphertext_not_decrypted")
 
+    def verify_legacy_factor(self, session, secret, code):
+        alias = session.get("keyring_account")
+        require(isinstance(alias, str) and ("rsrs", "legacy-secret:" + alias) in self.keys.entries
+            and session.get("legacy_secret_backend") == self.keys.credential_backend
+            and self.keys.credential_backend in ("native", "secret_service")
+            and not {"pass", "super", "secret", "secret_key"}.intersection(session), code)
+        require(self.keys.read("rsrs", "legacy-secret:" + alias) == secret, code)
+
     def run_version(self, version):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         env = self.env(f"v{version}-original")
@@ -342,7 +350,7 @@ class Smoke:
         original_session = (source / "session.json").read_bytes()
         original_database = digest(source / "onememory.db")
         alias = "legacy-" + hashlib.sha256(str(source.resolve()).encode()).hexdigest()[:16]
-        for slot in ("super:", "pass:"):
+        for slot in ("super:", "pass:", "legacy-secret:"):
             self.keys.reserve("rsrs", slot + alias)
         migration_env = dict(env, RSRS_SUPER=original_super)
         if version == 1:
@@ -370,8 +378,8 @@ class Smoke:
         require(self.keys.read("rsrs", "pass:" + alias) == password, "original_password_not_retained")
         if version != 1:
             require(self.keys.read("rsrs", "super:" + alias) == original_super, "original_super_not_retained")
-        if version == 1:
-            require(upgraded.get("secret") == secret, "original_account_secret_not_retained")
+        if version in (1, 3):
+            self.verify_legacy_factor(upgraded, secret, "original_account_secret_not_retained")
         # Recovery factors already exist in this fixture's verified migrated
         # session/isolated keyring; only the password needs terminal input.
         result = self.cli(upgraded_env, "migrate", "--vault", "--addr", UPSTREAM, "--user", user,
@@ -386,8 +394,8 @@ class Smoke:
         rejected, _ = self.request(account, "POST", "/login", {"user": user, "pass_hash": old_pass_hash,
             "device_name": "legacy-auth-regression"})
         require(rejected == 401, "old_authentication_hash_still_accepted")
-        if version == 1:
-            require(committed.get("secret") == secret, "cloud_migration_changed_account_secret")
+        if version in (1, 3):
+            self.verify_legacy_factor(committed, secret, "cloud_migration_changed_account_secret")
         published = self.api(account, "GET", "/api/self/vault")
         require(published["version"] == version and published["wrapped_urk"].startswith(PREFIX), "cloud_factors_changed")
         recovered = AESGCM(legacy_kek(version, password if version == 1 else original_super, secret, published["kdf_salt"], current=True)).decrypt(
@@ -412,8 +420,8 @@ class Smoke:
             and self.api(account, "GET", "/auth/salt?user=" + urllib.parse.quote(user))["salt"] == new_auth_salt,
             "fresh_login_did_not_use_new_auth_salt")
         account["token"] = recovered_session["token"]
-        if version == 1:
-            require(recovered_session.get("secret") == secret, "new_device_changed_account_secret")
+        if version in (1, 3):
+            self.verify_legacy_factor(recovered_session, secret, "new_device_changed_account_secret")
         self.report["stage"] = f"v{version}_fresh_device_sync"
         self.save()
         self.cli(final_env, "sync")
@@ -448,8 +456,8 @@ class Smoke:
                 and headless.get("keyring_backend") in ("native", "secret_service")
                 and headless_env.get("RSRS_PASS") == password,
                 "headless_v1_persistent_password_commit_invalid")
-            require(headless.get("secret") == secret and headless.get("vault_version") == 1,
-                "headless_v1_changed_original_factors")
+            require(headless.get("vault_version") == 1, "headless_v1_changed_original_factors")
+            self.verify_legacy_factor(headless, secret, "headless_v1_changed_original_factors")
             headless_urk = AESGCM(legacy_kek(1, password, secret, headless["kdf_salt"], current=True)).decrypt(
                 bytes.fromhex(headless["urk_nonce"]), encrypted_bytes(headless["wrapped_urk"]), None)
             require(headless_urk == urk, "headless_v1_changed_urk")

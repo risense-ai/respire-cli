@@ -1,0 +1,321 @@
+"""Reproduce #285 with the official dev.3 CLI and a candidate on native macOS arm64.
+
+Uses an empty, explicitly supplied directory and native Keychain credentials.
+Never deletes the fixture or publishes keygen output. Existing model files may
+be reused with --m3-dir. A failure leaves the fixture available for inspection.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import socket
+import subprocess
+import time
+import urllib.request
+
+
+def digest(path):
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--old-cli', type=Path, required=True)
+    parser.add_argument('--old-metadata', type=Path, required=True)
+    parser.add_argument('--candidate', type=Path, required=True)
+    parser.add_argument('--root', type=Path, required=True)
+    parser.add_argument('--m3-dir', type=Path)
+    parser.add_argument('--candidate-runtime-archive', type=Path, required=True)
+    parser.add_argument('--candidate-runtime-version', required=True)
+    args = parser.parse_args()
+    if (platform.system(), platform.machine()) != ('Darwin', 'arm64'):
+        raise RuntimeError('requires native macOS arm64; do not substitute another platform')
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        raise RuntimeError('requires a disposable GitHub Actions runner; native Keychain defaults are changed')
+    old = args.old_cli.resolve(strict=True)
+    candidate = args.candidate.resolve(strict=True)
+    archive = args.candidate_runtime_archive.resolve(strict=True)
+    install_args = ('runtime', 'install', '--file', str(archive),
+                    '--version', args.candidate_runtime_version)
+    metadata = json.loads(args.old_metadata.read_text(encoding='utf-8'))
+    if metadata.get('binary_sha256') != digest(old):
+        raise ValueError('old CLI differs from its official release metadata')
+    root = args.root.resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    if any(root.iterdir()):
+        raise ValueError('--root must be empty; existing homes are never modified')
+    data = root / 'data'
+    stable = data / 'bin' / 'rsrs'
+    stable.parent.mkdir(parents=True)
+    shutil.copy2(old, stable)
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1', 0))
+        port = reservation.getsockname()[1]
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(('RSRS_', 'ONEMEMORY_', 'RESPIRE_', 'XDG_'))
+           and key not in ('GH_TOKEN', 'GITHUB_TOKEN', 'CORE_SDK_READ_TOKEN')}
+    env.update(RSRS_DATA_DIR=str(data), RSRS_BIN_DIR=str(stable.parent),
+               RSRS_RPC_PORT=str(port), RSRS_ENGINE='cpu', RSRS_LOG='info')
+    if args.m3_dir:
+        env['RSRS_M3_DIR'] = str(args.m3_dir.resolve(strict=True))
+    report = {'issue': 285, 'passed': False, 'checks': [],
+              'old_cli_sha256': digest(old), 'candidate_sha256': digest(candidate),
+              'candidate_runtime_archive_sha256': digest(archive),
+              'candidate_runtime_version': args.candidate_runtime_version}
+    report_path = root / 'upgrade-report.json'
+
+    def sample_owned_runtime():
+        samples = []
+        processes = subprocess.check_output(
+            ['/bin/ps', '-axo', 'pid=,command='], text=True, timeout=10)
+        for process in processes.splitlines():
+            fields = process.strip().split(None, 1)
+            if len(fields) != 2:
+                continue
+            pid, command = fields
+            executable, _, _ = command.partition(' --')
+            image = Path(executable)
+            if image.name not in ('rsrs-runtime', 'rsrs-runtime-aarch64-apple-darwin') or not image.is_relative_to(data):
+                continue
+            sample_path = root / ('runtime-sample-' + pid + '.txt')
+            try:
+                subprocess.run(['/usr/bin/sample', pid, '3', '-file', str(sample_path)],
+                               capture_output=True, check=True, timeout=15)
+                sample = sample_path.read_text(encoding='utf-8', errors='replace')
+                graph = sample.partition('Call graph:')[2].partition('Total number in stack')[0]
+                samples.append({'pid': int(pid), 'stack': graph[:60000].replace(str(root), '<fixture>')})
+            except (OSError, subprocess.SubprocessError) as error:
+                samples.append({'pid': int(pid), 'error': type(error).__name__})
+        return samples
+
+    def run(binary, *arguments):
+        report['stage'] = ' '.join(arguments[:2])
+        started = time.monotonic()
+        command = [str(binary), '--json', *arguments]
+        if binary == old and arguments[:2] == ('runtime', 'start'):
+            # The old CLI kills its control child at its own deadline; sample it before that.
+            with subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+                try:
+                    stdout, stderr = process.communicate(timeout=8)
+                except subprocess.TimeoutExpired:
+                    report['startup_samples'] = sample_owned_runtime()
+                    try:
+                        stdout, stderr = process.communicate(timeout=592)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
+                        raise
+                result = subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+        else:
+            result = subprocess.run(command, env=env, capture_output=True, timeout=600)
+        # Keygen stdout can include a recovery kit: never put raw output in reports.
+        if result.returncode:
+            try:
+                failure = json.loads(result.stdout)
+            except (ValueError, UnicodeError):
+                failure = {}
+            report['failure'] = {'exit': result.returncode,
+                                 'cli_role': 'official_dev3_baseline' if binary == old else 'candidate',
+                                 'elapsed_seconds': time.monotonic() - started,
+                                 'errors': failure.get('errors', []) if failure.get('status') == 'fail' else []}
+            print(json.dumps(report['failure']), flush=True)
+            if report['checks'] and binary == candidate and arguments[:2] == ('runtime', 'install'):
+                report['retained_state_after_failure'] = {
+                    'journal': journal_path.is_file() and journal_path.read_bytes() == journal_bytes,
+                    'session': session.is_file() and session.read_bytes() == original_session,
+                    'legacy_release': old_release.is_dir(),
+                }
+            if arguments[:2] in (('runtime', 'install'), ('runtime', 'start')):
+                if 'startup_samples' not in report:
+                    report['startup_samples'] = sample_owned_runtime()
+                try:
+                    status = subprocess.run([str(binary), '--json', 'status'], env=env,
+                                            capture_output=True, timeout=20)
+                    value = json.loads(status.stdout)
+                    report['post_failure_status'] = {'exit': status.returncode, 'errors': value.get('errors', [])}
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    report['post_failure_status'] = {'error': type(error).__name__}
+            raise RuntimeError('command failed: ' + ' '.join(arguments[:2])
+                               + '; inspect the retained fixture logs')
+        value = json.loads(result.stdout)
+        if value.get('status') != 'ok':
+            raise RuntimeError('command did not report success: ' + arguments[0])
+        return value
+
+    def health():
+        request = urllib.request.Request(f'http://127.0.0.1:{port}/api/health',
+                                         headers={'X-Respire-Health': 'runtime-v1'})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=5) as response:
+            return json.load(response)
+
+    def preauthorize_keychain(original_session):
+        # Retain the original Keychain and clone only this fixture's freshly issued secret.
+        secret = generated.get('summary', {}).get('super')
+        alias = json.loads(original_session).get('keyring_account')
+        if not isinstance(secret, str) or not secret or not isinstance(alias, str) or not alias:
+            raise AssertionError('official keygen did not return the synthetic credential and alias')
+        authorized_keychain = str(keychains / 'authorized-upgrade.keychain-db')
+        # Ad-hoc signed Rust binaries have a cdhash partition, not the unsigned partition.
+        partitions = ['apple-tool:', 'apple:']
+        for image in [old, stable, candidate, data / 'runtime' / '2.0.0-dev.14' / 'rsrs-runtime']:
+            signature = subprocess.run(['/usr/bin/codesign', '-d', '--verbose=4', str(image)],
+                                       capture_output=True, text=True, timeout=15)
+            if signature.returncode:
+                raise RuntimeError('synthetic Keychain consumer has no readable code signature')
+            hashes = [match.group(1).lower() for line in signature.stderr.splitlines()
+                      if (match := re.fullmatch(r'CDHash=([a-fA-F0-9]{40})', line.strip()))]
+            if len(hashes) != 1:
+                raise RuntimeError('synthetic Keychain consumer has no unambiguous code hash')
+            partition = 'cdhash:' + hashes[0]
+            if partition not in partitions:
+                partitions.append(partition)
+        for operation in [
+            ['create-keychain', '-p', keychain_password, authorized_keychain],
+            ['unlock-keychain', '-p', keychain_password, authorized_keychain],
+            ['set-keychain-settings', '-t', '3600', '-u', authorized_keychain],
+            ['add-generic-password', '-A', '-s', 'rsrs', '-a', 'super:' + alias,
+             '-w', secret, authorized_keychain],
+            ['set-generic-password-partition-list', '-s', 'rsrs', '-a', 'super:' + alias,
+             '-S', ','.join(partitions), '-k', keychain_password, authorized_keychain],
+            ['list-keychains', '-d', 'user', '-s', authorized_keychain],
+            ['default-keychain', '-d', 'user', '-s', authorized_keychain],
+        ]:
+            try:
+                approval = subprocess.run(['/usr/bin/security', *operation], env=env,
+                                          capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                raise RuntimeError('synthetic Keychain preparation timed out') from None
+            if approval.returncode:
+                raise RuntimeError('synthetic Keychain preparation failed: ' + operation[0])
+        # Retain the original file, but do not let an ambiguous duplicate select its old ACL.
+        selected = subprocess.check_output(
+            ['/usr/bin/security', 'list-keychains', '-d', 'user'], env=env, timeout=15)
+        if selected.decode().strip().strip('"') != authorized_keychain:
+            raise AssertionError('synthetic upgrade must search only its preauthorized Keychain')
+        return authorized_keychain
+
+    try:
+        # Security.framework and the security tool must use the same disposable runner account HOME.
+        keychains = root / 'Library' / 'Keychains'
+        keychains.mkdir(parents=True)
+        keychain = str(keychains / 'upgrade.keychain-db')
+        keychain_password = 'issue-285-synthetic-only'
+        for operation in [
+            ['create-keychain', '-p', keychain_password, keychain],
+            ['list-keychains', '-d', 'user', '-s', keychain],
+            ['default-keychain', '-d', 'user', '-s', keychain],
+            ['unlock-keychain', '-p', keychain_password, keychain],
+            ['set-keychain-settings', '-t', '3600', '-u', keychain],
+        ]:
+            subprocess.run(['/usr/bin/security', *operation], env=env, check=True,
+                           capture_output=True, timeout=15)
+        selected = subprocess.check_output(
+            ['/usr/bin/security', 'default-keychain', '-d', 'user'], env=env, timeout=15)
+        if selected.decode().strip().strip('"') != keychain:
+            raise AssertionError('isolated native Keychain selection changed')
+        version = subprocess.check_output([str(old), '--version'], env=env, timeout=15)
+        if version.strip() != b'rsrs 2.0.0-dev.3':
+            raise ValueError('expected CLI 2.0.0-dev.3')
+        run(old, 'runtime', 'install')
+        run(old, 'status')
+        generated = run(old, 'keygen')
+        # Select the fixture credential store before starting the baseline owner;
+        # changing Keychain defaults under a live Security.framework client is not an upgrade.
+        run(old, 'runtime', 'stop')
+        authorized_keychain = preauthorize_keychain((data / 'session.json').read_bytes())
+        report['interactive_prompt_tested'] = False
+        report['preauthorized_before_baseline_start'] = True
+        run(old, 'runtime', 'start')
+        run(old, 'model', 'install')
+        content = 'Issue 285 retained offline memory'
+        stored = run(old, 'remember', content, '--title', 'issue-285-before-upgrade',
+                     '--importance', 'important', '--force')
+        memory_id = stored['summary']['id']
+        original_memory = run(old, 'show', memory_id)['details']['entry']
+        original_health = health()
+        if original_health.get('runtime_version') != '2.0.0-dev.14':
+            raise AssertionError('fixture did not start Runtime dev.14')
+        old_release = data / 'runtime' / '2.0.0-dev.14'
+        if not old_release.is_dir():
+            raise AssertionError('fixture does not use the reported legacy layout')
+        journal_path = data / '.login-recovery.json'
+        journal_bytes = journal_path.read_bytes()
+        journal = json.loads(journal_bytes)
+        if (journal.get('schema_version') != 2 or journal.get('active') is not None
+                or not any(item.get('phase') == 'committed' and item.get('backend') == 'native'
+                           for item in journal.get('operations', []))):
+            raise AssertionError('fixture does not contain the reported committed native receipt')
+        session = data / 'session.json'
+        original_session = session.read_bytes()
+        report['checks'].append('dev.3/dev.14 running with committed native receipt and stored memory')
+
+        del generated
+        if run(old, 'show', memory_id)['details']['entry']['content'] != original_memory['content']:
+            raise AssertionError('original credential did not retain access to the original memory')
+        report['checks'].append('same synthetic credential works in a preauthorized native Keychain; original Keychain retained')
+        report['interactive_prompt_tested'] = False
+        installed = run(candidate, *install_args)['summary']
+        if installed.get('restarted') is not True or digest(stable) != digest(candidate):
+            raise AssertionError('upgrade did not refresh the CLI and restart the old owner')
+        if not old_release.is_dir() or journal_path.read_bytes() != journal_bytes:
+            raise AssertionError('upgrade removed the old release or changed recovery evidence')
+        if session.read_bytes() != original_session:
+            raise AssertionError('upgrade changed the original offline session')
+        upgraded_health = health()
+        expected_runtime = args.candidate_runtime_version
+        if upgraded_health.get('runtime_version') != expected_runtime:
+            raise AssertionError('upgraded owner does not match the candidate CLI Runtime pin')
+        report['runtime_version'] = upgraded_health['runtime_version']
+        report['checks'].append('in-place restart with original session, journal and old release retained')
+        run(candidate, 'status')
+        subprocess.run(['/usr/bin/security', 'lock-keychain', authorized_keychain],
+                       env=env, capture_output=True, check=True, timeout=15)
+        try:
+            # Bypass host credential reads: the unlocked Runtime itself must not use Keychain.
+            request = urllib.request.Request(f'http://127.0.0.1:{port}/api/rpc',
+                data=json.dumps({'v': 1, 'id': 'issue285-locked-keychain', 'method': 'cli.exec',
+                                 'args': ['--json', 'show', memory_id]}).encode(),
+                headers={'Content-Type': 'application/json'})
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=10) as response:
+                reply = json.load(response)
+            if reply.get('id') != 'issue285-locked-keychain' or reply.get('ok') is not True:
+                raise AssertionError('locked-Keychain read did not return a successful matching receipt')
+            locked = reply['envelope']['details']['entry']
+            if locked['content'] != original_memory['content']:
+                raise AssertionError('running Runtime lost access after locking host Keychain')
+        finally:
+            subprocess.run(['/usr/bin/security', 'unlock-keychain', '-p', keychain_password,
+                            authorized_keychain], env=env, capture_output=True, check=True, timeout=15)
+        report['checks'].append('unlocked Runtime retains memory access while host Keychain is locked')
+        restored = run(candidate, 'show', memory_id)['details']['entry']
+        if (restored['id'], restored['content']) != (original_memory['id'], original_memory['content']):
+            raise AssertionError('pre-upgrade memory changed')
+        written = run(candidate, 'remember', 'Issue 285 post-upgrade write',
+                      '--importance', 'important', '--force')['summary']['id']
+        after_write = run(candidate, 'show', written)['details']['entry']
+        if after_write['id'] != written or after_write['content'] != 'Issue 285 post-upgrade write':
+            raise AssertionError('post-upgrade write did not read back unchanged')
+        recalled = run(candidate, 'recall', content, '--titles')
+        if memory_id not in {item['id'] for item in recalled['details']}:
+            raise AssertionError('recall did not return the pre-upgrade memory')
+        report['checks'].append('status/show/remember/recall succeed against the upgraded original home')
+        repeated = run(candidate, *install_args)['summary']
+        if repeated.get('restarted') is not False or health()['pid'] != upgraded_health['pid']:
+            raise AssertionError('repeated installation restarted an already compatible owner')
+        run(candidate, 'runtime', 'stop')
+        report['checks'].append('repeat installation is idempotent; normal stop succeeds')
+        report['passed'] = True
+    finally:
+        report_path.write_text(json.dumps(report, indent=2) + '\n', encoding='utf-8')
+        print(report_path)
+
+
+if __name__ == '__main__':
+    main()

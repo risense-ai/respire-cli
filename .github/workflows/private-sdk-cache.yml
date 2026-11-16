@@ -6,6 +6,10 @@ on:
         description: Exact independently reviewed CLI commit containing both private SDK locks
         type: string
         required: true
+      reviewed_runtime_source_sha:
+        description: Optional exact reviewed Runtime commit whose independent SDK cache is also prepared
+        type: string
+        required: false
 permissions:
   contents: read
   actions: read
@@ -31,6 +35,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SDK_SOURCE_SHA: ${{ inputs.reviewed_source_sha }}
+          RUNTIME_SOURCE_SHA: ${{ inputs.reviewed_runtime_source_sha }}
         run: |
           set -euo pipefail
           [[ "$SDK_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || exit 1
@@ -38,13 +43,21 @@ jobs:
           gh api "repos/risense-ai/respire-cli/contents/sdk/core-sdk.lock.json?ref=$SDK_SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/sdk-locks/root.json"
           gh api "repos/risense-ai/respire-cli/contents/crates/core-sdk/core-sdk.lock.json?ref=$SDK_SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/sdk-locks/crate.json"
           node scripts/sdk-ci-cache.mjs plan "$RUNNER_TEMP/sdk-locks/root.json" "$RUNNER_TEMP/sdk-locks/crate.json" > "$RUNNER_TEMP/sdk-locks/plan.json"
+          if [ -n "$RUNTIME_SOURCE_SHA" ]; then
+            [[ "$RUNTIME_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]] || exit 1
+            gh api "repos/risense-ai/respire-runtime/contents/sdk/core-sdk.lock.json?ref=$RUNTIME_SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/sdk-locks/runtime-root.json"
+            gh api "repos/risense-ai/respire-runtime/contents/crates/core-sdk/core-sdk.lock.json?ref=$RUNTIME_SOURCE_SHA" --jq .content | base64 --decode > "$RUNNER_TEMP/sdk-locks/runtime-crate.json"
+            node scripts/sdk-ci-cache.mjs plan "$RUNNER_TEMP/sdk-locks/runtime-root.json" "$RUNNER_TEMP/sdk-locks/runtime-crate.json" > "$RUNNER_TEMP/sdk-locks/runtime-plan.json"
+          fi
           node --input-type=module - <<'JS'
           import {readFileSync,appendFileSync} from 'node:fs';
           const matrix=JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/sdk-locks/plan.json'));
           const os={'x86_64-unknown-linux-gnu':'ubuntu-latest','x86_64-unknown-linux-musl':'ubuntu-latest','aarch64-unknown-linux-gnu':'ubuntu-24.04-arm','aarch64-unknown-linux-musl':'ubuntu-24.04-arm','aarch64-apple-darwin':'macos-latest','x86_64-apple-darwin':'macos-15-intel','x86_64-pc-windows-msvc':'windows-latest'};
           const native={include:matrix.include.filter(x=>os[x.target]).map(({target,key})=>({target,key,os:os[target]}))};
           if(native.include.length!==matrix.include.length-1)throw Error('Expected every selected native SDK consumer except Windows ARM64');
-          appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(matrix)}\nnative=${JSON.stringify(native)}\n`);
+          const runtime=process.env.RUNTIME_SOURCE_SHA ? JSON.parse(readFileSync(process.env.RUNNER_TEMP+'/sdk-locks/runtime-plan.json')).include : [];
+          const downloads={include:[...new Map([...matrix.include,...runtime].map(entry=>[entry.key,entry])).values()]};
+          appendFileSync(process.env.GITHUB_OUTPUT,`matrix=${JSON.stringify(downloads)}\nnative=${JSON.stringify(native)}\n`);
           JS
   download:
     cache-mode: write-only

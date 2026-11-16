@@ -10,15 +10,14 @@
 //! Semantics: event JSON is written to the plugin stdin (`{"event":"...","ts":"...","data":{...}}`);
 //! a `pre-*` hook that exits 0 with stdout `{"verdict":"block","reason":"..."}` vetoes the action;
 //! a non-zero exit follows `on_error` (block=veto / warn=log and continue / skip=silent);
-//! `post-*` failures do not block the main flow. Timeouts report failure; the child is not killed.
+//! `post-*` failures do not block the main flow. Timeouts attempt cleanup and report failure.
 //! Safety: the child is stripped of all ONEMEMORY_* secrets; payloads are summaries, not keys.
 
 use std::collections::BTreeMap;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Hook event. pre = before the action (can veto); post = after (observe only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,7 +59,7 @@ impl HookEvent {
 pub struct HookSpec {
     /// Plugin command (run via shell; may include args).
     pub cmd: String,
-    /// Wait timeout in milliseconds (default 5000; `on_error` applies without killing the child).
+    /// Wait timeout in milliseconds (default 5000; `on_error` applies after cleanup).
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
     /// Failure policy: block (pre may veto) / warn (stderr warning, action continues) / skip (silent).
@@ -181,6 +180,10 @@ pub fn fire_at(path: &Path, event: HookEvent, payload: serde_json::Value) -> Hoo
 
 /// Run a single plugin.
 fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
+    let body = match serde_json::to_string(envelope) {
+        Ok(body) => body,
+        Err(e) => return HookOutcome::Failed(e.to_string()),
+    };
     // Restore PATH/HOME and Windows SystemRoot, but no ONEMEMORY_* secrets.
     // New secret vars are also wiped by env_clear, so there is no "forgot to strip" hole.
     #[cfg(windows)]
@@ -193,8 +196,9 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
     };
     #[cfg(not(windows))]
     let mut spawn = {
+        use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
-        command.arg("-c").arg(&spec.cmd);
+        command.arg("-c").arg(&spec.cmd).process_group(0);
         command
     };
     let spawn = spawn
@@ -210,54 +214,96 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
         spawn.env("SystemRoot", root);
     }
     let mut child = match spawn.spawn() {
-        Ok(c) => c,
+        Ok(child) => child,
         Err(e) => return HookOutcome::Failed(format!("failed to start ({e})")),
     };
-    let mut stdin = match child.stdin.take() {
-        Some(s) => s,
-        None => return HookOutcome::Failed("stdin unavailable".into()),
+    let (Some(mut stdin), Some(mut stdout), Some(mut stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        let mut errors = vec!["hook I/O pipes unavailable".to_owned()];
+        errors.extend(stop_hook(&mut child));
+        return HookOutcome::Failed(errors.join("; "));
     };
-    let body = match serde_json::to_string(envelope) {
-        Ok(b) => b,
-        Err(e) => return HookOutcome::Failed(e.to_string()),
-    };
-    // Write stdin on a side thread: a plugin that never reads stdin would block the writer.
-    let writer = std::thread::spawn(move || {
-        let _ = stdin.write_all(body.as_bytes());
+    let writer = std::thread::spawn(move || stdin.write_all(body.as_bytes()));
+    let stdout_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr.read_to_end(&mut bytes).map(|_| bytes)
     });
 
-    let (tx, rx) = mpsc::channel::<std::io::Result<std::process::Output>>();
-    let _ = &tx;
-    let waiter = {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            let out = child.wait_with_output();
-            let _ = tx.send(out);
-        })
-    };
     let timeout = Duration::from_millis(spec.timeout_ms.max(1));
-    let output = match rx.recv_timeout(timeout) {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return HookOutcome::Failed(format!("wait for plugin failed ({e})")),
-        Err(_) => {
-            // Timeout: the child was moved into the waiter thread so we cannot kill it -
-            // treat as failure. The plugin is responsible for its own watchdog (documented).
-            // writer/waiter wind down when the pipe closes.
-            let _ = writer.join();
-            return HookOutcome::Failed(format!("timeout (>{}ms)", spec.timeout_ms));
+    let started = Instant::now();
+    let mut errors = Vec::new();
+    let status = loop {
+        if writer.is_finished() && stdout_reader.is_finished() && stderr_reader.is_finished() {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(e) => {
+                    errors.push(format!("wait for plugin failed ({e})"));
+                    break None;
+                }
+            }
+        }
+        if started.elapsed() >= timeout {
+            errors.push(format!("timeout (>{}ms)", spec.timeout_ms));
+            break None;
+        }
+        std::thread::sleep(
+            Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+        );
+    };
+    if status.is_none() {
+        errors.extend(stop_hook(&mut child));
+        let started = Instant::now();
+        while !(writer.is_finished() && stdout_reader.is_finished() && stderr_reader.is_finished())
+            && started.elapsed() < Duration::from_secs(2)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    let input = finish_hook_io(writer, "stdin write");
+    let stdout = finish_hook_io(stdout_reader, "stdout read");
+    let stderr = finish_hook_io(stderr_reader, "stderr read");
+    if status.is_some() {
+        if let Ok(stderr) = &stderr {
+            let stderr = String::from_utf8_lossy(stderr);
+            for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(5) {
+                eprintln!("HOOK command={} message={}", spec.cmd, line);
+            }
+        }
+    }
+    let (status, stdout, input_error) = match (status, input, stdout, stderr) {
+        (Some(status), Ok(()), Ok(stdout), Ok(_)) if errors.is_empty() => (status, stdout, None),
+        (Some(status), Err(error), Ok(stdout), Ok(_))
+            if errors.is_empty()
+                && status.success()
+                && error.kind() == std::io::ErrorKind::BrokenPipe =>
+        {
+            // An early veto may close stdin before the full payload is written.
+            (status, stdout, Some(error))
+        }
+        (_, input, stdout, stderr) => {
+            if let Err(e) = input {
+                errors.push(e.to_string());
+            }
+            if let Err(e) = stdout {
+                errors.push(e.to_string());
+            }
+            if let Err(e) = stderr {
+                errors.push(e.to_string());
+            }
+            return HookOutcome::Failed(errors.join("; "));
         }
     };
-    drop(writer);
-    drop(waiter);
-
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-    for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(5) {
-        eprintln!("HOOK command={} message={}", spec.cmd, line);
+    if !status.success() {
+        return HookOutcome::Failed(format!("{}", status));
     }
-    if !output.status.success() {
-        return HookOutcome::Failed(format!("{}", output.status));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = String::from_utf8_lossy(&stdout);
     // Pre: last stdout JSON line {"verdict":"block","reason":"..."} -> veto
     if let Some(last) = stdout.lines().rev().find(|l| !l.trim().is_empty()) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(last.trim()) {
@@ -268,7 +314,106 @@ fn run_hook(spec: &HookSpec, envelope: &serde_json::Value) -> HookOutcome {
             }
         }
     }
+    if let Some(error) = input_error {
+        return HookOutcome::Failed(error.to_string());
+    }
     HookOutcome::Ok(Vec::new())
+}
+
+fn wait_for_child(
+    child: &mut std::process::Child,
+    timeout: Duration,
+) -> std::io::Result<Option<std::process::ExitStatus>> {
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if started.elapsed() >= timeout {
+            return Ok(None);
+        }
+        std::thread::sleep(
+            Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+        );
+    }
+}
+
+fn stop_hook(child: &mut std::process::Child) -> Vec<String> {
+    let mut errors = Vec::new();
+    // shortcut: escaped descendants can survive; use OS-enforced jobs for full tree ownership.
+    #[cfg(windows)]
+    let mut stop = {
+        use std::os::windows::process::CommandExt;
+        let mut command = Command::new("taskkill");
+        command.args(["/PID", &child.id().to_string(), "/T", "/F"]);
+        command.creation_flags(0x0800_0000);
+        command
+    };
+    #[cfg(not(windows))]
+    let mut stop = {
+        let mut command = Command::new("kill");
+        command.args(["-KILL", "--", &format!("-{}", child.id())]);
+        command
+    };
+    match stop
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(mut stopper) => {
+            let unfinished = match wait_for_child(&mut stopper, Duration::from_secs(2)) {
+                Ok(Some(status)) if status.success() => false,
+                Ok(Some(status)) => {
+                    errors.push(format!("process tree termination failed ({status})"));
+                    false
+                }
+                Ok(None) => {
+                    errors.push("process tree termination timed out".to_owned());
+                    true
+                }
+                Err(e) => {
+                    errors.push(format!("waiting for process tree termination failed ({e})"));
+                    true
+                }
+            };
+            if unfinished {
+                let kill_error = stopper.kill().err();
+                match wait_for_child(&mut stopper, Duration::from_secs(2)) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => errors.push(format!(
+                        "termination helper was not reaped (kill: {kill_error:?})"
+                    )),
+                    Err(e) => errors.push(format!(
+                        "termination helper could not be reaped ({e}; kill: {kill_error:?})"
+                    )),
+                }
+            }
+        }
+        Err(e) => errors.push(format!("failed to start process tree termination ({e})")),
+    }
+    let kill_error = child.kill().err();
+    match wait_for_child(child, Duration::from_secs(2)) {
+        Ok(Some(_)) => {}
+        Ok(None) => errors.push(format!("hook child was not reaped (kill: {kill_error:?})")),
+        Err(e) => errors.push(format!(
+            "hook child could not be reaped ({e}; kill: {kill_error:?})"
+        )),
+    }
+    errors
+}
+
+fn finish_hook_io<T>(
+    worker: std::thread::JoinHandle<std::io::Result<T>>,
+    name: &str,
+) -> std::io::Result<T> {
+    if !worker.is_finished() {
+        return Err(std::io::Error::other(format!("{name} thread did not stop")));
+    }
+    worker
+        .join()
+        .map_err(|_| std::io::Error::other(format!("{name} thread panicked")))?
+        .map_err(|e| std::io::Error::new(e.kind(), format!("{name} failed ({e})")))
 }
 
 #[cfg(feature = "server")]
@@ -450,12 +595,86 @@ mod tests {
             {"cmd": "exit 1", "on_error": "warn"}
         ]}});
         std::fs::write(&path, cfg.to_string())?;
-        let verdict = fire_at(&path, HookEvent::PreRemember, serde_json::json!({}));
-        assert!(verdict.blocked);
-        assert!(verdict.reason.contains("private data"));
-        assert!(verdict.warnings.is_empty(), "a veto must stop later hooks");
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"data": "x".repeat(2 * 1024 * 1024)}),
+        ] {
+            // The echo hook exits without reading stdin, including a payload larger than the pipe.
+            let verdict = fire_at(&path, HookEvent::PreRemember, payload);
+            assert!(verdict.blocked, "{} {:?}", verdict.reason, verdict.warnings);
+            assert!(verdict.reason.contains("private data"));
+            assert!(verdict.warnings.is_empty(), "a veto must stop later hooks");
+        }
+        let outcome = run_hook(
+            &HookSpec {
+                cmd: "exit 0".to_owned(),
+                timeout_ms: 2000,
+                on_error: "skip".to_owned(),
+            },
+            &serde_json::json!({"data": "x".repeat(2 * 1024 * 1024)}),
+        );
+        match outcome {
+            HookOutcome::Failed(error) => assert!(error.contains("stdin write failed"), "{error}"),
+            _ => panic!("a broken pipe without an explicit veto must still fail"),
+        }
         std::fs::write(&path, "invalid json")?;
         assert!(read_config_at(&path).hooks.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_hook_child() -> anyhow::Result<()> {
+        let event = std::env::var("RSRS_HOOK_EVENT").unwrap_or_default();
+        if let Some(path) = event.strip_prefix("timeout-test:") {
+            std::fs::write(path, "running")?;
+            std::thread::sleep(Duration::from_secs(4));
+            std::fs::write(path, "survived")?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn timeout_terminates_hook_tree_and_unblocks_writer() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let marker = dir.path().join("hook-state");
+        let executable = std::env::current_exe()?;
+        #[cfg(windows)]
+        let cmd = format!(
+            "\"\"{}\" --exact hooks::tests::timeout_hook_child --nocapture\"",
+            executable.display()
+        );
+        #[cfg(not(windows))]
+        let cmd = format!(
+            "'{}' --exact hooks::tests::timeout_hook_child --nocapture",
+            executable.display().to_string().replace('\'', "'\\''")
+        );
+        let spec = HookSpec {
+            cmd,
+            timeout_ms: 2000,
+            on_error: "block".to_owned(),
+        };
+        let envelope = serde_json::json!({
+            "event": format!("timeout-test:{}", marker.display()),
+            "data": "x".repeat(2 * 1024 * 1024),
+        });
+        let started = Instant::now();
+        let outcome = run_hook(&spec, &envelope);
+        let failure = match outcome {
+            HookOutcome::Failed(failure) => failure,
+            _ => panic!("expected timeout failure"),
+        };
+        assert!(started.elapsed() < Duration::from_secs(6), "{failure}");
+        assert!(failure.contains("timeout"), "{failure}");
+        assert!(failure.contains("stdin write failed"), "{failure}");
+        assert!(!failure.contains("did not stop"), "{failure}");
+        assert!(!failure.contains("not reaped"), "{failure}");
+        assert!(!failure.contains("could not be reaped"), "{failure}");
+        assert!(!failure.contains("termination"), "{failure}");
+        assert!(!failure.contains("stdout read"), "{failure}");
+        assert!(!failure.contains("stderr read"), "{failure}");
+        assert_eq!(std::fs::read_to_string(&marker)?, "running");
+        std::thread::sleep(Duration::from_secs(4));
+        assert_eq!(std::fs::read_to_string(&marker)?, "running");
         Ok(())
     }
 }

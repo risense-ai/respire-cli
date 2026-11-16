@@ -177,7 +177,7 @@ test('cleanup uses the publication source manifest rather than a later main plat
 
 test('critical cleanup requires all declared target jobs and cannot use a legacy protocol-1 receipt',async()=>{
   const critical=regressionContract(manifest,'critical'),job=name=>({name,status:'completed',conclusion:'success'});
-  const jobs=[...manifest.targets.map(t=>job('native-regression / Native ('+t.triple+')')),job('api-smoke'),job('publish')];
+  const jobs=[...manifest.targets.map(t=>job('validate / Release ('+t.triple+')')),job('validate / npm-dry-run'),job('publish')];
   requireRegressions(jobs,manifest.targets.map(t=>t.triple),critical);
   for(const conclusion of ['failure','cancelled','skipped']){const bad=clone(jobs);bad[0].conclusion=conclusion;assert.throws(()=>requireRegressions(bad,manifest.targets.map(t=>t.triple),critical))}
   const f=fixture();f.scoped.validation_profile='critical';f.scoped.validation_inventory=critical;
