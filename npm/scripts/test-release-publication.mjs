@@ -8,6 +8,7 @@ import {createServer} from 'node:http';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {promisify} from 'node:util';
+import {runInNewContext} from 'node:vm';
 import {createHash} from 'node:crypto';
 import {execFile, execFileSync} from 'node:child_process';
 import {waitForPublicInstall, publicInstallArgs, publicInstallPlatform, PUBLICATION_MAX_BUFFER, publicationCommand, scopedPublisherFinished, selectRelease, validateArtifact, assertTagCommit, assertDraft, assertSourceRun, validateAlias, validateScoped, validateSource, readyName, aliasName} from './release-publication.mjs';
@@ -164,6 +165,77 @@ test('workflow contract keeps trust identities, unprivileged waiting and acyclic
     const step=final.slice(final.indexOf(`- name: ${name}`)).split('\n      - ')[0];
     assert.match(step,/run: /);
     assert.doesNotMatch(step,/if:/);
+  }
+});
+
+test('source CI cancels duplicates only within the same ref and SHA',()=>{
+  const workflow=readFileSync(new URL('../../.github/workflows/ci.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const concurrency=workflow.split('\nconcurrency:\n')[1].split('\njobs:')[0];
+  const group=concurrency.match(/^  group: (.+)$/m)?.[1];
+  assert.equal(group,'cli-ci-${{ github.ref }}-${{ github.sha }}');
+  assert.match(concurrency,/^  cancel-in-progress: true$/m);
+  const key=(ref,sha)=>group.replace('${{ github.ref }}',ref).replace('${{ github.sha }}',sha);
+  assert.equal(key('refs/heads/main',sha),key('refs/heads/main',sha));
+  assert.notEqual(key('refs/heads/main',sha),key('refs/heads/main','c'.repeat(40)));
+  assert.notEqual(key('refs/heads/main',sha),key('refs/pull/1/merge',sha));
+  const release=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const gate=release.split('- name: Require successful CLI CI for this exact source')[1].split('\n      - ')[0];
+  assert.match(gate,/runs\?head_sha=\$\{sha\}&per_page=100/);
+  assert(gate.includes("run.head_sha===sha&&run.event==='push'"));
+  assert(gate.includes("run?.status==='completed'"));
+  assert(gate.includes("if(run.conclusion!=='success') throw"));
+});
+
+test('empty DEV draft resumption permits only a rerun to bypass its own active owner',()=>{
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  const program=workflow.split('      - id: plan\n')[1].split("node - <<'NODE'\n")[1].split('\n          NODE')[0];
+  const exercise=({owner='100',attempt='2',status='in_progress',reserved={},accepted=false,override=version,ref='main',legacyActive=''}={})=>{
+    const calls=[],outputs=[];
+    const draft={draft:true,prerelease:true,asset_count:0,body:`Release workflow run: ${owner}`,...reserved};
+    const execute=()=>runInNewContext(program,{
+      require:name=>{
+        if(name==='fs')return {readFileSync:()=>`version = "${version}"`,appendFileSync:(_,value)=>outputs.push(value)};
+        if(name==='./npm/artifact-manifest.json')return {cliVersion:version};
+        assert.equal(name,'child_process');
+        return {execFileSync:(command,args)=>{
+          calls.push([command,...args]);
+          if(command==='git'&&args[0]==='merge-base')return '';
+          if(command==='git'&&args[0]==='rev-parse')return sha;
+          if(command==='node'&&args[0]==='npm/scripts/next-dev-version.mjs')return version;
+          if(command==='node'&&args[1]==='guard-reservation-accepted'){
+            if(accepted)throw Error('accepted reservation refused');
+            return '';
+          }
+          if(command==='gh'&&args[0]==='api'){
+            if(args[1].includes('/releases?'))return JSON.stringify(draft);
+            if(args[1].endsWith(`/actions/runs/${owner}`))return JSON.stringify({status});
+            if(args[1].includes('/actions/workflows/release.yml/runs?'))return legacyActive;
+          }
+          if(command==='gh'&&args[0]==='release'&&args[1]==='edit')return '';
+          assert.fail(`Unexpected plan command: ${command} ${args.join(' ')}`);
+        }};
+      },
+      process:{env:{RELEASE_REF:ref,RELEASE_PUBLISH:'true',RELEASE_DEV_VERSION:override,
+        GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'100',GITHUB_RUN_ATTEMPT:attempt,GITHUB_OUTPUT:'output'}},
+    });
+    return {execute,calls,outputs};
+  };
+  for(const options of [{},{attempt:'3'},{owner:'200',status:'completed'},
+    {override:'',ref:`refs/tags/v${version}`}]){
+    const check=exercise(options);check.execute();
+    assert.equal(check.outputs.length,1);
+    assert.equal(check.calls.filter(call=>call[0]==='gh'&&call[1]==='release'&&call[2]==='edit').length,1);
+    const guard=check.calls.findIndex(call=>call.includes('guard-reservation-accepted'));
+    assert(guard>=0&&guard<check.calls.findIndex(call=>call[1]==='release'));
+  }
+  for(const options of [{attempt:'1'},{attempt:''},{attempt:'invalid'},
+    {owner:'200'},{owner:'200',status:'queued'},{owner:'200',attempt:'3'},
+    {reserved:{draft:false}},{reserved:{prerelease:false}},{reserved:{asset_count:1}},
+    {accepted:true},{override:''},{reserved:{body:''},legacyActive:'200'}]){
+    const check=exercise(options);
+    assert.throws(check.execute,/active|empty DEV draft|accepted reservation/);
+    assert.equal(check.outputs.length,0);
+    assert(!check.calls.some(call=>call[0]==='gh'&&call[1]==='release'));
   }
 });
 
