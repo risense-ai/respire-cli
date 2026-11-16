@@ -646,13 +646,17 @@ class Smoke:
         require(Path(config.get('data_dir', '')).resolve() == self.library and config.get('addr') == DEV,
                 'data_dir_configuration_failed')
         self.passed('data_dir_persisted')
-        self.direct(['model', 'install-m3'], timeout=1200)
-        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180)['summary']
-        require(probe.get('ready') is True and probe.get('dimensions') == 1024
+        installed = self.direct(['model', 'install-m3'], timeout=1200)
+        probe = installed['details']['backend_load']['evidence']
+        require(probe.get('ready') is True and probe.get('inference_completed') is True
+                and probe.get('fresh_session') is True and probe.get('dimensions') == 1024
                 and str(probe.get('selected', '')).lower() == 'cpu', 'real_bge_cpu_probe_failed')
         self.attempted = True
         registered = self.direct(['register', '--user', self.user, '--pass=' + self.password, '--addr', DEV])
         require(registered['summary'].get('user') == self.user, 'owned_account_registration_failed')
+        probe = self.direct(['model', 'probe', '--model', 'm3'], timeout=180)['summary']
+        require(probe.get('ready') is True and probe.get('dimensions') == 1024
+                and str(probe.get('selected', '')).lower() == 'cpu', 'real_bge_cpu_probe_failed')
         self.start()
 
     def transport(self):
