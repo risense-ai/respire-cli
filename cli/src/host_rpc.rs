@@ -57,6 +57,7 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
                 &[("addr", "addr"), ("user", "user"), ("password", "pass")],
                 &["user", "password"],
             ),
+            "auth.login.browser" => ("login", &[("addr", "addr")], &[]),
             "auth.login" => (
                 "login",
                 &[
@@ -129,6 +130,9 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
     let mut args = vec!["--json".to_owned(), command.to_owned()];
     if request.method == "auth.login" {
         args.push("--interactive".to_owned());
+    }
+    if request.method == "auth.login.browser" {
+        args.push("--oauth".to_owned());
     }
     if request.method == "auth.recover" && !request.params.contains_key("password") {
         args.push("--pass=".to_owned());
@@ -318,7 +322,7 @@ fn capture_request(request: &WireRequest) -> crate::Captured {
                 .map_err(|_| anyhow::anyhow!("authentication fields must be strings"))?,
         };
         let args = arguments(&legacy)?;
-        if legacy.method == "auth.login" {
+        if matches!(legacy.method.as_str(), "auth.login" | "auth.login.browser") {
             let input = initial_input(&legacy.params)?;
             LOGIN_INPUT.with(|slot| *slot.borrow_mut() = Some(input));
         }
@@ -471,6 +475,27 @@ mod tests {
         assert!(input.migrate_local && !input.migrate_vault && !input.offer_local_merge);
         assert_eq!(input.source_secret.as_deref(), Some("synthetic-source"));
         assert_eq!(input.merge_local, Some(true));
+        let browser = arguments(&request("auth.login.browser", &[]))?;
+        assert_eq!(browser, vec!["--json", "login", "--oauth"]);
+        let browser = arguments(&request(
+            "auth.login.browser",
+            &[("addr", "http://127.0.0.1:9")],
+        ))?;
+        assert!(browser
+            .iter()
+            .any(|value| value == "--addr=http://127.0.0.1:9"));
+        for field in [
+            "password",
+            "user",
+            "authorization",
+            "token",
+            "totp",
+            "continuation",
+            "material",
+            "migrate_local",
+        ] {
+            assert!(arguments(&request("auth.login.browser", &[(field, "forbidden")])).is_err());
+        }
         assert!(command.iter().any(|value| value == "--interactive"));
         assert!(!command.iter().any(|value| value.contains("123456")));
         assert!(arguments(&request(

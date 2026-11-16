@@ -30,10 +30,16 @@ Launch `rsrs --json --host-rpc-stdio`, write one UTF-8 JSON request to stdin, th
 | `auth.login` | `user`, `password` | `addr`, `super`, `totp`, `continuation`, `migrate_local`, `migrate_vault`, `offer_local_merge` |
 | `auth.recover` | `kdf_salt`, `wrapped_urk`, `urk_nonce` | `addr`, `user`, `password`, `super`, `secret` |
 | `auth.reset` | none | `super` |
+| `auth.login.browser` | none | `addr` |
 | `auth.login.continue` | `operation_id`, `source_profile`, `continuation` | `super_password`, `totp` |
 | `auth.key.continue` | `operation_id`, `source_profile`, `input` | none |
 
-The original four methods retain string-valued params. Initial login intent flags
+The original four methods and `auth.login.browser` retain string-valued params.
+Browser login accepts only an optional server address. The CLI opens the browser,
+receives authorization itself, and uses the same host custody and structured
+pending receipt as password login. The desktop never supplies a browser token.
+Continue a pending browser login with `auth.login.continue`; do not repeat OAuth.
+Initial login intent flags
 use exactly `"true"` or `"false"` and default to false. Its optional `continuation`
 is a JSON string containing supplemental login input. The two continuation
 methods use typed JSON params instead. Login supplemental fields are
