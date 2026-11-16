@@ -19,6 +19,7 @@ fn operation(root: &Path) -> Result<SnapshotOperation> {
         sync_generation: 7,
         snapshot_id: "b".repeat(32),
         action: Action::Restore,
+        material: None,
     };
     original.request_fingerprint = SnapshotOperation::fingerprint(
         &original.binding,
@@ -117,6 +118,30 @@ fn snapshot_diagnostics_are_allowlisted_without_confirming_an_outcome() -> Resul
             operation.restore_validation_reason(&rejected, &changed),
             None
         );
+    }
+    use respire_protocol::host_control::HostAuthVaultFactors as Factors;
+    for version in 1..=4 {
+        let session = json!({"user":"fixture", "vault_version":version,
+            "pass":"original-password", "secret":"account-secret", "super":"super-password",
+            "secret_key":if version == 4 { "super-password" } else { "secret-key" }});
+        let bytes = serde_json::to_vec(&session)?;
+        std::fs::write(directory.path().join("session.json"), &bytes)?;
+        let material = super::restore_material(directory.path())?;
+        assert_eq!(material.session_sha256, format!("{:x}", Sha256::digest(&bytes)));
+        match (version, &material.factors) {
+            (1, Factors::V1 { password, account_secret }) => {
+                assert_eq!(password, "original-password"); assert_eq!(account_secret, "account-secret");
+            }
+            (2, Factors::V2 { super_password }) | (4, Factors::V4 { super_password }) =>
+                assert_eq!(super_password, "super-password"),
+            (3, Factors::V3 { super_password, secret_key }) => {
+                assert_eq!(super_password, "super-password"); assert_eq!(secret_key, "secret-key");
+            }
+            _ => anyhow::bail!("host snapshot factor version changed"),
+        }
+        let mut retained = operation.original().clone();
+        retained.material = Some(material);
+        assert!(SnapshotOperation::from_original(retained).is_err());
     }
     assert_eq!(serde_json::to_value(operation.original())?, original);
     Ok(())

@@ -80,6 +80,7 @@ pub(crate) fn account_request(
                 authorization,
                 super_password: Some(super_password),
                 continuation: None,
+                material: None, challenge: None, custody_ack: None,
             })?,
         ),
         AccountControl::LoginStep {
@@ -99,6 +100,7 @@ pub(crate) fn account_request(
                 authorization,
                 super_password,
                 continuation: Some(input),
+                material: None, challenge: None, custody_ack: None,
             })?,
         ),
         receipt => {

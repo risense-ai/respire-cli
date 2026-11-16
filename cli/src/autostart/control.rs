@@ -49,11 +49,13 @@ pub(crate) fn account_request(
                 schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, authorization,
                 super_password: Some(super_password),
                 continuation: None,
+                material: None, challenge: None, custody_ack: None,
             })?),
         AccountControl::LoginStep { addr, user, authorization, super_password, input } =>
             (HOST_AUTH_LOGIN_METHOD, serde_json::to_string(&HostAuthLoginParams {
                 schema_version: HOST_AUTH_SCHEMA_V, binding, identity, addr, user, authorization, super_password,
                 continuation: Some(input),
+                material: None, challenge: None, custody_ack: None,
             })?),
         receipt => {
             let method = match receipt {
