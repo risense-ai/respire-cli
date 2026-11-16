@@ -207,6 +207,16 @@ include every registered checkpoint; missing published assets fail validation.
 Unclassified historical DEV checkpoints remain covered until their database
 format has been audited. Do not remove them merely because their tag is a DEV.
 
+The published build manifest for `v1.0.6-dev.37075716045` records source
+`a5d52456cc237827f0c1fb30837470231d33fc48`; the formal `v1.0.7` manifest records
+`3cd7e8e3a456ae9131deb0f345552a6e178f8fe1`. Their [source comparison](https://github.com/risense-ai/respire-cli/compare/a5d52456cc237827f0c1fb30837470231d33fc48...3cd7e8e3a456ae9131deb0f345552a6e178f8fe1)
+contains only package version changes in `Cargo.lock`, `cli/Cargo.toml`,
+`spawn/Cargo.toml` and `npm/artifact-manifest.json`. Storage, schema, encryption
+and index code and dependency versions are unchanged. This DEV therefore has
+no separate database migration; formal `v1.0.7` covers the same persistent
+format in the full profile. Use the published build manifest's source SHA for
+this audit: the DEV tag currently points to a different commit.
+
 The `v1.0.15-dev.10` checkpoint added SQLite revision insert, update and delete
 triggers. That release published Linux x64 (GNU and musl), Windows x64 and macOS
 ARM64 assets. Linux ARM64, Windows ARM64 and Intel macOS are not applicable for

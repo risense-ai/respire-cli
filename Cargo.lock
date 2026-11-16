@@ -1575,6 +1575,7 @@ dependencies = [
  "respire_protocol",
  "respire_spawn",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

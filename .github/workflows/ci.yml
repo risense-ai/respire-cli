@@ -196,6 +196,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - name: Test Windows host paths without a Runtime or SDK
         run: cargo test --locked -p respire_client_host --lib
+      - name: Test host component plans and file verification without Runtime or Core
+        run: |
+          cargo test --locked -p respire --lib model_maintenance::tests:: -- --test-threads=1
 
   native-fixture-contracts:
     # Isolated Python-only checks; full native Runtime acceptance remains required.
