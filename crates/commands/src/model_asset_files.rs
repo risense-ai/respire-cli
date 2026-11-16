@@ -20,7 +20,8 @@ pub fn prepare_model_assets(
     allowed_roots: &[PathBuf],
 ) -> Result<()> {
     let sources: Vec<_> = plan.assets.iter()
-        .map(|asset| vec![asset.suggested_source.clone()]).collect();
+        .map(|asset| if asset.suggested_source.is_empty() { Vec::new() }
+            else { vec![asset.suggested_source.clone()] }).collect();
     prepare_model_assets_with_sources(plan, allowed_roots, &sources).map(|_| ())
 }
 
@@ -32,9 +33,8 @@ pub fn prepare_model_assets_with_sources(
 ) -> Result<bool> {
     use respire_protocol::AssetState;
     anyhow::ensure!(sources.len() == plan.assets.len()
-        && sources.iter().all(|list| !list.is_empty()
-            && list.iter().all(|source| !source.is_empty())),
-        "every model asset requires local download sources");
+        && sources.iter().all(|list| list.iter().all(|source| !source.is_empty())),
+        "model sources must match the assets and contain no empty URLs");
     anyhow::ensure!(
         !plan.complete
             && plan.backend_load.is_none()
@@ -97,6 +97,18 @@ pub fn prepare_model_assets_with_sources(
         check_model_path(&target)?;
         #[cfg(windows)]
         let target = respire_protocol::metadata_control::metadata_status_path(&target)?;
+        if asset_sources.is_empty() {
+            anyhow::ensure!(matches!(asset.name.as_str(), "profile-tokenizer" | "profile-weights")
+                && asset.suggested_source.is_empty(), "only local profile resources may omit download sources");
+            let key = target.to_str().context("model path is not Unicode")?.to_owned();
+            #[cfg(windows)]
+            let key = key.to_ascii_lowercase();
+            anyhow::ensure!(claimed.insert(key), "model plan has overlapping paths");
+            anyhow::ensure!(crate::model_download::file_valid(&target, hash, asset.expected_size)?,
+                "local profile asset {} is missing or fails size/SHA-256 validation; no download source is configured", asset.name);
+            // Declared local files are read-only inputs; installation roots constrain writes.
+            continue;
+        }
         let relative = allowed_roots
             .iter()
             .find_map(|root| target.strip_prefix(root).ok())

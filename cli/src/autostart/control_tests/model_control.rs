@@ -238,9 +238,50 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
     let planned = host_installation_plan(&intent, &profile_core, Some(&selected), &directory, &ort)?;
     assert_eq!(planned.assets[0].suggested_source, source);
     assert_eq!(planned.assets[0].version.as_deref(), Some(revision.as_str()));
-    let mut no_source = selected.clone();
-    no_source["profile"]["weights"]["download"] = Value::Null;
-    assert!(host_installation_plan(&intent, &profile_core, Some(&no_source), &directory, &ort).is_err());
+    // Local profile files are explicit host inputs, not installation destinations.
+    use sha2::{Digest, Sha256};
+    let local_directory = root.join("provided-profile");
+    std::fs::create_dir_all(&local_directory)?;
+    let mut local_selected = selected.clone();
+    let mut local_assets = Vec::new();
+    for field in ["tokenizer", "weights"] {
+        let bytes = field.as_bytes();
+        let path = local_directory.join(format!("{field}.bin"));
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        std::fs::write(&path, bytes)?;
+        local_selected["profile"][field] = json!({"path":path,"size":bytes.len(),"sha256":hash});
+        local_assets.push(host_asset(&format!("profile-{field}"), "profile-v1", path,
+            bytes.len() as u64, &hash, "diagnostic only".into())?);
+    }
+    local_selected["profile"]["weights"]["download"] = Value::Null;
+    let local_core = AssetsStatus::installation_plan(local_assets);
+    let local_plan = host_installation_plan(&intent, &local_core, Some(&local_selected), &directory, &ort)?;
+    assert!(local_plan.assets.iter().all(|asset| asset.suggested_source.is_empty()));
+    let sources = local_model_sources(&intent, &local_plan)?;
+    assert!(sources.iter().all(Vec::is_empty));
+    let installation_roots = [root.join("models")];
+    assert!(respire_commands::model_asset_files::prepare_model_assets_with_sources(
+        &local_plan, &installation_roots, &sources)?);
+    respire_commands::model_asset_files::prepare_model_assets(&local_plan, &installation_roots)?;
+    for field in ["tokenizer", "weights"] {
+        let path = local_directory.join(format!("{field}.bin"));
+        std::fs::remove_file(&path)?;
+        let error = respire_commands::model_asset_files::prepare_model_assets_with_sources(
+            &local_plan, &installation_roots, &sources).err().context("accepted missing local profile file")?;
+        assert!(error.to_string().contains("no download source"));
+        std::fs::write(&path, vec![b'x'; field.len()])?;
+        assert!(respire_commands::model_asset_files::prepare_model_assets_with_sources(
+            &local_plan, &installation_roots, &sources).is_err(), "accepted wrong local SHA-256");
+        std::fs::write(&path, b"wrong size")?;
+        assert!(respire_commands::model_asset_files::prepare_model_assets_with_sources(
+            &local_plan, &installation_roots, &sources).is_err(), "accepted wrong local size");
+        std::fs::write(&path, field.as_bytes())?;
+    }
+    assert_eq!(std::fs::read_dir(&local_directory)?.count(), 2, "local verification created staging files");
+    let mut legacy_without_source = local_plan.assets.clone();
+    legacy_without_source[0].name = "bge-m3-tokenizer".into();
+    assert!(respire_commands::model_asset_files::prepare_model_assets_with_sources(
+        &AssetsStatus::installation_plan(legacy_without_source), &installation_roots, &sources).is_err());
     intent.model = Some("fp16".into());
     let planned = host_installation_plan(&intent, &profile_core, Some(&selected), &directory, &ort)?;
     assert_eq!(planned.assets.len(), 4, "profile files plus legacy baseline and requested variant");
