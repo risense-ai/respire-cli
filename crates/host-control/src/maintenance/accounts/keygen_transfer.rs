@@ -147,7 +147,7 @@ pub(crate) fn prepare_keygen_account(takeover: &LibraryLock, host: Arc<dyn HostL
     let grant = crate::launch::prepare_grant(&runtime, &authority, &identity)?;
     let params = HostAuthKeygenParams { schema_version: HOST_AUTH_SCHEMA_V,
         binding: ControlBinding { installation_root: source.root.clone(), profile: source.profile.clone(),
-            launch_id: grant.instance_id.clone(), expected_account_id: None }, identity: identity.clone(), force: source.force };
+            launch_id: grant.instance_id.clone(), expected_account_id: None }, identity: identity.clone(), force: source.force, material: None };
     let request = RpcRequest { v: crate::PROTOCOL_V, id: uuid::Uuid::new_v4().to_string(),
         method: HOST_AUTH_RESULT_METHOD.to_owned(), args: vec![serde_json::to_string(&params)?],
         scope: None, operation_id: Some(source.original_operation_id.clone()),

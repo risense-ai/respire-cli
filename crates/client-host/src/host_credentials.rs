@@ -70,6 +70,39 @@ fn execute(request: &CredentialRequest) -> Result<Option<String>, CredentialErro
     }
 }
 
+fn auth_super_entry(account: &str, backend: &str) -> Result<keyring::Entry> {
+    anyhow::ensure!(account.starts_with("login-") && account.len() <= 128
+        && account.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid host auth credential account");
+    anyhow::ensure!(credential_backends().contains(&backend) && backend != "kernel",
+        "host auth requires a persistent credential backend");
+    entry("rsrs", &format!("super:{account}"), backend)
+        .map_err(|error| anyhow::anyhow!("host auth credential store unavailable ({error:?})"))
+}
+
+/// Exact host transaction lookup, without environment overrides or backend discovery.
+pub fn read_auth_super(account: &str, backend: &str) -> Result<Option<String>> {
+    match auth_super_entry(account, backend)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => anyhow::bail!("host auth credential read failed ({:?})", credential_error(error)),
+    }
+}
+
+/// The owning host transaction has already checkpointed this slot and its public candidate.
+pub fn write_auth_super(account: &str, backend: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(!value.is_empty(), "host auth credential is empty");
+    let slot = auth_super_entry(account, backend)?;
+    match read_auth_super(account, backend)? {
+        Some(existing) => anyhow::ensure!(existing == value, "host auth credential slot belongs to different material"),
+        None => slot.set_password(value)
+            .map_err(|error| anyhow::anyhow!("host auth credential write failed ({:?})", credential_error(error)))?,
+    }
+    anyhow::ensure!(read_auth_super(account, backend)?.as_deref() == Some(value),
+        "host auth credential readback mismatch; retain the original operation");
+    Ok(())
+}
+
 /// Consume private credential frames until the original Runtime response arrives.
 /// Credentials are never attached to that response, written to files, or logged.
 pub fn read_control_response<T: serde::de::DeserializeOwned>(
