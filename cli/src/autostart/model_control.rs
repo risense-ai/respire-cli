@@ -455,10 +455,15 @@ fn host_installation_plan(
         for (name, field) in [("profile-tokenizer", "tokenizer"), ("profile-weights", "weights")] {
             let resource = &selected["profile"][field];
             let path = PathBuf::from(resource["path"].as_str().context("profile resource path missing")?);
+            let source = match &resource["download"] {
+                serde_json::Value::Null => String::new(),
+                serde_json::Value::String(source) => source.clone(),
+                _ => anyhow::bail!("profile download source must be a string or null"),
+            };
             assets.push(host_asset(name, revision, path,
                 resource["size"].as_u64().context("profile resource size missing")?,
                 resource["sha256"].as_str().context("profile resource SHA-256 missing")?,
-                resource["download"].as_str().context("selected profile has no pinned download source")?.to_owned())?);
+                source)?);
         }
     } else {
         assets.push(host_tokenizer(directory)?);
@@ -518,6 +523,9 @@ fn local_model_sources(intent: &ModelInstallIntent, plan: &AssetsStatus) -> Resu
         .unwrap_or_else(|| "auto".to_owned());
     plan.assets.iter().map(|asset| {
         let official = &asset.suggested_source;
+        if asset.name.starts_with("profile-") && official.is_empty() {
+            return Ok(Vec::new());
+        }
         if asset.name == "bge-m3-cpu-ort" {
             anyhow::ensure!(official.starts_with("https://github.com/risense-ai/respire-cli/releases/download/"),
                 "CPU artifact lacks its official pinned source");
