@@ -69,7 +69,7 @@ jobs:
             target: aarch64-unknown-linux-musl
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
           - os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -187,6 +187,18 @@ jobs:
           CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}
           CLI_VERSION: ${{ inputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli target/ci/${{ matrix.target }}/release
+      - name: Verify OS autostart registration from published release bytes
+        if: inputs.artifact_source == 'published-assets' && inputs.validation_profile == 'full'
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN RSRS_RUNTIME_BIN
+          : "${RSRS_PUBLISHED_RUNTIME_ARCHIVE:?Verified published Runtime archive required}"
+          : "${RSRS_PUBLISHED_RUNTIME_VERSION:?Verified published Runtime version required}"
+          exe="target/ci/${{ matrix.target }}/release/rsrs"
+          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
+          python scripts/test-runtime-autostart.py --binary "$exe" --register \
+            --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"
       - name: Install and verify the official pinned standalone Runtime
         if: inputs.artifact_source != 'published-assets'
         id: pinned-runtime
