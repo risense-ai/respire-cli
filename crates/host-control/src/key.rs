@@ -186,6 +186,11 @@ fn committed_summary(receipt: &HostKeyResult) -> Result<Value> {
     Ok(summary)
 }
 
+fn host_completion_required(receipt: &HostKeyResult) -> bool {
+    receipt.verification_required
+        || matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack)
+}
+
 fn canonical(value: &str) -> bool {
     uuid::Uuid::parse_str(value)
         .is_ok_and(|id| id.get_version_num() == 4 && id.to_string() == value)
@@ -443,17 +448,15 @@ fn control_key_inner(host: Arc<dyn HostLifecycle>, action: Action<'_>,
                 deadline,
             )?
         };
-        if source.is_some() && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput) {
+        if source.is_some()
+            && !host_completion_required(&receipt)
+            && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput)
+        {
             maintenance.pause_key()?;
-            let status = if matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack) {
-                Status::Ok
-            } else { Status::Pending };
-            let summary = if receipt.outcome == HostKeyOutcome::Committed {
-                committed_summary(&receipt)?
-            } else { serde_json::to_value(receipt)? };
-            return Ok(ResultEnvelope::new("key-control", status, summary, Vec::new()));
+            return Ok(ResultEnvelope::new("key-control", Status::Pending,
+                serde_json::to_value(receipt)?, Vec::new()));
         }
-        if let Some(input) = &supplemental {
+        if let Some(input) = supplemental.as_ref().filter(|_| receipt.outcome == HostKeyOutcome::AwaitingInput) {
             let (candidate, private) = material::prepare(&original, input)?;
             let new_candidate = candidate.is_some();
             if let Some(candidate) = candidate {
@@ -1255,6 +1258,21 @@ mod tests {
         result.operation_id = original.operation_id.clone();
         result.source_profile = PathBuf::from("/synthetic/foreign");
         assert!(validate_receipt(&result, &original).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_or_applied_key_results_require_host_completion() -> Result<()> {
+        let original = original();
+        for outcome in [HostKeyOutcome::Unknown, HostKeyOutcome::Pending, HostKeyOutcome::AwaitingInput] {
+            assert!(!host_completion_required(&receipt(&original, outcome)?));
+        }
+        for outcome in [HostKeyOutcome::Committed, HostKeyOutcome::RolledBack] {
+            assert!(host_completion_required(&receipt(&original, outcome)?));
+        }
+        let mut applied = receipt(&original, HostKeyOutcome::Pending)?;
+        applied.verification_required = true;
+        assert!(host_completion_required(&applied));
         Ok(())
     }
 
