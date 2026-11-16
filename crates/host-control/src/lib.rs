@@ -9,6 +9,7 @@ mod account;
 mod account_control;
 mod exchange;
 mod key;
+pub mod keys_export;
 mod launch;
 pub mod lifecycle_io;
 mod maintenance;

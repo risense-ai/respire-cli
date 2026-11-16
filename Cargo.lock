@@ -1569,6 +1569,7 @@ dependencies = [
  "ratatui",
  "respire_client_host",
  "respire_commands",
+ "respire_crypto",
  "respire_host_control",
  "respire_logging",
  "respire_protocol",
