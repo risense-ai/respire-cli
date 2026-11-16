@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$OutputDirectory,
     [switch]$OfflineAcceptance,
     [switch]$SourceCandidateStability,
-    [switch]$ExistingKeys
+    [switch]$ExistingKeys,
+    [ValidateSet('issue','resume','verified')][string]$RecoveryPhase
 )
 $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
@@ -441,6 +442,7 @@ function Prepare-TargetWindow {
 }
 
 function Capture-Target([int[]]$ExpectedBounds) {
+    if ($script:recoveryMaterialVisible) { throw 'Capture is forbidden until recovery material is acknowledged and dismissed' }
     $before = Assert-Target $true
     $report.capture_geometry_before = Read-DesktopGeometry $before
     if (($before.client_bounds -join ',') -ne ($ExpectedBounds -join ',')) { throw 'Target client bounds changed before desktop capture' }
@@ -1507,6 +1509,118 @@ function Invoke-ExistingKeysAcceptance {
     Stop-OfflineRuntime
     $report.offline.status = 'offline-subset-passed'
 }
+function Read-RecoveryRecord {
+    # requests.json is the public desktop journal, never a CLI material/custody record.
+    $records = @(Get-Content -Raw -LiteralPath (Join-Path $binding.data_directory 'client2/requests.json') | ConvertFrom-Json)
+    $matches = @($records | Where-Object { $_.name -ceq 'auth_reset' })
+    if ($matches.Count -ne 1) { throw 'Require exactly one real desktop reset request' }
+    $record = $matches[0]
+    $allowed = @('id','name','started','state','host','transaction','materialSaved')
+    if (@($record.PSObject.Properties.Name | Where-Object { $_ -cnotin $allowed }).Count -or
+        @($record.transaction.PSObject.Properties.Name | Where-Object { $_ -cnotin @('operation_id','source_profile','kind') }).Count -or
+        $record.id -cnotmatch '\Adesktop-[0-9a-f-]{36}\z' -or $record.state -cne 'done' -or
+        $record.host -isnot [bool] -or $record.host -ne $true -or $record.transaction.kind -cne 'key' -or
+        $record.transaction.source_profile -isnot [string] -or -not $record.transaction.source_profile -or
+        ($null -ne $record.materialSaved -and $record.materialSaved -isnot [bool]) -or
+        $record.transaction.operation_id -cnotmatch '\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z') {
+        throw 'Reset journal must contain only a completed public transaction identity and materialSaved'
+    }
+    return $record
+}
+function Assert-RecoveryMaterialGate {
+    $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u8bf7\u4fdd\u5b58\u6062\u590d\u6750\u6599$')) 60
+    $checkbox = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('^\u6211\u5df2\u5c06\u6062\u590d\u6750\u6599\u4fdd\u5b58\u5230\u5b89\u5168\u4f4d\u7f6e$'))
+    $toggle = $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern)
+    $submit = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u6211\u5df2\u4fdd\u5b58\u6062\u590d\u6750\u6599$')) 10 -AllowAbsent
+    if ($toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off -or
+        $null -eq $submit -or $submit.Current.IsEnabled) { throw 'Unchecked recovery acknowledgement is not blocked' }
+    Focus-OfflineControl $checkbox
+    Send-OfflineKey 13 -ExpectedRuntimeId ($checkbox.GetRuntimeId() -join '.')
+    $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u8bf7\u4fdd\u5b58\u6062\u590d\u6750\u6599$'))
+    if ($submit.Current.IsEnabled -or $toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::Off) {
+        throw 'Enter bypassed the unchecked recovery acknowledgement'
+    }
+}
+function Confirm-RecoveryMaterial {
+    $checkbox = Find-OfflineControl 'ControlType.CheckBox' ([regex]::Unescape('^\u6211\u5df2\u5c06\u6062\u590d\u6750\u6599\u4fdd\u5b58\u5230\u5b89\u5168\u4f4d\u7f6e$'))
+    $id = $checkbox.GetRuntimeId() -join '.'
+    Focus-OfflineControl $checkbox
+    Send-OfflineKey 32 -ExpectedRuntimeId $id
+    if (($checkbox.GetRuntimeId() -join '.') -cne $id -or
+        $checkbox.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Current.ToggleState -ne [Windows.Automation.ToggleState]::On) {
+        throw 'Recovery checkbox did not accept actual Space input'
+    }
+    Press-OfflineButton ([regex]::Unescape('^\u6211\u5df2\u4fdd\u5b58\u6062\u590d\u6750\u6599$'))
+    for ($attempt=0; $attempt -lt 50; $attempt++) {
+        $title = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u8bf7\u4fdd\u5b58\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
+        $material = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('^\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
+        if ($null -eq $title -and $null -eq $material) {
+            $script:recoveryMaterialVisible = $false
+            return
+        }
+        Pause-Probe
+    }
+    throw 'Acknowledged recovery dialog did not disappear'
+}
+function Invoke-RecoveryMaterialAcceptance {
+    $report.offline = @{} # Reuse guarded UI input diagnostics, not offline acceptance claims.
+    $report.recovery = @{status='failed'; phase=$RecoveryPhase; unchecked_blocked=$false}
+    if (-not $binding.final_public_assets) { throw 'Recovery acceptance requires the final public products' }
+    if ($RecoveryPhase -ceq 'verified') {
+        $record = Read-RecoveryRecord
+        if ($record.materialSaved -ne $true) { throw 'Saved recovery acknowledgement did not survive another restart' }
+        $record.PSObject.Properties.Remove('materialSaved')
+        if ($record.id -cne $binding.recovery_request.id -or
+            $record.transaction.operation_id -cne $binding.recovery_request.transaction.operation_id -or
+            $record.transaction.source_profile -cne $binding.recovery_request.transaction.source_profile) {
+            throw 'Saved restart changed the original reset identity'
+        }
+        Press-OfflineButton ([regex]::Unescape('^\u8d26\u6237\u4e0e\u7a7a\u95f4$'))
+        $null = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u5df2\u4fdd\u5b58$'))
+        for ($sample=0; $sample -lt 3; $sample++) {
+            $title = Find-OfflineControl 'ControlType.Text' ([regex]::Unescape('^\u8bf7\u4fdd\u5b58\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
+            $material = Find-OfflineControl 'ControlType.Edit' ([regex]::Unescape('^\u6062\u590d\u6750\u6599$')) 1 -AllowAbsent
+            if ($null -ne $title -or $null -ne $material) { throw 'Saved recovery material was prompted again after restart' }
+        }
+        $script:recoveryMaterialVisible = $false
+        $report.recovery.material_saved = $true
+        $report.recovery.saved_restart_no_prompt = $true
+        $report.recovery.absence_samples = 3
+        Invoke-NativeGuiProbe
+        $report.recovery.status = 'recovery-subset-passed'
+        return
+    }
+    if ($RecoveryPhase -ceq 'issue') {
+        Press-OfflineButton ([regex]::Unescape('^\u8d26\u6237\u4e0e\u7a7a\u95f4$'))
+        $script:recoveryMaterialVisible = $true
+        Press-OfflineButton ([regex]::Unescape('^\u66f4\u6362\u8d85\u7ea7\u5bc6\u7801$'))
+        Press-OfflineButton ([regex]::Unescape('^\u66f4\u6362\u5e76\u663e\u793a\u65b0\u6750\u6599$'))
+        Press-OfflineButton ([regex]::Unescape('^\u66f4\u6362$'))
+    }
+    Assert-RecoveryMaterialGate
+    $record = Read-RecoveryRecord
+    if ($record.materialSaved -eq $true) { throw 'Unacknowledged reset was persisted as saved' }
+    $report.recovery.unchecked_blocked = $true
+    $report.recovery.request = $record
+    if ($RecoveryPhase -ceq 'resume') {
+        $script:recoveryMaterialVisible = $true
+        if ($record.id -cne $binding.recovery_request.id -or
+            $record.transaction.operation_id -cne $binding.recovery_request.transaction.operation_id -or
+            $record.transaction.source_profile -cne $binding.recovery_request.transaction.source_profile) { throw 'Restart did not recover the original reset identity' }
+        Confirm-RecoveryMaterial
+        $saved = Read-RecoveryRecord
+        if ($saved.materialSaved -ne $true) { throw 'Real recovery acknowledgement did not persist materialSaved' }
+        $saved.PSObject.Properties.Remove('materialSaved')
+        $record.PSObject.Properties.Remove('materialSaved')
+        if (($saved | ConvertTo-Json -Compress -Depth 6) -cne ($record | ConvertTo-Json -Compress -Depth 6)) {
+            throw 'Recovery acknowledgement changed the original transaction identity'
+        }
+        $report.recovery.material_saved = $true
+        # Run ordinary focus/capture acceptance only after all material dialogs disappear.
+        Invoke-NativeGuiProbe
+    }
+    $report.recovery.status = 'recovery-subset-passed'
+}
 function Invoke-OfflineGuiAcceptance {
     $report.offline = [ordered]@{status='failed'; onboarding_completed=$false; runtime_bound=$false
         local_keys_initialized=$false; important_memory_readback=$false; diary_readback=$false
@@ -1700,8 +1814,15 @@ public static class RespireNativeInput {
 '@
     if ([RespireNativeInput]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) { throw 'Cannot establish per-monitor-v2 thread coordinates for target desktop capture' }
     $report.capture_coordinate_context = 'per-monitor-v2 helper thread; ends with helper process'
-    Invoke-NativeGuiProbe
-    if ($OfflineAcceptance) {
+    if ($RecoveryPhase -in @('resume','verified')) {
+        $script:recoveryMaterialVisible = $true
+        $report.initial_guard = Assert-Target
+        Prepare-TargetWindow
+        Focus-Target
+        Wait-TargetDocument
+    } else { Invoke-NativeGuiProbe }
+    if ($RecoveryPhase) { Invoke-RecoveryMaterialAcceptance }
+    elseif ($OfflineAcceptance) {
         if ($ExistingKeys) { Invoke-ExistingKeysAcceptance } else { Invoke-OfflineGuiAcceptance }
     }
 } catch { $report.error = $_.Exception.Message }
@@ -1709,5 +1830,7 @@ finally {
     $json = $report | ConvertTo-Json -Depth 12
     [IO.File]::WriteAllText((Join-Path $OutputDirectory 'native-gui.json'), $json + "`n", [Text.UTF8Encoding]::new($false))
 }
-if ($report.status -ne 'native-connectivity-passed' -or ($OfflineAcceptance -and $report.offline.status -ne 'offline-subset-passed')) { exit 1 }
+if ($report.status -ne 'native-connectivity-passed' -or
+    ($RecoveryPhase -and $report.recovery.status -ne 'recovery-subset-passed') -or
+    ($OfflineAcceptance -and -not $RecoveryPhase -and $report.offline.status -ne 'offline-subset-passed')) { exit 1 }
 exit 0

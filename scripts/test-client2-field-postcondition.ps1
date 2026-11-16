@@ -134,4 +134,82 @@ foreach ($script:present in @($false,$true)) {
         if ($queries -ne 20 -or $pauses -ne 10 -or $caught -cne 'Original recovery dialog controls did not disappear within the bounded checks' -or $report.offline.recovery_dismiss_detail -cne 'observe_absence') { throw 'Recovery presence protocol changed' }
     } elseif ($queries -ne 2 -or $pauses -ne 0 -or $null -ne $caught -or $report.offline.recovery_dismiss_detail -cne 'complete') { throw 'Recovery completion protocol changed' }
 }
-Write-Host 'PASS: one text input with a strict three-second read-only postcondition and recovery-only breadcrumbs'
+# Execute the real reset gate/acknowledgement with synthetic UIA controls.
+# The material node has no value interface: any material read would fail this test.
+foreach ($name in @('Assert-RecoveryMaterialGate','Confirm-RecoveryMaterial','Capture-Target')) {
+    $nodes=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq $name},$true))
+    if ($nodes.Count -ne 1) { throw 'Reset acknowledgement helper missing' }
+    . ([scriptblock]::Create($nodes[0].Extent.Text))
+}
+$script:recoveryMaterialVisible=$true
+$captureBlocked=$false
+try { $null=Capture-Target @(0,0,1,1) } catch { $captureBlocked=$_.Exception.Message -ceq 'Capture is forbidden until recovery material is acknowledged and dismissed' }
+if (-not $captureBlocked) { throw 'Pending recovery material reached desktop capture' }
+function Focus-OfflineControl { param($Element) if ($Element -ne $script:checkbox) { throw 'Unexpected recovery input target' } }
+function Send-OfflineKey {
+    param($Key,$ExpectedRuntimeId)
+    if ($ExpectedRuntimeId -cne '7') { throw 'Recovery input lost control identity' }
+    $script:keys.Add($Key)
+    if ($Key -eq 13 -and $script:ackMode -ceq 'enter-bypass') { $script:submit.Current.IsEnabled=$true }
+    if ($Key -eq 32 -and $script:ackMode -cne 'toggle-rejected') { $script:toggle.Current.ToggleState=[Windows.Automation.ToggleState]::On }
+}
+function Press-OfflineButton {
+    param($Name)
+    if ($script:toggle.Current.ToggleState -ne [Windows.Automation.ToggleState]::On) { throw 'Unchecked material was submitted' }
+    $script:submits++
+    if ($script:ackMode -cne 'dialog-retained') { $script:dismissed=$true }
+}
+function Find-OfflineControl {
+    param($Type,$Name,$Seconds,[switch]$AllowAbsent)
+    switch ($Type) {
+        'ControlType.CheckBox' { return $script:checkbox }
+        'ControlType.Button' { if (-not $AllowAbsent) { throw 'Disabled submit was filtered out' }; return $script:submit }
+        default { if (-not $script:dismissed) { return [pscustomobject]@{} }; return $null }
+    }
+}
+foreach ($script:ackMode in @('success','already-on','initially-enabled','enter-bypass','toggle-rejected','dialog-retained')) {
+    $script:keys=[Collections.Generic.List[int]]::new(); $script:submits=0; $script:dismissed=$false; $script:pauses=0
+    $script:recoveryMaterialVisible=$true
+    $script:toggle=[pscustomobject]@{Current=[pscustomobject]@{ToggleState=[Windows.Automation.ToggleState]::Off}}
+    $script:submit=[pscustomobject]@{Current=[pscustomobject]@{IsEnabled=($ackMode -ceq 'initially-enabled')}}
+    $script:checkbox=[pscustomobject]@{}
+    $checkbox | Add-Member ScriptMethod GetRuntimeId { return @(7) }
+    $checkbox | Add-Member ScriptMethod GetCurrentPattern {
+        param($Pattern)
+        if ($Pattern -ne [Windows.Automation.TogglePattern]::Pattern) { throw 'Recovery value pattern requested' }
+        return $script:toggle
+    }
+    if ($ackMode -ceq 'already-on') { $toggle.Current.ToggleState=[Windows.Automation.ToggleState]::On }
+    $caught=$false
+    try { Assert-RecoveryMaterialGate; Confirm-RecoveryMaterial } catch { $caught=$true }
+    if ($caught -ne ($ackMode -cne 'success')) { throw 'Reset gate accepted a bypass or lost a real acknowledgement' }
+    if ($ackMode -ceq 'success' -and (($keys -join ',') -cne '13,32' -or $submits -ne 1 -or $script:recoveryMaterialVisible)) { throw 'Reset acknowledgement input/capture order changed' }
+    if ($ackMode -cne 'success' -and -not $script:recoveryMaterialVisible) { throw 'Failed acknowledgement permitted capture' }
+}
+$savedBranch=@($ast.FindAll({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -ceq 'Invoke-RecoveryMaterialAcceptance'},$true))
+if ($savedBranch.Count -ne 1) { throw 'Saved restart acceptance missing' }
+. ([scriptblock]::Create($savedBranch[0].Extent.Text))
+$RecoveryPhase='verified'
+$binding=@{final_public_assets=$true;recovery_request=@{id='desktop-original';transaction=@{operation_id='original';source_profile='synthetic-profile'}}}
+function Read-RecoveryRecord {
+    return [pscustomobject]@{id=$(if ($script:savedMode -ceq 'wrong-request') {'desktop-other'} else {'desktop-original'});
+        transaction=@{operation_id='original';source_profile='synthetic-profile'};materialSaved=($script:savedMode -cne 'unsaved')}
+}
+function Press-OfflineButton { param($Name) }
+function Find-OfflineControl {
+    param($Type,$Name,$Seconds,[switch]$AllowAbsent)
+    if ($Name -ceq [regex]::Unescape('^\u5df2\u4fdd\u5b58$')) { return [pscustomobject]@{} }
+    if ($script:savedMode -ceq 'reprompt') { return [pscustomobject]@{} }
+    return $null
+}
+function Invoke-NativeGuiProbe {
+    if ($script:recoveryMaterialVisible) { throw 'Saved restart capture preceded absence proof' }
+    $script:captured=$true
+}
+foreach ($script:savedMode in @('success','unsaved','wrong-request','reprompt')) {
+    $script:report=@{}; $script:recoveryMaterialVisible=$true; $script:captured=$false; $caught=$false
+    try { Invoke-RecoveryMaterialAcceptance } catch { $caught=$true }
+    if ($caught -ne ($savedMode -cne 'success') -or $captured -ne ($savedMode -ceq 'success')) { throw 'Saved restart accepted a lost receipt, different operation, or repeated material prompt' }
+    if ($savedMode -ceq 'success' -and (-not $report.recovery.saved_restart_no_prompt -or $report.recovery.absence_samples -ne 3)) { throw 'Saved restart absence evidence missing' }
+}
+Write-Host 'PASS: guarded fields, reset checkbox/acknowledgement, capture prohibition, and saved-restart no-prompt gates'
