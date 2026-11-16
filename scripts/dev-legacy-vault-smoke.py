@@ -335,6 +335,8 @@ class Smoke:
         elif version == 3:
             recovery["secret_key"] = secret
         self.write_session(old_login_env, recovery)
+        self.report["stage"] = f"v{version}_old_auth_login"
+        self.save()
         self.password_login(old_login_env, user, password, version, original_super)
         old_login = self.session(old_login_env)
         self.diagnostic_secrets.add(old_login.get("token", ""))
