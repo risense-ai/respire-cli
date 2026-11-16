@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {appendFileSync, chmodSync, copyFileSync, existsSync, statSync, createReadStream, createWriteStream, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync} from 'node:fs';
+import {appendFileSync, chmodSync, copyFileSync, existsSync, statSync, createReadStream, createWriteStream, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync} from 'node:fs';
 import {open} from 'node:fs/promises';
 import {dirname, join, resolve} from 'node:path';
 import {execFileSync} from 'node:child_process';
@@ -268,7 +268,10 @@ export async function consumePublishedTarget(spec, target, source, destination, 
   requireValue(binaryEntry?.sha256 === runtime.binary_sha256, 'Runtime archive binary differs from raw asset');
   const extension = target.includes('windows') ? '.exe' : '', binary = join(destination,'rsrs'+extension);
   copyFileSync(join(source,'cli',cli.binary_file), binary); chmodSync(binary,0o755);
-  const runtimeBinary = join(runtimeDirectory,runtime.binary_file); chmodSync(runtimeBinary,0o755);
+  // Match the managed installer's executable name after verifying the original archive inventory.
+  const runtimeBinary = join(runtimeDirectory,'rsrs-runtime'+extension);
+  requireValue(!existsSync(runtimeBinary), 'Managed Runtime binary destination already exists');
+  renameSync(join(runtimeDirectory,runtime.binary_file),runtimeBinary); chmodSync(runtimeBinary,0o755);
   verifyBinary(binary,target); verifyBinary(runtimeBinary,target);
   // Existing migration joins consume this exact metadata filename, never synthesized metadata.
   copyFileSync(join(source,'cli',`cli-build-${target}.json`),join(source,`cli-build-${target}.json`));
