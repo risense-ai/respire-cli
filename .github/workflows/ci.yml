@@ -9,7 +9,7 @@ cache-mode: read
 permissions:
   contents: read
 concurrency:
-  group: cli-ci-${{ github.ref }}
+  group: cli-ci-${{ github.ref }}-${{ github.sha }}
   cancel-in-progress: true
 jobs:
   workspace-tests:

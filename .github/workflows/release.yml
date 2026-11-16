@@ -262,7 +262,7 @@ jobs:
               const owner=reserved.body?.match(/Release workflow run: (\d+)/)?.[1];
               if(owner){
                 const prior=JSON.parse(cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${owner}`],{encoding:'utf8'}));
-                if(prior.status!=='completed') throw new Error('The prior release run is still active; draft resumption refused');
+                if(prior.status!=='completed'&&!(owner===process.env.GITHUB_RUN_ID&&Number(process.env.GITHUB_RUN_ATTEMPT)>1)) throw new Error('The prior release run is still active; draft resumption refused');
               }else{
                 // Legacy drafts have no owner marker; do not infer their run from a source ref.
                 const activeRuns=cp.execFileSync('gh',['api',`repos/${process.env.GITHUB_REPOSITORY}/actions/workflows/release.yml/runs?per_page=100`,'--paginate','--jq',`.workflow_runs[] | select(.id!=${process.env.GITHUB_RUN_ID} and .status!="completed") | .id`],{encoding:'utf8'}).trim();
