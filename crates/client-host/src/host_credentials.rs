@@ -117,18 +117,26 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
         }
         Some(_) => anyhow::bail!("invalid session credential backend metadata"),
     };
+    let version = session["vault_version"].as_u64().unwrap_or(1);
     let read = |slot: &str| {
-        // Login credentials can use a different backend from the recorded super credential.
+        // A recorded v1 backend owns the password; later login passwords may differ from super.
         let backends: Vec<_> = match backend {
-            Some(selected) if slot == "super" => vec![selected],
+            Some(selected) if slot == "super" || version < 2 => vec![selected],
             Some(selected) => std::iter::once(selected).chain(credential_backends().iter().copied()
                 .filter(|candidate| *candidate != selected)).collect(),
             None => credential_backends().to_vec(),
         };
+        if version < 2 && slot == "pass" {
+            for selected in backends {
+                if let Some(value) = read_session_slot(&format!("{slot}:{account}"), selected)? {
+                    return Ok(Some(value));
+                }
+            }
+            return Ok(None);
+        }
         read_provider_credential("rsrs", &format!("{slot}:{account}"), &backends)
             .map_err(|code| anyhow::anyhow!("host session credential read failed ({code:?})"))
     };
-    let version = session["vault_version"].as_u64().unwrap_or(1);
     let session_super = session["super"].as_str().filter(|value| !value.is_empty()).map(str::to_owned);
     let super_password = match crate::env::var("RSRS_SUPER").ok().filter(|value| !value.is_empty()) {
         Some(value) => Some(value),
@@ -149,6 +157,111 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
     Ok((super_password, login_password))
 }
 
+// Ordinary reads preserve a present empty v1 password; provider reads intentionally do not.
+fn read_session_slot(account: &str, backend: &str) -> Result<Option<String>> {
+    let request = CredentialRequest {
+        credential_request: CREDENTIAL_SCHEMA_V, id: uuid::Uuid::new_v4().to_string(),
+        service: "rsrs".into(), account: account.into(), backend: backend.into(),
+        operation: CredentialOperation::Read,
+    };
+    match execute(&request) {
+        Ok(value) => Ok(value),
+        Err(CredentialError::NoEntry) => Ok(None),
+        Err(error) => anyhow::bail!("host session credential read failed ({error:?})"),
+    }
+}
+
+fn read_session_legacy_secret(session: &serde_json::Value) -> Result<Option<String>> {
+    let version = session["vault_version"].as_u64().unwrap_or(1);
+    if version != 1 && version != 3 {
+        return Ok(None);
+    }
+    // Raw historical factors belong to explicit migration, never automatic unlock.
+    let backend = session["legacy_secret_backend"].as_str()
+        .context("legacy secret backend is missing; explicit historical migration is required")?;
+    anyhow::ensure!(credential_backends().contains(&backend), "unsupported legacy secret backend");
+    let account = session["keyring_account"].as_str().filter(|alias|
+        (alias.starts_with("legacy-") || alias.starts_with("login-"))
+            && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+        .context("legacy secret credential account is missing or invalid")?;
+    let value = read_session_slot(&format!("legacy-secret:{account}"), backend)?
+        .filter(|value| !value.is_empty())
+        .context("legacy secret credential is missing or empty; library remains locked")?;
+    Ok(Some(value))
+}
+
+/// A legacy marker is never repaired by falling back to an inline factor.
+pub fn legacy_session_needs_migration(session: &serde_json::Value) -> bool {
+    matches!(session["vault_version"].as_u64().unwrap_or(1), 1 | 3)
+        && session.get("legacy_secret_backend").is_none()
+}
+
+/// Stage credential custody only. The installation coordinator owns session publication.
+/// Slots survive an interrupted publication for an exact, conflict-checked retry.
+pub fn prepare_legacy_session(session: &serde_json::Value, proposed_alias: &str) -> Result<serde_json::Value> {
+    prepare_legacy_session_with(session, proposed_alias, execute)
+}
+
+fn prepare_legacy_session_with(
+    session: &serde_json::Value, proposed_alias: &str,
+    mut exchange: impl FnMut(&CredentialRequest) -> Result<Option<String>, CredentialError>,
+) -> Result<serde_json::Value> {
+    anyhow::ensure!(legacy_session_needs_migration(session), "session does not require legacy credential migration");
+    let version = session["vault_version"].as_u64().unwrap_or(1);
+    let factor = session[if version == 3 { "secret_key" } else { "secret" }].as_str()
+        .filter(|value| !value.is_empty()).context("historical session factor is unavailable; no session was changed")?;
+    let alias = match session.get("keyring_account") {
+        None => proposed_alias,
+        Some(value) => value.as_str().context("invalid legacy credential alias")?,
+    };
+    anyhow::ensure!((alias.starts_with("legacy-") || alias.starts_with("login-"))
+        && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+        && alias.len() <= 498, "invalid legacy credential alias");
+    let (super_password, login_password) = read_session_credentials(session)?;
+    // Preserve an original inline primary exactly, including an empty v1 password.
+    let primary = session[if version == 1 { "pass" } else { "super" }].as_str().map(str::to_owned)
+        .or(if version == 1 { login_password } else { super_password })
+        .context("historical session primary credential is unavailable; no session was changed")?;
+    anyhow::ensure!(version == 1 || !primary.is_empty(),
+        "historical session primary credential is empty; no session was changed");
+    let backend = credential_backends().iter().copied().find(|backend| *backend != "kernel")
+        .context("legacy session migration requires persistent host credentials")?;
+    // Never overwrite a conflicting slot or erase an original factor before verified custody.
+    let primary_backend = session["keyring_backend"].as_str().filter(|value| *value != "kernel")
+        .unwrap_or(backend);
+    let mut slots = vec![(if version == 1 { "pass" } else { "super" }, primary.as_str(), primary_backend),
+        ("legacy-secret", factor, backend)];
+    if version == 3 {
+        if let Some(value) = session["pass"].as_str() { slots.push(("pass", value, primary_backend)); }
+    }
+    for (slot, value, backend) in slots {
+        let mut request = CredentialRequest {
+            credential_request: CREDENTIAL_SCHEMA_V, id: uuid::Uuid::new_v4().to_string(),
+            service: "rsrs".into(), account: format!("{slot}:{alias}"), backend: backend.into(),
+            operation: CredentialOperation::Read,
+        };
+        match exchange(&request) {
+            Ok(Some(found)) => anyhow::ensure!(found == value, "legacy credential destination conflicts; original session retained"),
+            Err(CredentialError::NoEntry) => {
+                request.operation = CredentialOperation::Write(value.to_owned());
+                exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential write failed ({error:?}); original session retained"))?;
+            }
+            Ok(None) => anyhow::bail!("legacy credential read returned no result; original session retained"),
+            Err(error) => anyhow::bail!("legacy credential read failed ({error:?}); original session retained"),
+        }
+        request.operation = CredentialOperation::Read;
+        let found = exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential readback failed ({error:?}); original session retained"))?;
+        anyhow::ensure!(found.as_deref() == Some(value), "legacy credential readback mismatch; original session retained");
+    }
+    let mut migrated = session.clone();
+    let fields = migrated.as_object_mut().context("session must contain an object")?;
+    for name in ["secret", "secret_key", "super", "pass"] { fields.remove(name); }
+    fields.insert("keyring_account".into(), serde_json::json!(alias));
+    fields.insert("keyring_backend".into(), serde_json::json!(primary_backend));
+    fields.insert("legacy_secret_backend".into(), serde_json::json!(backend));
+    Ok(migrated)
+}
+
 /// The caller verifies the Runtime process/image and profile before delivering any key.
 /// Missing credentials leave the library locked; they never authorize another keygen.
 pub fn unlock_runtime(
@@ -165,6 +278,7 @@ pub fn unlock_runtime(
     let bytes = std::fs::read(path).context("Runtime session credentials are unavailable; library remains locked")?;
     let session: serde_json::Value = serde_json::from_slice(&bytes)?;
     let (super_password, login_password) = read_session_credentials(&session)?;
+    let legacy_secret_material = read_session_legacy_secret(&session)?;
     let version = session["vault_version"].as_u64().unwrap_or(1);
     anyhow::ensure!(!((version < 2 && login_password.is_none())
         || (version >= 2 && super_password.is_none())),
@@ -201,9 +315,7 @@ pub fn unlock_runtime(
         schema_version: RUNTIME_UNLOCK_SCHEMA_V2, profile: profile.canonicalize()?,
         session_sha256: format!("{:x}", Sha256::digest(&bytes)),
         instance_id: instance_id.into(), generation, super_password, login_password,
-        legacy_secret: if session["vault_version"] == 3 {
-            session["secret_key"].as_str().map(str::to_owned)
-        } else { session["secret"].as_str().map(str::to_owned) },
+        legacy_secret: legacy_secret_material,
         provider_update,
     };
     let bytes = serde_json::to_vec(&input)?;
@@ -364,4 +476,83 @@ fn provider_credentials(root: &std::path::Path, profile: &std::path::Path)
         .map_err(|_| ProviderUnavailableCode::InvalidConfiguration)?;
     collect(&value, &mut result)?;
     Ok(result)
+}
+
+#[cfg(test)]
+mod legacy_session_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn legacy_slots_preserve_empty_v1_and_v3_material_without_changing_the_source() -> Result<()> {
+        for (version, has_alias) in [(1, false), (1, true), (3, false), (3, true)] {
+            let mut session = if version == 1 {
+                serde_json::json!({"vault_version":1, "pass":"", "secret":"synthetic-factor", "wrapped_urk":"unchanged-wrap"})
+            } else {
+                serde_json::json!({"vault_version":3, "super":"synthetic-primary", "secret_key":"synthetic-factor",
+                    "pass":"synthetic-login", "wrapped_urk":"unchanged-wrap"})
+            };
+            if has_alias { session["keyring_account"] = serde_json::json!("login-existing"); }
+            let original = session.clone();
+            let mut slots = BTreeMap::<(String, String), String>::new();
+            let migrated = prepare_legacy_session_with(&session, "legacy-proposed", |request| {
+                let key = (request.backend.clone(), request.account.clone());
+                match &request.operation {
+                    CredentialOperation::Read => slots.get(&key).cloned().map(Some).ok_or(CredentialError::NoEntry),
+                    CredentialOperation::Write(value) => { slots.insert(key, value.clone()); Ok(None) }
+                    _ => Err(CredentialError::Invalid),
+                }
+            })?;
+            assert_eq!(session, original);
+            assert_eq!(migrated["wrapped_urk"], original["wrapped_urk"]);
+            for name in ["secret", "secret_key", "super", "pass"] { assert!(migrated.get(name).is_none()); }
+            let alias = if has_alias { "login-existing" } else { "legacy-proposed" };
+            assert_eq!(migrated["keyring_account"], alias);
+            for (slot, field) in [(if version == 1 { "pass" } else { "super" }, "keyring_backend"),
+                ("legacy-secret", "legacy_secret_backend")] {
+                let backend = migrated[field].as_str().context("fixture backend missing")?;
+                let value = slots.get(&(backend.to_owned(), format!("{slot}:{alias}"))).context("fixture slot missing")?;
+                assert_eq!(value, if slot == "legacy-secret" { "synthetic-factor" }
+                    else if version == 1 { "" } else { "synthetic-primary" });
+                assert_ne!(backend, "kernel");
+            }
+            assert!(!legacy_session_needs_migration(&migrated));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_or_conflicting_custody_never_returns_a_sanitized_session() {
+        let session = serde_json::json!({"vault_version":1, "pass":"", "secret":"synthetic-sensitive-factor"});
+        let original = session.clone();
+        for failure in ["read", "write", "readback", "conflict"] {
+            let mut written = false;
+            let result = prepare_legacy_session_with(&session, "legacy-fixture", |request| {
+                if request.account.starts_with("legacy-secret:") {
+                    return match &request.operation {
+                        CredentialOperation::Read if failure == "read" => Err(CredentialError::Unavailable),
+                        CredentialOperation::Read if failure == "conflict" || written => Ok(Some("different-factor".into())),
+                        CredentialOperation::Read => Err(CredentialError::NoEntry),
+                        CredentialOperation::Write(_) if failure == "write" => Err(CredentialError::Unavailable),
+                        CredentialOperation::Write(_) => { written = true; Ok(None) }
+                        _ => Err(CredentialError::Invalid),
+                    };
+                }
+                Ok(Some(String::new()))
+            });
+            assert!(result.is_err());
+            if let Err(error) = result { assert!(!error.to_string().contains("synthetic-sensitive-factor")); }
+            assert_eq!(session, original);
+        }
+    }
+
+    #[test]
+    fn recorded_legacy_backend_is_never_repaired_from_inline_factors() {
+        for marker in [serde_json::Value::Null, serde_json::json!("invalid-backend")] {
+            let session = serde_json::json!({"vault_version":3, "secret_key":"synthetic-factor",
+                "legacy_secret_backend":marker, "keyring_account":"login-fixture"});
+            assert!(!legacy_session_needs_migration(&session));
+            assert!(read_session_legacy_secret(&session).is_err());
+        }
+    }
 }

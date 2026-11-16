@@ -101,7 +101,8 @@ pub fn read_migrated_local_session(
             // Old copy-only migration retained these fields; neither is authority.
             || (matches!(field.as_str(), "pass" | "super") && session[field].is_string())
             || (version == 1 && field == "secret")
-            || (version == 3 && field == "secret_key")), "invalid migrated local session fields");
+            || (version == 3 && field == "secret_key")
+            || (matches!(version, 1 | 3) && field == "legacy_secret_backend")), "invalid migrated local session fields");
     for field in ["kdf_salt", "wrapped_urk", "urk_nonce", "keyring_account", "keyring_backend"] {
         anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
             "migrated local session material is missing");
@@ -111,8 +112,14 @@ pub fn read_migrated_local_session(
         && session["wrapped_urk"].as_str().is_some_and(|value| value.starts_with("rsrs:v1:") == current_namespace)
         && session["keyring_backend"] != "kernel", "invalid migrated local namespace or backend");
     if let Some(field) = match version { 1 => Some("secret"), 3 => Some("secret_key"), _ => None } {
-        anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
-            "original migration factor is missing");
+        if let Some(backend) = session.get("legacy_secret_backend") {
+            anyhow::ensure!(backend.as_str().is_some_and(|value| matches!(value, "native" | "secret_service"))
+                && session.get("secret").is_none() && session.get("secret_key").is_none(),
+                "invalid migrated local legacy credential custody");
+        } else {
+            anyhow::ensure!(session[field].as_str().is_some_and(|value| !value.is_empty()),
+                "original migration factor is missing");
+        }
     }
     let receipt_bytes = read_identity_record(&directory.join(".rsrs-migration.json"))?;
     let receipt: Value = serde_json::from_slice(&receipt_bytes).context("invalid migration receipt JSON")?;
@@ -222,8 +229,8 @@ mod tests {
         }
         let receipt_path = root.path().join(".rsrs-migration.json");
         let receipt = serde_json::json!({"schema":2, "complete":true,
-            "source_identity":"0".repeat(64), "source":root.path().canonicalize()?,
-            "destination":root.path().canonicalize()?, "keyring_backend":"native",
+            "source_identity":"0".repeat(64), "source":crate::config::normalize_control_path(root.path())?,
+            "destination":crate::config::normalize_control_path(root.path())?, "keyring_backend":"native",
             "namespace_migrated":true, "original_preserved":true});
         std::fs::write(&receipt_path, serde_json::to_vec(&receipt)?)?;
         for version in 1..=4 {
@@ -235,6 +242,19 @@ mod tests {
             if version == 3 { migrated["secret_key"] = serde_json::json!("original-secret-key"); }
             assert!(read(&migrated).is_err());
             assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+            if matches!(version, 1 | 3) {
+                let mut factor_free = migrated.clone();
+                let fields = factor_free.as_object_mut().context("migration fixture must be an object")?;
+                fields.remove("secret");
+                fields.remove("secret_key");
+                fields.insert("legacy_secret_backend".into(), serde_json::json!("native"));
+                std::fs::write(&path, serde_json::to_vec(&factor_free)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned())?.is_some());
+                factor_free["legacy_secret_backend"] = serde_json::json!("kernel");
+                std::fs::write(&path, serde_json::to_vec(&factor_free)?)?;
+                assert!(read_migrated_local_session(root.path(), |_| "digest".to_owned()).is_err());
+                std::fs::write(&path, serde_json::to_vec(&migrated)?)?;
+            }
             assert!(host_session_user_of_dir(root.path(), |_| "digest".to_owned())?.is_none());
             assert!(session_user_of_dir(root.path()).is_err());
             let mut prior_namespace = migrated.clone();

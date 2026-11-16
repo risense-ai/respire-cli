@@ -214,9 +214,37 @@ class UnlockV2SourceTests(unittest.TestCase):
     def test_library_credentials_fail_before_optional_provider_collection(self):
         self.assertLess(self.unlock.index('read_session_credentials(&session)?'),
                         self.unlock.index('provider_credentials(installation, profile)'))
+        self.assertLess(self.unlock.index('read_session_legacy_secret(&session)?'),
+                        self.unlock.index('provider_credentials(installation, profile)'))
         self.assertIn('Runtime session key is unavailable; library remains locked', self.unlock)
         self.assertNotIn('keygen(', self.unlock)
         self.assertNotIn('return Ok(false)', self.unlock)
+
+    def test_legacy_factor_requires_its_recorded_slot_without_disk_fallback(self):
+        resolver = self.sender.split('fn read_session_legacy_secret(', 1)[1].split(
+            'pub fn legacy_session_needs_migration(', 1)[0]
+        self.assertIn('version != 1 && version != 3', resolver)
+        self.assertIn('session["legacy_secret_backend"].as_str()', resolver)
+        self.assertIn('session["keyring_account"].as_str()', resolver)
+        self.assertIn('read_session_slot(&format!("legacy-secret:{account}"), backend)?', resolver)
+        self.assertIn('explicit historical migration is required', resolver)
+        self.assertIn('legacy secret credential is missing or empty', resolver)
+        for source in (resolver, self.unlock):
+            for field in ('session["secret"]', 'session["secret_key"]', 'session["keyring_backend"]'):
+                self.assertNotIn(field, source)
+
+    def test_v1_password_uses_ordinary_read_and_preserves_present_empty_values(self):
+        slot = self.sender.split('fn read_session_slot(', 1)[1].split(
+            'fn read_session_legacy_secret(', 1)[0]
+        reader = self.sender.split('pub fn read_session_credentials(', 1)[1].split(
+            'fn read_session_slot(', 1)[0]
+        self.assertIn('operation: CredentialOperation::Read,', slot)
+        self.assertIn('Ok(value) => Ok(value)', slot)
+        self.assertIn('Err(CredentialError::NoEntry) => Ok(None)', slot)
+        self.assertNotIn('.filter(', slot)
+        self.assertIn('if version < 2 && slot == "pass"', reader)
+        self.assertIn('read_session_slot(&format!("{slot}:{account}"), selected)?', reader)
+        self.assertIn('slot == "super" || version < 2', reader)
 
     def test_delivery_is_v2_and_complete_or_explicitly_unavailable(self):
         self.assertIn('let input = RuntimeUnlockV2 {', self.unlock)

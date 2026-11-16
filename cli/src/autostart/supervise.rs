@@ -93,6 +93,8 @@ pub(crate) fn supervise(data_dir: &Path) -> Result<()> {
     // Runtime commands bypass the normal CLI bootstrap. Initialize only after
     // the registration has established this supervisor's owned data root.
     super::super::install_error_logging();
+    // Parent-driven launches migrated under takeover before waiting for this child.
+    respire_host_control::lifecycle_io::migrate_legacy_session()?;
     // The registered task is the foreground owner. A kill-on-close job keeps a
     // dead supervisor from orphaning the runtime child (Windows 8+ nested jobs
     // preserve the enclosing Task Scheduler job).

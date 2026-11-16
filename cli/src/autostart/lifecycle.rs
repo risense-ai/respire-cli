@@ -1011,6 +1011,7 @@ pub(crate) fn coordinate_materialization() -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
     owned(&config)?;
     let was_running = crate::rpc::probe_runtime()?.is_some();
     let mut guard = Maintenance::begin(config, false)?;
@@ -1265,9 +1266,10 @@ pub(crate) fn ensure_managed_locked_with_expectation(
     Ok(true)
 }
 
-fn start_explicit_locked() -> Result<()> {
+fn start_explicit_locked(takeover: &respire_client_host::lock::LibraryLock) -> Result<()> {
     super::supervise::offline_keygen::reject_generic_recovery(&respire_client_host::paths::main_data_dir())?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(takeover)?;
     let root = respire_client_host::paths::main_data_dir();
     let Some(mut config) = read_registration(&root)? else {
         return crate::rpc::ensure_daemon_locked();
@@ -1289,7 +1291,7 @@ fn start_explicit_locked() -> Result<()> {
             if health.managed_id.as_deref() == Some(config.id.as_str())
                 && crate::rpc::runtime_acceptable(&health)?
             {
-                respire_host_control::lifecycle_io::unlock_if_needed(&health)?;
+                respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock.confirm_credentials(&health)?;
                 reset_attempts(&config)?;
                 return Ok(());
             }
@@ -1661,7 +1663,7 @@ pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
             crate::runtime_fetch::require_automatic_migration_safe()?;
             let ownership = crate::runtime_policy::takeover_lock()?;
             if !super::supervise::offline_keygen::start_explicit(&ownership)? {
-                start_explicit_locked()?;
+                start_explicit_locked(&ownership)?;
             }
             emit("runtime.start", status()?)
         }
@@ -1740,7 +1742,7 @@ fn install_runtime(command: &str, file: Option<&Path>, version: Option<&str>, mi
         crate::mcp::materialize_bin().map_err(anyhow::Error::msg)?;
         maintenance.finish()?;
         if previous.is_some() {
-            start_explicit_locked().context(
+            start_explicit_locked(&_ownership).context(
                 "Runtime and CLI installed; restart failed; old data and recovery records were retained; inspect the startup error before running rsrs runtime start")?;
             restarted = true;
         }
@@ -1772,6 +1774,7 @@ fn enable(now: bool) -> Result<()> {
     // A platform-rejected native path must not even create lifecycle state.
     manager::validate_executable(Platform::current()?, &crate::mcp::stable_bin_path())?;
     let _ownership = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&_ownership)?;
     // Resolve before creating the registration: otherwise our new registration
     // would look like an unbound legacy owner to the materialization preflight.
     crate::rpc::resolve_runtime_executable()?;
@@ -1931,6 +1934,7 @@ fn run_foreground(id: Option<&str>, root: Option<&Path>, supervised_child: bool)
         check_direct_access()?;
     }
     verify_managed_boot()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session()?;
     let stopped = Arc::new(AtomicBool::new(false));
     #[cfg(unix)]
     {
@@ -2575,7 +2579,7 @@ mod tests {
         let endpoint = root.join("runtime/endpoint.json");
         let owner = br#"{"v":1,"pid":0}"#;
         fs::write(&endpoint, owner)?;
-        let error = start_explicit_locked().err().context("locked start skipped its second check")?;
+        let error = start_explicit_locked(&_ownership).err().context("locked start skipped its second check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
         let error = restart_maintenance_locked().err().context("restart maintenance skipped its check")?;
         anyhow::ensure!(error.is::<crate::runtime_fetch::LegacyRuntimeMigrationRequired>());
@@ -2913,7 +2917,7 @@ mod tests {
         anyhow::ensure!(!ensure_managed_locked()? && !stop_managed_locked()?);
         run_foreground(Some(&config.id), Some(&root), false)?;
         std::env::set_var("RSRS_RUNTIME_BIN", root.join("missing-runtime"));
-        anyhow::ensure!(start_explicit_locked().is_err());
+        anyhow::ensure!(start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         std::env::remove_var("RSRS_RUNTIME_BIN");
         config = read_registration(&root)?.context("disabled registration disappeared")?;
         anyhow::ensure!(!config.enabled && !config.manually_stopped
@@ -3064,7 +3068,7 @@ mod tests {
         );
         let unchanged = fs::read(control_path(&root))?;
         state.borrow_mut().dropin = true;
-        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked().is_err());
+        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         anyhow::ensure!(fs::read(control_path(&root))? == unchanged && marker(&root)?.is_none());
         state.borrow_mut().dropin = false;
         let original_port = std::env::var("RSRS_RPC_PORT")?;
@@ -3074,7 +3078,7 @@ mod tests {
             "65534"
         };
         std::env::set_var("RSRS_RPC_PORT", different);
-        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked().is_err());
+        anyhow::ensure!(restart_maintenance_locked().is_err() && start_explicit_locked(&crate::runtime_policy::takeover_lock()?).is_err());
         anyhow::ensure!(fs::read(control_path(&root))? == unchanged && marker(&root)?.is_none());
         std::env::set_var("RSRS_RPC_PORT", original_port);
         let mut restarted = restart_maintenance_locked()?;

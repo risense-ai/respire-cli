@@ -124,7 +124,7 @@ pub fn stop_if_running() -> Result<()> {
 pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     crate::runtime_policy::require_host("runtime restart")?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    let _takeover = crate::runtime_policy::takeover_lock()?;
+    let takeover = crate::runtime_policy::takeover_lock()?;
     crate::runtime_fetch::require_automatic_migration_safe()?;
     // An unavailable health response is not permission to discover or kill a PID.
     let health = probe_runtime().context(
@@ -140,6 +140,7 @@ pub(crate) fn restart_runtime(timeout: Duration) -> Result<Value> {
     if let Some(stale) = stale {
         stale.remove_endpoint_locked()?;
     }
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     crate::autostart::restart_stage("restart_probe");
     let stopped_pid = health.as_ref().map(|value| value.pid);
     if crate::autostart::managed_enabled()?
@@ -773,7 +774,8 @@ pub(crate) fn ensure_daemon() -> Result<()> {
         }
     }
     crate::runtime_fetch::require_automatic_migration_safe()?;
-    let _takeover = crate::runtime_policy::takeover_lock()?;
+    let takeover = crate::runtime_policy::takeover_lock()?;
+    respire_host_control::lifecycle_io::migrate_legacy_session_under_takeover(&takeover)?;
     ensure_daemon_locked()
 }
 

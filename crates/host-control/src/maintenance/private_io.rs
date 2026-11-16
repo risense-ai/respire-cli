@@ -6,7 +6,7 @@ use std::fs;
 use std::io::{Read, Write};
 use std::path::Path;
 
-pub(super) fn bounded_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
+pub(crate) fn bounded_bytes(path: &Path, limit: usize) -> Result<Option<Vec<u8>>> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(value) => value,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -50,8 +50,12 @@ pub(super) fn registration_digest(root: &Path, mode: &RegistrationMode) -> Resul
 }
 
 pub(super) fn private_write(path: &Path, bytes: &[u8], expected: Option<&str>) -> Result<()> {
+    private_write_record(path, bytes, expected, MAINTENANCE_MARKER_MAX_BYTES)
+}
+
+pub(crate) fn private_write_record(path: &Path, bytes: &[u8], expected: Option<&str>, limit: usize) -> Result<()> {
     anyhow::ensure!(
-        bytes.len() <= MAINTENANCE_MARKER_MAX_BYTES,
+        bytes.len() <= limit,
         "maintenance marker exceeds size limit"
     );
     let parent = path.parent().context("maintenance file has no parent")?;
@@ -76,7 +80,7 @@ pub(super) fn private_write(path: &Path, bytes: &[u8], expected: Option<&str>) -
             );
         }
     }
-    let actual = bounded_bytes(path, MAINTENANCE_MARKER_MAX_BYTES)?;
+    let actual = bounded_bytes(path, limit)?;
     match actual.as_ref() {
         Some(actual) => anyhow::ensure!(
             expected == Some(hash(actual).as_str()),
@@ -101,7 +105,7 @@ pub(super) fn private_write(path: &Path, bytes: &[u8], expected: Option<&str>) -
         // Recheck immediately before publication. Cooperating callers also hold
         // the installation takeover lock; external races remain fail-closed on
         // the following exact-digest ownership check.
-        let latest = bounded_bytes(path, MAINTENANCE_MARKER_MAX_BYTES)?;
+        let latest = bounded_bytes(path, limit)?;
         anyhow::ensure!(
             latest == actual,
             "maintenance file changed during publication"
