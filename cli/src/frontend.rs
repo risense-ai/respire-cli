@@ -875,6 +875,7 @@ fn run_fivekeys(
         },
         account_secret: Some(secret.to_owned()),
         totp: None,
+        material: None,
     };
     let mut envelope = autostart::control_fivekeys(
         operation.clone(),
@@ -883,6 +884,7 @@ fn run_fivekeys(
             super_password: input.super_password.clone(),
             account_secret: input.account_secret.clone(),
             totp: None,
+            material: None,
         },
         None,
     )?;
@@ -918,6 +920,7 @@ fn run_fivekeys(
                 super_password: input.super_password.clone(),
                 account_secret: input.account_secret.clone(),
                 totp: input.totp.clone(),
+                material: None,
             },
             Some(&receipt),
         )?;
