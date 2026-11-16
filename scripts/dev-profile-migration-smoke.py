@@ -12,12 +12,14 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import sqlite3
 from dev_witness_fixture import register_witness_functions, verify_fixture_witness, sqlite_failure_details
 import subprocess
 import sys
 import time
 import uuid
+from native_fixture_process import scoped_rpc_request, verify_rpc_receipt
 
 spec = importlib.util.spec_from_file_location("vault_smoke_support", Path(__file__).with_name("dev-legacy-vault-smoke.py"))
 support = importlib.util.module_from_spec(spec)
@@ -35,7 +37,8 @@ REQUIRED = ("model_cpu_real", "onememory_multiaccount_wal_migrated",
     "migration_interrupted_restart_recovered", "existing_rsrs_preserved_and_legacy_imported",
     "migrated_outbox_sync_and_independent_decrypt", "migration_incompatible_primary_keys_rejected",
     "migration_symlink_root_rejected", "migration_client_only_does_not_write",
-    "startup_does_not_migrate", "migration_source_order_and_backup_only_idempotent")
+    "startup_does_not_migrate", "migration_source_order_and_backup_only_idempotent",
+    "restart_locked_with_native_credentials_then_host_unlock")
 
 
 class Smoke(support.Smoke):
@@ -684,6 +687,83 @@ class Smoke(support.Smoke):
             self.passed("respire_compatibility_migrated", profiles=len(fixtures),
                 deleted_payloads_reencrypted=sum(len(f["legacy_tombstones"]) for f in fixtures))
 
+    def restart_key_handoff(self):
+        env = self.env("restart-key-handoff")
+        profile = Path(env["RSRS_DATA_DIR"]).resolve()
+        fixture = self.seed(env, profile, "rsrs", "restart-key-handoff")
+        require(not any(name in env for name in ("RSRS_SUPER", "RSRS_PASS")),
+                "restart_fixture_has_environment_credentials")
+        self.verify_retained_current_credentials(self.session(env), fixture)
+        runtime = support.install_published_runtime(self.args.binary, env)
+        require(runtime is not None, "restart_requires_verified_standalone_runtime")
+        metadata = json.loads(json.loads((profile / "bin/runtime.json").read_bytes())["release"]["metadata_json"])
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+        endpoint = "http://127.0.0.1:" + str(port)
+        raw_env = dict(env, RSRS_RPC_PORT=str(port))
+        output_path = profile / "keyless-runtime.log"
+        with output_path.open("wb") as output:
+            child = subprocess.Popen([str(runtime), "serve", "--host", "127.0.0.1", "--port", str(port),
+                "--data-dir", str(profile)], cwd=runtime.parent, env=raw_env, stdin=subprocess.DEVNULL,
+                stdout=output, stderr=output)
+            try:
+                deadline = time.monotonic() + 90
+                while True:
+                    require(child.poll() is None, "keyless_runtime_exited_before_locked_probe")
+                    require(time.monotonic() < deadline, "keyless_runtime_did_not_finish_startup")
+                    try:
+                        response = self.opener.open(endpoint + "/api/health", timeout=5)
+                    except (support.urllib.error.URLError, TimeoutError):
+                        time.sleep(.1)
+                        continue
+                    with response:
+                        require(response.status == 200, "keyless_runtime_health_http_failed")
+                        health = json.load(response)
+                    require(health.get("v") == 1 and health.get("pid") == child.pid
+                        and health.get("runtime_version") == metadata["runtime_version"]
+                        and health.get("image_sha256") == metadata["binary_sha256"]
+                        and Path(health.get("image_path", "")).resolve() == runtime.resolve()
+                        and Path(health.get("installation_root", "")).resolve() == profile
+                        and Path(health.get("data_dir", "")).resolve() == profile,
+                        "keyless_runtime_identity_mismatch")
+                    require(health.get("store_ready") is False, "runtime_read_native_credentials_without_host")
+                    if health.get("startup_complete"):
+                        require(health.get("state") == "locked" and health.get("credential_state") == "required",
+                                "keyless_restart_did_not_remain_locked")
+                        break
+                    time.sleep(.1)
+                request = scoped_rpc_request(health, ["--json", "show", fixture["id"]])
+                read = support.urllib.request.Request(endpoint + "/api/rpc", json.dumps(request).encode(),
+                    {"Content-Type": "application/json"}, method="POST")
+                with self.opener.open(read, timeout=15) as response:
+                    require(response.status == 200, "keyless_runtime_read_http_failed")
+                    rejected = json.load(response)
+                verify_rpc_receipt(request, rejected)
+                require(rejected.get("ok") is False and rejected.get("code") == "runtime_locked",
+                        "keyless_runtime_exposed_encrypted_memory")
+                stop = support.urllib.request.Request(endpoint + "/api/runtime/stop", b"{}",
+                    {"Content-Type": "application/json"}, method="POST")
+                with self.opener.open(stop, timeout=15) as response:
+                    require(response.status == 200 and json.load(response).get("ok") is True,
+                            "keyless_runtime_stop_rejected")
+                require(child.wait(timeout=30) == 0, "keyless_runtime_stop_failed")
+            finally:
+                if child.poll() is None:
+                    self.report["keyless_runtime_forced_cleanup"] = True
+                    child.terminate()
+                    child.wait(timeout=30)
+        self.verify_retained_current_credentials(self.session(env), fixture)
+        self.read_entry(env, fixture["id"], fixture["text"])
+        written = self.cli(env, "remember", "Native restart host key handoff write", "--title",
+            "restart-key-handoff-after", "--importance", "important", "--force")["summary"]["id"]
+        self.read_entry(env, written, "Native restart host key handoff write")
+        recalled = self.cli(env, "recall", fixture["text"], "--titles")
+        require(fixture["id"] in json.dumps(recalled), "host_restart_recall_lost_original_memory")
+        self.passed("restart_locked_with_native_credentials_then_host_unlock", native_credentials_preserved=True,
+            keyless_restart_locked=True, locked_read_rejected=True, host_auto_unlock=True,
+            remembered_and_read_back=True, original_memory_recalled=True)
+
     def run(self):
         expected_server = os.environ.get("RSRS_DEV_SERVER_SHA", "")
         require(os.environ.get("RSRS_DEV_SERVER_ADDR") == support.UPSTREAM
@@ -709,6 +789,7 @@ class Smoke(support.Smoke):
             and probe.get("fresh_session") is True and probe.get("dimensions") == 1024
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=1024)
+        self.restart_key_handoff()
         self.case("multiaccount", [(".onememory", "1memory")])
         self.case("respire", [(".respire", "respire")])
         self.case("interrupted", [(".respire", "respire")], interrupt=True)
