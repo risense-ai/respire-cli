@@ -342,7 +342,7 @@ export async function inspectRuntimeProducer(part, target, {token, fetcher = fet
   const evidence = [];
   for (const [name, jobName, files] of [
     [`runtime-release-${target}`, `Release (${target})`, expected.filter((_, i) => i !== 1)],
-    [`runtime-smoke-${target}`, `Native regression (${target})`, [{name:`runtime-smoke-${target}.json`}]],
+    [`runtime-smoke-${target}`, `Post-release native regression (${target})`, [{name:`runtime-smoke-${target}.json`}]],
   ]) {
     const matches = jobs.filter(job => job.name === jobName), found = artifacts.filter(artifact => artifact.name === name);
     const job = matches[0], artifact = found[0];

@@ -549,7 +549,7 @@ function runtimeProducerFixture(part, target, metadata, archive) {
   const report = {target, version:part.version, source_commit:part.source_sha, run_id:String(producer.run_id),
     run_attempt:String(producer.run_attempt), archive_sha256:digest(archive),
     binary_sha256:part.assets.find(a => a.name === names[1]).sha256, passed:true, g1Passed:false};
-  const jobs = [`Release (${target})`,`Native regression (${target})`].map((name, i) => ({id:i+11, name,
+  const jobs = [`Release (${target})`,`Post-release native regression (${target})`].map((name, i) => ({id:i+11, name,
     run_id:producer.run_id, run_attempt:producer.run_attempt, head_sha:part.source_sha, status:'completed', conclusion:'success',
     started_at:'2026-11-05T00:00:00Z', completed_at:'2026-11-05T00:01:00Z'}));
   const zips = new Map(), artifacts = [];

@@ -15,7 +15,7 @@ for (const [kind, tag, runID] of [['cli', args[0], args[1]], ['runtime', args[2]
   const repository = `risense-ai/respire-${kind}`;
   const prefix = `repos/${repository}`;
   const release = api(`${prefix}/releases/tags/${tag}`);
-  const source = api(`${prefix}/commits/${tag}`);
+  const source = {sha: execFileSync('gh', ['api', `${prefix}/commits/${tag}`, '--jq', '.sha'], {encoding: 'utf8'}).trim()};
   const run = api(`${prefix}/actions/runs/${runID}`);
   assert.equal(run.id, Number(runID));
   assert.equal(run.repository?.full_name, repository);
