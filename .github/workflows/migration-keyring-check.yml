@@ -99,6 +99,7 @@ jobs:
       ARTIFACT_SOURCE: published-assets
       REQUEST_PUBLISH: 'false'
       VALIDATION_PROFILE: full
+      RELEASE_REF: ${{ github.sha }}
       PUBLISHED_ASSETS: ${{ inputs.published_assets }}
       PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
       CLI_TARGET: ${{ matrix.target }}
