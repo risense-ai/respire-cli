@@ -714,7 +714,9 @@ class Smoke(support.Smoke):
                     require(time.monotonic() < deadline, "keyless_runtime_did_not_finish_startup")
                     try:
                         response = self.opener.open(endpoint + "/api/health", timeout=5)
-                    except (support.urllib.error.URLError, TimeoutError):
+                    except support.urllib.error.URLError as error:
+                        if not isinstance(error.reason, ConnectionRefusedError):
+                            raise
                         time.sleep(.1)
                         continue
                     with response:
