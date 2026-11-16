@@ -66,6 +66,7 @@ pub(crate) fn account_request(
             };
             (method, serde_json::to_string(&HostAuthAccountParams {
                 schema_version: HOST_AUTH_SCHEMA_V, binding, identity,
+                candidate: None, migration_password: None,
             })?)
         }
     };

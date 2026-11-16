@@ -116,6 +116,8 @@ pub(crate) fn account_request(
                     schema_version: HOST_AUTH_SCHEMA_V,
                     binding,
                     identity,
+                    candidate: None,
+                    migration_password: None,
                 })?,
             )
         }
