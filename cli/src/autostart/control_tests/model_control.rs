@@ -31,6 +31,9 @@ fn isolate(root: &Path) -> Restore {
         "RSRS_MIRROR",
         "ONEMEMORY_MIRROR",
         "RESPIRE_MIRROR",
+        "RSRS_CPU_OWNED_ORT_FILE",
+        "ONEMEMORY_CPU_OWNED_ORT_FILE",
+        "RESPIRE_CPU_OWNED_ORT_FILE",
         "RSRS_CPU_ORT_MIRROR",
         "ONEMEMORY_CPU_ORT_MIRROR",
         "RESPIRE_CPU_ORT_MIRROR",
@@ -146,6 +149,77 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
         std::env::set_var("RSRS_M3_DIR", OsString::from_vec(vec![0xff]));
         assert!(allowed_model_roots().is_err());
     }
+    let directory = root.join("models/bge-m3");
+    let ort = directory.join("onnx/model_quantized.cpu-v1.ort");
+    let tokenizer = host_tokenizer(&directory)?;
+    let cpu = host_cpu_container(&ort)?;
+    let mut core = AssetsStatus::installation_plan(vec![tokenizer.clone(), cpu]);
+    // Diagnostic source strings carry no download authority, even when files are complete.
+    for requirement in &mut core.assets {
+        requirement.state = AssetState::Complete;
+        requirement.actual_size = requirement.expected_size;
+        requirement.actual_sha256 = requirement.sha256.clone();
+        requirement.suggested_source = "https://untrusted.invalid/payload".into();
+    }
+    core.complete = true;
+    core.missing.clear();
+    let mut intent = ModelInstallIntent { model: Some("fp16".into()), ..Default::default() };
+    let plan = host_installation_plan(&intent, &core, None, &directory, &ort)?;
+    assert_eq!(plan.assets.len(), 4, "ORT core choice must still install baseline and requested extra");
+    assert_eq!(plan.missing, plan.assets);
+    assert!(!plan.complete && plan.backend_load.is_none());
+    assert!(plan.assets.iter().all(|asset| asset.state == AssetState::Missing
+        && asset.actual_size.is_none() && asset.actual_sha256.is_none()
+        && !asset.suggested_source.contains("untrusted.invalid")));
+    for (name, _, _) in MODEL_VARIANTS {
+        let mut model = host_variant(&directory, name)?;
+        model.name = "bge-m3-model".into();
+        model.version = Some((*name).into());
+        let requirements = AssetsStatus::installation_plan(vec![tokenizer.clone(), model]);
+        intent.model = Some((*name).into());
+        let planned = host_installation_plan(&intent, &requirements, None, &directory, &ort)?;
+        assert_eq!(planned.assets.len(), if *name == "quantized" { 2 } else { 3 });
+    }
+    for field in ["sha256", "expected_size", "path"] {
+        let mut changed = serde_json::to_value(&core)?;
+        changed["assets"][0][field] = Value::Null;
+        let changed = serde_json::from_value(changed)?;
+        assert!(host_installation_plan(&intent, &changed, None, &directory, &ort).is_err(),
+            "accepted mismatched core pin {field}");
+    }
+    let mut incompatible = core.clone();
+    incompatible.assets[0].state = AssetState::Incompatible;
+    assert!(host_installation_plan(&intent, &incompatible, None, &directory, &ort).is_err());
+    let mut duplicate = core.clone();
+    duplicate.assets[1] = duplicate.assets[0].clone();
+    assert!(host_installation_plan(&intent, &duplicate, None, &directory, &ort).is_err());
+    intent.model = Some("unknown-variant".into());
+    assert!(host_installation_plan(&intent, &core, None, &directory, &ort).is_err());
+    intent.model = None;
+    std::env::set_var("RSRS_CPU_OWNED_ORT_FILE", &ort);
+    assert!(host_installation_plan(&intent, &core, None, &directory, &ort).is_err());
+    std::env::remove_var("RSRS_CPU_OWNED_ORT_FILE");
+    let revision = "b".repeat(40);
+    let source = format!("https://huggingface.co/fixture/profile/resolve/{revision}/tokenizer.json");
+    let selected = json!({"engine":"cpu","backend_profile":{"backend":"onnx"},"profile":{"embedding":{"revision":revision},
+        "tokenizer":{"path":tokenizer.path,"size":tokenizer.expected_size,"sha256":tokenizer.sha256,"download":source},
+        "weights":{"path":directory.join("weights.onnx"),"size":7,"sha256":"a".repeat(64),
+            "download":format!("https://huggingface.co/fixture/profile/resolve/{revision}/weights.onnx")}}});
+    let profile_assets = vec![
+        host_asset("profile-tokenizer", "profile-v1", directory.join("tokenizer.json"), 17_082_821,
+            selected["profile"]["tokenizer"]["sha256"].as_str().context("fixture hash")?, "diagnostic only".into())?,
+        host_asset("profile-weights", "profile-v1", directory.join("weights.onnx"), 7, &"a".repeat(64), "diagnostic only".into())?,
+    ];
+    let profile_core = AssetsStatus::installation_plan(profile_assets);
+    let planned = host_installation_plan(&intent, &profile_core, Some(&selected), &directory, &ort)?;
+    assert_eq!(planned.assets[0].suggested_source, source);
+    assert_eq!(planned.assets[0].version.as_deref(), Some(revision.as_str()));
+    let mut no_source = selected.clone();
+    no_source["profile"]["weights"]["download"] = Value::Null;
+    assert!(host_installation_plan(&intent, &profile_core, Some(&no_source), &directory, &ort).is_err());
+    intent.model = Some("fp16".into());
+    let planned = host_installation_plan(&intent, &profile_core, Some(&selected), &directory, &ort)?;
+    assert_eq!(planned.assets.len(), 4, "profile files plus legacy baseline and requested variant");
     assert_eq!(account(&profile)?, None);
     std::fs::write(
         profile.join("session.json"),

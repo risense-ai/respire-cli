@@ -24,7 +24,7 @@ pub fn prepare_model_assets(
     prepare_model_assets_with_sources(plan, allowed_roots, &sources).map(|_| ())
 }
 
-/// Sources come from local mirror policy; the Runtime plan still supplies fixed pins.
+/// The host supplies the fixed catalog pins, destinations and local mirror policy.
 pub fn prepare_model_assets_with_sources(
     plan: &respire_protocol::AssetsStatus,
     allowed_roots: &[PathBuf],
@@ -64,7 +64,7 @@ pub fn prepare_model_assets_with_sources(
                 && asset.reason.is_none()
                 && asset.actual_size.is_none()
                 && asset.actual_sha256.is_none(),
-            "asset {} requires Runtime preparation: {}",
+            "asset {} is not an executable host installation requirement: {}",
             asset.name,
             asset.reason.as_deref().unwrap_or("invalid plan state")
         );
