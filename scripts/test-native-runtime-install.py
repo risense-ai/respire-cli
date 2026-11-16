@@ -69,7 +69,7 @@ class FixtureInstallationTests(unittest.TestCase):
         stage = next(node for node in calls if node.func.id == 'stage_fixture_cli')
         self.assertLess(stage.lineno, install.lineno)
         session = next(node for node in ast.walk(tree) if isinstance(node, ast.Call)
-                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_bytes'
+                       and isinstance(node.func, ast.Attribute) and node.func.attr == 'write_text'
                        and any(isinstance(part, ast.Constant) and part.value == 'session.json'
                                for part in ast.walk(node.func.value)))
         handoff = next(node for node in ast.walk(tree) if isinstance(node, ast.Assign)
