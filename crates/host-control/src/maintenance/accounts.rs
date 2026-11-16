@@ -2,6 +2,7 @@
 //! It is never inferred from a current selection or an unrelated maintenance owner.
 use super::*;
 mod keygen_transfer;
+mod registration;
 pub use keygen_transfer::{KeygenAccountTransfer, KeygenAccountAdmission};
 pub(crate) use keygen_transfer::{prepare_keygen_account, lookup_keygen_account};
 

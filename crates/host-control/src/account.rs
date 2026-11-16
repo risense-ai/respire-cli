@@ -136,6 +136,7 @@ impl AccountCoordinator {
                     user: user.to_owned(),
                     password: password.to_owned(),
                     super_password: None,
+                    material: None,
                 },
                 None,
             );
@@ -162,6 +163,7 @@ impl AccountCoordinator {
                 user: user.to_owned(),
                 password: password.to_owned(),
                 super_password: super_password.map(str::to_owned),
+                material: None,
             },
             None,
         )
@@ -259,7 +261,7 @@ impl AccountCoordinator {
         operation_id: &str,
         original_source: Option<&Path>,
         register: bool,
-        operation: AccountControl,
+        mut operation: AccountControl,
         mut continuation: Option<&mut Option<AccountContinuation>>,
     ) -> Result<ResultEnvelope> {
         self.host.require_account_write()?;
@@ -275,6 +277,9 @@ impl AccountCoordinator {
             std::fs::create_dir_all(&selected)?;
         }
         let source = original_source.unwrap_or(&selected).canonicalize()?;
+        if register && original_source.is_none() {
+            crate::auth_material::prepare_source(&takeover)?;
+        }
         let saved = continuation.as_mut().and_then(|slot| slot.take());
         let is_continuation =
             original_source.is_some() && matches!(&operation, AccountControl::LoginStep { .. });
@@ -339,11 +344,29 @@ impl AccountCoordinator {
         };
         let sent = maintenance.account_operation_sent()?;
         let mut envelope = if !sent {
+            if register && matches!(&operation, AccountControl::Rollback) {
+                maintenance.rollback_registration(operation_id, &source, &original_identity)?;
+                let was_serving = restore_owner.context("original registration serving state is missing")?;
+                maintenance.finish_rollback(&source, &original_identity, was_serving)?;
+                self.host.finish_key_handoff(&source, &original_identity, was_serving)?;
+                crate::maintenance::finish_account_routing(maintenance.installation_root(), operation_id)?;
+                let receipt = HostAuthAccountResult {
+                    operation_id: operation_id.to_owned(), outcome: HostAuthAccountOutcome::RolledBack,
+                    source_profile: source, target_profile: None, account_id: None,
+                    session_sha256: None, super_password: None, login: None,
+                };
+                return Ok(ResultEnvelope::new("registration-custody-rollback",
+                    respire_commands::output::Status::Ok, serde_json::to_value(receipt)?, Vec::new()));
+            }
             anyhow::ensure!(
                 selected.canonicalize()? == source,
                 "unadmitted original operation selection changed"
             );
             require_unsent_admission(&operation, &crate::identity(&source)?, &original_identity)?;
+            if let AccountControl::Register { password, super_password, material, .. } = &mut operation {
+                *material = Some(maintenance.prepare_registration(operation_id, &source,
+                    &original_identity, password, super_password.as_deref())?);
+            }
             // Same write-ahead rule as the existing key coordinator. Once this
             // bit is durable, uncertainty only permits querying the original id.
             maintenance.mark_account_operation_sent()?;
@@ -464,6 +487,10 @@ impl AccountCoordinator {
                 maintenance
                     .verify_account_target(&source, operation_id, &receipt, register)
                     .map_err(|error| error.context(unknown()))?;
+                let registration_super = if register {
+                    Some(maintenance.registration_super(operation_id, &source, &original_identity,
+                        receipt.target_profile.as_deref().context("committed registration target is missing")?)?)
+                } else { None };
                 maintenance.finish().map_err(|error| {
                     error.context(AccountHandoffPending {
                         operation_id: operation_id.to_owned(),
@@ -491,9 +518,15 @@ impl AccountCoordinator {
                         register,
                     })
                 })?;
+                if let Some(super_password) = registration_super {
+                    envelope.summary["super_password"] = serde_json::json!(super_password);
+                }
                 Ok(envelope)
             }
             HostAuthAccountOutcome::RolledBack => {
+                if register {
+                    maintenance.rollback_registration(operation_id, &source, &original_identity)?;
+                }
                 if let Some(was_serving) = restore_owner {
                     maintenance.finish_rollback(&source, &original_identity, was_serving)?;
                     self.host
