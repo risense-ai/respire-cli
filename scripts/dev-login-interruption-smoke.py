@@ -292,9 +292,12 @@ def fixture_runtime_owners(directory, images):
         try:
             if entry.stat().st_uid != os.geteuid():
                 continue
+            argv = (entry / "cmdline").read_bytes().split(b"\0")
+            # Spawned CLI/Runtime argv[0] is its executable path; inspect only those images.
+            if not argv[0] or Path(os.fsdecode(argv[0])).resolve() not in images:
+                continue
             if (entry / "exe").resolve(strict=True) not in images:
                 continue
-            argv = (entry / "cmdline").read_bytes().split(b"\0")
             profiles = [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == b"--data-dir"]
             profiles.extend(arg.split(b"=", 1)[1] for arg in argv if arg.startswith(b"--data-dir="))
             environment = (entry / "environ").read_bytes().split(b"\0")
