@@ -176,7 +176,7 @@ class RuntimeCleanupContract(unittest.TestCase):
                 observation = {}
                 runner = Mock(return_value=subprocess.CompletedProcess([], exit_code, receipt))
                 scope = dict(globals(), binary=Path('fixture-cli'), command_env={},
-                             directory=Path('fixture'), observation=observation,
+                             directory=Path('fixture'), images=[Path('fixture-cli')], observation=observation,
                              subprocess=SimpleNamespace(run=runner), fixture_runtime_owners=Mock(return_value=owners))
                 code = compile(ast.Module(body=cleanup, type_ignores=[]), '<actual-cleanup>', 'exec')
                 if passed:
@@ -242,6 +242,25 @@ class BarrierContract(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform.startswith('linux') and hasattr(os, 'pidfd_open'), 'Linux pidfd required')
 class ProcessContract(unittest.TestCase):
+    def test_cleanup_detects_environment_only_owner_and_equals_argument_after_image_match(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'selected-profile'
+            for arguments, environment in (([], dict(os.environ, RSRS_DATA_DIR=str(target))),
+                    (['--data-dir=' + str(target)], dict(os.environ, RSRS_DATA_DIR=temp + '-unrelated'))):
+                with self.subTest(arguments=arguments):
+                    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)', *arguments],
+                                             env=environment)
+                    try:
+                        self.assertEqual(fixture_runtime_owners(Path(temp), [sys.executable]), [child.pid])
+                        self.assertEqual(fixture_runtime_owners(Path(temp), [Path(temp) / 'other-image']), [])
+                        child.terminate()
+                        child.wait(timeout=5)
+                        self.assertEqual(fixture_runtime_owners(Path(temp), [sys.executable]), [])
+                    finally:
+                        if child.poll() is None:
+                            child.kill()
+                        child.wait(timeout=5)
+
     def test_cleanup_detects_live_owner_in_selected_target_and_ignores_other_fixture(self):
         with tempfile.TemporaryDirectory() as temp, tempfile.TemporaryDirectory() as other:
             target = Path(temp) / 'selected-profile'
@@ -250,10 +269,10 @@ class ProcessContract(unittest.TestCase):
             unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)',
                                           '--data-dir', other])
             try:
-                self.assertEqual(fixture_runtime_owners(Path(temp)), [child.pid])
+                self.assertEqual(fixture_runtime_owners(Path(temp), [sys.executable]), [child.pid])
                 child.terminate()
                 child.wait(timeout=5)
-                self.assertEqual(fixture_runtime_owners(Path(temp)), [])
+                self.assertEqual(fixture_runtime_owners(Path(temp), [sys.executable]), [])
                 self.assertIsNone(unrelated.poll())
             finally:
                 if child.poll() is None:

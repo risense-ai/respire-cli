@@ -282,15 +282,24 @@ def runtime_stop_receipt(stopped):
             and receipt.get("summary", {}).get("state") == "stopped", "owned_runtime_cleanup_failed")
 
 
-def fixture_runtime_owners(directory):
-    """Check every fixture profile, including a target selected during login."""
+def fixture_runtime_owners(directory, images):
+    """Match owned images before reading private profile scope from argv/environment."""
+    images = {Path(image).resolve() for image in images}
     owners = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdecimal():
             continue
         try:
+            if entry.stat().st_uid != os.geteuid():
+                continue
+            if (entry / "exe").resolve(strict=True) not in images:
+                continue
             argv = (entry / "cmdline").read_bytes().split(b"\0")
             profiles = [argv[index + 1] for index, arg in enumerate(argv[:-1]) if arg == b"--data-dir"]
+            profiles.extend(arg.split(b"=", 1)[1] for arg in argv if arg.startswith(b"--data-dir="))
+            environment = (entry / "environ").read_bytes().split(b"\0")
+            profiles.extend(item.split(b"=", 1)[1] for item in environment
+                            if item.startswith(b"RSRS_DATA_DIR="))
             if not any(Path(os.fsdecode(profile)).resolve().is_relative_to(directory.resolve())
                        for profile in profiles):
                 continue
@@ -315,7 +324,12 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         listener.bind(("127.0.0.1", 0))
         command_env["RSRS_RPC_PORT"] = str(listener.getsockname()[1])
     observation.update(passed=False, stage="runtime_install")
-    install_published_runtime(binary, command_env)
+    installed_runtime = install_published_runtime(binary, command_env)
+    images = [binary]
+    if installed_runtime is not None:
+        images.append(installed_runtime)
+    if command_env.get("RSRS_BIN_DIR"):
+        images.append(Path(command_env["RSRS_BIN_DIR"]) / "rsrs")
 
     def rpc(method, params, expected_exit):
         transport_id = "host-login-" + uuid.uuid4().hex
@@ -399,7 +413,7 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
         stopped = subprocess.run([str(binary), "--json", "--runtime-internal", "--stop"],
             env=command_env, capture_output=True, timeout=60)
         runtime_stop_receipt(stopped)
-        require(not fixture_runtime_owners(directory), "owned_runtime_cleanup_failed")
+        require(not fixture_runtime_owners(directory, images), "owned_runtime_cleanup_failed")
         observation["runtime_cleanup"].update(passed=True, stopped_confirmed=True, no_live_owner=True)
     observation["passed"] = True
 
