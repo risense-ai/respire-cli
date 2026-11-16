@@ -13,6 +13,7 @@ pub(crate) enum AccountControl {
         user: String,
         password: String,
         super_password: Option<String>,
+        material: Option<respire_protocol::HostAuthKeygenMaterial>,
     },
     Login {
         addr: String,
@@ -49,6 +50,7 @@ pub(crate) fn account_request(
             user,
             password,
             super_password,
+            material,
         } => (
             HOST_AUTH_REGISTER_METHOD,
             serde_json::to_string(&HostAuthRegisterParams {
@@ -59,6 +61,7 @@ pub(crate) fn account_request(
                 user,
                 password,
                 super_password,
+                material: Some(material.context("host registration material is missing")?),
             })?,
         ),
         AccountControl::Login {
@@ -150,8 +153,8 @@ pub(crate) fn validate_account_receipt(
         "account receipt operation or profile mismatch"
     );
     anyhow::ensure!(
-        !register || receipt.login.is_none(),
-        "register receipt contains login continuation state"
+        !register || (receipt.login.is_none() && receipt.super_password.is_none()),
+        "Runtime register receipt contains host-owned recovery material or login continuation state"
     );
     if matches!(
         receipt.outcome,
@@ -225,14 +228,7 @@ pub(crate) fn validate_account_receipt(
                 "account receipt target identity mismatch"
             );
             anyhow::ensure!(
-                if register {
-                    receipt
-                        .super_password
-                        .as_deref()
-                        .is_some_and(|value| !value.is_empty())
-                } else {
-                    receipt.super_password.is_none()
-                },
+                receipt.super_password.is_none(),
                 "invalid account recovery-code presence"
             );
         }
@@ -555,6 +551,34 @@ pub(crate) fn validate_account_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn register_request_requires_host_material_and_preserves_the_private_payload() -> Result<()> {
+        let root = std::env::temp_dir();
+        let id = uuid::Uuid::new_v4().to_string();
+        let binding = ControlBinding { installation_root: root.clone(), profile: root,
+            launch_id: uuid::Uuid::new_v4().to_string(), expected_account_id: None };
+        let operation = |material| AccountControl::Register { addr: "https://fixture.invalid".into(),
+            user: "synthetic-register".into(), password: "synthetic-password".into(),
+            super_password: None, material };
+        assert!(account_request(binding.clone(), HostAuthIdentity::Absent, &id, operation(None)).is_err());
+        let request = account_request(binding, HostAuthIdentity::Absent, &id,
+            operation(Some(respire_protocol::HostAuthKeygenMaterial {
+                kdf_salt: "synthetic-salt".into(), wrapped_urk: "synthetic-wrap".into(),
+                urk_nonce: "synthetic-nonce".into(), super_password: "synthetic-super".into(),
+                keyring_account: "login-synthetic".into(), keyring_backend: "native".into(),
+            })))?;
+        assert_eq!(request.method, HOST_AUTH_REGISTER_METHOD);
+        assert_eq!(request.operation_id.as_deref(), Some(id.as_str()));
+        let params: HostAuthRegisterParams = serde_json::from_str(&request.args[0])?;
+        let material = params.material.context("private registration material was lost")?;
+        assert_eq!(material.super_password, "synthetic-super");
+        assert_eq!(material.wrapped_urk, "synthetic-wrap");
+        assert_eq!(params.password, "synthetic-password");
+        assert!(params.super_password.is_none());
+        Ok(())
+    }
+
     #[test]
     fn rolled_back_receipt_rejects_nested_issued_material() -> Result<()> {
         let directory = tempfile::tempdir()?;
