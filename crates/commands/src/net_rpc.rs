@@ -226,18 +226,9 @@ pub fn pid_is_respire(pid: u32) -> bool {
     }
     #[cfg(all(unix, not(target_os = "linux")))]
     {
-        let out = std::process::Command::new("ps")
+        darwin_runtime_name(std::process::Command::new("ps")
             .args(["-p", &pid.to_string(), "-o", "comm="])
-            .output();
-        let Ok(out) = out else {
-            return false;
-        };
-        let text = String::from_utf8_lossy(&out.stdout);
-        let name = text.trim();
-        name == "rsrs"
-            || name.ends_with("/rsrs")
-            || name == "rsrs-runtime"
-            || name.ends_with("/rsrs-runtime")
+            .output()).is_ok()
     }
 }
 
@@ -921,11 +912,45 @@ fn linux_process_arguments(command: &[u8]) -> Result<Vec<&str>> {
         .context("runtime command line is not UTF-8")
 }
 
+#[cfg(any(test, all(unix, not(target_os = "linux"))))]
+fn darwin_runtime_name(output: std::io::Result<std::process::Output>) -> Result<()> {
+    let output = output.map_err(|error| anyhow::anyhow!(
+        "stage=process_name class=ps_spawn_failed os_kind={:?} os_code={:?}",
+        error.kind(), error.raw_os_error()
+    ))?;
+    anyhow::ensure!(output.status.success(),
+        "stage=process_name class=ps_failed ps_status={}", output.status);
+    let text = String::from_utf8_lossy(&output.stdout);
+    let name = text.trim();
+    anyhow::ensure!(!name.is_empty(), "stage=process_name class=empty_image");
+    anyhow::ensure!(name == "rsrs" || name.ends_with("/rsrs")
+        || name == "rsrs-runtime" || name.ends_with("/rsrs-runtime"),
+        "stage=process_name class=image_name_mismatch");
+    Ok(())
+}
+
 pub fn runtime_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
+    #[cfg(any(windows, target_os = "linux"))]
     anyhow::ensure!(
         pid != std::process::id() && pid_is_respire(pid),
         "cannot verify runtime process {pid}"
     );
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        anyhow::ensure!(pid != 0 && pid != std::process::id(),
+            "cannot verify runtime process {pid}: stage=process_name class=invalid_pid");
+        darwin_runtime_name(std::process::Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "comm="])
+            .output()).with_context(|| {
+                // This observation explains a refusal; it never authorizes cleanup or exit.
+                let observation = match process_is_running(pid) {
+                    Ok(true) => "running".to_owned(),
+                    Ok(false) => "not_observed_running".to_owned(),
+                    Err(error) => format!("unconfirmed observation_error={error:#}"),
+                };
+                format!("cannot verify runtime process {pid}: exit_observation={observation}")
+            })?;
+    }
     #[cfg(windows)]
     {
         let process = respire_spawn::runtime_process_identity(pid)?
@@ -1192,7 +1217,36 @@ mod tests {
     }
 
     #[test]
-    fn runtime_role_uses_the_executable_not_argv_zero() {
+    fn runtime_role_uses_the_executable_not_argv_zero() -> Result<()> {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        let output = |name: &[u8]| std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: name.to_vec(),
+            stderr: b"private stderr must not be reported".to_vec(),
+        };
+        for name in ["rsrs", "/private/path with spaces/rsrs-runtime"] {
+            darwin_runtime_name(Ok(output(name.as_bytes())))?;
+        }
+        for (name, class) in [("", "empty_image"),
+            ("/private/secret-name/foreign --private-argument", "image_name_mismatch")] {
+            let error = darwin_runtime_name(Ok(output(name.as_bytes())))
+                .err().context("unverified image was accepted")?.to_string();
+            assert!(error.contains("stage=process_name") && error.contains(class));
+            assert!(!error.contains("secret-name") && !error.contains("private-argument"));
+        }
+        let mut failed = output(b"/private/rsrs-runtime");
+        failed.status = std::process::ExitStatus::from_raw(256);
+        let error = darwin_runtime_name(Ok(failed))
+            .err().context("failed ps was accepted")?.to_string();
+        assert!(error.contains("class=ps_failed") && error.contains("ps_status="));
+        assert!(!error.contains("private"));
+        let error = darwin_runtime_name(Err(std::io::Error::from_raw_os_error(13)))
+            .err().context("failed inspection was accepted")?.to_string();
+        assert!(error.contains("class=ps_spawn_failed") && error.contains("os_kind=")
+            && error.contains("os_code=Some(13)"));
         assert!(!runtime_role_arguments(
             Path::new("/tmp/rsrs"),
             &["rsrs-runtime", "serve"]
@@ -1225,6 +1279,7 @@ mod tests {
             Path::new("/tmp/rsrs-runtime (deleted) suffix"),
             &["rsrs-runtime", "serve"]
         ));
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]

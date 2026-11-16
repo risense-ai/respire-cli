@@ -248,7 +248,8 @@ fn run_config_control_inner(
                 None
             } else {
                 attempted_start = true;
-                maintenance.start_account_runtime()?;
+                maintenance.start_account_runtime()
+                    .context("config stage=target_start")?;
                 let health = crate::rpc::probe_runtime()?
                     .context("configured target Runtime did not start")?;
                 super::model_control::verify_model_owner(
@@ -259,7 +260,7 @@ fn run_config_control_inner(
                     &binary,
                     &manifest,
                     Some(&account(&target_identity, &target)),
-                )?;
+                ).context("config stage=target_owner_verification")?;
                 anyhow::ensure!(
                     health.store_ready || validation.off_mode,
                     "configured target Runtime did not confirm store readiness"
