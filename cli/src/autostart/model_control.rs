@@ -470,10 +470,8 @@ fn host_installation_plan(
                     if variant != "quantized" { assets.push(host_variant(directory, variant)?); }
                 },
                 "bge-m3-cpu-ort" => {
-                    // Match Runtime's loader: use an existing cache, otherwise the selected model directory.
-                    let path = if cpu_container.is_file() { cpu_container.to_owned() }
-                        else { directory.join("onnx/model_quantized.cpu-v1.ort") };
-                    assets.push(host_cpu_container(&path)?);
+                    // Runtime22 preparation pins the default cache independently of loader discovery.
+                    assets.push(host_cpu_container(cpu_container)?);
                 },
                 _ => anyhow::bail!("core resource {} requires separate component preparation: {}", requirement.name,
                     requirement.reason.as_deref().unwrap_or("no host file installation contract")),
