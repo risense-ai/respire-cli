@@ -190,8 +190,8 @@ class AliasTests(unittest.TestCase):
         for forbidden in (PASSWORD, SUPER, OTHER, USER):
             self.assertNotIn(forbidden, str(raised.exception) + json.dumps(report))
 
-    def test_all_password_login_versions_track_before_return(self):
-        for version in (1, 2, 3):
+    def test_tty_password_login_versions_track_before_return(self):
+        for version in (1, 2):
             with self.subTest(version=version):
                 keys = MemoryKeys()
                 smoke = object.__new__(legacy.Smoke)
@@ -216,7 +216,7 @@ class AliasTests(unittest.TestCase):
                 self.assertFalse(keys.values)
 
     def test_interactive_factor_env_is_removed_only_from_login_copy(self):
-        for version in (1, 2, 3):
+        for version in (1, 2):
             keys = MemoryKeys()
             smoke = object.__new__(legacy.Smoke)
             smoke.keys = keys
@@ -245,6 +245,169 @@ class AliasTests(unittest.TestCase):
             self.assertEqual(env, before)
             self.assertTrue(keys.cleanup()['passed'])
             self.assertFalse(keys.values)
+
+    def test_v1_fresh_login_blocks_use_hidden_factor_without_a_seeded_session(self):
+        tree = ast.parse((HERE / 'dev-legacy-vault-smoke.py').read_text(encoding='utf-8'))
+        run = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef) and node.name == 'run_version')
+        for variable in ('old_login_env', 'final_env'):
+            start = next(index for index, node in enumerate(run.body)
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == variable for target in node.targets))
+            end = next(index for index, node in enumerate(run.body[start:], start)
+                       if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                       and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'password_login')
+            code = compile(ast.Module(body=run.body[start:end + 1], type_ignores=[]),
+                           '<actual-v1-login-setup>', 'exec')
+            for fails in (False, True):
+                with self.subTest(profile=variable, fails=fails), tempfile.TemporaryDirectory() as temp:
+                    smoke = object.__new__(legacy.Smoke)
+                    smoke.root, smoke.model = Path(temp), Path(temp) / 'models'
+                    smoke.base_env, smoke.report = {}, {}
+                    smoke.args = SimpleNamespace(binary=Path('fixture-cli'))
+                    smoke.save = Mock()
+                    keys = MemoryKeys()
+                    keys.configure_env = Mock()
+                    smoke.keys = keys
+                    factor = 'fixture-account-secret'
+
+                    def cli(env, *args, **kwargs):
+                        self.assertFalse((Path(env['RSRS_DATA_DIR']) / 'session.json').exists())
+                        self.assertEqual(kwargs['prompts'][-1], ('  original v1 Account Secret: ', factor))
+                        self.assertNotIn(factor, args)
+                        if fails:
+                            raise RuntimeError('auth_failed')
+                        keys.created(ALIAS, None)
+                        keys.values['rsrs', 'legacy-secret:' + ALIAS] = factor
+                        smoke.write_session(env, dict(user=USER, keyring_account=ALIAS, token='fixture-token',
+                            vault_version=1, keyring_backend='native', legacy_secret_backend='native'))
+                        return {'summary': {'ok': True}}
+
+                    smoke.cli = cli
+                    scope = dict(self=smoke, version=1, user=USER, password=PASSWORD,
+                                 original_super=factor, secret=factor)
+                    with patch.object(legacy, 'install_published_runtime'):
+                        if fails:
+                            with self.assertRaisesRegex(RuntimeError, '^auth_failed$'):
+                                exec(code, scope)
+                            self.assertFalse(keys.entries)
+                        else:
+                            exec(code, scope)
+                            self.assertEqual(keys.entries, {('rsrs', 'pass:' + ALIAS), ('rsrs', 'legacy-secret:' + ALIAS)})
+                    self.assertTrue(keys.cleanup()['passed'])
+                    self.assertFalse(keys.values)
+                    session_path = Path(scope[variable]['RSRS_DATA_DIR']) / 'session.json'
+                    session_path.write_text('{', encoding='utf-8')
+                    with self.assertRaises(json.JSONDecodeError):
+                        smoke.session(scope[variable])
+
+    def test_v3_fresh_login_blocks_use_stdin_rpc_and_keep_failures_fatal(self):
+        tree = ast.parse((HERE / 'dev-legacy-vault-smoke.py').read_text(encoding='utf-8'))
+        run = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef) and node.name == 'run_version')
+        for variable in ('old_login_env', 'final_env'):
+            start = next(index for index, node in enumerate(run.body)
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == variable for target in node.targets))
+            end = next(index for index, node in enumerate(run.body[start:], start)
+                       if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                       and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'password_login')
+            code = compile(ast.Module(body=run.body[start:end + 1], type_ignores=[]),
+                           '<actual-v3-login-setup>', 'exec')
+            failures = dict(auth='cli_failed_login', pending='cli_failed_login',
+                transport='legacy_login_rpc_transport_mismatch', wire_version='legacy_login_rpc_transport_mismatch',
+                wire_exit='legacy_login_rpc_transport_mismatch', wire_ok='legacy_login_rpc_transport_mismatch',
+                transaction='legacy_login_rpc_transaction_mismatch', operation='legacy_login_rpc_transaction_mismatch',
+                outcome='legacy_login_rpc_transaction_mismatch', identity='legacy_login_rpc_identity_mismatch',
+                required_inputs='legacy_login_rpc_identity_mismatch', status='legacy_login_rpc_not_committed',
+                errors='cli_error_login', stop='owned_runtime_stop_failed', json='invalid_cli_json_login')
+            for failure in (None, *failures):
+                with self.subTest(profile=variable, failure=failure), tempfile.TemporaryDirectory() as temp:
+                    smoke = object.__new__(legacy.Smoke)
+                    smoke.root, smoke.model = Path(temp), Path(temp) / 'models'
+                    smoke.base_env, smoke.report, smoke.diagnostic_secrets = {}, {}, {PASSWORD, SUPER, 'fixture-secret-key'}
+                    smoke.args = SimpleNamespace(binary=Path('fixture-cli'))
+                    smoke.save = Mock()
+                    keys = MemoryKeys()
+                    keys.configure_env = Mock()
+                    smoke.keys = keys
+                    requests, stops = [], []
+                    factor = 'fixture-secret-key'
+                    committed = failure not in ('auth', 'pending')
+
+                    def child(argv, **kwargs):
+                        env = kwargs['env']
+                        if '--stop' in argv:
+                            stops.append(argv)
+                            return SimpleNamespace(returncode=1 if failure == 'stop' else 0)
+                        self.assertEqual(argv, ['fixture-cli', '--json', '--host-rpc-stdio'])
+                        self.assertNotIn('RSRS_SUPER', env)
+                        self.assertFalse((Path(env['RSRS_DATA_DIR']) / 'session.json').exists())
+                        request = json.loads(kwargs['input'])
+                        requests.append(request)
+                        self.assertEqual(request['v'], 1)
+                        self.assertEqual(request['method'], 'auth.login')
+                        self.assertEqual(request['params'], dict(addr=legacy.UPSTREAM, user=USER,
+                            password=PASSWORD, super=SUPER, continuation=json.dumps({'secret_key': factor})))
+                        self.assertNotIn(factor, str(argv))
+                        self.assertNotIn(PASSWORD, str(argv))
+                        self.assertNotIn(SUPER, str(argv))
+                        operation = '12345678-1234-4234-8234-123456789abc'
+                        self.assertNotEqual(request['id'], operation)
+                        receipt = dict(operation_id=operation, outcome='committed',
+                            source_profile=str(Path(env['RSRS_DATA_DIR']).resolve()),
+                            login=dict(user=USER, addr=legacy.UPSTREAM, required_inputs=[]))
+                        envelope = dict(status='ok', summary=receipt, errors=[])
+                        if committed:
+                            keys.created(ALIAS)
+                            keys.values['rsrs', 'legacy-secret:' + ALIAS] = factor
+                            smoke.write_session(env, dict(user=USER, keyring_account=ALIAS, token='fixture-token',
+                                vault_version=3, keyring_backend='native', legacy_secret_backend='native'))
+                        exit_code = 1 if failure == 'auth' else 2 if failure == 'pending' else 0
+                        if failure in ('auth', 'pending'):
+                            envelope.update(status='fail' if failure == 'auth' else 'pending',
+                                errors=[PASSWORD + SUPER + factor] if failure == 'auth' else [])
+                            receipt['outcome'] = 'awaiting_input'
+                        if failure == 'transaction':
+                            receipt['source_profile'] = 'foreign-profile'
+                        if failure == 'operation':
+                            receipt['operation_id'] = request['id']
+                        if failure == 'outcome':
+                            receipt['outcome'] = 'awaiting_input'
+                        if failure == 'identity':
+                            receipt['login']['user'] = 'foreign-user'
+                        if failure == 'required_inputs':
+                            receipt['login']['required_inputs'] = ['secret_key']
+                        if failure == 'status':
+                            envelope['status'] = 'pending'
+                        if failure == 'errors':
+                            envelope['errors'] = [PASSWORD + SUPER + factor]
+                        reply = dict(v=2 if failure == 'wire_version' else 1,
+                            id='foreign' if failure == 'transport' else request['id'],
+                            exit=1 if failure == 'wire_exit' else exit_code,
+                            ok=False if failure == 'wire_ok' else exit_code == 0, envelope=envelope)
+                        return SimpleNamespace(returncode=exit_code,
+                            stdout=b'{' if failure == 'json' else json.dumps(reply).encode(), stderr=b'')
+
+                    scope = dict(self=smoke, version=3, user=USER, password=PASSWORD,
+                                 original_super=SUPER, secret=factor)
+                    with patch.object(legacy, 'install_published_runtime'), \
+                            patch.object(legacy.subprocess, 'run', side_effect=child), \
+                            patch.object(legacy, 'run_hidden', side_effect=AssertionError('v3_must_use_stdin_rpc')):
+                        if failure:
+                            with self.assertRaisesRegex(RuntimeError, '^' + failures[failure] + '$') as raised:
+                                exec(code, scope)
+                            for forbidden in (PASSWORD, SUPER, factor):
+                                self.assertNotIn(forbidden, str(raised.exception) + json.dumps(smoke.report))
+                        else:
+                            exec(code, scope)
+                    self.assertEqual(len(requests), 1)
+                    self.assertEqual(len(stops), 1)
+                    self.assertEqual(keys.entries, {('rsrs', prefix + ALIAS) for prefix in
+                        ('pass:', 'super:', 'legacy-secret:')} if committed else set())
+                    self.assertEqual('RSRS_SUPER' in scope[variable], variable == 'final_env')
+                    self.assertTrue(keys.cleanup()['passed'])
+                    self.assertFalse(keys.values)
 
     def test_committed_session_tracked_even_when_post_auth_checks_fail(self):
         for reason in ('fixture_tty_missing_prompt', 'invalid_cli_json_login', 'owned_runtime_stop_failed'):

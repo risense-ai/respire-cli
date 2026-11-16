@@ -17,6 +17,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from dev_model_fixture import share_cpu_container
 from dev_fixture_tty import run_hidden
 
@@ -130,6 +131,8 @@ class Smoke:
     def redacted_cli_error(self, env, output):
         try:
             value = json.loads(output.stdout)
+            if isinstance(value, dict) and isinstance(value.get("envelope"), dict):
+                value = value["envelope"]
             errors = value.get("errors", []) if isinstance(value, dict) else []
             diagnostic = "; ".join(str(error) for error in errors)
         except (ValueError, UnicodeError):
@@ -149,11 +152,15 @@ class Smoke:
         diagnostic = re.sub(r"(?i)\b(?:A3-)?[a-f0-9]{24,}\b", "[redacted]", diagnostic)
         return diagnostic[:1500] or "no structured error"
 
-    def cli(self, env, *args, timeout=180, prompts=None):
+    def cli(self, env, *args, timeout=180, prompts=None, host_request=None):
         try:
-            argv = [str(self.args.binary), "--direct", "--json", *args]
-            output = run_hidden(argv, prompts=prompts, cwd=self.root, env=env, timeout=timeout) if prompts is not None else subprocess.run(
-                argv, cwd=self.root, env=env, capture_output=True, timeout=timeout)
+            if host_request is not None:
+                output = subprocess.run([str(self.args.binary), "--json", "--host-rpc-stdio"],
+                    input=json.dumps(host_request).encode(), cwd=self.root, env=env, capture_output=True, timeout=timeout)
+            else:
+                argv = [str(self.args.binary), "--direct", "--json", *args]
+                output = run_hidden(argv, prompts=prompts, cwd=self.root, env=env, timeout=timeout) if prompts is not None else subprocess.run(
+                    argv, cwd=self.root, env=env, capture_output=True, timeout=timeout)
         finally:
             # Login and automatic indexing can start this fixture's runtime.
             # Release it before subsequent direct database consumers.
@@ -169,24 +176,49 @@ class Smoke:
             value = json.loads(output.stdout)
         except (ValueError, UnicodeError):
             raise RuntimeError("invalid_cli_json_" + args[0]) from None
+        if host_request is not None:
+            require(isinstance(value, dict) and value.get("v") == 1 and value.get("id") == host_request["id"]
+                and value.get("exit") == 0 and value.get("ok") is True
+                and isinstance(value.get("envelope"), dict), "legacy_login_rpc_transport_mismatch")
+            value = value["envelope"]
+            require(value.get("status") == "ok", "legacy_login_rpc_not_committed")
         require(not value.get("errors") and value.get("status") not in ("error", "failed"), "cli_error_" + args[0])
         return value
 
-    def password_login(self, env, user, password, version, original_super):
-        """Authorize this synthetic account through the existing hidden TTY prompts."""
+    def password_login(self, env, user, password, version, original_super, account_secret=None, secret_key=None):
+        """Authorize through hidden TTY prompts or the existing v3 stdin host RPC."""
         prompts = [("  login method: 1 OAuth (default), 2 password/TOTP: ", "2"),
             ("  login password: ", password)]
         if version != 1:
             prompts.append(("  super password (A3-…): ", original_super))
+        if account_secret is not None:
+            prompts.append(("  original v1 Account Secret: ", account_secret))
         login_env = dict(env)
         if version != 1:
-            # This case proves the original factor through the hidden prompt.
-            # A supplied environment factor bypasses that prompt in the product.
+            # Prove the original factor through explicit TTY/stdin input,
+            # without letting an environment factor satisfy the login.
             login_env.pop("RSRS_SUPER", None)
         previous_alias = self.session(env).get("keyring_account")
         completed = False
         try:
-            result = self.cli(login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
+            if version == 3:
+                require(isinstance(secret_key, str) and bool(secret_key), "legacy_v3_secret_key_missing")
+                request = {"v": 1, "id": "legacy-login-" + uuid.uuid4().hex, "method": "auth.login",
+                    "params": {"addr": UPSTREAM, "user": user, "password": password, "super": original_super,
+                        "continuation": json.dumps({"secret_key": secret_key})}}
+                result = self.cli(login_env, "login", host_request=request)
+                receipt = result.get("summary") or {}
+                operation_id = receipt.get("operation_id")
+                require(isinstance(operation_id, str) and operation_id != request["id"]
+                    and re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", operation_id)
+                    and receipt.get("outcome") == "committed"
+                    and receipt.get("source_profile") == str(Path(env["RSRS_DATA_DIR"]).resolve()),
+                    "legacy_login_rpc_transaction_mismatch")
+                login = receipt.get("login") or {}
+                require(login.get("user") == user and login.get("addr") == UPSTREAM
+                    and login.get("required_inputs") == [], "legacy_login_rpc_identity_mismatch")
+            else:
+                result = self.cli(login_env, "login", "--interactive", "--addr", UPSTREAM, "--user", user, prompts=prompts)
             completed = True
         finally:
             # A committed login can still fail the TTY/JSON/owned-stop checks.
@@ -203,7 +235,9 @@ class Smoke:
         return result
 
     def session(self, env):
-        return json.loads((Path(env["RSRS_DATA_DIR"]) / "session.json").read_text())
+        # A new-device login starts without a session; existing files must parse.
+        path = Path(env["RSRS_DATA_DIR"]) / "session.json"
+        return json.loads(path.read_text()) if path.exists() else {}
 
     def write_session(self, env, value):
         path = Path(env["RSRS_DATA_DIR"]) / "session.json"
@@ -328,16 +362,11 @@ class Smoke:
         self.diagnostic_secrets.add(old_pass_hash)
         require(self.api(account, "POST", "/api/self/password", {"salt": old_auth_salt, "pass_hash": old_pass_hash}).get("updated") is True,
             "legacy_authentication_not_stored")
-        old_login_env = self.env(f"v{version}-old-auth-login", user)
-        recovery = {"user": user}
-        if version == 1:
-            recovery["secret"] = secret
-        elif version == 3:
-            recovery["secret_key"] = secret
-        self.write_session(old_login_env, recovery)
+        old_login_env = self.env(f"v{version}-old-auth-login", None if version in (1, 3) else user)
         self.report["stage"] = f"v{version}_old_auth_login"
         self.save()
-        self.password_login(old_login_env, user, password, version, original_super)
+        self.password_login(old_login_env, user, password, version, original_super,
+            account_secret=secret if version == 1 else None, secret_key=secret if version == 3 else None)
         old_login = self.session(old_login_env)
         self.diagnostic_secrets.add(old_login.get("token", ""))
         require(old_login.get("user") == user and bool(old_login.get("token"))
@@ -406,16 +435,11 @@ class Smoke:
         self.report["stage"] = f"v{version}_migrated_sync"
         self.save()
         self.cli(upgraded_env, "sync")
-        final_env = self.env(f"v{version}-new-device", user)
+        final_env = self.env(f"v{version}-new-device", None if version in (1, 3) else user)
         if version != 1:
             final_env["RSRS_SUPER"] = original_super
-        else:
-            # Supply only the original recovery factor, never a migrated wrap.
-            self.write_session(final_env, {"user": user, "secret": secret})
-        if version == 3:
-            # Explicitly restore the original second recovery factor.
-            self.write_session(final_env, {"user": user, "secret_key": secret})
-        self.password_login(final_env, user, password, version, original_super)
+        self.password_login(final_env, user, password, version, original_super,
+            account_secret=secret if version == 1 else None, secret_key=secret if version == 3 else None)
         recovered_session = self.session(final_env)
         require(recovered_session.get("user") == user and bool(recovered_session.get("token"))
             and self.api(dict(account, token=recovered_session["token"]), "GET", "/api/self").get("user") == user
