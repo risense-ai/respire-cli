@@ -2,6 +2,7 @@
 """CI-only real CPU/tree smoke and deterministic local provider contract smoke."""
 from native_fixture_process import install_published_runtime
 import argparse
+from dev_migration_diagnostics import script_failure_location
 import hashlib
 import importlib.util
 import json
@@ -614,6 +615,7 @@ def main():
     except Exception as error:
         smoke.report["status"] = "failed"
         smoke.report["failure"] = str(error) if isinstance(error, RuntimeError) else type(error).__name__
+        smoke.report["failure_location"] = script_failure_location(error, __file__)
     finally:
         if smoke.provider:
             try:

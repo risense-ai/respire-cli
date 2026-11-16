@@ -124,6 +124,7 @@ class DiagnosticsTests(unittest.TestCase):
         fixture.args = types.SimpleNamespace(binary=self.image, runtime_binary=self.image)
         fixture.a = {'RSRS_DATA_DIR': str(self.root), 'RSRS_RUNTIME_BIN': str(self.image), 'RSRS_RPC_PORT': '1234'}
         fixture.direct_failures, fixture.port = [], 1234
+        self.health['startup_complete'] = True
         fixture.child = Mock(pid=123)
         (self.root / 'runtime').mkdir()
         (self.root / 'runtime' / 'endpoint.json').write_text('{}')
@@ -152,7 +153,8 @@ class DiagnosticsTests(unittest.TestCase):
         child.poll.return_value = None
         with patch.object(outbox.urllib.request, 'urlopen', side_effect=response), \
              patch.object(outbox, 'verify_runtime_health') as verified, \
-             patch.object(outbox.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0, stdout=b'{"errors":[]}')), \
+             patch.object(outbox.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0,
+                 stdout=b'{"errors":[],"summary":{"store_ready":true}}')) as executed, \
              patch.object(outbox.subprocess, 'Popen', return_value=child), \
              patch.object(outbox.socket, 'socket', return_value=fake_socket), \
              patch.object(outbox, 'wait_for', side_effect=wait):
@@ -160,6 +162,8 @@ class DiagnosticsTests(unittest.TestCase):
             fixture.start()
             self.assertTrue(fixture.rpc(['status'])['ok'])
             self.assertEqual(verified.call_count, 4)  # direct, ready, start-status, explicit status
+            self.assertEqual(sum(call.args[0][-2:] == ['runtime', 'unlock']
+                                 for call in executed.call_args_list), 1)
             wrong_receipt = True
             with self.assertRaisesRegex(RuntimeError, '^local_rpc_failed$'):
                 fixture.rpc(['status'])

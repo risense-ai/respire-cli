@@ -16,3 +16,14 @@ def migration_failure_diagnostics(envelope):
         if type(value) is str and value in allowed:
             result[target] = value
     return result
+
+
+def script_failure_location(error, script):
+    """Report source coordinates only, never exception arguments or frame locals."""
+    location = {}
+    trace = error.__traceback__
+    while trace is not None:
+        if trace.tb_frame.f_code.co_filename == script:
+            location = {"line": trace.tb_lineno, "function": trace.tb_frame.f_code.co_name}
+        trace = trace.tb_next
+    return location

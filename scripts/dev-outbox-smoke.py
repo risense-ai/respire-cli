@@ -334,6 +334,8 @@ class Fixture:
                 return False
             if self.args.runtime_binary:
                 verify_runtime_health(self.args, health, data_dir, data_dir, self.child.pid)
+                if health.get("startup_complete") is not True:
+                    return False
             else:
                 require(health.get("v") == 1 and health.get("bin") == self.args.version
                     and health.get("pid") == self.child.pid
@@ -343,6 +345,9 @@ class Fixture:
             return True
 
         wait_for(ready, 30, "runtime_start_timeout")
+        if self.args.runtime_binary:
+            unlocked = self.direct(self.a, ["runtime", "unlock"])
+            require(unlocked.get("summary", {}).get("store_ready") is True, "runtime_host_unlock_failed")
         wait_for(lambda: self.rpc(["status"]).get("ok"), 30, "runtime_ready_timeout")
 
     def rpc(self, command):

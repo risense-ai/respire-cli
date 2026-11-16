@@ -3,7 +3,7 @@
 import argparse
 import base64
 from contextlib import closing, contextmanager
-from dev_migration_diagnostics import migration_failure_diagnostics
+from dev_migration_diagnostics import migration_failure_diagnostics, script_failure_location
 import hashlib
 import importlib.util
 import json
@@ -708,6 +708,7 @@ class Smoke(support.Smoke):
                 "--data-dir", str(profile)], cwd=runtime.parent, env=raw_env, stdin=subprocess.DEVNULL,
                 stdout=output, stderr=output)
             try:
+                self.report["stage"] = "keyless_restart_health"
                 deadline = time.monotonic() + 90
                 while True:
                     require(child.poll() is None, "keyless_runtime_exited_before_locked_probe")
@@ -735,6 +736,7 @@ class Smoke(support.Smoke):
                                 "keyless_restart_did_not_remain_locked")
                         break
                     time.sleep(.1)
+                self.report["stage"] = "keyless_restart_locked_read"
                 request = scoped_rpc_request(health, ["--json", "show", fixture["id"]])
                 read = support.urllib.request.Request(endpoint + "/api/rpc", json.dumps(request).encode(),
                     {"Content-Type": "application/json"}, method="POST")
@@ -744,7 +746,10 @@ class Smoke(support.Smoke):
                 verify_rpc_receipt(request, rejected)
                 require(rejected.get("ok") is False and rejected.get("code") == "runtime_locked",
                         "keyless_runtime_exposed_encrypted_memory")
-                stop = support.urllib.request.Request(endpoint + "/api/runtime/stop", b"{}",
+                self.report["stage"] = "keyless_restart_stop"
+                stop_identity = {key: health[key] for key in
+                    ("installation_id", "instance_id", "account_id", "generation")}
+                stop = support.urllib.request.Request(endpoint + "/api/runtime/stop", json.dumps(stop_identity).encode(),
                     {"Content-Type": "application/json"}, method="POST")
                 with self.opener.open(stop, timeout=15) as response:
                     require(response.status == 200 and json.load(response).get("ok") is True,
@@ -755,6 +760,7 @@ class Smoke(support.Smoke):
                     self.report["keyless_runtime_forced_cleanup"] = True
                     child.terminate()
                     child.wait(timeout=30)
+        self.report["stage"] = "restart_host_unlock"
         self.verify_retained_current_credentials(self.session(env), fixture)
         self.read_entry(env, fixture["id"], fixture["text"])
         written = self.cli(env, "remember", "Native restart host key handoff write", "--title",
@@ -792,6 +798,7 @@ class Smoke(support.Smoke):
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=1024)
         self.restart_key_handoff()
+        self.report.pop("stage", None)
         self.case("multiaccount", [(".onememory", "1memory")])
         self.case("respire", [(".respire", "respire")])
         self.case("interrupted", [(".respire", "respire")], interrupt=True)
@@ -917,6 +924,9 @@ def main():
         smoke.run()
     except Exception as error:
         smoke.report.update(status="failed", failure=str(error) if isinstance(error, RuntimeError) else type(error).__name__)
+        smoke.report["failure_location"] = script_failure_location(error, __file__)
+        if isinstance(error, support.urllib.error.HTTPError):
+            smoke.report["failure_http_status"] = error.code
         sqlite_failure = sqlite_failure_details(error)
         if sqlite_failure is not None:
             smoke.report["sqlite_failure"] = sqlite_failure
