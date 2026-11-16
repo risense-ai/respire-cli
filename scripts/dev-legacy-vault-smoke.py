@@ -172,12 +172,14 @@ class Smoke:
         require(not value.get("errors") and value.get("status") not in ("error", "failed"), "cli_error_" + args[0])
         return value
 
-    def password_login(self, env, user, password, version, original_super):
+    def password_login(self, env, user, password, version, original_super, account_secret=None):
         """Authorize this synthetic account through the existing hidden TTY prompts."""
         prompts = [("  login method: 1 OAuth (default), 2 password/TOTP: ", "2"),
             ("  login password: ", password)]
         if version != 1:
             prompts.append(("  super password (A3-…): ", original_super))
+        if account_secret is not None:
+            prompts.append(("  original v1 Account Secret: ", account_secret))
         login_env = dict(env)
         if version != 1:
             # This case proves the original factor through the hidden prompt.
@@ -203,7 +205,9 @@ class Smoke:
         return result
 
     def session(self, env):
-        return json.loads((Path(env["RSRS_DATA_DIR"]) / "session.json").read_text())
+        # A new-device login starts without a session; existing files must parse.
+        path = Path(env["RSRS_DATA_DIR"]) / "session.json"
+        return json.loads(path.read_text()) if path.exists() else {}
 
     def write_session(self, env, value):
         path = Path(env["RSRS_DATA_DIR"]) / "session.json"
@@ -328,16 +332,13 @@ class Smoke:
         self.diagnostic_secrets.add(old_pass_hash)
         require(self.api(account, "POST", "/api/self/password", {"salt": old_auth_salt, "pass_hash": old_pass_hash}).get("updated") is True,
             "legacy_authentication_not_stored")
-        old_login_env = self.env(f"v{version}-old-auth-login", user)
-        recovery = {"user": user}
-        if version == 1:
-            recovery["secret"] = secret
-        elif version == 3:
-            recovery["secret_key"] = secret
-        self.write_session(old_login_env, recovery)
+        old_login_env = self.env(f"v{version}-old-auth-login", None if version == 1 else user)
+        if version == 3:
+            self.write_session(old_login_env, {"user": user, "secret_key": secret})
         self.report["stage"] = f"v{version}_old_auth_login"
         self.save()
-        self.password_login(old_login_env, user, password, version, original_super)
+        self.password_login(old_login_env, user, password, version, original_super,
+            account_secret=secret if version == 1 else None)
         old_login = self.session(old_login_env)
         self.diagnostic_secrets.add(old_login.get("token", ""))
         require(old_login.get("user") == user and bool(old_login.get("token"))
@@ -406,16 +407,14 @@ class Smoke:
         self.report["stage"] = f"v{version}_migrated_sync"
         self.save()
         self.cli(upgraded_env, "sync")
-        final_env = self.env(f"v{version}-new-device", user)
+        final_env = self.env(f"v{version}-new-device", None if version == 1 else user)
         if version != 1:
             final_env["RSRS_SUPER"] = original_super
-        else:
-            # Supply only the original recovery factor, never a migrated wrap.
-            self.write_session(final_env, {"user": user, "secret": secret})
         if version == 3:
             # Explicitly restore the original second recovery factor.
             self.write_session(final_env, {"user": user, "secret_key": secret})
-        self.password_login(final_env, user, password, version, original_super)
+        self.password_login(final_env, user, password, version, original_super,
+            account_secret=secret if version == 1 else None)
         recovered_session = self.session(final_env)
         require(recovered_session.get("user") == user and bool(recovered_session.get("token"))
             and self.api(dict(account, token=recovered_session["token"]), "GET", "/api/self").get("user") == user

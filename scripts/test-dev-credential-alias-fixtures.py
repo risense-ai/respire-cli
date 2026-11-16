@@ -246,6 +246,61 @@ class AliasTests(unittest.TestCase):
             self.assertTrue(keys.cleanup()['passed'])
             self.assertFalse(keys.values)
 
+    def test_v1_fresh_login_blocks_use_hidden_factor_without_a_seeded_session(self):
+        tree = ast.parse((HERE / 'dev-legacy-vault-smoke.py').read_text(encoding='utf-8'))
+        run = next(node for node in ast.walk(tree)
+                   if isinstance(node, ast.FunctionDef) and node.name == 'run_version')
+        for variable in ('old_login_env', 'final_env'):
+            start = next(index for index, node in enumerate(run.body)
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == variable for target in node.targets))
+            end = next(index for index, node in enumerate(run.body[start:], start)
+                       if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+                       and isinstance(node.value.func, ast.Attribute) and node.value.func.attr == 'password_login')
+            code = compile(ast.Module(body=run.body[start:end + 1], type_ignores=[]),
+                           '<actual-v1-login-setup>', 'exec')
+            for fails in (False, True):
+                with self.subTest(profile=variable, fails=fails), tempfile.TemporaryDirectory() as temp:
+                    smoke = object.__new__(legacy.Smoke)
+                    smoke.root, smoke.model = Path(temp), Path(temp) / 'models'
+                    smoke.base_env, smoke.report = {}, {}
+                    smoke.args = SimpleNamespace(binary=Path('fixture-cli'))
+                    smoke.save = Mock()
+                    keys = MemoryKeys()
+                    keys.configure_env = Mock()
+                    smoke.keys = keys
+                    factor = 'fixture-account-secret'
+
+                    def cli(env, *args, **kwargs):
+                        self.assertFalse((Path(env['RSRS_DATA_DIR']) / 'session.json').exists())
+                        self.assertEqual(kwargs['prompts'][-1], ('  original v1 Account Secret: ', factor))
+                        self.assertNotIn(factor, args)
+                        if fails:
+                            raise RuntimeError('auth_failed')
+                        keys.created(ALIAS, None)
+                        keys.values['rsrs', 'legacy-secret:' + ALIAS] = factor
+                        smoke.write_session(env, dict(user=USER, keyring_account=ALIAS, token='fixture-token',
+                            vault_version=1, keyring_backend='native', legacy_secret_backend='native'))
+                        return {'summary': {'ok': True}}
+
+                    smoke.cli = cli
+                    scope = dict(self=smoke, version=1, user=USER, password=PASSWORD,
+                                 original_super=factor, secret=factor)
+                    with patch.object(legacy, 'install_published_runtime'):
+                        if fails:
+                            with self.assertRaisesRegex(RuntimeError, '^auth_failed$'):
+                                exec(code, scope)
+                            self.assertFalse(keys.entries)
+                        else:
+                            exec(code, scope)
+                            self.assertEqual(keys.entries, {('rsrs', 'pass:' + ALIAS), ('rsrs', 'legacy-secret:' + ALIAS)})
+                    self.assertTrue(keys.cleanup()['passed'])
+                    self.assertFalse(keys.values)
+                    session_path = Path(scope[variable]['RSRS_DATA_DIR']) / 'session.json'
+                    session_path.write_text('{', encoding='utf-8')
+                    with self.assertRaises(json.JSONDecodeError):
+                        smoke.session(scope[variable])
+
     def test_committed_session_tracked_even_when_post_auth_checks_fail(self):
         for reason in ('fixture_tty_missing_prompt', 'invalid_cli_json_login', 'owned_runtime_stop_failed'):
             keys = MemoryKeys()
