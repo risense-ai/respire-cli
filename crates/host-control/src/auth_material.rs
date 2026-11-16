@@ -1,6 +1,6 @@
 //! Host-owned v4 generation and credential custody for keygen and registration.
 use anyhow::{ensure, Context, Result};
-use respire_client_host::host_credentials::{read_auth_super, write_auth_super};
+use respire_client_host::host_credentials::{read_auth_super, write_auth_super, write_auth_password, remove_auth_material};
 use respire_crypto::crypto;
 use respire_protocol::HostAuthKeygenMaterial;
 use serde_json::Value;
@@ -27,6 +27,22 @@ pub fn checkpoint(material: &HostAuthKeygenMaterial, before_write: impl FnOnce()
     validate(material)?;
     before_write()?;
     write_auth_super(&material.keyring_account, &material.keyring_backend, &material.super_password)
+}
+
+/// Registration has already recorded its password-slot intent under the same operation owner.
+pub fn checkpoint_password(material: &HostAuthKeygenMaterial, password: &str) -> Result<()> {
+    validate(material)?;
+    ensure!(read_auth_super(&material.keyring_account, &material.keyring_backend)?.as_deref()
+        == Some(material.super_password.as_str()), "host registration Super Key checkpoint is missing");
+    write_auth_password(&material.keyring_account, &material.keyring_backend, password)
+}
+
+/// Retire only newly generated, receipt-owned slots, never a reused source vault.
+/// Supply the expected registration password to preserve any conflicting password slot.
+pub fn remove(material: &HostAuthKeygenMaterial, password: Option<&str>) -> Result<()> {
+    validate(material)?;
+    remove_auth_material(&material.keyring_account, &material.keyring_backend,
+        &material.super_password, password)
 }
 
 /// Reconnect using the exact public candidate and credential slot; never generate a replacement.
