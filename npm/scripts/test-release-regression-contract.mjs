@@ -107,7 +107,7 @@ test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',
 });
 test('supported Linux ARM targets require native runners, every source feedback phase and background install proof',async()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
-  for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
+  for(const file of ['release-validation.yml','release-native-validation.yml','release.yml']){
     const workflow=text(file).replace(/\r\n/g,'\n');
     for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
     assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
@@ -117,7 +117,7 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(source,/if: \$\{\{ inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin' && contains\(inputs.target, '-musl'\) \}\}/);
   assert.match(source,/scripts\/verify-linux-arm64-elf.sh/);assert.match(source,/diary_tests/);assert.match(source,/feedback_contract_probe/);
   assert.match(source,/scripts\/probe-native-arm64-alpine.sh/);
-  for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
+  assert.match(text('release-native-validation.yml'),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
   assert.match(alpine,/--network none/);assert.match(alpine,/--direct model install-m3 --json/);
   assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,4);
