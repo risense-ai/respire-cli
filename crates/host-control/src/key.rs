@@ -126,6 +126,15 @@ impl KeyCoordinator {
         control_key(Arc::clone(&self.host), Action::Query(operation_id))
     }
 
+    pub fn result_at(&self, operation_id: &str, source: &Path) -> Result<ResultEnvelope> {
+        control_key_inner(Arc::clone(&self.host), Action::Query(operation_id), Some(source), None)
+    }
+
+    pub fn continue_input(&self, operation_id: &str, source: &Path, input: HostKeyInput) -> Result<ResultEnvelope> {
+        anyhow::ensure!(input.material.is_none(), "desktop key input cannot supply private material");
+        control_key_inner(Arc::clone(&self.host), Action::Query(operation_id), Some(source), Some(input))
+    }
+
     pub fn rollback(&self, operation_id: &str) -> Result<ResultEnvelope> {
         control_key(Arc::clone(&self.host), Action::Rollback(operation_id))
     }
@@ -208,6 +217,12 @@ fn read_original(path: &Path) -> Result<Option<(Original, String)>> {
 }
 
 fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<ResultEnvelope> {
+    control_key_inner(host, action, None, None)
+}
+
+fn control_key_inner(host: Arc<dyn HostLifecycle>, action: Action<'_>,
+    source: Option<&Path>, supplemental: Option<HostKeyInput>,
+) -> Result<ResultEnvelope> {
     host.require_account_write()?;
     anyhow::ensure!(
         crate::maintenance::current_boot_token().is_none(),
@@ -217,8 +232,10 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
     let takeover = crate::maintenance::takeover_lock()?;
     let image = host.verified_runtime()?;
     image.revalidate()?;
-    std::fs::create_dir_all(&root)?;
-    std::fs::create_dir_all(&profile)?;
+    if source.is_none() {
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&profile)?;
+    }
     let root = root.canonicalize()?;
     let profile = profile.canonicalize()?;
     let path = root.join("runtime/autostart/key-control.json");
@@ -278,6 +295,14 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 *id == original.operation_id,
                 "key recovery requires the original operation ID"
             ),
+        }
+        if let Some(source) = source {
+            let source = source.canonicalize()?;
+            anyhow::ensure!(source == original.profile,
+                "key continuation source differs from original operation");
+            if supplemental.is_none() {
+                anyhow::ensure!(profile == source, "key query requires the original selected source");
+            }
         }
         let maintenance = Maintenance::resume_key_locked(
             &takeover,
@@ -399,7 +424,28 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 deadline,
             )?
         };
-        if reconnect && receipt.outcome == HostKeyOutcome::AwaitingInput {
+        if source.is_some() && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput) {
+            maintenance.pause_key()?;
+            let status = if matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack) {
+                Status::Ok
+            } else { Status::Pending };
+            return Ok(ResultEnvelope::new("key-control", status,
+                serde_json::to_value(receipt)?, Vec::new()));
+        }
+        if let Some(input) = &supplemental {
+            let (candidate, private) = material::prepare(&original, input)?;
+            let new_candidate = candidate.is_some();
+            if let Some(candidate) = candidate {
+                original.candidate = Some(candidate);
+                let bytes = serde_json::to_vec(&original)?;
+                crate::maintenance::write_recovery(&path, &bytes, Some(&digest))?;
+                digest = crate::launch::hash(&bytes);
+            }
+            if new_candidate { material::persist(&original, &private)?; }
+            receipt = exchange(&takeover, &mut maintenance, host.as_ref(), &original,
+                execute_method(&original.operation), Some(input), deadline)?;
+        }
+        if supplemental.is_none() && reconnect && receipt.outcome == HostKeyOutcome::AwaitingInput {
             match &action {
                 Action::Reset {
                     input,

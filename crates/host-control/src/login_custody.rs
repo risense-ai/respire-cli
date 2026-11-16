@@ -81,6 +81,33 @@ impl LoginCustody {
         Ok(Self { path, bytes, record, encoded, secrets })
     }
 
+    pub(crate) fn continue_operation(mut self, receipt: &HostAuthAccountResult,
+        mut input: HostAuthLoginContinuation, super_password: Option<String>, totp: Option<String>,
+    ) -> Result<crate::account_control::AccountControl> {
+        ensure!(receipt.operation_id == self.record.operation_id
+            && receipt.source_profile == self.record.source
+            && receipt.outcome == HostAuthAccountOutcome::AwaitingInput,
+            "login continuation does not match original custody");
+        let original = self.secrets.take().context("original login input custody is missing; do not replay authentication")?.request;
+        let status = receipt.login.as_ref().context("original login status is missing")?;
+        ensure!(status.addr == original.addr && status.user == original.user,
+            "login receipt differs from original custody");
+        let intent = original.continuation.as_ref().context("original login intent is missing")?;
+        input.migrate_local = intent.migrate_local;
+        input.migrate_vault = intent.migrate_vault;
+        input.offer_local_merge = intent.offer_local_merge;
+        let mut authorization = original.authorization;
+        if let Some(totp) = totp {
+            let HostAuthAuthorization::Password { totp: code, .. } = &mut authorization else {
+                anyhow::bail!("original authorization does not accept TOTP");
+            };
+            *code = Some(totp);
+        }
+        Ok(crate::account_control::AccountControl::LoginStep {
+            addr: original.addr, user: original.user, authorization, super_password, input,
+        })
+    }
+
     fn save(&mut self) -> Result<()> {
         let bytes = serde_json::to_vec(&self.record)?;
         crate::maintenance::private_io::private_write_record(&self.path, &bytes,

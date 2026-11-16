@@ -256,13 +256,28 @@ impl AccountCoordinator {
         )
     }
 
-    fn operate(
+    /// Continue only a durably bound operation; no authentication admission is allowed.
+    pub fn continue_login(&self, operation_id: &str, source: &Path,
+        input: HostAuthLoginContinuation, super_password: Option<String>, totp: Option<String>,
+    ) -> Result<ResultEnvelope> {
+        self.operate_inner(operation_id, Some(source), false, AccountControl::Result, None,
+            Some((input, super_password, totp)))
+    }
+
+    fn operate(&self, operation_id: &str, original_source: Option<&Path>, register: bool,
+        operation: AccountControl, continuation: Option<&mut Option<AccountContinuation>>,
+    ) -> Result<ResultEnvelope> {
+        self.operate_inner(operation_id, original_source, register, operation, continuation, None)
+    }
+
+    fn operate_inner(
         &self,
         operation_id: &str,
         original_source: Option<&Path>,
         register: bool,
         mut operation: AccountControl,
         mut continuation: Option<&mut Option<AccountContinuation>>,
+        supplemental: Option<(HostAuthLoginContinuation, Option<String>, Option<String>)>,
     ) -> Result<ResultEnvelope> {
         self.host.require_account_write()?;
         let id = uuid::Uuid::parse_str(operation_id).context("invalid account operation ID")?;
@@ -382,8 +397,8 @@ impl AccountCoordinator {
                 operation,
                 None,
             )?
-        } else if let (Some(_), AccountControl::LoginStep { addr, user, .. }) =
-            (original_source, &operation)
+        } else if original_source.is_some()
+            && (supplemental.is_some() || matches!(&operation, AccountControl::LoginStep { .. }))
         {
             let queried = exchange_account(
                 &takeover,
@@ -399,7 +414,18 @@ impl AccountCoordinator {
                 .map_err(|_| {
                     anyhow::anyhow!("invalid login continuation receipt shape").context(unknown())
                 })?;
+            if supplemental.is_some() && receipt.outcome != HostAuthAccountOutcome::AwaitingInput {
+                return Ok(queried);
+            }
             if receipt.outcome == HostAuthAccountOutcome::AwaitingInput {
+                if let Some((input, super_password, totp)) = supplemental {
+                    operation = crate::login_custody::LoginCustody::open(&takeover,
+                        maintenance.installation_root(), &source, operation_id)?
+                        .continue_operation(&receipt, input, super_password, totp)?;
+                }
+                let AccountControl::LoginStep { addr, user, .. } = &operation else {
+                    anyhow::bail!("original login continuation is missing");
+                };
                 let status = receipt
                     .login
                     .as_ref()

@@ -1578,8 +1578,8 @@ fn emit(command: &str, summary: Value) -> Result<()> {
 
 pub(crate) fn execute(command: &RuntimeCommand) -> Result<()> {
     match command {
-        RuntimeCommand::KeyResult { operation_id } => {
-            return crate::emit_result(super::control_key_result(operation_id)?);
+        RuntimeCommand::KeyResult { operation_id, source_profile } => {
+            return crate::emit_result(super::control_key_result(operation_id, source_profile.as_deref())?);
         }
         RuntimeCommand::KeyRollback { operation_id, confirm } => {
             anyhow::ensure!(*confirm, "key rollback requires explicit --confirm");
