@@ -66,14 +66,90 @@ pub(super) fn spawn(
         .join(format!("launch-{nonce}.json"));
     private_write(&path, &serde_json::to_vec(&grant)?, None)?;
     let token = format!("launch-v1:{nonce}");
-    match respire_spawn::spawn_binary_with_boot_token(&binary, arguments, Some(&token)) {
-        Ok(child) => Ok((child, nonce)),
+    let mut command = Command::new(&binary);
+    command.args(arguments).env("RSRS_RUNTIME_BOOT_TOKEN", &token)
+        .env("RSRS_HOST_PLUGIN_CHANNEL", "1").env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    match respire_spawn::spawn_owned_runtime(&mut command) {
+        Ok(mut child) => {
+            if let Err(error) = start_plugin_host(&mut child, profile) {
+                child.kill().context("stop Runtime after plugin channel initialization failure")?;
+                child.wait().context("reap Runtime after plugin channel initialization failure")?;
+                return Err(error);
+            }
+            Ok((child, nonce))
+        },
         Err(error) => {
             fs::remove_file(&path).with_context(|| {
                 format!("unused launch grant cleanup failed after spawn error: {error}")
             })?;
             Err(error).context("authorized runtime could not be spawned")
         }
+    }
+}
+
+fn start_plugin_host(child: &mut Child, root: std::path::PathBuf) -> Result<()> {
+    let input = child.stdin.take().context("Runtime host plugin input is missing")?;
+    let output = child.stdout.take().context("Runtime host plugin output is missing")?;
+    std::thread::Builder::new().name("runtime-plugin-host".into()).spawn(move || {
+        if let Err(error) = serve_plugin_events(output, input, &root.join("plugins.json")) {
+            // Dropping the writer revokes the Runtime parent channel. Never replay an event.
+            eprintln!("Runtime host plugin channel failed: {error:#}");
+            respire_logging::error(format_args!("Runtime host plugin channel failed: {error:#}"));
+        }
+    }).context("start Runtime host plugin reader")?;
+    Ok(())
+}
+
+fn execute_plugin_event(bytes: &[u8], config: &Path) -> Result<respire_protocol::host_plugin::HostPluginEventAck> {
+    use respire_protocol::host_plugin::*;
+    let request: HostPluginEventRequest = serde_json::from_slice(bytes).context("invalid Runtime host plugin event")?;
+    anyhow::ensure!(request.plugin_event == HOST_PLUGIN_SCHEMA_V
+        && uuid::Uuid::parse_str(&request.id).is_ok(), "invalid Runtime host plugin event identity");
+    let result = (|| -> Result<HostPluginEventResult> {
+        let event = match request.event { HostPluginEvent::PostSync => respire_commands::hooks::HookEvent::PostSync };
+        let verdict = respire_commands::hooks::fire_at(config, event, serde_json::to_value(request.data)?)?;
+        if verdict.failures.is_empty() {
+            Ok(HostPluginEventResult::Completed { warnings: verdict.warnings })
+        } else {
+            Ok(HostPluginEventResult::Failed { error: verdict.failures.join("; ") })
+        }
+    })().unwrap_or_else(|error| HostPluginEventResult::Failed { error: format!("{error:#}") });
+    match &result {
+        HostPluginEventResult::Failed { error } => {
+            eprintln!("Runtime post-sync plugin failed: {error}");
+            respire_logging::error(format_args!("Runtime post-sync plugin failed: {error}"));
+        },
+        HostPluginEventResult::Completed { warnings } => {
+            for warning in warnings { eprintln!("Runtime post-sync plugin warning: {warning}"); }
+        },
+    }
+    Ok(HostPluginEventAck { plugin_event_ack: HOST_PLUGIN_SCHEMA_V, id: request.id, result })
+}
+
+fn serve_plugin_events(mut output: impl Read, mut input: impl Write, config: &Path) -> Result<()> {
+    loop {
+        let mut length = [0_u8; 4];
+        // EOF between frames is the Runtime's normal exit. Partial frames are errors.
+        match output.read(&mut length[..1])? {
+            0 => return Ok(()),
+            1 => {},
+            _ => unreachable!("one-byte read cannot return more than one byte"),
+        }
+        output.read_exact(&mut length[1..])?;
+        let length = u32::from_be_bytes(length) as usize;
+        anyhow::ensure!(length > 0 && length <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES,
+            "invalid Runtime host plugin event frame size");
+        let mut bytes = vec![0_u8; length];
+        output.read_exact(&mut bytes)?;
+        let acknowledgement = execute_plugin_event(&bytes, config)?;
+        let bytes = serde_json::to_vec(&acknowledgement)?;
+        anyhow::ensure!(bytes.len() <= respire_protocol::HOST_CONTROL_MAX_FRAME_BYTES,
+            "Runtime host plugin acknowledgement exceeds protocol limit");
+        input.write_all(&u32::try_from(bytes.len())?.to_be_bytes())?;
+        input.write_all(&bytes)?;
+        input.flush()?;
     }
 }
 
@@ -877,6 +953,40 @@ mod tests {
 
     #[test]
     fn explicit_launch_port_is_exact_and_unambiguous() -> Result<()> {
+        use respire_protocol::host_plugin::*;
+        let directory = tempfile::tempdir()?;
+        let config = directory.path().join("plugins.json");
+        let id = uuid::Uuid::new_v4().to_string();
+        let request = HostPluginEventRequest { plugin_event: HOST_PLUGIN_SCHEMA_V, id: id.clone(),
+            event: HostPluginEvent::PostSync, data: HostPluginSyncData { pulled: 2, pushed: 3 } };
+        let bytes = serde_json::to_vec(&request)?;
+        let ack = execute_plugin_event(&bytes, &config)?;
+        assert_eq!(ack.id, id);
+        assert_eq!(ack.plugin_event_ack, HOST_PLUGIN_SCHEMA_V);
+        assert!(matches!(ack.result, HostPluginEventResult::Completed { warnings } if warnings.is_empty()));
+        for policy in ["skip", "warn", "block", ""] {
+            fs::write(&config, serde_json::to_vec(&json!({"hooks":{"post-sync":[
+                {"cmd":"exit 1", "on_error":policy}
+            ]}}))?)?;
+            let ack = execute_plugin_event(&bytes, &config)?;
+            assert!(matches!(ack.result, HostPluginEventResult::Failed { error } if error.contains("failed")));
+        }
+        fs::write(&config, b"{")?;
+        assert!(matches!(execute_plugin_event(&bytes, &config)?.result, HostPluginEventResult::Failed { .. }));
+        fs::remove_file(&config)?;
+        let mut frame = u32::try_from(bytes.len())?.to_be_bytes().to_vec();
+        frame.extend_from_slice(&bytes);
+        let mut reply = Vec::new();
+        serve_plugin_events(std::io::Cursor::new(&frame), &mut reply, &config)?;
+        assert_eq!(u32::from_be_bytes(reply[..4].try_into()?) as usize, reply.len() - 4);
+        let ack: HostPluginEventAck = serde_json::from_slice(&reply[4..])?;
+        assert_eq!(ack.id, id);
+        assert!(matches!(ack.result, HostPluginEventResult::Completed { warnings } if warnings.is_empty()));
+        assert!(serve_plugin_events(std::io::Cursor::new(&frame[..frame.len()-1]), Vec::new(), &config).is_err());
+        assert!(serve_plugin_events(std::io::Cursor::new(&frame[..2]), Vec::new(), &config).is_err());
+        let arbitrary = serde_json::to_vec(&json!({"plugin_event":1, "id":id,
+            "event":"command", "data":{"pulled":0,"pushed":0}, "cmd":"exit 0"}))?;
+        assert!(execute_plugin_event(&arbitrary, &config).is_err());
         assert_eq!(
             launch_port(&["serve".into(), "--port".into(), "19169".into()])?,
             19169

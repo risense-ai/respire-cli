@@ -1113,10 +1113,7 @@ pub fn set_data_dir(dir: &str) -> Result<()> {
             o.remove("data_dir");
         }
     } else {
-        if !(dir.starts_with('/')
-            || dir.starts_with("~/")
-            || (dir.len() >= 2 && dir.as_bytes()[1] == b':'))
-        {
+        if !requested.is_absolute() {
             anyhow::bail!("data dir must be an absolute path (/\u{2026} or ~/\u{2026})");
         }
         data["data_dir"] = serde_json::json!(dir);
@@ -3740,6 +3737,9 @@ mod tests {
         let absolute = custom.to_string_lossy().to_string();
         set_data_dir(&absolute)?;
         assert_eq!(data_dir(), custom);
+        let canonical_profile = custom.canonicalize()?;
+        set_data_dir(&canonical_profile.to_string_lossy())?;
+        assert_eq!(data_dir(), canonical_profile);
         assert!(
             iso.path().join("client.json").is_file(),
             "client.json was not written inside the isolated root"

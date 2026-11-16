@@ -1,5 +1,8 @@
 //! Native credential custody belongs to the host, including private control helpers.
 pub mod space;
+pub mod legacy_migration;
+pub mod key_control;
+pub mod login;
 
 use anyhow::{Context, Result};
 use respire_protocol::credentials::{
@@ -223,6 +226,15 @@ pub fn read_export_factors(session: &serde_json::Value) -> Result<(Option<String
 }
 
 pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
+    read_session_credentials_with(session, true)
+}
+
+/// Snapshot factors must belong to the original session, never process overrides.
+pub fn read_stored_session_credentials(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
+    read_session_credentials_with(session, false)
+}
+
+fn read_session_credentials_with(session: &serde_json::Value, use_environment: bool) -> Result<(Option<String>, Option<String>)> {
     let account = session["keyring_account"].as_str().filter(|alias|
         (alias.starts_with("legacy-") || alias.starts_with("login-"))
             && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
@@ -259,7 +271,7 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
             .map_err(|code| anyhow::anyhow!("host session credential read failed ({code:?})"))
     };
     let session_super = session["super"].as_str().filter(|value| !value.is_empty()).map(str::to_owned);
-    let super_password = match crate::env::var("RSRS_SUPER").ok().filter(|value| !value.is_empty()) {
+    let super_password = match use_environment.then(|| crate::env::var("RSRS_SUPER").ok()).flatten().filter(|value| !value.is_empty()) {
         Some(value) => Some(value),
         None if version < 2 => None,
         None if version < 4 && session_super.is_some() => session_super,
@@ -267,7 +279,7 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
             .or_else(|| (version >= 4).then(|| session["secret_key"].as_str().map(str::to_owned)).flatten()),
     };
     let login_password = if version < 2 {
-        match crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
+        match use_environment.then(|| crate::env::var("RSRS_PASS").ok()).flatten().filter(|value| !value.is_empty())
             .or_else(|| session["pass"].as_str().map(str::to_owned)) {
             Some(value) => Some(value),
             None => read("pass")?,
@@ -356,23 +368,7 @@ fn prepare_legacy_session_with(
         if let Some(value) = session["pass"].as_str() { slots.push(("pass", value, primary_backend)); }
     }
     for (slot, value, backend) in slots {
-        let mut request = CredentialRequest {
-            credential_request: CREDENTIAL_SCHEMA_V, id: uuid::Uuid::new_v4().to_string(),
-            service: "rsrs".into(), account: format!("{slot}:{alias}"), backend: backend.into(),
-            operation: CredentialOperation::Read,
-        };
-        match exchange(&request) {
-            Ok(Some(found)) => anyhow::ensure!(found == value, "legacy credential destination conflicts; original session retained"),
-            Err(CredentialError::NoEntry) => {
-                request.operation = CredentialOperation::Write(value.to_owned());
-                exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential write failed ({error:?}); original session retained"))?;
-            }
-            Ok(None) => anyhow::bail!("legacy credential read returned no result; original session retained"),
-            Err(error) => anyhow::bail!("legacy credential read failed ({error:?}); original session retained"),
-        }
-        request.operation = CredentialOperation::Read;
-        let found = exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential readback failed ({error:?}); original session retained"))?;
-        anyhow::ensure!(found.as_deref() == Some(value), "legacy credential readback mismatch; original session retained");
+        ensure_legacy_slot(alias, slot, value, backend, &mut exchange)?;
     }
     let mut migrated = session.clone();
     let fields = migrated.as_object_mut().context("session must contain an object")?;
@@ -381,6 +377,30 @@ fn prepare_legacy_session_with(
     fields.insert("keyring_backend".into(), serde_json::json!(primary_backend));
     fields.insert("legacy_secret_backend".into(), serde_json::json!(backend));
     Ok(migrated)
+}
+
+// Shared custody primitive: never overwrite a conflict or delete a slot after an uncertain write.
+fn ensure_legacy_slot(alias: &str, slot: &str, value: &str, backend: &str,
+    exchange: &mut impl FnMut(&CredentialRequest) -> Result<Option<String>, CredentialError>) -> Result<()> {
+    anyhow::ensure!(backend != "kernel", "legacy migration requires persistent host credentials");
+    let mut request = CredentialRequest {
+        credential_request: CREDENTIAL_SCHEMA_V, id: uuid::Uuid::new_v4().to_string(),
+        service: "rsrs".into(), account: format!("{slot}:{alias}"), backend: backend.into(),
+        operation: CredentialOperation::Read,
+    };
+    match exchange(&request) {
+        Ok(Some(found)) => anyhow::ensure!(found == value, "legacy credential destination conflicts; original session retained"),
+        Err(CredentialError::NoEntry) => {
+            request.operation = CredentialOperation::Write(value.to_owned());
+            exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential write failed ({error:?}); original session retained"))?;
+        }
+        Ok(None) => anyhow::bail!("legacy credential read returned no result; original session retained"),
+        Err(error) => anyhow::bail!("legacy credential read failed ({error:?}); original session retained"),
+    }
+    request.operation = CredentialOperation::Read;
+    let found = exchange(&request).map_err(|error| anyhow::anyhow!("legacy credential readback failed ({error:?}); original session retained"))?;
+    anyhow::ensure!(found.as_deref() == Some(value), "legacy credential readback mismatch; original session retained");
+    Ok(())
 }
 
 /// The caller verifies the Runtime process/image and profile before delivering any key.

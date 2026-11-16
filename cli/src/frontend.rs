@@ -398,7 +398,7 @@ fn run_plugin(command: &PluginCommand) -> Result<()> {
     let path = profile.join("plugins.json");
     match command {
         PluginCommand::List => {
-            let cfg = hooks::read_config_at(&path);
+            let cfg = hooks::read_config_at(&path)?;
             let mut items = Vec::new();
             for (event, hooks) in &cfg.hooks {
                 for hook in hooks {
@@ -453,7 +453,7 @@ fn run_plugin(command: &PluginCommand) -> Result<()> {
             })?;
             let data = serde_json::from_str(payload)
                 .map_err(|error| anyhow!("--payload is not JSON: {error}"))?;
-            let verdict = hooks::fire_at(&path, event, data);
+            let verdict = hooks::fire_at(&path, event, data)?;
             let status = if verdict.blocked {
                 OutputStatus::Warn
             } else {
@@ -875,6 +875,7 @@ fn run_fivekeys(
         },
         account_secret: Some(secret.to_owned()),
         totp: None,
+        material: None,
     };
     let mut envelope = autostart::control_fivekeys(
         operation.clone(),
@@ -883,6 +884,7 @@ fn run_fivekeys(
             super_password: input.super_password.clone(),
             account_secret: input.account_secret.clone(),
             totp: None,
+            material: None,
         },
         None,
     )?;
@@ -918,6 +920,7 @@ fn run_fivekeys(
                 super_password: input.super_password.clone(),
                 account_secret: input.account_secret.clone(),
                 totp: input.totp.clone(),
+                material: None,
             },
             Some(&receipt),
         )?;

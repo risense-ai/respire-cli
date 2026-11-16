@@ -7084,7 +7084,7 @@ pub fn run_local_inner(args: Cli) -> Result<()> {
         }
         Command::Plugin { command } => match command {
             PluginCommand::List => {
-                let cfg = crate::hooks::read_config();
+                let cfg = crate::hooks::read_config()?;
                 let path = crate::hooks::config_path();
                 let mut items = Vec::new();
                 for (ev, hooks) in &cfg.hooks {

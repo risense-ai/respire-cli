@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 mod account;
 mod account_control;
+mod login_custody;
 pub mod auth_material;
 mod exchange;
 mod key;
