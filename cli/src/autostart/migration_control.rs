@@ -1,4 +1,4 @@
-//! Explicit legacy migration: Runtime owns the copy, credentials and completion marker.
+//! Explicit legacy migration: host owns credential custody; Runtime owns DB/session publication.
 use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -176,6 +176,8 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         anyhow::ensure!(!crate::net_rpc::port_is_open(), "migration requires a drained Runtime");
         stage = "selection_before_send";
         unchanged()?;
+        stage = "host_candidates";
+        let mut host = respire_client_host::host_credentials::legacy_migration::LegacyMigration::collect(source_id)?;
         let method = if original.sent { HOST_MIGRATION_RESULT_METHOD } else {
             stage = "save_sent";
             original.sent = true;
@@ -186,7 +188,23 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
         };
         // A saved sent request always queries. A timeout never admits a replacement operation.
         stage = "exchange";
-        let reply = exchange(&takeover, &mut maintenance, &original.operation, method, &mut exchange_failure)?;
+        let mut reply = exchange(&takeover, &mut maintenance, &original.operation, method,
+            Some(host.material()), &mut exchange_failure)?;
+        if let MigrationReply::Receipt(receipt) = &reply {
+            if receipt.outcome == HostMigrationOutcome::CredentialsRequired {
+                stage = "host_custody";
+                unchanged()?;
+                host.retain_selected(&receipt.details)?;
+                stage = "selection_before_finalize";
+                unchanged()?;
+                stage = "exchange";
+                reply = exchange(&takeover, &mut maintenance, &original.operation, HOST_MIGRATION_RESULT_METHOD,
+                    Some(host.material()), &mut exchange_failure)?;
+                anyhow::ensure!(!matches!(&reply, MigrationReply::Receipt(receipt)
+                    if receipt.outcome == HostMigrationOutcome::CredentialsRequired),
+                    "migration still requires host credentials; no completion was accepted");
+            }
+        }
         if let MigrationReply::Receipt(receipt) = &reply {
             if receipt.outcome == HostMigrationOutcome::Unknown {
                 stage = "encode_unknown";
@@ -248,13 +266,15 @@ pub(crate) fn control_migrate_profile(source_id: &str, account: &str) -> Result<
 
 
 fn exchange(takeover: &LibraryLock, maintenance: &mut super::lifecycle::Maintenance,
-    original: &HostMigrationOperation, method: &str, failure: &mut &'static str) -> Result<MigrationReply> {
+    original: &HostMigrationOperation, method: &str, material: Option<&HostMigrationMaterial>,
+    failure: &mut &'static str) -> Result<MigrationReply> {
     let mut runtime_code = None;
     let envelope = super::control::auth_exchange(takeover, maintenance,
         Instant::now() + Duration::from_secs(185), None, |binding, identity| {
             anyhow::ensure!(binding.installation_root == original.installation_root && binding.profile == original.profile
                 && identity == original.identity, "migration exchange selection changed");
-            let params = HostMigrationParams { schema_version: HOST_MIGRATION_SCHEMA_V, binding, identity, original: original.clone() };
+            let params = HostMigrationParams { schema_version: HOST_MIGRATION_SCHEMA_V, binding, identity,
+                original: original.clone(), material: material.cloned() };
             Ok(RpcRequest { v: respire_commands::rpc_client::PROTOCOL_V, id: uuid::Uuid::new_v4().to_string(),
                 method: method.to_owned(), args: vec![serde_json::to_string(&params)?], scope: None,
                 operation_id: Some(original.operation_id.clone()), idempotency_key: Some(original.key.clone()),
@@ -353,6 +373,15 @@ fn validate_response(response: RpcResponse<ResultEnvelope>, request: &RpcRequest
         anyhow::ensure!(!response.ok && response.exit == 2 && response.code.as_deref() == Some("migration_outcome_unknown")
             && response.error.is_none() && matches!(envelope.status, Status::Fail) && receipt.details.is_null(),
             "invalid unknown migration result");
+    } else if receipt.outcome == HostMigrationOutcome::CredentialsRequired {
+        anyhow::ensure!(response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none()
+            && matches!(envelope.status, Status::Ok)
+            && receipt.details.as_object().is_some_and(|fields| fields.len() == 3)
+            && receipt.details["state"] == "credentials_required"
+            && receipt.details["candidate_index"].as_u64().is_some_and(|index| usize::try_from(index).is_ok())
+            && receipt.details["session_sha256"].as_str().is_some_and(|digest| digest.len() == 64
+                && digest.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))),
+            "invalid private migration custody requirement");
     } else {
         anyhow::ensure!(response.ok && response.exit == 0 && response.code.is_none() && response.error.is_none()
             && matches!(envelope.status, Status::Ok) && receipt.details.is_object(), "invalid terminal migration result");
@@ -377,7 +406,8 @@ fn validate_terminal_receipt(receipt: &HostMigrationResult, original: &HostMigra
         }
         HostMigrationOutcome::AlreadyMigrated => anyhow::ensure!(method == HOST_MIGRATION_PROFILE_METHOD
             && receipt.details["state"] == "already_migrated", "query cannot adopt an unbound legacy receipt"),
-        HostMigrationOutcome::Unknown => anyhow::bail!("unknown migration result is not a terminal receipt"),
+        HostMigrationOutcome::Unknown | HostMigrationOutcome::CredentialsRequired =>
+            anyhow::bail!("migration intermediate result is not a terminal receipt"),
     }
     Ok(())
 }

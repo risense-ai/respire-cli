@@ -18,6 +18,41 @@ use respire_protocol::maintenance_control::{LegacySnapshotRecoveryParams as Lega
     LEGACY_SNAPSHOT_RECOVERY_METHOD};
 pub(crate) use respire_protocol::maintenance_control::LegacySnapshotDescriptor;
 
+fn restore_material(profile: &Path) -> Result<respire_protocol::host_control::HostAuthSessionMaterial> {
+    use respire_client_host::host_credentials::{read_export_factors, read_session_credentials};
+    use respire_protocol::host_control::{HostAuthSessionMaterial, HostAuthVaultFactors as Factors};
+    let path = profile.join("session.json");
+    let metadata = std::fs::symlink_metadata(&path)?;
+    anyhow::ensure!(metadata.is_file() && !metadata.file_type().is_symlink()
+        && metadata.len() <= 65536, "snapshot session must be a bounded regular file");
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&path)?.take(65537).read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() <= 65536, "snapshot session is too large");
+    let session: serde_json::Value = serde_json::from_slice(&bytes)?;
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_u64().context("invalid snapshot vault version")?,
+    };
+    anyhow::ensure!((1..=4).contains(&version), "unsupported snapshot vault version");
+    let (super_password, legacy_secret) = read_export_factors(&session)?;
+    let factors = match version {
+        1 => Factors::V1 {
+            password: read_session_credentials(&session)?.1.context("snapshot original password is unavailable")?,
+            account_secret: legacy_secret.context("snapshot Account Secret is unavailable")?,
+        },
+        2 => Factors::V2 { super_password: super_password.context("snapshot super password is unavailable")? },
+        3 => Factors::V3 {
+            super_password: super_password.context("snapshot super password is unavailable")?,
+            secret_key: legacy_secret.context("snapshot Secret Key is unavailable")?,
+        },
+        4 => Factors::V4 { super_password: super_password.context("snapshot super password is unavailable")? },
+        _ => anyhow::bail!("unsupported snapshot vault version"),
+    };
+    anyhow::ensure!(std::fs::read(&path)? == bytes, "snapshot session changed while reading host factors");
+    Ok(HostAuthSessionMaterial { session_sha256: format!("{:x}", Sha256::digest(&bytes)), factors })
+}
+
 fn digest_shape(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
@@ -165,6 +200,7 @@ impl SnapshotOperation {
     /// Accept the exact original DTO, including its fingerprint and generation.
     /// The first caller creates O once; reconnect callers reuse that same O.
     pub(crate) fn from_original(original: Params) -> Result<Self> {
+        anyhow::ensure!(original.material.is_none(), "snapshot operation must not retain private material");
         let id = uuid::Uuid::parse_str(&original.operation_id)
             .context("invalid snapshot operation ID")?;
         anyhow::ensure!(
@@ -345,7 +381,7 @@ impl SnapshotOperation {
                 },
             "snapshot helper requires the exact operation and role-specific marker"
         );
-        let request = self.request(
+        let mut request = self.request(
             ControlBinding {
                 installation_root: grant.installation_root.clone(),
                 profile: grant.profile.clone(),
@@ -354,6 +390,11 @@ impl SnapshotOperation {
             },
             action,
         )?;
+        if action == Action::Restore {
+            let mut params: Params = serde_json::from_str(&request.args[0])?;
+            params.material = Some(restore_material(&grant.profile)?);
+            request.args[0] = serde_json::to_string(&params)?;
+        }
         let envelope = super::supervise::exchange_snapshot_control(
             binary,
             grant,

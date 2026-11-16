@@ -5,7 +5,7 @@ This crate does not include the retrieval engine or native SDK implementation.
 
 ```toml
 [dependencies]
-respire_protocol = "=2.0.0-dev.9"
+respire_protocol = "=2.0.0-dev.16"
 ```
 
 Wire field compatibility is maintained independently of client display names.

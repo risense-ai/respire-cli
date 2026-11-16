@@ -27,6 +27,8 @@ fn receipt(
             "dir":original.installation_root.join("accounts").join(&original.account),"original_preserved":true}),
         HostMigrationOutcome::AlreadyMigrated => json!({"state":"already_migrated"}),
         HostMigrationOutcome::Unknown => Value::Null,
+        HostMigrationOutcome::CredentialsRequired => json!({"state":"credentials_required",
+            "session_sha256":"b".repeat(64),"candidate_index":0}),
     };
     HostMigrationResult {
         operation_id: original.operation_id.clone(),
@@ -212,6 +214,7 @@ fn migration_responses_keep_unknown_queries_separate_from_terminal_receipts() ->
         HostMigrationOutcome::Completed,
         HostMigrationOutcome::AlreadyMigrated,
         HostMigrationOutcome::Unknown,
+        HostMigrationOutcome::CredentialsRequired,
     ] {
         let request = request(&original, HOST_MIGRATION_PROFILE_METHOD)?;
         let baseline = response(&original, outcome);
@@ -234,6 +237,19 @@ fn migration_responses_keep_unknown_queries_separate_from_terminal_receipts() ->
         .is_err());
     }
     let query = request(&original, HOST_MIGRATION_RESULT_METHOD)?;
+    let required = receipt(&original, HostMigrationOutcome::CredentialsRequired);
+    assert!(validate_terminal_receipt(&required, &original, HOST_MIGRATION_PROFILE_METHOD).is_err());
+    assert!(validate_terminal_receipt(&required, &original, HOST_MIGRATION_RESULT_METHOD).is_err());
+    validate_response(serde_json::from_value(response(&original, HostMigrationOutcome::CredentialsRequired))?,
+        &query, &root, 42, &original)?;
+    for details in [json!({"state":"migrated","session_sha256":"b".repeat(64),"candidate_index":0}),
+        json!({"state":"credentials_required","session_sha256":"bad","candidate_index":0}),
+        json!({"state":"credentials_required","session_sha256":"b".repeat(64),"candidate_index":-1}),
+        json!({"state":"credentials_required","session_sha256":"b".repeat(64),"candidate_index":0,"extra":true})] {
+        let mut changed = response(&original, HostMigrationOutcome::CredentialsRequired);
+        changed["envelope"]["summary"]["details"] = details;
+        assert!(validate_response(serde_json::from_value(changed)?, &query, &root, 42, &original).is_err());
+    }
     let baseline = response(&original, HostMigrationOutcome::Unknown);
     for (pointer, value) in [
         ("/v", json!(2)),
