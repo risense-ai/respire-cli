@@ -19,7 +19,7 @@ on:
         default: ''
         type: string
       full_validation:
-        default: true
+        default: false
         type: boolean
       client2_release:
         description: Explicit public Client2 tag; empty selects authenticated CI candidate evidence
@@ -46,8 +46,8 @@ on:
         default: main
         type: string
       full_validation:
-        description: Run historical native upgrades as well as build/package checks
-        default: true
+        description: Full acceptance requires the Release published-assets entry; standalone runs build/package checks
+        default: false
         type: boolean
       client2_release:
         description: Explicit public Client2 tag; empty selects authenticated CI candidate evidence
@@ -82,6 +82,10 @@ jobs:
       sha: ${{ steps.source.outputs.sha }}
       version: ${{ steps.source.outputs.version }}
     steps:
+      - name: Reject full native acceptance of unpublished build candidates
+        env:
+          FULL_VALIDATION: ${{ inputs.full_validation }}
+        run: node -e "if(process.env.FULL_VALIDATION==='true'&&process.env.ARTIFACT_SOURCE!=='published-assets')throw Error('Use Release artifact_source=published-assets after final product publication for full acceptance')"
       - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref }}
@@ -223,23 +227,16 @@ jobs:
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
       - uses: actions/cache/restore@v4
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.artifact_source == 'published-assets'
         with:
           path: ${{ runner.temp }}/release-probe/models/bge-m3
           key: release-m3-quantized-0826f8c1-macos
       - uses: actions/setup-python@v5
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && inputs.artifact_source == 'published-assets'
         with:
           python-version: '3.12'
-      - name: Bind macOS fixtures to an independent official pinned Runtime
-        if: runner.os == 'macOS' && inputs.artifact_source != 'published-assets'
-        shell: bash
-        env:
-          RSRS_DATA_DIR: ${{ runner.temp }}/full-runtime-proof
-          RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
-        run: node scripts/ci-install-pinned-runtime.mjs target/ci/${{ matrix.target }}/release/rsrs
-      - name: Verify real macOS CPU inference before DEV publication
-        if: runner.os == 'macOS'
+      - name: Verify real macOS CPU inference from published Release assets
+        if: runner.os == 'macOS' && inputs.artifact_source == 'published-assets'
         shell: bash
         env:
           RSRS_ENGINE: cpu

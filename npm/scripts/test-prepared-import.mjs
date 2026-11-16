@@ -167,7 +167,7 @@ test('optional historical byte parameters cannot substitute for mandatory write-
 test('prepared import preserves the exact validation profile and old missing fields remain full',()=>{
   const old=fixture();delete old.receipt.preparation.validation_profile;old.receipt.origin=preparationLink(old.receipt.preparation,{id:90,name:'release-prepared-700-1',size_in_bytes:100,digest:'sha256:'+hash,expired:false,workflow_run:{id:700,head_sha:sha}});validateImportedEvidence(old.receipt,old.source,old.manifest,old.context);
   const f=fixture(),h=f.context.history;
-  h.jobs=h.jobs.filter(j=>!j.name.startsWith('cloud-sweep (')&&!j.name.startsWith('Native migration (')&&!j.name.startsWith('Migration gate ('));
+  h.jobs=h.jobs.filter(j=>j.name.startsWith('validate / ')||j.name==='preparation-receipt');
   const producing=structuredClone(h.jobs);Object.assign(producing.at(-1),{status:'in_progress',conclusion:undefined,completed_at:undefined});
   const proof=createPreparation({...h,jobs:producing,run:{...h.run,status:'in_progress'},profile:'critical',now:time(4)});
   f.receipt.preparation=proof;f.receipt.validation_profile='critical';

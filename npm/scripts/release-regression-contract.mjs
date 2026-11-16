@@ -8,7 +8,7 @@ export function regressionContract(manifest,profile='full') {
   const native=manifest.targets.map(t=>t.triple);
   // Legacy migration fixtures bind architectures with published pre-1.0.20 binaries.
   const migration=native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
-  if(profile==='critical')return {schema:1,validation_profile:profile,native,cloud:[],migration:[],migration_gate:[],api:true};
+  if(profile==='critical')return {schema:1,validation_profile:profile,binaries:native,package:true,native:[],cloud:[],migration:[],migration_gate:[],api:false};
   return {schema:1,native,cloud:native.filter(t=>t!=='x86_64-unknown-linux-gnu'),migration,migration_gate:migration,api:true};
 }
 const same=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
@@ -21,6 +21,7 @@ export function validateRegressionContract(contract,manifest,expectedProfile){
   return contract;
 }
 const groups=[
+    ['binaries',j=>j.name.startsWith('validate / Release ('),t=>j=>j.name===`validate / Release (${t})`],
     ['native',j=>j.name.includes('native-regression / Native ('),t=>j=>j.name.endsWith(`Native (${t})`)],
     ['cloud',j=>j.name.startsWith('cloud-sweep ('),t=>j=>j.name.endsWith(`${t})`)],
     ['migration',j=>j.name.startsWith('Native migration ('),t=>j=>j.name===`Native migration (${t})`],
@@ -30,10 +31,12 @@ export function regressionStatus(jobs,contract){
   const profile=validationProfile(contract?.validation_profile);
   let pending=false;
   for(const [kind,select,match] of groups){
+    if(kind==='binaries'&&profile==='full')continue;
     const selected=jobs.filter(select);
     if(new Set(selected.map(j=>j.name)).size!==selected.length)throw Error('Duplicate '+kind+' regression');
-    const fullTargets=kind==='cloud'?contract.native.filter(t=>t!=='x86_64-unknown-linux-gnu'):contract.native.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
-    const inactive=profile==='critical'&&kind!=='native'?selected.filter(j=>j.status==='completed'&&j.conclusion==='skipped'&&fullTargets.some(target=>match(target)(j))):[];
+    const targets=contract.binaries??contract.native;
+    const fullTargets=kind==='cloud'?targets.filter(t=>t!=='x86_64-unknown-linux-gnu'):targets.filter(t=>t.includes('windows')||t==='aarch64-apple-darwin'||t==='x86_64-apple-darwin');
+    const inactive=profile==='critical'&&kind!=='native'&&kind!=='binaries'?selected.filter(j=>j.status==='completed'&&j.conclusion==='skipped'&&fullTargets.some(target=>match(target)(j))):[];
     const placeholder=selected.filter(j=>j.name==='Native migration (${{ matrix.target }})'||j.name==='Migration gate (${{ matrix.target }})');
     // Actual API run 41291097685 emits these placeholders for unselected full-only matrices.
     if(placeholder.length>(profile==='critical'?1:0)||placeholder.some(j=>j.status!=='completed'||j.conclusion!=='skipped'))throw Error('Unexpected inactive regression matrix');
@@ -47,10 +50,19 @@ export function regressionStatus(jobs,contract){
       if(!job||job.status!=='completed'||job.conclusion!=='success')pending=true;
     }
   }
-  const api=jobs.filter(j=>j.name==='api-smoke');
-  if(contract.api!==true||api.length>1)throw Error('Invalid API regression inventory');
-  if(api[0]?.status==='completed'&&api[0].conclusion!=='success')throw Error(`Required API regression: ${api[0].conclusion}`);
-  if(api.length!==1||api[0].status!=='completed'||api[0].conclusion!=='success')pending=true;
+  if(typeof contract.api!=='boolean')throw Error('Invalid API regression inventory');
+  for(const [name,required] of [['api-smoke',contract.api],['validate / npm-dry-run',contract.package]]){
+    if(required===undefined)continue;
+    const selected=jobs.filter(j=>j.name===name);
+    if(selected.length>1)throw Error('Duplicate required gate: '+name);
+    if(required===false){
+      if(selected.some(j=>j.status!=='completed'||j.conclusion!=='skipped'))throw Error('Unexpected inactive gate: '+name);
+      continue;
+    }
+    if(required!==true)throw Error('Invalid required gate: '+name);
+    if(selected[0]?.status==='completed'&&selected[0].conclusion!=='success')throw Error(`Required ${name}: ${selected[0].conclusion}`);
+    if(selected.length!==1||selected[0].status!=='completed'||selected[0].conclusion!=='success')pending=true;
+  }
   return pending?'pending':'success';
 }
 
@@ -67,7 +79,7 @@ export function parseTimestamp(value){
 export function regressionCompletedAt(jobs,contract,readyTimestamp){
   if(regressionStatus(jobs,contract)!=='success')return null;
   const ready=parseTimestamp(readyTimestamp);if(ready===null)return null;
-  const required=jobs.filter(j=>j.name==='api-smoke'||groups.some(([kind,,match])=>contract[kind].some(target=>match(target)(j))));
+  const required=jobs.filter(j=>(contract.api&&j.name==='api-smoke')||(contract.package&&j.name==='validate / npm-dry-run')||groups.some(([kind,,match])=>(contract[kind]??[]).some(target=>match(target)(j))));
   const completions=[];
   for(const job of required){
     const end=parseTimestamp(job.completed_at);if(end===null)return null;

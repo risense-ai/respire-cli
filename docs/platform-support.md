@@ -9,7 +9,7 @@ compiler target alone does not establish product support.
 | --- | --- | --- | --- |
 | Windows x64 | `x86_64-pc-windows-msvc` | Existing; `windows-latest` | Pinned SDK and DirectML |
 | Windows ARM64 | `aarch64-pc-windows-msvc` | Added; native `windows-11-arm`, DEV first | Pinned SDK and ARM64 DirectML |
-| macOS Intel | `x86_64-apple-darwin` | Restored candidate; native `macos-15-intel`, macOS 13.4+; official Runtime 2.0.0-dev.17 pinned | ORT API 20; bundled ORT 1.20.1 |
+| macOS Intel | `x86_64-apple-darwin` | Restored candidate; native `macos-15-intel`, macOS 13.4+; official Runtime 2.0.0-dev.18 pinned | ORT API 20; bundled ORT 1.20.1 |
 | macOS ARM64 | `aarch64-apple-darwin` | Existing; native `macos-latest` | Pinned CPU SDK |
 | Linux x64 GNU | `x86_64-unknown-linux-gnu` | Existing; `ubuntu-latest` | Pinned CPU SDK |
 | Linux x64 musl | `x86_64-unknown-linux-musl` | Existing; Ubuntu and native Alpine | Pinned static CPU SDK |
@@ -72,7 +72,7 @@ Every released CLI target must provide `cli-build-<target>.json` and
 `rsrs-<target>[.exe]`. Frontend schema 2 metadata binds the version, source
 commit, target, executable filename and SHA-256. The CLI does not bundle a
 Runtime archive. Runtime 2.0.0-dev.16 retains its immutable seven targets and
-21 assets. Official Runtime 2.0.0-dev.17 supplies eight targets and 24 assets,
+21 assets. Official Runtime 2.0.0-dev.18 supplies eight targets and 24 assets,
 including Intel archives, libraries and notices; CLI CI consumes those assets
 without compiling Runtime.
 The build checks version and headers before staging; package verification
