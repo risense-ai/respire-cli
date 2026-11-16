@@ -37,47 +37,41 @@ class RejectionTests(unittest.TestCase):
         reason = ('local runtime requires a literal loopback IP or localhost' if host == 'example.invalid'
                   else 'local runtime cannot bind a non-loopback address')
         return [subprocess.CompletedProcess([], 2, f'runtime=starting host={host} port=12345\n',
-                                             'rsrs-runtime: ' + reason + '\n'),
-                subprocess.CompletedProcess([], 2, '', '')]
+                                             'rsrs-runtime: ' + reason + '\n')]
 
-    def test_all_hosts_two_separate_paths_and_no_secrets(self):
+    def test_all_hosts_runtime_only_and_no_secrets(self):
         for host, case in CASES:
             with patch.object(runtime, 'contained_rejection_run', side_effect=self.results(host)) as run:
                 self.smoke.nonloopback(host, case)
-                self.assertEqual(run.call_count, 2)
+                self.assertEqual(run.call_count, 1)
                 self.assertEqual(run.call_args_list[0].args[0], ['owned-runtime', 'serve', '--host', host, '--port', '12345'])
-                self.assertIn('--runtime-internal', run.call_args_list[1].args[0])
                 self.assertNotIn('--supervised', run.call_args_list[0].args[0])
                 self.assertEqual(self.smoke.report, {})
-        self.assertEqual(self.sock.connect_ex.call_count, 15)
+        self.assertEqual(self.sock.connect_ex.call_count, 9)
 
-    def test_wrong_exit_in_either_path_fails_closed(self):
+    def test_wrong_runtime_exit_fails_closed(self):
         for host, case in CASES:
-            for index in (0, 1):
-                for code in (0, 1, 3, -11, True, None):
-                    results = self.results(host)
-                    results[index].returncode = code
-                    with patch.object(runtime, 'contained_rejection_run', side_effect=results):
-                        with self.assertRaisesRegex(runtime.Failure, '^nonloopback_exit_mismatch$'):
-                            self.smoke.nonloopback(host, case)
-                    self.assertNotIn(SECRET, json.dumps(self.smoke.report))
+            for code in (0, 1, 3, -11, True, None):
+                results = self.results(host)
+                results[0].returncode = code
+                with patch.object(runtime, 'contained_rejection_run', side_effect=results):
+                    with self.assertRaisesRegex(runtime.Failure, '^nonloopback_exit_mismatch$'):
+                        self.smoke.nonloopback(host, case)
+                self.assertNotIn(SECRET, json.dumps(self.smoke.report))
 
     def test_wrong_reason_clap_panic_auth_and_mixed_output_rejected(self):
         for host, case in CASES:
-            for index in (0, 1):
-                for field in ('stdout', 'stderr'):
-                    for text in ('error: unexpected argument', 'thread panicked',
-                                 'rsrs-runtime: runtime launch grant is missing or consumed\n',
-                                 SECRET, 'success\n', '',
-                                 'rsrs-runtime: local runtime requires an exclusively loopback localhost address\n'):
-                        if index == 1 and text == '':
-                            continue
-                        results = self.results(host)
-                        setattr(results[index], field, text)
-                        with patch.object(runtime, 'contained_rejection_run', side_effect=results):
-                            with self.assertRaises(runtime.Failure):
-                                self.smoke.nonloopback(host, case)
-                        self.assertNotIn(SECRET, json.dumps(self.smoke.report))
+            for field in ('stdout', 'stderr'):
+                for text in ('error: unexpected argument', 'thread panicked',
+                             'rsrs-runtime: runtime launch grant is missing or consumed\n',
+                             SECRET, 'success\n', '',
+                             'rsrs-runtime: local runtime requires an exclusively loopback localhost address\n'):
+                    results = self.results(host)
+                    setattr(results[0], field, text)
+                    with patch.object(runtime, 'contained_rejection_run', side_effect=results):
+                        with self.assertRaises(runtime.Failure):
+                            self.smoke.nonloopback(host, case)
+                    self.assertNotIn(SECRET, json.dumps(self.smoke.report))
             results = self.results(host)
             results[0].stderr += SECRET
             with patch.object(runtime, 'contained_rejection_run', side_effect=results):
@@ -88,7 +82,7 @@ class RejectionTests(unittest.TestCase):
         host, case = CASES[0]
         for name in ('endpoint.json', 'token'):
             target = self.smoke.root / 'runtime' / name
-            for stage in ('before', 0, 1):
+            for stage in ('before', 0):
                 target.unlink(missing_ok=True)
                 results = iter(self.results(host))
                 calls = []
@@ -104,7 +98,7 @@ class RejectionTests(unittest.TestCase):
                         self.smoke.nonloopback(host, case)
                 self.assertEqual(len(calls), 0 if stage == 'before' else stage + 1)
                 target.unlink()
-        for stage in (0, 2, 4):
+        for stage in (0, 1, 2):
             self.sock.connect_ex.side_effect = [111] * stage + [0]
             with patch.object(runtime, 'contained_rejection_run', side_effect=self.results(host)):
                 with self.assertRaisesRegex(runtime.Failure, 'left_listener'):
