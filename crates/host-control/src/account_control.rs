@@ -79,7 +79,7 @@ pub(crate) fn account_request(
                 user,
                 authorization,
                 super_password: Some(super_password),
-                continuation: None,
+                continuation: None, material: None, challenge: None, custody_ack: None,
             })?,
         ),
         AccountControl::LoginStep {
@@ -98,7 +98,7 @@ pub(crate) fn account_request(
                 user,
                 authorization,
                 super_password,
-                continuation: Some(input),
+                continuation: Some(input), material: None, challenge: None, custody_ack: None,
             })?,
         ),
         receipt => {
@@ -113,7 +113,7 @@ pub(crate) fn account_request(
                 serde_json::to_string(&HostAuthAccountParams {
                     schema_version: HOST_AUTH_SCHEMA_V,
                     binding,
-                    identity,
+                    identity, candidate: None, migration_password: None,
                 })?,
             )
         }
@@ -188,6 +188,7 @@ pub(crate) fn validate_account_receipt(
                     && login.required_inputs.iter().all(|input| matches!(
                         input.as_str(),
                         "totp"
+                            | "host_credentials"
                             | "super_password"
                             | "legacy_password"
                             | "account_secret"
@@ -609,6 +610,28 @@ mod tests {
             super_password: "fixture-only".into(),
         })?;
         let private = "synthetic-private-account-material";
+        let mut awaiting = ResultEnvelope::new("auth-account", Status::Pending, serde_json::json!({
+            "receipt": {"operation_id":receipt.operation_id,"outcome":"awaiting_input",
+                "source_profile":source,"login":{"user":"fixture","addr":"https://fixture.invalid",
+                    "required_inputs":["totp"]}},
+            "handoff":{"kind":"challenge","payload":private,
+                "sha256":"a".repeat(64)}
+        }), Vec::new());
+        awaiting.items = vec![
+            respire_commands::output::Item::new("control_ready", Status::Ok, "true"),
+            respire_commands::output::Item::new("store_ready", Status::Skip, "false"),
+        ];
+        let mut response = RpcResponse {
+            v: request.v, id: request.id.clone(), operation_id: request.operation_id.clone(),
+            idempotency_key: request.idempotency_key.clone(), ok: true, exit: 0,
+            bin: "rsrs-runtime".into(), pid: Some(5252), scope: None, web_url: None,
+            data_dir: None, code: None, error: None, envelope: Some(awaiting),
+        };
+        let handoff = crate::login_custody::unpack(&mut response, false)?;
+        assert!(matches!(handoff, Some(respire_protocol::host_control::HostAuthLoginHandoff::Challenge { payload, .. }) if payload == private));
+        let public = validate_account_response(response, &request, &source, 5252, &source, false)?;
+        assert!(!serde_json::to_string(&public)?.contains(private));
+        assert!(public.summary.get("handoff").is_none());
         for head in ["local library uses different key material; original data was preserved",
             "destination belongs to another account"] {
             for (diagnostic, classified) in [

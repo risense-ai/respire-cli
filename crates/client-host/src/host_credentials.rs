@@ -1,5 +1,6 @@
 //! Native credential custody belongs to the host, including private control helpers.
 pub mod space;
+pub mod login;
 
 use anyhow::{Context, Result};
 use respire_protocol::credentials::{
