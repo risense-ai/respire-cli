@@ -456,12 +456,20 @@ pub(crate) fn serve() -> Result<()> {
             && Path::new(&health.installation_root).canonicalize()? == installation.canonicalize()?
             && Path::new(&health.data_dir).canonicalize()? == profile.canonicalize()?,
             "Runtime readiness does not match the selected child and installation");
-        let backend = Arc::new(Backend { port, health, executable, public_port,
+        let mut backend = Backend { port, health, executable, public_port,
             host_executable: visible_path(std::env::current_exe()?)?,
             host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
-            last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
+            last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) };
         backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+        if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::Unlock {
+            respire_host_control::lifecycle_io::unlock_if_needed(&backend.health)?;
+            let current = serde_json::from_value(health_at(port)?)?;
+            backend.verify(&current)?;
+            backend.health = current.clone();
+            backend.last_health = Mutex::new(current);
+        }
         expectation.confirm_credentials(&backend.health)?;
+        let backend = Arc::new(backend);
         let server = tiny_http::Server::from_listener(listener, None)
             .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
         Ok((backend, server))
@@ -751,7 +759,9 @@ pub(crate) fn start_locked_with_expectation(
     };
     let deadline = Instant::now() + Duration::from_secs(40);
     while Instant::now() < deadline {
-        anyhow::ensure!(child.try_wait()?.is_none(), "compatibility host exited before readiness");
+        if let Some(status) = child.try_wait()? {
+            anyhow::bail!("compatibility host exited before readiness: {status}");
+        }
         if let Ok(public) = health_at(crate::net_rpc::rpc_port()) {
             return verify_host(&public, &executable, Some(host_pid));
         }
