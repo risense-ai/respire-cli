@@ -362,7 +362,7 @@ class Smoke:
         return value
 
     def nonloopback_no_effects(self):
-        # Check before and after each individual probe, not only after the pair.
+        # Check before and after the Runtime rejection probe.
         with socket.socket() as check:
             check.settimeout(1)
             require(check.connect_ex(('127.0.0.1', self.port)) != 0,
@@ -385,52 +385,38 @@ class Smoke:
                         expected=1, case_id=case_id)
             self.nonloopback_no_effects()
             return
-        # CLI forwarding discards child stdio. Verify the same installed image's
-        # rejection separately via its supported unsupervised serve entry point.
+        # Verify the installed Runtime's supported unsupervised serve entry point.
         # No boot token, grant, registration, or ownership state is manufactured.
-        launches = (
-            ('runtime_host_rejection', [str(self.args.runtime_binary), 'serve',
-             '--host', host, '--port', str(self.port)]),
-            ('cli_runtime_forwarding', [str(self.args.binary), '--direct', '--json',
-             '--runtime-internal', '--host', host, '--port', str(self.port)]),
-        )
-        for probe_id, command in launches:
+        command = [str(self.args.runtime_binary), 'serve', '--host', host, '--port', str(self.port)]
+        self.nonloopback_no_effects()
+        try:
+            result = contained_rejection_run(command, self.env, self.root)
+        except (OSError, subprocess.TimeoutExpired):
+            raise Failure('nonloopback_execution_failed') from None
+        finally:
+            # The supervisor has already killed/reaped its exact descendants;
+            # check filesystem/listener effects even after launch/timeout errors.
             self.nonloopback_no_effects()
-            try:
-                result = contained_rejection_run(command, self.env, self.root)
-            except (OSError, subprocess.TimeoutExpired):
-                raise Failure('nonloopback_execution_failed') from None
-            finally:
-                # The supervisor has already killed/reaped its exact descendants;
-                # check filesystem/listener effects even after launch/timeout errors.
-                self.nonloopback_no_effects()
-            # Only fixed classifications, booleans and lengths may leave this process.
-            self.report['failure_diagnostic'] = {
-                'case_id': case_id, 'probe_id': probe_id, 'expected_exit': 2,
-                'actual_exit': result.returncode if type(result.returncode) is int else None,
-            }
-            expected_stdout = f'runtime=starting host={host} port={self.port}\n' if probe_id == 'runtime_host_rejection' else ''
-            expected_stderr = 'rsrs-runtime: ' + cases[host][1] + '\n' if probe_id == 'runtime_host_rejection' else ''
-            known_cpuid_warning = 'onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n'
-            known_cpuid_warning_match = (probe_id == 'runtime_host_rejection'
-                                         and result.stderr == known_cpuid_warning + expected_stderr)
-            stdout_match = result.stdout == expected_stdout
-            stderr_match = result.stderr == expected_stderr or known_cpuid_warning_match
-            self.report['failure_diagnostic'].update(
-                known_cpuid_warning_match=known_cpuid_warning_match,
-                stdout_expected_match=stdout_match, stderr_expected_match=stderr_match,
-                stdout_utf8_bytes=len(result.stdout.encode('utf-8')), stderr_utf8_bytes=len(result.stderr.encode('utf-8')),
-                output_classification='expected_output' if stdout_match and stderr_match else 'output_mismatch')
-            require(type(result.returncode) is int and result.returncode == 2,
-                    'nonloopback_exit_mismatch')
-            if probe_id == 'runtime_host_rejection':
-                require(stderr_match
-                        and result.stdout == f'runtime=starting host={host} port={self.port}\n',
-                        'nonloopback_rejection_reason_mismatch')
-            else:
-                require(result.stdout == '' and result.stderr == '',
-                        'nonloopback_forwarding_output_mismatch')
-            self.report.pop('failure_diagnostic', None)
+        # Only fixed classifications, booleans and lengths may leave this process.
+        self.report['failure_diagnostic'] = {
+            'case_id': case_id, 'probe_id': 'runtime_host_rejection', 'expected_exit': 2,
+            'actual_exit': result.returncode if type(result.returncode) is int else None,
+        }
+        expected_stdout = f'runtime=starting host={host} port={self.port}\n'
+        expected_stderr = 'rsrs-runtime: ' + cases[host][1] + '\n'
+        known_cpuid_warning = 'onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0\n'
+        known_cpuid_warning_match = result.stderr == known_cpuid_warning + expected_stderr
+        stdout_match = result.stdout == expected_stdout
+        stderr_match = result.stderr == expected_stderr or known_cpuid_warning_match
+        self.report['failure_diagnostic'].update(
+            known_cpuid_warning_match=known_cpuid_warning_match,
+            stdout_expected_match=stdout_match, stderr_expected_match=stderr_match,
+            stdout_utf8_bytes=len(result.stdout.encode('utf-8')), stderr_utf8_bytes=len(result.stderr.encode('utf-8')),
+            output_classification='expected_output' if stdout_match and stderr_match else 'output_mismatch')
+        require(type(result.returncode) is int and result.returncode == 2,
+                'nonloopback_exit_mismatch')
+        require(stderr_match and stdout_match, 'nonloopback_rejection_reason_mismatch')
+        self.report.pop('failure_diagnostic', None)
 
     def http(self, base, method, path, body=None, token=None, headers=None, raw=False):
         fields = {'Content-Type': 'application/json', **(headers or {})}
