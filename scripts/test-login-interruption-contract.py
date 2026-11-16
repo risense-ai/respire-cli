@@ -19,7 +19,7 @@ import uuid
 SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
 NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation',
-         'process_group_members', 'interrupt_owned_control', 'stop_owned_control'}
+         'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt'}
 
 
 def require(value, message):
@@ -126,6 +126,23 @@ class JournalContract(unittest.TestCase):
             terminal['active'] = self.journal['active']
             with self.assertRaises(RuntimeError):
                 terminal_operation(terminal, self.record, phase)
+
+    def test_continuation_requires_original_identity_and_actual_required_input(self):
+        for outcome in ('awaiting_input', 'committed'):
+            summary = {'operation_id': self.id, 'source_profile': str(self.root), 'outcome': outcome,
+                       'login': {'user': 'synthetic', 'addr': self.addr,
+                                 'required_inputs': ['super_password'] if outcome == 'awaiting_input' else []}}
+            login_continuation_receipt(summary, self.id, self.root, self.addr, outcome)
+            for field, wrong in (('operation_id', str(uuid.uuid4())), ('source_profile', '/other'),
+                                 ('outcome', 'unknown')):
+                with self.subTest(outcome=outcome, field=field), self.assertRaises(RuntimeError):
+                    login_continuation_receipt(dict(summary, **{field: wrong}), self.id, self.root, self.addr, outcome)
+            for field, wrong in (('user', 'other'), ('addr', 'http://other.invalid'),
+                                 ('required_inputs', ['host_credentials'])):
+                value = copy.deepcopy(summary)
+                value['login'][field] = wrong
+                with self.subTest(outcome=outcome, field=field), self.assertRaises(RuntimeError):
+                    login_continuation_receipt(value, self.id, self.root, self.addr, outcome)
 
     def test_real_fixture_keeps_required_failure_assertions(self):
         for assertion in ('legacy_original_profile_not_restored', 'legacy_interrupted_credential_not_deleted',
@@ -304,7 +321,7 @@ class ReportContract(unittest.TestCase):
 
     def test_all_phases_write_safe_report_without_swallowing_failure(self):
         reporter, namespace = self.reporter()
-        for phase in ('bootstrap', 'runtime_install', 'initial_authentication', 'before_publish',
+        for phase in ('bootstrap', 'runtime_install', 'host_login_continue', 'initial_authentication', 'before_publish',
                       'owned_child_cleanup', 'runtime_cleanup', 'credential_cleanup', 'server_cleanup'):
             for error in (RuntimeError('secret-token-and-path'), ValueError('secret-token-and-path'),
                           RuntimeError('original_operation_identity_mismatch'),
