@@ -171,18 +171,19 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
     assert!(plan.assets.iter().all(|asset| asset.state == AssetState::Missing
         && asset.actual_size.is_none() && asset.actual_sha256.is_none()
         && !asset.suggested_source.contains("untrusted.invalid")));
-    // A fresh CPU install follows the selected model directory until a cache file exists.
-    let explicit_ort = explicit.join("onnx/model_quantized.cpu-v1.ort");
-    let mut explicit_core = AssetsStatus::installation_plan(vec![
-        host_tokenizer(&explicit)?, host_cpu_container(&explicit_ort)?,
+    // Runtime22 preparation pins the default cache even when it is absent and M3 is overridden.
+    let explicit_core = AssetsStatus::installation_plan(vec![
+        host_tokenizer(&explicit)?, host_cpu_container(&ort)?,
     ]);
+    assert!(!ort.exists());
     let planned = host_installation_plan(&intent, &explicit_core, None, &explicit, &ort)?;
     assert_eq!(planned.assets.iter().find(|asset| asset.name == "bge-m3-cpu-ort")
-        .context("CPU container missing")?.path.as_deref(), explicit_ort.to_str());
+        .context("CPU container missing")?.path.as_deref(), ort.to_str());
+    let mut loader_destination = explicit_core.clone();
+    loader_destination.assets[1] = host_cpu_container(&explicit.join("onnx/model_quantized.cpu-v1.ort"))?;
+    assert!(host_installation_plan(&intent, &loader_destination, None, &explicit, &ort).is_err());
     std::fs::create_dir_all(ort.parent().context("cache parent missing")?)?;
     std::fs::write(&ort, b"cache fixture; pin validation remains required")?;
-    assert!(host_installation_plan(&intent, &explicit_core, None, &explicit, &ort).is_err());
-    explicit_core.assets[1] = host_cpu_container(&ort)?;
     let planned = host_installation_plan(&intent, &explicit_core, None, &explicit, &ort)?;
     assert_eq!(planned.assets.iter().find(|asset| asset.name == "bge-m3-cpu-ort")
         .context("cached CPU container missing")?.path.as_deref(), ort.to_str());
