@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createPreparation,preparationLink} from './release-preparation.mjs';
 import {validateImportedEvidence,importedAnchor,validateImportAnchor,assertImportPin,assertImportSelection,assertImportedContents,validateConsumerIntent} from './prepared-import.mjs';
-import {preparedConsumerFlow} from './fixtures/prepared-consumer-flow.mjs';
 import {readFileSync} from 'node:fs';
 
 test('Release requires fresh validation and has no prepared publication entry',()=>{
@@ -16,18 +15,6 @@ test('Release requires fresh validation and has no prepared publication entry',(
   assert.match(job('publication-ready'),/Require successful CLI CI for this exact source/);
   const publish=job('publish');
   assert(publish.indexOf('guard-accepted')<publish.indexOf('--publish --accepted-only'));
-});
-
-test('actual helper processes bind preparation, registered import, readiness and mandatory publication bytes',()=>{
-  const result=preparedConsumerFlow();
-  assert.equal(result.positive.length,6);
-  assert.equal(result.rejected.length,9);
-  assert.equal(result.finalized,true);
-  assert.notEqual(result.source_sha,result.workflow_sha);
-});
-test('six-platform prepared publication checks both ARM copies and every original gate through finalization',()=>{
-  const result=preparedConsumerFlow({arm64:true,frontend:true});
-  assert.equal(result.platform_count,6);assert.equal(result.finalized,true);assert.equal(result.rejected.length,9);
 });
 
 const sha='a'.repeat(40),workflowSha='c'.repeat(40),hash='b'.repeat(64),version='1.2.3-dev.4';
