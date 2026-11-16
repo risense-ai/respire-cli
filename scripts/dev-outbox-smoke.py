@@ -208,7 +208,7 @@ class Fixture:
                    XDG_CACHE_HOME=str(profile / "cache"), TMPDIR=str(profile / "tmp"),
                    RSRS_DATA_DIR=str(profile / "library"), RSRS_BIN_DIR=str(profile / "bin"),
                    RSRS_M3_DIR=str(self.args.model_dir), RSRS_ENGINE="cpu",
-                   RSRS_NO_AUTOSYNC="1")
+                   RSRS_NO_AUTOSYNC="1", RSRS_RPC_TOKEN=secrets.token_hex(32))
         env['RSRS_RUNTIME_BIN'] = str(self.args.runtime_binary or self.args.binary)
         if self.args.runtime_binary:
             env['LC_ALL'] = 'C'
