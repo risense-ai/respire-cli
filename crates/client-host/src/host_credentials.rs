@@ -171,25 +171,6 @@ fn read_session_slot(account: &str, backend: &str) -> Result<Option<String>> {
     }
 }
 
-fn read_session_legacy_secret(session: &serde_json::Value) -> Result<Option<String>> {
-    let version = session["vault_version"].as_u64().unwrap_or(1);
-    if version != 1 && version != 3 {
-        return Ok(None);
-    }
-    // Raw historical factors belong to explicit migration, never automatic unlock.
-    let backend = session["legacy_secret_backend"].as_str()
-        .context("legacy secret backend is missing; explicit historical migration is required")?;
-    anyhow::ensure!(credential_backends().contains(&backend), "unsupported legacy secret backend");
-    let account = session["keyring_account"].as_str().filter(|alias|
-        (alias.starts_with("legacy-") || alias.starts_with("login-"))
-            && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
-        .context("legacy secret credential account is missing or invalid")?;
-    let value = read_session_slot(&format!("legacy-secret:{account}"), backend)?
-        .filter(|value| !value.is_empty())
-        .context("legacy secret credential is missing or empty; library remains locked")?;
-    Ok(Some(value))
-}
-
 /// Export uses stored original factors, never process overrides or another recorded backend.
 pub fn read_export_factors(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
     let version = match session.get("vault_version") {
@@ -235,6 +216,25 @@ pub fn read_export_factors(session: &serde_json::Value) -> Result<(Option<String
         }
     } else { None };
     Ok((super_password, legacy_secret))
+}
+
+fn read_session_legacy_secret(session: &serde_json::Value) -> Result<Option<String>> {
+    let version = session["vault_version"].as_u64().unwrap_or(1);
+    if version != 1 && version != 3 {
+        return Ok(None);
+    }
+    // Raw historical factors belong to explicit migration, never automatic unlock.
+    let backend = session["legacy_secret_backend"].as_str()
+        .context("legacy secret backend is missing; explicit historical migration is required")?;
+    anyhow::ensure!(credential_backends().contains(&backend), "unsupported legacy secret backend");
+    let account = session["keyring_account"].as_str().filter(|alias|
+        (alias.starts_with("legacy-") || alias.starts_with("login-"))
+            && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+        .context("legacy secret credential account is missing or invalid")?;
+    let value = read_session_slot(&format!("legacy-secret:{account}"), backend)?
+        .filter(|value| !value.is_empty())
+        .context("legacy secret credential is missing or empty; library remains locked")?;
+    Ok(Some(value))
 }
 
 /// A legacy marker is never repaired by falling back to an inline factor.
