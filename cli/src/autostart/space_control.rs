@@ -297,8 +297,6 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
         finished = true;
         anyhow::ensure!(read_original(&path)?.as_ref().map(|(_, hash)| hash.as_str()) == digest.as_deref(),
             "space recovery context changed before cleanup");
-        std::fs::remove_file(&path)?;
-        respire_spawn::durable::sync_directory(path.parent().context("identity context parent missing")?)?;
         if receipt.outcome == HostSpaceOutcome::Rejected {
             if let Some(value) = &host_material {
                 if let Some(legacy) = value.legacy_secret.as_deref() {
@@ -308,6 +306,8 @@ fn control_write(operation: HostSpaceOperation, invite_code: Option<&str>) -> Re
                     &value.keyring_backend, &value.super_password, None)?;
             }
         }
+        std::fs::remove_file(&path)?;
+        respire_spawn::durable::sync_directory(path.parent().context("identity context parent missing")?)?;
         Ok(receipt)
     })();
     if result.is_ok() && finished { maintenance.finish_handoff()?; }
