@@ -178,14 +178,14 @@ fn model_roots_follow_selected_profiles_and_only_explicit_local_overrides() -> R
     ]);
     let planned = host_installation_plan(&intent, &explicit_core, None, &explicit, &ort)?;
     assert_eq!(planned.assets.iter().find(|asset| asset.name == "bge-m3-cpu-ort")
-        .context("CPU container missing")?.path, explicit_ort);
+        .context("CPU container missing")?.path.as_deref(), explicit_ort.to_str());
     std::fs::create_dir_all(ort.parent().context("cache parent missing")?)?;
     std::fs::write(&ort, b"cache fixture; pin validation remains required")?;
     assert!(host_installation_plan(&intent, &explicit_core, None, &explicit, &ort).is_err());
     explicit_core.assets[1] = host_cpu_container(&ort)?;
     let planned = host_installation_plan(&intent, &explicit_core, None, &explicit, &ort)?;
     assert_eq!(planned.assets.iter().find(|asset| asset.name == "bge-m3-cpu-ort")
-        .context("cached CPU container missing")?.path, ort);
+        .context("cached CPU container missing")?.path.as_deref(), ort.to_str());
     for field in ["sha256", "expected_size", "path"] {
         let mut changed = serde_json::to_value(&explicit_core)?;
         changed["assets"][1][field] = Value::Null;
