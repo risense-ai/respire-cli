@@ -33,6 +33,7 @@ $report = [ordered]@{
     target_desktop_screenshot_saved = $false
     cleanup_exit_confirmed = $false; cleanup_pending_absence = @()
     full_gui_acceptance = 'not-evaluated'; g1_passed = $false; status = 'failed'
+    cloud_login = 'not-evaluated-no-gui-account-fixture'
 }
 if ($PSCmdlet.ParameterSetName -ceq 'SourceCandidate' -and -not $SourceCandidate) { throw 'Source candidate mode must be explicitly enabled' }
 if ($SourceCandidate) {
@@ -466,79 +467,108 @@ public static class RespireGuiNative {
         $report.offline_model_hashes = $modelHashes
         $childEnv['RSRS_M3_DIR'] = $modelRoot; $childEnv['RSRS_ENGINE'] = 'cpu'
     }
-    Write-Output 'GUI probe: starting desktop'
-    $desktopProcess = Child-Start $exe @()
-    $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
-    Write-Output 'GUI probe: desktop started'
-    $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
-    if (-not $nativeRoot -or -not [string]::Equals($nativeRoot.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native process does not name the verified original EXE' }
-    $report.desktop = @{pid=$desktopProcess.Id; session_id=$desktopProcess.SessionId; path=$nativeRoot.ExecutablePath; started_ticks=$desktopStarted}
-    if ($desktopProcess.SessionId -ne $report.environment.session_id) { throw 'Desktop launched into a different session' }
-    $windows = @()
-    for ($attempt=0; $attempt -lt 80; $attempt++) {
-        if ($desktopProcess.HasExited) { throw 'Official desktop exited before a native window appeared' }
-        $windows = @([RespireGuiNative]::Windows($desktopProcess.Id))
-        if (@($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count) { break }
-        Start-Sleep -Milliseconds 250
-    }
-    $report.windows = $windows
-    $report.native_window_visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count -gt 0
-    if (-not $report.native_window_visible) { throw 'No visible uncloaked original native window' }
-    $visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 })
-    if ($visible.Count -ne 1) { throw 'Require one unambiguous original visible window' }
-    $tracked = @(Descendants $desktopProcess.Id)
-    $report.processes = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
-    $expectedProfile = [IO.Path]::GetFullPath((Join-Path $taskProfile 'client2/webview2/EBWebView'))
-    $profileArg = '--user-data-dir=(?:"' + [regex]::Escape($expectedProfile) + '"|' + [regex]::Escape($expectedProfile) + '(?=\s|$))'
-    $browser = @($tracked | Where-Object { [IO.Path]::GetFileName($_.ExecutablePath) -eq 'msedgewebview2.exe' -and $_.CommandLine -match $profileArg -and $_.CommandLine -notmatch '(?:^|\s)--type=' })
-    if ($browser.Count -ne 1 -or $browser[0].SessionId -ne $desktopProcess.SessionId) { throw 'Original WebView browser/profile/session binding failed' }
-    $report.isolated_webview_bound = $true
-    $report.native_binding = @{
-        desktop_pid=$desktopProcess.Id; desktop_started_ticks=$desktopStarted; exe=$exe; exe_sha256=$report.exe_sha256
-        session_id=$desktopProcess.SessionId; hwnd=$visible[0].hwnd
-        browser_pid=$browser[0].ProcessId; browser_started_ticks=(Get-Process -Id $browser[0].ProcessId).StartTime.ToUniversalTime().Ticks
-        webview_profile=$expectedProfile; full_gui_acceptance='not-evaluated'; g1_passed=$false
-        rpc_port=$rpcPort; data_directory=$taskProfile; preferences_path=$preferencesPath
-        runtime_exe=(Join-Path $managed 'rsrs-runtime.exe')
-        runtime_sha256=(Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
-    }
-    if ($client2Candidate) { $report.native_binding.fixture_mode='source-client2-ui-candidate'; $report.native_binding.source_commit=if ($SourceCandidate) { $SourceClient2Commit } else { $Client2Commit } }
-    $bindingPath = Join-Path $root 'native-binding.json'
-    $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
-    Write-Output 'GUI probe: window and WebView bound'
-    $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
-    $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
-    $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
-    if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
-    if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
-    Write-Output 'GUI probe: starting UI Automation helper'
-    $driver = Child-Start $systemPowerShell $helperArgs
-    Write-Output 'GUI probe: UI Automation helper started'
-    $helperDeadline = if ($OfflineAcceptance) { 360000 } else { 45000 }
-    if (-not $driver.WaitForExit($helperDeadline)) {
-        Write-Output 'GUI probe: UI Automation helper timed out; stopping helper'
-        $driver.Kill($true); throw 'System UI Automation helper timed out'
-    }
-    Write-Output 'GUI probe: UI Automation helper exited'
-    $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
-    $report.native_gui = $native
-    if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
-        $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
-        $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
-    if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or
-        -not $native.offline.runtime_normal_stop_confirmed -or $native.offline.full_gui_acceptance -ne 'not-evaluated' -or
-        $native.offline.g1_passed -ne $false)) { throw 'Original offline GUI subset failed; full GUI remains not-evaluated' }
-    $report.native_accessibility_read = $native.accessibility_tree_read -eq $true
-    $report.foreground_verified = $native.foreground_verified -eq $true
-    $report.gui_input_observed = $native.native_tab_sent -eq $true -and $native.focus_changed_in_target_document -eq $true
-    $report.target_desktop_screenshot_saved = $native.target_desktop_screenshot_saved -eq $true
-    if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
-        -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
-        -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
-    if ($publishedOnline) {
-        $persistedPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
-        $report.online_install.runtime_channel = $persistedPreferences.runtimeChannel
-        if ($persistedPreferences.runtimeChannel -cne 'dev') { throw 'Fresh product preferences did not retain the default dev discovery channel' }
+    $phases = if ($publishedOnline -and $OfflineAcceptance) { @('initial','restart') } else { @('initial') }
+    foreach ($phase in $phases) {
+        Write-Output ('GUI probe: starting desktop ' + $phase)
+        $desktopProcess = Child-Start $exe @()
+        $desktopStarted = $desktopProcess.StartTime.ToUniversalTime().Ticks
+        Write-Output 'GUI probe: desktop started'
+        $nativeRoot = Get-CimInstance Win32_Process -Filter "ProcessId=$($desktopProcess.Id)"
+        if (-not $nativeRoot -or -not [string]::Equals($nativeRoot.ExecutablePath, $exe, [StringComparison]::OrdinalIgnoreCase)) { throw 'Native process does not name the verified original EXE' }
+        $report.desktop = @{pid=$desktopProcess.Id; session_id=$desktopProcess.SessionId; path=$nativeRoot.ExecutablePath; started_ticks=$desktopStarted}
+        if ($desktopProcess.SessionId -ne $report.environment.session_id) { throw 'Desktop launched into a different session' }
+        $windows = @()
+        for ($attempt=0; $attempt -lt 80; $attempt++) {
+            if ($desktopProcess.HasExited) { throw 'Official desktop exited before a native window appeared' }
+            $windows = @([RespireGuiNative]::Windows($desktopProcess.Id))
+            if (@($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count) { break }
+            Start-Sleep -Milliseconds 250
+        }
+        $report.windows = $windows
+        $report.native_window_visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 }).Count -gt 0
+        if (-not $report.native_window_visible) { throw 'No visible uncloaked original native window' }
+        $visible = @($windows | Where-Object { $_.visible -and $_.rect_ok -and $_.width -gt 0 -and $_.height -gt 0 -and $_.cloak_query_ok -and $_.cloaked -eq 0 })
+        if ($visible.Count -ne 1) { throw 'Require one unambiguous original visible window' }
+        $currentTree = @(Descendants $desktopProcess.Id)
+        $tracked = @($tracked) + $currentTree
+        $report.processes = @($tracked | Select-Object ProcessId,ParentProcessId,ExecutablePath,CommandLine,CreationDate,SessionId)
+        $expectedProfile = [IO.Path]::GetFullPath((Join-Path $taskProfile 'client2/webview2/EBWebView'))
+        $profileArg = '--user-data-dir=(?:"' + [regex]::Escape($expectedProfile) + '"|' + [regex]::Escape($expectedProfile) + '(?=\s|$))'
+        $browser = @($currentTree | Where-Object { [IO.Path]::GetFileName($_.ExecutablePath) -eq 'msedgewebview2.exe' -and $_.CommandLine -match $profileArg -and $_.CommandLine -notmatch '(?:^|\s)--type=' })
+        if ($browser.Count -ne 1 -or $browser[0].SessionId -ne $desktopProcess.SessionId) { throw 'Original WebView browser/profile/session binding failed' }
+        $report.isolated_webview_bound = $true
+        $report.native_binding = @{
+            desktop_pid=$desktopProcess.Id; desktop_started_ticks=$desktopStarted; exe=$exe; exe_sha256=$report.exe_sha256
+            session_id=$desktopProcess.SessionId; hwnd=$visible[0].hwnd
+            browser_pid=$browser[0].ProcessId; browser_started_ticks=(Get-Process -Id $browser[0].ProcessId).StartTime.ToUniversalTime().Ticks
+            webview_profile=$expectedProfile; full_gui_acceptance='not-evaluated'; g1_passed=$false
+            rpc_port=$rpcPort; data_directory=$taskProfile; preferences_path=$preferencesPath
+            final_public_assets=$publishedOnline
+            runtime_exe=(Join-Path $managed 'rsrs-runtime.exe')
+            runtime_sha256=(Get-FileHash -LiteralPath (Join-Path $managed 'rsrs-runtime.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+        if ($client2Candidate) { $report.native_binding.fixture_mode='source-client2-ui-candidate'; $report.native_binding.source_commit=if ($SourceCandidate) { $SourceClient2Commit } else { $Client2Commit } }
+        if ($phase -eq 'restart') {
+            $report.native_binding.restart_memory = $report.initial_native_gui.offline.restart_memory
+            $report.native_binding.previous_runtime_pid = $report.initial_native_gui.offline.runtime_process.ProcessId
+            $report.native_binding.previous_runtime_ticks = $report.initial_native_gui.offline.runtime_process.creation_utc_ticks
+        }
+        $bindingPath = Join-Path $root 'native-binding.json'
+        $report.native_binding | ConvertTo-Json | Set-Content -LiteralPath $bindingPath -Encoding utf8NoBOM
+        Write-Output 'GUI probe: window and WebView bound'
+        $systemPowerShell = [IO.Path]::GetFullPath((Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))
+        $helperPath = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot 'probe-client2-gui-native.ps1')).Path
+        $helperArgs = @('-NoLogo','-NoProfile','-NonInteractive','-Mta','-File',$helperPath,'-BindingPath',$bindingPath,'-OutputDirectory',$root)
+        if ($OfflineAcceptance) { $helperArgs += '-OfflineAcceptance' }
+        if ($phase -eq 'restart') { $helperArgs += '-ExistingKeys' }
+        if ($client2Candidate) { $helperArgs += '-SourceCandidateStability' }
+        Write-Output 'GUI probe: starting UI Automation helper'
+        $driver = Child-Start $systemPowerShell $helperArgs
+        Write-Output 'GUI probe: UI Automation helper started'
+        $helperDeadline = if ($OfflineAcceptance) { 360000 } else { 45000 }
+        if (-not $driver.WaitForExit($helperDeadline)) {
+            Write-Output 'GUI probe: UI Automation helper timed out; stopping helper'
+            $driver.Kill($true); throw 'System UI Automation helper timed out'
+        }
+        Write-Output 'GUI probe: UI Automation helper exited'
+        $native = Get-Content -Raw -LiteralPath (Join-Path $root 'native-gui.json') | ConvertFrom-Json
+        $report.native_gui = $native
+        if ($client2Candidate -and ($native.fixture_mode -cne 'source-client2-ui-candidate' -or
+            $native.offline.account_focus_stability.status -cne 'timed-window-passed' -or
+            $native.offline.account_focus_stability.completed_poll_count -cne 'not-observed')) { throw 'Source candidate focus stability was not verified' }
+        if ($OfflineAcceptance -and ($native.offline.status -ne 'offline-subset-passed' -or
+            -not $native.offline.runtime_normal_stop_confirmed -or $native.offline.full_gui_acceptance -ne 'not-evaluated' -or
+            $native.offline.g1_passed -ne $false)) { throw 'Original offline GUI subset failed; full GUI remains not-evaluated' }
+        $report.native_accessibility_read = $native.accessibility_tree_read -eq $true
+        $report.foreground_verified = $native.foreground_verified -eq $true
+        $report.gui_input_observed = $native.native_tab_sent -eq $true -and $native.focus_changed_in_target_document -eq $true
+        $report.target_desktop_screenshot_saved = $native.target_desktop_screenshot_saved -eq $true
+        if ($driver.ExitCode -ne 0 -or $native.status -ne 'native-connectivity-passed' -or -not $native.identity_verified -or
+            -not $report.native_accessibility_read -or -not $report.foreground_verified -or -not $report.gui_input_observed -or
+            -not $report.target_desktop_screenshot_saved -or $native.full_gui_acceptance -ne 'not-evaluated' -or $native.g1_passed -ne $false) { throw 'Original native GUI connectivity probe failed; see native-gui.json' }
+        if ($publishedOnline) {
+            $persistedPreferences = Get-Content -Raw -LiteralPath $preferencesPath | ConvertFrom-Json
+            $report.online_install.runtime_channel = $persistedPreferences.runtimeChannel
+            if ($persistedPreferences.runtimeChannel -cne 'dev') { throw 'Fresh product preferences did not retain the default dev discovery channel' }
+        }
+        if ($publishedOnline -and $OfflineAcceptance) {
+            if (-not $native.offline.recall_hit) { throw 'Published Client2 recall was not verified' }
+            if ($phase -eq 'initial') {
+                $report.initial_native_gui = $native
+                Copy-Item -LiteralPath (Join-Path $root 'native-gui.json') -Destination (Join-Path $root 'native-gui-initial.json')
+                $tracked = @($tracked) + @(Descendants $desktopProcess.Id)
+                # Guarded process termination tests restart after desktop exit, not tray-menu shutdown.
+                foreach ($item in $tracked) { Stop-TrackedOwned $item }
+                foreach ($item in $tracked) {
+                    if (-not (Confirm-TrackedAbsent $item)) { throw 'Original desktop tree survived before restart' }
+                }
+                if (Get-CimInstance Win32_Process -Filter "ProcessId=$($native.offline.runtime_process.ProcessId)") { throw 'Original Runtime survived before desktop restart' }
+                $report.restart = @{exit_method='guarded-process-termination'; original_tree_absent=$true; completed=$false}
+            } else {
+                if (-not $native.offline.automatic_start -or -not $native.offline.automatic_key_handoff) { throw 'Published desktop automatic start/key handoff was not verified' }
+                $report.restart.completed = $true
+            }
+        }
     }
     $report.status = 'connectivity-passed'
 } catch {

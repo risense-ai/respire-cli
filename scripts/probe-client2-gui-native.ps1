@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory)][string]$BindingPath,
     [Parameter(Mandatory)][string]$OutputDirectory,
     [switch]$OfflineAcceptance,
-    [switch]$SourceCandidateStability
+    [switch]$SourceCandidateStability,
+    [switch]$ExistingKeys
 )
 $ErrorActionPreference = 'Stop'
 $report = [ordered]@{
@@ -1303,17 +1304,29 @@ function Assert-OfflineRuntime {
         -not [string]::Equals([IO.Path]::GetFullPath($health.data_dir),$binding.data_directory,[StringComparison]::OrdinalIgnoreCase)) {
         throw 'Offline Runtime actor changed during business acceptance'
     }
+    return $health
 }
 function Read-OfflineRpc([string[]]$Arguments) {
     # Read-only oracle: no CLI/API writes may stand in for visible UI operations.
-    if (($Arguments -join '|') -notmatch '^--json\|(list\|--limit\|100|show\|[A-Za-z0-9_-]+|diary|status)$') { throw 'Offline oracle command is not allowlisted' }
-    Assert-OfflineRuntime
+    if (($Arguments -join '|') -notmatch '^--json\|(list\|--limit\|100|show\|[A-Za-z0-9_-]+|diary|status|recall\|gui-offline-[0-9a-f]{32} important body\|--mode\|fast\|--titles\|--limit\|20)$') { throw 'Offline oracle command is not allowlisted' }
+    $health = Assert-OfflineRuntime
+    # Same identity contract as native_fixture_process.scoped_rpc_request/verify_rpc_receipt.
+    if ($health.v -ne 1 -or $health.account_id -isnot [string] -or -not $health.account_id -or
+        $health.instance_id -isnot [string] -or -not $health.instance_id -or
+        ($health.generation -isnot [int] -and $health.generation -isnot [long] -and $health.generation -isnot [uint64]) -or
+        $health.generation -le 0) { throw 'RPC requires complete health scope' }
+    $scope = @{account_id=$health.account_id; instance_id=$health.instance_id; generation=$health.generation}
     $id = 'offline-gui-' + [Guid]::NewGuid().ToString('N')
-    $reply = Read-OfflineHttp '/api/rpc' @{v=1; id=$id; method='cli.exec'; args=$Arguments}
+    $operation = 'offline-gui-' + [Guid]::NewGuid().ToString('N')
+    $reply = Read-OfflineHttp '/api/rpc' @{v=1; id=$id; operation_id=$operation; idempotency_key=$operation; scope=$scope; method='cli.exec'; args=$Arguments}
+    if ($reply.operation_id -cne $operation -or $reply.idempotency_key -cne $operation -or
+        $reply.scope.account_id -cne $scope.account_id -or $reply.scope.instance_id -cne $scope.instance_id -or
+        $reply.scope.generation -ne $scope.generation -or $reply.exit -ne 0) { throw 'Read-only oracle receipt scope/operation mismatch' }
     if ($reply.v -ne 1 -or $reply.id -ne $id -or $reply.ok -ne $true -or
-        $reply.envelope.status -ne 'ok' -or $reply.envelope.command -ne $Arguments[1] -or
+        ($reply.envelope.status -ne 'ok' -and -not ($Arguments[1] -ceq 'recall' -and $reply.envelope.status -ceq 'skip')) -or
+        $reply.envelope.command -ne $Arguments[1] -or
         @($reply.envelope.errors).Count -ne 0) { throw 'Read-only oracle did not return a matching successful receipt' }
-    Assert-OfflineRuntime
+    $null = Assert-OfflineRuntime
     return $reply.envelope
 }
 function Wait-OfflinePreferences([string]$Field, $Expected, $Observation = $null) {
@@ -1434,6 +1447,66 @@ function Convert-OfflineEntry($Value) {
     if (-not ($Value.id -is [string]) -or -not $Value.id) { throw 'Runtime returned no valid memory entry' }
     return $Value
 }
+function Stop-OfflineRuntime {
+    $report.offline.action_stage = 'runtime_pre_stop_check'
+    $null = Assert-OfflineRuntime
+    $report.offline.action_stage = 'overview_navigation'
+    Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
+    Press-OfflineButton ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) -DiagnosticStage 'normal_stop'
+    $report.offline.action_stage = 'normal_stop_process_lookup'
+    $process = Get-Process -Id $offlineRuntime.pid -ErrorAction SilentlyContinue
+    if ($process) {
+        $report.offline.action_stage = 'normal_stop_birth_check'
+        if ($process.StartTime.ToUniversalTime().Ticks -ne $offlineRuntime.started_ticks) { $report.offline.failure_kind = 'pid_reused'; throw 'Runtime PID reused before normal-stop observation' }
+        $report.offline.action_stage = 'normal_stop_wait_exit'
+        if (-not $process.WaitForExit(30000)) { $report.offline.failure_kind = 'exit_timeout'; throw 'Runtime did not exit after visible normal Stop' }
+    }
+    for ($attempt=0; $attempt -lt 2; $attempt++) {
+        if ($attempt -eq 0) { $report.offline.action_stage = 'normal_stop_cim_first' } else { $report.offline.action_stage = 'normal_stop_cim_second' }
+        if (Get-CimInstance Win32_Process -Filter "ProcessId=$($offlineRuntime.pid)") { $report.offline.failure_kind = 'pid_present_after_stop'; throw 'Runtime PID still exists or was reused after normal Stop' }
+        Pause-Probe
+    }
+    $report.offline.action_stage = 'normal_stop_confirmed'
+    $report.offline.runtime_normal_stop_confirmed = $true
+}
+function Assert-OfflineRecall([string]$Id, [string]$Title, [string]$Query) {
+    $report.offline.recall_hit = $false
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $result = Read-OfflineRpc @('--json','recall',$Query,'--mode','fast','--titles','--limit','20')
+        $details = ConvertTo-Json -InputObject $result.details -Compress -Depth 16
+        if ($details.Contains(('"' + $Id + '"')) -and $details.Contains(('"' + $Title + '"'))) {
+            $report.offline.recall_hit = $true
+            return
+        }
+        # Only retry a successful read while the real index explicitly reports pending work.
+        if ($result.summary.index_pending -le 0) { throw 'Recall did not return the exact GUI-written memory' }
+        Pause-Probe
+    } while ($clock.Elapsed.TotalSeconds -lt 60)
+    throw 'GUI-written memory did not become recallable while indexing'
+}
+function Invoke-ExistingKeysAcceptance {
+    $report.offline = [ordered]@{status='failed'; runtime_bound=$false; runtime_normal_stop_confirmed=$false
+        automatic_start=$false; automatic_key_handoff=$false; full_gui_acceptance='not-evaluated'; g1_passed=$false}
+    if (-not $binding.final_public_assets -or -not $binding.restart_memory) { throw 'Existing-key restart requires final public assets and the original synthetic memory' }
+    Wait-OfflinePreferences 'autoRuntime' $true
+    Press-OfflineButton ([regex]::Unescape('^\u6982\u89c8$'))
+    # Observe the automatic start; never press Start or call a CLI start/keygen command.
+    $null = Find-OfflineControl 'ControlType.Button' ([regex]::Unescape('^\u505c\u6b62 Runtime$')) 60
+    Bind-OfflineRuntime
+    if ($offlineRuntime.started_ticks -lt $binding.desktop_started_ticks -or
+        ($offlineRuntime.pid -eq $binding.previous_runtime_pid -and
+         $offlineRuntime.started_ticks.ToString() -ceq $binding.previous_runtime_ticks)) { throw 'Restart reused an old Runtime actor' }
+    $report.offline.automatic_start = $true
+    Assert-OfflineLocalKeys (Read-OfflineRpc @('--json','status'))
+    $saved = $binding.restart_memory
+    $entry = Convert-OfflineEntry (Read-OfflineRpc @('--json','show',$saved.id))
+    if ($entry.id -cne $saved.id -or $entry.title -cne $saved.title -or $entry.content -cne $saved.query) { throw 'Automatic key handoff did not reopen the original memory' }
+    $report.offline.automatic_key_handoff = $true
+    Assert-OfflineRecall $saved.id $saved.title $saved.query
+    Stop-OfflineRuntime
+    $report.offline.status = 'offline-subset-passed'
+}
 function Invoke-OfflineGuiAcceptance {
     $report.offline = [ordered]@{status='failed'; onboarding_completed=$false; runtime_bound=$false
         local_keys_initialized=$false; important_memory_readback=$false; diary_readback=$false
@@ -1496,6 +1569,8 @@ function Invoke-OfflineGuiAcceptance {
         $entry.content -ne $importantContent -or $entry.importance -ne 'important') { throw 'Important UI/Runtime readback mismatch' }
     $report.offline.important_memory_readback = $true
     $report.offline.important_id = $entry.id
+    $report.offline.restart_memory = @{id=$entry.id; title=$importantTitle; query=$importantContent}
+    Assert-OfflineRecall $entry.id $importantTitle $importantContent
     $diaryContent = $marker + ' diary body'
     Create-OfflineMemory ($marker + '-diary') $diaryContent $true
     $report.offline.action_stage = 'diary_runtime_readback'
@@ -1520,10 +1595,10 @@ function Invoke-OfflineGuiAcceptance {
     Press-OfflineButton ([regex]::Unescape('\u005e\u8bbe\u7f6e\u0024'))
     $report.offline.settings_inputs = @{}
     Set-OfflineAutoRuntime $true
-    Set-OfflineAutoRuntime $false
+    if (-not $binding.final_public_assets) { Set-OfflineAutoRuntime $false }
     $report.offline.settings_persisted = $true
     $report.offline.action_stage = 'runtime_pre_stop_check'
-    Assert-OfflineRuntime
+    $null = Assert-OfflineRuntime
     $report.offline.action_stage = 'overview_navigation'
     Press-OfflineButton ([regex]::Unescape('\u005e\u6982\u89c8\u0024'))
     Press-OfflineButton ([regex]::Unescape('\u005e\u505c\u6b62\u0020\u0052\u0075\u006e\u0074\u0069\u006d\u0065\u0024')) -DiagnosticStage 'normal_stop'
@@ -1626,7 +1701,9 @@ public static class RespireNativeInput {
     if ([RespireNativeInput]::SetThreadDpiAwarenessContext([IntPtr](-4)) -eq [IntPtr]::Zero) { throw 'Cannot establish per-monitor-v2 thread coordinates for target desktop capture' }
     $report.capture_coordinate_context = 'per-monitor-v2 helper thread; ends with helper process'
     Invoke-NativeGuiProbe
-    if ($OfflineAcceptance) { Invoke-OfflineGuiAcceptance }
+    if ($OfflineAcceptance) {
+        if ($ExistingKeys) { Invoke-ExistingKeysAcceptance } else { Invoke-OfflineGuiAcceptance }
+    }
 } catch { $report.error = $_.Exception.Message }
 finally {
     $json = $report | ConvertTo-Json -Depth 12
