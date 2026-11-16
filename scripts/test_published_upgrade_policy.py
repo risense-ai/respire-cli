@@ -158,7 +158,9 @@ class UpgradeProfileTest(unittest.TestCase):
                     checks = [{"passed": True, "binary_sha256": digest, "real_model": True, "engine": "cpu",
                         "upgrade_contract": "legacy-shim-v1",
                         "supervised_worker_checked": True, "global_engine_preserved": True, "distinct_vault_keys": True,
-                        "source_and_keys_unchanged": True, "compatible_index_reused": True,
+                        "original_records_preserved": True, "original_sync_work_preserved": True,
+                        "urk_preserved": True, "old_records_decrypted": True, "post_upgrade_recall_checked": True,
+                        "seed_vault_versions": [1, 3],
                         "forced_restart_checked": True, "old_rpc_checked": True, "old_rpc_authenticated": False,
                         "resident_stress": None, "in_process_checked": False,
                         "sequence": [{"account": account, "model_rows": {
@@ -296,7 +298,8 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_each_required_upgrade_flag_must_be_present_and_strictly_true(self):
         flags = ["passed", "real_model", "supervised_worker_checked", "global_engine_preserved",
-                 "distinct_vault_keys", "source_and_keys_unchanged", "compatible_index_reused",
+                 "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
+                 "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
                  "forced_restart_checked", "old_rpc_checked"]
         for name in flags:
             with self.subTest(name=name, value="missing"):
@@ -304,6 +307,15 @@ class UpgradeProfileTest(unittest.TestCase):
             for value in [False, 1, "true"]:
                 with self.subTest(name=name, value=value):
                     self.assert_rejected_checks(lambda checks: [{**checks[0], name: value}])
+
+    def test_historical_session_coverage_cannot_be_replaced_by_v4_or_old_success_flags(self):
+        for standalone in [False, True]:
+            for versions in [None, [], [4, 4], [1], [True, 3], [3, 1]]:
+                self.assert_rejected_checks(lambda checks: [{**checks[0], 'seed_vault_versions': versions}], standalone)
+            self.assert_rejected_checks(lambda checks: [{key: value for key, value in
+                {**checks[0], 'source_and_keys_unchanged': True, 'compatible_index_reused': True}.items()
+                if key not in ('original_records_preserved', 'original_sync_work_preserved', 'urk_preserved',
+                               'old_records_decrypted', 'post_upgrade_recall_checked')}], standalone)
 
     def test_candidate_hash_and_cpu_engine_must_match(self):
         for standalone in [False, True]:
@@ -349,7 +361,8 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_standalone_required_flags_are_present_and_strictly_true(self):
         flags = ["passed", "real_model", "supervised_worker_checked", "global_engine_preserved",
-                 "distinct_vault_keys", "source_and_keys_unchanged", "compatible_index_reused",
+                 "distinct_vault_keys", "original_records_preserved", "original_sync_work_preserved",
+                 "urk_preserved", "old_records_decrypted", "post_upgrade_recall_checked",
                  "live_owner_restart_rejected",
                  "safe_restart_checked", "standalone_runtime_evidence", "runtime_installed_after_legacy_data"]
         self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()

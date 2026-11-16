@@ -2,7 +2,7 @@
 """Hosted CI only: real encrypted profiles, keyring aliases, WAL and restart migration."""
 import argparse
 import base64
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dev_migration_diagnostics import migration_failure_diagnostics
 import hashlib
 import importlib.util
@@ -156,7 +156,7 @@ class Smoke(support.Smoke):
 
     def reserve_alias(self, source):
         alias = "legacy-" + keyring_backend.canonical_identity(source)[:16]
-        for slot in ("super:", "pass:"):
+        for slot in ("super:", "pass:", "legacy-secret:"):
             self.keys.reserve("rsrs", slot + alias)
         return alias
 
@@ -179,8 +179,14 @@ class Smoke(support.Smoke):
         session = json.loads(original)
         require(session.get("user") == fixture["account"]["user"]
             and session.get("vault_version") == 4
-            and all(not session.get(key) for key in ("pass", "super", "secret_key")),
+            and all(not session.get(key) for key in ("pass", "super", "secret", "secret_key"))
+            and "legacy_secret_backend" not in session,
             "native_consumer_session_has_override")
+        alias = session.get("keyring_account")
+        require(isinstance(alias, str) and ("rsrs", "pass:" + alias) in self.keys.entries,
+                "native_consumer_credential_alias_not_owned")
+        legacy_slot = "legacy-secret:" + alias
+        self.keys.reserve("rsrs", legacy_slot)
         note = self.root / ("native-recovery-" + secrets.token_hex(8) + ".txt")
         require(not note.exists(), "native_consumer_export_not_fresh")
         try:
@@ -194,6 +200,7 @@ class Smoke(support.Smoke):
                 bytes.fromhex(session["urk_nonce"]), support.encrypted_bytes(session["wrapped_urk"]), None)
             require(len(urk) == 32, "native_consumer_urk_invalid")
             salt, nonce, secret = secrets.token_bytes(16).hex(), secrets.token_bytes(12), secrets.token_hex(32)
+            self.diagnostic_secrets.add(secret)
             wrapped = AESGCM(support.legacy_kek(1, fixture["password"], secret, salt)).encrypt(nonce, urk, None)
             probe = dict(session, vault_version=1, kdf_salt=salt, wrapped_urk=wrapped.hex(),
                          urk_nonce=nonce.hex(), secret=secret)
@@ -205,14 +212,22 @@ class Smoke(support.Smoke):
             shown = self.cli(clean_env, "show", fixture["id"])
             require(shown.get("details", {}).get("entry", {}).get("content") == fixture["text"],
                     "native_consumer_original_ciphertext_not_decrypted")
+            committed = self.session(clean_env)
+            require(committed.get("keyring_account") == alias
+                and committed.get("legacy_secret_backend") == "native"
+                and all(key not in committed for key in ("pass", "super", "secret", "secret_key")),
+                "native_consumer_legacy_custody_not_committed")
         finally:
             try:
-                session_path.write_bytes(original)
+                self.keys.remove("rsrs", legacy_slot)
             finally:
-                note.unlink(missing_ok=True)
+                try:
+                    session_path.write_bytes(original)
+                finally:
+                    note.unlink(missing_ok=True)
             require(session_path.read_bytes() == original, "native_consumer_session_restore_failed")
         database = profile / ("rsrs.db" if (profile / "rsrs.db").exists() else "onememory.db")
-        with sqlite3.connect(database.as_uri() + "?mode=ro", uri=True) as db:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as db:
             row = db.execute("SELECT ciphertext,nonce FROM memories WHERE id=?", (fixture["id"],)).fetchone()
             require(support.decrypt_content(urk, *row) == support.decrypt_content(urk, *fixture["cipher"]),
                     "native_consumer_content_changed")

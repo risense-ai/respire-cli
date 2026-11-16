@@ -41,6 +41,7 @@ def hosted_user_bus_environment():
 
 class SecretServiceKeys(_base.TrackedKeys):
     name = "linux-secret-service"
+    credential_backend = "secret_service"
 
     def __init__(self, root, *, hosted_user_bus=False):
         super().__init__(root)
@@ -173,7 +174,7 @@ class SecretServiceKeys(_base.TrackedKeys):
         diagnostic["stage"] = "enumeration"
         items = list(self.collection.get_all_items())
         diagnostic["observed_entries"] = len(items)
-        prefixes = ("super:", "pass:", "totp:", "classify:ds-model@", "classify:ds@", "classify:")
+        prefixes = ("super:", "pass:", "totp:", "legacy-secret:", "classify:ds-model@", "classify:ds@", "classify:")
         classification = self.business_classification = {
             "classified_entries": 0,
             "attribute_matches": {key: {"matched": 0, "mismatched": 0}
@@ -198,7 +199,8 @@ class SecretServiceKeys(_base.TrackedKeys):
                     and attributes.get("target") == "default"
                     and attributes.get("application") == "rust-keyring"
                     and isinstance(username, str)
-                    and re.fullmatch(r"(?:super|pass|totp):login-[a-f0-9]{32}", username)))
+                    and re.fullmatch(r"(?:(?:super|pass|totp|legacy-secret):login-[a-f0-9]{32}"
+                        r"|(?:super|pass|legacy-secret):legacy-(?:[a-f0-9]{16}|[a-f0-9]{64}))", username)))
         diagnostic["stage"] = "ownership_validation"
         for owned in ownership:
             require(owned, "unexpected_private_credential")

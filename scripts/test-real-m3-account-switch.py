@@ -1,8 +1,85 @@
 """Read-only real M3 cache; disposable profiles and owned runtime port only."""
-import argparse, faulthandler, hashlib, hmac, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
+import argparse, faulthandler, hashlib, json, os, pathlib, secrets, socket, sqlite3, subprocess, sys, tempfile, time, urllib.request
 from native_fixture_process import (install_official_runtime, install_published_runtime, FixtureCancelled, ForegroundOverlapProbe, WorkerInspector, captured_run,
-    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, stage_fixture_cli)
+    add_runtime_arguments, runtime_inputs, runtime_report, verify_runtime_health, process_start_id, stage_fixture_cli, canonical_scope_path)
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from contextlib import closing
+
+def recover_fixture_urk(session, factors):
+    version = session.get('vault_version', 1)
+    assert version in (1, 2, 3, 4), 'unsupported fixture vault version'
+    wrapped = session['wrapped_urk']
+    if version == 4:
+        kek = vault_crypto.v4_kek(factors['super'], session['kdf_salt'], wrapped)
+    else:
+        kek = vault_crypto.legacy_kek(version, factors['pass'] if version == 1 else factors['super'],
+            factors['secret'] if version == 1 else factors['secret_key'] if version == 3 else '',
+            session['kdf_salt'], current=wrapped.startswith(vault_crypto.PREFIX))
+    return AESGCM(kek).decrypt(bytes.fromhex(session['urk_nonce']), vault_crypto.encrypted_bytes(wrapped), None)
+
+
+def legacy_custody_alias(profile, session_bytes):
+    return 'legacy-'+hashlib.sha256(canonical_scope_path(profile).encode('utf-8')+session_bytes).hexdigest()
+
+
+def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
+    alias,version,slots=plan
+    session=json.loads((profile/'session.json').read_bytes())
+    backend='secret_service' if sys.platform.startswith('linux') else 'native'
+    assert session.get('keyring_account')==alias, 'custody alias differs from the reserved profile/session identity'
+    assert session.get('vault_version',1)==version, 'custody changed the historical vault version'
+    assert session.get('keyring_backend')==session.get('legacy_secret_backend')==backend, 'custody selected an unverified provider'
+    assert not {'pass','super','secret','secret_key'} & session.keys(), 'custody retained inline sensitive factors'
+    if sys.platform.startswith('linux'): keys.verify_owner()
+    recovered={}
+    for slot,expected in slots.items():
+        assert ('rsrs',slot+':'+alias) in keys.entries, 'custody slot is not reserved by this fixture'
+        if sys.platform=='darwin':
+            # Metadata is readable without changing the product creator's Keychain ACL.
+            metadata=keys._security(keys.root,['find-generic-password','-s','rsrs','-a',slot+':'+alias,str(keys.keychain)])
+            assert metadata.returncode==0, 'custody exact slot metadata missing'
+        else:
+            value=keys.read('rsrs',slot+':'+alias)
+            assert value==expected, 'custody slot readback differs from the original factor'
+            name=('secret' if version==1 else 'secret_key') if slot=='legacy-secret' else slot
+            recovered[name]=value
+    if sys.platform=='darwin':
+        # Check the wrap with original factors, then require the CLI to unlock the same data via host slots.
+        original_factors={(('secret' if version==1 else 'secret_key') if slot=='legacy-secret' else slot): value
+            for slot,value in slots.items()}
+        assert recover_fixture_urk(session,original_factors)==expected_urk, 'host custody changed the URK'
+        assert set(slots)=={'pass' if version==1 else 'super','legacy-secret'}, 'CLI custody proof has an unconsumed slot'
+        clean_env=dict(env,RSRS_DATA_DIR=str(profile))
+        for prefix in ('RSRS_','ONEMEMORY_','RESPIRE_'):
+            for suffix in ('SUPER','PASS','SECRET','KDF_SALT','WRAPPED_URK','URK_NONCE'):
+                assert prefix+suffix not in env, 'resident custody consumer has a factor override'
+        with closing(sqlite3.connect((profile/'rsrs.db').as_uri()+'?mode=ro',uri=True)) as db:
+            row=db.execute('SELECT id,ciphertext,nonce FROM memories WHERE deleted=0 ORDER BY id LIMIT 1').fetchone()
+        assert row is not None, 'custody consumer has no original ciphertext'
+        expected=json.loads(vault_crypto.decrypt_content(expected_urk,*row[1:]))['content']
+        shown=captured_run([str(binary),'--json','show',row[0]],env=clean_env,timeout=120)
+        assert shown.returncode==0, 'CLI host custody consumer failed'
+        result=json.loads(shown.stdout)
+        assert not result.get('errors') and result.get('status') not in ('error','failed'), 'CLI host custody consumer returned an error'
+        assert result.get('details',{}).get('entry',{}).get('content')==expected, 'CLI host custody could not decrypt original data'
+        assert json.loads((profile/'session.json').read_bytes())==session, 'CLI custody consumer changed the session'
+    else:
+        assert recover_fixture_urk(session,recovered)==expected_urk, 'host custody changed the URK'
+    return {'vault_version':version,'primary_slot_readback':sys.platform!='darwin',
+        'legacy_secret_readback':sys.platform!='darwin','urk_preserved':True,
+        'consumer':'cli_authenticated_decryption' if sys.platform=='darwin' else 'exact_slot_readback'}
+
+
+def library_state(snapshot, factors):
+    rows, _, session_bytes = snapshot
+    session = json.loads(session_bytes)
+    urk = recover_fixture_urk(session, factors)
+    records = []
+    for memory_id, ciphertext, nonce, dirty, deleted in rows[0]:
+        plaintext = vault_crypto.decrypt_content(urk, ciphertext, nonce)
+        records.append((memory_id, plaintext, dirty, deleted))
+    return records, rows[1], urk
+
 
 parser=argparse.ArgumentParser()
 parser.add_argument('--binary',action='append',required=True)
@@ -20,6 +97,9 @@ parser.add_argument('--seed-binary',help='Create both libraries with this publis
 add_runtime_arguments(parser)
 args=parser.parse_args()
 runtime_config=args
+if sys.platform.startswith('linux') and args.seed_binary and os.environ.get('RSRS_SS_FIXTURE_BUS')!='private':
+    os.execvpe('dbus-run-session', ['dbus-run-session','--',sys.executable,*sys.argv],
+        dict(os.environ,RSRS_SS_FIXTURE_BUS='private'))
 faulthandler.enable()
 # A cloud container's PID 1 may not reap orphans. Adopt workers after a forced
 # host termination so this fixture can verify and reap their actual exit.
@@ -32,6 +112,9 @@ if sys.platform.startswith('linux'):
 BASE=pathlib.Path(args.output_dir).resolve()
 BASE.mkdir(parents=True,exist_ok=True)
 import cryptography, importlib.metadata, importlib.util, psutil
+vault_spec=importlib.util.spec_from_file_location('upgrade_vault_crypto', pathlib.Path(__file__).with_name('dev-legacy-vault-smoke.py'))
+vault_crypto=importlib.util.module_from_spec(vault_spec)
+vault_spec.loader.exec_module(vault_crypto)
 (BASE/'fixture-dependencies.json').write_text(json.dumps({
     'python':sys.version,'cryptography':cryptography.__version__,'psutil':psutil.__version__,
     'psutil_source':json.loads(importlib.metadata.distribution('psutil').read_text('direct_url.json') or 'null'),
@@ -57,7 +140,7 @@ for binary in BINARIES:
         # Keep fixture paths short and isolated from the CI report
         # directory for cross-platform tools; keep the owned
         # fixture in a short workspace directory and retain reports in BASE.
-        root = pathlib.Path.cwd() / ('rsrs-up-' + secrets.token_hex(6))
+        root = pathlib.Path(os.environ['RUNNER_TEMP'] if args.seed_binary else pathlib.Path.cwd()) / ('rsrs-up-' + secrets.token_hex(6))
     main = root / '.rsrs'
     alternate = main / 'accounts/alternate'
     root.mkdir(mode=0o700)
@@ -70,15 +153,19 @@ for binary in BINARIES:
         listener.bind(('127.0.0.1',0)); port = listener.getsockname()[1]
     env = {key: value for key, value in os.environ.items()
            if key not in ('GH_TOKEN', 'GITHUB_TOKEN')}
-    for suffix in ['CLIENT_ONLY','NO_AUTOSTART','RUNTIME_WORKER','CORE_TEST_MODE','RPC_TOKEN','ENGINE','ADDR','TOKEN','JSON','ORT_DEBUG']:
+    for suffix in ['CLIENT_ONLY','NO_AUTOSTART','RUNTIME_WORKER','CORE_TEST_MODE','RPC_TOKEN','ENGINE','ADDR','TOKEN','JSON','ORT_DEBUG',
+                   'SUPER','PASS','SECRET','KDF_SALT','WRAPPED_URK','URK_NONCE']:
         for prefix in ['RSRS_', 'ONEMEMORY_', 'RESPIRE_']:
             env.pop(prefix + suffix,None)
     env.update(HOME=str(root), USERPROFILE=str(root), RSRS_DATA_DIR=str(main), RSRS_RPC_PORT=str(port),
         RSRS_SUPER=code,RSRS_NO_AUTOSYNC='1',RSRS_UPDATE_CHECK='0',RSRS_M3_DIR=str(CACHE))
+    if args.seed_binary: env.pop('RSRS_SUPER')
     env['RSRS_RUNTIME_BIN']=str(args.runtime_binary or binary)
     if args.runtime_binary: env['LC_ALL']='C'
     runtime_installed_after_legacy_data = False
     keys=None
+    custody_slots={}
+    custody_receipts={}
     components_started=False
     def run(*args, allow_failure=False, timeout=120, cancel=None):
         result = captured_run([str(binary),'--json',*args],env=env,timeout=timeout,cancel=cancel)
@@ -102,7 +189,7 @@ for binary in BINARIES:
     def snapshot(profile):
         database = profile/'rsrs.db'
         if not database.exists(): database = profile/'onememory.db'
-        with sqlite3.connect(database) as db:
+        with closing(sqlite3.connect(database)) as db:
             assert db.execute('PRAGMA integrity_check').fetchall() == [('ok',)], 'database integrity check failed'
             rows = [db.execute(query).fetchall() for query in ['SELECT id,ciphertext,nonce,dirty,deleted FROM memories ORDER BY id',
                 'SELECT * FROM sync_outbox ORDER BY seq','SELECT * FROM core_artifacts ORDER BY memory_id,model']]
@@ -169,25 +256,44 @@ for binary in BINARIES:
                 assert time.monotonic()<deadline, 'owned Core worker survived its host: '+str(pid)
                 time.sleep(.02)
     try:
-        if sys.platform == 'darwin':
-            # Each isolated HOME needs its own verified default/search preferences.
+        if sys.platform == 'darwin' or args.seed_binary:
+            keyring_script='dev-migration-secret-service.py' if sys.platform.startswith('linux') else 'dev-migration-keyring.py'
             keyring_spec=importlib.util.spec_from_file_location('upgrade_native_keyring',
-                pathlib.Path(__file__).with_name('dev-migration-keyring.py'))
+                pathlib.Path(__file__).with_name(keyring_script))
             keyring_backend=importlib.util.module_from_spec(keyring_spec)
             keyring_spec.loader.exec_module(keyring_backend)
             keys=keyring_backend.create(root/'keyring-home')
-            keys.configure_env(env)
+            if sys.platform.startswith('linux'): keys.configure_business_env(env)
+            else: keys.configure_env(env)
         components_started=True
         if not (args.seed_binary and args.runtime_binary):
             installed = install_published_runtime(binary, env)
             if installed is None and args.runtime_binary:
                 installed = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
             if installed is not None: args.runtime_binary = installed
+        expected_urks={}
+        recovery_factors={}
+        seed_vault_versions=[]
         for profile in [main, alternate]:
             salt,nonce,urk=secrets.token_bytes(16),secrets.token_bytes(12),secrets.token_bytes(32)
-            kek=hmac.new(hmac.new(salt,entropy,hashlib.sha256).digest(),b'onememory:kek:v4\x01',hashlib.sha256).digest()
-            session=json.dumps({'user':'fixture-'+str(time.time_ns()),'vault_version':4,'kdf_salt':salt.hex(),'wrapped_urk':AESGCM(kek).encrypt(nonce,urk,None).hex(),'urk_nonce':nonce.hex()}).encode()
-            (profile/'session.json').write_bytes(session)
+            version=(1 if profile==main else 3) if args.seed_binary else 4
+            factors={'super':code}
+            session={'user':'fixture-'+str(time.time_ns()),'vault_version':version,'kdf_salt':salt.hex()}
+            if version in (1,3):
+                field='secret' if version==1 else 'secret_key'
+                factors[field]=secrets.token_hex(32)
+                if version==1: factors['pass']=secrets.token_urlsafe(32)
+                session.update({field:factors[field], 'pass':factors['pass']} if version==1 else
+                    {field:factors[field], 'super':code})
+                kek=vault_crypto.legacy_kek(version,factors['pass'] if version==1 else code,factors[field],salt.hex())
+            else:
+                kek=vault_crypto.v4_kek(code,salt.hex())
+            session.update(wrapped_urk=AESGCM(kek).encrypt(nonce,urk,None).hex(),urk_nonce=nonce.hex())
+            (profile/'session.json').write_text(json.dumps(session),encoding='utf-8')
+            expected_urks[str(profile)]=urk
+            recovery_factors[str(profile)]=factors
+            seed_vault_versions.append(version)
+        assert len(set(expected_urks.values()))==2, 'fixture accounts must have distinct URKs'
         seed_env={**env,'RSRS_M3_DIR':str(LEGACY_CACHE)}
         if args.seed_binary: seed_env['RSRS_RUNTIME_BIN']=str(pathlib.Path(args.seed_binary).resolve())
         # Historical artifacts predate RSRS_*; keep their inputs explicit and
@@ -217,9 +323,25 @@ for binary in BINARIES:
                     # --direct forwards to a resident owner; drain it before raw fixture profile selection.
                     stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
                     assert stopped.returncode==0,'direct seed runtime stop failed'
-        stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
-        assert stopped.returncode==0,'direct seed runtime stop failed'
+        if not args.seed_binary:
+            stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
+            assert stopped.returncode==0,'direct seed runtime stop failed'
         original = {str(profile):snapshot(profile) for profile in [main,alternate]}
+        assert [json.loads(original[str(profile)][2]).get('vault_version',1) for profile in [main,alternate]]==seed_vault_versions, 'historical preparation replaced the selected session formats'
+        original_state={name:library_state(value,recovery_factors[name]) for name,value in original.items()}
+        assert all(state[2]==expected_urks[name] for name,state in original_state.items()), 'seed changed the fixture URK'
+        if args.seed_binary:
+            for profile in [main,alternate]:
+                session_bytes=original[str(profile)][2]
+                session=json.loads(session_bytes)
+                assert session.get('keyring_account') is None, 'historical seed already selected a credential alias'
+                version=session.get('vault_version',1)
+                alias=legacy_custody_alias(profile,session_bytes)
+                primary='pass' if version==1 else 'super'
+                slots={primary:session[primary], 'legacy-secret':session['secret' if version==1 else 'secret_key']}
+                if version==3 and 'pass' in session: slots['pass']=session['pass']
+                for slot in slots: keys.reserve('rsrs',slot+':'+alias)
+                custody_slots[str(profile)]=(alias,version,slots)
         select(main)
         if args.seed_binary:
             log=(root/'old-runtime.log').open('wb')
@@ -297,6 +419,8 @@ for binary in BINARIES:
                     support_spec.loader.exec_module(support)
                     redactor=object.__new__(support.Smoke)
                     redactor.diagnostic_secrets={code,entropy.hex()}
+                    for factors in recovery_factors.values():
+                        redactor.diagnostic_secrets.update(factors.values())
                     for profile in (main,alternate):
                         redactor.diagnostic_secrets.update(value for value in
                             json.loads((profile/'session.json').read_bytes()).values()
@@ -326,10 +450,13 @@ for binary in BINARIES:
             assert not (alternate/'inference.json').exists()
             # A real model change may rebuild derived indexes once; never source data.
             rows = wait_index_ready()
+            if args.seed_binary:
+                custody_receipts[str(profile)]={'account':account, **verify_fixture_custody(
+                    profile,keys,custody_slots[str(profile)],expected_urks[str(profile)],binary,env)}
             if args.seed_binary and str(profile) not in visited:
                 current=snapshot(profile)
                 baseline=original[str(profile)]
-                assert current[0][:2]==baseline[0][:2] and current[2]==baseline[2],'model migration changed ciphertext, sync work or keys'
+                assert library_state(current,recovery_factors[str(profile)])==original_state[str(profile)], 'migration changed original records, sync work or URK'
                 generation_changes[str(profile)]=current[0][2]!=baseline[0][2] or current[1]!=baseline[1]
                 original[str(profile)]=current
             visited.add(str(profile))
@@ -390,17 +517,18 @@ for binary in BINARIES:
             assert pathlib.Path(json.loads((main/'client.json').read_text())['data_dir'])==profile
             config=json.loads((main/'client.json').read_text())
             assert all(config.get(key)==value for key,value in public_config.items()),'upgrade/switch changed public API settings'
-            assert snapshot(profile)==original[str(profile)],'switch/probe changed source data or rebuilt existing index'
+            assert library_state(snapshot(profile),recovery_factors[str(profile)])==original_state[str(profile)], 'switch/probe changed original records, sync work or URK'
             # Independent important entries avoid the intentional daily-trivia append behavior.
             written=run('remember','Post-upgrade real inference '+account+' '+str(time.time_ns()),'--title','post-upgrade-'+account,'--importance','important','--force')
             assert written['summary'].get('id'),'real post-upgrade remember did not commit'
             # The durable write precedes derived indexing; compare stable snapshots after background completion.
             wait_index_ready()
             updated=snapshot(profile)
-            assert all(row in updated[0][0] for row in original[str(profile)][0][0]),'remember changed an existing ciphertext'
-            assert all(row in updated[0][1] for row in original[str(profile)][0][1]),'remember changed existing sync work'
-            assert all(row in updated[0][2] for row in original[str(profile)][0][2]),'remember changed a compatible existing index'
-            assert updated[2]==original[str(profile)][2],'remember changed vault keys'
+            updated_state=library_state(updated,recovery_factors[str(profile)])
+            assert all(row in updated_state[0] for row in original_state[str(profile)][0]), 'remember changed an existing record'
+            assert all(row in updated_state[1] for row in original_state[str(profile)][1]), 'remember changed existing sync work'
+            assert updated_state[2]==expected_urks[str(profile)], 'remember changed the URK'
+            original_state[str(profile)]=updated_state
             original[str(profile)]=updated
             assert run('recall','Post-upgrade real inference','--titles').get('items'),'post-upgrade remember could not be recalled'
             statuses.append({'account':account,'model_rows':rows})
@@ -622,7 +750,7 @@ for binary in BINARIES:
             else:
                 assert pathlib.Path(owned.exe()).name.lower() in ['rsrs','rsrs.exe']
                 assert '--runtime-internal' in owned.cmdline(),'only the isolated runtime may be suspended'
-            before_restart={str(profile):snapshot(profile) for profile in [main,alternate]}
+            before_restart={str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}
             config_before=(main/'client.json').read_bytes()
             endpoint_before=(main/'runtime/endpoint.json').read_bytes()
             token_path=main/'runtime/token'
@@ -646,7 +774,7 @@ for binary in BINARIES:
                     if args.runtime_binary: assert process_start_id(owned.pid)==health['process_start_id']
                     owned.resume()
             if args.runtime_binary:
-                assert {str(profile):snapshot(profile) for profile in [main,alternate]}==before_restart
+                assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_restart
                 resumed=observe_runtime()
                 assert (resumed['pid'],resumed['process_start_id'],resumed['instance_id'])==(
                     health['pid'],health['process_start_id'],health['instance_id'])
@@ -667,7 +795,10 @@ for binary in BINARIES:
                 assert replacement['image_sha256']==health['image_sha256']==args.runtime_sha256
             assert pathlib.Path(restarted['summary']['data_dir'])==main,restarted
             assert (main/'client.json').read_bytes()==config_before,'restart changed the account or API configuration'
-            assert {str(profile):snapshot(profile) for profile in [main,alternate]}==before_restart,'restart changed source, key, sync or compatible index'
+            assert {str(profile):library_state(snapshot(profile),recovery_factors[str(profile)]) for profile in [main,alternate]}==before_restart,'restart changed original records, sync work or URK'
+            if args.seed_binary:
+                for profile in [main,alternate]:
+                    verify_fixture_custody(profile,keys,custody_slots[str(profile)],expected_urks[str(profile)],binary,env)
             run('model','probe','--model','m3')
             assert run('recall','Real account return fixture','--titles').get('items')
             if args.runtime_binary:
@@ -678,11 +809,17 @@ for binary in BINARIES:
                 with urllib.request.urlopen(urllib.request.Request(f'http://127.0.0.1:{port}/api/health',headers={'X-Respire-Health':'runtime-v1'}),timeout=2) as response:
                     checked_worker(json.load(response))
             restart_checked=True
+        if args.seed_binary:
+            assert set(custody_receipts)==set(custody_slots) and len(custody_receipts)==2, 'host custody evidence missing for a historical account'
         reports.append({'binary_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),'binary':str(binary),'passed':True,
             'real_model':True,'model_file':args.model_file,'engine':'cpu','in_process_checked':args.expect_in_process,
             'supervised_worker_checked':args.expect_supervised_worker,'owned_worker_identities':worker_identities,
-            'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,'source_and_keys_unchanged':True,
-            'compatible_index_reused':True,'resident_stress':stress,
+            'global_engine_preserved':True,'distinct_vault_keys':True,'sequence':statuses,
+            'original_records_preserved':True,'original_sync_work_preserved':True,'urk_preserved':True,
+            'old_records_decrypted':True,'post_upgrade_recall_checked':True,
+            'seed_vault_versions':seed_vault_versions,
+            'host_credential_custody':{'required':bool(args.seed_binary),'verified_accounts':list(custody_receipts.values())},
+            'resident_stress':stress,
             'upgrade_contract':'standalone-v1' if args.runtime_binary else 'legacy-shim-v1',
             'source_rpc_checked':source_rpc_checked,'legacy_handoff_actor':legacy_handoff_actor,
             'runtime_installed_after_legacy_data':runtime_installed_after_legacy_data,
@@ -719,6 +856,10 @@ for binary in BINARIES:
                 reports[-1]['native_credential_cleanup']=keys.cleanup()
                 assert reports[-1]['native_credential_cleanup'].get('passed') is True \
                     and not reports[-1]['native_credential_cleanup'].get('remaining_entries'), 'native credential cleanup failed'
+                custody=reports[-1].get('host_credential_custody')
+                if custody is not None and custody['required']:
+                    assert len(reports[-1]['native_credential_cleanup']['events'])==sum(len(plan[2]) for plan in custody_slots.values()), 'custody cleanup omitted an owned slot'
+                    custody['cleanup_passed']=True
             except Exception as error:
                 reports[-1].setdefault('native_credential_cleanup',
                     {'passed':False,'failure_code':type(error).__name__})
@@ -733,5 +874,5 @@ for binary in BINARIES:
         if cleanup_errors and sys.exc_info()[0] is None:
             raise RuntimeError('fixture cleanup failed: '+str(cleanup_errors))
     assert reports[-1]['passed'], 'fixture evidence incomplete'
-    print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; compatible index reused after preparation',flush=True)
+    print('PASS '+str(binary)+': main -> alternate -> main; real CPU inference; original records decrypted and URKs preserved',flush=True)
 (BASE/'real-account-return-verification.json').write_text(json.dumps(reports,indent=2),encoding='utf-8')

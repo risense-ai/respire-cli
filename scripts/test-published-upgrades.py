@@ -124,8 +124,10 @@ def verify_upgrade(source):
     check=checks[0]
     assert isinstance(check,dict) and all(check.get(name) is True for name in [
         'passed','real_model','supervised_worker_checked','global_engine_preserved','distinct_vault_keys',
-        'source_and_keys_unchanged','compatible_index_reused',
+        'original_records_preserved','original_sync_work_preserved','urk_preserved',
+        'old_records_decrypted','post_upgrade_recall_checked',
     ]),'required real upgrade checks missing or failed'
+    assert check.get('seed_vault_versions')==[1,3] and all(type(value) is int for value in check['seed_vault_versions']), 'historical v1/v3 session coverage missing'
     assert check.get('upgrade_contract')==upgrade_contract,'unknown, missing or incompatible upgrade contract'
     if upgrade_contract=='standalone-v1':
         assert all(check.get(name) is True for name in [
