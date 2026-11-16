@@ -443,17 +443,15 @@ fn control_key_inner(host: Arc<dyn HostLifecycle>, action: Action<'_>,
                 deadline,
             )?
         };
-        if source.is_some() && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput) {
+        if source.is_some()
+            && !matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack)
+            && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput)
+        {
             maintenance.pause_key()?;
-            let status = if matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack) {
-                Status::Ok
-            } else { Status::Pending };
-            let summary = if receipt.outcome == HostKeyOutcome::Committed {
-                committed_summary(&receipt)?
-            } else { serde_json::to_value(receipt)? };
-            return Ok(ResultEnvelope::new("key-control", status, summary, Vec::new()));
+            return Ok(ResultEnvelope::new("key-control", Status::Pending,
+                serde_json::to_value(receipt)?, Vec::new()));
         }
-        if let Some(input) = &supplemental {
+        if let Some(input) = supplemental.as_ref().filter(|_| receipt.outcome == HostKeyOutcome::AwaitingInput) {
             let (candidate, private) = material::prepare(&original, input)?;
             let new_candidate = candidate.is_some();
             if let Some(candidate) = candidate {
