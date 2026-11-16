@@ -35,7 +35,7 @@ exec(compile(ast.Module(body=[node for node in TREE.body
 
 class JournalContract(unittest.TestCase):
     def setUp(self):
-        self.root = Path('/tmp/synthetic-interruption-contract')
+        self.root = Path('/tmp/synthetic-interruption-contract').resolve()
         self.id = str(uuid.uuid4())
         self.addr = 'http://127.0.0.1:12345'
         self.record = {'operation_id': self.id, 'idempotency_key': self.id,
@@ -60,6 +60,24 @@ class JournalContract(unittest.TestCase):
         self.assertIs(original_operation(self.journal, self.root, 'after_publish', self.addr), self.record)
         with self.assertRaisesRegex(RuntimeError, 'publication_checkpoint'):
             original_operation(self.journal, self.root, 'before_publish', self.addr)
+        main = next(n for n in TREE.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
+        cli_node = next(n for n in ast.walk(main) if isinstance(n, ast.FunctionDef) and n.name == 'cli')
+        runner = Mock(return_value=subprocess.CompletedProcess([], 0, b'{}', b''))
+        from types import SimpleNamespace
+        scope = dict(env={'RSRS_SUPER': 'synthetic-legacy-super'}, keys=object(),
+                     report={'stage': 'after_publish'}, old_super='synthetic-legacy-super',
+                     args=SimpleNamespace(binary=Path('fixture-cli')),
+                     subprocess=SimpleNamespace(run=runner))
+        exec(compile(ast.Module(body=[cli_node], type_ignores=[]), '<actual-fixture-cli>', 'exec'), scope)
+        scope['cli']('--json', 'account-result')
+        self.assertNotIn('RSRS_SUPER', runner.call_args.kwargs['env'])
+        scope['keys'] = None
+        scope['cli']('--json', 'account-result')
+        self.assertEqual(runner.call_args.kwargs['env']['RSRS_SUPER'], 'synthetic-legacy-super')
+        scope['keys'] = object()
+        scope['report']['stage'] = 'initial_authentication'
+        scope['cli']('--json', 'remember')
+        self.assertEqual(runner.call_args.kwargs['env']['RSRS_SUPER'], 'synthetic-legacy-super')
 
     def test_wrong_original_and_unknown_phase_fail_closed(self):
         mutations = [
