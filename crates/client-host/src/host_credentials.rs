@@ -226,6 +226,15 @@ pub fn read_export_factors(session: &serde_json::Value) -> Result<(Option<String
 }
 
 pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
+    read_session_credentials_with(session, true)
+}
+
+/// Snapshot factors must belong to the original session, never process overrides.
+pub fn read_stored_session_credentials(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
+    read_session_credentials_with(session, false)
+}
+
+fn read_session_credentials_with(session: &serde_json::Value, use_environment: bool) -> Result<(Option<String>, Option<String>)> {
     let account = session["keyring_account"].as_str().filter(|alias|
         (alias.starts_with("legacy-") || alias.starts_with("login-"))
             && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
@@ -262,7 +271,7 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
             .map_err(|code| anyhow::anyhow!("host session credential read failed ({code:?})"))
     };
     let session_super = session["super"].as_str().filter(|value| !value.is_empty()).map(str::to_owned);
-    let super_password = match crate::env::var("RSRS_SUPER").ok().filter(|value| !value.is_empty()) {
+    let super_password = match use_environment.then(|| crate::env::var("RSRS_SUPER").ok()).flatten().filter(|value| !value.is_empty()) {
         Some(value) => Some(value),
         None if version < 2 => None,
         None if version < 4 && session_super.is_some() => session_super,
@@ -270,7 +279,7 @@ pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<S
             .or_else(|| (version >= 4).then(|| session["secret_key"].as_str().map(str::to_owned)).flatten()),
     };
     let login_password = if version < 2 {
-        match crate::env::var("RSRS_PASS").ok().filter(|value| !value.is_empty())
+        match use_environment.then(|| crate::env::var("RSRS_PASS").ok()).flatten().filter(|value| !value.is_empty())
             .or_else(|| session["pass"].as_str().map(str::to_owned)) {
             Some(value) => Some(value),
             None => read("pass")?,

@@ -67,6 +67,8 @@ fn response(operation: &SnapshotOperation, request: &RpcRequest) -> RpcResponse<
 
 #[test]
 fn snapshot_diagnostics_are_allowlisted_without_confirming_an_outcome() -> Result<()> {
+    let _env = crate::runtime_fetch::runtime_fetch_tests::env_scope(&["RSRS_PASS"])?;
+    std::env::set_var("RSRS_PASS", "other-account-password");
     let directory = tempfile::tempdir()?;
     let operation = operation(&directory.path().canonicalize()?)?;
     let original = serde_json::to_value(operation.original())?;
@@ -131,6 +133,8 @@ fn snapshot_diagnostics_are_allowlisted_without_confirming_an_outcome() -> Resul
         match (version, &material.factors) {
             (1, Factors::V1 { password, account_secret }) => {
                 assert_eq!(password, "original-password"); assert_eq!(account_secret, "account-secret");
+                assert_eq!(respire_client_host::host_credentials::read_session_credentials(&session)?.1.as_deref(),
+                    Some("other-account-password"));
             }
             (2, Factors::V2 { super_password }) | (4, Factors::V4 { super_password }) =>
                 assert_eq!(super_password, "super-password"),

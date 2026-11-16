@@ -19,7 +19,7 @@ use respire_protocol::maintenance_control::{LegacySnapshotRecoveryParams as Lega
 pub(crate) use respire_protocol::maintenance_control::LegacySnapshotDescriptor;
 
 fn restore_material(profile: &Path) -> Result<respire_protocol::host_control::HostAuthSessionMaterial> {
-    use respire_client_host::host_credentials::{read_export_factors, read_session_credentials};
+    use respire_client_host::host_credentials::{read_export_factors, read_stored_session_credentials};
     use respire_protocol::host_control::{HostAuthSessionMaterial, HostAuthVaultFactors as Factors};
     let path = profile.join("session.json");
     let metadata = std::fs::symlink_metadata(&path)?;
@@ -38,7 +38,7 @@ fn restore_material(profile: &Path) -> Result<respire_protocol::host_control::Ho
     let (super_password, legacy_secret) = read_export_factors(&session)?;
     let factors = match version {
         1 => Factors::V1 {
-            password: read_session_credentials(&session)?.1.context("snapshot original password is unavailable")?,
+            password: read_stored_session_credentials(&session)?.1.context("snapshot original password is unavailable")?,
             account_secret: legacy_secret.context("snapshot Account Secret is unavailable")?,
         },
         2 => Factors::V2 { super_password: super_password.context("snapshot super password is unavailable")? },
