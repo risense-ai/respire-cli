@@ -14,7 +14,8 @@ must preserve existing data, integrity and read/write behavior. Keep latest
 applicable stable and historical stable migration coverage. Both critical and
 full profiles also retain DEV checkpoints that changed persistent formats;
 ordinary DEV revisions do not add redundant upgrade combinations. The policy
-currently registers `v1.0.15-dev.10` and the older unclassified DEV format.
+in `scripts/published_upgrade_policy.py` retains formal stable releases and the
+registered database-changing DEV checkpoint `v1.0.15-dev.10`.
 
 Old CLI or Client2 operating against the new Runtime, and new clients operating
 against the old Runtime, are not acceptance targets. Preserve database recovery,
