@@ -36,7 +36,7 @@ fn capabilities_is_typed_and_does_not_initialize_any_profile() -> anyhow::Result
             serde_json::json!({
             "rerank":false, "model":{"install":true,"install_rerank":false,"profile_contract":1,"transport_contract":1,"methods":["model.catalog","model.configure","model.switch","model.resume","model.progress"],"selection_scope":"library"},
             "host_rpc":{"version":1,"transport":"stdio","flag":"--host-rpc-stdio",
-                "methods":["auth.register","auth.login","auth.recover","auth.reset"]},
+                "methods":["auth.register","auth.login","auth.recover","auth.reset","auth.login.continue","auth.key.continue","auth.login.browser"]},
             "memory_list_metadata":true,
             "memory_metadata_flags":true,
             "memory_metadata_gate_default":false})

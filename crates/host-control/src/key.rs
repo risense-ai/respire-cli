@@ -126,6 +126,15 @@ impl KeyCoordinator {
         control_key(Arc::clone(&self.host), Action::Query(operation_id))
     }
 
+    pub fn result_at(&self, operation_id: &str, source: &Path) -> Result<ResultEnvelope> {
+        control_key_inner(Arc::clone(&self.host), Action::Query(operation_id), Some(source), None)
+    }
+
+    pub fn continue_input(&self, operation_id: &str, source: &Path, input: HostKeyInput) -> Result<ResultEnvelope> {
+        anyhow::ensure!(input.material.is_none(), "desktop key input cannot supply private material");
+        control_key_inner(Arc::clone(&self.host), Action::Query(operation_id), Some(source), Some(input))
+    }
+
     pub fn rollback(&self, operation_id: &str) -> Result<ResultEnvelope> {
         control_key(Arc::clone(&self.host), Action::Rollback(operation_id))
     }
@@ -156,6 +165,25 @@ fn execute_method(operation: &HostKeyOperation) -> &'static str {
         HostKeyOperation::SuperReset { .. } => HOST_KEY_SUPER_RESET_METHOD,
         HostKeyOperation::Fivekeys { .. } => HOST_KEY_FIVEKEYS_METHOD,
     }
+}
+
+/// Retain the original transaction identity alongside legacy terminal success fields.
+fn committed_summary(receipt: &HostKeyResult) -> Result<Value> {
+    anyhow::ensure!(receipt.outcome == HostKeyOutcome::Committed && !receipt.verification_required,
+        "key success summary requires a verified committed receipt");
+    let mut summary = json!({"ok":true, "operation_id":receipt.operation_id,
+        "source_profile":receipt.source_profile, "outcome":receipt.outcome});
+    match &receipt.operation {
+        HostKeyOperation::Fivekeys { user, addr, .. } => {
+            summary["user"] = json!(user);
+            summary["addr"] = json!(addr);
+        }
+        HostKeyOperation::SuperReset { .. } => {
+            summary["super"] = json!(receipt.super_password.as_deref()
+                .context("verified key receipt has no issued code")?);
+        }
+    }
+    Ok(summary)
 }
 
 fn canonical(value: &str) -> bool {
@@ -208,6 +236,12 @@ fn read_original(path: &Path) -> Result<Option<(Original, String)>> {
 }
 
 fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<ResultEnvelope> {
+    control_key_inner(host, action, None, None)
+}
+
+fn control_key_inner(host: Arc<dyn HostLifecycle>, action: Action<'_>,
+    source: Option<&Path>, supplemental: Option<HostKeyInput>,
+) -> Result<ResultEnvelope> {
     host.require_account_write()?;
     anyhow::ensure!(
         crate::maintenance::current_boot_token().is_none(),
@@ -217,8 +251,10 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
     let takeover = crate::maintenance::takeover_lock()?;
     let image = host.verified_runtime()?;
     image.revalidate()?;
-    std::fs::create_dir_all(&root)?;
-    std::fs::create_dir_all(&profile)?;
+    if source.is_none() {
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&profile)?;
+    }
     let root = root.canonicalize()?;
     let profile = profile.canonicalize()?;
     let path = root.join("runtime/autostart/key-control.json");
@@ -278,6 +314,14 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 *id == original.operation_id,
                 "key recovery requires the original operation ID"
             ),
+        }
+        if let Some(source) = source {
+            let source = source.canonicalize()?;
+            anyhow::ensure!(source == original.profile,
+                "key continuation source differs from original operation");
+            if supplemental.is_none() {
+                anyhow::ensure!(profile == source, "key query requires the original selected source");
+            }
         }
         let maintenance = Maintenance::resume_key_locked(
             &takeover,
@@ -399,7 +443,30 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 deadline,
             )?
         };
-        if reconnect && receipt.outcome == HostKeyOutcome::AwaitingInput {
+        if source.is_some() && (supplemental.is_none() || receipt.outcome != HostKeyOutcome::AwaitingInput) {
+            maintenance.pause_key()?;
+            let status = if matches!(receipt.outcome, HostKeyOutcome::Committed | HostKeyOutcome::RolledBack) {
+                Status::Ok
+            } else { Status::Pending };
+            let summary = if receipt.outcome == HostKeyOutcome::Committed {
+                committed_summary(&receipt)?
+            } else { serde_json::to_value(receipt)? };
+            return Ok(ResultEnvelope::new("key-control", status, summary, Vec::new()));
+        }
+        if let Some(input) = &supplemental {
+            let (candidate, private) = material::prepare(&original, input)?;
+            let new_candidate = candidate.is_some();
+            if let Some(candidate) = candidate {
+                original.candidate = Some(candidate);
+                let bytes = serde_json::to_vec(&original)?;
+                crate::maintenance::write_recovery(&path, &bytes, Some(&digest))?;
+                digest = crate::launch::hash(&bytes);
+            }
+            if new_candidate { material::persist(&original, &private)?; }
+            receipt = exchange(&takeover, &mut maintenance, host.as_ref(), &original,
+                execute_method(&original.operation), Some(input), deadline)?;
+        }
+        if supplemental.is_none() && reconnect && receipt.outcome == HostKeyOutcome::AwaitingInput {
             match &action {
                 Action::Reset {
                     input,
@@ -556,26 +623,13 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 )
             })?;
         }
-        if receipt.outcome == HostKeyOutcome::Committed && fivekeys {
-            let HostKeyOperation::Fivekeys { user, addr, .. } = &receipt.operation else {
-                anyhow::bail!("fivekeys intent missing");
-            };
-            return Ok(ResultEnvelope::new(
-                "fivekeys",
-                Status::Ok,
-                json!({"ok":true,"user":user,"addr":addr}),
-                vec![Item::new("session", Status::Ok, "ready")],
-            ));
-        }
         if receipt.outcome == HostKeyOutcome::Committed {
-            let issued = receipt
-                .super_password
-                .context("verified key receipt has no issued code")?;
             return Ok(ResultEnvelope::new(
-                "super-reset",
+                if fivekeys { "fivekeys" } else { "super-reset" },
                 Status::Ok,
-                json!({"ok":true,"super":issued}),
-                vec![Item::new("password", Status::Ok, "issued")],
+                committed_summary(&receipt)?,
+                vec![Item::new(if fivekeys { "session" } else { "password" }, Status::Ok,
+                    if fivekeys { "ready" } else { "issued" })],
             ));
         }
         Ok(ResultEnvelope::new(
@@ -1208,6 +1262,7 @@ mod tests {
     fn issued_code_is_only_valid_for_exact_committed_super_reset() -> Result<()> {
         let original = original();
         let mut result = receipt(&original, HostKeyOutcome::Pending)?;
+        assert!(committed_summary(&result).is_err());
         result.super_password = Some("synthetic-issued-code".into());
         assert!(validate_receipt(&result, &original).is_err());
         result.outcome = HostKeyOutcome::Committed;
@@ -1216,6 +1271,15 @@ mod tests {
         result.account_id = Some("synthetic-account".into());
         result.session_sha256 = Some("synthetic-session".into());
         validate_receipt(&result, &original)?;
+        result.challenge = Some("synthetic-private-challenge".into());
+        let summary = committed_summary(&result)?;
+        assert_eq!(summary["operation_id"], result.operation_id);
+        assert_eq!(summary["source_profile"], serde_json::to_value(&result.source_profile)?);
+        assert_eq!(summary["outcome"], "committed");
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["super"].as_str(), result.super_password.as_deref());
+        assert!(summary.get("challenge").is_none() && summary.get("material").is_none());
+        result.challenge = None;
         result.required_inputs.push("password".into());
         assert!(validate_receipt(&result, &original).is_err());
         result.required_inputs.clear();
@@ -1278,6 +1342,19 @@ mod tests {
             *addr = "https://never-contact.invalid".into();
         }
         assert!(!target_identity_matches(&result));
+        result.outcome = HostKeyOutcome::Committed;
+        result.verification_required = false;
+        result.challenge = Some("synthetic-private-challenge".into());
+        let summary = committed_summary(&result)?;
+        assert_eq!(summary["operation_id"], result.operation_id);
+        assert_eq!(summary["source_profile"], serde_json::to_value(&result.source_profile)?);
+        assert_eq!(summary["outcome"], "committed");
+        assert_eq!(summary["ok"], true);
+        assert_eq!(summary["addr"], "https://never-contact.invalid");
+        assert_eq!(summary["user"], "");
+        for field in ["challenge", "material", "wrapped_urk", "super", "super_password"] {
+            assert!(summary.get(field).is_none());
+        }
         Ok(())
     }
 }

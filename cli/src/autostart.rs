@@ -19,6 +19,7 @@ pub(crate) use manager::process_birth;
 #[cfg(all(windows, any(test, feature = "client2-host-prototype")))]
 pub(crate) use manager::windows_task_path;
 mod supervise;
+pub(crate) use supervise::{rpc_accounts, rpc_keys};
 pub(crate) use supervise::control_migrate_profile;
 pub(crate) use supervise::{login_recovery_status, recover_legacy_login_locked};
 pub(crate) use supervise::{control_metadata, control_offline_read};

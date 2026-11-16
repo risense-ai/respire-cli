@@ -244,6 +244,7 @@ pub(crate) fn run(
         offer_local_merge: interactive && !migrate_local && respire::prompt::interactive(),
         ..Default::default()
     };
+    let input = crate::host_rpc::initial_login_input(input);
     run_account_control("login", &addr, &user, authorization, super_password, input)
 }
 
@@ -389,6 +390,9 @@ fn run_account_control(
             (explicit_super_password || !super_password.is_empty()).then_some(super_password.as_str()),
             request_input, resume.as_ref(), &mut continuation,
         )?;
+        if crate::output_state::HOST_RPC_OUTPUT.get() {
+            return crate::emit_result(envelope);
+        }
         let receipt: HostAuthAccountResult = serde_json::from_value(envelope.summary)
             .map_err(|_| anyhow!("invalid login control receipt"))?;
         if let Some(previous) = resume.as_ref() {

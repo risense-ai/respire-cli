@@ -27,9 +27,45 @@ Launch `rsrs --json --host-rpc-stdio`, write one UTF-8 JSON request to stdin, th
 | Method | Required fields | Optional fields |
 | --- | --- | --- |
 | `auth.register` | `user`, `password` | `addr` |
-| `auth.login` | `user`, `password` | `addr`, `super`, `totp` |
+| `auth.login` | `user`, `password` | `addr`, `super`, `totp`, `continuation`, `migrate_local`, `migrate_vault`, `offer_local_merge` |
 | `auth.recover` | `kdf_salt`, `wrapped_urk`, `urk_nonce` | `addr`, `user`, `password`, `super`, `secret` |
 | `auth.reset` | none | `super` |
+| `auth.login.browser` | none | `addr` |
+| `auth.login.continue` | `operation_id`, `source_profile`, `continuation` | `super_password`, `totp` |
+| `auth.key.continue` | `operation_id`, `source_profile`, `input` | none |
+
+The original four methods and `auth.login.browser` retain string-valued params.
+Browser login accepts only an optional server address. The CLI opens the browser,
+receives authorization itself, and uses the same host custody and structured
+pending receipt as password login. The desktop never supplies a browser token.
+Continue a pending browser login with `auth.login.continue`; do not repeat OAuth.
+Initial login intent flags
+use exactly `"true"` or `"false"` and default to false. Its optional `continuation`
+is a JSON string containing supplemental login input. The two continuation
+methods use typed JSON params instead. Login supplemental fields are
+`legacy_password`, `account_secret`, `source_secret`, `secret_key`, `new_super`
+(strings), and `merge_local` (boolean). Key input fields are `password`,
+`super_password`, `account_secret`, and `totp` (strings).
+
+Continuation requires the original durable CLI operation and source binding.
+The CLI queries that operation first and supplements only `awaiting_input`.
+It restores the original login address, user, authorization and three intent flags
+from its own custody. Desktop input cannot supply or replace those values,
+receipts, material, challenges, or custody acknowledgements. Other known outcomes
+are returned without submitting supplemental input. A missing original operation
+fails without admitting authentication or creating a replacement operation.
+
+Read pending receipts from `envelope.summary`, including `operation_id`,
+`source_profile`, `outcome` and `login.required_inputs` (or `required_inputs` for
+keys). Initial login also returns this receipt without attempting terminal prompts.
+Committed key replies retain `operation_id`, `source_profile` and
+`outcome: "committed"` alongside the existing success fields. Recovery keeps
+`ok`, `user` and `addr`; super-reset keeps `ok` and `super` for material
+confirmation. These summaries never include private challenges or material.
+Use a new transport `id` while retaining the same operation and source.
+For a paused key operation, `runtime key-result --operation-id <ID>
+--source-profile <DIR>` validates the original selected source inside the host;
+it does not require live Runtime health or select a different profile.
 
 `totp` is a six-digit code used only if password login requires two-step verification. Recovery additionally requires `super` or the legacy `password` and `secret` pair, and can run offline when cloud routing fields are omitted. Explicit server addresses must be HTTPS origins, except HTTP loopback fixtures. Omit empty optional fields. No method accepts arbitrary commands or flags.
 
@@ -37,4 +73,4 @@ The request is limited to 64 KiB, each credential field to 16 KiB. Unknown field
 
 Replies contain `v`, the original `id`, `ok`, `exit`, and the existing `envelope`. Read the envelope status: a warning can include a completed operation. Malformed requests can fail before an ID is available. Never replay a request after losing its receipt; inspect the active profile first. Submitted credentials are redacted from failure envelopes. Successful receipts can contain newly issued recovery material and must not be logged or persisted in an operation journal.
 
-`rsrs capabilities --json` advertises `host_rpc.version`, `transport`, `flag`, and supported methods. Clients must show an upgrade error for older packages. Separately, `memory_list_metadata: true` advertises `list --metadata`, which omits body content while keeping directory metadata; use `show` to read the selected body.
+`rsrs capabilities --json` advertises `summary.capabilities.host_rpc.version`, `transport`, `flag`, and supported methods. Clients must show an upgrade error for older packages. Separately, `memory_list_metadata: true` advertises `list --metadata`, which omits body content while keeping directory metadata; use `show` to read the selected body.

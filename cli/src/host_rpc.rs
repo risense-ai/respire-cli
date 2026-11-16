@@ -8,6 +8,20 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 
 thread_local! {static TOTP:std::cell::RefCell<Option<String>>=const {std::cell::RefCell::new(None)};}
+thread_local! {static LOGIN_INPUT:std::cell::RefCell<Option<respire_protocol::host_control::HostAuthLoginContinuation>>=const {std::cell::RefCell::new(None)};}
+pub(crate) fn initial_login_input(
+    default: respire_protocol::host_control::HostAuthLoginContinuation,
+) -> respire_protocol::host_control::HostAuthLoginContinuation {
+    LOGIN_INPUT.with(|slot| match slot.borrow_mut().take() {
+        Some(mut input) => {
+            if input.legacy_password.is_none() {
+                input.legacy_password = default.legacy_password;
+            }
+            input
+        }
+        None => default,
+    })
+}
 pub(crate) fn totp_code() -> Option<String> {
     TOTP.with(|value| value.borrow().clone())
 }
@@ -21,17 +35,21 @@ struct Request {
     params: BTreeMap<String, String>,
 }
 
-fn arguments(request: &Request) -> Result<Vec<String>> {
-    ensure!(request.v == 1, "unsupported host RPC version");
+fn validate_header(v: u8, id: &str) -> Result<()> {
+    ensure!(v == 1, "unsupported host RPC version");
     ensure!(
-        !request.id.is_empty()
-            && request.id.len() <= 96
-            && request
-                .id
+        !id.is_empty()
+            && id.len() <= 96
+            && id
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || "-_".contains(c)),
         "invalid host RPC request ID"
     );
+    Ok(())
+}
+
+fn arguments(request: &Request) -> Result<Vec<String>> {
+    validate_header(request.v, &request.id)?;
     let (command, fields, required): (&str, &[(&str, &str)], &[&str]) =
         match request.method.as_str() {
             "auth.register" => (
@@ -39,6 +57,7 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
                 &[("addr", "addr"), ("user", "user"), ("password", "pass")],
                 &["user", "password"],
             ),
+            "auth.login.browser" => ("login", &[("addr", "addr")], &[]),
             "auth.login" => (
                 "login",
                 &[
@@ -69,7 +88,15 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
     for key in request.params.keys() {
         ensure!(
             fields.iter().any(|(name, _)| name == key)
-                || (key == "totp" && request.method == "auth.login"),
+                || (request.method == "auth.login"
+                    && matches!(
+                        key.as_str(),
+                        "totp"
+                            | "continuation"
+                            | "migrate_local"
+                            | "migrate_vault"
+                            | "offer_local_merge"
+                    )),
             "unknown authentication field"
         );
     }
@@ -103,6 +130,9 @@ fn arguments(request: &Request) -> Result<Vec<String>> {
     let mut args = vec!["--json".to_owned(), command.to_owned()];
     if request.method == "auth.login" {
         args.push("--interactive".to_owned());
+    }
+    if request.method == "auth.login.browser" {
+        args.push("--oauth".to_owned());
     }
     if request.method == "auth.recover" && !request.params.contains_key("password") {
         args.push("--pass=".to_owned());
@@ -142,6 +172,213 @@ fn scrub(value: &mut Value, secrets: &[&str]) {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireRequest {
+    v: u8,
+    id: String,
+    method: String,
+    params: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginContinue {
+    operation_id: String,
+    source_profile: std::path::PathBuf,
+    continuation: Value,
+    super_password: Option<String>,
+    totp: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct KeyContinue {
+    operation_id: String,
+    source_profile: std::path::PathBuf,
+    input: Value,
+}
+
+fn supplemental_input(
+    value: Value,
+) -> Result<respire_protocol::host_control::HostAuthLoginContinuation> {
+    let object = value
+        .as_object()
+        .context("login continuation must be an object")?;
+    ensure!(
+        object.keys().all(|key| matches!(
+            key.as_str(),
+            "legacy_password"
+                | "account_secret"
+                | "source_secret"
+                | "secret_key"
+                | "new_super"
+                | "merge_local"
+        )),
+        "login continuation cannot replace original intent or private material"
+    );
+    serde_json::from_value(value).map_err(|_| anyhow::anyhow!("invalid login supplemental input"))
+}
+
+fn key_input(value: Value) -> Result<respire_protocol::key_control::HostKeyInput> {
+    let object = value.as_object().context("key input must be an object")?;
+    ensure!(
+        object.keys().all(|key| matches!(
+            key.as_str(),
+            "password" | "super_password" | "account_secret" | "totp"
+        )),
+        "key input cannot supply private material"
+    );
+    serde_json::from_value(value).map_err(|_| anyhow::anyhow!("invalid key supplemental input"))
+}
+
+fn initial_input(
+    params: &BTreeMap<String, String>,
+) -> Result<respire_protocol::host_control::HostAuthLoginContinuation> {
+    let mut input = match params.get("continuation") {
+        Some(value) => supplemental_input(
+            serde_json::from_str(value)
+                .map_err(|_| anyhow::anyhow!("invalid login continuation JSON"))?,
+        )?,
+        None => Default::default(),
+    };
+    let intent = |name: &str| -> Result<bool> {
+        match params.get(name).map(String::as_str) {
+            None | Some("false") => Ok(false),
+            Some("true") => Ok(true),
+            _ => bail!("login intent must be true or false"),
+        }
+    };
+    input.migrate_local = intent("migrate_local")?;
+    input.migrate_vault = intent("migrate_vault")?;
+    input.offer_local_merge = intent("offer_local_merge")?;
+    Ok(input)
+}
+
+fn continue_request(request: &WireRequest) -> Result<respire_commands::output::ResultEnvelope> {
+    validate_header(request.v, &request.id)?;
+    // Validate all desktop input before starting or querying the original host transaction.
+    match request.method.as_str() {
+        "auth.login.continue" => {
+            let params: LoginContinue = serde_json::from_value(request.params.clone())
+                .map_err(|_| anyhow::anyhow!("invalid login continuation fields"))?;
+            let input = supplemental_input(params.continuation)?;
+            if let Some(code) = &params.totp {
+                ensure!(
+                    code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),
+                    "TOTP code must contain 6 digits"
+                );
+            }
+            crate::prepare_command_runtime()?;
+            crate::autostart::check_direct_access()?;
+            crate::autostart::rpc_accounts().continue_login(
+                &params.operation_id,
+                &params.source_profile,
+                input,
+                params.super_password,
+                params.totp,
+            )
+        }
+        "auth.key.continue" => {
+            let params: KeyContinue = serde_json::from_value(request.params.clone())
+                .map_err(|_| anyhow::anyhow!("invalid key continuation fields"))?;
+            let input = key_input(params.input)?;
+            if let Some(code) = &input.totp {
+                ensure!(
+                    code.len() == 6 && code.bytes().all(|byte| byte.is_ascii_digit()),
+                    "TOTP code must contain 6 digits"
+                );
+            }
+            crate::prepare_command_runtime()?;
+            crate::autostart::check_direct_access()?;
+            crate::autostart::rpc_keys().continue_input(
+                &params.operation_id,
+                &params.source_profile,
+                input,
+            )
+        }
+        _ => bail!("unknown host RPC continuation method"),
+    }
+}
+
+fn capture_request(request: &WireRequest) -> crate::Captured {
+    let result = (|| -> Result<crate::Captured> {
+        validate_header(request.v, &request.id)?;
+        if matches!(
+            request.method.as_str(),
+            "auth.login.continue" | "auth.key.continue"
+        ) {
+            let envelope = continue_request(request)?;
+            return Ok(crate::Captured {
+                exit: respire_commands::output_state::status_exit_code(envelope.status),
+                envelope,
+            });
+        }
+        let legacy = Request {
+            v: request.v,
+            id: request.id.clone(),
+            method: request.method.clone(),
+            params: serde_json::from_value(request.params.clone())
+                .map_err(|_| anyhow::anyhow!("authentication fields must be strings"))?,
+        };
+        let args = arguments(&legacy)?;
+        if matches!(legacy.method.as_str(), "auth.login" | "auth.login.browser") {
+            let input = initial_input(&legacy.params)?;
+            LOGIN_INPUT.with(|slot| *slot.borrow_mut() = Some(input));
+        }
+        crate::prepare_command_runtime()?;
+        TOTP.with(|value| *value.borrow_mut() = legacy.params.get("totp").cloned());
+        Ok(crate::capture_run(args))
+    })();
+    LOGIN_INPUT.with(|slot| *slot.borrow_mut() = None);
+    TOTP.with(|value| *value.borrow_mut() = None);
+    match result {
+        Ok(captured) => captured,
+        Err(error) => {
+            let (envelope, exit) = crate::command_failure(&error);
+            crate::Captured { exit, envelope }
+        }
+    }
+}
+
+fn secret_values(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if matches!(key.as_str(), "continuation" | "input") {
+                    if let Some(text) = value.as_str() {
+                        values.push(text.to_owned());
+                        if let Ok(nested) = serde_json::from_str::<Value>(text) {
+                            secret_values(&nested, values);
+                        }
+                    } else {
+                        secret_values(value, values);
+                    }
+                } else if matches!(
+                    key.as_str(),
+                    "password"
+                        | "super"
+                        | "secret"
+                        | "wrapped_urk"
+                        | "totp"
+                        | "super_password"
+                        | "legacy_password"
+                        | "account_secret"
+                        | "source_secret"
+                        | "secret_key"
+                        | "new_super"
+                ) {
+                    if let Some(value) = value.as_str() {
+                        values.push(value.to_owned());
+                    }
+                }
+            }
+        }
+        Value::String(value) => values.push(value.to_owned()),
+        _ => {}
+    }
+}
+
 pub(crate) fn serve() -> Result<i32> {
     crate::runtime_policy::require_host("authentication RPC")?;
     ensure!(
@@ -153,38 +390,15 @@ pub(crate) fn serve() -> Result<i32> {
     let mut bytes = Vec::new();
     std::io::stdin().take(65537).read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= 65536, "host RPC request exceeds 64 KiB");
-    let request: Request = serde_json::from_slice(&bytes)
+    let request: WireRequest = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid host RPC JSON request"))?;
-    let captured = match arguments(&request).and_then(|args| {
-        crate::prepare_command_runtime()?;
-        Ok(args)
-    }) {
-        Ok(args) => {
-            // Preserve existing host lifecycle, access gates and profile transactions.
-            HOST_RPC_OUTPUT.set(true);
-            TOTP.with(|value| *value.borrow_mut() = request.params.get("totp").cloned());
-            let result = crate::capture_run(args);
-            TOTP.with(|value| *value.borrow_mut() = None);
-            HOST_RPC_OUTPUT.set(false);
-            result
-        }
-        Err(error) => {
-            let (envelope, exit) = crate::command_failure(&error);
-            crate::Captured { exit, envelope }
-        }
-    };
+    HOST_RPC_OUTPUT.set(true);
+    let captured = capture_request(&request);
+    HOST_RPC_OUTPUT.set(false);
     let mut envelope = serde_json::to_value(captured.envelope)?;
-    let secrets: Vec<&str> = request
-        .params
-        .iter()
-        .filter(|(key, _)| {
-            matches!(
-                key.as_str(),
-                "password" | "super" | "secret" | "wrapped_urk" | "totp"
-            )
-        })
-        .map(|(_, v)| v.as_str())
-        .collect();
+    let mut secrets = Vec::new();
+    secret_values(&request.params, &mut secrets);
+    let secrets: Vec<&str> = secrets.iter().map(String::as_str).collect();
     if envelope["status"] == "fail" {
         scrub(&mut envelope, &secrets);
     } else if let Some(errors) = envelope.get_mut("errors") {
@@ -244,6 +458,44 @@ mod tests {
                 ("totp", "123456"),
             ],
         ))?;
+        let input = initial_input(
+            &request(
+                "auth.login",
+                &[
+                    ("migrate_local", "true"),
+                    ("offer_local_merge", "false"),
+                    (
+                        "continuation",
+                        r#"{"source_secret":"synthetic-source","merge_local":true}"#,
+                    ),
+                ],
+            )
+            .params,
+        )?;
+        assert!(input.migrate_local && !input.migrate_vault && !input.offer_local_merge);
+        assert_eq!(input.source_secret.as_deref(), Some("synthetic-source"));
+        assert_eq!(input.merge_local, Some(true));
+        let browser = arguments(&request("auth.login.browser", &[]))?;
+        assert_eq!(browser, vec!["--json", "login", "--oauth"]);
+        let browser = arguments(&request(
+            "auth.login.browser",
+            &[("addr", "http://127.0.0.1:9")],
+        ))?;
+        assert!(browser
+            .iter()
+            .any(|value| value == "--addr=http://127.0.0.1:9"));
+        for field in [
+            "password",
+            "user",
+            "authorization",
+            "token",
+            "totp",
+            "continuation",
+            "material",
+            "migrate_local",
+        ] {
+            assert!(arguments(&request("auth.login.browser", &[(field, "forbidden")])).is_err());
+        }
         assert!(command.iter().any(|value| value == "--interactive"));
         assert!(!command.iter().any(|value| value.contains("123456")));
         assert!(arguments(&request(
@@ -259,7 +511,52 @@ mod tests {
     }
 
     #[test]
-    fn existing_transport_rejects_unknown_method_fields_and_missing_inputs() {
+    fn existing_transport_rejects_unknown_method_fields_and_missing_inputs() -> Result<()> {
+        let login: LoginContinue = serde_json::from_value(json!({
+            "operation_id":"a7e71cb4-0016-4a1d-bc18-8f83816078ec", "source_profile":"synthetic-profile",
+            "continuation":{"account_secret":"synthetic-secret"}, "totp":"123456"
+        }))?;
+        assert!(supplemental_input(login.continuation).is_ok());
+        assert!(key_input(json!({"totp":"123456"})).is_ok());
+        for field in [
+            "material",
+            "challenge",
+            "custody_ack",
+            "operation",
+            "receipt",
+        ] {
+            let mut value = json!({});
+            value[field] = json!({});
+            assert!(key_input(value).is_err());
+        }
+        for field in [
+            "authorization",
+            "addr",
+            "user",
+            "migrate_local",
+            "material",
+            "challenge",
+            "custody_ack",
+        ] {
+            let mut value = json!({"operation_id":"original", "source_profile":"synthetic-profile", "continuation":{}});
+            value[field] = json!("forbidden");
+            assert!(serde_json::from_value::<LoginContinue>(value).is_err());
+            assert!(supplemental_input(json!({field:"forbidden"})).is_err());
+        }
+        assert!(serde_json::from_value::<LoginContinue>(
+            json!({"source_profile":"synthetic-profile", "continuation":{}})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<KeyContinue>(json!({"operation_id":"original", "source_profile":"synthetic-profile", "input":{}, "receipt":{}})).is_err());
+        assert!(initial_input(&request("auth.login", &[("migrate_local", "yes")]).params).is_err());
+        assert!(initial_input(
+            &request(
+                "auth.login",
+                &[("continuation", r#"{"migrate_local":true}"#)]
+            )
+            .params
+        )
+        .is_err());
         assert!(arguments(&request("auth.unknown", &[])).is_err());
         assert!(arguments(&request("auth.login", &[("user", "synthetic-user")])).is_err());
         assert!(arguments(&request("auth.reset", &[("unexpected", "value")])).is_err());
@@ -272,13 +569,23 @@ mod tests {
             ]
         ))
         .is_err());
+        Ok(())
     }
 
     #[test]
     fn existing_failure_scrubber_removes_synthetic_values() {
         let mut value =
             json!({"errors":["synthetic-secret", {"detail":"prefix synthetic-secret suffix"}]});
-        scrub(&mut value, &["synthetic-secret"]);
+        let mut values = Vec::new();
+        secret_values(
+            &json!({"continuation":r#"{"account_secret":"synthetic-secret"}"#,
+            "input":{"super_password":"synthetic-super"}}),
+            &mut values,
+        );
+        assert!(values.iter().any(|secret| secret == "synthetic-secret"));
+        assert!(values.iter().any(|secret| secret == "synthetic-super"));
+        let refs: Vec<&str> = values.iter().map(String::as_str).collect();
+        scrub(&mut value, &refs);
         assert!(!value.to_string().contains("synthetic-secret"));
     }
 }

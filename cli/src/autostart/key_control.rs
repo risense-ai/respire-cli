@@ -18,8 +18,11 @@ pub(crate) fn control_super_reset_step(
     super::shared_host::keys().super_reset_step(addr, input, resume)
 }
 
-pub(crate) fn control_key_result(operation_id: &str) -> Result<ResultEnvelope> {
-    super::shared_host::keys().result(operation_id)
+pub(crate) fn control_key_result(operation_id: &str, source_profile: Option<&std::path::Path>) -> Result<ResultEnvelope> {
+    match source_profile {
+        Some(source) => super::shared_host::keys().result_at(operation_id, source),
+        None => super::shared_host::keys().result(operation_id),
+    }
 }
 
 pub(crate) fn control_key_rollback(operation_id: &str) -> Result<ResultEnvelope> {

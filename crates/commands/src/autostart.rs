@@ -45,6 +45,9 @@ pub enum RuntimeCommand {
     KeyResult {
         #[arg(long, value_parser = parse_auth_operation_id)]
         operation_id: String,
+        /// Bind the query to the original selected profile without requiring live health.
+        #[arg(long, value_name = "DIR")]
+        source_profile: Option<PathBuf>,
     },
     /// Explicitly compensate the original key operation when its receipt permits it.
     KeyRollback {
