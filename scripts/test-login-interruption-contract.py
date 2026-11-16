@@ -21,7 +21,8 @@ SOURCE = Path(__file__).with_name('dev-login-interruption-smoke.py').read_text()
 TREE = ast.parse(SOURCE)
 NAMES = {'original_operation', 'account_recovery_flags', 'terminal_operation',
          'process_group_members', 'interrupt_owned_control', 'stop_owned_control', 'login_continuation_receipt',
-         'runtime_stop_receipt', 'fixture_runtime_owners', 'key_continuation_receipt', 'remove_fixture_super'}
+         'runtime_stop_receipt', 'fixture_runtime_owners', 'key_continuation_receipt', 'remove_fixture_super',
+         'safe_cli_diagnostic'}
 
 
 def require(value, message):
@@ -329,7 +330,7 @@ class BarrierContract(unittest.TestCase):
     def test_reset_uses_authenticated_vault_storage_and_readback(self):
         main = next(node for node in TREE.body if isinstance(node, ast.FunctionDef) and node.name == 'account_fixture_handler')
         handler = next(node for node in ast.walk(main) if isinstance(node, ast.ClassDef) and node.name == 'Handler')
-        state = {'vault': {'version': 4, 'wrapped_urk': 'original'}, 'posts': 0, 'gets': 0, 'barrier': None}
+        state = {'vault': {'version': 4, 'wrapped_urk': 'original'}, 'posts': 0, 'gets': 0, 'logins': 0, 'barrier': None}
         scope = dict(BaseHTTPRequestHandler=object, json=json, state=state)
         exec(compile(ast.Module(body=[handler], type_ignores=[]), '<actual-vault-handler>', 'exec'), scope)
         instance = scope['Handler']()
@@ -345,7 +346,17 @@ class BarrierContract(unittest.TestCase):
             instance.send_error.assert_called_with(401)
             self.assertEqual(state, before)
             instance.reply.assert_not_called()
-        instance.headers['Authorization'] = 'Bearer synthetic-token'
+        instance.path = '/login'
+        instance.rfile = io.BytesIO(b'{}')
+        instance.headers = {'Content-Length': '2'}
+        instance.do_POST()
+        token = instance.reply.call_args.args[0]['token']
+        self.assertEqual(state['logins'], 1)
+        instance.reply.reset_mock()
+        instance.path = '/api/self/vault'
+        instance.headers = {'Authorization': 'Bearer ' + token, 'Content-Length': str(len(body))}
+        instance.do_GET()
+        instance.reply.assert_called_once_with({'version': 4, 'wrapped_urk': 'original'})
         instance.rfile = io.BytesIO(body)
         instance.do_POST()
         self.assertEqual(state['vault'], replacement)
@@ -538,6 +549,34 @@ class ProcessContract(unittest.TestCase):
 
 
 class ReportContract(unittest.TestCase):
+    def test_host_rpc_failure_keeps_only_fixed_diagnostic_and_still_fails(self):
+        from types import SimpleNamespace
+        host = next(node for node in TREE.body
+                    if isinstance(node, ast.FunctionDef) and node.name == 'host_login_continuation')
+        rpc = next(node for node in host.body if isinstance(node, ast.FunctionDef) and node.name == 'rpc')
+        marker = ('runtime maintenance is incomplete; use the host runtime restart or the indicated '
+                  'snapshot/login recovery before accessing the library')
+        for error, category in ((marker + '; private-account-material', 'host_maintenance_pending'),
+                                ('private-account-material', 'unclassified')):
+            with self.subTest(category=category):
+                observation = {}
+
+                def reject(args, **kwargs):
+                    request = json.loads(kwargs['input'])
+                    reply = {'v': 1, 'id': request['id'], 'ok': False, 'exit': 1,
+                             'envelope': {'status': 'fail', 'summary': {}, 'errors': [error]}}
+                    return subprocess.CompletedProcess(args, 1, json.dumps(reply).encode(), b'private-stderr')
+
+                scope = dict(globals(), observation=observation, binary=Path('fixture-cli'), command_env={},
+                             subprocess=SimpleNamespace(run=reject))
+                exec(compile(ast.Module(body=[rpc], type_ignores=[]), '<actual-host-rpc>', 'exec'), scope)
+                with self.assertRaisesRegex(RuntimeError, 'login_continuation_transport_mismatch'):
+                    scope['rpc']('auth.login.continue', {}, 0)
+                diagnostic = observation['last_rpc']['diagnostic']
+                self.assertEqual(diagnostic['category'], category)
+                self.assertEqual(observation['last_rpc']['exit'], 1)
+                self.assertNotIn('private-', json.dumps(observation))
+
     def reporter(self):
         from contextlib import contextmanager
         from types import SimpleNamespace

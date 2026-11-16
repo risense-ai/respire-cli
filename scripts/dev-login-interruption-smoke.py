@@ -489,6 +489,8 @@ def host_login_continuation(binary, directory, env, state, addr, code, observati
             "status": status if status in ("pending", "ok", "warn", "fail") else "unrecognized",
             "outcome": outcome if outcome in ("awaiting_input", "awaiting_verification", "committed",
                 "rolled_back", "pending", "unknown") else "absent-or-unrecognized"}
+        if result.returncode != expected_exit:
+            observation["last_rpc"]["diagnostic"] = safe_cli_diagnostic(json.dumps(envelope).encode(), result.stderr)
         require(result.returncode == expected_exit and reply.get("v") == 1
                 and reply.get("id") == transport_id and reply.get("exit") == expected_exit
                 and reply.get("ok") is (expected_exit == 0), "login_continuation_transport_mismatch")
