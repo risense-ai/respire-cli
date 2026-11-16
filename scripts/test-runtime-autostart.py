@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Actual native lifecycle in a disposable home; optional owned OS registration.
 
-The CLI and an extracted independent Runtime bundle are inputs. No credentials,
-user data or inherited Respire configuration are passed to them. Real sign-in
-service adapters are exercised only with --register on an ephemeral hosted
+The CLI and an extracted independent Runtime bundle are inputs. Only disposable
+CLI-created credentials are used; no user data or inherited Respire configuration.
+Real sign-in service adapters are exercised only with --register on an ephemeral hosted
 runner; a foreground-only run does not claim registration acceptance.
 """
 import argparse
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import runpy
 import shutil
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+import uuid
 
 
 def backend_health(port):
@@ -25,6 +27,49 @@ def backend_health(port):
     request = urllib.request.Request(f"http://127.0.0.1:{port}/api/health",
                                      headers={"X-Respire-Health": "runtime-v1"})
     return urllib.request.urlopen(request, timeout=5)
+
+
+def seed_local_credentials(binary, env, keys):
+    """Create only an owned, unbound session through the public host transaction."""
+    profile = Path(env["RSRS_DATA_DIR"]).resolve()
+    session_path = profile / "session.json"
+    journal = profile / "runtime/autostart/key-control.json"
+    results = journal.parent / "key-results"
+    assert not session_path.exists() and not journal.exists() and not results.exists(), "key fixture must be fresh"
+    try:
+        try:
+            generated = subprocess.run([binary, "--json", "keygen"], env=env,
+                                       capture_output=True, text=True, timeout=45)
+        finally:
+            # Track the host's durable owner even when keygen fails after custody.
+            for path in [journal, *results.glob("*.json")]:
+                if path.exists():
+                    assert not path.is_symlink(), "key fixture journal must not be linked"
+                    binding = json.loads(path.read_text(encoding="utf-8"))
+                    operation = uuid.UUID(binding["operation_id"])
+                    assert operation.version == 4 and str(operation) == binding["operation_id"], "invalid key fixture operation"
+                    assert os.path.samefile(binding["root"], profile) and os.path.samefile(binding["profile"], profile), "foreign key fixture owner"
+                    alias = "login-" + operation.hex
+                    keys.entries.update(("rsrs", prefix + alias) for prefix in ("super:", "pass:", "key-control:"))
+        assert generated.returncode == 0, "synthetic CLI keygen did not commit"
+        assert not session_path.is_symlink(), "key fixture session must not be linked"
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        alias = session.get("keyring_account")
+        assert not session.get("user") and session.get("vault_version") == 4, "keygen must create an unbound v4 session"
+        assert isinstance(alias, str) and re.fullmatch(r"login-[a-f0-9]{32}", alias), "invalid keygen fixture alias"
+        assert ("rsrs", "super:" + alias) in keys.entries and session.get("keyring_backend") == keys.credential_backend, "keygen fixture custody differs"
+        assert not any(key in session for key in ("pass", "super", "secret", "secret_key")), "keygen retained inline credentials"
+        started = subprocess.run([binary, "--json", "runtime", "start"], env=env,
+                                 capture_output=True, text=True, timeout=45)
+        assert started.returncode == 0, "synthetic key handoff did not start"
+        status = subprocess.run([binary, "--json", "runtime", "status"], env=env,
+                                capture_output=True, text=True, timeout=45)
+        assert status.returncode == 0, "synthetic key handoff status failed"
+        assert json.loads(status.stdout)["summary"]["runtime"]["store_ready"] is True, "host did not unlock synthetic credentials"
+    finally:
+        stopped = subprocess.run([binary, "--json", "runtime", "stop"], env=env,
+                                 capture_output=True, text=True, timeout=45)
+        assert stopped.returncode == 0, "synthetic key fixture did not stop"
 
 
 def main():
@@ -40,6 +85,8 @@ def main():
         parser.error("previous-version upgrade acceptance requires --register")
     if args.register and not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"):
         parser.error("OS registration acceptance is limited to an ephemeral GitHub-hosted runner")
+    if not (os.environ.get("GITHUB_ACTIONS") == "true" and os.environ.get("RUNNER_ENVIRONMENT") == "github-hosted"):
+        parser.error("native credential lifecycle acceptance requires an ephemeral GitHub-hosted runner")
     binary = str(args.binary.resolve(strict=True))
     runtime_name = "rsrs-runtime.exe" if os.name == "nt" else "rsrs-runtime"
     selected_runtime = args.runtime_binary or os.environ.get("RSRS_RUNTIME_BIN")
@@ -65,7 +112,8 @@ def main():
 
     # Failed startup/cleanup can leave a detached owner or OS registration.
     # Preserve its files for explicit recovery instead of deleting live paths.
-    temporary = tempfile.mkdtemp(prefix="respire-autostart-")
+    temporary = tempfile.mkdtemp(prefix="respire-autostart-", dir=os.environ["RUNNER_TEMP"])
+    keys = None
     try:
         base = Path(temporary).resolve(strict=True)
         home = base / "home"
@@ -94,10 +142,19 @@ def main():
         managed_fixture = base / "managed-installation"
         # Restart/drain and registration tests must start from the installer's
         # original release proof, not an unbound explicit Runtime override.
-        needs_managed = args.register or os.name == "nt"
-        runtime_binary = stage_runtime(base / "bin", managed_fixture if needs_managed else None)
+        runtime_binary = stage_runtime(base / "bin", managed_fixture)
         shutil.copy2(binary, base / "bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
+        binary = str(base / "bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
         env["RSRS_RUNTIME_BIN"] = str(base / "bin" / runtime_name)
+        helper = "dev-migration-secret-service.py" if sys.platform.startswith("linux") else "dev-migration-keyring.py"
+        credential_helpers = runpy.run_path(str(Path(__file__).with_name(helper)))
+        if sys.platform.startswith("linux"):
+            os.environ.update(credential_helpers["hosted_user_bus_environment"]())
+            keys = credential_helpers["create"](base / "keyring-home", hosted_user_bus=True)
+            keys.configure_business_env(env)
+        else:
+            keys = credential_helpers["create"](base / "keyring-home")
+            keys.configure_env(env)
 
         restart_stages={"restart_probe","restart_managed","restart_identity","restart_stop","restart_start","restart_ready"}
         def read_restart_stages():
@@ -127,77 +184,90 @@ def main():
         assert not root.exists(), "status must not create a profile"
         denied = command("--client-only", "runtime", "autostart", "enable", "--now")
         assert denied.returncode != 0 and not root.exists()
-        with (base / "foreground.log").open("w+") as log:
-            child = subprocess.Popen([binary, "runtime", "run"], env=env,
-                                     stdout=log, stderr=log)
-            foreground_stopped = False
-            health = None
-            try:
-                deadline = time.monotonic() + 30
-                while time.monotonic() < deadline:
-                    if child.poll() is not None:
-                        log.seek(0)
-                        raise AssertionError("foreground exited: " + log.read()[-3000:])
-                    try:
-                        with urllib.request.urlopen(
-                            f"http://127.0.0.1:{port}/api/health", timeout=1
-                        ) as response:
-                            health = json.load(response)
-                        if health.get("store_ready"):
-                            break
-                    except (OSError, ValueError):
-                        pass
-                    time.sleep(0.1)
-                assert health and health["store_ready"], "store never became ready"
-                assert health["pid"] != child.pid and health["managed_id"] is None
-                assert os.path.samefile(health["exe"], env["RSRS_RUNTIME_BIN"])
-                assert Path(health["installation_root"]).resolve() == root.resolve()
-                # Status runs inside Runtime and reports its own environment's
-                # autosync switch without needing keys or an inference model.
-                query=command("--client-only","status")
-                assert query.returncode == 0, f"foreground status RPC failed: {query.stdout} {query.stderr}"
-                status_reply=json.loads(query.stdout)
-                assert status_reply["command"] == "status" and status_reply["summary"]["autosync"] is False
-                assert child.poll() is None, "status RPC terminated the foreground host"
-                stopped = command("runtime", "stop")
-                assert stopped.returncode == 0, stopped.stderr
-                foreground_stopped = True
-                assert child.wait(timeout=20) == 0
-                assert not (root / "runtime/autostart/registration.json").exists()
-            except Exception:
-                print("isolated foreground diagnostic", json.dumps({
-                    "temporary": temporary,
-                    "base": str(base),
-                    "root": str(root),
-                    "foreground_returncode": child.poll(),
-                    "foreground_log": log.name,
-                }), file=sys.stderr, flush=True)
-                raise
-            finally:
-                primary_error = sys.exc_info()[1]
+        def foreground(expected_ready):
+            with (base / ("foreground-ready.log" if expected_ready else "foreground-locked.log")).open("w+") as log:
+                child = subprocess.Popen([binary, "runtime", "run"], env=env,
+                                         stdout=log, stderr=log)
+                foreground_stopped = False
+                health = None
                 try:
-                    # No observed Runtime means there is no verified HTTP owner
-                    # to clean up; retain the original foreground startup error.
-                    if not foreground_stopped and health is not None:
-                        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
-                            cleanup_health=json.load(response)
-                        assert cleanup_health["server"] == "respire" and cleanup_health["managed_id"] is None
-                        assert os.path.samefile(cleanup_health["exe"], env["RSRS_RUNTIME_BIN"])
-                        assert Path(cleanup_health["installation_root"]).resolve() == root.resolve()
-                        assert Path(cleanup_health["data_dir"]).resolve() == root.resolve()
-                        for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
-                            assert cleanup_health[key] == health[key], f"foreground owner changed before cleanup: {key}"
-                        # Host stop verifies native birth identity, waits for the real
-                        # Runtime to exit and validates its final drained receipt.
-                        cleanup=command("runtime", "stop")
-                        assert cleanup.returncode == 0, f"foreground Runtime cleanup failed: {cleanup.stdout} {cleanup.stderr}"
-                    if child.poll() is None:
-                        assert child.wait(timeout=20) == 0, "foreground CLI did not exit after Runtime stopped"
-                except Exception as cleanup_error:
-                    if primary_error is None:
-                        raise
-                    print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
-        print("PASS: read-only default-off status, client-only denial, actual foreground store readiness and owned stop")
+                    deadline = time.monotonic() + 30
+                    while time.monotonic() < deadline:
+                        if child.poll() is not None:
+                            raise AssertionError("foreground exited before readiness")
+                        try:
+                            with urllib.request.urlopen(
+                                f"http://127.0.0.1:{port}/api/health", timeout=1
+                            ) as response:
+                                health = json.load(response)
+                            if health.get("store_ready") is expected_ready:
+                                break
+                        except (OSError, ValueError):
+                            pass
+                        time.sleep(0.1)
+                    assert health and health["store_ready"] is expected_ready, "foreground readiness differs from fixture credentials"
+                    if not expected_ready:
+                        assert health["credential_state"] == "required", "keyless foreground must require credentials"
+                        assert not (root / "session.json").exists(), "keyless startup created a session"
+                        assert not (root / "rsrs.db").exists() and not (root / "onememory.db").exists(), "keyless startup opened a library"
+                    assert health["pid"] != child.pid and health["managed_id"] is None
+                    assert os.path.samefile(health["exe"], env["RSRS_RUNTIME_BIN"])
+                    assert Path(health["installation_root"]).resolve() == root.resolve()
+                    # Status runs inside Runtime and reports its own environment's
+                    # autosync switch without needing keys or an inference model.
+                    query=command("--client-only","status")
+                    assert query.returncode == 0, f"foreground status RPC failed: {query.stdout} {query.stderr}"
+                    status_reply=json.loads(query.stdout)
+                    assert status_reply["command"] == "status"
+                    if expected_ready:
+                        assert status_reply["summary"]["autosync"] is False
+                    assert child.poll() is None, "status RPC terminated the foreground host"
+                    stopped = command("runtime", "stop")
+                    assert stopped.returncode == 0, stopped.stderr
+                    foreground_stopped = True
+                    assert child.wait(timeout=20) == 0
+                    assert not (root / "runtime/autostart/registration.json").exists()
+                except Exception:
+                    print("isolated foreground diagnostic", json.dumps({
+                        "temporary": temporary,
+                        "base": str(base),
+                        "root": str(root),
+                        "foreground_returncode": child.poll(),
+                        "foreground_log": log.name,
+                    }), file=sys.stderr, flush=True)
+                    raise
+                finally:
+                    primary_error = sys.exc_info()[1]
+                    try:
+                        # No observed Runtime means there is no verified HTTP owner
+                        # to clean up; retain the original foreground startup error.
+                        if not foreground_stopped and health is not None:
+                            with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as response:
+                                cleanup_health=json.load(response)
+                            assert cleanup_health["server"] == "respire" and cleanup_health["managed_id"] is None
+                            assert os.path.samefile(cleanup_health["exe"], env["RSRS_RUNTIME_BIN"])
+                            assert Path(cleanup_health["installation_root"]).resolve() == root.resolve()
+                            assert Path(cleanup_health["data_dir"]).resolve() == root.resolve()
+                            for key in ("pid", "instance_id", "process_start_id", "image_sha256", "account_id", "generation"):
+                                assert cleanup_health[key] == health[key], f"foreground owner changed before cleanup: {key}"
+                            # Host stop verifies native birth identity, waits for the real
+                            # Runtime to exit and validates its final drained receipt.
+                            cleanup=command("runtime", "stop")
+                            assert cleanup.returncode == 0, f"foreground Runtime cleanup failed: {cleanup.stdout} {cleanup.stderr}"
+                        if child.poll() is None:
+                            assert child.wait(timeout=20) == 0, "foreground CLI did not exit after Runtime stopped"
+                    except Exception as cleanup_error:
+                        if primary_error is None:
+                            raise
+                        print(f"foreground cleanup also failed: {cleanup_error}", file=sys.stderr)
+            return health
+
+        foreground(False)
+        print("PASS: fresh default-off status, client-only denial, keyless locked foreground and owned stop")
+        env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
+        seed_local_credentials(binary, env, keys)
+        health = foreground(True)
+        print("PASS: CLI-created unbound credentials, real host unlock, foreground store readiness and owned stop")
         # A fresh off-mode installation must restart without opening/creating a
         # library. Its detached child is always stopped before leaving the test.
         off_root = base / "off installation"
@@ -207,8 +277,7 @@ def main():
         stage_runtime(base / "off-bin")
         shutil.copy2(binary, base / "off-bin" / ("rsrs.exe" if os.name == "nt" else "rsrs"))
         off_env["RSRS_RUNTIME_BIN"] = str(base / "off-bin" / runtime_name)
-        if needs_managed:
-            off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", off_root))
+        off_env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", off_root))
         try:
             for argv in [("runtime","start"),("runtime","stop")]*3+[("runtime","restart")]:
                 result = subprocess.run([binary,"--json",*argv],env=off_env,capture_output=True,text=True,timeout=45)
@@ -695,8 +764,9 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                             raise
                         print(f"identity fixture cleanup also failed: {cleanup_error}",file=sys.stderr)
                 print("PASS: verified cross-installation owner refused without replacement; persisted fence cleared only by explicit recovery after owner drain")
-                managed_runtime_binary = copy_managed_installation(managed_fixture / "bin", root)
-                env["RSRS_RUNTIME_BIN"] = str(managed_runtime_binary)
+                if sys.platform.startswith("linux"):
+                    env["RSRS_RUNTIME_BIN"] = str(copy_managed_installation(managed_fixture / "bin", root))
+                    seed_local_credentials(binary, env, keys)
                 enabled = run("runtime", "autostart", "enable")
                 assert enabled["enabled"] is True and enabled["registered"] is True, enabled
                 assert enabled["runtime"]["running"] is False, "enable without --now unexpectedly starts runtime"
@@ -706,6 +776,7 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
                 assert up["runtime"]["running"] is True and up["runtime"]["store_ready"] is True, up
                 first_pid = up["runtime"]["pid"]
                 config_path = root / "runtime/autostart/registration.json"
+                assert os.path.samefile(json.loads(config_path.read_text())["executable"], binary), "registration changed the CLI image used for key custody"
                 # Observe the managed child's captured opt-out through the
                 # existing client-only RPC, with the caller deliberately set
                 # to the opposite value. No sync or network write is requested.
@@ -927,8 +998,11 @@ $s=[Activator]::CreateInstance([Type]::GetTypeFromProgID('Schedule.Service'));$s
     except BaseException:
         print(f"Failed lifecycle fixture retained for explicit recovery: {temporary}",file=sys.stderr)
         raise
-    else:
-        shutil.rmtree(temporary)
+    finally:
+        if keys is not None:
+            cleanup = keys.cleanup()
+            assert cleanup.get("passed") is True and not cleanup.get("remaining_entries"), "synthetic native credential cleanup failed; fixture retained"
+    shutil.rmtree(temporary)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import ast
 import json
 import os
 import re
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,69 @@ class FixtureInstallationTests(unittest.TestCase):
                                         capture_output=True, text=True, timeout=10)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn('OS registration acceptance is limited to an ephemeral GitHub-hosted runner', result.stderr)
+        source = (scripts / 'test-runtime-autostart.py').read_text(encoding='utf-8')
+        self.assertLess(source.index('assert not root.exists()'), source.index('        foreground(False)'))
+        self.assertLess(source.index('        foreground(False)'), source.index('        seed_local_credentials(binary, env, keys)'))
+        self.assertLess(source.index('        seed_local_credentials(binary, env, keys)'), source.index('        health = foreground(True)'))
+        self.assertLess(source.index('        binary = str(base / "bin"'), source.index('        seed_local_credentials(binary, env, keys)'))
+        for proof in ('health["credential_state"] == "required"', '"keyless startup created a session"',
+                      '"keyless startup opened a library"', 'keys.configure_business_env(env)',
+                      'keys.configure_env(env)', 'hosted_user_bus=True', 'keys.cleanup()',
+                      '"registration changed the CLI image used for key custody"',
+                      '"synthetic native credential cleanup failed; fixture retained"'):
+            self.assertIn(proof, source)
+        self.assertNotIn('"session.json").write', source)
+        self.assertNotIn('keys.put(', source)
+        # Execute the actual seeding helper; subprocesses stand in only for this offline contract.
+        seed = runpy.run_path(str(scripts / 'test-runtime-autostart.py'))['seed_local_credentials']
+        operation = '12345678-1234-4234-9234-123456789abc'
+        alias = 'login-' + operation.replace('-', '')
+        for fault in ('', 'keygen', 'handoff', 'locked', 'bound', 'foreign', 'stop'):
+            with self.subTest(seed=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory).resolve()
+                keys = types.SimpleNamespace(entries=set(), credential_backend='native')
+                calls = []
+                def cli(command, **kwargs):
+                    calls.append(command[2:])
+                    self.assertEqual(command[:2], ['owned-cli', '--json'])
+                    self.assertTrue(kwargs['capture_output'])
+                    self.assertEqual(kwargs['timeout'], 45)
+                    if command[2:] == ['keygen']:
+                        journal = root / 'runtime/autostart/key-control.json'
+                        journal.parent.mkdir(parents=True)
+                        if fault == 'foreign':
+                            (root / 'foreign').mkdir()
+                        journal.write_text(json.dumps({'operation_id': operation, 'root': str(root),
+                            'profile': str(root / 'foreign' if fault == 'foreign' else root)}), encoding='utf-8')
+                        if fault != 'keygen':
+                            archive = journal.parent / 'key-results'
+                            archive.mkdir()
+                            journal.rename(archive / (operation + '.json'))
+                        session = {'vault_version': 4, 'keyring_account': alias, 'keyring_backend': 'native'}
+                        if fault == 'bound':
+                            session['user'] = 'foreign-account'
+                        (root / 'session.json').write_text(json.dumps(session), encoding='utf-8')
+                        return types.SimpleNamespace(returncode=int(fault == 'keygen'), stdout='private-sentinel-never-report')
+                    if command[2:] == ['runtime', 'status']:
+                        return types.SimpleNamespace(returncode=0, stdout=json.dumps(
+                            {'summary': {'runtime': {'store_ready': fault != 'locked'}}}))
+                    return types.SimpleNamespace(returncode=int(
+                        fault == 'handoff' and command[2:] == ['runtime', 'start']
+                        or fault == 'stop' and command[2:] == ['runtime', 'stop']))
+                with patch('subprocess.run', side_effect=cli):
+                    if fault:
+                        with self.assertRaises(AssertionError) as raised:
+                            seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
+                        self.assertNotIn('private-sentinel-never-report', str(raised.exception))
+                    else:
+                        seed('owned-cli', {'RSRS_DATA_DIR': str(root)}, keys)
+                self.assertEqual(calls[0], ['keygen'])
+                self.assertEqual(calls[-1], ['runtime', 'stop'])
+                self.assertEqual(calls.count(['keygen']), 1)
+                self.assertEqual(keys.entries, set() if fault == 'foreign' else
+                    {('rsrs', prefix + alias) for prefix in ('super:', 'pass:', 'key-control:')})
+                if not fault:
+                    self.assertEqual(calls, [['keygen'], ['runtime', 'start'], ['runtime', 'status'], ['runtime', 'stop']])
 
     def test_scope_ids_use_os_canonical_paths_and_preserve_bound_accounts(self):
         with tempfile.TemporaryDirectory() as temporary:
