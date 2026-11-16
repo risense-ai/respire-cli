@@ -98,6 +98,39 @@ fn export_output_uses_private_files_and_preserves_inline_contract() -> Result<()
         body: "synthetic-export-body".into(),
         legacy_warning: false,
     };
+    // Exercise the real host renderer through the existing output contract test.
+    use respire_crypto::crypto;
+    let code = crypto::generate_secret_key();
+    let salt = crypto::random_hex(16);
+    let kek = crypto::derive_rsrs_kek(&code, &salt)?;
+    let (nonce, wrapped) = crypto::wrap_key(&crypto::generate_key(), &kek)?;
+    let session = json!({"vault_version":4, "user":"fixture-user", "kdf_salt":salt,
+        "wrapped_urk":format!("{}{wrapped}", crypto::RSRS_PREFIX), "urk_nonce":nonce});
+    let host = respire_host_control::keys_export::keys_export(&session, Some(&code), None)?;
+    assert!(host.body.contains(&code));
+    assert!(!host.legacy_warning);
+    assert!(respire_host_control::keys_export::keys_export(&session, None, None).is_err());
+    let other = crypto::generate_secret_key();
+    assert!(respire_host_control::keys_export::keys_export(&session, Some(&other), None).is_err());
+    let masked = respire_host_control::keys_export::secret_read(Some(&session), false, None, None)?;
+    assert!(masked.secret.is_none() && masked.five.is_none());
+    let revealed = respire_host_control::keys_export::secret_read(Some(&session), true, Some(&code), None)?;
+    assert_eq!(revealed.secret.as_deref(), Some(code.as_str()));
+    assert_eq!(revealed.five.context("host five-piece kit")?["secret_key"], code);
+    assert!(respire_host_control::keys_export::secret_read(Some(&session), true, Some(&other), None).is_err());
+    let absent = respire_host_control::keys_export::secret_read(None, true, None, None)?;
+    assert!(!absent.session.has_session && absent.secret.is_none() && absent.five.is_none());
+    for version in [1, 2, 3] {
+        let legacy = json!({"vault_version":version, "wrapped_urk":"unchanged-wrap"});
+        let super_factor = (version >= 2).then_some("original-super");
+        let account_factor = (version != 2).then_some("original-account-secret");
+        let rendered = respire_host_control::keys_export::keys_export(&legacy, super_factor, account_factor)?;
+        assert_eq!(rendered.legacy_warning, version != 3);
+        assert!(rendered.body.contains(if version == 1 { "original-account-secret" } else { "original-super" }));
+        assert!(respire_host_control::keys_export::keys_export(&legacy, None, None).is_err());
+        let read = respire_host_control::keys_export::secret_read(Some(&legacy), true, super_factor, account_factor)?;
+        assert_eq!(read.secret.as_deref(), if version == 2 { super_factor } else { account_factor });
+    }
     let inline = keys_export_result(exported(), None)?;
     assert!(matches!(inline.status, OutputStatus::Warn));
     assert_eq!(inline.summary["inline"], true);
@@ -134,7 +167,7 @@ fn private_read_responses_validate_all_binding_and_readiness_fields() -> Result<
     let dir = tempfile::tempdir()?;
     let profile = dir.path().canonicalize()?;
     let request = request()?;
-    for command in ["secret-read", "keys-export-read", "session"] {
+    for command in ["session"] {
         let baseline = response(command, &profile);
         validate_response(
             serde_json::from_value(baseline.clone())?,

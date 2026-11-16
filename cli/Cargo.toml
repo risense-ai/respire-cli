@@ -53,6 +53,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 signal-hook = "0.3"
 
 [dev-dependencies]
+respire_crypto = { path = "../crates/crypto", default-features = false }
 tempfile = "3.15"
 
 [lints.rust]

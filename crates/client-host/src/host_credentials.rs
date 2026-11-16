@@ -101,6 +101,53 @@ pub fn read_control_response<T: serde::de::DeserializeOwned>(
     }
 }
 
+/// Export uses stored original factors, never process overrides or another recorded backend.
+pub fn read_export_factors(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_u64().context("invalid export vault version")?,
+    };
+    anyhow::ensure!(version >= 1, "unsupported export vault version");
+    let super_password = if version >= 2 {
+        let bound = ["keyring_account", "keyring_backend", "auth_operation_id"]
+            .iter().any(|field| session.get(*field).is_some());
+        let value = if bound {
+            let backend = session["keyring_backend"].as_str().context("invalid export credential backend")?;
+            anyhow::ensure!(credential_backends().contains(&backend), "unsupported export credential backend");
+            let alias = session["keyring_account"].as_str().filter(|alias|
+                (alias.starts_with("legacy-") || alias.starts_with("login-"))
+                    && alias.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '-'))
+                .context("export credential account is missing or invalid")?;
+            read_session_slot(&format!("super:{alias}"), backend)?
+        } else {
+            // Historical sessions can retain their original factor inline.
+            let field = if version >= 4 { "secret_key" } else { "super" };
+            match session.get(field) {
+                Some(value) => Some(value.as_str().context("invalid original super password")?.to_owned()),
+                None => {
+                    let user = session["user"].as_str().filter(|user| !user.trim().is_empty())
+                        .context("original super password account is unavailable")?;
+                    anyhow::ensure!(user.len() <= 512 && !user.contains(['\0', '\r', '\n']),
+                        "invalid export credential account");
+                    read_provider_credential("rsrs", &format!("super:{}", user.trim()), credential_backends())
+                        .map_err(|code| anyhow::anyhow!("host export credential read failed ({code:?})"))?
+                }
+            }
+        };
+        Some(value.filter(|value| !value.is_empty()).context("original super password is unavailable")?)
+    } else { None };
+    let legacy_secret = if matches!(version, 1 | 3) {
+        if session.get("legacy_secret_backend").is_some() {
+            read_session_legacy_secret(session)?
+        } else {
+            let field = if version == 1 { "secret" } else { "secret_key" };
+            Some(session[field].as_str().filter(|value| !value.is_empty())
+                .context("original legacy factor is unavailable")?.to_owned())
+        }
+    } else { None };
+    Ok((super_password, legacy_secret))
+}
+
 pub fn read_session_credentials(session: &serde_json::Value) -> Result<(Option<String>, Option<String>)> {
     let account = session["keyring_account"].as_str().filter(|alias|
         (alias.starts_with("legacy-") || alias.starts_with("login-"))
@@ -548,6 +595,20 @@ mod legacy_session_tests {
 
     #[test]
     fn recorded_legacy_backend_is_never_repaired_from_inline_factors() {
+        for version in [1, 2, 3, 4] {
+            let session = serde_json::json!({"vault_version":version, "super":"original-super",
+                "secret":"original-account", "secret_key":"original-code"});
+            let (primary, legacy) = read_export_factors(&session).unwrap_or_else(|error| panic!("inline export failed: {error}"));
+            assert_eq!(primary.as_deref(), match version { 1 => None, 4 => Some("original-code"), _ => Some("original-super") });
+            assert_eq!(legacy.as_deref(), match version { 1 => Some("original-account"), 3 => Some("original-code"), _ => None });
+        }
+        for version in [2, 3, 4] {
+            for marker in [serde_json::Value::Null, serde_json::json!("invalid-backend")] {
+                let session = serde_json::json!({"vault_version":version, "super":"original-super",
+                    "secret_key":"original-code", "keyring_backend":marker, "keyring_account":"login-fixture"});
+                assert!(read_export_factors(&session).is_err());
+            }
+        }
         for marker in [serde_json::Value::Null, serde_json::json!("invalid-backend")] {
             let session = serde_json::json!({"vault_version":3, "secret_key":"synthetic-factor",
                 "legacy_secret_backend":marker, "keyring_account":"login-fixture"});
