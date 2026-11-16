@@ -67,7 +67,8 @@ pub(super) fn spawn(
     private_write(&path, &serde_json::to_vec(&grant)?, None)?;
     let token = format!("launch-v1:{nonce}");
     let mut command = Command::new(&binary);
-    command.args(arguments).env("RSRS_RUNTIME_BOOT_TOKEN", &token)
+    // Stdout carries framed plugin events; suppress Runtime's human startup banner.
+    command.arg("--json").args(arguments).env("RSRS_RUNTIME_BOOT_TOKEN", &token)
         .env("RSRS_HOST_PLUGIN_CHANNEL", "1").env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
@@ -984,6 +985,8 @@ mod tests {
         assert!(matches!(ack.result, HostPluginEventResult::Completed { warnings } if warnings.is_empty()));
         assert!(serve_plugin_events(std::io::Cursor::new(&frame[..frame.len()-1]), Vec::new(), &config).is_err());
         assert!(serve_plugin_events(std::io::Cursor::new(&frame[..2]), Vec::new(), &config).is_err());
+        assert!(serve_plugin_events(std::io::Cursor::new(b"runtime=starting host=127.0.0.1 port=default\n"),
+            Vec::new(), &config).is_err(), "human startup output must not enter the framed plugin channel");
         let arbitrary = serde_json::to_vec(&json!({"plugin_event":1, "id":id,
             "event":"command", "data":{"pulled":0,"pushed":0}, "cmd":"exit 0"}))?;
         assert!(execute_plugin_event(&arbitrary, &config).is_err());
