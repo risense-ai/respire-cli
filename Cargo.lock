@@ -1742,6 +1742,7 @@ dependencies = [
  "hex",
  "respire_client_host",
  "respire_commands",
+ "respire_crypto",
  "respire_protocol",
  "respire_spawn",
  "serde",
