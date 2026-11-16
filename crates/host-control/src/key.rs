@@ -336,6 +336,26 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
         maintenance
             .auth_launch_binding(&profile)?
             .context("key control requires an actual drained Paused binding")?;
+        if !original.sent && matches!(action, Action::Rollback(_)) {
+            anyhow::ensure!(profile == original.profile && crate::identity(&profile)? == original.source_identity,
+                "unsent key source changed before host compensation");
+            material::rollback(&original)?;
+            if original.was_serving {
+                maintenance.start_account_runtime()?;
+                let restored = host.probe_runtime()?.context("unsent key owner did not resume")?;
+                verify_owner(host.as_ref(), &restored, &root, &profile, &image, &original.source_identity)?;
+                anyhow::ensure!(!original.store_ready || restored.store_ready, "unsent key owner lost store readiness");
+            }
+            maintenance.finish_key(&profile, &original.source_identity, original.was_serving, original.store_ready)?;
+            finished = true;
+            host.finish_key_handoff(&profile, &original.source_identity, original.was_serving)?;
+            anyhow::ensure!(read_original(&path)?.as_ref().map(|(_, hash)| hash.as_str()) == Some(digest.as_str()),
+                "unsent key recovery changed before cleanup");
+            std::fs::remove_file(&path)?;
+            respire_spawn::durable::sync_directory(path.parent().context("key recovery parent missing")?)?;
+            return Ok(ResultEnvelope::new("key-control", Status::Ok,
+                json!({"operation_id":original.operation_id,"state":"not_sent","credential_cleanup":"completed"}), Vec::new()));
+        }
         let deadline = Instant::now() + Duration::from_secs(185);
         if let Action::Reset { input, .. } = &action {
             let (candidate, private) = material::prepare(&original, input)?;

@@ -47,7 +47,11 @@ fn unlock(session: &Value, input: &HostKeyInput) -> Result<[u8; 32]> {
     let current = wrapped.strip_prefix(crypto::RSRS_PREFIX);
     let secret = || input.super_password.as_deref().context("explicit Super Key required");
     let legacy = || input.account_secret.as_deref().context("explicit legacy factor required");
-    let kek = match session["vault_version"].as_i64().unwrap_or(1) {
+    let version = match session.get("vault_version") {
+        None => 1,
+        Some(value) => value.as_i64().context("invalid host key vault version")?,
+    };
+    let kek = match version {
         1 if current.is_some() => crypto::derive_rsrs_password_kek(input.password.as_deref().context("password required")?, legacy()?, salt)?,
         1 => crypto::derive_kek(input.password.as_deref().context("password required")?, legacy()?, salt)?,
         2 => crypto::derive_super_kek(secret()?, salt)?,
@@ -146,8 +150,15 @@ pub(super) fn persist(original: &Original, input: &HostKeyInput) -> Result<()> {
 
 pub(super) fn load(original: &Original, supplied: Option<&HostKeyInput>, verify_slots: bool) -> Result<HostKeyInput> {
     let Some(_) = original.candidate else { return supplied.map(copy).unwrap_or_else(|| Ok(HostKeyInput::default())); };
-    let payload = slots::read(&alias(original), backend(), "key-control")?
-        .context("host key custody missing; retain the original operation without regenerating material")?;
+    let account = alias(original);
+    let Some(payload) = slots::read(&account, backend(), "key-control")? else {
+        ensure!(!verify_slots, "host key custody missing; retain the original operation without regenerating material");
+        // Explicit rollback may precede the first private write; no candidate slot may exist.
+        for name in ["super", "pass", "legacy-secret"] {
+            ensure!(slots::read(&account, backend(), name)?.is_none(), "host key custody missing for existing slot");
+        }
+        return Ok(HostKeyInput::default());
+    };
     let mut input: HostKeyInput = serde_json::from_str(&payload).map_err(|_| anyhow::anyhow!("invalid host key custody"))?;
     validate(original, &input)?;
     if original.sent && verify_slots {
