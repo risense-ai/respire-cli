@@ -45,18 +45,26 @@ fn read_ready(reader: impl Read) -> Result<Value> {
     anyhow::ensure!(bytes.len() <= READY_LIMIT as usize && bytes.last() == Some(&b'\n'),
         "incomplete Runtime readiness frame");
     let ready: Value = serde_json::from_slice(&bytes)?;
-    anyhow::ensure!(ready["startup_complete"] == true, "Runtime startup is incomplete");
+    anyhow::ensure!(ready["startup_complete"] == true
+        || (ready["startup_complete"] == false && ready["error"].is_string()),
+        "Runtime startup is incomplete");
     Ok(ready)
 }
 
-#[cfg(target_os = "macos")]
 fn receive_ready(child: &mut std::process::Child) -> Result<Value> {
     let pid = child.id();
     let reader = child.stdout.take().context("private readiness pipe is missing")?;
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || { let _ = sender.send(read_ready(reader)); });
-    receiver.recv_timeout(Duration::from_secs(40))
-        .with_context(|| format!("startup is uncertain for child {pid}; inspect before retry"))?
+    let ready = receiver.recv_timeout(Duration::from_secs(40))
+        .with_context(|| format!("startup is uncertain for child {pid}; inspect before retry"))?;
+    match ready {
+        Err(error) => match child.try_wait()? {
+            Some(status) => Err(error).with_context(|| format!("compatibility startup pipe failed; child exit status: {status}")),
+            None => Err(error),
+        },
+        Ok(ready) => Ok(ready),
+    }
 }
 
 fn publish_ready(ready: &Value) -> Result<()> {
@@ -65,6 +73,27 @@ fn publish_ready(ready: &Value) -> Result<()> {
     output.write_all(b"\n")?;
     output.flush()?;
     Ok(())
+}
+
+// Never forward Display/source strings: they can contain credentials or responses.
+pub(crate) fn report_failure(stage: &'static str, error: &anyhow::Error) -> Result<()> {
+    let stage = error.downcast_ref::<&'static str>().copied().unwrap_or(stage);
+    let category = if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        format!("io::{:?}; os_error={:?}", error.kind(), error.raw_os_error())
+    } else if let Some(error) = error.downcast_ref::<respire_commands::runtime_error::RuntimeError>() {
+        use respire_commands::runtime_error::RuntimeError;
+        match error {
+            RuntimeError::Unavailable => "runtime_unavailable",
+            RuntimeError::TokenUnreadable(_) => "runtime_token_unreadable",
+            RuntimeError::Unauthorized => "runtime_unauthorized",
+            RuntimeError::Transport(_) => "runtime_transport",
+            RuntimeError::OutcomeUnknown { .. } => "request_outcome_unknown",
+        }.into()
+    } else { "internal_error".into() };
+    let status = error.downcast_ref::<std::process::ExitStatus>();
+    let message = format!("compatibility startup failed at {stage} ({category}; exit_status={status:?})");
+    eprintln!("{message}");
+    publish_ready(&json!({"startup_complete":false, "error":message}))
 }
 
 #[cfg(any(test, target_os = "macos"))]
@@ -85,8 +114,10 @@ fn guarded_host_pid(ready: &Value, guardian: u32, executable: &Path, root: &Path
 /// library lock, or fabricated identity is retained for it.
 #[cfg(target_os = "macos")]
 pub(crate) fn supervise() -> Result<()> {
-    let expectation = startup_expectation(std::env::args_os().skip(2))?;
-    respire_client_host::roots::validate_client_environment()?;
+    let expectation = startup_expectation(std::env::args_os().skip(2))
+        .context("startup arguments")?;
+    respire_client_host::roots::validate_client_environment()
+        .context("client environment")?;
     crate::runtime_policy::require_host("Client2 exit observation")?;
     let executable = std::env::current_exe()?.canonicalize()?;
     let mut command = Command::new(&executable);
@@ -97,6 +128,10 @@ pub(crate) fn supervise() -> Result<()> {
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
     let mut child = respire_spawn::spawn_host_control(&mut command)?;
     let mut ready = receive_ready(&mut child)?;
+    if ready["startup_complete"] == false {
+        publish_ready(&ready)?;
+        anyhow::bail!("owned compatibility host startup failed");
+    }
     anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
     ready["guardian_pid"] = json!(std::process::id());
     guarded_host_pid(&ready, std::process::id(), &executable,
@@ -394,13 +429,17 @@ pub(crate) fn startup_expectation(arguments: impl Iterator<Item = std::ffi::OsSt
 }
 
 pub(crate) fn serve() -> Result<()> {
-    let expectation = startup_expectation(std::env::args_os().skip(2))?;
-    respire_client_host::roots::validate_client_environment()?;
-    crate::runtime_policy::require_host("Client2 compatibility startup")?;
-    crate::autostart::check_direct_access()?;
+    let expectation = startup_expectation(std::env::args_os().skip(2))
+        .context("startup arguments")?;
+    respire_client_host::roots::validate_client_environment()
+        .context("client environment")?;
+    crate::runtime_policy::require_host("Client2 compatibility startup")
+        .context("host policy")?;
+    crate::autostart::check_direct_access()
+        .context("direct access policy")?;
     #[cfg(windows)]
     respire_spawn::confine_supervisor_tree()
-        .context("cannot confine compatibility host and its owned Runtime")?;
+        .context("owned process confinement")?;
     let interrupted = Arc::new(std::sync::atomic::AtomicBool::new(false));
     #[cfg(unix)]
     {
@@ -423,23 +462,33 @@ pub(crate) fn serve() -> Result<()> {
     anyhow::ensure!(!root.join("runtime/autostart/registration.json").exists(),
         "compatibility host cannot replace a registered service");
     let public_port = crate::net_rpc::rpc_port();
-    let listener = TcpListener::bind(("127.0.0.1", public_port))?;
-    let reservation = TcpListener::bind(("127.0.0.1", 0))?;
+    let listener = TcpListener::bind(("127.0.0.1", public_port))
+        .context("public listener bind")?;
+    let reservation = TcpListener::bind(("127.0.0.1", 0))
+        .context("Runtime port reservation")?;
     let port = reservation.local_addr()?.port();
-    let executable = crate::rpc::resolve_runtime_executable()?.canonicalize()?;
-    let digest = hex::encode(Sha256::digest(std::fs::read(&executable)?));
+    let executable = crate::rpc::resolve_runtime_executable()
+        .context("Runtime executable resolution")?
+        .canonicalize().context("Runtime executable path")?;
+    let digest = hex::encode(Sha256::digest(std::fs::read(&executable)
+        .context("Runtime image read")?));
     let mut command = Command::new(&executable);
     command.args(["serve", "--port", &port.to_string()])
         .env("RSRS_RPC_PORT", port.to_string()).env_remove("RSRS_RUNTIME_BOOT_TOKEN")
         .env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN")
         .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::inherit());
     drop(reservation);
-    let mut child = respire_spawn::spawn_owned_runtime(&mut command)?;
+    let mut child = respire_spawn::spawn_owned_runtime(&mut command)
+        .context("Runtime spawn")?;
     let pid = child.id();
+    let mut stage = "Runtime readiness";
     let startup = (|| -> Result<_> {
         let deadline = Instant::now() + Duration::from_secs(30);
         let health: crate::net_rpc::Health = loop {
-            anyhow::ensure!(child.try_wait()?.is_none(), "owned Runtime exited before readiness");
+            if let Some(status) = child.try_wait()? {
+                stage = "owned Runtime exited before readiness";
+                return Err(anyhow::anyhow!("owned Runtime exited before readiness").context(status));
+            }
             if let Ok(ready) = health_at(port) {
                 if ready["startup_complete"] == true {
                     break serde_json::from_value(ready)?;
@@ -449,6 +498,7 @@ pub(crate) fn serve() -> Result<()> {
                 "Runtime readiness is uncertain for child {pid}; inspect before retry");
             std::thread::sleep(Duration::from_millis(100));
         };
+        stage = "Runtime identity verification";
         let (installation, profile) = respire_client_host::config::control_roots()?;
         anyhow::ensure!(child.try_wait()?.is_none() && health.pid == pid && health.image_sha256 == digest
             && !health.instance_id.is_empty() && !health.account_id.is_empty() && health.generation > 0
@@ -461,7 +511,9 @@ pub(crate) fn serve() -> Result<()> {
             host_image_sha256: hex::encode(Sha256::digest(std::fs::read(std::env::current_exe()?)?)),
             last_health: Mutex::new(serde_json::from_value(health_at(port)?)?) });
         backend.verify(&serde_json::from_value(health_at(port)?)?)?;
+        stage = "Runtime credential confirmation";
         expectation.confirm_credentials(&backend.health)?;
+        stage = "compatibility listener creation";
         let server = tiny_http::Server::from_listener(listener, None)
             .map_err(|error| anyhow::anyhow!("cannot create compatibility listener: {error}"))?;
         Ok((backend, server))
@@ -469,6 +521,7 @@ pub(crate) fn serve() -> Result<()> {
     let (backend, server) = match startup {
         Ok(ready) => ready,
         Err(error) => {
+            let error = error.context(stage);
             // Stop only the child we spawned; a delayed startup must not race the next owner.
             let cleanup = (|| -> Result<()> {
                 if child.try_wait().context("could not inspect unready Runtime child")?.is_none() {
@@ -478,10 +531,12 @@ pub(crate) fn serve() -> Result<()> {
                 Ok(())
             })();
             return match cleanup {
-                Ok(()) => Err(error).context(
-                    "Runtime startup failed; original data and recovery records retained"),
-                Err(cleanup_error) => Err(error).context(format!(
-                    "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed: {cleanup_error:#}")),
+                Ok(()) => Err(error).with_context(||
+                    "Runtime startup failed; original data and recovery records retained".to_owned()),
+                Err(cleanup_error) => {
+                    Err(error).context("owned Runtime cleanup failed after startup failure").context(format!(
+                        "Runtime startup failed; original data and recovery records retained; owned child {pid} cleanup failed: {cleanup_error:#}"))
+                },
             };
         }
     };
@@ -733,21 +788,16 @@ pub(crate) fn start_locked_with_expectation(
     if expectation == respire_host_control::lifecycle_io::AccountRuntimeExpectation::LockedAfterFullLogout {
         arguments.push("--locked-after-full-logout".into());
     }
+    let mut child = respire_spawn::spawn_binary_with_readiness(&executable, &arguments)?;
+    let ready = receive_ready(&mut child)?;
+    anyhow::ensure!(ready["startup_complete"] == true, "{}", ready["error"].as_str().context("startup error missing")?);
     #[cfg(target_os = "macos")]
-    let (mut child, host_pid) = {
-        let mut guardian = respire_spawn::spawn_binary_with_readiness(&executable,
-            &arguments)?;
-        let ready = receive_ready(&mut guardian)?;
-        let pid = guarded_host_pid(&ready, guardian.id(), &executable,
-            &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
-        (guardian, pid)
-    };
+    let host_pid = guarded_host_pid(&ready, child.id(), &executable,
+        &respire_client_host::paths::main_data_dir(), crate::net_rpc::rpc_port())?;
     #[cfg(not(target_os = "macos"))]
-    let (mut child, host_pid) = {
-        let child = respire_spawn::spawn_binary_with_boot_token(&executable,
-            &arguments, None)?;
-        let pid = child.id();
-        (child, pid)
+    let host_pid = {
+        anyhow::ensure!(ready["pid"] == child.id(), "readiness does not identify the owned host child");
+        child.id()
     };
     let deadline = Instant::now() + Duration::from_secs(40);
     while Instant::now() < deadline {
@@ -770,6 +820,12 @@ mod tests {
         let ready = json!({"startup_complete":true, "pid":123, "guardian_pid":456,
             "exe":executable, "installation_root":root, "bin":crate::VERSION, "port":15169});
         assert_eq!(guarded_host_pid(&ready, 456, &executable, &root, 15169)?, 123);
+        let frame = format!("{ready}\n");
+        assert_eq!(read_ready(frame.as_bytes())?, ready);
+        assert!(read_ready(b"".as_slice()).is_err());
+        let failed = json!({"startup_complete":false, "error":"public listener bind (io::AddrInUse)"});
+        let frame = format!("{failed}\n");
+        assert_eq!(read_ready(frame.as_bytes())?, failed);
         for (key, value) in [("pid", json!(0)), ("pid", json!(456)),
             ("pid", json!(u64::MAX)), ("guardian_pid", json!(789)),
             ("startup_complete", json!(false)), ("bin", json!("foreign")),
