@@ -187,6 +187,27 @@ jobs:
           CLI_SHA: ${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}
           CLI_VERSION: ${{ inputs.version }}
         run: node npm/scripts/extract-artifact.mjs validated-cli target/ci/${{ matrix.target }}/release
+      - name: Prepare isolated upgrade Python and the fixed Windows wheel key
+        id: wheel-key
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/upgrade-python"
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          if [ "$RUNNER_OS" = Windows ]; then py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"; fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            "$py" -m pip install --only-binary=:all: pip==26.2.2 setuptools==84.2.1 wheel==0.48.0
+          fi
+          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
+          if [ "$RUNNER_OS" = Linux ]; then
+            bash scripts/ci-apt-get.sh update
+            bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
+            "$py" -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0
+          fi
+          if [ "$RUNNER_OS" = Windows ]; then
+            key="$("$py" scripts/native-psutil-wheel-cache.py key)"
+            echo "key=$key" >> "$GITHUB_OUTPUT"
+          fi
       - name: Verify OS autostart registration from published release bytes
         if: inputs.artifact_source == 'published-assets' && inputs.validation_profile == 'full'
         shell: bash
@@ -196,8 +217,12 @@ jobs:
           : "${RSRS_PUBLISHED_RUNTIME_ARCHIVE:?Verified published Runtime archive required}"
           : "${RSRS_PUBLISHED_RUNTIME_VERSION:?Verified published Runtime version required}"
           exe="target/ci/${{ matrix.target }}/release/rsrs"
-          if [ "$RUNNER_OS" = Windows ]; then exe="$exe.exe"; fi
-          python scripts/test-runtime-autostart.py --binary "$exe" --register \
+          py="$RUNNER_TEMP/upgrade-python/bin/python"
+          if [ "$RUNNER_OS" = Windows ]; then
+            exe="$exe.exe"
+            py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"
+          fi
+          "$py" scripts/test-runtime-autostart.py --binary "$exe" --register \
             --runtime-archive "$RSRS_PUBLISHED_RUNTIME_ARCHIVE" --runtime-version "$RSRS_PUBLISHED_RUNTIME_VERSION"
       - name: Install and verify the official pinned standalone Runtime
         if: inputs.artifact_source != 'published-assets'
@@ -345,25 +370,6 @@ jobs:
             ${{ runner.temp }}/published-client2-gui/workspace.png
             ${{ runner.temp }}/published-client2-gui/online-*
           if-no-files-found: error
-      - name: Prepare isolated upgrade Python and the fixed Windows wheel key
-        id: wheel-key
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -m venv "$RUNNER_TEMP/upgrade-python"
-          py="$RUNNER_TEMP/upgrade-python/bin/python"
-          if [ "$RUNNER_OS" = Windows ]; then py="$RUNNER_TEMP/upgrade-python/Scripts/python.exe"; fi
-          if [ "$RUNNER_OS" = Windows ]; then
-            "$py" -m pip install --only-binary=:all: pip==26.2.2 setuptools==84.2.1 wheel==0.48.0
-          fi
-          "$py" -m pip install --only-binary=:all: cryptography==46.0.3
-          if [ "$RUNNER_OS" = Linux ]; then
-            "$py" -m pip install --only-binary=:all: SecretStorage==3.3.3 jeepney==0.9.0
-          fi
-          if [ "$RUNNER_OS" = Windows ]; then
-            key="$("$py" scripts/native-psutil-wheel-cache.py key)"
-            echo "key=$key" >> "$GITHUB_OUTPUT"
-          fi
       - uses: actions/cache/restore@v4
         id: wheel-cache
         if: runner.os == 'Windows'
@@ -481,13 +487,9 @@ jobs:
           RSRS_RUNTIME_TRIPLE: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          bash scripts/ci-apt-get.sh update
-          bash scripts/ci-apt-get.sh install -y --no-install-recommends dbus-x11 gnome-keyring
-          python3 -m venv "$RUNNER_TEMP/login-regression-python"
-          "$RUNNER_TEMP/login-regression-python/bin/pip" install --only-binary=:all: cryptography==46.0.3 SecretStorage==3.3.3 jeepney==0.9.0
           binary="$(realpath target/ci/${{ matrix.target }}/release/rsrs)"
           checksum="$(sha256sum "$binary" | cut -d ' ' -f 1)"
-          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private "$RUNNER_TEMP/login-regression-python/bin/python" scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
+          dbus-run-session -- env RSRS_SS_FIXTURE_BUS=private "$RUNNER_TEMP/upgrade-python/bin/python" scripts/dev-login-interruption-smoke.py --native-credentials --binary "$binary" --binary-sha256 "$checksum" --version '${{ inputs.version }}' --source-sha '${{ inputs.artifact_source == 'published-assets' && fromJSON(inputs.published_assets).cli.source_sha || inputs.ref }}' --root "$RUNNER_TEMP/gnu-login-interruption" --model-dir "$RUNNER_TEMP/release-probe/models/bge-m3"
       - uses: actions/upload-artifact@v4
         if: always() && inputs.validation_profile == 'full' && matrix.target == 'x86_64-unknown-linux-gnu'
         with:
