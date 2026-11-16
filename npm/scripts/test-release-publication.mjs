@@ -579,20 +579,24 @@ test('published Runtime producer binds exact attempt reports and build bytes, in
 });
 
 test('published target downloads and verifies both real file sets but records no process/full success before execution', async () => {
-  const target = 'x86_64-unknown-linux-gnu', root = mkdtempSync(path.join(tmpdir(), 'published-target-test-'));
+  for (const target of ['x86_64-unknown-linux-gnu','x86_64-apple-darwin','aarch64-apple-darwin','x86_64-pc-windows-msvc']) {
+  const extension = target.includes('windows') ? '.exe' : '', root = mkdtempSync(path.join(tmpdir(), 'published-target-test-'));
   const hash = bytes => createHash('sha256').update(bytes).digest('hex');
-  const image = Buffer.alloc(64); image.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]); image.writeUInt16LE(62, 18);
+  const image = Buffer.alloc(128);
+  if (target.includes('darwin')) { image.writeUInt32LE(0xfeedfacf,0); image.writeUInt32LE(target.startsWith('aarch64')?0x100000c:0x1000007,4); }
+  else if (target.includes('windows')) { image.write('MZ'); image.writeUInt32LE(64,0x3c); image.write('PE\0\0',64); image.writeUInt16LE(0x8664,68); image.writeUInt16LE(0x20b,88); }
+  else { image.set([0x7f, 0x45, 0x4c, 0x46, 2, 1]); image.writeUInt16LE(62, 18); }
   const license = Buffer.from('synthetic license'), sdk = {sdk_version:'1.0.2-dev.23',manifest_sha256:'a'.repeat(64),archive_sha256:'b'.repeat(64),redistribution:'approved'};
   const core = Buffer.from(JSON.stringify({schema_version:1,target,sdk_version:sdk.sdk_version,redistribution:'permitted-under-included-license',files:[{path:'core-notices/CORE-SDK-LICENSE.txt',sha256:hash(license)}]}));
-  const archive = syntheticTar([['core-runtime.json',core],['core-notices/CORE-SDK-LICENSE.txt',license],[`rsrs-runtime-${target}`,image]]);
+  const archive = syntheticTar([['core-runtime.json',core],['core-notices/CORE-SDK-LICENSE.txt',license],[`rsrs-runtime-${target}${extension}`,image]]);
   const fileHash = hash(image), archiveHash = hash(archive), manifestHash = 'd'.repeat(64);
-  const cli = {schema_version: 2, artifact_layout:'cli-frontend-v2', git_sha: sha, version, target, binary_file: `rsrs-${target}`,
+  const cli = {schema_version: 2, artifact_layout:'cli-frontend-v2', git_sha: sha, version, target, binary_file: `rsrs-${target}${extension}`,
     binary_size:image.length, binary_sha256: fileHash, producer:{run_id:91,run_attempt:2}};
   const runtime = {schema_version: 2, source_commit: sha, runtime_version: version, target_triple: target,
-    binary_file: `rsrs-runtime-${target}`, archive_file: `rsrs-runtime-${target}.tar.gz`, binary_sha256: fileHash,
+    binary_file: `rsrs-runtime-${target}${extension}`, archive_file: `rsrs-runtime-${target}.tar.gz`, binary_sha256: fileHash,
     archive_sha256: archiveHash, protocol_range: {minimum: 1, maximum: 1}, capabilities: {business_executor: '1', mcp_server: '1'},
     compat:{min_cli:version,max_cli:'*'},
-    files: [{path:'core-runtime.json',size:core.length,sha256:hash(core)},{path:'core-notices/CORE-SDK-LICENSE.txt',size:license.length,sha256:hash(license)}, {path: `rsrs-runtime-${target}`, size: image.length, sha256: fileHash}]};
+    files: [{path:'core-runtime.json',size:core.length,sha256:hash(core)},{path:'core-notices/CORE-SDK-LICENSE.txt',size:license.length,sha256:hash(license)}, {path: `rsrs-runtime-${target}${extension}`, size: image.length, sha256: fileHash}]};
   const bytes = new Map();
   const part = (kind, metadata, names, id) => ({repository: `risense-ai/respire-${kind}`, release_id: id, version, source_sha: sha, producer:{run_id:91,run_attempt:2},
     assets: [Buffer.from(JSON.stringify(metadata)), image, ...(kind === 'cli' ? [] : [archive])].map((value, n) => {
@@ -631,12 +635,16 @@ test('published target downloads and verifies both real file sets but records no
     assert.equal(receipt.runtime_producer.run_attempt,2);assert.equal(receipt.runtime_producer.artifacts.length,2);
     assert.deepEqual(JSON.parse(readFileSync(path.join(destination, 'published-assets-receipt.json'))), receipt);
     const inspected=path.join(destination,'inspected/runtime'),licensePath=path.join(inspected,'core-notices/CORE-SDK-LICENSE.txt');
-    writeFileSync(licensePath,'tampered');assert.throws(()=>verifyCorePayload(inspected,target,sdk,runtime.files),/hash\/size/);writeFileSync(licensePath,license);
-    writeFileSync(path.join(inspected,'unexpected'),'extra');assert.throws(()=>verifyCorePayload(inspected,target,sdk,runtime.files),/Runtime\/Core inventory/);rmSync(path.join(inspected,'unexpected'));
+    const installedFiles=runtime.files.map(file=>file.path===runtime.binary_file?{...file,path:'rsrs-runtime'+extension}:file);
+    verifyCorePayload(inspected,target,sdk,installedFiles);
+    writeFileSync(licensePath,'tampered');assert.throws(()=>verifyCorePayload(inspected,target,sdk,installedFiles),/hash\/size/);writeFileSync(licensePath,license);
+    writeFileSync(path.join(inspected,'unexpected'),'extra');assert.throws(()=>verifyCorePayload(inspected,target,sdk,installedFiles),/Runtime\/Core inventory/);rmSync(path.join(inspected,'unexpected'));
     assert.throws(()=>verifyCorePayload(inspected,target,{...sdk,sdk_version:'1.0.2-dev.22'}),/Core identity/);
     const consumed=await consumePublishedTarget(spec,target,destination,path.join(root,'nested/consumer/release'),manifestHash,{fetcher});
-    assert.deepEqual(consumed.env,{RSRS_ARTIFACT_SOURCE:'published-assets',RSRS_RUNTIME_BIN:path.resolve(root,'nested/consumer/release/runtime',runtime.binary_file),RSRS_PUBLISHED_RUNTIME_SHA256:fileHash,RSRS_PUBLISHED_RUNTIME_VERSION:version,RSRS_PUBLISHED_ASSETS_SHA256:manifestHash,RSRS_PUBLISHED_BUNDLE_SHA256:archiveHash,RSRS_PUBLISHED_RUNTIME_ARCHIVE:path.resolve(destination,'runtime',runtime.archive_file),RSRS_PUBLISHED_RUNTIME_METADATA:path.resolve(destination,'runtime',`runtime-build-${target}.json`),RSRS_PUBLISHED_RUNTIME_METADATA_SHA256:hash(Buffer.from(JSON.stringify(runtime))),RSRS_RUNTIME_TRIPLE:target});
+    assert.deepEqual(consumed.env,{RSRS_ARTIFACT_SOURCE:'published-assets',RSRS_RUNTIME_BIN:path.resolve(root,'nested/consumer/release/runtime','rsrs-runtime'+extension),RSRS_PUBLISHED_RUNTIME_SHA256:fileHash,RSRS_PUBLISHED_RUNTIME_VERSION:version,RSRS_PUBLISHED_ASSETS_SHA256:manifestHash,RSRS_PUBLISHED_BUNDLE_SHA256:archiveHash,RSRS_PUBLISHED_RUNTIME_ARCHIVE:path.resolve(destination,'runtime',runtime.archive_file),RSRS_PUBLISHED_RUNTIME_METADATA:path.resolve(destination,'runtime',`runtime-build-${target}.json`),RSRS_PUBLISHED_RUNTIME_METADATA_SHA256:hash(Buffer.from(JSON.stringify(runtime))),RSRS_RUNTIME_TRIPLE:target});
     assert.equal(hash(readFileSync(consumed.env.RSRS_RUNTIME_BIN)),fileHash);
+    assert.equal(existsSync(path.join(root,'nested/consumer/release/runtime',runtime.binary_file)),false);
+    assert.equal(hash(readFileSync(consumed.env.RSRS_PUBLISHED_RUNTIME_ARCHIVE)),archiveHash);
     await assert.rejects(verifyPublishedTarget(spec, target, destination, manifestHash, options), /EEXIST/);
     producer.report.run_attempt='1';
     producer.replaceZip(1,[[`runtime-smoke-${target}.json`,JSON.stringify(producer.report)]]);
@@ -651,6 +659,7 @@ test('published target downloads and verifies both real file sets but records no
     assert.equal(failure.assets_verified, false); assert.equal(failure.full_passed, false);
     assert.match(failure.error, /hash\/size/); assert.deepEqual(failure.actual_processes, []);
   } finally { rmSync(root, {recursive: true, force: true}); }
+  }
 });
 
 function syntheticTar(entries) {
