@@ -70,6 +70,78 @@ fn execute(request: &CredentialRequest) -> Result<Option<String>, CredentialErro
     }
 }
 
+fn auth_entry(account: &str, backend: &str, slot: &str) -> Result<keyring::Entry> {
+    anyhow::ensure!(matches!(slot, "super" | "pass"), "invalid host auth credential slot");
+    anyhow::ensure!(account.starts_with("login-") && account.len() <= 128
+        && account.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'),
+        "invalid host auth credential account");
+    anyhow::ensure!(credential_backends().contains(&backend) && backend != "kernel",
+        "host auth requires a persistent credential backend");
+    entry("rsrs", &format!("{slot}:{account}"), backend)
+        .map_err(|error| anyhow::anyhow!("host auth credential store unavailable ({error:?})"))
+}
+
+/// Exact host transaction lookup, without environment overrides or backend discovery.
+pub fn read_auth_super(account: &str, backend: &str) -> Result<Option<String>> {
+    read_auth_slot(account, backend, "super")
+}
+
+/// Exact registration recovery lookup; the receipt owner verifies its password commitment.
+pub fn read_auth_password(account: &str, backend: &str) -> Result<Option<String>> {
+    read_auth_slot(account, backend, "pass")
+}
+
+fn read_auth_slot(account: &str, backend: &str, slot: &str) -> Result<Option<String>> {
+    match auth_entry(account, backend, slot)?.get_password() {
+        Ok(value) => Ok(Some(value)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => anyhow::bail!("host auth credential read failed ({:?})", credential_error(error)),
+    }
+}
+
+/// The owning host transaction has already checkpointed this slot and its public candidate.
+pub fn write_auth_super(account: &str, backend: &str, value: &str) -> Result<()> {
+    write_auth_slot(account, backend, "super", value)
+}
+
+/// The registration host has checkpointed this exact password slot before calling.
+pub fn write_auth_password(account: &str, backend: &str, value: &str) -> Result<()> {
+    write_auth_slot(account, backend, "pass", value)
+}
+
+fn write_auth_slot(account: &str, backend: &str, name: &str, value: &str) -> Result<()> {
+    anyhow::ensure!(!value.is_empty(), "host auth credential is empty");
+    let slot = auth_entry(account, backend, name)?;
+    match read_auth_slot(account, backend, name)? {
+        Some(existing) => anyhow::ensure!(existing == value, "host auth credential slot belongs to different material"),
+        None => slot.set_password(value)
+            .map_err(|error| anyhow::anyhow!("host auth credential write failed ({:?})", credential_error(error)))?,
+    }
+    anyhow::ensure!(read_auth_slot(account, backend, name)?.as_deref() == Some(value),
+        "host auth credential readback mismatch; retain the original operation");
+    Ok(())
+}
+
+/// Only the host receipt owner may retire newly created slots; conflicts remain untouched.
+pub fn remove_auth_material(account: &str, backend: &str, super_password: &str, password: Option<&str>) -> Result<()> {
+    let original_super = read_auth_slot(account, backend, "super")?;
+    let original_pass = read_auth_slot(account, backend, "pass")?;
+    anyhow::ensure!(original_super.as_deref().is_none_or(|found| found == super_password)
+        && original_pass.as_deref().is_none_or(|found| Some(found) == password),
+        "host auth cleanup credential conflict; original slots retained");
+    for (name, original) in [("pass", original_pass), ("super", original_super)] {
+        if original.is_some() {
+            match auth_entry(account, backend, name)?.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => {},
+                Err(error) => anyhow::bail!("host auth cleanup failed ({:?})", credential_error(error)),
+            }
+            anyhow::ensure!(read_auth_slot(account, backend, name)?.is_none(),
+                "host auth cleanup readback failed; retain the operation receipt");
+        }
+    }
+    Ok(())
+}
+
 /// Consume private credential frames until the original Runtime response arrives.
 /// Credentials are never attached to that response, written to files, or logged.
 pub fn read_control_response<T: serde::de::DeserializeOwned>(
