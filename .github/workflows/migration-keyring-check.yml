@@ -6,7 +6,17 @@ on:
   workflow_dispatch:
     inputs:
       release_run_id:
-        description: Optional validated Release run for targeted native migration; blank runs credential fixtures only
+        description: Published CLI Release producer for targeted migration; blank runs credential fixtures only
+        required: false
+        default: ''
+        type: string
+      published_assets:
+        description: Exact public CLI and Runtime inventory required for targeted migration
+        required: false
+        default: ''
+        type: string
+      published_assets_sha256:
+        description: SHA-256 of the exact public inventory bytes
         required: false
         default: ''
         type: string
@@ -85,6 +95,15 @@ jobs:
     name: Targeted migration (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
+    env:
+      ARTIFACT_SOURCE: published-assets
+      REQUEST_PUBLISH: 'false'
+      VALIDATION_PROFILE: full
+      PUBLISHED_ASSETS: ${{ inputs.published_assets }}
+      PUBLISHED_ASSETS_SHA256: ${{ inputs.published_assets_sha256 }}
+      CLI_TARGET: ${{ matrix.target }}
+      CLI_RUN_ID: ${{ inputs.release_run_id }}
+      GH_TOKEN: ${{ github.token }}
     strategy:
       fail-fast: false
       matrix:
@@ -99,32 +118,29 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify the original seven-platform release build
+      - name: Verify the public release producer and assets
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CLI_RUN_ID: ${{ inputs.release_run_id }}
         run: |
-          node - <<'NODE'
-          const cp=require('child_process'),fs=require('fs'),m=require('./npm/artifact-manifest.json');
+          node --input-type=module - <<'NODE'
+          import {execFileSync} from 'node:child_process';
+          import {readFileSync,appendFileSync} from 'node:fs';
+          import {validateArtifactRequest} from './npm/scripts/extract-artifact.mjs';
+          const m=JSON.parse(readFileSync('npm/artifact-manifest.json','utf8'));
+          const spec=validateArtifactRequest(process.env,m.targets.map(t=>t.triple));
           const id=process.env.CLI_RUN_ID,repo=process.env.GITHUB_REPOSITORY;
           if(repo!=='risense-ai/respire-cli'||!/^\d+$/.test(id)) throw new Error('Pass an exact Release run ID from risense-ai/respire-cli');
-          const api=path=>JSON.parse(cp.execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
+          if(spec.cli.producer.run_id!==Number(id)) throw new Error('Public CLI producer differs from requested Release run');
+          const api=path=>JSON.parse(execFileSync('gh',['api',`repos/${repo}/${path}`],{encoding:'utf8'}));
           const run=api(`actions/runs/${id}`),sha=run.head_sha;
-          if(!/^[a-f0-9]{40}$/.test(sha)||!['.github/workflows/release.yml','.github/workflows/release-validation.yml'].includes(run.path)) throw new Error('Unexpected release source or workflow');
-          const jobs=JSON.parse(cp.execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${id}/jobs?per_page=10`],{encoding:'utf8'})).flatMap(page=>page.jobs);
+          if(sha!==spec.cli.source_sha||run.path!=='.github/workflows/release.yml'||run.status!=='completed'||run.conclusion!=='success'||run.run_attempt!==spec.cli.producer.run_attempt) throw new Error('Unexpected public release source, attempt or workflow');
+          const jobs=JSON.parse(execFileSync('gh',['api','--paginate','--slurp',`repos/${repo}/actions/runs/${id}/jobs?per_page=10`],{encoding:'utf8'})).flatMap(page=>page.jobs);
           for(const name of [...m.targets.map(t=>`Release (${t.triple})`),'npm-dry-run']) {
             if(!jobs.some(j=>(j.name===name||j.name.endsWith(` / ${name}`))&&j.conclusion==='success')) throw new Error(`Original validation failed: ${name}`);
           }
-          fs.appendFileSync(process.env.GITHUB_ENV,`CLI_SHA=${sha}\n`);
+          appendFileSync(process.env.GITHUB_ENV,`CLI_SHA=${sha}\nCLI_VERSION=${spec.cli.version}\n`);
           NODE
-      - uses: actions/download-artifact@v4
-        with:
-          name: cli-release-${{ matrix.target }}
-          path: original-artifact
-          run-id: ${{ inputs.release_run_id }}
-          github-token: ${{ github.token }}
-      - name: Verify and extract the exact original artifact
+          node npm/scripts/extract-artifact.mjs --verify-published original-artifact
+      - name: Consume verified public CLI and Runtime installations
         id: verified_artifact
         shell: bash
         env:
@@ -133,9 +149,9 @@ jobs:
         run: |
           node - <<'NODE'
           const fs=require('fs'),cp=require('child_process');
-          const metadata=JSON.parse(fs.readFileSync(`original-artifact/cli-build-${process.env.CLI_TARGET}.json`,'utf8'));
+          const metadata=JSON.parse(fs.readFileSync(`original-artifact/cli/cli-build-${process.env.CLI_TARGET}.json`,'utf8'));
           cp.execFileSync(process.execPath,['npm/scripts/set-build-version.mjs',metadata.version],{stdio:'inherit'});
-          cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
+          cp.execFileSync(process.execPath,['npm/scripts/extract-artifact.mjs','--consume-published','original-artifact','validated-cli'],{env:{...process.env,CLI_VERSION:metadata.version},stdio:'inherit'});
           fs.appendFileSync(process.env.GITHUB_ENV,`CLI_VERSION=${metadata.version}\nCLI_BINARY_SHA256=${metadata.binary_sha256}\n`);
           fs.writeFileSync(`${process.env.RUNNER_TEMP}/targeted-migration-identity.json`,JSON.stringify({fixture_source_sha:process.env.GITHUB_SHA,binary_source_sha:process.env.CLI_SHA,binary_sha256:metadata.binary_sha256,version:metadata.version,target:process.env.CLI_TARGET,release_run_id:process.env.CLI_RUN_ID,repository:'risense-ai/respire-cli'},null,2)+'\n');
           NODE
