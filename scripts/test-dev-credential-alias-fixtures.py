@@ -9,7 +9,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.dont_write_bytecode = True
 HERE = Path(__file__).parent
@@ -80,6 +80,40 @@ class KeylessRuntimeIdentityTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, '^keyless_runtime_identity_mismatch$'):
                     self.verify()
                 self.health[field] = original
+
+
+class RestartRetainedCredentialTests(unittest.TestCase):
+    def test_both_restart_checks_use_platform_consumer_and_preserve_alias(self):
+        tree = ast.parse((HERE / 'dev-profile-migration-smoke.py').read_text())
+        restart = next(node for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == 'restart_key_handoff')
+        checks = [node for node in restart.body if isinstance(node, ast.If)
+            and ast.unparse(node.test) == "sys.platform == 'darwin'"]
+        self.assertEqual(len(checks), 2)
+        env, fixture = {'RSRS_DATA_DIR': 'owned-profile'}, {'alias': ALIAS}
+        for index, check in enumerate(checks):
+            for platform in ('darwin', 'win32', 'linux'):
+                for alias in (ALIAS, OTHER):
+                    with self.subTest(check=index, platform=platform, original_alias=alias == ALIAS):
+                        session = {'keyring_account': alias}
+                        smoke = SimpleNamespace(session=lambda env: session,
+                            verify_mac_native_credentials=Mock(), verify_retained_current_credentials=Mock())
+                        code = compile(ast.Module(body=[check], type_ignores=[]), '<restart-retained>', 'exec')
+                        namespace = dict(self=smoke, env=env, fixture=fixture,
+                            require=profile.require, sys=SimpleNamespace(platform=platform))
+                        if platform == 'darwin' and alias != ALIAS:
+                            with self.assertRaisesRegex(RuntimeError, '^existing_target_credential_identity_changed$'):
+                                exec(code, namespace)
+                            smoke.verify_mac_native_credentials.assert_not_called()
+                            smoke.verify_retained_current_credentials.assert_not_called()
+                        else:
+                            exec(code, namespace)
+                            if platform == 'darwin':
+                                smoke.verify_mac_native_credentials.assert_called_once_with(env, fixture)
+                                smoke.verify_retained_current_credentials.assert_not_called()
+                            else:
+                                smoke.verify_retained_current_credentials.assert_called_once_with(session, fixture)
+                                smoke.verify_mac_native_credentials.assert_not_called()
 
 
 class MemoryKeys(native.TrackedKeys):

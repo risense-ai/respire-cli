@@ -693,7 +693,12 @@ class Smoke(support.Smoke):
         fixture = self.seed(env, profile, "rsrs", "restart-key-handoff")
         require(not any(name in env for name in ("RSRS_SUPER", "RSRS_PASS")),
                 "restart_fixture_has_environment_credentials")
-        self.verify_retained_current_credentials(self.session(env), fixture)
+        if sys.platform == "darwin":
+            require(self.session(env).get("keyring_account") == fixture["alias"],
+                    "existing_target_credential_identity_changed")
+            self.verify_mac_native_credentials(env, fixture)
+        else:
+            self.verify_retained_current_credentials(self.session(env), fixture)
         runtime = support.install_published_runtime(self.args.binary, env)
         require(runtime is not None, "restart_requires_verified_standalone_runtime")
         metadata = json.loads(json.loads((profile / "bin/runtime.json").read_bytes())["release"]["metadata_json"])
@@ -757,7 +762,12 @@ class Smoke(support.Smoke):
                     self.report["keyless_runtime_forced_cleanup"] = True
                     child.terminate()
                     child.wait(timeout=30)
-        self.verify_retained_current_credentials(self.session(env), fixture)
+        if sys.platform == "darwin":
+            require(self.session(env).get("keyring_account") == fixture["alias"],
+                    "existing_target_credential_identity_changed")
+            self.verify_mac_native_credentials(env, fixture)
+        else:
+            self.verify_retained_current_credentials(self.session(env), fixture)
         self.read_entry(env, fixture["id"], fixture["text"])
         written = self.cli(env, "remember", "Native restart host key handoff write", "--title",
             "restart-key-handoff-after", "--importance", "important", "--force")["summary"]["id"]
