@@ -210,7 +210,7 @@ jobs:
                       line = text.count('\n', 0, match.start()) + 1
                       raise SystemExit(f'{source.relative_to(root)}:{line}: forbidden source path {relative}')
           PY
-      - name: Require business-free commands and CLI dependency graphs
+      - name: Require commands and CLI dependency graphs without Runtime business code
         shell: bash
         run: |
           set -euo pipefail
@@ -226,7 +226,7 @@ jobs:
             if [ "$features" = no-default ]; then options+=(--no-default-features); fi
             cargo tree -p respire "${options[@]}" --locked --edges normal,build,dev --prefix none --format '{p}' > "$RUNNER_TEMP/cli-$features-tree.txt"
             cat "$RUNNER_TEMP/cli-$features-tree.txt"
-            if grep -Eq '^(respire_app|respire_app_domain|respire_storage|respire_crypto|respire_core_sdk|respire_runtime)([[:space:]]|$)' "$RUNNER_TEMP/cli-$features-tree.txt"; then
+            if grep -Eq '^(respire_app|respire_app_domain|respire_storage|respire_core_sdk|respire_runtime)([[:space:]]|$)' "$RUNNER_TEMP/cli-$features-tree.txt"; then
               echo "CLI $features depends on a forbidden business package" >&2
               exit 1
             fi
@@ -237,6 +237,12 @@ jobs:
           set -euo pipefail
           unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
           cargo check -p respire --bin rsrs --locked
+      - name: Test host cryptography without the engine or native SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN
+          cargo test -p respire_crypto --no-default-features --lib --locked
       - name: Test only the commands frontend library
         shell: bash
         run: |
