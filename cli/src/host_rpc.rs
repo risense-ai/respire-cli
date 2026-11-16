@@ -258,6 +258,7 @@ fn initial_input(
 fn continue_request(request: &WireRequest) -> Result<respire_commands::output::ResultEnvelope> {
     validate_header(request.v, &request.id)?;
     // Validate all desktop input before starting or querying the original host transaction.
+    // A fenced original resumes through its coordinator's maintenance binding and custody checks.
     match request.method.as_str() {
         "auth.login.continue" => {
             let params: LoginContinue = serde_json::from_value(request.params.clone())
@@ -270,7 +271,6 @@ fn continue_request(request: &WireRequest) -> Result<respire_commands::output::R
                 );
             }
             crate::prepare_command_runtime()?;
-            crate::autostart::check_direct_access()?;
             crate::autostart::rpc_accounts().continue_login(
                 &params.operation_id,
                 &params.source_profile,
@@ -290,7 +290,6 @@ fn continue_request(request: &WireRequest) -> Result<respire_commands::output::R
                 );
             }
             crate::prepare_command_runtime()?;
-            crate::autostart::check_direct_access()?;
             crate::autostart::rpc_keys().continue_input(
                 &params.operation_id,
                 &params.source_profile,
@@ -569,6 +568,65 @@ mod tests {
             ]
         ))
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn pending_maintenance_continuation_reaches_original_transaction_validation() -> Result<()> {
+        let _lock = crate::TEST_ENV_LOCK
+            .lock()
+            .map_err(|_| anyhow::anyhow!("test environment lock poisoned"))?;
+        struct Restore(Option<std::ffi::OsString>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("RSRS_DATA_DIR", value),
+                    None => std::env::remove_var("RSRS_DATA_DIR"),
+                }
+            }
+        }
+        let _restore = Restore(std::env::var_os("RSRS_DATA_DIR"));
+        let directory = tempfile::tempdir()?;
+        std::env::set_var("RSRS_DATA_DIR", directory.path());
+        let marker = directory.path().join("runtime/autostart/maintenance.json");
+        std::fs::create_dir_all(marker.parent().context("test marker parent")?)?;
+        let bytes = serde_json::to_vec(&json!({
+            "schema": 1, "id": "fixture-installation", "token": uuid::Uuid::new_v4().to_string(),
+            "phase": "Paused", "expected_profile": directory.path().canonicalize()?,
+            "expected_version": env!("CARGO_PKG_VERSION"),
+            "owner_pid": std::process::id(), "owner_birth": "fixture-birth"
+        }))?;
+        std::fs::write(&marker, &bytes)?;
+        assert!(crate::autostart::check_direct_access().is_err());
+        let request = WireRequest {
+            v: 1,
+            id: "resume-transport".into(),
+            method: "auth.login.continue".into(),
+            params: json!({"operation_id": "not-an-operation", "source_profile": directory.path(),
+                           "continuation": {}, "super_password": "fixture-super"}),
+        };
+        let error = continue_request(&request)
+            .err()
+            .context("foreign operation was accepted")?;
+        assert!(
+            format!("{error:#}").contains("invalid account operation ID"),
+            "{error:#}"
+        );
+        let request = WireRequest {
+            method: "auth.key.continue".into(),
+            params: json!({"operation_id": uuid::Uuid::new_v4().to_string(),
+                           "source_profile": directory.path(), "input": {}}),
+            ..request
+        };
+        let error = continue_request(&request)
+            .err()
+            .context("unverified Runtime was accepted")?;
+        assert!(
+            format!("{error:#}").contains("model control Runtime manifest is missing"),
+            "{error:#}"
+        );
+        assert!(crate::autostart::check_direct_access().is_err());
+        assert_eq!(std::fs::read(&marker)?, bytes);
         Ok(())
     }
 
