@@ -950,6 +950,7 @@ fn original_operation(
         sync_generation: snapshot.sync_generation,
         snapshot_id: snapshot.snapshot_id.clone(),
         action: MaintenanceAction::Query,
+        material: None,
     })
 }
 
@@ -1127,6 +1128,7 @@ pub(crate) fn snapshot_restore_control(snapshot_id: &str) -> Result<ResultEnvelo
         sync_generation: generation,
         snapshot_id: snapshot_id.to_owned(),
         action: MaintenanceAction::Restore,
+        material: None,
     };
     params.request_fingerprint = SnapshotOperation::fingerprint(
         &params.binding,

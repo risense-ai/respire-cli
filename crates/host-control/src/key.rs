@@ -15,7 +15,8 @@ use respire_commands::output::{Item, ResultEnvelope, Status};
 use respire_protocol::key_control::*;
 use respire_protocol::{ControlBinding, HostAuthIdentity, RpcRequest, RpcResponse};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+mod material;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,6 +33,10 @@ struct Original {
     was_serving: bool,
     store_ready: bool,
     sent: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    candidate: Option<Value>,
+    #[serde(default)]
+    rolled_back: bool,
 }
 
 pub struct KeyRecoveryRequired {
@@ -198,6 +203,7 @@ fn read_original(path: &Path) -> Result<Option<(Original, String)>> {
     );
     let original = serde_json::from_slice(&bytes)
         .map_err(|_| anyhow::anyhow!("invalid key recovery metadata"))?;
+    material::validate_public(&original)?;
     Ok(Some((original, crate::launch::hash(&bytes))))
 }
 
@@ -315,6 +321,8 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
             was_serving: owner.is_some(),
             store_ready: owner.as_ref().is_some_and(|health| health.store_ready),
             sent: false,
+            candidate: None,
+            rolled_back: false,
         };
         let bytes = serde_json::to_vec(&original)?;
         crate::maintenance::write_recovery(&path, &bytes, None)?;
@@ -328,14 +336,45 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
         maintenance
             .auth_launch_binding(&profile)?
             .context("key control requires an actual drained Paused binding")?;
+        if !original.sent && matches!(action, Action::Rollback(_)) {
+            anyhow::ensure!(profile == original.profile && crate::identity(&profile)? == original.source_identity,
+                "unsent key source changed before host compensation");
+            material::rollback(&original)?;
+            if original.was_serving {
+                maintenance.start_account_runtime()?;
+                let restored = host.probe_runtime()?.context("unsent key owner did not resume")?;
+                verify_owner(host.as_ref(), &restored, &root, &profile, &image, &original.source_identity)?;
+                anyhow::ensure!(!original.store_ready || restored.store_ready, "unsent key owner lost store readiness");
+            }
+            maintenance.finish_key(&profile, &original.source_identity, original.was_serving, original.store_ready)?;
+            finished = true;
+            host.finish_key_handoff(&profile, &original.source_identity, original.was_serving)?;
+            anyhow::ensure!(read_original(&path)?.as_ref().map(|(_, hash)| hash.as_str()) == Some(digest.as_str()),
+                "unsent key recovery changed before cleanup");
+            std::fs::remove_file(&path)?;
+            respire_spawn::durable::sync_directory(path.parent().context("key recovery parent missing")?)?;
+            return Ok(ResultEnvelope::new("key-control", Status::Ok,
+                json!({"operation_id":original.operation_id,"state":"not_sent","credential_cleanup":"completed"}), Vec::new()));
+        }
         let deadline = Instant::now() + Duration::from_secs(185);
+        if let Action::Reset { input, .. } = &action {
+            let (candidate, private) = material::prepare(&original, input)?;
+            let new_candidate = candidate.is_some();
+            if let Some(candidate) = candidate {
+                original.candidate = Some(candidate);
+                let bytes = serde_json::to_vec(&original)?;
+                crate::maintenance::write_recovery(&path, &bytes, Some(&digest))?;
+                digest = crate::launch::hash(&bytes);
+            }
+            if !original.sent || new_candidate { material::persist(&original, &private)?; }
+        }
         let mut receipt = if original.sent {
             exchange(
                 &takeover,
                 &mut maintenance,
                 host.as_ref(),
                 &original,
-                HOST_KEY_RESULT_METHOD,
+                if matches!(action, Action::Rollback(_)) { HOST_KEY_ROLLBACK_METHOD } else { HOST_KEY_RESULT_METHOD },
                 None,
                 deadline,
             )?
@@ -439,6 +478,16 @@ fn control_key(host: Arc<dyn HostLifecycle>, action: Action<'_>) -> Result<Resul
                 return Ok(output);
             }
             HostKeyOutcome::Committed | HostKeyOutcome::RolledBack => {}
+        }
+        if receipt.outcome == HostKeyOutcome::Committed { material::complete(&original)?; }
+        if receipt.outcome == HostKeyOutcome::RolledBack {
+            if !original.rolled_back {
+                original.rolled_back = true;
+                let bytes = serde_json::to_vec(&original)?;
+                crate::maintenance::write_recovery(&path, &bytes, Some(&digest))?;
+                digest = crate::launch::hash(&bytes);
+            }
+            material::rollback(&original)?;
         }
         unchanged(host.as_ref(), &original, &receipt, &image)?;
         let restore_owner = if archived {
@@ -765,12 +814,8 @@ fn exchange_inner(
     completion: Option<&HostKeyResult>,
     deadline: Instant,
 ) -> Result<HostKeyResult> {
-    let input = input.map(|input| HostKeyInput {
-        password: input.password.clone(),
-        super_password: input.super_password.clone(),
-        account_secret: input.account_secret.clone(),
-        totp: input.totp.clone(),
-    });
+    let input = Some(if original.rolled_back { HostKeyInput::default() }
+        else { material::load(original, input, method != HOST_KEY_ROLLBACK_METHOD)? });
     host.require_account_write()?;
     let image = host.verified_runtime()?;
     let (root, profile) = respire_client_host::config::control_roots()?;
@@ -840,8 +885,10 @@ fn exchange_inner(
         |response, pid| validate_response(response, &request, &profile, pid, original),
     )
     .map_err(|_| anyhow::anyhow!("private key exchange failed; query the original operation"))?;
-    serde_json::from_value(envelope.summary)
-        .map_err(|_| anyhow::anyhow!("invalid private key receipt"))
+    let mut receipt = serde_json::from_value(envelope.summary)
+        .map_err(|_| anyhow::anyhow!("invalid private key receipt"))?;
+    material::checkpoint_challenge(original, &mut receipt)?;
+    Ok(receipt)
 }
 
 fn validate_receipt(receipt: &HostKeyResult, original: &Original) -> Result<()> {
@@ -1051,6 +1098,8 @@ mod tests {
             was_serving: false,
             store_ready: false,
             sent: false,
+            candidate: None,
+            rolled_back: false,
         }
     }
 
@@ -1068,6 +1117,7 @@ mod tests {
             required_inputs: Vec::new(),
             verification_required: false,
             super_password: None,
+            challenge: None,
         })
     }
 
@@ -1121,6 +1171,20 @@ mod tests {
         assert!(canonical(&original.operation_id));
         assert!(!canonical("20000000-0000-1000-8000-000000000001"));
         assert!(!canonical("not-an-operation"));
+        let mut custody = original;
+        let kit = crate::auth_material::generate()?;
+        custody.operation = HostKeyOperation::Fivekeys { addr: String::new(), user: String::new(),
+            kdf_salt: kit.kdf_salt, wrapped_urk: kit.wrapped_urk, urk_nonce: kit.urk_nonce, use_super: true };
+        let input = HostKeyInput { password: Some(String::new()), super_password: Some(kit.super_password),
+            ..HostKeyInput::default() };
+        let (candidate, private) = material::prepare(&custody, &input)?;
+        custody.candidate = candidate;
+        material::validate_public(&custody)?;
+        let public = custody.candidate.as_mut().context("host fixture candidate missing")?;
+        assert!(public.get("super_password").is_none() && public.get("password").is_none());
+        assert!(private.material.is_some());
+        public["super_password"] = json!("forbidden-plaintext");
+        assert!(material::validate_public(&custody).is_err());
         Ok(())
     }
 

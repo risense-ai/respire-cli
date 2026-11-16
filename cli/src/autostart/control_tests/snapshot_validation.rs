@@ -19,6 +19,7 @@ fn operation(root: &Path) -> Result<SnapshotOperation> {
         sync_generation: 7,
         snapshot_id: "b".repeat(32),
         action: Action::Restore,
+        material: None,
     };
     original.request_fingerprint = SnapshotOperation::fingerprint(
         &original.binding,
