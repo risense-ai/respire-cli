@@ -1,4 +1,4 @@
-//! Fixed secret and identity reads over the inherited control exchange, never HTTP.
+//! Host-owned secret reads and fixed private cloud identity reads.
 //! Caller owns maintenance/drain/resume; display and export files remain on this host.
 
 use std::path::Path;
@@ -13,8 +13,7 @@ use respire_protocol::identity_control::{
     HOST_IDENTITY_SCHEMA_V, HOST_IDENTITY_SESSION_LIST_METHOD,
 };
 use respire_protocol::secret_control::{
-    HostKeysExportReadParams, HostKeysExportReadResult, HostSecretReadParams,
-    HostSecretReadResult, HOST_KEYS_EXPORT_READ_METHOD, HOST_SECRET_READ_METHOD, HOST_SECRET_SCHEMA_V,
+    HostKeysExportReadResult, HostSecretReadResult,
 };
 
 /// Complete host transaction; no secret leaves this module before owner restoration.
@@ -133,30 +132,82 @@ pub(crate) fn secret_read_locked(
     maintenance: &mut super::lifecycle::Maintenance,
     reveal: bool,
 ) -> Result<HostSecretReadResult> {
-    let envelope = read_locked(takeover, maintenance, ReadKind::Secret(reveal))?;
-    let read: HostSecretReadResult = serde_json::from_value(envelope.details)
-        .map_err(|_| anyhow::anyhow!("invalid private secret read result"))?;
-    validate_secret_result(&read, reveal)?;
-    Ok(read)
+    read_host_locked(takeover, maintenance, |session| {
+        let factors = if reveal {
+            session.map(respire_client_host::host_credentials::read_export_factors).transpose()?
+        } else { None };
+        let (super_password, legacy_secret) = factors.unwrap_or((None, None));
+        respire_host_control::keys_export::secret_read(session, reveal,
+            super_password.as_deref(), legacy_secret.as_deref())
+    })
 }
 
 pub(crate) fn keys_export_read_locked(
     takeover: &LibraryLock,
     maintenance: &mut super::lifecycle::Maintenance,
 ) -> Result<HostKeysExportReadResult> {
-    let envelope = read_locked(takeover, maintenance, ReadKind::KeysExport)?;
-    let read: HostKeysExportReadResult = serde_json::from_value(envelope.details)
-        .map_err(|_| anyhow::anyhow!("invalid private key export result"))?;
-    anyhow::ensure!(!read.body.is_empty() && read.legacy_warning == !(read.version >= 4 || read.version == 3),
-        "invalid private key export metadata");
-    Ok(read)
+    read_host_locked(takeover, maintenance, |session| {
+        respire_client_host::settings::ensure_writable()?;
+        let session = session.context("key export session is unavailable")?;
+        let (super_password, legacy_secret) = respire_client_host::host_credentials::read_export_factors(session)?;
+        respire_host_control::keys_export::keys_export(session, super_password.as_deref(), legacy_secret.as_deref())
+    })
+}
+
+/// Hold the same root/profile ownership as the old helper, then recheck before exposing secrets.
+fn read_host_locked<T>(
+    takeover: &LibraryLock,
+    maintenance: &mut super::lifecycle::Maintenance,
+    read: impl FnOnce(Option<&serde_json::Value>) -> Result<T>,
+) -> Result<T> {
+    crate::runtime_policy::require_host("host secret read")?;
+    let (root, profile) = respire_client_host::config::control_roots()?;
+    let root = root.canonicalize()?;
+    let profile = profile.canonicalize()?;
+    anyhow::ensure!(takeover.protects(&root.join("runtime/takeover"))?,
+        "secret read requires this installation's takeover ownership");
+    maintenance.auth_launch_binding(&profile)?.context("secret read requires Paused maintenance")?;
+    anyhow::ensure!(!crate::net_rpc::port_is_open(), "secret read requires the Runtime to be drained");
+    let wait = Duration::from_secs(1);
+    let _root_lock = LibraryLock::acquire(&root, wait)?;
+    let _profile_lock = if profile == root { None } else { Some(LibraryLock::acquire(&profile, wait)?) };
+    let journal_path = respire_client_host::config::normalize_control_path(&root.join(".login-recovery.json"))?;
+    match std::fs::read(journal_path) {
+        Ok(bytes) => {
+            let journal: serde_json::Value = serde_json::from_slice(&bytes)
+                .context("invalid authentication recovery record; retain it for recovery")?;
+            anyhow::ensure!(journal["schema_version"] == 2 && journal.get("active").is_some_and(serde_json::Value::is_null),
+                "auth_recovery_pending: finish account recovery before reading secrets");
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("authentication recovery record is unavailable"),
+    }
+    let expected = super::control::identity(&profile)?;
+    let session_path = respire_client_host::config::normalize_control_path(&profile.join("session.json"))?;
+    let snapshot = || -> Result<Option<Vec<u8>>> {
+        match std::fs::read(&session_path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).context("secret read session is unavailable"),
+        }
+    };
+    let bytes = snapshot()?;
+    let session = bytes.as_deref().map(serde_json::from_slice::<serde_json::Value>).transpose()
+        .map_err(|_| anyhow::anyhow!("invalid secret read session"))?;
+    let result = read(session.as_ref())?;
+    let (current_root, current_profile) = respire_client_host::config::control_roots()?;
+    anyhow::ensure!(current_root.canonicalize()? == root && current_profile.canonicalize()? == profile
+        && super::control::identity(&profile)? == expected && snapshot()? == bytes,
+        "secret read installation, selection or session changed");
+    maintenance.auth_launch_binding(&profile)?.context("secret read lost its Paused maintenance ownership")?;
+    Ok(result)
 }
 
 fn session_list_read_locked(
     takeover: &LibraryLock,
     maintenance: &mut super::lifecycle::Maintenance,
 ) -> Result<HostIdentitySessionListResult> {
-    let envelope = read_locked(takeover, maintenance, ReadKind::SessionList)?;
+    let envelope = read_locked(takeover, maintenance)?;
     serde_json::from_value(envelope.details)
         .map_err(|_| anyhow::anyhow!("invalid private session list result"))
 }
@@ -166,7 +217,6 @@ enum ReadKind { Secret(bool), KeysExport, SessionList }
 fn read_locked(
     takeover: &LibraryLock,
     maintenance: &mut super::lifecycle::Maintenance,
-    kind: ReadKind,
 ) -> Result<ResultEnvelope> {
     crate::runtime_policy::require_host("private secret read")?;
     let (root, profile) = respire_client_host::config::control_roots()?;
@@ -175,32 +225,18 @@ fn read_locked(
     let expected = super::control::identity(&profile)?;
     maintenance.auth_launch_binding(&profile)?
         .context("private secret read requires an actual Paused maintenance grant")?;
-    let (method, command) = match kind {
-        ReadKind::Secret(_) => (HOST_SECRET_READ_METHOD, "secret-read"),
-        ReadKind::KeysExport => (HOST_KEYS_EXPORT_READ_METHOD, "keys-export-read"),
-        ReadKind::SessionList => (HOST_IDENTITY_SESSION_LIST_METHOD, "session"),
-    };
-    let timeout = match kind {
-        ReadKind::SessionList => Duration::from_secs(35),
-        ReadKind::Secret(_) | ReadKind::KeysExport => Duration::from_secs(12),
-    };
+    let method = HOST_IDENTITY_SESSION_LIST_METHOD;
+    let command = "session";
+    let timeout = Duration::from_secs(35);
     // Reuse installed-image verification, grant creation, identity and the bounded exchange.
     let envelope = super::control::auth_exchange(takeover, maintenance,
         Instant::now() + timeout, None,
         |binding, identity| {
             anyhow::ensure!(binding.installation_root == root && binding.profile == profile && identity == expected,
                 "private secret read scope changed while authorizing");
-            let argument = match kind {
-                ReadKind::Secret(reveal) => serde_json::to_string(&HostSecretReadParams {
-                    schema_version: HOST_SECRET_SCHEMA_V, binding, identity, reveal,
-                }),
-                ReadKind::KeysExport => serde_json::to_string(&HostKeysExportReadParams {
-                    schema_version: HOST_SECRET_SCHEMA_V, binding, identity,
-                }),
-                ReadKind::SessionList => serde_json::to_string(&HostIdentitySessionListParams {
-                    schema_version: HOST_IDENTITY_SCHEMA_V, binding, identity,
-                }),
-            }.map_err(|_| anyhow::anyhow!("cannot encode private secret read request"))?;
+            let argument = serde_json::to_string(&HostIdentitySessionListParams {
+                schema_version: HOST_IDENTITY_SCHEMA_V, binding, identity,
+            }).map_err(|_| anyhow::anyhow!("cannot encode private session list request"))?;
             Ok(RpcRequest { v: respire_commands::rpc_client::PROTOCOL_V,
                 id: uuid::Uuid::new_v4().to_string(), method: method.to_owned(), args: vec![argument],
                 scope: None, operation_id: None, idempotency_key: None, parent_operation_id: None,

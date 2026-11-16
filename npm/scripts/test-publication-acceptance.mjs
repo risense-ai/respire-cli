@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,cpSync,chmodSync,rmSync,existsSync} from 'node:fs';
+import {readFileSync,writeFileSync,mkdtempSync,mkdirSync,cpSync,rmSync,existsSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
@@ -299,8 +299,17 @@ if(args[0]==='api'){
  if(pub())throw Error('Release edit must never replay');
  fs.writeFileSync('edited-release',JSON.stringify(args));
 }else throw Error('Unpermitted fake command '+args.join(' '));
-`);chmodSync(gh,0o755);
+`);
   const bootstrap=path.join(root,'run.mjs');writeFileSync(bootstrap,`globalThis.fetch=()=>{throw Error('Accepted barrier must not wait on public registry');};
+import childProcess from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+const execute=childProcess.execFileSync;
+// Execute the Node fixture directly; Windows does not resolve its extensionless shebang.
+childProcess.execFileSync=(command,args,options)=>{
+  if(command!=='gh')throw Error('Unexpected fixture executable: '+command);
+  return execute(process.execPath,['./bin/gh',...args],options);
+};
+syncBuiltinESMExports();
 const {main}=await import('./npm/scripts/release-publication.mjs');
 main(process.argv[2]).catch(e=>{console.error(e.message);process.exitCode=1;});`);
   const env={...process.env,PATH:path.join(root,'bin')+path.delimiter+process.env.PATH,GITHUB_REPOSITORY:source.repository,GITHUB_RUN_ID:'100',GITHUB_RUN_ATTEMPT:'1',FULL_REGRESSION_REQUIRED:'true'};

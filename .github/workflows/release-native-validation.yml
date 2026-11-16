@@ -282,8 +282,19 @@ jobs:
           export RSRS_RUNTIME_BIN
           "$exe" --version
           bash scripts/verify-linux-arm64-elf.sh '${{ matrix.target }}' "$exe"
-          "$exe" --direct model install-m3 --json
-          "$exe" --direct model probe --json
+          "$exe" --direct model install-m3 --json > "$RUNNER_TEMP/native-model-inference.json"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          const result = JSON.parse(readFileSync(`${process.env.RUNNER_TEMP}/native-model-inference.json`, 'utf8'));
+          assert.equal(result.status, 'ok');
+          const proof = result.details.backend_load.evidence;
+          assert.equal(proof.ready, true);
+          assert.equal(proof.inference_completed, true);
+          assert.equal(proof.fresh_session, true);
+          assert.equal(proof.dimensions, 1024);
+          assert.equal(proof.selected, 'CPU');
+          NODE
           bash scripts/probe-native-arm64-alpine.sh '${{ matrix.target }}' "$exe" "$RSRS_M3_DIR" "$RUNNER_TEMP/arm-alpine-probe" "$RSRS_RUNTIME_BIN" "$NATIVE_RUNTIME_SHA256" "$NATIVE_RUNTIME_VERSION"
           "$exe" --runtime-internal --stop --json
       - name: Verify selected Client2 installation and the existing GUI subset

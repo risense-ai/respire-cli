@@ -10,6 +10,7 @@ default = []
 runtime-host = []
 
 [dependencies]
+respire_crypto = { path = "../crypto", default-features = false }
 respire_client_host = { path = "../client-host", features = ["locks"] }
 respire_commands = { path = "../commands" }
 respire_protocol = { path = "../protocol" }

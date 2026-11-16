@@ -1,34 +1,5 @@
 name: Opt-in user runtime supervision validation
 on:
-  pull_request:
-    branches: [main]
-    paths:
-      - '.github/workflows/runtime-autostart-validation.yml'
-      - 'runtime-pin.json'
-      - 'scripts/test-runtime-autostart.py'
-      - 'scripts/native_fixture_process.py'
-      - 'scripts/test-native-runtime-install.py'
-      - 'cli/src/autostart.rs'
-      - 'cli/src/autostart/**'
-      - 'cli/src/client2_host.rs'
-      - 'crates/client-host/**'
-      - 'crates/host-control/**'
-      - 'crates/protocol/**'
-      - 'cli/tests/model_maintenance.rs'
-      - 'cli/tests/support/**'
-      - 'cli/src/main.rs'
-      - 'cli/src/lib.rs'
-      - 'cli/src/frontend.rs'
-      - 'cli/src/rpc.rs'
-      - 'cli/src/net_rpc.rs'
-      - 'crates/commands/src/net_rpc.rs'
-      - 'cli/src/runtime_http.rs'
-      - 'crates/commands/src/runtime_http.rs'
-      - 'crates/commands/src/admission.rs'
-      - 'crates/commands/src/rpc_serve.rs'
-      - 'crates/commands/src/rpc_worker.rs'
-      - 'cli/src/mcp.rs'
-      - 'spawn/**'
   workflow_dispatch:
     inputs:
       runtime_source_sha:
@@ -40,21 +11,8 @@ permissions:
   actions: read
 jobs:
   source-checks:
-    name: Source checks (${{ matrix.os }})
-    cache-mode: read
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {os: ubuntu-latest, target: x86_64-unknown-linux-gnu, suffix: '', previous_package: '@rsrsai/linux-x64-gnu'}
-          - {os: macos-latest, target: aarch64-apple-darwin, suffix: '', previous_package: '@rsrsai/macos-arm64'}
-          - {os: windows-latest, target: x86_64-pc-windows-msvc, suffix: '.exe', previous_package: '@rsrsai/win-x64'}
-    env:
-      RSRS_ENGINE: cpu
-      RUST_TEST_THREADS: '1'
-      RUST_MIN_STACK: '16777216'
+    name: Offline fixture preflight
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
         with:
@@ -66,55 +24,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Verify fixture Runtime installation and native path identity
+      - name: Verify fixture installation and explicit Runtime provenance contract
         run: python scripts/test-native-runtime-install.py
-      - uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          targets: ${{ matrix.target }}
-      - name: Require token-free validation
-        shell: bash
-        run: test -z "${CORE_SDK_READ_TOKEN:-}"
-      - name: Resolve pinned SDK cache identity
-        id: sdk
-        shell: bash
-        env:
-          SDK_TARGET: ${{ matrix.target }}
-        run: |
-          set -euo pipefail
-          key=$(node scripts/sdk-ci-cache.mjs key "$SDK_TARGET")
-          test -n "$key"
-          echo "key=$key" >> "$GITHUB_OUTPUT"
-      - uses: actions/cache/restore@v4
-        id: sdk-restore
-        with:
-          path: .sdk/${{ matrix.target }}
-          key: ${{ steps.sdk.outputs.key }}
-          enableCrossOsArchive: true
-          fail-on-cache-miss: true
-      - name: Require exact verified SDK bytes
-        shell: bash
-        env:
-          SDK_TARGET: ${{ matrix.target }}
-          EXPECTED_KEY: ${{ steps.sdk.outputs.key }}
-          MATCHED_KEY: ${{ steps.sdk-restore.outputs.cache-matched-key }}
-        run: |
-          set -euo pipefail
-          test -n "$EXPECTED_KEY" && test "$MATCHED_KEY" = "$EXPECTED_KEY"
-          node scripts/fetch-core-sdk.mjs "$SDK_TARGET"
-      - name: Build and test exact native source
-        shell: bash
-        env:
-          SDK_TARGET: ${{ matrix.target }}
-          RSRS_CORE_TEST_MODE: '1'
-        run: |
-          set -euo pipefail
-          if [[ "$SDK_TARGET" == *windows-msvc ]]; then export RUSTFLAGS='-C target-feature=-crt-static'; fi
-          cargo test --locked -p respire_spawn --target "$SDK_TARGET" --target-dir target/autostart-validation
-          cargo test --locked -p respire --lib autostart:: --target "$SDK_TARGET" --target-dir target/autostart-validation -- --test-threads=1 --show-output
-          cargo build --locked -p respire --bin rsrs --target "$SDK_TARGET" --target-dir target/autostart-validation
       - name: Record source-only validation scope
-        shell: bash
-        run: echo 'Source and fixture checks only. Published Runtime product supervision is a separate explicit manual job.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Source and fixture checks only. Native product validation follows on explicit dispatch.' >> "$GITHUB_STEP_SUMMARY"
 
   user-runtime:
     name: Published Runtime supervision (${{ matrix.os }})

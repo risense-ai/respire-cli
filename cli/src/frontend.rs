@@ -1543,7 +1543,8 @@ fn run(args: Cli) -> Result<()> {
         );
         // Runtime distinguishes legacy journals from operation-owned recovery.
         // Recover only the former; account control must retain its original receipt.
-        if !runtime_policy::client_only() {
+        // Keygen prepares its source before identity binding and rejects legacy journals explicitly.
+        if !runtime_policy::client_only() && !matches!(args.command.as_ref(), Some(Command::Keygen { .. })) {
             rpc::recover_legacy_login_before_account_control()?;
         }
         match args.command.as_ref() {

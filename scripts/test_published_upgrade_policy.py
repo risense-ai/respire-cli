@@ -230,9 +230,9 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_critical_runs_latest_and_database_dev_checkpoints_and_marks_partial_coverage(self):
         upgraded, report = self.run_fixture("critical")
-        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
-        self.assertEqual(report["selected_sources"], ["v1.0.15-dev.10", "v1.0.18", "v1.0.6-dev.37075716045"])
-        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
+        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.15-dev.10"})
+        self.assertEqual(report["selected_sources"], ["v1.0.15-dev.10", "v1.0.18"])
+        self.assertEqual(set(report["database_dev_checkpoints"]), {"v1.0.15-dev.10"})
         self.assertEqual(report["profile"], "critical")
         self.assertTrue(report["passed"])
         self.assertEqual(report["upgrade_contract"], "legacy-shim-v1")
@@ -240,14 +240,14 @@ class UpgradeProfileTest(unittest.TestCase):
         self.assertFalse(report["all_published_sources_covered"])
         self.assertEqual(report["additional_draft_baselines"], [])
         upgraded, report = self.run_fixture("critical", missing_checkpoint=True)
-        self.assertEqual(set(upgraded), {"v1.0.18", "v1.0.6-dev.37075716045"})
+        self.assertEqual(set(upgraded), {"v1.0.18"})
         self.assertIn("v1.0.15-dev.10", report["selected_sources"])
         checkpoint = next(item for item in report["sources"] if item["version"] == "1.0.15-dev.10")
         self.assertEqual(checkpoint["status"], "not-applicable")
 
-    def test_default_full_keeps_stables_and_conservative_dev_checkpoint(self):
+    def test_default_full_keeps_stables_and_database_dev_checkpoints(self):
         upgraded, report = self.run_fixture()
-        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.6-dev.37075716045", "v1.0.15-dev.10"})
+        self.assertEqual(set(upgraded), {"v1.0.12", "v1.0.18", "v1.0.15-dev.10"})
         self.assertEqual(report["profile"], "full")
         self.assertTrue(report["full_coverage"])
         self.assertTrue(report["all_published_sources_covered"])

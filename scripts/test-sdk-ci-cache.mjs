@@ -61,18 +61,12 @@ test('ordinary CLI source checks avoid SDK caches; explicit product checks requi
     const block=restore.split(/\n      - (?:name:|uses:)/)[0];
     assert.match(block,/if: inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin'/);
    }
+   assert.match(text,/cargo build --locked -p respire --bin rsrs/);
   } else {
-   const source=text.split('\n  coverage-tests:\n')[1].split('\n  runtime-integration:\n')[0];
-   for(const restore of source.split('- uses: actions/cache/restore@v4').slice(1)){
-    const block=restore.split(/\n      - (?:name:|uses:)/)[0];
-    if(block.includes('path: .sdk/')){
-     assert.match(block,/if: .*CANDIDATE_MODE|if: .*required_candidate_sha256/);
-     assert.match(block,/fail-on-cache-miss: true/);assert.doesNotMatch(block,/restore-keys:/);
-    }
-   }
-   assert.match(text,/RSRS_CORE_SDK_DIR: process.env.RSRS_RUNTIME_CORE_SDK_DIR/);
+   assert.doesNotMatch(text,/path: \.sdk\/|RSRS_CORE_SDK_DIR|CANDIDATE_MODE|runtime-integration:/);
+   assert.match(text,/cargo test --locked -p respire_spawn/);
+   assert.match(text,/unset GH_TOKEN GITHUB_TOKEN CORE_SDK_READ_TOKEN RSRS_RUNTIME_BIN/);
   }
-  assert.match(text,/cargo build --locked -p respire --bin rsrs/);
   assert.doesNotMatch(text,/cargo (?:test|build) --workspace|--manifest-path \.runtime-examples/);
  }
  const text=readFileSync(new URL('../.github/workflows/accelerator.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');

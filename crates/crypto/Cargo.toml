@@ -7,9 +7,13 @@ license-file = "../../LICENSE"
 description = "Account keys, compatible ciphertext and local memory orchestration"
 publish = false
 
+[features]
+default = ["engine"]
+engine = ["dep:respire_core_sdk"]
+
 [dependencies]
 respire_protocol = { path = "../protocol" }
-respire_core_sdk = { path = "../core-sdk" }
+respire_core_sdk = { path = "../core-sdk", optional = true }
 anyhow = "1.0"
 rand = "0.8"
 sha2 = "0.10"

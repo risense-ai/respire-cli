@@ -524,12 +524,12 @@ class Smoke:
         env = self.env("model-probe")
         output = subprocess.run([str(self.args.binary), "--version"], env=env, capture_output=True, timeout=20)
         require(output.returncode == 0 and re.search(r"(?<!\S)" + re.escape(self.args.version) + r"(?!\S)", output.stdout.decode()), "binary_version_mismatch")
-        self.cli(env, "model", "install-m3", timeout=900)
+        installed = self.cli(env, "model", "install-m3", timeout=900)
         share_cpu_container(self.root, env, self.model)
         require(all(digest(self.model / p) == h for p, h in MODEL_HASHES.items()), "model_hash_mismatch")
-        self.cli(env, "model", "engine", "cpu")
-        probe = self.cli(env, "model", "probe", "--model", "m3", "--text", "Legacy recovery CPU probe")["summary"]
-        require(probe.get("ready") is True and probe.get("dimensions") == 1024
+        probe = installed["details"]["backend_load"]["evidence"]
+        require(probe.get("ready") is True and probe.get("inference_completed") is True
+            and probe.get("fresh_session") is True and probe.get("dimensions") == 1024
             and str(probe.get("selected")).lower() == "cpu", "real_cpu_probe_failed")
         self.passed("model_cpu_real", dimensions=1024, model_hashes=MODEL_HASHES)
         for version in ((2,) if self.args.auth_salt_only else (1, 2, 3)):

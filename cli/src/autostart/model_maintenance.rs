@@ -1,17 +1,16 @@
-//! Mount below launch_authorization. Only these three host maintenance actions
-//! are accepted; Runtime owns selection/config semantics, this host owns files.
+//! Host-owned component planning, configuration publication and file verification.
+//! Only fresh core backend evidence comes from Runtime's preparation control.
 use anyhow::{Context, Result};
 use respire_client_host::lock::LibraryLock;
 use respire_commands::output::{Item, ResultEnvelope, Status};
 use respire_protocol::model_maintenance::*;
-use respire_protocol::{ControlBinding, HostControlLaunchGrant, RpcRequest};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::{
     fs,
     path::{Component, Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 #[cfg(windows)]
@@ -21,6 +20,253 @@ const PACKAGE_SHA256: &str = "5c68ecfb947223267abf159a023f5192ad42725e4e9cc995e7
 
 fn hash(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Read only committed selection metadata. Never open Core or create a library.
+pub(super) fn saved_selection(profile: &Path) -> Result<Option<serde_json::Value>> {
+    use rusqlite::{Connection, OpenFlags, OptionalExtension};
+    let current = profile.join("rsrs.db");
+    let legacy = profile.join("onememory.db");
+    anyhow::ensure!(
+        !(current.try_exists()? && legacy.try_exists()?),
+        "both rsrs.db and the legacy database exist; select the intended library explicitly"
+    );
+    let path = if current.try_exists()? {
+        current
+    } else {
+        legacy
+    };
+    check_path(&path)?;
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )?;
+    let value: Option<String> = connection
+        .query_row(
+            "SELECT value FROM meta WHERE key=?1",
+            ["embedding.active.selection.v1"],
+            |row| row.get(0),
+        )
+        .optional()?;
+    value
+        .map(|value| serde_json::from_str(&value).map_err(Into::into))
+        .transpose()
+}
+
+fn local_plan(
+    kind: ModelMaintenanceKind,
+    root: &Path,
+    profile: &Path,
+) -> Result<ModelMaintenancePlan> {
+    let selected = saved_selection(profile)?;
+    if kind == ModelMaintenanceKind::ResetCpu {
+        anyhow::ensure!(selected.is_none(),
+            "library uses a model profile; use model switch PROFILE --backend onnx --engine cpu for CPU recovery");
+    }
+    let settings = cpu_settings(root)?;
+    let registry = read_maintenance_file(&root.join("embedding-profiles-v1.json"))?;
+    let selection_sha256 = hash(&serde_json::to_vec(&(
+        MODEL_MAINTENANCE_SCHEMA_V,
+        kind,
+        root,
+        profile,
+        selected,
+        registry,
+        respire_client_host::env::var_os("RSRS_ENGINE"),
+        respire_client_host::env::var_os("RSRS_MODEL_VARIANT"),
+        respire_client_host::env::var_os("RSRS_M3_DIR"),
+    ))?);
+    let revision_sha256 = cpu_revision(&settings, &selection_sha256)?;
+    let mut plan = ModelMaintenancePlan {
+        kind,
+        review: ModelMaintenanceReview {
+            selection_sha256,
+            revision_sha256,
+        },
+        preparation: None,
+        catalog: None,
+        uninstall_directory: None,
+        cpu_candidate_sha256: None,
+    };
+    match kind {
+        ModelMaintenanceKind::ResetCpu => {
+            plan.cpu_candidate_sha256 = Some(hash(&cpu_candidate(&settings)?))
+        }
+        ModelMaintenanceKind::UninstallM3 => {
+            let directory = local_m3_directory()?;
+            check_path(&directory)?;
+            anyhow::ensure!(
+                !directory
+                    .to_string_lossy()
+                    .replace('\\', "/")
+                    .contains("/usr/lib/respire/models"),
+                "refusing to delete the system model dir"
+            );
+            plan.uninstall_directory = Some(directory);
+        }
+        ModelMaintenanceKind::InstallEngines => {
+            #[cfg(windows)]
+            {
+                plan.catalog = Some(catalog_pin(root)?);
+            }
+        }
+    }
+    Ok(plan)
+}
+
+#[cfg(windows)]
+fn catalog_pin(root: &Path) -> Result<ModelCatalogPin> {
+    // These DLL pins were measured from the SHA-256-verified official NuGet package.
+    let (arch, dll_size, dll_sha256) = if cfg!(target_arch = "x86_64") {
+        (
+            "x64",
+            971504,
+            "b401a47552a745755d65100828faefcf3df3895c759f96ac625ddf990711c8dd",
+        )
+    } else if cfg!(target_arch = "aarch64") {
+        (
+            "arm64",
+            1091328,
+            "457295ca2aec34db4aec7064cb401520bc85f29fd18f7e7bb9e25ddb849bedb1",
+        )
+    } else {
+        anyhow::bail!("unsupported Windows ML architecture")
+    };
+    Ok(ModelCatalogPin {
+        version: "2.4.89".into(),
+        package_source: PACKAGE_SOURCE.into(),
+        package_sha256: PACKAGE_SHA256.into(),
+        archive_member: format!(
+            "runtimes/win-{arch}/native/Microsoft.Windows.AI.MachineLearning.dll"
+        ),
+        destination: root.join("engines/winml-2.4.89/Microsoft.Windows.AI.MachineLearning.dll"),
+        dll_size,
+        dll_sha256: dll_sha256.into(),
+    })
+}
+
+fn verify_catalog(pin: &ModelCatalogPin) -> Result<()> {
+    check_path(&pin.destination)?;
+    let metadata = fs::symlink_metadata(&pin.destination)?;
+    anyhow::ensure!(
+        metadata.is_file() && metadata.len() == pin.dll_size,
+        "installed catalog is not the pinned regular file"
+    );
+    let mut bytes = Vec::new();
+    fs::File::open(&pin.destination)?
+        .take(pin.dll_size + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(
+        bytes.len() as u64 == pin.dll_size && hash(&bytes) == pin.dll_sha256,
+        "installed catalog differs from the official host pin"
+    );
+    Ok(())
+}
+
+fn verify_maintenance(
+    takeover: &LibraryLock,
+    maintenance: &mut super::lifecycle::Maintenance,
+    plan: &ModelMaintenancePlan,
+    root: &Path,
+    profile: &Path,
+) -> Result<ModelMaintenanceReceipt> {
+    let mut receipt = ModelMaintenanceReceipt {
+        plan: plan.clone(),
+        phase: ModelMaintenancePhase::Verify,
+        verified: false,
+        config_applied: false,
+        npu_ready: false,
+        warning: None,
+    };
+    {
+        let _installation = LibraryLock::acquire(&root.join("runtime"), Duration::ZERO)?;
+        let _library = LibraryLock::acquire(profile, Duration::ZERO)?;
+        anyhow::ensure!(
+            local_plan(plan.kind, root, profile)?.review == plan.review,
+            "model maintenance selection/revision changed during file verification"
+        );
+        match plan.kind {
+            ModelMaintenanceKind::UninstallM3 => {
+                let directory = plan
+                    .uninstall_directory
+                    .as_deref()
+                    .context("host uninstall target missing")?;
+                anyhow::ensure!(
+                    fs::symlink_metadata(directory)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound),
+                    "model uninstall not complete; target still exists or cannot be inspected"
+                );
+            }
+            ModelMaintenanceKind::InstallEngines => {
+                if let Some(pin) = &plan.catalog {
+                    verify_catalog(pin)?;
+                }
+            }
+            ModelMaintenanceKind::ResetCpu => {
+                anyhow::bail!("CPU reset requires its configuration publication receipt")
+            }
+        }
+    }
+    #[cfg(windows)]
+    if plan.kind == ModelMaintenanceKind::InstallEngines {
+        let preparation = plan
+            .preparation
+            .as_ref()
+            .context("NPU preparation selection missing")?;
+        let verified = super::model_control::model_install_verify_locked(
+            takeover,
+            maintenance,
+            &respire_protocol::ModelInstallIntent {
+                for_engine: Some("npu".into()),
+                ..Default::default()
+            },
+            &preparation.selection_sha256,
+        )?;
+        let backend = verified
+            .assets
+            .backend_load
+            .as_ref()
+            .context("Runtime backend verification missing")?;
+        let evidence = backend.evidence.as_ref().with_context(|| {
+            format!(
+                "Runtime returned no inference evidence: state={:?}, reason={:?}",
+                backend.state, backend.reason
+            )
+        })?;
+        anyhow::ensure!(
+            verified.assets.complete
+                && verified.assets.missing.is_empty()
+                && !verified.assets.assets.is_empty()
+                && verified
+                    .assets
+                    .assets
+                    .iter()
+                    .all(|asset| asset.state == respire_protocol::AssetState::Complete)
+                && backend.state == respire_protocol::BackendLoadState::Loaded
+                && backend.reason.is_none()
+                && evidence.contract == 1
+                && evidence.status == respire_protocol::BackendLoadState::Loaded
+                && evidence.ready
+                && evidence.fresh_session
+                && evidence.inference_completed,
+            "Runtime did not verify fresh core backend inference"
+        );
+        receipt.plan.preparation = Some(verified);
+        receipt.warning = Some("npu_provider_unverified: core inference passed; catalog integrity does not attest unpinned provider payloads".into());
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (takeover, maintenance);
+    }
+    anyhow::ensure!(
+        local_plan(plan.kind, root, profile)?.review == plan.review,
+        "model maintenance selection/revision changed during backend verification"
+    );
+    receipt.verified = true;
+    Ok(receipt)
 }
 
 struct CpuSettings {
@@ -128,6 +374,13 @@ fn cpu_candidate(settings: &CpuSettings) -> Result<Vec<u8>> {
             .context("inference.json model must be a string")?
             .trim()
             .to_ascii_lowercase();
+        anyhow::ensure!(
+            matches!(
+                model.as_str(),
+                "quantized" | "fp16" | "int8" | "uint8" | "q4" | "q4f16"
+            ),
+            "unsupported model variant in inference.json"
+        );
         value["model"] = json!(model);
     }
     value["engine"] = json!("cpu");
@@ -151,17 +404,10 @@ fn apply_cpu_reset(
     let _library = LibraryLock::acquire(&profile, Duration::ZERO)?;
     let registry_path = root.join("embedding-profiles-v1.json");
     let registry = read_maintenance_file(&registry_path)?;
-    // The CPU Plan phase does not take the installation or library locks itself.
-    let reviewed = exchange(
-        takeover,
-        maintenance,
-        ModelMaintenanceKind::ResetCpu,
-        ModelMaintenancePhase::Plan,
-        None,
-    )?;
+    let reviewed = local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile)?;
     anyhow::ensure!(
-        reviewed.plan.review == expected.review
-            && reviewed.plan.cpu_candidate_sha256 == expected.cpu_candidate_sha256
+        reviewed.review == expected.review
+            && reviewed.cpu_candidate_sha256 == expected.cpu_candidate_sha256
             && read_maintenance_file(&registry_path)? == registry,
         "model reset selection/revision conflict; no mutation performed"
     );
@@ -224,19 +470,10 @@ fn apply_cpu_reset(
         maintenance
             .auth_launch_binding(&profile)?
             .context("model reset lost Paused authority")?;
-        let inspected = exchange(
-            takeover,
-            maintenance,
-            ModelMaintenanceKind::ResetCpu,
-            ModelMaintenancePhase::Plan,
-            Some(&expected.review),
-        )?;
+        let inspected = local_plan(ModelMaintenanceKind::ResetCpu, &root, &profile)?;
         anyhow::ensure!(
-            inspected.phase == ModelMaintenancePhase::Plan
-                && !inspected.verified
-                && !inspected.config_applied
-                && !inspected.npu_ready
-                && inspected.plan.cpu_candidate_sha256 == expected.cpu_candidate_sha256,
+            inspected.review == expected.review
+                && inspected.cpu_candidate_sha256 == expected.cpu_candidate_sha256,
             "model reset selection or candidate changed before CAS"
         );
         let current = cpu_settings(&root)?;
@@ -268,7 +505,7 @@ fn apply_cpu_reset(
         .auth_launch_binding(&profile)?
         .context("model reset lost Paused authority")?;
     Ok(ModelMaintenanceReceipt {
-        plan: reviewed.plan,
+        plan: reviewed,
         phase: ModelMaintenancePhase::Apply,
         verified: true,
         config_applied: true,
@@ -295,8 +532,10 @@ fn roots() -> Result<(PathBuf, PathBuf)> {
 }
 
 fn account(profile: &Path) -> Result<Option<String>> {
-    Ok(respire_client_host::identity::host_session_user_of_dir(profile, hash)?
-        .map(|user| hash(user.as_bytes())))
+    Ok(
+        respire_client_host::identity::host_session_user_of_dir(profile, hash)?
+            .map(|user| hash(user.as_bytes())),
+    )
 }
 
 fn verify_owner(
@@ -418,13 +657,7 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
             .auth_launch_binding(&profile)?
             .context("model maintenance requires durable Paused authority")?;
         let cpu_plan = if kind == ModelMaintenanceKind::ResetCpu {
-            Some(exchange(
-                &takeover,
-                &mut maintenance,
-                kind,
-                ModelMaintenancePhase::Plan,
-                None,
-            )?)
+            Some(local_plan(kind, &root, &profile)?)
         } else {
             None
         };
@@ -450,25 +683,25 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
             }
         }
         unchanged()?;
-        let planned = match cpu_plan {
+        let plan = match cpu_plan {
             Some(plan) => plan,
-            None => exchange(
-                &takeover,
-                &mut maintenance,
-                kind,
-                ModelMaintenancePhase::Plan,
-                None,
-            )?,
+            None => local_plan(kind, &root, &profile)?,
         };
-        anyhow::ensure!(
-            planned.phase == ModelMaintenancePhase::Plan
-                && !planned.config_applied
-                && !planned.verified
-                && !planned.npu_ready
-                && planned.plan.kind == kind,
-            "Runtime returned an invalid model maintenance plan"
-        );
-        let plan = planned.plan;
+        #[cfg(windows)]
+        let plan = {
+            let mut plan = plan;
+            if kind == ModelMaintenanceKind::InstallEngines {
+                plan.preparation = Some(super::model_control::model_install_plan_locked(
+                    &takeover,
+                    &mut maintenance,
+                    &respire_protocol::ModelInstallIntent {
+                        for_engine: Some("npu".into()),
+                        ..Default::default()
+                    },
+                )?);
+            }
+            plan
+        };
         let mut providers: Vec<String> = Vec::new();
         let mut removed = false;
         let mut reset_reconciled = false;
@@ -491,14 +724,8 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                     }
                     Err(error) if publication_attempted => {
                         // Read the postcondition once. Never repeat the uncertain CAS.
-                        let inspected = exchange(
-                            &takeover,
-                            &mut maintenance,
-                            kind,
-                            ModelMaintenancePhase::Plan,
-                            None,
-                        )
-                        .context("CPU reset outcome unknown; no Apply was replayed")?;
+                        let inspected = local_plan(kind, &root, &profile)
+                            .context("CPU reset outcome unknown; no Apply was replayed")?;
                         let candidate = plan
                             .cpu_candidate_sha256
                             .as_deref()
@@ -506,12 +733,18 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                         let bytes = fs::read(root.join("inference.json"))?;
                         anyhow::ensure!(
                             hash(&bytes) == candidate
-                                && inspected.plan.cpu_candidate_sha256.as_deref()
-                                    == Some(candidate),
+                                && inspected.cpu_candidate_sha256.as_deref() == Some(candidate),
                             "CPU reset outcome unknown: {error:#}; no Apply was replayed"
                         );
                         reset_reconciled = true;
-                        inspected
+                        ModelMaintenanceReceipt {
+                            plan: inspected,
+                            phase: ModelMaintenancePhase::Apply,
+                            verified: true,
+                            config_applied: true,
+                            npu_ready: false,
+                            warning: None,
+                        }
                     }
                     Err(error) => return Err(error),
                 }
@@ -530,6 +763,10 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                         .open(root.join("inference.json.lock"))?;
                     lock.lock()?;
                     unchanged()?;
+                    anyhow::ensure!(
+                        local_plan(kind, &root, &profile)?.review == plan.review,
+                        "model maintenance selection/revision conflict; no mutation performed"
+                    );
                     if kind == ModelMaintenanceKind::InstallEngines {
                         providers = install_catalog(&root, plan.catalog.as_ref())?;
                     } else {
@@ -538,21 +775,12 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
                             &profile,
                             plan.uninstall_directory
                                 .as_deref()
-                                .context("Runtime uninstall directory missing")?,
+                                .context("host uninstall directory missing")?,
                         )?;
                     }
                 }
-                let receipt = exchange(
-                    &takeover,
-                    &mut maintenance,
-                    kind,
-                    ModelMaintenancePhase::Verify,
-                    Some(&plan.review),
-                )?;
-                anyhow::ensure!(
-                    receipt.verified && !receipt.config_applied && !receipt.npu_ready,
-                    "Runtime did not verify host model maintenance"
-                );
+                let receipt =
+                    verify_maintenance(&takeover, &mut maintenance, &plan, &root, &profile)?;
                 receipt
             }
         };
@@ -638,7 +866,10 @@ fn coordinate(kind: ModelMaintenanceKind) -> Result<ResultEnvelope> {
             output.errors.push(warning);
         }
         // Files/config are already accepted. Marker cleanup must not undo them.
-        if let Err(error) = maintenance.finish().and_then(|()| maintenance.finish_handoff()) {
+        if let Err(error) = maintenance
+            .finish()
+            .and_then(|()| maintenance.finish_handoff())
+        {
             output.status = Status::Warn;
             output.errors.push(format!(
                 "model maintenance completed; marker cleanup pending: {error:#}"
@@ -694,147 +925,6 @@ fn force_stop_observed(
     Ok(())
 }
 
-fn exchange(
-    takeover: &LibraryLock,
-    maintenance: &mut super::lifecycle::Maintenance,
-    kind: ModelMaintenanceKind,
-    phase: ModelMaintenancePhase,
-    expected: Option<&ModelMaintenanceReview>,
-) -> Result<ModelMaintenanceReceipt> {
-    let (binary, manifest) = super::model_control::installed_model_runtime()?;
-    let (root, profile) = roots()?;
-    anyhow::ensure!(
-        takeover.protects(&root.join("runtime/takeover"))?,
-        "model maintenance takeover mismatch"
-    );
-    let paused = maintenance
-        .auth_launch_binding(&profile)?
-        .context("model maintenance Paused marker missing")?;
-    let expected_account = account(&profile)?;
-    let grant_account = expected_account
-        .clone()
-        .unwrap_or_else(|| hash(profile.display().to_string().as_bytes()));
-    let config = super::read_registration(&root)?;
-    let managed = config
-        .as_ref()
-        .filter(|config| config.enabled && !config.manually_stopped)
-        .map(|config| config.id.as_str());
-    let (grant, _) = super::prepare_grant_for_identity(
-        &binary,
-        &root,
-        &profile,
-        managed,
-        crate::net_rpc::rpc_port(),
-        &grant_account,
-        Some(paused),
-    )?;
-    let grant: HostControlLaunchGrant = serde_json::from_value(grant)?;
-    anyhow::ensure!(
-        grant.image_sha256.eq_ignore_ascii_case(&manifest.sha256),
-        "model maintenance helper image changed"
-    );
-    let params = ModelMaintenanceParams {
-        schema_version: MODEL_MAINTENANCE_SCHEMA_V,
-        binding: ControlBinding {
-            installation_root: root.clone(),
-            profile: profile.clone(),
-            launch_id: grant.instance_id.clone(),
-            expected_account_id: expected_account.clone(),
-        },
-        kind,
-        phase,
-        expected: expected.cloned(),
-    };
-    let request = RpcRequest {
-        v: respire_commands::rpc_client::PROTOCOL_V,
-        id: uuid::Uuid::new_v4().to_string(),
-        method: MODEL_MAINTENANCE_METHOD.into(),
-        args: vec![serde_json::to_string(&params)?],
-        scope: None,
-        operation_id: None,
-        idempotency_key: None,
-        parent_operation_id: None,
-        queue_wait_ms: None,
-        lifecycle: None,
-    };
-    let mut receipt = None;
-    super::exchange_control(
-        &binary,
-        &grant,
-        &request,
-        Instant::now() + Duration::from_secs(185),
-        |response, pid| {
-            anyhow::ensure!(
-                response.v == request.v
-                    && response.id == request.id
-                    && response.pid == Some(pid)
-                    && response.ok
-                    && response.exit == 0
-                    && response.scope.is_none()
-                    && response.operation_id.is_none()
-                    && response.idempotency_key.is_none()
-                    && response.error.is_none()
-                    && response.code.is_none(),
-                "model maintenance response identity/failure"
-            );
-            if let Some(directory) = response.data_dir.as_ref() {
-                anyhow::ensure!(
-                    Path::new(directory).canonicalize()? == profile,
-                    "model maintenance response profile mismatch"
-                );
-            }
-            let envelope = response
-                .envelope
-                .context("model maintenance envelope missing")?;
-            anyhow::ensure!(
-                envelope.command == "model-maintenance"
-                    && matches!(envelope.status, Status::Ok)
-                    && envelope.errors.is_empty(),
-                "invalid model maintenance envelope"
-            );
-            for (name, value) in [("control_ready", "true"), ("store_ready", "false")] {
-                let mut items = envelope.items.iter().filter(|item| item.name == name);
-                anyhow::ensure!(
-                    items.next().is_some_and(|item| item.value == value
-                        && if name == "control_ready" {
-                            matches!(item.status, Status::Ok)
-                        } else {
-                            matches!(item.status, Status::Skip)
-                        })
-                        && items.next().is_none(),
-                    "model maintenance helper readiness missing"
-                );
-            }
-            let read: ModelMaintenanceReceipt = serde_json::from_value(envelope.details.clone())?;
-            anyhow::ensure!(
-                read.plan.kind == kind
-                    && read.phase == phase
-                    && [
-                        &read.plan.review.selection_sha256,
-                        &read.plan.review.revision_sha256
-                    ]
-                    .into_iter()
-                    .all(|digest| digest.len() == 64
-                        && digest
-                            .bytes()
-                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
-                    && expected.is_none_or(|expected| read.plan.review == *expected),
-                "model maintenance returned another reviewed operation"
-            );
-            receipt = Some(read);
-            Ok(envelope)
-        },
-    )?;
-    anyhow::ensure!(
-        roots()? == (root, profile.clone()) && account(&profile)? == expected_account,
-        "model maintenance scope changed during exchange"
-    );
-    maintenance
-        .auth_launch_binding(&profile)?
-        .context("model maintenance lost Paused authority")?;
-    receipt.context("model maintenance receipt missing")
-}
-
 fn check_path(path: &Path) -> Result<()> {
     anyhow::ensure!(
         path.is_absolute() && path.to_str().is_some(),
@@ -879,7 +969,7 @@ fn check_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn local_m3_directory() -> Result<PathBuf> {
+pub(super) fn local_m3_directory() -> Result<PathBuf> {
     let home = || {
         dirs::home_dir()
             .or_else(|| respire_client_host::env::var_os("HOME").map(PathBuf::from))
@@ -1041,7 +1131,7 @@ fn install_catalog(root: &Path, pin: Option<&ModelCatalogPin>) -> Result<Vec<Str
         if destination == dll {
             anyhow::ensure!(
                 bytes.len() as u64 == pin.dll_size && hash(&bytes) == pin.dll_sha256,
-                "catalog DLL differs from Runtime official pin"
+                "catalog DLL differs from the official host pin"
             );
         }
         publish(&destination, &bytes)?;

@@ -107,7 +107,7 @@ test('published Darwin ARM64 alias requires the exact 64-bit Mach-O CPU header',
 });
 test('supported Linux ARM targets require native runners, every source feedback phase and background install proof',async()=>{
   const text=file=>readFileSync(new URL('../../.github/workflows/'+file,import.meta.url),'utf8');
-  for(const file of ['ci.yml','release-validation.yml','release-native-validation.yml','release.yml']){
+  for(const file of ['release-validation.yml','release-native-validation.yml','release.yml']){
     const workflow=text(file).replace(/\r\n/g,'\n');
     for(const {triple} of manifest.targets.filter(t=>t.triple.startsWith('aarch64-unknown-linux-')))assert(workflow.includes('os: ubuntu-24.04-arm\n            target: '+triple),file+' missing native ARM target '+triple);
     assert(workflow.includes('scripts/require-native-linux-arm64.sh'),file+' lacks hardware check');
@@ -117,13 +117,14 @@ test('supported Linux ARM targets require native runners, every source feedback 
   assert.match(source,/if: \$\{\{ inputs.feedback_probe && inputs.target != 'x86_64-apple-darwin' && contains\(inputs.target, '-musl'\) \}\}/);
   assert.match(source,/scripts\/verify-linux-arm64-elf.sh/);assert.match(source,/diary_tests/);assert.match(source,/feedback_contract_probe/);
   assert.match(source,/scripts\/probe-native-arm64-alpine.sh/);
-  for(const file of ['ci.yml','release-native-validation.yml'])assert.match(text(file),/scripts\/probe-native-arm64-alpine.sh/);
+  assert.match(text('release-native-validation.yml'),/scripts\/probe-native-arm64-alpine.sh/);
   const alpine=readFileSync(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url),'utf8');
-  assert.match(alpine,/--network none/);assert.match(alpine,/--direct model probe --json/);
+  assert.match(alpine,/--network none/);assert.match(alpine,/--direct model install-m3 --json/);
   assert.match(alpine,/RSRS_CPU_OWNED_ORT_FILE=\/cpu-model\.ort/);assert.equal((alpine.match(/sha256sum -c >\/dev\/null/g)||[]).length,4);
   assert.doesNotMatch(alpine,/--check|--status/);
-  assert.match(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
-  assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model probe'),'mounted CPU artifact must be checked before inference');
+  assert.doesNotMatch(alpine,/--json runtime start/);assert.match(alpine,/--json runtime stop/);assert.match(alpine,/trap .* EXIT/);
+  assert.match(alpine,/p\["inference_completed"\] is True/);assert.match(alpine,/p\["fresh_session"\] is True/);
+  assert(alpine.indexOf('test -r /cpu-model.ort')<alpine.indexOf('--direct model install-m3'),'mounted CPU artifact must be checked before inference');
   assert.match(alpine,/test -z "\$\{RSRS_CORE_TEST_MODE:-\}"/);assert.doesNotMatch(alpine,/-e (?:GH_TOKEN|GITHUB_TOKEN|CORE_SDK_READ_TOKEN|RSRS_CORE_TEST_MODE)/);
   const background=text('verify-publication.yml').split('  verify-publication-arm64:')[1];
   assert.match(background,/runs-on: ubuntu-24.04-arm/);assert.match(background,/VERIFY_ARM64: 'true'/);
@@ -251,7 +252,11 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
     // The fake digest checker isolates selection/argv tests from the 570MB real model.
     stub('sha256sum','#!/bin/sh\ncat >/dev/null\nexit "${FAKE_HASH_STATUS:-0}"\n');
     const docker=path.join(root,'docker.cjs');
-    writeFileSync(docker,'require("node:fs").writeFileSync(process.env.CAPTURE,JSON.stringify(process.argv.slice(2)))\n');
+    writeFileSync(docker,`const fs=require('node:fs'),path=require('node:path'),args=process.argv.slice(2);
+fs.writeFileSync(process.env.CAPTURE,JSON.stringify(args));
+const mount=args.find(arg=>arg.endsWith(':/profile')).slice(0,-':/profile'.length);
+fs.writeFileSync(path.join(mount,'inference.json'),JSON.stringify({status:'ok',details:{backend_load:{evidence:{ready:true,inference_completed:process.env.FAKE_INFERENCE!=='incomplete',fresh_session:true,dimensions:1024,selected:'CPU'}}}}));
+`);
     stub('docker','#!/bin/sh\nMSYS2_ARG_CONV_EXCL="*" exec "'+process.execPath.replaceAll('\\','/')+'" "'+docker.replaceAll('\\','/')+'" "$@"\n');
     const script=fileURLToPath(new URL('../../scripts/probe-native-arm64-alpine.sh',import.meta.url));
     const shellPath=file=>file.split(path.sep).join('/');
@@ -269,6 +274,7 @@ test('Alpine preflight mounts the selected CPU cache read-only and refuses missi
       assert(args.includes('NATIVE_RUNTIME_SHA256='+'a'.repeat(64)));assert(args.includes('NATIVE_RUNTIME_VERSION=1.0.21-dev.5'));
       rmSync(capture);
     }
+    assert.notEqual(run({FAKE_INFERENCE:'incomplete'}).status,0,'incomplete inference cannot pass acceptance');rmSync(capture);
     rmSync(cached);writeFileSync(local,'fixture');assert.equal(run({}).status,0);assert(JSON.parse(readFileSync(capture)).includes(shellPath(local)+':/cpu-model.ort:ro'));rmSync(capture);
     assert.notEqual(run({FAKE_HASH_STATUS:'1'}).status,0);assert(!existsSync(capture));
     rmSync(local);assert.notEqual(run({}).status,0);assert(!existsSync(capture));
@@ -327,6 +333,10 @@ test('critical publication requires build identity and final full acceptance con
   runInNewContext(guard,{channel:'dev'});
   assert.match(release,/validation_profile:[\s\S]*?default: critical/);
   assert.match(release,/Reject full acceptance before public Release assets exist/);
+  const client2Guard=release.match(/node -e "(if\(process.env.ARTIFACT_SOURCE==='published-assets'.*)"/)[1];
+  for(const env of [{},{CLIENT2_RELEASE:'v2.0.0-dev.6'},{CLIENT2_COMMIT:'c'.repeat(40)},{CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'main'}])assert.throws(()=>runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',...env}}}),/must be explicit/);
+  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'published-assets',CLIENT2_RELEASE:'v2.0.0-dev.6',CLIENT2_COMMIT:'c'.repeat(40)}}});
+  runInNewContext(client2Guard,{process:{env:{ARTIFACT_SOURCE:'build'}}});
   assert.doesNotMatch(release,/^  native-regression-critical(?:-readonly)?:/m);
   assert.match(part('publication-ready'),/regressionContract\(require\('.\/npm\/artifact-manifest.json'\),process.env.VALIDATION_PROFILE\)/);
   assert.match(part('publication-ready'),/Require successful CLI CI for this exact source/);
@@ -335,14 +345,16 @@ test('critical publication requires build identity and final full acceptance con
   assert.match(daily,/-f publish=false -f validation_profile=full/);
   assert.match(daily,/-f artifact_source=published-assets/);
   assert.match(daily,/-f client2_release="\$CLIENT2_RELEASE" -f client2_commit="\$CLIENT2_COMMIT"/);
-  assert.match(daily,/-f client2_candidate_run_id=/);
+  assert.doesNotMatch(daily,/client2_candidate_run_id/);
+  assert.doesNotMatch(release,/43721147038|6ffa187685734873721ab51f3a54d8b2c29cd269/);
   assert.match(text('release-validation.yml'),/full_validation:\n        default: false/);
-  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40),client2_candidate_run_id:''};
+  const selected={client2_release:'v2.0.0-dev.6',client2_commit:'c'.repeat(40)};
+  for(const call of ['validate','native-regression'].map(part))assert.match(call,/client2_candidate_run_id: ''/);
   for(const call of ['validate','native-regression'].map(part))for(const key of Object.keys(selected)){
     const expression=call.match(new RegExp('^      '+key+': \\$\\{\\{ (.+) \\}\\}$','m'))?.[1];
     assert(expression);
     const actual=runInNewContext(expression,{inputs:selected});
-    if(key!=='client2_candidate_run_id')assert.equal(actual,selected[key]);
+    assert.equal(actual,selected[key]);
   }
 });
 

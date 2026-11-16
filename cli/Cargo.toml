@@ -21,7 +21,7 @@ path = "src/main.rs"
 respire_host_control = { path = "../crates/host-control" }
 respire_client_host = { path = "../crates/client-host", features = ["locks"] }
 respire_commands = { path = "../crates/commands" }
-respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.9" }
+respire_protocol = { path = "../crates/protocol", version = "=2.0.0-dev.12" }
 respire_spawn = { path = "../spawn" }
 respire_logging = { path = "../crates/logging" }
 anyhow = "1.0"
@@ -35,6 +35,7 @@ ureq = { version = "2.12", features = ["json", "socks-proxy"] }
 url = "2.5"
 rand = "0.8"
 rpassword = "7"
+rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1.0", features = ["v4", "v5"] }
@@ -53,6 +54,7 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 signal-hook = "0.3"
 
 [dev-dependencies]
+respire_crypto = { path = "../crates/crypto", default-features = false }
 tempfile = "3.15"
 
 [lints.rust]

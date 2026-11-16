@@ -86,7 +86,7 @@ test('recovery tooling must independently belong to main before entering OIDC', 
   assert.match(readOnlyJob,/ref: main/);
   assert.doesNotMatch(readOnlyJob,/id-token:/);
   const releaseWorkflow=readFileSync(new URL('.github/workflows/release.yml',root),'utf8');
-  assert.match(releaseWorkflow.split('  dev6-publication-resume:')[1],/github.ref == 'refs\/heads\/main'/);
+  assert.doesNotMatch(releaseWorkflow,/dev6-publication-resume:|resume_dev6_publication/);
   const recovery=readFileSync(new URL('./dev6-publication-recovery.mjs',import.meta.url),'utf8');
   assert.match(recovery,/r.head_branch === 'main'/);
 });
@@ -136,16 +136,11 @@ test('absent short entry is allowed but an existing inconsistent version/bytes/d
   await assert.rejects(verifyRecoveryAlias(expected,registry(p=>{p.dependencies['@rsrsai/cli']='1.0.15-dev.5';})));
   await assert.rejects(verifyRecoveryAlias(expected,registry(()=>{},Buffer.from('inconsistent alias'))));
 });
-test('resume workflow retains trusted identity, no builds/scoped writes, and both publication barriers', () => {
-  const root=new URL('../../',import.meta.url);
-  const workflow=readFileSync(new URL('.github/workflows/release.yml',root),'utf8').replace(/\r\n/g,'\n');
-  const resume=workflow.split('  dev6-publication-resume:')[1];
-  assert.match(resume,/name: \$\{\{ inputs.resume_dev6_publication && 'publish' \|\| 'unused-dev6-publication-resume' \}\}/);
-  assert.match(resume,/contents: write\n      actions: write/);
-  assert(resume.indexOf('name: scoped-ready-')<resume.indexOf('gh workflow run npm-alias.yml'));
-  assert.doesNotMatch(resume,/id-token:|cargo|--clobber|release upload|--publish|workflow_call|npm publish/);
-  assert(resume.indexOf('recovery-ready')<resume.indexOf('name: scoped-ready-'));
-  assert(resume.indexOf('name: scoped-ready-')<resume.indexOf('await-alias'));
-  assert(resume.indexOf('await-alias')<resume.indexOf('release-publication.mjs finalize'));
-  assert.match(workflow,/!inputs.resume_dev6_publication/);
+test('Release removes the historical DEV6 recovery entry and keeps current publication barriers', () => {
+  const workflow=readFileSync(new URL('../../.github/workflows/release.yml',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+  assert.doesNotMatch(workflow,/resume_dev6_publication|dev6-publication-resume|recovery-ready|recovery-validation/);
+  const publish=workflow.split('\n  publish:\n')[1];
+  assert(publish.indexOf('scoped-accepted')<publish.indexOf('await-alias-accepted'));
+  assert(publish.indexOf('await-alias-accepted')<publish.indexOf('release-publication.mjs finalize-accepted'));
+  assert.match(publish,/needs.publication-ready.result == 'success'/);
 });

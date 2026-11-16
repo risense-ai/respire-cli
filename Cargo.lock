@@ -1569,11 +1569,13 @@ dependencies = [
  "ratatui",
  "respire_client_host",
  "respire_commands",
+ "respire_crypto",
  "respire_host_control",
  "respire_logging",
  "respire_protocol",
  "respire_spawn",
  "rpassword",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -1742,6 +1744,7 @@ dependencies = [
  "hex",
  "respire_client_host",
  "respire_commands",
+ "respire_crypto",
  "respire_protocol",
  "respire_spawn",
  "serde",
@@ -1760,7 +1763,7 @@ dependencies = [
 
 [[package]]
 name = "respire_protocol"
-version = "2.0.0-dev.9"
+version = "2.0.0-dev.12"
 dependencies = [
  "anyhow",
  "serde",
