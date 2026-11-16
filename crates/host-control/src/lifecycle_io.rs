@@ -207,10 +207,39 @@ fn supply_verified_runtime_credentials(health: &Health)
         || respire_client_host::settings::off_mode()? {
         return Ok(None);
     }
+    let (_, profile) = respire_client_host::config::control_roots()?;
+    // A fresh or fully logged-out profile deliberately starts with its library locked.
+    if !session_requires_unlock(&profile)? {
+        return Ok(None);
+    }
     let (installation, profile) = verify_credential_owner(health)?;
     respire_client_host::host_credentials::unlock_runtime(
         &health.url, &installation, &profile, &health.instance_id, health.generation,
     ).map(Some)
+}
+
+fn session_requires_unlock(profile: &Path) -> Result<bool> {
+    Ok(!matches!(crate::identity(profile)?, respire_protocol::HostAuthIdentity::Absent))
+}
+
+#[cfg(test)]
+#[test]
+fn absent_session_stays_locked_but_existing_sessions_require_unlock() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let path = directory.path().join("session.json");
+    assert!(!session_requires_unlock(directory.path())?);
+    assert!(!path.exists());
+    std::fs::write(&path, br#"{"user":"synthetic"}"#)?;
+    assert!(session_requires_unlock(directory.path())?);
+    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({
+        "vault_version": 4, "kdf_salt": "synthetic", "wrapped_urk": "synthetic",
+        "urk_nonce": "synthetic", "keyring_account": "synthetic", "keyring_backend": "native",
+        "auth_operation_id": uuid::Uuid::new_v4().to_string(),
+    }))?)?;
+    assert!(session_requires_unlock(directory.path())?);
+    std::fs::write(&path, b"{")?;
+    assert!(session_requires_unlock(directory.path()).is_err());
+    Ok(())
 }
 
 fn verify_credential_owner(health: &Health) -> Result<(std::path::PathBuf, std::path::PathBuf)> {
