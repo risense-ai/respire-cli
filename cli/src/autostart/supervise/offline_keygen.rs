@@ -315,7 +315,9 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     verify_selection(&record)?;
     update_marker(&mut record,&mut maintenance)?;
     let send=keygen_sends_original(record.stage,operation.is_some())?;
-    let mut material=None;
+    let mut material=if send { None } else {
+        record.material.as_ref().map(respire_host_control::auth_material::load).transpose()?
+    };
     if send {
         anyhow::ensure!(control::identity(&record.profile)? == record.original_identity, "offline keygen source identity changed");
         require_no_owner()?;
@@ -338,7 +340,7 @@ pub(crate) fn keygen(operation: Option<&str>, force: bool) -> Result<ResultEnvel
     save(&record,&mut digest)?; // sent + current controller durable before any exchange.
     let envelope=if send { control::auth_keygen_locked(&takeover,&mut maintenance,&record.operation_id,force,
         material.as_ref().context("offline keygen host material is missing")?)? }
-        else { control::auth_result_locked(&takeover,&mut maintenance,&record.operation_id,force)? };
+        else { control::auth_result_locked(&takeover,&mut maintenance,&record.operation_id,force,material.as_ref())? };
     verify_selection(&record)?;
     let result:HostAuthResult=serde_json::from_value(envelope.summary.clone())?;
     anyhow::ensure!(result.operation_id == record.operation_id && result.path == record.profile.join("session.json"),
@@ -457,6 +459,17 @@ fn finish_initial_rollback(takeover:&respire_client_host::lock::LibraryLock,reco
         "offline keygen rollback original identity changed");
     lifecycle::verify_offline_keygen_marker(&record.root,&record.profile,&record.token,&record.coordinator,&record.marker_sha256)?;
     require_no_owner()?;
+    if let Some(candidate)=record.material.as_ref() {
+        let account=candidate["keyring_account"].as_str().context("offline keygen cleanup account missing")?;
+        let backend=candidate["keyring_backend"].as_str().context("offline keygen cleanup backend missing")?;
+        if respire_client_host::host_credentials::read_auth_super(account,backend)?.is_some() {
+            let material=respire_host_control::auth_material::load(candidate)?;
+            respire_host_control::auth_material::remove(&material,None)?;
+        } else {
+            anyhow::ensure!(respire_client_host::host_credentials::read_auth_password(account,backend)?.is_none(),
+                "offline keygen cleanup found a foreign password slot; original operation retained");
+        }
+    }
     claim_rollback(record,digest)?;
     if record.was_serving {
         maintenance.start_account_runtime()?;
@@ -614,7 +627,8 @@ pub(crate) fn start_explicit(takeover:&respire_client_host::lock::LibraryLock) -
     let mut maintenance=lifecycle::resume_key_maintenance(&root,&profile,&record.source,&record.token,&record.coordinator)?;
     let mut digest=Some(digest);
     update_marker(&mut record,&mut maintenance)?; save(&record,&mut digest)?;
-    let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force)?;
+    let material=record.material.as_ref().map(respire_host_control::auth_material::load).transpose()?;
+    let envelope=control::auth_result_locked(takeover,&mut maintenance,&record.operation_id,record.force,material.as_ref())?;
     let receipt:HostAuthResult=serde_json::from_value(envelope.summary)
         .map_err(|_| anyhow::anyhow!("offline keygen query receipt invalid"))?;
     if receipt.outcome == HostAuthOutcome::RolledBack {

@@ -166,8 +166,9 @@ pub(crate) fn auth_result_locked(
     maintenance: &mut super::lifecycle::Maintenance,
     operation_id: &str,
     force: bool,
+    material: Option<&respire_protocol::HostAuthKeygenMaterial>,
 ) -> Result<ResultEnvelope> {
-    auth_request(takeover, maintenance, operation_id, force, true, None)
+    auth_request(takeover, maintenance, operation_id, force, true, material)
 }
 
 pub(crate) fn identity(profile: &Path) -> Result<HostAuthIdentity> {
