@@ -22,6 +22,25 @@ def legacy_custody_alias(profile, session_bytes):
     return 'legacy-'+hashlib.sha256(canonical_scope_path(profile).encode('utf-8')+session_bytes).hexdigest()
 
 
+def migrate_fixture_custody(profile, keys, plan, expected_urk):
+    alias,version,slots=plan
+    original=(profile/'session.json').read_bytes()
+    session=json.loads(original)
+    assert legacy_custody_alias(profile,original)==alias, 'historical session changed before fixture custody'
+    backend=keys.credential_backend
+    assert backend in ('native','secret_service'), 'fixture custody requires a persistent provider'
+    factors={('secret' if version==1 else 'secret_key') if slot=='legacy-secret' else slot:value
+        for slot,value in slots.items()}
+    assert recover_fixture_urk(session,factors)==expected_urk, 'fixture custody original URK differs'
+    for slot,value in slots.items():
+        assert ('rsrs',slot+':'+alias) in keys.entries, 'fixture custody slot was not reserved'
+        keys.put('rsrs',slot+':'+alias,value)
+    migrated={key:value for key,value in session.items() if key not in ('pass','super','secret','secret_key')}
+    migrated.update(keyring_account=alias,keyring_backend=backend,legacy_secret_backend=backend)
+    assert (profile/'session.json').read_bytes()==original, 'historical session changed during fixture custody'
+    (profile/'session.json').write_text(json.dumps(migrated),encoding='utf-8')
+
+
 def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
     alias,version,slots=plan
     session=json.loads((profile/'session.json').read_bytes())
@@ -35,7 +54,7 @@ def verify_fixture_custody(profile, keys, plan, expected_urk, binary, env):
     for slot,expected in slots.items():
         assert ('rsrs',slot+':'+alias) in keys.entries, 'custody slot is not reserved by this fixture'
         if sys.platform=='darwin':
-            # Metadata is readable without changing the product creator's Keychain ACL.
+            # These synthetic fixture entries are readable without changing product ACLs.
             metadata=keys._security(keys.root,['find-generic-password','-s','rsrs','-a',slot+':'+alias,str(keys.keychain)])
             assert metadata.returncode==0, 'custody exact slot metadata missing'
         else:
@@ -404,6 +423,16 @@ for binary in BINARIES:
             args.runtime_binary = install_official_runtime(binary, env, args.runtime_version, args.runtime_sha256)
             assert {str(profile):snapshot(profile) for profile in [main,alternate]} == legacy_data, 'Runtime installation changed old account data'
             runtime_installed_after_legacy_data = True
+        if args.seed_binary:
+            # This gate tests historical databases; fixture-owned custody is explicit
+            # before target_start, rather than depending on startup to migrate secrets.
+            for profile in [main,alternate]:
+                before=snapshot(profile)
+                migrate_fixture_custody(profile,keys,custody_slots[str(profile)],expected_urks[str(profile)])
+                after=snapshot(profile)
+                assert after[:2]==before[:2], 'fixture custody changed historical database or indexes'
+                assert library_state(after,recovery_factors[str(profile)])==original_state[str(profile)], 'fixture custody changed original records, sync work or URK'
+        if args.seed_binary and args.runtime_binary:
             run('--direct','model','engine','cpu')
             stopped=captured_run([str(binary),'--runtime-internal','--stop'],env=env,timeout=50)
             if stopped.returncode:
@@ -819,6 +848,7 @@ for binary in BINARIES:
             'old_records_decrypted':True,'post_upgrade_recall_checked':True,
             'seed_vault_versions':seed_vault_versions,
             'host_credential_custody':{'required':bool(args.seed_binary),'verified_accounts':list(custody_receipts.values())},
+            'historical_credential_migration_actor':'fixture' if args.seed_binary else None,
             'resident_stress':stress,
             'upgrade_contract':'standalone-v1' if args.runtime_binary else 'legacy-shim-v1',
             'source_rpc_checked':source_rpc_checked,'legacy_handoff_actor':legacy_handoff_actor,
