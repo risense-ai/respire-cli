@@ -253,6 +253,33 @@ pub(crate) fn validate_account_receipt(
 
 /// Reduce a private Runtime rejection to a fixed diagnostic class without copying its content.
 pub fn register_rejection_class(error: &str) -> &'static str {
+    if let Some(cause) = error.strip_prefix("registration outcome unknown; query the original operation, do not resend: ") {
+        if let Some(detail) = cause.strip_prefix("authentication salt request failed: ") {
+            if let Some(class) = authorization_request_class(detail, true) { return class; }
+        }
+        if let Some(detail) = cause.strip_prefix("register request failed: ") {
+            match authorization_request_class(detail, false) {
+                Some("auth_login_http_unauthorized") => return "register_http_unauthorized",
+                Some("auth_login_http_forbidden") => return "register_http_forbidden",
+                Some("auth_login_http_rate_limited") => return "register_http_rate_limited",
+                Some("auth_login_http_server_error") => return "register_http_server_error",
+                Some("auth_login_http_other") => return "register_http_other",
+                Some("auth_login_transport") => return "register_transport",
+                _ => {},
+            }
+        }
+        for (head, class) in [
+            ("server did not return an authentication salt", "auth_salt_missing"),
+            ("salt hex decode failed", "auth_salt_invalid_hex"),
+            ("Failed to read JSON", "auth_salt_reply_parse_failed"),
+            ("failed to parse response", "register_reply_parse_failed"),
+            ("register failed", "register_token_missing"),
+        ] {
+            if cause == head || cause.strip_prefix(head).is_some_and(|tail| tail.starts_with(": ")) {
+                return class;
+            }
+        }
+    }
     let groups: &[(&str, &[&str])] = &[
         ("register_remote_unknown", &[
             "registration outcome unknown; query the original operation, do not resend",
@@ -577,6 +604,67 @@ mod tests {
         assert_eq!(material.wrapped_urk, "synthetic-wrap");
         assert_eq!(params.password, "synthetic-password");
         assert!(params.super_password.is_none());
+        let outer = "registration outcome unknown; query the original operation, do not resend";
+        let url = "https://private-host.invalid/private-path?user=private-user&token=private-token";
+        let sentinel = "private-body-and-credential";
+        let mut cases = Vec::new();
+        for (status, suffix) in [(401, "unauthorized"), (403, "forbidden"), (429, "rate_limited"),
+            (503, "server_error"), (400, "other")] {
+            cases.push((format!("authentication salt request failed: {url}: status code {status}"),
+                format!("auth_salt_http_{suffix}")));
+            cases.push((format!("register request failed: {url}: status code {status}"),
+                format!("register_http_{suffix}")));
+        }
+        for (cause, class) in [
+            (format!("authentication salt request failed: {url}: Dns Failed: {sentinel}"), "auth_salt_transport"),
+            (format!("register request failed: {url}: Connection Failed: {sentinel}"), "register_transport"),
+            ("server did not return an authentication salt".into(), "auth_salt_missing"),
+            (format!("salt hex decode failed: {sentinel}"), "auth_salt_invalid_hex"),
+            (format!("Failed to read JSON: {sentinel}"), "auth_salt_reply_parse_failed"),
+            (format!("failed to parse response: Failed to read JSON: {sentinel}"), "register_reply_parse_failed"),
+            (format!("register failed: {sentinel}"), "register_token_missing"),
+            (format!("{sentinel}: authentication salt request failed: {url}: status code 401"), "register_remote_unknown"),
+            (format!("authentication salt request failed: {url}: status code 401: {sentinel}"), "register_remote_unknown"),
+            (format!("register failed: authentication salt request failed: {url}: status code 401"), "register_token_missing"),
+            (format!("{sentinel}: Failed to read JSON: private-user"), "register_remote_unknown"),
+        ] {
+            cases.push((cause, class.to_owned()));
+        }
+        let profile = std::env::temp_dir();
+        for (cause, class) in cases {
+            // Match Runtime24's format!("{failure:#}") over its authorization error context.
+            let private = format!("{:#}", anyhow::anyhow!(cause).context(outer));
+            let mut envelope = ResultEnvelope::new("auth-account", Status::Fail, serde_json::json!({}),
+                vec![respire_commands::output::Item::new("control_ready", Status::Ok, "true"),
+                    respire_commands::output::Item::new("store_ready", Status::Skip, "false")]);
+            envelope.errors.push(private.clone());
+            let response: RpcResponse<ResultEnvelope> = serde_json::from_value(serde_json::json!({
+                "v": request.v, "id": request.id, "operation_id": request.operation_id,
+                "idempotency_key": request.idempotency_key, "bin": "rsrs-runtime", "pid": 5252,
+                "ok": false, "exit": 2, "code": "account_outcome_unknown", "error": private,
+                "envelope": envelope,
+            }))?;
+            let error = validate_account_response(response.clone(), &request, &profile, 5252, &profile, true)
+                .err().context("registration rejection was accepted")?.to_string();
+            assert_eq!(error, format!("Runtime rejected account control (account_outcome_unknown): account outcome is unknown; query the original operation without replaying; register_kind={class}"));
+            for private in [url, "private-host", "private-user", "private-token", sentinel] {
+                assert!(!error.contains(private));
+            }
+            let mut wrong_owner = response.clone();
+            wrong_owner.pid = Some(5253);
+            assert_eq!(validate_account_response(wrong_owner, &request, &profile, 5252, &profile, true)
+                .err().context("foreign registration rejection was accepted")?.to_string(),
+                "account control response identity mismatch");
+            let mut result_request = request.clone();
+            result_request.method = HOST_AUTH_ACCOUNT_RESULT_METHOD.into();
+            assert!(!validate_account_response(response.clone(), &result_request, &profile, 5252, &profile, true)
+                .err().context("result rejection was accepted")?.to_string().contains("register_kind="));
+            assert!(!validate_account_response(response, &request, &profile, 5252, &profile, false)
+                .err().context("non-registration rejection was accepted")?.to_string().contains("register_kind="));
+        }
+        assert_eq!(register_rejection_class(outer), "register_remote_unknown");
+        assert_eq!(register_rejection_class(&format!("outer: {outer}: Failed to read JSON: {sentinel}")),
+            "register_unclassified");
         Ok(())
     }
 
