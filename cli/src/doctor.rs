@@ -8,6 +8,9 @@ pub(crate) fn run(remote: bool, check_update: bool, fix: bool) -> Result<()> {
     if check_update || fix {
         runtime_policy::require_host("doctor repair and CLI update checks")?;
     }
+    if fix {
+        respire_client_host::settings::ensure_writable()?;
+    }
     if client_only {
         return crate::emit_result(runtime_doctor(remote)?);
     }
@@ -67,6 +70,16 @@ pub(crate) fn run(remote: bool, check_update: bool, fix: bool) -> Result<()> {
 }
 
 fn runtime_doctor(remote: bool) -> Result<ResultEnvelope> {
+    if respire_client_host::settings::off_mode()? {
+        let mut result = ResultEnvelope::new(
+            "memory",
+            Status::Ok,
+            serde_json::json!({"mode":"off", "skipped":true, "count":0}),
+            Vec::new(),
+        );
+        result.details = serde_json::json!([]);
+        return Ok(result);
+    }
     let mut args = vec!["doctor".to_owned()];
     if remote {
         args.push("--remote".to_owned());

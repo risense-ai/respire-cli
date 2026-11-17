@@ -540,9 +540,16 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         vec!["--json", "sync"],
     ] {
         let response = execute(&rt, &args)?;
-        assert_eq!(response["ok"], true, "{response}");
-        assert_eq!(response["envelope"]["summary"]["skipped"], true);
-        assert_eq!(response["envelope"]["items"], serde_json::json!([]));
+        assert_eq!(response["ok"], false, "{response}");
+        assert_eq!(response["code"], "runtime_locked", "{response}");
+        let (ok, result) = host(&rt, &args)?;
+        assert!(ok, "{result}");
+        assert_eq!(result["summary"]["mode"], "off");
+        assert_eq!(result["summary"]["skipped"], true);
+        assert_eq!(result["summary"]["count"], 0);
+        assert_eq!(result["items"], serde_json::json!([]));
+        assert_eq!(result["details"], serde_json::json!([]));
+        assert_eq!(result["errors"], serde_json::json!([]));
     }
     // Doctor always checks the generic prompt, even when no IDE is installed.
     eprintln!("device-stage=off-host-inject");
@@ -597,8 +604,12 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
     set_mode(&mut rt, "normal")?;
     eprintln!("device-stage=normal-initial-status-rpc");
     let initialized = execute(&rt, &["--json", "status"])?;
-    assert_eq!(initialized["ok"], true, "{initialized}");
-    assert!(rt.dir.path().join("rsrs.db").exists());
+    // Changing device mode does not supply keys; this fixture owns no account.
+    assert_eq!(initialized["ok"], false, "{initialized}");
+    assert_eq!(initialized["exit"], 2, "{initialized}");
+    assert_eq!(initialized["envelope"]["summary"]["store_ready"], false);
+    assert_eq!(initialized["envelope"]["summary"]["credential_state"], "required");
+    assert!(!rt.dir.path().join("rsrs.db").exists());
     eprintln!("device-stage=enter-readonly");
     set_mode(&mut rt, "readonly")?;
     let (ok, config) = host(&rt, &["--json", "agent-config"])?;
@@ -624,15 +635,20 @@ fn device_modes_gate_rpc_and_disabled_startup_never_opens_memory() -> Result<(),
         } else {
             eprintln!("device-stage=readonly-reject-write-rpc");
             let response = execute(&rt, &args)?;
-            assert_eq!(response["ok"], false, "read-only accepted {args:?}: {response}");
+            assert_eq!(response["ok"], false, "locked Runtime accepted {args:?}: {response}");
+            assert_eq!(response["code"], "runtime_locked", "{response}");
         }
     }
     eprintln!("device-stage=enter-normal");
     set_mode(&mut rt, "normal")?;
     eprintln!("device-stage=normal-final-status-rpc");
     let status = execute(&rt, &["--json", "status"])?;
-    assert_eq!(status["ok"], true, "{status}");
+    assert_eq!(status["ok"], false, "{status}");
+    assert_eq!(status["exit"], 2, "{status}");
+    assert_eq!(status["envelope"]["summary"]["store_ready"], false);
+    assert_eq!(status["envelope"]["summary"]["credential_state"], "required");
     assert_ne!(status["envelope"]["summary"]["workspace"], "off");
+    assert!(!rt.dir.path().join("rsrs.db").exists());
     let (ok, config) = host(&rt, &["--json", "agent-config"])?;
     assert!(ok, "{config}");
     assert_eq!(config["summary"]["readonly"], false, "{config}");

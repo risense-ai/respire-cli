@@ -1890,7 +1890,22 @@ fn run(args: Cli) -> Result<()> {
             .as_ref()
             .is_some_and(|command| !is_off_allowed(command))
     {
-        return rpc::call_from_argv();
+        if !json_mode() {
+            return Ok(());
+        }
+        let command = match args.command.as_ref() {
+            Some(Command::Recall { .. }) => "recall",
+            Some(Command::Remember { .. }) => "remember",
+            _ => "memory",
+        };
+        let mut result = ResultEnvelope::new(
+            command,
+            OutputStatus::Ok,
+            serde_json::json!({"mode":"off", "skipped":true, "count":0}),
+            Vec::new(),
+        );
+        result.details = serde_json::json!([]);
+        return emit_result(result);
     }
     let display = !json_mode()
         && args.command.is_some()
