@@ -521,7 +521,9 @@ class Smoke:
             # A public recovery may commit before its output/stop check fails.
             candidate = self.session(env)
             operation = candidate.get("auth_operation_id")
-            if candidate.get("wrapped_urk") == wrapped and isinstance(operation, str):
+            if all(candidate.get(field) == value for field, value in
+                    (("wrapped_urk", wrapped), ("kdf_salt", salt), ("urk_nonce", nonce.hex()))) \
+                    and isinstance(operation, str):
                 self.keys.track_created_login(candidate, "", code, None, recovery_operation=operation)
         require(recovered.get("outcome") == "committed" and recovered.get("source_profile") == str(source)
             and recovered.get("operation_id") == operation and candidate.get("user") == ""

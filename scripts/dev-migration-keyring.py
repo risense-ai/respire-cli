@@ -6,6 +6,7 @@ does not prove that a real legacy Keychain ACL will avoid an authorization promp
 import ctypes
 import errno
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -67,6 +68,7 @@ class TrackedKeys:
     def __init__(self, root):
         self.root = root
         self.entries = set()
+        self.recovery_controls = {}
 
     def configure_env(self, env):
         owned_path(env["HOME"])
@@ -132,6 +134,30 @@ class TrackedKeys:
                 value = self.read("rsrs", prefix + alias)
                 require(value == expected if expected is not None else bool(value),
                         "login_credential_fixture_value_changed")
+        if recovery and user == "":
+            require(isinstance(super_password, str) and bool(super_password)
+                and login_password is None, "recovery_control_factor_mismatch")
+            control = ("rsrs", "key-control:" + alias)
+            require(control not in self.entries, "recovery_control_already_owned")
+            # The returned operation/alias authorizes this exact read. Only matching
+            # private material grants cleanup ownership; foreign material stays untouched.
+            self.entries.add(control)
+            try:
+                payload = self.read(*control)
+                expected = {"password": "", "super_password": super_password,
+                    "account_secret": "", "totp": None, "material": {
+                        "keyring_account": alias, "keyring_backend": session.get("keyring_backend"),
+                        "reset": None, "challenge": None}}
+                try:
+                    material = json.loads(payload)
+                except (ValueError, TypeError):
+                    raise RuntimeError("recovery_control_material_invalid") from None
+                require(session.get("keyring_backend") == self.credential_backend
+                    and material == expected, "recovery_control_material_mismatch")
+                self.recovery_controls[control] = payload
+            except Exception:
+                self.entries.discard(control)
+                raise
 
     def put(self, service, slot, value):
         self.reserve(service, slot)
@@ -140,8 +166,14 @@ class TrackedKeys:
 
     def remove(self, service, slot):
         require((service, slot) in self.entries, "credential_not_owned_by_fixture")
+        self.verify_cleanup_material(service, slot)
         self._remove(service, slot)
         require(self._read(service, slot) is None, "fixture_credential_delete_readback_failed")
+
+    def verify_cleanup_material(self, service, slot):
+        expected = self.recovery_controls.get((service, slot))
+        if expected is not None:
+            require(self.read(service, slot) == expected, "recovery_control_changed_before_cleanup")
 
     def cleanup(self):
         events, remaining = [], []

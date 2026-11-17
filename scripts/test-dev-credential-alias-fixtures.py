@@ -253,11 +253,15 @@ class AliasTests(unittest.TestCase):
                          keyring_account=alias, keyring_backend='native')
         keys = MemoryKeys()
         keys.values['rsrs', 'super:' + alias] = SUPER
+        control = ('rsrs', 'key-control:' + alias)
+        payload = dict(password='', super_password=SUPER, account_secret='', totp=None,
+            material=dict(keyring_account=alias, keyring_backend='native', reset=None, challenge=None))
+        keys.values[control] = json.dumps(payload)
         keys.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
         keys.values['rsrs', 'pass:' + alias] = PASSWORD
         keys.track_created_login(dict(candidate, user=USER, addr=legacy.UPSTREAM), USER, SUPER, PASSWORD,
                                  recovery_operation=operation)
-        self.assertEqual(keys.entries, {('rsrs', 'super:' + alias), ('rsrs', 'pass:' + alias)})
+        self.assertEqual(keys.entries, {('rsrs', 'super:' + alias), ('rsrs', 'pass:' + alias), control})
         with self.assertRaises(RuntimeError):
             keys.track_created_login(dict(candidate, user=USER), USER, SUPER, PASSWORD, recovery_operation=operation)
         for field, value in (('auth_operation_id', 'wrong'), ('keyring_account', OTHER), ('vault_version', 3)):
@@ -265,6 +269,28 @@ class AliasTests(unittest.TestCase):
                 MemoryKeys().track_created_login(dict(candidate, **{field: value}), '', SUPER, None,
                                                 recovery_operation=operation)
         self.assertTrue(keys.cleanup()['passed'])
+        self.assertFalse(keys.values)
+        for invalid in ('invalid JSON', json.dumps(dict(payload, super_password='foreign')),
+                        json.dumps(dict(payload, password=PASSWORD)),
+                        json.dumps(dict(payload, material=dict(payload['material'], keyring_account=OTHER))),
+                        json.dumps(dict(payload, material=dict(payload['material'], keyring_backend='kernel')))):
+            rejected = MemoryKeys()
+            rejected.values['rsrs', 'super:' + alias] = SUPER
+            rejected.values[control] = invalid
+            with self.assertRaises(RuntimeError):
+                rejected.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+            self.assertNotIn(control, rejected.entries)
+            rejected.cleanup()
+            self.assertEqual(rejected.values, {control: invalid})
+        changed = MemoryKeys()
+        changed.values.update({('rsrs', 'super:' + alias): SUPER, control: json.dumps(payload)})
+        changed.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+        changed.values[control] = 'third-party-private-material'
+        report = changed.cleanup()
+        self.assertFalse(report['passed'])
+        self.assertEqual(changed.values, {control: 'third-party-private-material'})
+        for secret in (SUPER, alias, 'third-party-private-material'):
+            self.assertNotIn(secret, json.dumps(report))
 
     def test_wrong_password_tracked_for_cleanup_without_secret_output(self):
         keys = MemoryKeys()
@@ -888,6 +914,25 @@ class SnapshotTests(unittest.TestCase):
 
     def test_all_tracked_cleanup_is_empty(self):
         self.keys.register_current_target(self.session, USER)
+        operation = '44444444-4444-4444-8444-444444444444'
+        alias = 'login-' + operation.replace('-', '')
+        candidate = dict(user='', addr='', vault_version=4, auth_operation_id=operation,
+            keyring_account=alias, keyring_backend='secret_service')
+        payload = json.dumps(dict(password='', super_password=SUPER, account_secret='', totp=None,
+            material=dict(keyring_account=alias, keyring_backend='secret_service', reset=None, challenge=None)))
+        for prefix, value in (('super:', SUPER), ('key-control:', payload)):
+            self.keys.collection.items.append(Item(self.keys.collection,
+                self.keys.attributes('rsrs', prefix + alias), value))
+        self.keys.track_created_login(candidate, '', SUPER, None, recovery_operation=operation)
+        control = next(item for item in self.keys.collection.items
+            if item.attributes['username'] == 'key-control:' + alias)
+        control.value = 'third-party-private-material'
+        rejected = self.keys.cleanup()
+        self.assertFalse(rejected['passed'])
+        self.assertEqual(self.keys.collection.items, [control])
+        self.assertIn({'code': 'fixture_collection_not_empty'}, rejected['remaining_entries'])
+        self.assertNotIn(control.value, json.dumps(rejected))
+        control.value = payload
         report = self.keys.cleanup()
         self.assertTrue(report['passed'])
         self.assertEqual(report['provider_schema_baseline']['registered_entries'], 2)
