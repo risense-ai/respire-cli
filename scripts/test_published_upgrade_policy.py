@@ -161,6 +161,11 @@ class UpgradeProfileTest(unittest.TestCase):
                         "original_records_preserved": True, "original_sync_work_preserved": True,
                         "urk_preserved": True, "old_records_decrypted": True, "post_upgrade_recall_checked": True,
                         "seed_vault_versions": [1, 3],
+                        "historical_credential_migration_actor": "fixture",
+                        "host_credential_custody": {"required": True, "cleanup_passed": True,
+                            "verified_accounts": [{"account": account, "vault_version": version,
+                                "urk_preserved": True} for account, version in [("main", 1), ("alternate", 3)]]},
+                        "native_credential_cleanup": {"passed": True, "remaining_entries": []},
                         "forced_restart_checked": True, "old_rpc_checked": True, "old_rpc_authenticated": False,
                         "resident_stress": None, "in_process_checked": False,
                         "sequence": [{"account": account, "model_rows": {
@@ -310,6 +315,15 @@ class UpgradeProfileTest(unittest.TestCase):
 
     def test_historical_session_coverage_cannot_be_replaced_by_v4_or_old_success_flags(self):
         for standalone in [False, True]:
+            for name in ('historical_credential_migration_actor', 'host_credential_custody', 'native_credential_cleanup'):
+                self.assert_rejected_checks(lambda checks: [{key: value for key, value in checks[0].items()
+                                                            if key != name}], standalone)
+            for custody in (None, {}, {'required': True, 'cleanup_passed': False},
+                            {'required': True, 'cleanup_passed': True, 'verified_accounts': []}):
+                self.assert_rejected_checks(lambda checks: [{**checks[0], 'host_credential_custody': custody}], standalone)
+            for cleanup in (None, {}, {'passed': False, 'remaining_entries': []},
+                            {'passed': True, 'remaining_entries': [{'code': 'credential_cleanup_failed'}]}):
+                self.assert_rejected_checks(lambda checks: [{**checks[0], 'native_credential_cleanup': cleanup}], standalone)
             for versions in [None, [], [4, 4], [1], [True, 3], [3, 1]]:
                 self.assert_rejected_checks(lambda checks: [{**checks[0], 'seed_vault_versions': versions}], standalone)
             self.assert_rejected_checks(lambda checks: [{key: value for key, value in

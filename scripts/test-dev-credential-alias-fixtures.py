@@ -193,6 +193,9 @@ class MemoryKeys(native.TrackedKeys):
         self.reads.append((service, slot))
         return self.values.get((service, slot))
 
+    def _put(self, service, slot, value):
+        self.values[service, slot] = value
+
     def _remove(self, service, slot):
         self.values.pop((service, slot), None)
 
@@ -815,8 +818,10 @@ class UpgradeLibraryStateTests(unittest.TestCase):
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         tree = ast.parse((HERE / 'test-real-m3-account-switch.py').read_text(encoding='utf-8'))
         functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
-                     and node.name in ('recover_fixture_urk', 'library_state', 'snapshot')]
-        namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing)
+                     and node.name in ('recover_fixture_urk', 'library_state', 'snapshot',
+                                       'legacy_custody_alias', 'migrate_fixture_custody')]
+        namespace = dict(vault_crypto=legacy, AESGCM=AESGCM, json=json, hashlib=hashlib, sqlite3=sqlite3, closing=closing,
+                         canonical_scope_path=lambda path: str(path.resolve()))
         exec(compile(ast.Module(body=functions, type_ignores=[]), '<upgrade-library-fixture>', 'exec'), namespace)
         cls.helpers = namespace
 
@@ -883,6 +888,33 @@ class UpgradeLibraryStateTests(unittest.TestCase):
                 before = snapshot(profile)
                 expected = state(before, factors)
                 self.assertEqual(expected[2], urk)
+                if version in (1, 3):
+                    alias = self.helpers['legacy_custody_alias'](profile, before[2])
+                    slots = {'pass' if version == 1 else 'super': factors['pass' if version == 1 else 'super'],
+                             'legacy-secret': factors['secret' if version == 1 else 'secret_key']}
+                    migrate = self.helpers['migrate_fixture_custody']
+                    for backend in ('native', 'secret_service'):
+                        keys = MemoryKeys()
+                        keys.credential_backend = backend
+                        for slot in slots:
+                            keys.reserve('rsrs', slot + ':' + alias)
+                        # Failed readback must retain the original session and owned cleanup set.
+                        with patch.object(keys, 'read', return_value='wrong'), self.assertRaises(RuntimeError):
+                            migrate(profile, keys, (alias, version, slots), urk)
+                        self.assertEqual(snapshot(profile), before)
+                        self.assertTrue(keys.cleanup()['passed'])
+                        migrate(profile, keys, (alias, version, slots), urk)
+                        current = snapshot(profile)
+                        self.assertEqual(current[:2], before[:2])
+                        self.assertEqual(state(current, factors), expected)
+                        committed = json.loads(current[2])
+                        self.assertEqual(committed['legacy_secret_backend'], backend)
+                        self.assertEqual(committed['keyring_backend'], backend)
+                        self.assertEqual(committed['vault_version'], version)
+                        self.assertFalse(set(factors) & committed.keys())
+                        self.assertTrue(keys.cleanup()['passed'])
+                        self.assertFalse(keys.values)
+                        (profile / 'session.json').write_bytes(before[2])
                 migrated = {key: value for key, value in session.items() if key not in factors}
                 migrated.update(wrapped_urk=wrap(True), keyring_account='legacy-' + '1' * 16,
                                 keyring_backend='native')
