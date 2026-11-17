@@ -316,12 +316,33 @@ class Smoke:
         if not ok:
             require(result.returncode != 0, "expected_rejection_missing")
             return None
-        require(result.returncode in (0, 2), "cli_failed_" + command[0])
+        failure = "cli_failed_" if result.returncode not in (0, 2) else None
+        stage = "process_exit" if failure else None
         try:
             value = json.loads(result.stdout)
         except (ValueError, UnicodeError):
-            raise RuntimeError("cli_invalid_json_" + command[0]) from None
-        require(not value.get("errors") and value.get("status") not in ("error", "failed"), "cli_error_" + command[0])
+            value = None
+        if not isinstance(value, dict):
+            failure, stage = failure or "cli_invalid_json_", stage or "json_decode"
+        elif value.get("errors") or value.get("status") in ("error", "failed"):
+            failure, stage = failure or "cli_error_", stage or "envelope_validation"
+        if failure:
+            diagnostic = {"exit_code": result.returncode, "stage": stage,
+                "structured_reason": "unknown", "error_type": "unknown"}
+            # Only producer-defined enum values may leave the captured response.
+            if isinstance(value, dict):
+                for section, field, target, allowed in (
+                    ("summary", "reason", "structured_reason",
+                     ("invalid_input", "runtime_error", "request_outcome_unknown")),
+                    ("details", "error_type", "error_type", ("user", "runtime", "outcome_unknown")),
+                ):
+                    part = value.get(section)
+                    item = part.get(field) if isinstance(part, dict) else None
+                    if type(item) is str and item in allowed:
+                        diagnostic[target] = item
+            self.report["cli_failure"] = diagnostic
+            self.save()
+            raise RuntimeError(failure + command[0]) from None
         return value
 
     def passed(self, name, **evidence):

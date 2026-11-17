@@ -1,9 +1,11 @@
 """Offline redaction and fail-closed regression tests; never execute the product."""
+import ast
 import copy
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import types
@@ -19,6 +21,64 @@ SECRET = 'secret-token-password-user-server-/private/path-123'
 
 class DiagnosticsTests(unittest.TestCase):
     def test_exit_redaction(self):
+        tree = ast.parse(Path(__file__).with_name('dev-ai-inject-smoke.py').read_text(encoding='utf-8'))
+        smoke = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'Smoke')
+        methods = [node for node in smoke.body if isinstance(node, ast.FunctionDef) and node.name in ('cli', 'save')]
+        require = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'require')
+        namespace = dict(json=json, subprocess=subprocess, RuntimeError=RuntimeError)
+        exec(compile(ast.Module(body=[require, *methods], type_ignores=[]), '<ai-cli-diagnostics>', 'exec'), namespace)
+        with tempfile.TemporaryDirectory() as directory:
+            instance = types.SimpleNamespace(args=types.SimpleNamespace(binary='owned-cli'), env={},
+                root=Path(directory), report={})
+            instance.save = types.MethodType(namespace['save'], instance)
+            for reason, error_type in (('runtime_error', 'runtime'), ('invalid_input', 'user'),
+                    ('request_outcome_unknown', 'outcome_unknown'), (SECRET, SECRET),
+                    ({'token': SECRET}, [SECRET]), (None, None)):
+                envelope = dict(summary={'reason': reason, 'token': SECRET},
+                    details={'error_type': error_type, 'token': SECRET}, errors=[SECRET], command=SECRET)
+                for exit_code in (1, -9, 0, 2):
+                    result = types.SimpleNamespace(returncode=exit_code,
+                        stdout=json.dumps(envelope).encode(), stderr=SECRET.encode())
+                    with patch.object(subprocess, 'run', return_value=result) as call:
+                        with self.assertRaisesRegex(RuntimeError, 'cli_failed_remember' if exit_code not in (0, 2) else 'cli_error_remember'):
+                            namespace['cli'](instance, 'remember', SECRET)
+                        self.assertEqual(call.call_count, 1)
+                    saved = json.loads((instance.root / 'ai-inject-coverage.json').read_text(encoding='utf-8'))
+                    self.assertNotIn(SECRET, json.dumps(saved))
+                    self.assertEqual(saved['cli_failure'], dict(exit_code=exit_code,
+                        stage='process_exit' if exit_code not in (0, 2) else 'envelope_validation',
+                        structured_reason=reason if isinstance(reason, str) and reason in
+                            ('runtime_error', 'invalid_input', 'request_outcome_unknown') else 'unknown',
+                        error_type=error_type if isinstance(error_type, str) and error_type in
+                            ('runtime', 'user', 'outcome_unknown') else 'unknown'))
+            for stdout in (SECRET.encode(), b'\xff', b'[]', b'null', b'{', b'{}'):
+                for exit_code in (1, 0):
+                    instance.report.clear()
+                    result = types.SimpleNamespace(returncode=exit_code, stdout=stdout, stderr=SECRET.encode())
+                    with patch.object(subprocess, 'run', return_value=result) as call:
+                        if exit_code == 0 and stdout == b'{}':
+                            self.assertEqual(namespace['cli'](instance, 'remember', SECRET), {})
+                            self.assertNotIn('cli_failure', instance.report)
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                namespace['cli'](instance, 'remember', SECRET)
+                            self.assertEqual(instance.report['cli_failure']['stage'],
+                                'process_exit' if exit_code else 'json_decode')
+                            self.assertNotIn(SECRET, json.dumps(instance.report))
+                        self.assertEqual(call.call_count, 1)
+            for exit_code in (0, 2):
+                instance.report.clear()
+                result = types.SimpleNamespace(returncode=exit_code, stdout=b'{"status":"ok","errors":[]}', stderr=b'')
+                with patch.object(subprocess, 'run', return_value=result):
+                    self.assertEqual(namespace['cli'](instance, 'remember', SECRET)['status'], 'ok')
+                self.assertNotIn('cli_failure', instance.report)
+            result.returncode = 1
+            instance.report.clear()
+            with patch.object(subprocess, 'run', return_value=result) as call:
+                self.assertIsNone(namespace['cli'](instance, 'remember', SECRET, ok=False))
+                self.assertEqual(call.call_count, 1)
+            self.assertEqual(instance.report, {})
+
         for reason in (SECRET, {'token': SECRET}, [SECRET], None, 'invalid_input', 'runtime_error', 'request_outcome_unknown'):
             value = {'summary': {'reason': reason, 'password': SECRET}, 'errors': [SECRET], 'details': {'token': SECRET}}
             result = types.SimpleNamespace(stdout=json.dumps(value), stderr=SECRET, returncode=2)
