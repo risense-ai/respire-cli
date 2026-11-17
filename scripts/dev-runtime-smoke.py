@@ -458,6 +458,18 @@ class Smoke:
                                   body, self.token)
         if self.args.runtime_binary:
             verify_rpc_receipt(body, reply)
+        if code != 200 or not isinstance(reply, dict) or reply.get('ok') is not (expected == 0):
+            self.report['failure_diagnostic'] = {
+                'case_id': 'runtime_rpc',
+                'command': args[0] if args and args[0] in
+                    {'remember', 'show', 'status', 'recall', 'agent-config', 'model'} else 'other',
+                'expected_exit': expected,
+                'http_status': code,
+                'actual_exit': reply.get('exit') if isinstance(reply, dict) and type(reply.get('exit')) is int else None,
+                'rpc_code': reply.get('code') if isinstance(reply, dict) and reply.get('code') in
+                    ('locked', 'scope_mismatch', 'invalid_config', 'daemon_unavailable',
+                     'runtime_maintenance', 'host_command_required') else 'unclassified',
+            }
         require(code == 200 and isinstance(reply, dict) and reply.get('ok') is (expected == 0),
                 'runtime_rpc_transport_failed')
         envelope = reply.get('envelope', {})
