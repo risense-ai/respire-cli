@@ -138,6 +138,7 @@ jobs:
         if: always()
         with:
           name: client2-core-query-diagnostic-${{ github.run_attempt }}
+          retention-days: 1
           path: |
             ${{ runner.temp }}/core-query-assets/input-proof.json
             ${{ runner.temp }}/sealed-client2.json
