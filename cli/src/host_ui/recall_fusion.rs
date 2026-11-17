@@ -67,6 +67,49 @@ pub fn validate(value: &Value) -> Result<()> {
     Ok(())
 }
 
+/// Preserve the configuration receipt without loading Core or a Runtime process.
+pub(crate) fn receipt(configured: Value) -> Result<Value> {
+    validate(&configured)?;
+    let defaults = defaults();
+    let mut effective = defaults.clone();
+    for (key, value) in configured.as_object().context("recall_fusion must be an object")? {
+        effective.insert(key.clone(), value.clone());
+    }
+    let legacy = match crate::env::var("RSRS_RECALL_PROFILE") {
+        Ok(value) if value == "legacy" => true,
+        Ok(value) if value == "calibrated" => false,
+        Ok(_) => anyhow::bail!("RSRS_RECALL_PROFILE must be calibrated or legacy"),
+        Err(std::env::VarError::NotPresent) => false,
+        Err(error) => return Err(error.into()),
+    };
+    if legacy {
+        effective.insert("fusion".into(), json!("legacy"));
+    }
+    let mut overrides = Vec::new();
+    for key in defaults.keys() {
+        let name = format!("RSRS_RECALL_{}", key.to_uppercase());
+        match crate::env::var(&name) {
+            Ok(value) => {
+                let value = if key == "fusion" {
+                    json!(value.trim())
+                } else {
+                    let number: f32 = value.trim().parse().with_context(|| format!("invalid {name}"))?;
+                    anyhow::ensure!(number.is_finite(), "invalid {name}");
+                    json!(number)
+                };
+                effective.insert(key.clone(), value);
+                overrides.push(key.clone());
+            }
+            Err(std::env::VarError::NotPresent) if key == "fusion" && legacy => overrides.push(key.clone()),
+            Err(std::env::VarError::NotPresent) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    validate(&Value::Object(effective.clone()))?;
+    Ok(json!({"configured":configured,"effective":effective,"defaults":defaults,
+        "overrides":overrides,"applies":"next_query"}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

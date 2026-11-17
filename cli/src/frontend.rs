@@ -65,15 +65,7 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
                 Err(error) => Some(Err(error)),
             }
         }
-        Some(Command::AgentConfig { set: None }) if !runtime_policy::client_only() => Some(
-            runtime_policy::require_host("agent configuration read")
-                .and_then(|()| {
-                    autostart::control_offline_read(
-                        respire_protocol::metadata_control::HostOfflineRead::AgentConfigRead,
-                    )
-                })
-                .and_then(emit_result),
-        ),
+        Some(Command::AgentConfig { set: None }) => Some(run_agent_config_read()),
         Some(Command::AgentConfig { set: Some(kv) }) => {
             Some(autostart::control_agent_config(kv).and_then(emit_result))
         }
@@ -199,6 +191,23 @@ pub(crate) fn host_command(args: &Cli) -> Option<Result<()>> {
         )),
         _ => None,
     }
+}
+
+fn run_agent_config_read() -> Result<()> {
+    let mut config = respire_client_host::settings::agent_config_snapshot()?;
+    let configured_heat = config.get("read_heat").map(|value|
+        value.as_bool().context("read_heat must be true or false")).transpose()?;
+    // Like the former offline helper, this receipt describes this process's configuration,
+    // not the loaded state of a resident Runtime or Core scoring.
+    config["read_heat_runtime"] = serde_json::json!({
+        "configured":configured_heat, "loaded":configured_heat,
+        "effective":configured_heat.unwrap_or(true), "default":true, "pending_reload":false,
+    });
+    config["recall_fusion_runtime"] = recall_fusion::receipt(
+        config.get("recall_fusion").cloned().unwrap_or_else(|| serde_json::json!({})))?;
+    let rows = config.as_object().context("agent config must be an object")?.iter()
+        .map(|(key, value)| OutputItem::new(key, OutputStatus::Ok, value.to_string())).collect();
+    emit_result(ResultEnvelope::new("agent-config", OutputStatus::Ok, config, rows))
 }
 
 fn run_extract_tui() -> Result<()> {
@@ -1223,7 +1232,8 @@ fn main_body() -> i32 {
                     if matches!(
                         cli.command,
                         Some(
-                            Command::MemoryRevision
+                            Command::AgentConfig { set: None }
+                                | Command::MemoryRevision
                                 | Command::Capabilities
                                 | Command::Runtime { .. }
                                 | Command::Doctor { .. }
@@ -1498,6 +1508,11 @@ fn run(args: Cli) -> Result<()> {
     // in-process capture callers reach run() without main(), so wire them
     // idempotently here too (the first installation always wins).
     let _ = install_cli_host_hooks();
+    if matches!(args.command.as_ref(), Some(Command::AgentConfig { set: None })) {
+        set_json_mode(args.json || respire_client_host::env::var("RSRS_JSON")
+            .is_ok_and(|value| value == "1" || value == "true"));
+        return run_agent_config_read();
+    }
     if let Some(Command::Doctor {
         remote,
         check_update,

@@ -22,6 +22,43 @@ pub fn read_agent_config() -> Result<Value> {
     read_settings().map(|(_, agent)| agent)
 }
 
+/// Display one validated local snapshot without creating a profile or consulting Runtime.
+pub fn agent_config_snapshot() -> Result<Value> {
+    use anyhow::Context;
+    let (_, profile, client) = config::read_control_config()?;
+    let path = config::normalize_control_path(&profile.join("agent.json"))?;
+    let mut agent: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid agent configuration: {}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    };
+    let object = agent.as_object_mut().context("agent config must be an object")?;
+    for key in ["readonly_team", "readonly", "memory_off"] {
+        if let Some(value) = object.get(key) {
+            anyhow::ensure!(value.is_boolean(), "{key} must be true or false");
+        }
+    }
+    if let Some(mode) = client.as_ref().and_then(|value| value.get("service_mode")) {
+        anyhow::ensure!(matches!(mode.as_str(), Some("normal" | "readonly" | "off")),
+            "service_mode must be normal, readonly or off");
+    }
+    let mode = device_service_mode(client.as_ref());
+    let readonly = object.get("readonly_team").and_then(Value::as_bool).unwrap_or(false)
+        || match mode {
+            Some(mode) => mode == "readonly",
+            None => object.get("readonly").and_then(Value::as_bool).unwrap_or(false),
+        };
+    let off = match mode {
+        Some(mode) => mode == "off",
+        None => object.get("memory_off").and_then(Value::as_bool).unwrap_or(false),
+    };
+    object.insert("readonly".into(), serde_json::json!(readonly));
+    object.insert("memory_off".into(), serde_json::json!(off));
+    object.insert("workspace_mode".into(), serde_json::json!(if off { "off" } else if readonly { "readonly" } else { "normal" }));
+    Ok(agent)
+}
+
 fn device_service_mode(client: Option<&Value>) -> Option<&str> {
     client.and_then(|config| config["service_mode"].as_str())
         .filter(|mode| matches!(*mode, "normal" | "readonly" | "off"))
