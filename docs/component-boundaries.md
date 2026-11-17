@@ -36,6 +36,13 @@ CLI 的配置读取。`--client-only` 限制副作用，不改变命令的归属
 运行或解锁，不下载组件、不打开数据库、不读取钥匙串，也不创建或修改配置文件。
 未配置时使用明确的默认值；存在但损坏的配置必须报告错误，不能当成空配置继续。
 
+兼容字段 `read_heat_runtime`、`recall_fusion_runtime` 保留，但本地读取的两组回执均标记
+`scope: "host_configuration"`、`runtime_verified: false`。其中 `effective` 仅表示本命令
+按配置、默认值和环境变量解析的宿主设置，不证明 Core 支持该设置或常驻 Runtime 已应用。
+`read_heat_runtime.loaded` 与 `pending_reload` 返回 `null`，明确表示真实加载状态和待重载状态未知；
+不能从配置值推导这两个状态。`applies: "next_query"` 是配置的适用时机，不是已经生效的回执。
+界面应显示本地配置，不能将这些字段展示为已经验证的核心运行态。
+
 `agent-config --set` 的语法校验与配置持久化也属于宿主。设备模式保存为
 `client.json` 的 `service_mode`；所选账号的其他代理设置保存到该账号的
 `agent.json`。设置影响核心行为时，宿主通过明确的核心控制操作，或经过身份核验的
@@ -82,7 +89,7 @@ CLI 的配置读取。`--client-only` 限制副作用，不改变命令的归属
 | CLI 关闭模式与 keyless 模式 | PR #380 已合并；官方 Runtime23 的现有模式测试通过 | 全平台及所有插件均通过 |
 | Windows 登录 custody 容量 | PR #381 已合并；真实原生凭据写入和清理验证通过 | 云端 x64／ARM 重登及 cleanup 已全部通过 |
 | legacy vault 交互提示 | PR #382 已合并；现有检查通过 | 真实旧库登录及凭据清理已闭环 |
-| agent-config 读取 | 本地读取修复仍在收口 | 普通及 client-only 已在公开 CLI 修复 |
+| agent-config 读取 | PR #384 已合并；普通及 client-only 本地读取、完整字段和实际插件读回已验证 | 已在公开 CLI 发布；Core 已支持这些设置；常驻 Runtime 已加载这些值 |
 | agent-config 设置 | 当前链路仍依赖 Runtime 私有 setter，甚至可能触发 Runtime 安装 | 配置持久化已经完整移到宿主 |
 | 核心配置特殊项 | Runtime23 没有独立的 read_heat 候选支持验证／reload 接口；recall_fusion 也缺少 Runtime effective 候选校验入口 | 写文件后已等价完成原有验证和生效承诺 |
 | 其他原生阻塞 | 导入后账号选择、Client2 ExistingKeys 第二次启动仍在定位 | 最新整套产物验收已通过 |
