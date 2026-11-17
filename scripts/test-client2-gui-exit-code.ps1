@@ -71,12 +71,15 @@ exit 0
     $binding=@{data_directory=$root}
     $null=New-Item -ItemType Directory -Path (Join-Path $root 'client2')
     $journal=Join-Path $root 'client2/requests.json'
-    foreach ($case in @('public','saved','envelope','private-transaction','pending','duplicate','invalid-id')) {
+    foreach ($case in @('public','saved','continued','invalid-transport','same-transport','envelope','private-transaction','pending','duplicate','invalid-id')) {
         $report=@{recovery=@{}}
         $record=[pscustomobject]@{id=('desktop-'+[guid]::NewGuid());name='auth_reset';started='2026-11-16T00:00:00Z';state='done';host=$true;
             transaction=[pscustomobject]@{operation_id=[guid]::NewGuid().ToString();source_profile=$root;kind='key'}}
         switch ($case) {
             'saved' { $record | Add-Member NoteProperty materialSaved $true }
+            'continued' { $record | Add-Member NoteProperty transportId ('desktop-'+[guid]::NewGuid()) }
+            'invalid-transport' { $record | Add-Member NoteProperty transportId 'synthetic-forbidden-field' }
+            'same-transport' { $record | Add-Member NoteProperty transportId $record.id }
             'envelope' { $record | Add-Member NoteProperty envelope @{} }
             'private-transaction' { $record.transaction | Add-Member NoteProperty super 'synthetic-forbidden-field' }
             'pending' { $record.state='unconfirmed' }
@@ -86,11 +89,11 @@ exit 0
         [IO.File]::WriteAllText($journal,(ConvertTo-Json -InputObject $records -Depth 6))
         $failed=$false
         try { $null=Read-RecoveryRecord } catch { $failed=$true }
-        if ($failed -eq ($case -in @('public','saved'))) { throw 'Recovery journal accepted private data or rejected public identity' }
-        if ($case -in @('envelope','private-transaction','pending','invalid-id')) {
+        if ($failed -eq ($case -in @('public','saved','continued'))) { throw 'Recovery journal accepted private data or rejected public identity' }
+        if ($case -in @('envelope','private-transaction','pending','invalid-id','invalid-transport','same-transport')) {
             $diagnostic=$report.recovery.journal_validation
-            $field=@{envelope='record_fields_public'; 'private-transaction'='transaction_fields_public'; pending='state_done'; 'invalid-id'='operation_id_valid'}[$case]
-            if ($diagnostic.Count -ne 9 -or @($diagnostic.Values | Where-Object { $_ -isnot [bool] }).Count -or $diagnostic[$field] -ne $false -or
+            $field=@{envelope='record_fields_public'; 'private-transaction'='transaction_fields_public'; pending='state_done'; 'invalid-id'='operation_id_valid'; 'invalid-transport'='transport_id_valid'; 'same-transport'='transport_id_valid'}[$case]
+            if ($diagnostic.Count -ne 10 -or @($diagnostic.Values | Where-Object { $_ -isnot [bool] }).Count -or $diagnostic[$field] -ne $false -or
                 (ConvertTo-Json $diagnostic -Compress).Contains('synthetic-forbidden-field')) { throw 'Journal diagnostic must identify the failed predicate using fixed booleans only' }
         }
     }
